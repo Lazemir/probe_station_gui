@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import serial
 from PySide6.QtCore import Qt
@@ -55,8 +55,9 @@ class JoystickWindow(QMainWindow):
         self.setFocusPolicy(Qt.StrongFocus)
 
         self.serial_connection: Optional[serial.Serial] = None
-        self._active_direction: Optional[tuple[str, int]] = None
-        self._key_stack: list[Tuple[str, object]] = []
+        self._active_inputs: Dict[Tuple[str, object] | str, tuple[str, int]] = {}
+        self._current_axes: Dict[str, int] = {}
+        self._last_feedrate: Optional[float] = None
 
         central = QWidget(self)
         self.setCentralWidget(central)
@@ -93,14 +94,20 @@ class JoystickWindow(QMainWindow):
 
         root_layout.addLayout(grid_layout)
 
-        self.up_button.pressed.connect(lambda: self.start_jog("Y", 1))
-        self.up_button.released.connect(self.stop_jog)
-        self.down_button.pressed.connect(lambda: self.start_jog("Y", -1))
-        self.down_button.released.connect(self.stop_jog)
-        self.left_button.pressed.connect(lambda: self.start_jog("X", -1))
-        self.left_button.released.connect(self.stop_jog)
-        self.right_button.pressed.connect(lambda: self.start_jog("X", 1))
-        self.right_button.released.connect(self.stop_jog)
+        self.up_button.pressed.connect(lambda: self._handle_press("button_up", "Y", 1))
+        self.up_button.released.connect(lambda: self._handle_release("button_up"))
+        self.down_button.pressed.connect(
+            lambda: self._handle_press("button_down", "Y", -1)
+        )
+        self.down_button.released.connect(lambda: self._handle_release("button_down"))
+        self.left_button.pressed.connect(
+            lambda: self._handle_press("button_left", "X", -1)
+        )
+        self.left_button.released.connect(lambda: self._handle_release("button_left"))
+        self.right_button.pressed.connect(lambda: self._handle_press("button_right", "X", 1))
+        self.right_button.released.connect(
+            lambda: self._handle_release("button_right")
+        )
 
         home_layout = QHBoxLayout()
         self.home_all_button = QPushButton("Home All", self)
@@ -136,17 +143,31 @@ class JoystickWindow(QMainWindow):
     def set_serial(self, serial_connection: Optional[serial.Serial]) -> None:
         """Assign the serial connection used for jogging commands."""
 
+        previous_connection = self.serial_connection
+        previous_active = bool(self._current_axes)
+
         self.serial_connection = serial_connection
-        if not serial_connection or not serial_connection.is_open:
-            self._active_direction = None
-            self._key_stack.clear()
+
+        if (not serial_connection or not serial_connection.is_open) and previous_connection:
+            if previous_connection.is_open and previous_active:
+                try:
+                    previous_connection.write(b"\x85")
+                    previous_connection.flush()
+                except serial.SerialException:
+                    pass
+            self._active_inputs.clear()
+            self._current_axes.clear()
+
         if serial_connection and serial_connection.is_open:
             self.status_label.setText(
                 f"Connected to {serial_connection.port} @ {serial_connection.baudrate}"
             )
         else:
             self.status_label.setText("Disconnected")
+            self._last_feedrate = None
+
         self._update_enabled_state()
+        self._update_jog_motion()
 
     def _update_enabled_state(self) -> None:
         enabled = bool(self.serial_connection and self.serial_connection.is_open)
@@ -181,26 +202,72 @@ class JoystickWindow(QMainWindow):
             self._show_warning("Feed rate must be a positive number.")
             return None
 
-    def start_jog(self, axis: str, direction: int) -> None:
+    def _handle_press(
+        self, identifier: Tuple[str, object] | str, axis: str, direction: int
+    ) -> None:
+        if identifier in self._active_inputs:
+            return
         if not self.serial_connection or not self.serial_connection.is_open:
             return
         feedrate = self.get_feedrate()
         if feedrate is None:
             return
-        if self._active_direction == (axis, direction):
-            return
-        self._active_direction = (axis, direction)
-        distance = direction * self.JOG_DISTANCE_MM
-        command = f"$J=G91 G21 {axis}{distance:.3f} F{feedrate}\n"
-        self.send_command(command)
+        self._last_feedrate = feedrate
+        self._active_inputs[identifier] = (axis, direction)
+        self._update_jog_motion()
 
-    def stop_jog(self) -> None:
+    def _handle_release(self, identifier: Tuple[str, object] | str) -> None:
+        if identifier in self._active_inputs:
+            del self._active_inputs[identifier]
+            self._update_jog_motion()
+
+    def _calculate_axes(self) -> Dict[str, int]:
+        axes: Dict[str, set[int]] = {}
+        for axis, direction in self._active_inputs.values():
+            axes.setdefault(axis, set()).add(direction)
+        resolved: Dict[str, int] = {}
+        for axis, directions in axes.items():
+            if len(directions) == 1:
+                resolved[axis] = next(iter(directions))
+        return resolved
+
+    def _update_jog_motion(self) -> None:
         if not self.serial_connection or not self.serial_connection.is_open:
-            self._active_direction = None
+            if self._current_axes:
+                self._cancel_active_jog()
+            self._current_axes.clear()
             return
-        if self._active_direction is None:
+
+        axes = self._calculate_axes()
+        if axes == self._current_axes:
             return
-        self._active_direction = None
+
+        if self._current_axes:
+            self._cancel_active_jog()
+
+        if not axes:
+            self._current_axes.clear()
+            return
+
+        feedrate = self._last_feedrate
+        if feedrate is None:
+            feedrate = self.get_feedrate()
+            if feedrate is None:
+                return
+            self._last_feedrate = feedrate
+
+        distance_mm = self.JOG_DISTANCE_MM
+        parts = [
+            f"{axis}{direction * distance_mm:.3f}"
+            for axis, direction in sorted(axes.items())
+        ]
+        command = f"$J=G91 G21 {' '.join(parts)} F{feedrate}\n"
+        self.send_command(command)
+        self._current_axes = axes
+
+    def _cancel_active_jog(self) -> None:
+        if not self.serial_connection or not self.serial_connection.is_open:
+            return
         self.send_command(b"\x85")
 
     def _home_xy(self) -> None:
@@ -227,9 +294,7 @@ class JoystickWindow(QMainWindow):
             return
         identifier, mapping = self._mapping_from_event(event)
         if identifier and mapping:
-            if identifier not in self._key_stack:
-                self._key_stack.append(identifier)
-                self.start_jog(*mapping)
+            self._handle_press(identifier, *mapping)
             event.accept()
             return
         super().keyPressEvent(event)
@@ -238,28 +303,23 @@ class JoystickWindow(QMainWindow):
         if event.isAutoRepeat():
             event.ignore()
             return
-        identifier, mapping = self._mapping_from_event(event)
-        if identifier and mapping:
-            if identifier in self._key_stack:
-                self._key_stack.remove(identifier)
-            self.stop_jog()
-            if self._key_stack:
-                next_identifier = self._key_stack[-1]
-                next_mapping = self._mapping_from_identifier(next_identifier)
-                if next_mapping:
-                    self.start_jog(*next_mapping)
+        identifier, _ = self._mapping_from_event(event)
+        if identifier:
+            self._handle_release(identifier)
             event.accept()
             return
         super().keyReleaseEvent(event)
 
     def focusOutEvent(self, event) -> None:  # type: ignore[override]
-        self._key_stack.clear()
-        self.stop_jog()
+        if self._active_inputs:
+            self._active_inputs.clear()
+            self._update_jog_motion()
         super().focusOutEvent(event)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]
-        self._key_stack.clear()
-        self.stop_jog()
+        if self._active_inputs:
+            self._active_inputs.clear()
+            self._update_jog_motion()
         super().closeEvent(event)
 
     def _mapping_from_event(
@@ -284,11 +344,3 @@ class JoystickWindow(QMainWindow):
                 return ("charcode", normalized), mapping
 
         return (None, None)
-
-    def _mapping_from_identifier(self, identifier: Tuple[str, object]) -> Optional[tuple[str, int]]:
-        kind, value = identifier
-        if kind == "key":
-            return self.KEY_DIRECTION_MAP.get(value)  # type: ignore[arg-type]
-        if kind in {"char", "charcode"}:
-            return self.CHAR_DIRECTION_MAP.get(value)  # type: ignore[arg-type]
-        return None
