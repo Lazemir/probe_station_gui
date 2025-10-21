@@ -1,5 +1,6 @@
 """View widgets for the probe station GUI."""
 
+from .joystick_window import JoystickWindow
 from .microscope_view import MicroscopeView
 
-__all__ = ["MicroscopeView"]
+__all__ = ["JoystickWindow", "MicroscopeView"]
