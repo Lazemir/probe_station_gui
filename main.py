@@ -46,22 +46,10 @@ class Main(QMainWindow):
         print("Camera error:", message)
 
     def open_serial_scanner(self) -> None:
-        if self.serial_dialog is None:
-            self.serial_dialog = SerialScannerDialog(self)
-            self.serial_dialog.connected.connect(self.on_serial_connected)
-
-        if self.serial_dialog is not None:
-            self.serial_dialog.populate_ports()
-            is_connected = (
-                self.serial_connection is not None and self.serial_connection.is_open
-            )
-            self.serial_dialog.set_connection(
-                self.serial_connection,
-                port_name=self.serial_port_name,
-                baud_rate=self.serial_baud_rate,
-                connected=is_connected,
-            )
-        self.serial_dialog.exec()
+        dialog = SerialScannerDialog(self)
+        dialog.connected.connect(self.on_serial_connected)
+        dialog.disconnected.connect(self.on_serial_disconnected)
+        dialog.exec()
 
     def on_serial_connected(self, serial_port) -> None:
         if self.serial_connection and self.serial_connection.is_open:
@@ -76,13 +64,12 @@ class Main(QMainWindow):
         print(
             f"Serial connected: {self.serial_connection.port} @ {self.serial_connection.baudrate} baud"
         )
-        if self.serial_dialog is not None:
-            self.serial_dialog.set_connection(
-                self.serial_connection,
-                port_name=self.serial_port_name,
-                baud_rate=self.serial_baud_rate,
-                connected=True,
-            )
+
+    def on_serial_disconnected(self) -> None:
+        if self.serial_connection and self.serial_connection.is_open:
+            self.serial_connection.close()
+        self.serial_connection = None
+        print("Serial disconnected")
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         self.grabber.stop()
@@ -90,13 +77,6 @@ class Main(QMainWindow):
         self.thread.wait()
         if self.serial_connection and self.serial_connection.is_open:
             self.serial_connection.close()
-        if self.serial_dialog is not None:
-            self.serial_dialog.set_connection(
-                None,
-                port_name=self.serial_port_name,
-                baud_rate=self.serial_baud_rate,
-                connected=False,
-            )
         event.accept()
 
 
