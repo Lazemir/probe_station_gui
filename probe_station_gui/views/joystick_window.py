@@ -26,6 +26,7 @@ class JoystickWindow(QMainWindow):
 
     JOG_DISTANCE_MM = 10.0
     FEED_RATES = ["30", "60", "90", "120", "180", "Custom..."]
+    RELEASE_SETTLE_MS = 150
 
     KEY_DIRECTION_MAP = {
         Qt.Key_Up: ("Y", 1),
@@ -58,6 +59,9 @@ class JoystickWindow(QMainWindow):
         self._active_inputs: Dict[Tuple[str, object] | str, tuple[str, int]] = {}
         self._current_axes: Dict[str, int] = {}
         self._last_feedrate: Optional[float] = None
+        self._release_timer = QTimer(self)
+        self._release_timer.setSingleShot(True)
+        self._release_timer.timeout.connect(self._flush_motion_update)
         self._update_pending = False
 
         central = QWidget(self)
@@ -210,6 +214,9 @@ class JoystickWindow(QMainWindow):
             return
         if not self.serial_connection or not self.serial_connection.is_open:
             return
+        if self._release_timer.isActive():
+            self._release_timer.stop()
+            self._update_pending = False
         feedrate = self.get_feedrate()
         if feedrate is None:
             return
@@ -220,17 +227,33 @@ class JoystickWindow(QMainWindow):
     def _handle_release(self, identifier: Tuple[str, object] | str) -> None:
         if identifier in self._active_inputs:
             del self._active_inputs[identifier]
-            self._schedule_motion_update()
+            if not self._active_inputs:
+                if self._release_timer.isActive():
+                    self._release_timer.stop()
+                self._update_pending = False
+                self._update_jog_motion()
+            else:
+                self._stop_current_motion()
+                self._schedule_motion_update()
 
     def _schedule_motion_update(self) -> None:
-        if self._update_pending:
-            return
+        if self._release_timer.isActive():
+            self._release_timer.stop()
         self._update_pending = True
-        QTimer.singleShot(0, self._flush_motion_update)
+        self._release_timer.start(self.RELEASE_SETTLE_MS)
 
     def _flush_motion_update(self) -> None:
         self._update_pending = False
         self._update_jog_motion()
+
+    def _stop_current_motion(self) -> None:
+        if not self._current_axes:
+            return
+        if self._release_timer.isActive():
+            self._release_timer.stop()
+            self._update_pending = False
+        self._cancel_active_jog()
+        self._current_axes.clear()
 
     def _calculate_axes(self) -> Dict[str, int]:
         axes: Dict[str, set[int]] = {}
@@ -248,6 +271,8 @@ class JoystickWindow(QMainWindow):
             if self._current_axes:
                 self._cancel_active_jog()
             self._current_axes.clear()
+            if self._release_timer.isActive():
+                self._release_timer.stop()
             return
 
         axes = self._calculate_axes()
@@ -325,12 +350,14 @@ class JoystickWindow(QMainWindow):
     def focusOutEvent(self, event) -> None:  # type: ignore[override]
         if self._active_inputs:
             self._active_inputs.clear()
+            self._stop_current_motion()
             self._update_jog_motion()
         super().focusOutEvent(event)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]
         if self._active_inputs:
             self._active_inputs.clear()
+            self._stop_current_motion()
             self._update_jog_motion()
         super().closeEvent(event)
 
