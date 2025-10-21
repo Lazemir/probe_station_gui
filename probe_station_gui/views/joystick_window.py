@@ -65,11 +65,13 @@ class JoystickWindow(QMainWindow):
         self._release_timer.timeout.connect(self._flush_motion_update)
         self._update_pending = False
         self._filter_active = False
+        self._keyboard_grabbed = False
         self._app = QApplication.instance()
         if self._app is not None:
             self._app.installEventFilter(self)
             self._filter_active = True
             self.destroyed.connect(self._remove_event_filter)
+            self.destroyed.connect(self._release_keyboard_grab)
 
         central = QWidget(self)
         self.setCentralWidget(central)
@@ -221,12 +223,8 @@ class JoystickWindow(QMainWindow):
     def eventFilter(self, obj, event):  # type: ignore[override]
         if event.type() in (QEvent.KeyPress, QEvent.KeyRelease):
             widget = obj if isinstance(obj, QWidget) else None
-            if (
-                widget is not None
-                and widget.window() is self
-                and self.isVisible()
-                and self.isActiveWindow()
-            ):
+            same_window = widget is not None and widget.window() is self
+            if self.isVisible() and (same_window or self._keyboard_grabbed):
                 handled = self._process_key_event(
                     event, pressed=event.type() == QEvent.KeyPress
                 )
@@ -235,7 +233,7 @@ class JoystickWindow(QMainWindow):
         return super().eventFilter(obj, event)
 
     def _process_key_event(self, event, *, pressed: bool) -> bool:
-        if event.isAutoRepeat():
+        if pressed and event.isAutoRepeat():
             event.ignore()
             return False
         identifier, mapping = self._mapping_from_event(event)
@@ -439,7 +437,16 @@ class JoystickWindow(QMainWindow):
             self._active_inputs.clear()
             self._stop_current_motion()
             self._update_jog_motion()
+        self._release_keyboard_grab()
         super().closeEvent(event)
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._ensure_keyboard_grab()
+
+    def hideEvent(self, event) -> None:  # type: ignore[override]
+        self._release_keyboard_grab()
+        super().hideEvent(event)
 
     def _mapping_from_event(
         self, event
@@ -463,3 +470,19 @@ class JoystickWindow(QMainWindow):
                 return ("char", normalized), mapping
 
         return (None, None)
+
+    def _ensure_keyboard_grab(self) -> None:
+        if not self._keyboard_grabbed:
+            try:
+                self.grabKeyboard()
+                self._keyboard_grabbed = True
+            except RuntimeError:
+                # Grab can fail if the window is not yet fully native; try again later.
+                QTimer.singleShot(0, self._ensure_keyboard_grab)
+
+    def _release_keyboard_grab(self, _object=None) -> None:
+        if self._keyboard_grabbed:
+            try:
+                self.releaseKeyboard()
+            finally:
+                self._keyboard_grabbed = False
