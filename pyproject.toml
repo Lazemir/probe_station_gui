@@ -15,4 +15,8 @@ dependencies = [
 ]
 
 [tool.setuptools]
-py-modules = ["main"]
+packages = [
+    "probe_station_gui",
+    "probe_station_gui.views",
+    "probe_station_gui.dialogs",
+]
