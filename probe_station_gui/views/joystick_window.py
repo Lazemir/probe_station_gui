@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Dict, Optional, Tuple
+from typing import Optional, Tuple
 
 import serial
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QCloseEvent, QDoubleValidator, QKeyEvent
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QCloseEvent, QDoubleValidator
 from PySide6.QtWidgets import (
     QComboBox,
     QGridLayout,
@@ -26,7 +26,6 @@ class JoystickWindow(QMainWindow):
 
     JOG_DISTANCE_MM = 10.0
     FEED_RATES = ["30", "60", "90", "120", "180", "Custom..."]
-    RELEASE_SETTLE_MS = 120
 
     KEY_DIRECTION_MAP = {
         Qt.Key_Up: ("Y", 1),
@@ -56,13 +55,8 @@ class JoystickWindow(QMainWindow):
         self.setFocusPolicy(Qt.StrongFocus)
 
         self.serial_connection: Optional[serial.Serial] = None
-        self._active_inputs: Dict[str, Tuple[str, int]] = {}
-        self._current_axes: Dict[str, int] = {}
-        self._last_feedrate: Optional[float] = None
-        self._release_timer = QTimer(self)
-        self._release_timer.setSingleShot(True)
-        self._release_timer.timeout.connect(self._flush_motion_update)
-        self._update_pending = False
+        self._active_direction: Optional[tuple[str, int]] = None
+        self._key_stack: list[Tuple[str, object]] = []
 
         central = QWidget(self)
         self.setCentralWidget(central)
@@ -92,14 +86,6 @@ class JoystickWindow(QMainWindow):
         self.right_button = QPushButton("→", self)
         self.down_button = QPushButton("↓", self)
 
-        for button in (
-            self.up_button,
-            self.left_button,
-            self.right_button,
-            self.down_button,
-        ):
-            button.setFocusPolicy(Qt.NoFocus)
-
         grid_layout.addWidget(self.up_button, 0, 1)
         grid_layout.addWidget(self.left_button, 1, 0)
         grid_layout.addWidget(self.right_button, 1, 2)
@@ -107,21 +93,14 @@ class JoystickWindow(QMainWindow):
 
         root_layout.addLayout(grid_layout)
 
-        self._button_lookup = {
-            "button_up": self.up_button,
-            "button_down": self.down_button,
-            "button_left": self.left_button,
-            "button_right": self.right_button,
-        }
-
-        self.up_button.pressed.connect(lambda: self._handle_press("button_up", "Y", 1))
-        self.up_button.released.connect(lambda: self._handle_release("button_up"))
-        self.down_button.pressed.connect(lambda: self._handle_press("button_down", "Y", -1))
-        self.down_button.released.connect(lambda: self._handle_release("button_down"))
-        self.left_button.pressed.connect(lambda: self._handle_press("button_left", "X", -1))
-        self.left_button.released.connect(lambda: self._handle_release("button_left"))
-        self.right_button.pressed.connect(lambda: self._handle_press("button_right", "X", 1))
-        self.right_button.released.connect(lambda: self._handle_release("button_right"))
+        self.up_button.pressed.connect(lambda: self.start_jog("Y", 1))
+        self.up_button.released.connect(self.stop_jog)
+        self.down_button.pressed.connect(lambda: self.start_jog("Y", -1))
+        self.down_button.released.connect(self.stop_jog)
+        self.left_button.pressed.connect(lambda: self.start_jog("X", -1))
+        self.left_button.released.connect(self.stop_jog)
+        self.right_button.pressed.connect(lambda: self.start_jog("X", 1))
+        self.right_button.released.connect(self.stop_jog)
 
         home_layout = QHBoxLayout()
         self.home_all_button = QPushButton("Home All", self)
@@ -132,18 +111,9 @@ class JoystickWindow(QMainWindow):
         home_layout.addWidget(self.home_z_button)
         root_layout.addLayout(home_layout)
 
-        utility_layout = QHBoxLayout()
-        self.unlock_button = QPushButton("Unlock", self)
-        self.reset_button = QPushButton("Reset", self)
-        utility_layout.addWidget(self.unlock_button)
-        utility_layout.addWidget(self.reset_button)
-        root_layout.addLayout(utility_layout)
-
         self.home_all_button.clicked.connect(lambda: self.send_command("$H\n"))
         self.home_xy_button.clicked.connect(self._home_xy)
         self.home_z_button.clicked.connect(lambda: self.send_command("$HZ\n"))
-        self.unlock_button.clicked.connect(lambda: self.send_command("$X\n"))
-        self.reset_button.clicked.connect(lambda: self.send_command(b"\x18"))
 
         root_layout.addStretch(1)
         self._update_enabled_state()
@@ -157,31 +127,17 @@ class JoystickWindow(QMainWindow):
     def set_serial(self, serial_connection: Optional[serial.Serial]) -> None:
         """Assign the serial connection used for jogging commands."""
 
-        previous_connection = self.serial_connection
-        previous_active = bool(self._current_axes)
-
         self.serial_connection = serial_connection
-
-        if (not serial_connection or not serial_connection.is_open) and previous_connection:
-            if previous_connection.is_open and previous_active:
-                try:
-                    previous_connection.write(b"\x85")
-                    previous_connection.flush()
-                except serial.SerialException:
-                    pass
-            self._active_inputs.clear()
-            self._current_axes.clear()
-
+        if not serial_connection or not serial_connection.is_open:
+            self._active_direction = None
+            self._key_stack.clear()
         if serial_connection and serial_connection.is_open:
             self.status_label.setText(
                 f"Connected to {serial_connection.port} @ {serial_connection.baudrate}"
             )
         else:
             self.status_label.setText("Disconnected")
-            self._last_feedrate = None
-
         self._update_enabled_state()
-        self._update_jog_motion()
 
     def _update_enabled_state(self) -> None:
         enabled = bool(self.serial_connection and self.serial_connection.is_open)
@@ -195,8 +151,6 @@ class JoystickWindow(QMainWindow):
             self.home_all_button,
             self.home_xy_button,
             self.home_z_button,
-            self.unlock_button,
-            self.reset_button,
         ):
             widget.setEnabled(enabled)
 
@@ -216,128 +170,27 @@ class JoystickWindow(QMainWindow):
             self._show_warning("Feed rate must be a positive number.")
             return None
 
-    def _handle_press(
-        self,
-        identifier: str,
-        axis: str,
-        direction: int,
-        *,
-        auto_repeat: bool = False,
-    ) -> None:
-        if auto_repeat:
-            return
-        self._active_inputs[identifier] = (axis, direction)
+    def start_jog(self, axis: str, direction: int) -> None:
         if not self.serial_connection or not self.serial_connection.is_open:
             return
-        if self._release_timer.isActive():
-            self._release_timer.stop()
-            self._update_pending = False
         feedrate = self.get_feedrate()
         if feedrate is None:
             return
-        self._last_feedrate = feedrate
-        self._update_jog_motion()
-
-    def _handle_release(
-        self,
-        identifier: Optional[str],
-        mapping: Optional[Tuple[str, int]] = None,
-    ) -> None:
-        target = identifier
-        if target is None and mapping is not None:
-            for key, value in self._active_inputs.items():
-                if value == mapping:
-                    target = key
-                    break
-        if target is None:
+        if self._active_direction == (axis, direction):
             return
-        removed = self._active_inputs.pop(target, None)
-        if removed is None:
-            return
-        if self._release_timer.isActive():
-            self._release_timer.stop()
-            self._update_pending = False
-        if self._current_axes:
-            self._stop_current_motion()
-        if self._active_inputs:
-            self._schedule_motion_update()
-        else:
-            self._current_axes.clear()
-
-    def _schedule_motion_update(self) -> None:
-        if self._release_timer.isActive():
-            self._release_timer.stop()
-        self._update_pending = True
-        self._release_timer.start(self.RELEASE_SETTLE_MS)
-
-    def _flush_motion_update(self) -> None:
-        self._update_pending = False
-        self._update_jog_motion()
-
-    def _stop_current_motion(self) -> None:
-        if not self.serial_connection or not self.serial_connection.is_open:
-            return
-        self.send_command(b"\x85")
-
-    def _calculate_axes(self) -> Dict[str, int]:
-        self._prune_button_inputs()
-        axes: Dict[str, set[int]] = {}
-        for axis, direction in self._active_inputs.values():
-            axes.setdefault(axis, set()).add(direction)
-        resolved: Dict[str, int] = {}
-        for axis, directions in axes.items():
-            if len(directions) == 1:
-                resolved[axis] = next(iter(directions))
-        return resolved
-
-    def _update_jog_motion(self) -> None:
-        if not self.serial_connection or not self.serial_connection.is_open:
-            if self._current_axes:
-                self._stop_current_motion()
-                self._current_axes.clear()
-            if self._release_timer.isActive():
-                self._release_timer.stop()
-                self._update_pending = False
-            return
-
-        axes = self._calculate_axes()
-        if axes == self._current_axes:
-            return
-
-        if self._current_axes:
-            self._stop_current_motion()
-
-        if not axes:
-            self._current_axes.clear()
-            return
-
-        feedrate = self._last_feedrate
-        if feedrate is None:
-            feedrate = self.get_feedrate()
-            if feedrate is None:
-                return
-            self._last_feedrate = feedrate
-
-        distance_mm = self.JOG_DISTANCE_MM
-        parts = [
-            f"{axis}{direction * distance_mm:.3f}"
-            for axis, direction in sorted(axes.items())
-        ]
-        command = f"$J=G91 G21 {' '.join(parts)} F{feedrate}\n"
+        self._active_direction = (axis, direction)
+        distance = direction * self.JOG_DISTANCE_MM
+        command = f"$J=G91 G21 {axis}{distance:.3f} F{feedrate}\n"
         self.send_command(command)
-        self._current_axes = axes
 
-    def _prune_button_inputs(self) -> None:
-        removed = False
-        for key in list(self._active_inputs.keys()):
-            if key.startswith("button_"):
-                button = self._button_lookup.get(key)
-                if button is not None and not button.isDown():
-                    self._active_inputs.pop(key, None)
-                    removed = True
-        if removed and not self._active_inputs and self._current_axes:
-            self._stop_current_motion()
-            self._current_axes.clear()
+    def stop_jog(self) -> None:
+        if not self.serial_connection or not self.serial_connection.is_open:
+            self._active_direction = None
+            return
+        if self._active_direction is None:
+            return
+        self._active_direction = None
+        self.send_command(b"\x85")
 
     def _home_xy(self) -> None:
         self.send_command("$HX\n")
@@ -357,60 +210,74 @@ class JoystickWindow(QMainWindow):
     def _show_warning(self, message: str) -> None:
         QMessageBox.warning(self, "Joystick", message)
 
-    def keyPressEvent(self, event: QKeyEvent) -> None:  # type: ignore[override]
-        mapping = self._mapping_from_event(event)
-        if mapping:
-            identifier, (axis, direction) = mapping
-            self._handle_press(identifier, axis, direction, auto_repeat=event.isAutoRepeat())
+    def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        if event.isAutoRepeat():
+            event.ignore()
+            return
+        identifier, mapping = self._mapping_from_event(event)
+        if identifier and mapping:
+            if identifier not in self._key_stack:
+                self._key_stack.append(identifier)
+                self.start_jog(*mapping)
             event.accept()
             return
         super().keyPressEvent(event)
 
-    def keyReleaseEvent(self, event: QKeyEvent) -> None:  # type: ignore[override]
+    def keyReleaseEvent(self, event) -> None:  # type: ignore[override]
         if event.isAutoRepeat():
             event.ignore()
             return
-        mapping = self._mapping_from_event(event)
-        if mapping:
-            identifier, pair = mapping
-            self._handle_release(identifier, pair)
+        identifier, mapping = self._mapping_from_event(event)
+        if identifier and mapping:
+            if identifier in self._key_stack:
+                self._key_stack.remove(identifier)
+            self.stop_jog()
+            if self._key_stack:
+                next_identifier = self._key_stack[-1]
+                next_mapping = self._mapping_from_identifier(next_identifier)
+                if next_mapping:
+                    self.start_jog(*next_mapping)
             event.accept()
             return
         super().keyReleaseEvent(event)
 
     def focusOutEvent(self, event) -> None:  # type: ignore[override]
-        if self._active_inputs:
-            self._active_inputs.clear()
-            self._stop_current_motion()
-            self._current_axes.clear()
+        self._key_stack.clear()
+        self.stop_jog()
         super().focusOutEvent(event)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]
-        if self._active_inputs:
-            self._active_inputs.clear()
-            self._stop_current_motion()
-            self._current_axes.clear()
+        self._key_stack.clear()
+        self.stop_jog()
         super().closeEvent(event)
 
     def _mapping_from_event(
-        self, event: QKeyEvent
-    ) -> Optional[Tuple[str, Tuple[str, int]]]:
+        self, event
+    ) -> tuple[Optional[Tuple[str, object]], Optional[tuple[str, int]]]:
         key = event.key()
         mapping = self.KEY_DIRECTION_MAP.get(key)
         if mapping:
-            return (f"key_{key}", mapping)
+            return ("key", key), mapping
 
         text = event.text()
         if text:
             normalized = text.casefold()
             mapping = self.CHAR_DIRECTION_MAP.get(normalized)
             if mapping:
-                return (f"char_{normalized}", mapping)
+                return ("char", normalized), mapping
 
         if 0 < key <= 0x10FFFF:
             normalized = chr(key).casefold()
             mapping = self.CHAR_DIRECTION_MAP.get(normalized)
             if mapping:
-                return (f"char_{normalized}", mapping)
+                return ("charcode", normalized), mapping
 
+        return (None, None)
+
+    def _mapping_from_identifier(self, identifier: Tuple[str, object]) -> Optional[tuple[str, int]]:
+        kind, value = identifier
+        if kind == "key":
+            return self.KEY_DIRECTION_MAP.get(value)  # type: ignore[arg-type]
+        if kind in {"char", "charcode"}:
+            return self.CHAR_DIRECTION_MAP.get(value)  # type: ignore[arg-type]
         return None
