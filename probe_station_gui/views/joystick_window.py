@@ -5,9 +5,10 @@ from __future__ import annotations
 from typing import Dict, Optional, Tuple
 
 import serial
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtGui import QCloseEvent, QDoubleValidator
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QGridLayout,
     QHBoxLayout,
@@ -63,6 +64,12 @@ class JoystickWindow(QMainWindow):
         self._release_timer.setSingleShot(True)
         self._release_timer.timeout.connect(self._flush_motion_update)
         self._update_pending = False
+        self._filter_active = False
+        self._app = QApplication.instance()
+        if self._app is not None:
+            self._app.installEventFilter(self)
+            self._filter_active = True
+            self.destroyed.connect(self._remove_event_filter)
 
         central = QWidget(self)
         self.setCentralWidget(central)
@@ -91,6 +98,14 @@ class JoystickWindow(QMainWindow):
         self.left_button = QPushButton("←", self)
         self.right_button = QPushButton("→", self)
         self.down_button = QPushButton("↓", self)
+
+        for button in (
+            self.up_button,
+            self.left_button,
+            self.right_button,
+            self.down_button,
+        ):
+            button.setFocusPolicy(Qt.NoFocus)
 
         grid_layout.addWidget(self.up_button, 0, 1)
         grid_layout.addWidget(self.left_button, 1, 0)
@@ -197,6 +212,44 @@ class JoystickWindow(QMainWindow):
             self.reset_button,
         ):
             widget.setEnabled(enabled)
+
+    def _remove_event_filter(self, _object=None) -> None:
+        if self._app is not None and self._filter_active:
+            self._app.removeEventFilter(self)
+            self._filter_active = False
+
+    def eventFilter(self, obj, event):  # type: ignore[override]
+        if event.type() in (QEvent.KeyPress, QEvent.KeyRelease):
+            widget = obj if isinstance(obj, QWidget) else None
+            if (
+                widget is not None
+                and widget.window() is self
+                and self.isVisible()
+                and self.isActiveWindow()
+            ):
+                handled = self._process_key_event(
+                    event, pressed=event.type() == QEvent.KeyPress
+                )
+                if handled:
+                    return True
+        return super().eventFilter(obj, event)
+
+    def _process_key_event(self, event, *, pressed: bool) -> bool:
+        if event.isAutoRepeat():
+            event.ignore()
+            return False
+        identifier, mapping = self._mapping_from_event(event)
+        if pressed:
+            if identifier and mapping:
+                self._handle_press(identifier, *mapping)
+                event.accept()
+                return True
+            return False
+        if identifier or mapping:
+            self._handle_release(identifier, mapping)
+            event.accept()
+            return True
+        return False
 
     def get_feedrate(self) -> Optional[float]:
         text = self.feedrate_combo.currentText()
@@ -367,26 +420,12 @@ class JoystickWindow(QMainWindow):
         QMessageBox.warning(self, "Joystick", message)
 
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
-        if event.isAutoRepeat():
-            event.ignore()
-            return
-        identifier, mapping = self._mapping_from_event(event)
-        if identifier and mapping:
-            self._handle_press(identifier, *mapping)
-            event.accept()
-            return
-        super().keyPressEvent(event)
+        if not self._process_key_event(event, pressed=True):
+            super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event) -> None:  # type: ignore[override]
-        if event.isAutoRepeat():
-            event.ignore()
-            return
-        identifier, mapping = self._mapping_from_event(event)
-        if identifier or mapping:
-            self._handle_release(identifier, mapping)
-            event.accept()
-            return
-        super().keyReleaseEvent(event)
+        if not self._process_key_event(event, pressed=False):
+            super().keyReleaseEvent(event)
 
     def focusOutEvent(self, event) -> None:  # type: ignore[override]
         if self._active_inputs:
