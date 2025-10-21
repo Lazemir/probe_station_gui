@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "probe-station-gui"
+version = "0.1.0"
+description = "Graphical interface for controlling a microscope probe station"
+authors = [{ name = "Probe Station Team" }]
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "PySide6",
+    "rotpy",
+]
+
+[tool.setuptools]
+py-modules = ["main"]
