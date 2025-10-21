@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 import serial
-from PySide6.QtCore import QEvent, Qt, QTimer
-from PySide6.QtGui import QCloseEvent, QDoubleValidator
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QCloseEvent, QDoubleValidator, QKeyEvent
 from PySide6.QtWidgets import (
-    QApplication,
     QComboBox,
     QGridLayout,
     QHBoxLayout,
@@ -23,22 +21,12 @@ from PySide6.QtWidgets import (
 )
 
 
-@dataclass
-class InputState:
-    """Track an individual jog input."""
-
-    axis: str
-    direction: int
-    pressed: bool = True
-
-
 class JoystickWindow(QMainWindow):
     """Floating window that provides directional jogging controls."""
 
     JOG_DISTANCE_MM = 10.0
     FEED_RATES = ["30", "60", "90", "120", "180", "Custom..."]
-    RELEASE_SETTLE_MS = 90
-    WATCHDOG_INTERVAL_MS = 40
+    RELEASE_SETTLE_MS = 120
 
     KEY_DIRECTION_MAP = {
         Qt.Key_Up: ("Y", 1),
@@ -68,25 +56,13 @@ class JoystickWindow(QMainWindow):
         self.setFocusPolicy(Qt.StrongFocus)
 
         self.serial_connection: Optional[serial.Serial] = None
-        self._active_inputs: Dict[Tuple[str, object] | str, InputState] = {}
+        self._active_inputs: Dict[str, Tuple[str, int]] = {}
         self._current_axes: Dict[str, int] = {}
         self._last_feedrate: Optional[float] = None
         self._release_timer = QTimer(self)
         self._release_timer.setSingleShot(True)
         self._release_timer.timeout.connect(self._flush_motion_update)
-        self._watchdog_timer = QTimer(self)
-        self._watchdog_timer.setInterval(self.WATCHDOG_INTERVAL_MS)
-        self._watchdog_timer.timeout.connect(self._prune_stuck_inputs)
-        self._watchdog_timer.start()
         self._update_pending = False
-        self._filter_active = False
-        self._keyboard_grabbed = False
-        self._app = QApplication.instance()
-        if self._app is not None:
-            self._app.installEventFilter(self)
-            self._filter_active = True
-            self.destroyed.connect(self._remove_event_filter)
-            self.destroyed.connect(self._release_keyboard_grab)
 
         central = QWidget(self)
         self.setCentralWidget(central)
@@ -138,22 +114,14 @@ class JoystickWindow(QMainWindow):
             "button_right": self.right_button,
         }
 
-        self.up_button.pressed.connect(
-            lambda: self._handle_press("button_up", "Y", 1)
-        )
+        self.up_button.pressed.connect(lambda: self._handle_press("button_up", "Y", 1))
         self.up_button.released.connect(lambda: self._handle_release("button_up"))
-        self.down_button.pressed.connect(
-            lambda: self._handle_press("button_down", "Y", -1)
-        )
+        self.down_button.pressed.connect(lambda: self._handle_press("button_down", "Y", -1))
         self.down_button.released.connect(lambda: self._handle_release("button_down"))
-        self.left_button.pressed.connect(
-            lambda: self._handle_press("button_left", "X", -1)
-        )
+        self.left_button.pressed.connect(lambda: self._handle_press("button_left", "X", -1))
         self.left_button.released.connect(lambda: self._handle_release("button_left"))
         self.right_button.pressed.connect(lambda: self._handle_press("button_right", "X", 1))
-        self.right_button.released.connect(
-            lambda: self._handle_release("button_right")
-        )
+        self.right_button.released.connect(lambda: self._handle_release("button_right"))
 
         home_layout = QHBoxLayout()
         self.home_all_button = QPushButton("Home All", self)
@@ -232,39 +200,6 @@ class JoystickWindow(QMainWindow):
         ):
             widget.setEnabled(enabled)
 
-    def _remove_event_filter(self, _object=None) -> None:
-        if self._app is not None and self._filter_active:
-            self._app.removeEventFilter(self)
-            self._filter_active = False
-
-    def eventFilter(self, obj, event):  # type: ignore[override]
-        if event.type() in (QEvent.KeyPress, QEvent.KeyRelease):
-            widget = obj if isinstance(obj, QWidget) else None
-            same_window = widget is not None and widget.window() is self
-            if self.isVisible() and (same_window or self._keyboard_grabbed):
-                handled = self._process_key_event(
-                    event, pressed=event.type() == QEvent.KeyPress
-                )
-                if handled:
-                    return True
-        return super().eventFilter(obj, event)
-
-    def _process_key_event(self, event, *, pressed: bool) -> bool:
-        identifier, mapping = self._mapping_from_event(event)
-        if pressed:
-            if identifier and mapping:
-                self._handle_press(
-                    identifier, *mapping, refresh=event.isAutoRepeat()
-                )
-                event.accept()
-                return True
-            return False
-        if identifier or mapping:
-            self._handle_release(identifier, mapping)
-            event.accept()
-            return True
-        return False
-
     def get_feedrate(self) -> Optional[float]:
         text = self.feedrate_combo.currentText()
         if text == "Custom...":
@@ -283,64 +218,51 @@ class JoystickWindow(QMainWindow):
 
     def _handle_press(
         self,
-        identifier: Tuple[str, object] | str,
+        identifier: str,
         axis: str,
         direction: int,
         *,
-        refresh: bool = False,
+        auto_repeat: bool = False,
     ) -> None:
-        state = self._active_inputs.get(identifier)
-        if state is None:
-            state = InputState(axis=axis, direction=direction)
-            self._active_inputs[identifier] = state
-        else:
-            state.axis = axis
-            state.direction = direction
-            state.pressed = True
-        if refresh:
+        if auto_repeat:
             return
+        self._active_inputs[identifier] = (axis, direction)
         if not self.serial_connection or not self.serial_connection.is_open:
-            state.pressed = False
-            self._refresh_input_states()
             return
         if self._release_timer.isActive():
             self._release_timer.stop()
             self._update_pending = False
         feedrate = self.get_feedrate()
         if feedrate is None:
-            state.pressed = False
-            self._refresh_input_states()
             return
         self._last_feedrate = feedrate
         self._update_jog_motion()
 
     def _handle_release(
         self,
-        identifier: Tuple[str, object] | str | None,
-        mapping: Optional[tuple[str, int]] = None,
+        identifier: Optional[str],
+        mapping: Optional[Tuple[str, int]] = None,
     ) -> None:
-        target_identifier: Tuple[str, object] | str | None = identifier
-        state: Optional[InputState] = None
-        if target_identifier is not None:
-            state = self._active_inputs.get(target_identifier)
-        if state is None and mapping is not None:
-            for key, candidate in self._active_inputs.items():
-                if candidate.axis == mapping[0] and candidate.direction == mapping[1]:
-                    state = candidate
-                    target_identifier = key
+        target = identifier
+        if target is None and mapping is not None:
+            for key, value in self._active_inputs.items():
+                if value == mapping:
+                    target = key
                     break
-        if state is None:
+        if target is None:
             return
-        state.pressed = False
+        removed = self._active_inputs.pop(target, None)
+        if removed is None:
+            return
         if self._release_timer.isActive():
             self._release_timer.stop()
             self._update_pending = False
-        any_pressed = any(item.pressed for item in self._active_inputs.values())
-        self._stop_current_motion()
-        if any_pressed:
+        if self._current_axes:
+            self._stop_current_motion()
+        if self._active_inputs:
             self._schedule_motion_update()
         else:
-            self._update_jog_motion()
+            self._current_axes.clear()
 
     def _schedule_motion_update(self) -> None:
         if self._release_timer.isActive():
@@ -353,26 +275,15 @@ class JoystickWindow(QMainWindow):
         self._update_jog_motion()
 
     def _stop_current_motion(self) -> None:
-        if not self._current_axes:
+        if not self.serial_connection or not self.serial_connection.is_open:
             return
-        if self._release_timer.isActive():
-            self._release_timer.stop()
-            self._update_pending = False
-        self._cancel_active_jog()
-        self._current_axes.clear()
-
-    def _purge_inactive_inputs(self) -> None:
-        if not self._active_inputs:
-            return
-        self._refresh_input_states()
+        self.send_command(b"\x85")
 
     def _calculate_axes(self) -> Dict[str, int]:
-        self._purge_inactive_inputs()
+        self._prune_button_inputs()
         axes: Dict[str, set[int]] = {}
-        for state in self._active_inputs.values():
-            if not state.pressed:
-                continue
-            axes.setdefault(state.axis, set()).add(state.direction)
+        for axis, direction in self._active_inputs.values():
+            axes.setdefault(axis, set()).add(direction)
         resolved: Dict[str, int] = {}
         for axis, directions in axes.items():
             if len(directions) == 1:
@@ -380,13 +291,13 @@ class JoystickWindow(QMainWindow):
         return resolved
 
     def _update_jog_motion(self) -> None:
-        self._update_pending = False
         if not self.serial_connection or not self.serial_connection.is_open:
             if self._current_axes:
-                self._cancel_active_jog()
-            self._current_axes.clear()
+                self._stop_current_motion()
+                self._current_axes.clear()
             if self._release_timer.isActive():
                 self._release_timer.stop()
+                self._update_pending = False
             return
 
         axes = self._calculate_axes()
@@ -394,7 +305,7 @@ class JoystickWindow(QMainWindow):
             return
 
         if self._current_axes:
-            self._cancel_active_jog()
+            self._stop_current_motion()
 
         if not axes:
             self._current_axes.clear()
@@ -416,37 +327,17 @@ class JoystickWindow(QMainWindow):
         self.send_command(command)
         self._current_axes = axes
 
-    def _cancel_active_jog(self) -> None:
-        if not self.serial_connection or not self.serial_connection.is_open:
-            return
-        self.send_command(b"\x85")
-
-    def _refresh_input_states(self) -> None:
-        if not self._active_inputs:
-            return
+    def _prune_button_inputs(self) -> None:
         removed = False
-        for identifier, state in list(self._active_inputs.items()):
-            if state.pressed:
-                if isinstance(identifier, str) and identifier.startswith("button_"):
-                    button = self._button_lookup.get(identifier)
-                    if button is not None and not button.isDown():
-                        state.pressed = False
-            if not state.pressed:
-                del self._active_inputs[identifier]
-                removed = True
-        if removed and not self._active_inputs:
+        for key in list(self._active_inputs.keys()):
+            if key.startswith("button_"):
+                button = self._button_lookup.get(key)
+                if button is not None and not button.isDown():
+                    self._active_inputs.pop(key, None)
+                    removed = True
+        if removed and not self._active_inputs and self._current_axes:
             self._stop_current_motion()
-
-    def _prune_stuck_inputs(self) -> None:
-        if not self._active_inputs:
-            return
-        before = set(self._active_inputs.keys())
-        self._refresh_input_states()
-        if set(self._active_inputs.keys()) != before:
-            if self._release_timer.isActive():
-                self._release_timer.stop()
-            self._update_pending = False
-            self._update_jog_motion()
+            self._current_axes.clear()
 
     def _home_xy(self) -> None:
         self.send_command("$HX\n")
@@ -466,72 +357,60 @@ class JoystickWindow(QMainWindow):
     def _show_warning(self, message: str) -> None:
         QMessageBox.warning(self, "Joystick", message)
 
-    def keyPressEvent(self, event) -> None:  # type: ignore[override]
-        if not self._process_key_event(event, pressed=True):
-            super().keyPressEvent(event)
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # type: ignore[override]
+        mapping = self._mapping_from_event(event)
+        if mapping:
+            identifier, (axis, direction) = mapping
+            self._handle_press(identifier, axis, direction, auto_repeat=event.isAutoRepeat())
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
-    def keyReleaseEvent(self, event) -> None:  # type: ignore[override]
-        if not self._process_key_event(event, pressed=False):
-            super().keyReleaseEvent(event)
+    def keyReleaseEvent(self, event: QKeyEvent) -> None:  # type: ignore[override]
+        if event.isAutoRepeat():
+            event.ignore()
+            return
+        mapping = self._mapping_from_event(event)
+        if mapping:
+            identifier, pair = mapping
+            self._handle_release(identifier, pair)
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
 
     def focusOutEvent(self, event) -> None:  # type: ignore[override]
         if self._active_inputs:
             self._active_inputs.clear()
             self._stop_current_motion()
-            self._update_jog_motion()
+            self._current_axes.clear()
         super().focusOutEvent(event)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]
         if self._active_inputs:
             self._active_inputs.clear()
             self._stop_current_motion()
-            self._update_jog_motion()
-        self._release_keyboard_grab()
+            self._current_axes.clear()
         super().closeEvent(event)
 
-    def showEvent(self, event) -> None:  # type: ignore[override]
-        super().showEvent(event)
-        self._ensure_keyboard_grab()
-
-    def hideEvent(self, event) -> None:  # type: ignore[override]
-        self._release_keyboard_grab()
-        super().hideEvent(event)
-
     def _mapping_from_event(
-        self, event
-    ) -> tuple[Optional[Tuple[str, object]], Optional[tuple[str, int]]]:
+        self, event: QKeyEvent
+    ) -> Optional[Tuple[str, Tuple[str, int]]]:
         key = event.key()
         mapping = self.KEY_DIRECTION_MAP.get(key)
         if mapping:
-            return ("key", key), mapping
+            return (f"key_{key}", mapping)
 
         text = event.text()
         if text:
             normalized = text.casefold()
             mapping = self.CHAR_DIRECTION_MAP.get(normalized)
             if mapping:
-                return ("char", normalized), mapping
+                return (f"char_{normalized}", mapping)
 
         if 0 < key <= 0x10FFFF:
             normalized = chr(key).casefold()
             mapping = self.CHAR_DIRECTION_MAP.get(normalized)
             if mapping:
-                return ("char", normalized), mapping
+                return (f"char_{normalized}", mapping)
 
-        return (None, None)
-
-    def _ensure_keyboard_grab(self) -> None:
-        if not self._keyboard_grabbed:
-            try:
-                self.grabKeyboard()
-                self._keyboard_grabbed = True
-            except RuntimeError:
-                # Grab can fail if the window is not yet fully native; try again later.
-                QTimer.singleShot(0, self._ensure_keyboard_grab)
-
-    def _release_keyboard_grab(self, _object=None) -> None:
-        if self._keyboard_grabbed:
-            try:
-                self.releaseKeyboard()
-            finally:
-                self._keyboard_grabbed = False
+        return None
