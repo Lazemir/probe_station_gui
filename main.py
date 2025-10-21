@@ -20,6 +20,9 @@ class Main(QMainWindow):
         self.view = MicroscopeView()
         self.setCentralWidget(self.view)
         self.serial_connection = None
+        self.serial_dialog: SerialScannerDialog | None = None
+        self.serial_port_name: str | None = None
+        self.serial_baud_rate: int | None = None
 
         self.grabber = Grabber()
         self.thread = QThread()
@@ -52,6 +55,12 @@ class Main(QMainWindow):
         if self.serial_connection and self.serial_connection.is_open:
             self.serial_connection.close()
         self.serial_connection = serial_port
+        self.serial_port_name = serial_port.port
+        try:
+            baud_rate = int(serial_port.baudrate)
+        except TypeError:
+            baud_rate = int(float(serial_port.baudrate))
+        self.serial_baud_rate = baud_rate
         print(
             f"Serial connected: {self.serial_connection.port} @ {self.serial_connection.baudrate} baud"
         )
