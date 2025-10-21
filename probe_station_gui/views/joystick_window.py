@@ -24,29 +24,29 @@ from PySide6.QtWidgets import (
 class JoystickWindow(QMainWindow):
     """Floating window that provides directional jogging controls."""
 
-    JOG_DISTANCE_MM = 0.5
+    JOG_DISTANCE_MM = 10.0
     FEED_RATES = ["300", "600", "900", "1200", "1800", "Custom..."]
 
     KEY_DIRECTION_MAP = {
-        Qt.Key_Up: ("X", 1),
-        Qt.Key_W: ("X", 1),
-        Qt.Key_Down: ("X", -1),
-        Qt.Key_S: ("X", -1),
-        Qt.Key_Left: ("Y", -1),
-        Qt.Key_A: ("Y", -1),
-        Qt.Key_Right: ("Y", 1),
-        Qt.Key_D: ("Y", 1),
+        Qt.Key_Up: ("Y", 1),
+        Qt.Key_W: ("Y", 1),
+        Qt.Key_Down: ("Y", -1),
+        Qt.Key_S: ("Y", -1),
+        Qt.Key_Left: ("X", -1),
+        Qt.Key_A: ("X", -1),
+        Qt.Key_Right: ("X", 1),
+        Qt.Key_D: ("X", 1),
     }
 
     CHAR_DIRECTION_MAP = {
-        "w": ("X", 1),
-        "s": ("X", -1),
-        "a": ("Y", -1),
-        "d": ("Y", 1),
-        "ц": ("X", 1),
-        "ы": ("X", -1),
-        "ф": ("Y", -1),
-        "в": ("Y", 1),
+        "w": ("Y", 1),
+        "s": ("Y", -1),
+        "a": ("X", -1),
+        "d": ("X", 1),
+        "ц": ("Y", 1),
+        "ы": ("Y", -1),
+        "ф": ("X", -1),
+        "в": ("X", 1),
     }
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
@@ -93,13 +93,13 @@ class JoystickWindow(QMainWindow):
 
         root_layout.addLayout(grid_layout)
 
-        self.up_button.pressed.connect(lambda: self.start_jog("X", 1))
+        self.up_button.pressed.connect(lambda: self.start_jog("Y", 1))
         self.up_button.released.connect(self.stop_jog)
-        self.down_button.pressed.connect(lambda: self.start_jog("X", -1))
+        self.down_button.pressed.connect(lambda: self.start_jog("Y", -1))
         self.down_button.released.connect(self.stop_jog)
-        self.left_button.pressed.connect(lambda: self.start_jog("Y", -1))
+        self.left_button.pressed.connect(lambda: self.start_jog("X", -1))
         self.left_button.released.connect(self.stop_jog)
-        self.right_button.pressed.connect(lambda: self.start_jog("Y", 1))
+        self.right_button.pressed.connect(lambda: self.start_jog("X", 1))
         self.right_button.released.connect(self.stop_jog)
 
         home_layout = QHBoxLayout()
