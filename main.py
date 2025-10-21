@@ -25,6 +25,9 @@ class Main(QMainWindow):
         self.view = MicroscopeView()
         self.setCentralWidget(self.view)
         self.serial_connection = None
+        self.serial_dialog = SerialScannerDialog(self)
+        self.serial_dialog.connected.connect(self.on_serial_connected)
+        self.serial_dialog.disconnected.connect(self.on_serial_disconnected)
         self.joystick_window: JoystickWindow | None = None
 
         self.grabber = Grabber()
@@ -41,9 +44,10 @@ class Main(QMainWindow):
         serial_action.triggered.connect(self.open_serial_scanner)
         tools_menu.addAction(serial_action)
 
+        window_menu = self.menuBar().addMenu("Window")
         joystick_action = QAction("Joystick", self)
-        joystick_action.triggered.connect(self.open_joystick_window)
-        tools_menu.addAction(joystick_action)
+        joystick_action.triggered.connect(self.show_joystick_window)
+        window_menu.addAction(joystick_action)
 
     def on_click(self, dx: float, dy: float) -> None:
         print(f"Click Δx={dx:.1f}px  Δy={dy:.1f}px")
@@ -53,10 +57,10 @@ class Main(QMainWindow):
         print("Camera error:", message)
 
     def open_serial_scanner(self) -> None:
-        dialog = SerialScannerDialog(self)
-        dialog.connected.connect(self.on_serial_connected)
-        dialog.disconnected.connect(self.on_serial_disconnected)
-        dialog.exec()
+        self.serial_dialog.populate_ports(clear_status=False)
+        self.serial_dialog.show()
+        self.serial_dialog.raise_()
+        self.serial_dialog.activateWindow()
 
     def on_serial_connected(self, serial_port) -> None:
         if self.serial_connection and self.serial_connection.is_open:
@@ -65,26 +69,33 @@ class Main(QMainWindow):
         print(
             f"Serial connected: {self.serial_connection.port} @ {self.serial_connection.baudrate} baud"
         )
-        if self.joystick_window:
-            self.joystick_window.set_serial(self.serial_connection)
+        joystick = self._ensure_joystick_window()
+        joystick.set_serial(self.serial_connection)
+        joystick.show()
+        joystick.raise_()
+        joystick.activateWindow()
 
     def on_serial_disconnected(self) -> None:
         if self.serial_connection and self.serial_connection.is_open:
             self.serial_connection.close()
         self.serial_connection = None
         print("Serial disconnected")
+        self.serial_dialog.handle_external_disconnect()
         if self.joystick_window:
             self.joystick_window.set_serial(None)
 
-    def open_joystick_window(self) -> None:
+    def show_joystick_window(self) -> None:
+        joystick = self._ensure_joystick_window()
+        joystick.show()
+        joystick.raise_()
+        joystick.activateWindow()
+
+    def _ensure_joystick_window(self) -> JoystickWindow:
         if self.joystick_window is None:
             self.joystick_window = JoystickWindow(self)
-            self.joystick_window.setAttribute(Qt.WA_DeleteOnClose, True)
             self.joystick_window.set_serial(self.serial_connection)
             self.joystick_window.destroyed.connect(self._on_joystick_destroyed)
-        self.joystick_window.show()
-        self.joystick_window.raise_()
-        self.joystick_window.activateWindow()
+        return self.joystick_window
 
     def _on_joystick_destroyed(self, _object=None) -> None:
         self.joystick_window = None
@@ -95,6 +106,7 @@ class Main(QMainWindow):
         self.thread.wait()
         if self.serial_connection and self.serial_connection.is_open:
             self.serial_connection.close()
+            self.serial_dialog.handle_external_disconnect()
         if self.joystick_window:
             self.joystick_window.close()
         event.accept()

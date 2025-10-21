@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Tuple
 
 import serial
 from PySide6.QtCore import Qt
@@ -28,14 +28,25 @@ class JoystickWindow(QMainWindow):
     FEED_RATES = ["300", "600", "900", "1200", "1800", "Custom..."]
 
     KEY_DIRECTION_MAP = {
-        Qt.Key_Up: ("Y", 1),
-        Qt.Key_W: ("Y", 1),
-        Qt.Key_Down: ("Y", -1),
-        Qt.Key_S: ("Y", -1),
-        Qt.Key_Left: ("X", -1),
-        Qt.Key_A: ("X", -1),
-        Qt.Key_Right: ("X", 1),
-        Qt.Key_D: ("X", 1),
+        Qt.Key_Up: ("X", 1),
+        Qt.Key_W: ("X", 1),
+        Qt.Key_Down: ("X", -1),
+        Qt.Key_S: ("X", -1),
+        Qt.Key_Left: ("Y", -1),
+        Qt.Key_A: ("Y", -1),
+        Qt.Key_Right: ("Y", 1),
+        Qt.Key_D: ("Y", 1),
+    }
+
+    CHAR_DIRECTION_MAP = {
+        "w": ("X", 1),
+        "s": ("X", -1),
+        "a": ("Y", -1),
+        "d": ("Y", 1),
+        "ц": ("X", 1),
+        "ы": ("X", -1),
+        "ф": ("Y", -1),
+        "в": ("Y", 1),
     }
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
@@ -45,7 +56,7 @@ class JoystickWindow(QMainWindow):
 
         self.serial_connection: Optional[serial.Serial] = None
         self._active_direction: Optional[tuple[str, int]] = None
-        self._key_stack: list[int] = []
+        self._key_stack: list[Tuple[str, object]] = []
 
         central = QWidget(self)
         self.setCentralWidget(central)
@@ -82,13 +93,13 @@ class JoystickWindow(QMainWindow):
 
         root_layout.addLayout(grid_layout)
 
-        self.up_button.pressed.connect(lambda: self.start_jog("Y", 1))
+        self.up_button.pressed.connect(lambda: self.start_jog("X", 1))
         self.up_button.released.connect(self.stop_jog)
-        self.down_button.pressed.connect(lambda: self.start_jog("Y", -1))
+        self.down_button.pressed.connect(lambda: self.start_jog("X", -1))
         self.down_button.released.connect(self.stop_jog)
-        self.left_button.pressed.connect(lambda: self.start_jog("X", -1))
+        self.left_button.pressed.connect(lambda: self.start_jog("Y", -1))
         self.left_button.released.connect(self.stop_jog)
-        self.right_button.pressed.connect(lambda: self.start_jog("X", 1))
+        self.right_button.pressed.connect(lambda: self.start_jog("Y", 1))
         self.right_button.released.connect(self.stop_jog)
 
         home_layout = QHBoxLayout()
@@ -100,9 +111,9 @@ class JoystickWindow(QMainWindow):
         home_layout.addWidget(self.home_z_button)
         root_layout.addLayout(home_layout)
 
-        self.home_all_button.clicked.connect(lambda: self.send_command("G28\n"))
-        self.home_xy_button.clicked.connect(lambda: self.send_command("G28 X Y\n"))
-        self.home_z_button.clicked.connect(lambda: self.send_command("G28 Z\n"))
+        self.home_all_button.clicked.connect(lambda: self.send_command("$H\n"))
+        self.home_xy_button.clicked.connect(self._home_xy)
+        self.home_z_button.clicked.connect(lambda: self.send_command("$HZ\n"))
 
         root_layout.addStretch(1)
         self._update_enabled_state()
@@ -181,6 +192,10 @@ class JoystickWindow(QMainWindow):
         self._active_direction = None
         self.send_command(b"\x85")
 
+    def _home_xy(self) -> None:
+        self.send_command("$HX\n")
+        self.send_command("$HY\n")
+
     def send_command(self, command: str | bytes) -> None:
         if not self.serial_connection or not self.serial_connection.is_open:
             return
@@ -199,11 +214,10 @@ class JoystickWindow(QMainWindow):
         if event.isAutoRepeat():
             event.ignore()
             return
-        key = event.key()
-        mapping = self.KEY_DIRECTION_MAP.get(key)
-        if mapping:
-            if key not in self._key_stack:
-                self._key_stack.append(key)
+        identifier, mapping = self._mapping_from_event(event)
+        if identifier and mapping:
+            if identifier not in self._key_stack:
+                self._key_stack.append(identifier)
                 self.start_jog(*mapping)
             event.accept()
             return
@@ -213,16 +227,16 @@ class JoystickWindow(QMainWindow):
         if event.isAutoRepeat():
             event.ignore()
             return
-        key = event.key()
-        if key in self.KEY_DIRECTION_MAP:
-            if key in self._key_stack:
-                self._key_stack.remove(key)
+        identifier, mapping = self._mapping_from_event(event)
+        if identifier and mapping:
+            if identifier in self._key_stack:
+                self._key_stack.remove(identifier)
             self.stop_jog()
             if self._key_stack:
-                next_key = self._key_stack[-1]
-                mapping = self.KEY_DIRECTION_MAP.get(next_key)
-                if mapping:
-                    self.start_jog(*mapping)
+                next_identifier = self._key_stack[-1]
+                next_mapping = self._mapping_from_identifier(next_identifier)
+                if next_mapping:
+                    self.start_jog(*next_mapping)
             event.accept()
             return
         super().keyReleaseEvent(event)
@@ -236,3 +250,34 @@ class JoystickWindow(QMainWindow):
         self._key_stack.clear()
         self.stop_jog()
         super().closeEvent(event)
+
+    def _mapping_from_event(
+        self, event
+    ) -> tuple[Optional[Tuple[str, object]], Optional[tuple[str, int]]]:
+        key = event.key()
+        mapping = self.KEY_DIRECTION_MAP.get(key)
+        if mapping:
+            return ("key", key), mapping
+
+        text = event.text()
+        if text:
+            normalized = text.casefold()
+            mapping = self.CHAR_DIRECTION_MAP.get(normalized)
+            if mapping:
+                return ("char", normalized), mapping
+
+        if 0 < key <= 0x10FFFF:
+            normalized = chr(key).casefold()
+            mapping = self.CHAR_DIRECTION_MAP.get(normalized)
+            if mapping:
+                return ("charcode", normalized), mapping
+
+        return (None, None)
+
+    def _mapping_from_identifier(self, identifier: Tuple[str, object]) -> Optional[tuple[str, int]]:
+        kind, value = identifier
+        if kind == "key":
+            return self.KEY_DIRECTION_MAP.get(value)  # type: ignore[arg-type]
+        if kind in {"char", "charcode"}:
+            return self.CHAR_DIRECTION_MAP.get(value)  # type: ignore[arg-type]
+        return None

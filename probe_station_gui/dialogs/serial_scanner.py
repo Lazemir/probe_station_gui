@@ -131,12 +131,15 @@ class SerialScannerDialog(QDialog):
         self.update_ui_state()
         self.connected.emit(self._serial)
 
-    def closeEvent(self, event) -> None:  # type: ignore[override]
-        if self._serial and self._serial.is_open:
+    def handle_external_disconnect(self, message: str | None = None) -> None:
+        if self._serial is not None and self._serial.is_open:
             self._serial.close()
-            self._serial = None
-            self.disconnected.emit()
-        super().closeEvent(event)
-
+        self._serial = None
+        if message is not None:
+            self.status_label.setText(message)
+        elif not self.status_label.text():
+            self.status_label.setText("Disconnected from board.")
+        self.populate_ports(clear_status=False)
+        self.update_ui_state()
 
 __all__ = ["SerialScannerDialog"]
