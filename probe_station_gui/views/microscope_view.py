@@ -28,7 +28,7 @@ class MicroscopeView(QWidget):
         self._cross: tuple[float, float] | None = None
 
     def set_frame(self, qimg: QImage) -> None:
-        transform = QTransform().rotate(-90)
+        transform = QTransform().rotate(180)
         rotated = qimg.transformed(transform)
         self._pix = QPixmap.fromImage(rotated)
         self.update()

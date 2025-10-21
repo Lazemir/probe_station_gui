@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 
-from PySide6.QtCore import Qt, QThread
+from PySide6.QtCore import QThread, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QApplication, QMainWindow
 
@@ -48,6 +48,8 @@ class Main(QMainWindow):
         joystick_action = QAction("Joystick", self)
         joystick_action.triggered.connect(self.show_joystick_window)
         window_menu.addAction(joystick_action)
+
+        QTimer.singleShot(0, self.open_serial_scanner)
 
     def on_click(self, dx: float, dy: float) -> None:
         print(f"Click Δx={dx:.1f}px  Δy={dy:.1f}px")

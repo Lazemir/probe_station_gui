@@ -56,6 +56,10 @@ class SerialScannerDialog(QDialog):
         self.connect_button.clicked.connect(self.on_connect_button_clicked)
         cancel_button.clicked.connect(self.reject)
 
+        self.refresh_button.setAutoDefault(False)
+        self.connect_button.setDefault(True)
+        self.connect_button.setAutoDefault(True)
+
         form = QFormLayout()
         form.addRow("Port", self.port_combo)
         form.addRow("Baud rate", self.baud_combo)
@@ -72,6 +76,7 @@ class SerialScannerDialog(QDialog):
         layout.addLayout(button_layout)
 
         self.populate_ports()
+        self.connect_button.setFocus()
 
     def update_ui_state(self) -> None:
         """Toggle the widgets according to the connection state."""
@@ -130,6 +135,7 @@ class SerialScannerDialog(QDialog):
         self.status_label.setText(f"Connected to {port_name} @ {baud_rate} baud.")
         self.update_ui_state()
         self.connected.emit(self._serial)
+        self.accept()
 
     def handle_external_disconnect(self, message: str | None = None) -> None:
         if self._serial is not None and self._serial.is_open:

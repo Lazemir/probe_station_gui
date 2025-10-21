@@ -25,7 +25,7 @@ class JoystickWindow(QMainWindow):
     """Floating window that provides directional jogging controls."""
 
     JOG_DISTANCE_MM = 10.0
-    FEED_RATES = ["300", "600", "900", "1200", "1800", "Custom..."]
+    FEED_RATES = ["30", "60", "90", "120", "180", "Custom..."]
 
     KEY_DIRECTION_MAP = {
         Qt.Key_Up: ("Y", 1),
