@@ -45,6 +45,7 @@ class Main(QMainWindow):
     def open_serial_scanner(self) -> None:
         dialog = SerialScannerDialog(self)
         dialog.connected.connect(self.on_serial_connected)
+        dialog.disconnected.connect(self.on_serial_disconnected)
         dialog.exec()
 
     def on_serial_connected(self, serial_port) -> None:
@@ -54,6 +55,12 @@ class Main(QMainWindow):
         print(
             f"Serial connected: {self.serial_connection.port} @ {self.serial_connection.baudrate} baud"
         )
+
+    def on_serial_disconnected(self) -> None:
+        if self.serial_connection and self.serial_connection.is_open:
+            self.serial_connection.close()
+        self.serial_connection = None
+        print("Serial disconnected")
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         self.grabber.stop()
