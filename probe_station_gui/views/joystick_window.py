@@ -99,6 +99,13 @@ class JoystickWindow(QMainWindow):
 
         root_layout.addLayout(grid_layout)
 
+        self._button_lookup = {
+            "button_up": self.up_button,
+            "button_down": self.down_button,
+            "button_left": self.left_button,
+            "button_right": self.right_button,
+        }
+
         self.up_button.pressed.connect(lambda: self._handle_press("button_up", "Y", 1))
         self.up_button.released.connect(lambda: self._handle_release("button_up"))
         self.down_button.pressed.connect(
@@ -224,17 +231,36 @@ class JoystickWindow(QMainWindow):
         self._active_inputs[identifier] = (axis, direction)
         self._update_jog_motion()
 
-    def _handle_release(self, identifier: Tuple[str, object] | str) -> None:
-        if identifier in self._active_inputs:
+    def _handle_release(
+        self,
+        identifier: Tuple[str, object] | str | None,
+        mapping: Optional[tuple[str, int]] = None,
+    ) -> None:
+        removed = False
+        if identifier is not None and identifier in self._active_inputs:
             del self._active_inputs[identifier]
-            if not self._active_inputs:
-                if self._release_timer.isActive():
-                    self._release_timer.stop()
-                self._update_pending = False
-                self._update_jog_motion()
-            else:
-                self._stop_current_motion()
-                self._schedule_motion_update()
+            removed = True
+        elif mapping is not None:
+            candidates = [
+                key
+                for key, value in list(self._active_inputs.items())
+                if value == mapping
+            ]
+            for key in candidates:
+                del self._active_inputs[key]
+            removed = bool(candidates)
+
+        if not removed:
+            return
+
+        if not self._active_inputs:
+            if self._release_timer.isActive():
+                self._release_timer.stop()
+            self._update_pending = False
+            self._update_jog_motion()
+        else:
+            self._stop_current_motion()
+            self._schedule_motion_update()
 
     def _schedule_motion_update(self) -> None:
         if self._release_timer.isActive():
@@ -255,7 +281,22 @@ class JoystickWindow(QMainWindow):
         self._cancel_active_jog()
         self._current_axes.clear()
 
+    def _purge_inactive_inputs(self) -> None:
+        if not self._active_inputs:
+            return
+        removed = []
+        for identifier in list(self._active_inputs):
+            if isinstance(identifier, str) and identifier.startswith("button_"):
+                button = self._button_lookup.get(identifier)
+                if button is not None and not button.isDown():
+                    removed.append(identifier)
+        for identifier in removed:
+            del self._active_inputs[identifier]
+        if removed and not self._active_inputs:
+            self._stop_current_motion()
+
     def _calculate_axes(self) -> Dict[str, int]:
+        self._purge_inactive_inputs()
         axes: Dict[str, set[int]] = {}
         for axis, direction in self._active_inputs.values():
             axes.setdefault(axis, set()).add(direction)
@@ -340,9 +381,9 @@ class JoystickWindow(QMainWindow):
         if event.isAutoRepeat():
             event.ignore()
             return
-        identifier, _ = self._mapping_from_event(event)
-        if identifier:
-            self._handle_release(identifier)
+        identifier, mapping = self._mapping_from_event(event)
+        if identifier or mapping:
+            self._handle_release(identifier, mapping)
             event.accept()
             return
         super().keyReleaseEvent(event)
@@ -380,6 +421,6 @@ class JoystickWindow(QMainWindow):
             normalized = chr(key).casefold()
             mapping = self.CHAR_DIRECTION_MAP.get(normalized)
             if mapping:
-                return ("charcode", normalized), mapping
+                return ("char", normalized), mapping
 
         return (None, None)
