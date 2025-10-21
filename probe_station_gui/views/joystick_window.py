@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 import serial
@@ -22,12 +23,22 @@ from PySide6.QtWidgets import (
 )
 
 
+@dataclass
+class InputState:
+    """Track an individual jog input."""
+
+    axis: str
+    direction: int
+    pressed: bool = True
+
+
 class JoystickWindow(QMainWindow):
     """Floating window that provides directional jogging controls."""
 
     JOG_DISTANCE_MM = 10.0
     FEED_RATES = ["30", "60", "90", "120", "180", "Custom..."]
-    RELEASE_SETTLE_MS = 150
+    RELEASE_SETTLE_MS = 90
+    WATCHDOG_INTERVAL_MS = 40
 
     KEY_DIRECTION_MAP = {
         Qt.Key_Up: ("Y", 1),
@@ -57,12 +68,16 @@ class JoystickWindow(QMainWindow):
         self.setFocusPolicy(Qt.StrongFocus)
 
         self.serial_connection: Optional[serial.Serial] = None
-        self._active_inputs: Dict[Tuple[str, object] | str, tuple[str, int]] = {}
+        self._active_inputs: Dict[Tuple[str, object] | str, InputState] = {}
         self._current_axes: Dict[str, int] = {}
         self._last_feedrate: Optional[float] = None
         self._release_timer = QTimer(self)
         self._release_timer.setSingleShot(True)
         self._release_timer.timeout.connect(self._flush_motion_update)
+        self._watchdog_timer = QTimer(self)
+        self._watchdog_timer.setInterval(self.WATCHDOG_INTERVAL_MS)
+        self._watchdog_timer.timeout.connect(self._prune_stuck_inputs)
+        self._watchdog_timer.start()
         self._update_pending = False
         self._filter_active = False
         self._keyboard_grabbed = False
@@ -123,7 +138,9 @@ class JoystickWindow(QMainWindow):
             "button_right": self.right_button,
         }
 
-        self.up_button.pressed.connect(lambda: self._handle_press("button_up", "Y", 1))
+        self.up_button.pressed.connect(
+            lambda: self._handle_press("button_up", "Y", 1)
+        )
         self.up_button.released.connect(lambda: self._handle_release("button_up"))
         self.down_button.pressed.connect(
             lambda: self._handle_press("button_down", "Y", -1)
@@ -233,13 +250,12 @@ class JoystickWindow(QMainWindow):
         return super().eventFilter(obj, event)
 
     def _process_key_event(self, event, *, pressed: bool) -> bool:
-        if pressed and event.isAutoRepeat():
-            event.ignore()
-            return False
         identifier, mapping = self._mapping_from_event(event)
         if pressed:
             if identifier and mapping:
-                self._handle_press(identifier, *mapping)
+                self._handle_press(
+                    identifier, *mapping, refresh=event.isAutoRepeat()
+                )
                 event.accept()
                 return True
             return False
@@ -266,20 +282,36 @@ class JoystickWindow(QMainWindow):
             return None
 
     def _handle_press(
-        self, identifier: Tuple[str, object] | str, axis: str, direction: int
+        self,
+        identifier: Tuple[str, object] | str,
+        axis: str,
+        direction: int,
+        *,
+        refresh: bool = False,
     ) -> None:
-        if identifier in self._active_inputs:
+        state = self._active_inputs.get(identifier)
+        if state is None:
+            state = InputState(axis=axis, direction=direction)
+            self._active_inputs[identifier] = state
+        else:
+            state.axis = axis
+            state.direction = direction
+            state.pressed = True
+        if refresh:
             return
         if not self.serial_connection or not self.serial_connection.is_open:
+            state.pressed = False
+            self._refresh_input_states()
             return
         if self._release_timer.isActive():
             self._release_timer.stop()
             self._update_pending = False
         feedrate = self.get_feedrate()
         if feedrate is None:
+            state.pressed = False
+            self._refresh_input_states()
             return
         self._last_feedrate = feedrate
-        self._active_inputs[identifier] = (axis, direction)
         self._update_jog_motion()
 
     def _handle_release(
@@ -287,31 +319,28 @@ class JoystickWindow(QMainWindow):
         identifier: Tuple[str, object] | str | None,
         mapping: Optional[tuple[str, int]] = None,
     ) -> None:
-        removed = False
-        if identifier is not None and identifier in self._active_inputs:
-            del self._active_inputs[identifier]
-            removed = True
-        elif mapping is not None:
-            candidates = [
-                key
-                for key, value in list(self._active_inputs.items())
-                if value == mapping
-            ]
-            for key in candidates:
-                del self._active_inputs[key]
-            removed = bool(candidates)
-
-        if not removed:
+        target_identifier: Tuple[str, object] | str | None = identifier
+        state: Optional[InputState] = None
+        if target_identifier is not None:
+            state = self._active_inputs.get(target_identifier)
+        if state is None and mapping is not None:
+            for key, candidate in self._active_inputs.items():
+                if candidate.axis == mapping[0] and candidate.direction == mapping[1]:
+                    state = candidate
+                    target_identifier = key
+                    break
+        if state is None:
             return
-
-        if not self._active_inputs:
-            if self._release_timer.isActive():
-                self._release_timer.stop()
+        state.pressed = False
+        if self._release_timer.isActive():
+            self._release_timer.stop()
             self._update_pending = False
-            self._update_jog_motion()
-        else:
-            self._stop_current_motion()
+        any_pressed = any(item.pressed for item in self._active_inputs.values())
+        self._stop_current_motion()
+        if any_pressed:
             self._schedule_motion_update()
+        else:
+            self._update_jog_motion()
 
     def _schedule_motion_update(self) -> None:
         if self._release_timer.isActive():
@@ -335,22 +364,15 @@ class JoystickWindow(QMainWindow):
     def _purge_inactive_inputs(self) -> None:
         if not self._active_inputs:
             return
-        removed = []
-        for identifier in list(self._active_inputs):
-            if isinstance(identifier, str) and identifier.startswith("button_"):
-                button = self._button_lookup.get(identifier)
-                if button is not None and not button.isDown():
-                    removed.append(identifier)
-        for identifier in removed:
-            del self._active_inputs[identifier]
-        if removed and not self._active_inputs:
-            self._stop_current_motion()
+        self._refresh_input_states()
 
     def _calculate_axes(self) -> Dict[str, int]:
         self._purge_inactive_inputs()
         axes: Dict[str, set[int]] = {}
-        for axis, direction in self._active_inputs.values():
-            axes.setdefault(axis, set()).add(direction)
+        for state in self._active_inputs.values():
+            if not state.pressed:
+                continue
+            axes.setdefault(state.axis, set()).add(state.direction)
         resolved: Dict[str, int] = {}
         for axis, directions in axes.items():
             if len(directions) == 1:
@@ -398,6 +420,33 @@ class JoystickWindow(QMainWindow):
         if not self.serial_connection or not self.serial_connection.is_open:
             return
         self.send_command(b"\x85")
+
+    def _refresh_input_states(self) -> None:
+        if not self._active_inputs:
+            return
+        removed = False
+        for identifier, state in list(self._active_inputs.items()):
+            if state.pressed:
+                if isinstance(identifier, str) and identifier.startswith("button_"):
+                    button = self._button_lookup.get(identifier)
+                    if button is not None and not button.isDown():
+                        state.pressed = False
+            if not state.pressed:
+                del self._active_inputs[identifier]
+                removed = True
+        if removed and not self._active_inputs:
+            self._stop_current_motion()
+
+    def _prune_stuck_inputs(self) -> None:
+        if not self._active_inputs:
+            return
+        before = set(self._active_inputs.keys())
+        self._refresh_input_states()
+        if set(self._active_inputs.keys()) != before:
+            if self._release_timer.isActive():
+                self._release_timer.stop()
+            self._update_pending = False
+            self._update_jog_motion()
 
     def _home_xy(self) -> None:
         self.send_command("$HX\n")
