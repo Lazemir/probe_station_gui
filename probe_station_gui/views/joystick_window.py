@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Dict, Optional, Tuple
 
 import serial
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QCloseEvent, QDoubleValidator
 from PySide6.QtWidgets import (
     QComboBox,
@@ -58,6 +58,7 @@ class JoystickWindow(QMainWindow):
         self._active_inputs: Dict[Tuple[str, object] | str, tuple[str, int]] = {}
         self._current_axes: Dict[str, int] = {}
         self._last_feedrate: Optional[float] = None
+        self._update_pending = False
 
         central = QWidget(self)
         self.setCentralWidget(central)
@@ -219,7 +220,17 @@ class JoystickWindow(QMainWindow):
     def _handle_release(self, identifier: Tuple[str, object] | str) -> None:
         if identifier in self._active_inputs:
             del self._active_inputs[identifier]
-            self._update_jog_motion()
+            self._schedule_motion_update()
+
+    def _schedule_motion_update(self) -> None:
+        if self._update_pending:
+            return
+        self._update_pending = True
+        QTimer.singleShot(0, self._flush_motion_update)
+
+    def _flush_motion_update(self) -> None:
+        self._update_pending = False
+        self._update_jog_motion()
 
     def _calculate_axes(self) -> Dict[str, int]:
         axes: Dict[str, set[int]] = {}
@@ -232,6 +243,7 @@ class JoystickWindow(QMainWindow):
         return resolved
 
     def _update_jog_motion(self) -> None:
+        self._update_pending = False
         if not self.serial_connection or not self.serial_connection.is_open:
             if self._current_axes:
                 self._cancel_active_jog()
