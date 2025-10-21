@@ -3,7 +3,15 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QPoint, Qt, Signal
-from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPen, QPixmap, QImage
+from PySide6.QtGui import (
+    QColor,
+    QImage,
+    QMouseEvent,
+    QPainter,
+    QPen,
+    QPixmap,
+    QTransform,
+)
 from PySide6.QtWidgets import QWidget
 
 
@@ -20,7 +28,9 @@ class MicroscopeView(QWidget):
         self._cross: tuple[float, float] | None = None
 
     def set_frame(self, qimg: QImage) -> None:
-        self._pix = QPixmap.fromImage(qimg)
+        transform = QTransform().rotate(180)
+        rotated = qimg.transformed(transform)
+        self._pix = QPixmap.fromImage(rotated)
         self.update()
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
