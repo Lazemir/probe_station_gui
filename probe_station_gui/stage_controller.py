@@ -20,6 +20,38 @@ class StageControllerError(RuntimeError):
 
 
 @dataclass
+class MoveVector:
+    """Represents a movement across the available motion axes."""
+
+    x: float = 0.0
+    y: float = 0.0
+    z: float = 0.0
+    a: float = 0.0
+    b: float = 0.0
+    c: float = 0.0
+
+    def is_zero(self, tol: float = 1e-6) -> bool:
+        """Return True when all components are effectively zero."""
+
+        return all(
+            abs(component) < tol
+            for component in (self.x, self.y, self.z, self.a, self.b, self.c)
+        )
+
+    def items(self) -> tuple[tuple[str, float], ...]:
+        """Expose the vector components in G-code axis order."""
+
+        return (
+            ("X", self.x),
+            ("Y", self.y),
+            ("Z", self.z),
+            ("A", self.a),
+            ("B", self.b),
+            ("C", self.c),
+        )
+
+
+@dataclass
 class _Status:
     state: str
     position: Optional[tuple[float, float, float]] = None
@@ -114,13 +146,12 @@ class StageController(QObject):
                 raise StageControllerError("Camera frame unavailable before movement.")
             pixel_vector = np.array([dx_pixels, dy_pixels], dtype=float)
             mm_vector = self._pixels_to_mm @ pixel_vector
-            move_x_mm = float(mm_vector[0])
-            move_y_mm = float(mm_vector[1])
+            move = MoveVector(x=float(mm_vector[0]), y=float(mm_vector[1]))
 
             self.status_message.emit(
-                f"Jogging stage ΔX={move_x_mm:.3f} mm ΔY={move_y_mm:.3f} mm"
+                f"Jogging stage ΔX={move.x:.3f} mm ΔY={move.y:.3f} mm"
             )
-            self._send_relative_move(serial_connection, move_x_mm, move_y_mm)
+            self._send_relative_move(serial_connection, move)
             after_frame, _ = self._wait_for_new_frame(before_counter, timeout=4.0)
             if after_frame is None:
                 self.movement_finished.emit(
@@ -197,9 +228,11 @@ class StageController(QObject):
         with self._frame_condition:
             frame_counter = self._frame_counter
         for _ in range(self.CALIBRATION_MAX_STEPS):
-            step_x = self.CALIBRATION_STEP_MM if axis == "X" else 0.0
-            step_y = self.CALIBRATION_STEP_MM if axis == "Y" else 0.0
-            self._send_relative_move(serial_connection, step_x, step_y)
+            if axis == "X":
+                move = MoveVector(x=self.CALIBRATION_STEP_MM)
+            else:
+                move = MoveVector(y=self.CALIBRATION_STEP_MM)
+            self._send_relative_move(serial_connection, move)
             new_frame, frame_counter = self._wait_for_new_frame(frame_counter, timeout=2.0)
             if new_frame is None:
                 raise StageControllerError("Camera did not update during calibration.")
@@ -229,10 +262,11 @@ class StageController(QObject):
         current = status.position
         delta_x = origin[0] - current[0]
         delta_y = origin[1] - current[1]
-        if abs(delta_x) < 1e-5 and abs(delta_y) < 1e-5:
+        move = MoveVector(x=delta_x, y=delta_y)
+        if move.is_zero(tol=1e-5):
             return
         self.status_message.emit("Returning stage to calibration origin…")
-        self._send_relative_move(serial_connection, delta_x, delta_y)
+        self._send_relative_move(serial_connection, move)
 
     def _update_calibration_from_measurement(
         self,
@@ -271,19 +305,21 @@ class StageController(QObject):
         return (float(np.linalg.norm(column_x)), float(np.linalg.norm(column_y)))
 
     def _send_relative_move(
-        self, serial_connection: serial.Serial, delta_x: float, delta_y: float
+        self, serial_connection: serial.Serial, move: MoveVector
     ) -> None:
-        if abs(delta_x) < 1e-6 and abs(delta_y) < 1e-6:
+        if move.is_zero():
             return
         self._write_command(serial_connection, "G21")
         self._wait_for_ok(serial_connection)
         self._write_command(serial_connection, "G91")
         self._wait_for_ok(serial_connection)
-        move_parts: list[str] = []
-        if abs(delta_x) >= 1e-6:
-            move_parts.append(f"X{delta_x:.4f}")
-        if abs(delta_y) >= 1e-6:
-            move_parts.append(f"Y{delta_y:.4f}")
+        move_parts: list[str] = [
+            f"{axis}{value:.4f}"
+            for axis, value in move.items()
+            if abs(value) >= 1e-6
+        ]
+        if not move_parts:
+            return
         move = "G1 " + " ".join(move_parts) + f" F{self.DEFAULT_FEEDRATE:.0f}"
         self._write_command(serial_connection, move)
         self._wait_for_ok(serial_connection)
@@ -386,7 +422,7 @@ class StageController(QObject):
         b = frame_b.astype(np.float32)
         window = cv2.createHanningWindow((a.shape[1], a.shape[0]), cv2.CV_32F)
         (shift_x, shift_y), _ = cv2.phaseCorrelate(a, b, window)
-        return float(shift_x), float(shift_y)
+        return float(shift_x), float(-shift_y)
 
     @staticmethod
     def _qimage_to_gray(image: QImage) -> np.ndarray:
@@ -403,4 +439,4 @@ class StageController(QObject):
         return gray
 
 
-__all__ = ["StageController"]
+__all__ = ["StageController", "MoveVector"]
