@@ -49,7 +49,7 @@ class StageController(QObject):
         self._mm_per_pixel_x: Optional[float] = None
         self._mm_per_pixel_y: Optional[float] = None
         self._axis_sign_x: float = 1.0
-        self._axis_sign_y: float = 1.0
+        self._axis_sign_y: float = -1.0
         self._latest_frame: Optional[np.ndarray] = None
         self._frame_counter = 0
         self._frame_condition = threading.Condition()
@@ -65,7 +65,7 @@ class StageController(QObject):
                 self._mm_per_pixel_x = None
                 self._mm_per_pixel_y = None
                 self._axis_sign_x = 1.0
-                self._axis_sign_y = 1.0
+                self._axis_sign_y = -1.0
 
     def shutdown(self) -> None:
         """Stop any outstanding background task before application exit."""
@@ -164,7 +164,7 @@ class StageController(QObject):
             )
             latest_frame, _ = self._get_frame_snapshot(timeout=2.0)
             reference_for_y = latest_frame if latest_frame is not None else before_frame
-            mm_per_pixel_y, sign_y = self._calibrate_axis(
+            mm_per_pixel_y, _ = self._calibrate_axis(
                 serial_connection, reference_for_y, origin, axis="Y"
             )
         finally:
@@ -173,7 +173,7 @@ class StageController(QObject):
         self._mm_per_pixel_x = mm_per_pixel_x
         self._mm_per_pixel_y = mm_per_pixel_y
         self._axis_sign_x = sign_x
-        self._axis_sign_y = sign_y
+        self._axis_sign_y = -1.0
         self.calibration_changed.emit(mm_per_pixel_x, mm_per_pixel_y)
         self.status_message.emit(
             f"Calibration updated: ΔX {mm_per_pixel_x:.6f} mm/px, ΔY {mm_per_pixel_y:.6f} mm/px"
@@ -257,9 +257,6 @@ class StageController(QObject):
         if self._mm_per_pixel_y is not None and abs(expected_dy) >= self.CALIBRATION_MIN_VERIFY_PIXELS:
             if abs(measured_dy) > 1e-6:
                 effective_dy = measured_dy * self._axis_sign_y
-                if expected_dy * effective_dy < 0:
-                    self._axis_sign_y *= -1.0
-                    effective_dy = measured_dy * self._axis_sign_y
                 if abs(effective_dy) > 1e-6:
                     ratio_y = abs(expected_dy) / abs(effective_dy)
                     self._mm_per_pixel_y *= ratio_y
