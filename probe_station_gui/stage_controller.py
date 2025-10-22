@@ -61,6 +61,7 @@ class StageController(QObject):
     """Translate mouse clicks into stage movements via serial commands."""
 
     calibration_changed: Signal = Signal(float, float)
+    calibration_matrix_changed: Signal = Signal(float, float, float, float)
     movement_started: Signal = Signal()
     movement_finished: Signal = Signal(bool, str)
     status_message: Signal = Signal(str)
@@ -92,6 +93,7 @@ class StageController(QObject):
             self._serial = serial_connection
             if serial_connection is None or not serial_connection.is_open:
                 self._pixels_to_mm = None
+                self._emit_calibration_matrix()
 
     def shutdown(self) -> None:
         """Stop any outstanding background task before application exit."""
@@ -210,6 +212,7 @@ class StageController(QObject):
         self._pixels_to_mm = np.linalg.inv(calibration_matrix)
         mm_per_pixel_x, mm_per_pixel_y = self._calibration_magnitudes()
         self.calibration_changed.emit(mm_per_pixel_x, mm_per_pixel_y)
+        self._emit_calibration_matrix()
         self.status_message.emit(
             f"Calibration updated: ΔX {mm_per_pixel_x:.6f} mm/px, ΔY {mm_per_pixel_y:.6f} mm/px"
         )
@@ -294,6 +297,7 @@ class StageController(QObject):
         self._pixels_to_mm = updated_matrix
         mm_per_pixel_x, mm_per_pixel_y = self._calibration_magnitudes()
         self.calibration_changed.emit(mm_per_pixel_x, mm_per_pixel_y)
+        self._emit_calibration_matrix()
         message += " Calibration refined."
         return message
 
@@ -303,6 +307,18 @@ class StageController(QObject):
         column_x = self._pixels_to_mm[:, 0]
         column_y = self._pixels_to_mm[:, 1]
         return (float(np.linalg.norm(column_x)), float(np.linalg.norm(column_y)))
+
+    def _emit_calibration_matrix(self) -> None:
+        if self._pixels_to_mm is None:
+            self.calibration_matrix_changed.emit(0.0, 0.0, 0.0, 0.0)
+            return
+        matrix = self._pixels_to_mm
+        self.calibration_matrix_changed.emit(
+            float(matrix[0, 0]),
+            float(matrix[0, 1]),
+            float(matrix[1, 0]),
+            float(matrix[1, 1]),
+        )
 
     def _send_relative_move(
         self, serial_connection: serial.Serial, move: MoveVector

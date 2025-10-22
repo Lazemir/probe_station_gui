@@ -51,6 +51,15 @@ class Main(QMainWindow):
         self.stage_controller.movement_started.connect(
             lambda: self.statusBar().showMessage("Moving stage…")
         )
+        self.stage_controller.movement_started.connect(
+            self.view.on_stage_movement_started
+        )
+        self.stage_controller.movement_finished.connect(
+            self.view.on_stage_movement_finished
+        )
+        self.stage_controller.calibration_matrix_changed.connect(
+            self.view.set_calibration_matrix
+        )
         self.grabber.frame_ready.connect(self.stage_controller.on_frame_ready)
 
         tools_menu = self.menuBar().addMenu("Tools")
