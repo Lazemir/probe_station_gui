@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import serial
 from PySide6.QtCore import QTimer, Qt, Signal
@@ -17,6 +17,9 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+if TYPE_CHECKING:
+    from ..stage_controller import StageController
 
 
 class SerialInputLineEdit(QLineEdit):
@@ -46,6 +49,7 @@ class SerialTerminalWindow(QMainWindow):
         self.setWindowTitle("Serial Terminal")
 
         self.serial_connection: Optional[serial.Serial] = None
+        self.stage_controller: Optional["StageController"] = None
 
         central = QWidget(self)
         self.setCentralWidget(central)
@@ -82,6 +86,11 @@ class SerialTerminalWindow(QMainWindow):
 
         self._update_enabled_state()
 
+    def set_stage_controller(self, stage_controller: Optional["StageController"]) -> None:
+        """Assign the stage controller to coordinate serial access."""
+
+        self.stage_controller = stage_controller
+
     def set_serial(self, serial_connection: Optional[serial.Serial]) -> None:
         """Attach or detach the active serial connection."""
 
@@ -115,6 +124,9 @@ class SerialTerminalWindow(QMainWindow):
     def send_current_line(self) -> None:
         """Send the typed line to the serial port."""
 
+        if self.stage_controller and self.stage_controller.is_busy():
+            self._append_system_message("Cannot send while automated move is running.")
+            return
         text = self.input_edit.text()
         if not self.serial_connection or not self.serial_connection.is_open:
             self._append_system_message("Cannot send: no active connection.")
@@ -153,6 +165,8 @@ class SerialTerminalWindow(QMainWindow):
         if not self.serial_connection or not self.serial_connection.is_open:
             self.poll_timer.stop()
             self._update_enabled_state()
+            return
+        if self.stage_controller and self.stage_controller.is_busy():
             return
         try:
             waiting = self.serial_connection.in_waiting

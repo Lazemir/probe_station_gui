@@ -146,6 +146,7 @@ class Main(QMainWindow):
     def _ensure_serial_terminal_window(self) -> SerialTerminalWindow:
         if self.serial_terminal_window is None:
             self.serial_terminal_window = SerialTerminalWindow(self)
+            self.serial_terminal_window.set_stage_controller(self.stage_controller)
             self.serial_terminal_window.set_serial(self.serial_connection)
             self.serial_terminal_window.destroyed.connect(
                 self._on_serial_terminal_destroyed
