@@ -48,6 +48,8 @@ class StageController(QObject):
         self._serial: Optional[serial.Serial] = None
         self._mm_per_pixel_x: Optional[float] = None
         self._mm_per_pixel_y: Optional[float] = None
+        self._axis_sign_x: float = 1.0
+        self._axis_sign_y: float = 1.0
         self._latest_frame: Optional[np.ndarray] = None
         self._frame_counter = 0
         self._frame_condition = threading.Condition()
@@ -62,6 +64,8 @@ class StageController(QObject):
             if serial_connection is None or not serial_connection.is_open:
                 self._mm_per_pixel_x = None
                 self._mm_per_pixel_y = None
+                self._axis_sign_x = 1.0
+                self._axis_sign_y = 1.0
 
     def shutdown(self) -> None:
         """Stop any outstanding background task before application exit."""
@@ -114,8 +118,8 @@ class StageController(QObject):
             before_frame, before_counter = self._get_frame_snapshot()
             if before_frame is None:
                 raise StageControllerError("Camera frame unavailable before movement.")
-            move_x_mm = dx_pixels * self._mm_per_pixel_x
-            move_y_mm = dy_pixels * self._mm_per_pixel_y
+            move_x_mm = dx_pixels * self._mm_per_pixel_x * self._axis_sign_x
+            move_y_mm = dy_pixels * self._mm_per_pixel_y * self._axis_sign_y
 
             self.status_message.emit(
                 f"Jogging stage ΔX={move_x_mm:.3f} mm ΔY={move_y_mm:.3f} mm"
@@ -155,12 +159,12 @@ class StageController(QObject):
 
         origin = start_status.position
         try:
-            mm_per_pixel_x = self._calibrate_axis(
+            mm_per_pixel_x, sign_x = self._calibrate_axis(
                 serial_connection, before_frame, origin, axis="X"
             )
             latest_frame, _ = self._get_frame_snapshot(timeout=2.0)
             reference_for_y = latest_frame if latest_frame is not None else before_frame
-            mm_per_pixel_y = self._calibrate_axis(
+            mm_per_pixel_y, sign_y = self._calibrate_axis(
                 serial_connection, reference_for_y, origin, axis="Y"
             )
         finally:
@@ -168,6 +172,8 @@ class StageController(QObject):
 
         self._mm_per_pixel_x = mm_per_pixel_x
         self._mm_per_pixel_y = mm_per_pixel_y
+        self._axis_sign_x = sign_x
+        self._axis_sign_y = sign_y
         self.calibration_changed.emit(mm_per_pixel_x, mm_per_pixel_y)
         self.status_message.emit(
             f"Calibration updated: ΔX {mm_per_pixel_x:.6f} mm/px, ΔY {mm_per_pixel_y:.6f} mm/px"
@@ -179,7 +185,7 @@ class StageController(QObject):
         reference_frame: np.ndarray,
         origin: tuple[float, float, float],
         axis: str,
-    ) -> float:
+    ) -> tuple[float, float]:
         if reference_frame is None:
             raise StageControllerError("Reference frame unavailable for calibration.")
         index = 0 if axis == "X" else 1
@@ -211,7 +217,9 @@ class StageController(QObject):
             denominator = shift_y
         if abs(denominator) < 1e-6:
             raise StageControllerError("Pixel shift too small to compute calibration.")
-        return total_mm / denominator
+        ratio = total_mm / denominator
+        sign = 1.0 if ratio >= 0 else -1.0
+        return abs(ratio), sign
 
     def _return_to_origin(
         self, serial_connection: serial.Serial, origin: tuple[float, float, float]
@@ -237,14 +245,26 @@ class StageController(QObject):
         message = "Move complete."
         if self._mm_per_pixel_x is not None and abs(expected_dx) >= self.CALIBRATION_MIN_VERIFY_PIXELS:
             if abs(measured_dx) > 1e-6:
-                ratio_x = expected_dx / measured_dx
-                self._mm_per_pixel_x *= ratio_x
-                message += f" Cal X adjusted ×{ratio_x:.3f}."
+                effective_dx = measured_dx * self._axis_sign_x
+                if expected_dx * effective_dx < 0:
+                    self._axis_sign_x *= -1.0
+                    effective_dx = measured_dx * self._axis_sign_x
+                if abs(effective_dx) > 1e-6:
+                    ratio_x = abs(expected_dx) / abs(effective_dx)
+                    self._mm_per_pixel_x *= ratio_x
+                    self._mm_per_pixel_x = abs(self._mm_per_pixel_x)
+                    message += f" Cal X adjusted ×{ratio_x:.3f}."
         if self._mm_per_pixel_y is not None and abs(expected_dy) >= self.CALIBRATION_MIN_VERIFY_PIXELS:
             if abs(measured_dy) > 1e-6:
-                ratio_y = expected_dy / measured_dy
-                self._mm_per_pixel_y *= ratio_y
-                message += f" Cal Y adjusted ×{ratio_y:.3f}."
+                effective_dy = measured_dy * self._axis_sign_y
+                if expected_dy * effective_dy < 0:
+                    self._axis_sign_y *= -1.0
+                    effective_dy = measured_dy * self._axis_sign_y
+                if abs(effective_dy) > 1e-6:
+                    ratio_y = abs(expected_dy) / abs(effective_dy)
+                    self._mm_per_pixel_y *= ratio_y
+                    self._mm_per_pixel_y = abs(self._mm_per_pixel_y)
+                    message += f" Cal Y adjusted ×{ratio_y:.3f}."
         if self._mm_per_pixel_x is not None and self._mm_per_pixel_y is not None:
             self.calibration_changed.emit(self._mm_per_pixel_x, self._mm_per_pixel_y)
         return message
