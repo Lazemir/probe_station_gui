@@ -125,6 +125,12 @@ class StageController(QObject):
             self._active_thread = thread
             thread.start()
 
+    def is_busy(self) -> bool:
+        """Return True when a background movement task is currently running."""
+
+        with self._task_lock:
+            return bool(self._active_thread and self._active_thread.is_alive())
+
     def _run_move(self, dx_pixels: float, dy_pixels: float) -> None:
         self.movement_started.emit()
         try:

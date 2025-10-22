@@ -1,11 +1,11 @@
-"""Simple serial terminal window tied to the active FluidNC connection."""
+"""Serial terminal window tied to the active FluidNC connection."""
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import serial
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -18,6 +18,26 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+if TYPE_CHECKING:
+    from ..stage_controller import StageController
+
+
+class SerialInputLineEdit(QLineEdit):
+    """Line edit that emits a signal when Ctrl+X is pressed."""
+
+    control_x_pressed = Signal()
+
+    def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        if (
+            event.key() == Qt.Key_X
+            and event.modifiers() & Qt.ControlModifier
+            and not event.modifiers() & ~Qt.ControlModifier
+        ):
+            self.control_x_pressed.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
 
 class SerialTerminalWindow(QMainWindow):
     """Floating window that echoes FluidNC serial traffic."""
@@ -29,6 +49,7 @@ class SerialTerminalWindow(QMainWindow):
         self.setWindowTitle("Serial Terminal")
 
         self.serial_connection: Optional[serial.Serial] = None
+        self.stage_controller: Optional["StageController"] = None
 
         central = QWidget(self)
         self.setCentralWidget(central)
@@ -46,7 +67,7 @@ class SerialTerminalWindow(QMainWindow):
         terminal_layout.addWidget(self.output_edit)
 
         input_layout = QHBoxLayout()
-        self.input_edit = QLineEdit(self)
+        self.input_edit = SerialInputLineEdit(self)
         self.input_edit.setPlaceholderText("Enter command and press Enter")
         self.send_button = QPushButton("Send", self)
         input_layout.addWidget(self.input_edit)
@@ -57,12 +78,18 @@ class SerialTerminalWindow(QMainWindow):
 
         self.send_button.clicked.connect(self.send_current_line)
         self.input_edit.returnPressed.connect(self.send_current_line)
+        self.input_edit.control_x_pressed.connect(self.send_control_x)
 
         self.poll_timer = QTimer(self)
         self.poll_timer.setInterval(self.POLL_INTERVAL_MS)
         self.poll_timer.timeout.connect(self._poll_serial)
 
         self._update_enabled_state()
+
+    def set_stage_controller(self, stage_controller: Optional["StageController"]) -> None:
+        """Assign the stage controller to coordinate serial access."""
+
+        self.stage_controller = stage_controller
 
     def set_serial(self, serial_connection: Optional[serial.Serial]) -> None:
         """Attach or detach the active serial connection."""
@@ -79,9 +106,27 @@ class SerialTerminalWindow(QMainWindow):
             self.poll_timer.stop()
         self._update_enabled_state()
 
+    def send_control_x(self) -> None:
+        """Send a Ctrl+X (soft reset) control character."""
+
+        if not self.serial_connection or not self.serial_connection.is_open:
+            self._append_system_message("Cannot send: no active connection.")
+            return
+        try:
+            self.serial_connection.write(b"\x18")
+            self.serial_connection.flush()
+        except serial.SerialException as error:  # pragma: no cover - safety guard
+            self._append_system_message(f"Serial write failed: {error}")
+            self.set_serial(None)
+            return
+        self._append_local_echo("\u2418")
+
     def send_current_line(self) -> None:
         """Send the typed line to the serial port."""
 
+        if self.stage_controller and self.stage_controller.is_busy():
+            self._append_system_message("Cannot send while automated move is running.")
+            return
         text = self.input_edit.text()
         if not self.serial_connection or not self.serial_connection.is_open:
             self._append_system_message("Cannot send: no active connection.")
@@ -120,6 +165,8 @@ class SerialTerminalWindow(QMainWindow):
         if not self.serial_connection or not self.serial_connection.is_open:
             self.poll_timer.stop()
             self._update_enabled_state()
+            return
+        if self.stage_controller and self.stage_controller.is_busy():
             return
         try:
             waiting = self.serial_connection.in_waiting
