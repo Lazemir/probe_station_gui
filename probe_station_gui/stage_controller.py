@@ -367,14 +367,33 @@ class StageController(QObject):
                 raise StageControllerError(f"Controller reported: {line}")
         raise StageControllerError("Timeout waiting for controller acknowledgement.")
 
-    def _wait_for_idle(self, serial_connection: serial.Serial, timeout: float = 10.0) -> None:
+    def _wait_for_idle(
+        self, serial_connection: serial.Serial, timeout: float = 10.0
+    ) -> bool:
         deadline = time.monotonic() + timeout
+        last_state: Optional[str] = None
         while time.monotonic() < deadline:
             status = self._query_status(serial_connection)
-            if status and status.state.lower() == "idle":
-                return
+            if status is None:
+                time.sleep(0.1)
+                continue
+            last_state = status.state.lower()
+            if last_state == "idle":
+                return True
+            if last_state in {"hold", "alarm", "door"}:
+                raise StageControllerError(
+                    f"Controller entered {status.state} state while waiting for IDLE."
+                )
             time.sleep(0.1)
-        raise StageControllerError("Controller did not return to IDLE state in time.")
+        if last_state is not None:
+            self.status_message.emit(
+                f"Timed out waiting for IDLE (last state: {last_state.upper()})."
+            )
+        else:
+            self.status_message.emit(
+                "Timed out waiting for IDLE (no status response from controller)."
+            )
+        return False
 
     def _query_status(self, serial_connection: serial.Serial, timeout: float = 1.5) -> Optional[_Status]:
         try:
