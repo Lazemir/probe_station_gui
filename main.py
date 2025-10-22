@@ -6,12 +6,13 @@ import sys
 
 from PySide6.QtCore import QThread, QTimer
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QApplication, QMainWindow
+from PySide6.QtWidgets import QApplication, QMainWindow, QTabWidget
 
 from probe_station_gui import (
     Grabber,
     JoystickWindow,
     MicroscopeView,
+    SerialTerminalWidget,
     StageController,
     SerialScannerDialog,
 )
@@ -23,8 +24,12 @@ class Main(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Microscope control")
+        self.tab_widget = QTabWidget()
         self.view = MicroscopeView()
-        self.setCentralWidget(self.view)
+        self.serial_terminal = SerialTerminalWidget(self)
+        self.tab_widget.addTab(self.view, "Microscope")
+        self.tab_widget.addTab(self.serial_terminal, "Terminal")
+        self.setCentralWidget(self.tab_widget)
         self.serial_connection = None
         self.serial_dialog = SerialScannerDialog(self)
         self.serial_port_name: str | None = None
@@ -97,6 +102,7 @@ class Main(QMainWindow):
         joystick.show()
         joystick.raise_()
         joystick.activateWindow()
+        self.serial_terminal.set_serial(self.serial_connection)
 
     def on_serial_disconnected(self) -> None:
         if self.serial_connection and self.serial_connection.is_open:
@@ -108,6 +114,7 @@ class Main(QMainWindow):
             self.serial_dialog.handle_external_disconnect()
         if self.joystick_window:
             self.joystick_window.set_serial(None)
+        self.serial_terminal.set_serial(None)
 
     def show_joystick_window(self) -> None:
         joystick = self._ensure_joystick_window()
@@ -147,6 +154,7 @@ class Main(QMainWindow):
                 self.serial_dialog.handle_external_disconnect()
         if self.joystick_window:
             self.joystick_window.close()
+        self.serial_terminal.set_serial(None)
         self.stage_controller.shutdown()
         event.accept()
 

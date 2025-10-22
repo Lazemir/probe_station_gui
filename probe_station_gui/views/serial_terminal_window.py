@@ -1,4 +1,4 @@
-"""Simple serial terminal window tied to the active FluidNC connection."""
+"""Serial terminal widgets tied to the active FluidNC connection."""
 
 from __future__ import annotations
 
@@ -19,20 +19,17 @@ from PySide6.QtWidgets import (
 )
 
 
-class SerialTerminalWindow(QMainWindow):
-    """Floating window that echoes FluidNC serial traffic."""
+class SerialTerminalWidget(QWidget):
+    """Widget that echoes FluidNC serial traffic."""
 
     POLL_INTERVAL_MS = 100
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Serial Terminal")
 
         self.serial_connection: Optional[serial.Serial] = None
 
-        central = QWidget(self)
-        self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
+        layout = QVBoxLayout(self)
 
         self.status_label = QLabel("Disconnected", self)
         layout.addWidget(self.status_label)
@@ -143,4 +140,19 @@ class SerialTerminalWindow(QMainWindow):
         self.terminal_container.setEnabled(enabled)
 
 
-__all__ = ["SerialTerminalWindow"]
+class SerialTerminalWindow(QMainWindow):
+    """Floating window that embeds the serial terminal widget."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Serial Terminal")
+        self._terminal_widget = SerialTerminalWidget(self)
+        self.setCentralWidget(self._terminal_widget)
+
+    def set_serial(self, serial_connection: Optional[serial.Serial]) -> None:
+        """Forward the connection to the embedded widget."""
+
+        self._terminal_widget.set_serial(serial_connection)
+
+
+__all__ = ["SerialTerminalWidget", "SerialTerminalWindow"]
