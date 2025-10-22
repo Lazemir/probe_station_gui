@@ -111,9 +111,18 @@ class JoystickWindow(QMainWindow):
         home_layout.addWidget(self.home_z_button)
         root_layout.addLayout(home_layout)
 
+        safety_layout = QHBoxLayout()
+        self.unlock_button = QPushButton("Unlock", self)
+        self.reset_button = QPushButton("Reset", self)
+        safety_layout.addWidget(self.unlock_button)
+        safety_layout.addWidget(self.reset_button)
+        root_layout.addLayout(safety_layout)
+
         self.home_all_button.clicked.connect(lambda: self.send_command("$H\n"))
         self.home_xy_button.clicked.connect(self._home_xy)
         self.home_z_button.clicked.connect(lambda: self.send_command("$HZ\n"))
+        self.unlock_button.clicked.connect(lambda: self.send_command("$X\n"))
+        self.reset_button.clicked.connect(self._send_reset)
 
         root_layout.addStretch(1)
         self._update_enabled_state()
@@ -151,6 +160,8 @@ class JoystickWindow(QMainWindow):
             self.home_all_button,
             self.home_xy_button,
             self.home_z_button,
+            self.unlock_button,
+            self.reset_button,
         ):
             widget.setEnabled(enabled)
 
@@ -195,6 +206,9 @@ class JoystickWindow(QMainWindow):
     def _home_xy(self) -> None:
         self.send_command("$HX\n")
         self.send_command("$HY\n")
+
+    def _send_reset(self) -> None:
+        self.send_command(b"\x18")
 
     def send_command(self, command: str | bytes) -> None:
         if not self.serial_connection or not self.serial_connection.is_open:

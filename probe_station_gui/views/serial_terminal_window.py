@@ -1,11 +1,11 @@
-"""Serial terminal widgets tied to the active FluidNC connection."""
+"""Serial terminal window tied to the active FluidNC connection."""
 
 from __future__ import annotations
 
 from typing import Optional
 
 import serial
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -19,17 +19,37 @@ from PySide6.QtWidgets import (
 )
 
 
-class SerialTerminalWidget(QWidget):
-    """Widget that echoes FluidNC serial traffic."""
+class SerialInputLineEdit(QLineEdit):
+    """Line edit that emits a signal when Ctrl+X is pressed."""
+
+    control_x_pressed = Signal()
+
+    def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        if (
+            event.key() == Qt.Key_X
+            and event.modifiers() & Qt.ControlModifier
+            and not event.modifiers() & ~Qt.ControlModifier
+        ):
+            self.control_x_pressed.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
+class SerialTerminalWindow(QMainWindow):
+    """Floating window that echoes FluidNC serial traffic."""
 
     POLL_INTERVAL_MS = 100
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
+        self.setWindowTitle("Serial Terminal")
 
         self.serial_connection: Optional[serial.Serial] = None
 
-        layout = QVBoxLayout(self)
+        central = QWidget(self)
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
 
         self.status_label = QLabel("Disconnected", self)
         layout.addWidget(self.status_label)
@@ -43,7 +63,7 @@ class SerialTerminalWidget(QWidget):
         terminal_layout.addWidget(self.output_edit)
 
         input_layout = QHBoxLayout()
-        self.input_edit = QLineEdit(self)
+        self.input_edit = SerialInputLineEdit(self)
         self.input_edit.setPlaceholderText("Enter command and press Enter")
         self.send_button = QPushButton("Send", self)
         input_layout.addWidget(self.input_edit)
@@ -54,6 +74,7 @@ class SerialTerminalWidget(QWidget):
 
         self.send_button.clicked.connect(self.send_current_line)
         self.input_edit.returnPressed.connect(self.send_current_line)
+        self.input_edit.control_x_pressed.connect(self.send_control_x)
 
         self.poll_timer = QTimer(self)
         self.poll_timer.setInterval(self.POLL_INTERVAL_MS)
@@ -75,6 +96,21 @@ class SerialTerminalWidget(QWidget):
             self.status_label.setText("Disconnected")
             self.poll_timer.stop()
         self._update_enabled_state()
+
+    def send_control_x(self) -> None:
+        """Send a Ctrl+X (soft reset) control character."""
+
+        if not self.serial_connection or not self.serial_connection.is_open:
+            self._append_system_message("Cannot send: no active connection.")
+            return
+        try:
+            self.serial_connection.write(b"\x18")
+            self.serial_connection.flush()
+        except serial.SerialException as error:  # pragma: no cover - safety guard
+            self._append_system_message(f"Serial write failed: {error}")
+            self.set_serial(None)
+            return
+        self._append_local_echo("\u2418")
 
     def send_current_line(self) -> None:
         """Send the typed line to the serial port."""
@@ -140,19 +176,4 @@ class SerialTerminalWidget(QWidget):
         self.terminal_container.setEnabled(enabled)
 
 
-class SerialTerminalWindow(QMainWindow):
-    """Floating window that embeds the serial terminal widget."""
-
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Serial Terminal")
-        self._terminal_widget = SerialTerminalWidget(self)
-        self.setCentralWidget(self._terminal_widget)
-
-    def set_serial(self, serial_connection: Optional[serial.Serial]) -> None:
-        """Forward the connection to the embedded widget."""
-
-        self._terminal_widget.set_serial(serial_connection)
-
-
-__all__ = ["SerialTerminalWidget", "SerialTerminalWindow"]
+__all__ = ["SerialTerminalWindow"]

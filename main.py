@@ -6,13 +6,13 @@ import sys
 
 from PySide6.QtCore import QThread, QTimer
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QApplication, QMainWindow, QTabWidget
+from PySide6.QtWidgets import QApplication, QMainWindow
 
 from probe_station_gui import (
     Grabber,
     JoystickWindow,
     MicroscopeView,
-    SerialTerminalWidget,
+    SerialTerminalWindow,
     StageController,
     SerialScannerDialog,
 )
@@ -24,17 +24,14 @@ class Main(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Microscope control")
-        self.tab_widget = QTabWidget()
         self.view = MicroscopeView()
-        self.serial_terminal = SerialTerminalWidget(self)
-        self.tab_widget.addTab(self.view, "Microscope")
-        self.tab_widget.addTab(self.serial_terminal, "Terminal")
-        self.setCentralWidget(self.tab_widget)
+        self.setCentralWidget(self.view)
         self.serial_connection = None
         self.serial_dialog = SerialScannerDialog(self)
         self.serial_port_name: str | None = None
         self.serial_baud_rate: int | None = None
         self.joystick_window: JoystickWindow | None = None
+        self.serial_terminal_window: SerialTerminalWindow | None = None
         self.statusBar()
 
         self.grabber = Grabber()
@@ -67,6 +64,9 @@ class Main(QMainWindow):
         joystick_action = QAction("Joystick", self)
         joystick_action.triggered.connect(self.show_joystick_window)
         window_menu.addAction(joystick_action)
+        terminal_action = QAction("Serial Terminal", self)
+        terminal_action.triggered.connect(self.show_serial_terminal_window)
+        window_menu.addAction(terminal_action)
 
         QTimer.singleShot(0, self.open_serial_scanner)
 
@@ -102,7 +102,11 @@ class Main(QMainWindow):
         joystick.show()
         joystick.raise_()
         joystick.activateWindow()
-        self.serial_terminal.set_serial(self.serial_connection)
+        terminal = self._ensure_serial_terminal_window()
+        terminal.set_serial(self.serial_connection)
+        terminal.show()
+        terminal.raise_()
+        terminal.activateWindow()
 
     def on_serial_disconnected(self) -> None:
         if self.serial_connection and self.serial_connection.is_open:
@@ -114,13 +118,20 @@ class Main(QMainWindow):
             self.serial_dialog.handle_external_disconnect()
         if self.joystick_window:
             self.joystick_window.set_serial(None)
-        self.serial_terminal.set_serial(None)
+        if self.serial_terminal_window:
+            self.serial_terminal_window.set_serial(None)
 
     def show_joystick_window(self) -> None:
         joystick = self._ensure_joystick_window()
         joystick.show()
         joystick.raise_()
         joystick.activateWindow()
+
+    def show_serial_terminal_window(self) -> None:
+        terminal = self._ensure_serial_terminal_window()
+        terminal.show()
+        terminal.raise_()
+        terminal.activateWindow()
 
     def _ensure_joystick_window(self) -> JoystickWindow:
         if self.joystick_window is None:
@@ -131,6 +142,18 @@ class Main(QMainWindow):
 
     def _on_joystick_destroyed(self, _object=None) -> None:
         self.joystick_window = None
+
+    def _ensure_serial_terminal_window(self) -> SerialTerminalWindow:
+        if self.serial_terminal_window is None:
+            self.serial_terminal_window = SerialTerminalWindow(self)
+            self.serial_terminal_window.set_serial(self.serial_connection)
+            self.serial_terminal_window.destroyed.connect(
+                self._on_serial_terminal_destroyed
+            )
+        return self.serial_terminal_window
+
+    def _on_serial_terminal_destroyed(self, _object=None) -> None:
+        self.serial_terminal_window = None
 
     def on_move_finished(self, success: bool, message: str) -> None:
         if success:
@@ -154,7 +177,9 @@ class Main(QMainWindow):
                 self.serial_dialog.handle_external_disconnect()
         if self.joystick_window:
             self.joystick_window.close()
-        self.serial_terminal.set_serial(None)
+        if self.serial_terminal_window:
+            self.serial_terminal_window.close()
+            self.serial_terminal_window = None
         self.stage_controller.shutdown()
         event.accept()
 
