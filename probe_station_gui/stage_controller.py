@@ -372,9 +372,10 @@ class StageController(QObject):
         converted = image.convertToFormat(QImage.Format_RGB888)
         width = converted.width()
         height = converted.height()
-        ptr = converted.bits()
-        ptr.setsize(converted.sizeInBytes())
-        array = np.frombuffer(ptr, np.uint8).reshape((height, converted.bytesPerLine()))
+        ptr = converted.constBits()
+        array = np.frombuffer(
+            ptr, np.uint8, count=converted.sizeInBytes()
+        ).reshape((height, converted.bytesPerLine()))
         array = array[:, : width * 3].reshape((height, width, 3))
         rotated = cv2.rotate(array, cv2.ROTATE_90_COUNTERCLOCKWISE)
         gray = cv2.cvtColor(rotated, cv2.COLOR_RGB2GRAY)
