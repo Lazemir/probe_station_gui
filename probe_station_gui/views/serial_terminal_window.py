@@ -23,9 +23,11 @@ if TYPE_CHECKING:
 
 
 class SerialInputLineEdit(QLineEdit):
-    """Line edit that emits a signal when Ctrl+X is pressed."""
+    """Line edit that emits signals for control commands."""
 
     control_x_pressed = Signal()
+    history_previous_requested = Signal()
+    history_next_requested = Signal()
 
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
         if (
@@ -34,6 +36,14 @@ class SerialInputLineEdit(QLineEdit):
             and not event.modifiers() & ~Qt.ControlModifier
         ):
             self.control_x_pressed.emit()
+            event.accept()
+            return
+        if event.key() == Qt.Key_Up and event.modifiers() == Qt.NoModifier:
+            self.history_previous_requested.emit()
+            event.accept()
+            return
+        if event.key() == Qt.Key_Down and event.modifiers() == Qt.NoModifier:
+            self.history_next_requested.emit()
             event.accept()
             return
         super().keyPressEvent(event)
@@ -79,12 +89,21 @@ class SerialTerminalWindow(QMainWindow):
         self.send_button.clicked.connect(self.send_current_line)
         self.input_edit.returnPressed.connect(self.send_current_line)
         self.input_edit.control_x_pressed.connect(self.send_control_x)
+        self.input_edit.history_previous_requested.connect(
+            self._show_previous_history_entry
+        )
+        self.input_edit.history_next_requested.connect(
+            self._show_next_history_entry
+        )
 
         self.poll_timer = QTimer(self)
         self.poll_timer.setInterval(self.POLL_INTERVAL_MS)
         self.poll_timer.timeout.connect(self._poll_serial)
 
         self._update_enabled_state()
+
+        self._command_history: list[str] = []
+        self._history_position: int = 0
 
     def set_stage_controller(self, stage_controller: Optional["StageController"]) -> None:
         """Assign the stage controller to coordinate serial access."""
@@ -142,8 +161,10 @@ class SerialTerminalWindow(QMainWindow):
             return
         if text:
             self._append_local_echo(text)
+            self._command_history.append(text)
         else:
             self._append_local_echo("\u240d")
+        self._history_position = len(self._command_history)
         self.input_edit.clear()
 
     def _append_local_echo(self, message: str) -> None:
@@ -188,6 +209,27 @@ class SerialTerminalWindow(QMainWindow):
     def _update_enabled_state(self) -> None:
         enabled = bool(self.serial_connection and self.serial_connection.is_open)
         self.terminal_container.setEnabled(enabled)
+
+    def _show_previous_history_entry(self) -> None:
+        if not self._command_history:
+            return
+        if self._history_position > 0:
+            self._history_position -= 1
+        else:
+            self._history_position = 0
+        self.input_edit.setText(self._command_history[self._history_position])
+        self.input_edit.selectAll()
+
+    def _show_next_history_entry(self) -> None:
+        if not self._command_history:
+            return
+        if self._history_position < len(self._command_history) - 1:
+            self._history_position += 1
+            self.input_edit.setText(self._command_history[self._history_position])
+        else:
+            self._history_position = len(self._command_history)
+            self.input_edit.clear()
+        self.input_edit.selectAll()
 
 
 __all__ = ["SerialTerminalWindow"]
