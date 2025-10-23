@@ -55,7 +55,7 @@ class JoystickWindow(QMainWindow):
         self.setFocusPolicy(Qt.StrongFocus)
 
         self.serial_connection: Optional[serial.Serial] = None
-        self._active_direction: Optional[tuple[str, int]] = None
+        self._active_axes: Optional[tuple[tuple[str, int], ...]] = None
         self._key_stack: list[Tuple[str, object]] = []
 
         central = QWidget(self)
@@ -136,9 +136,11 @@ class JoystickWindow(QMainWindow):
     def set_serial(self, serial_connection: Optional[serial.Serial]) -> None:
         """Assign the serial connection used for jogging commands."""
 
+        if self.serial_connection and self.serial_connection.is_open:
+            self.stop_jog()
         self.serial_connection = serial_connection
         if not serial_connection or not serial_connection.is_open:
-            self._active_direction = None
+            self._active_axes = None
             self._key_stack.clear()
         if serial_connection and serial_connection.is_open:
             self.status_label.setText(
@@ -182,26 +184,51 @@ class JoystickWindow(QMainWindow):
             return None
 
     def start_jog(self, axis: str, direction: int) -> None:
-        if not self.serial_connection or not self.serial_connection.is_open:
-            return
-        feedrate = self.get_feedrate()
-        if feedrate is None:
-            return
-        if self._active_direction == (axis, direction):
-            return
-        self._active_direction = (axis, direction)
-        distance = direction * self.JOG_DISTANCE_MM
-        command = f"$J=G91 G21 {axis}{distance:.3f} F{feedrate}\n"
-        self.send_command(command)
+        self._apply_axes(((axis, direction),))
 
     def stop_jog(self) -> None:
         if not self.serial_connection or not self.serial_connection.is_open:
-            self._active_direction = None
+            self._active_axes = None
             return
-        if self._active_direction is None:
+        if self._active_axes is None:
             return
-        self._active_direction = None
+        self._active_axes = None
         self.send_command(b"\x85")
+
+    def _apply_axes(self, axes: tuple[tuple[str, int], ...]) -> None:
+        axes_sorted = tuple(sorted(axes, key=lambda item: item[0]))
+        if not axes_sorted:
+            self.stop_jog()
+            return
+        if self._active_axes == axes_sorted:
+            return
+        if not self.serial_connection or not self.serial_connection.is_open:
+            self._active_axes = None
+            return
+        feedrate = self.get_feedrate()
+        if feedrate is None:
+            self.stop_jog()
+            return
+        if self._active_axes is not None:
+            self.stop_jog()
+        parts: list[str] = []
+        for axis, direction in axes_sorted:
+            distance = direction * self.JOG_DISTANCE_MM
+            parts.append(f"{axis}{distance:.3f}")
+        command = f"$J=G91 G21 {' '.join(parts)} F{feedrate}\n"
+        self.send_command(command)
+        self._active_axes = axes_sorted
+
+    def _update_active_jog(self) -> None:
+        unique_axes: dict[str, int] = {}
+        for identifier in self._key_stack:
+            mapping = self._mapping_from_identifier(identifier)
+            if mapping is None:
+                continue
+            axis, direction = mapping
+            unique_axes[axis] = direction
+        axes = tuple(unique_axes.items())
+        self._apply_axes(axes)
 
     def _home_xy(self) -> None:
         self.send_command("$HX\n")
@@ -232,7 +259,7 @@ class JoystickWindow(QMainWindow):
         if identifier and mapping:
             if identifier not in self._key_stack:
                 self._key_stack.append(identifier)
-                self.start_jog(*mapping)
+                self._update_active_jog()
             event.accept()
             return
         super().keyPressEvent(event)
@@ -245,12 +272,7 @@ class JoystickWindow(QMainWindow):
         if identifier and mapping:
             if identifier in self._key_stack:
                 self._key_stack.remove(identifier)
-            self.stop_jog()
-            if self._key_stack:
-                next_identifier = self._key_stack[-1]
-                next_mapping = self._mapping_from_identifier(next_identifier)
-                if next_mapping:
-                    self.start_jog(*next_mapping)
+                self._update_active_jog()
             event.accept()
             return
         super().keyReleaseEvent(event)
