@@ -10,7 +10,6 @@ from PySide6.QtGui import (
     QPainter,
     QPen,
     QPixmap,
-    QTransform,
 )
 from PySide6.QtWidgets import QWidget
 
@@ -29,9 +28,7 @@ class MicroscopeView(QWidget):
         self._display_rect: QRect | None = None
 
     def set_frame(self, qimg: QImage) -> None:
-        transform = QTransform().rotate(90)
-        rotated = qimg.transformed(transform)
-        self._pix = QPixmap.fromImage(rotated)
+        self._pix = QPixmap.fromImage(qimg)
         self.update()
 
     def paintEvent(self, event) -> None:  # type: ignore[override]

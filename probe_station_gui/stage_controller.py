@@ -440,8 +440,7 @@ class StageController(QObject):
             ptr, np.uint8, count=converted.sizeInBytes()
         ).reshape((height, converted.bytesPerLine()))
         array = array[:, : width * 3].reshape((height, width, 3))
-        rotated = cv2.rotate(array, cv2.ROTATE_90_COUNTERCLOCKWISE)
-        gray = cv2.cvtColor(rotated, cv2.COLOR_RGB2GRAY)
+        gray = cv2.cvtColor(array, cv2.COLOR_RGB2GRAY)
         return gray
 
 
