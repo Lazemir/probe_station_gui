@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 
-from PySide6.QtCore import QThread, QTimer, Qt
+from PySide6.QtCore import QEvent, QThread, QTimer, Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QApplication, QMainWindow
 
@@ -12,11 +12,11 @@ from probe_station_gui import (
     Grabber,
     JoystickWindow,
     MicroscopeView,
-    SerialTerminalWindow,
     StageController,
-    SerialScannerDialog,
+    SerialTerminalWindow,
 )
 from probe_station_gui.views.dock_widgets import CollapsibleDockWidget
+from probe_station_gui.views.serial_connection_panel import SerialConnectionPanel
 
 
 class Main(QMainWindow):
@@ -28,13 +28,15 @@ class Main(QMainWindow):
         self.view = MicroscopeView()
         self.setCentralWidget(self.view)
         self.serial_connection = None
-        self.serial_dialog = SerialScannerDialog(self)
         self.serial_port_name: str | None = None
         self.serial_baud_rate: int | None = None
         self.joystick_panel: JoystickWindow | None = None
         self.serial_terminal_panel: SerialTerminalWindow | None = None
+        self.serial_connection_panel: SerialConnectionPanel | None = None
         self.joystick_dock: CollapsibleDockWidget | None = None
         self.serial_terminal_dock: CollapsibleDockWidget | None = None
+        self.serial_connection_dock: CollapsibleDockWidget | None = None
+        self._full_screen_action: QAction | None = None
         self.statusBar()
 
         self.grabber = Grabber()
@@ -45,9 +47,6 @@ class Main(QMainWindow):
         self.grabber.frame_ready.connect(self.view.set_frame)
         self.grabber.error.connect(self.on_error)
         self.thread.start()
-
-        self.serial_dialog.connected.connect(self.on_serial_connected)
-        self.serial_dialog.disconnected.connect(self.on_serial_disconnected)
 
         self.stage_controller = StageController()
         self.stage_controller.status_message.connect(self.statusBar().showMessage)
@@ -60,12 +59,9 @@ class Main(QMainWindow):
 
         self._create_dock_widgets()
 
-        tools_menu = self.menuBar().addMenu("Tools")
-        serial_action = QAction("Serial Scanner", self)
-        serial_action.triggered.connect(self.open_serial_scanner)
-        tools_menu.addAction(serial_action)
+        self._setup_menus()
 
-        window_menu = self.menuBar().addMenu("Window")
+        window_menu = self.menuBar().addMenu("Panels")
         if self.joystick_dock is not None:
             joystick_action = self.joystick_dock.toggleViewAction()
             joystick_action.setText("Joystick")
@@ -74,21 +70,22 @@ class Main(QMainWindow):
             terminal_action = self.serial_terminal_dock.toggleViewAction()
             terminal_action.setText("Serial Terminal")
             window_menu.addAction(terminal_action)
+        if self.serial_connection_dock is not None:
+            connection_action = self.serial_connection_dock.toggleViewAction()
+            connection_action.setText("Connection")
+            window_menu.addAction(connection_action)
 
-        QTimer.singleShot(0, self.open_serial_scanner)
+        QTimer.singleShot(0, self._auto_connect_if_possible)
+
+        self.setStyleSheet(
+            "QMainWindow::separator { width: 8px; height: 8px; background: palette(window); }"
+        )
 
     def on_click(self, dx: float, dy: float, _rel_x: float, _rel_y: float) -> None:
         self.stage_controller.request_move(dx, dy)
 
     def on_error(self, message: str) -> None:
         print("Camera error:", message)
-
-    def open_serial_scanner(self) -> None:
-        if self.serial_dialog:
-            self.serial_dialog.populate_ports(clear_status=False)
-            self.serial_dialog.show()
-            self.serial_dialog.raise_()
-            self.serial_dialog.activateWindow()
 
     def on_serial_connected(self, serial_port) -> None:
         if self.serial_connection and self.serial_connection.is_open:
@@ -123,12 +120,57 @@ class Main(QMainWindow):
         self.serial_connection = None
         print("Serial disconnected")
         self.stage_controller.set_serial(None)
-        if self.serial_dialog:
-            self.serial_dialog.handle_external_disconnect()
+        auto_retry = self.sender() is not self.serial_connection_panel
+        if self.serial_connection_panel:
+            self.serial_connection_panel.handle_external_disconnect(auto_retry=auto_retry)
         if self.joystick_panel:
             self.joystick_panel.set_serial(None)
         if self.serial_terminal_panel:
             self.serial_terminal_panel.set_serial(None)
+
+    def _auto_connect_if_possible(self) -> None:
+        if self.serial_connection_panel and not self.serial_connection:
+            self.serial_connection_panel.auto_connect()
+
+    def _setup_menus(self) -> None:
+        app_menu = self.menuBar().addMenu("Application")
+
+        minimize_action = QAction("Minimize", self)
+        minimize_action.triggered.connect(self.showMinimized)
+        app_menu.addAction(minimize_action)
+
+        restore_action = QAction("Restore", self)
+        restore_action.triggered.connect(self.showNormal)
+        app_menu.addAction(restore_action)
+
+        full_screen_action = QAction("Toggle Full Screen", self)
+        full_screen_action.setCheckable(True)
+        full_screen_action.setChecked(True)
+
+        def toggle_full_screen(checked: bool) -> None:
+            if checked:
+                self.showFullScreen()
+            else:
+                self.showNormal()
+            self._update_full_screen_action_state()
+
+        full_screen_action.triggered.connect(toggle_full_screen)
+        app_menu.addAction(full_screen_action)
+
+        self._full_screen_action = full_screen_action
+
+        minimize_action.triggered.connect(
+            lambda: self._set_full_screen_checked(False)
+        )
+        restore_action.triggered.connect(
+            lambda: self._set_full_screen_checked(False)
+        )
+
+        close_action = QAction("Close", self)
+        close_action.triggered.connect(self.close)
+        app_menu.addAction(close_action)
+
+        self._update_full_screen_action_state()
 
     def show_joystick_window(self) -> None:
         if not self.joystick_panel or not self.joystick_dock:
@@ -168,16 +210,32 @@ class Main(QMainWindow):
         self.thread.wait()
         if self.serial_connection and self.serial_connection.is_open:
             self.serial_connection.close()
-            if self.serial_dialog:
-                self.serial_dialog.handle_external_disconnect()
         if self.joystick_panel:
             self.joystick_panel.set_serial(None)
         if self.serial_terminal_panel:
             self.serial_terminal_panel.set_serial(None)
         self.stage_controller.shutdown()
+        if self.serial_connection_panel:
+            self.serial_connection_panel.shutdown()
         event.accept()
 
+    def changeEvent(self, event) -> None:  # type: ignore[override]
+        super().changeEvent(event)
+        if event.type() == QEvent.WindowStateChange:
+            QTimer.singleShot(0, self._update_full_screen_action_state)
+
     def _create_dock_widgets(self) -> None:
+        self.serial_connection_panel = SerialConnectionPanel(self)
+        self.serial_connection_panel.connected.connect(self.on_serial_connected)
+        self.serial_connection_panel.disconnected.connect(self.on_serial_disconnected)
+        self.serial_connection_dock = CollapsibleDockWidget("Connection", self)
+        self.serial_connection_dock.setObjectName("SerialConnectionDock")
+        self.serial_connection_dock.setWidget(self.serial_connection_panel)
+        self.serial_connection_dock.setAllowedAreas(
+            Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea
+        )
+        self.addDockWidget(Qt.LeftDockWidgetArea, self.serial_connection_dock)
+
         self.joystick_panel = JoystickWindow(self)
         self.joystick_panel.set_serial(self.serial_connection)
         self.joystick_dock = CollapsibleDockWidget("Joystick", self)
@@ -187,6 +245,9 @@ class Main(QMainWindow):
             Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea
         )
         self.addDockWidget(Qt.LeftDockWidgetArea, self.joystick_dock)
+        self.splitDockWidget(
+            self.serial_connection_dock, self.joystick_dock, Qt.Vertical
+        )
 
         self.serial_terminal_panel = SerialTerminalWindow(self)
         self.serial_terminal_panel.set_stage_controller(self.stage_controller)
@@ -199,6 +260,16 @@ class Main(QMainWindow):
         )
         self.addDockWidget(Qt.LeftDockWidgetArea, self.serial_terminal_dock)
         self.splitDockWidget(self.joystick_dock, self.serial_terminal_dock, Qt.Vertical)
+
+    def _set_full_screen_checked(self, checked: bool) -> None:
+        if not self._full_screen_action:
+            return
+        block = self._full_screen_action.blockSignals(True)
+        self._full_screen_action.setChecked(checked)
+        self._full_screen_action.blockSignals(block)
+
+    def _update_full_screen_action_state(self) -> None:
+        self._set_full_screen_checked(self.isFullScreen())
 
 
 def main() -> int:
