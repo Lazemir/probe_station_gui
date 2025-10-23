@@ -151,7 +151,9 @@ class StageController(QObject):
             if before_frame is None:
                 raise StageControllerError("Camera frame unavailable before movement.")
             pixel_vector = np.array([dx_pixels, dy_pixels], dtype=float)
-            mm_vector = self._pixels_to_mm @ pixel_vector
+            # Moving the stage shifts the image in the opposite direction, so we
+            # negate the calibrated conversion when turning pixel error into mm.
+            mm_vector = -(self._pixels_to_mm @ pixel_vector)
             move = MoveVector(x=float(mm_vector[0]), y=float(mm_vector[1]))
 
             self.status_message.emit(
