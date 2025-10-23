@@ -11,7 +11,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMainWindow,
     QPushButton,
     QTextEdit,
     QVBoxLayout,
@@ -49,21 +48,18 @@ class SerialInputLineEdit(QLineEdit):
         super().keyPressEvent(event)
 
 
-class SerialTerminalWindow(QMainWindow):
-    """Floating window that echoes FluidNC serial traffic."""
+class SerialTerminalWindow(QWidget):
+    """Widget that echoes FluidNC serial traffic."""
 
     POLL_INTERVAL_MS = 100
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Serial Terminal")
 
         self.serial_connection: Optional[serial.Serial] = None
         self.stage_controller: Optional["StageController"] = None
 
-        central = QWidget(self)
-        self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
+        layout = QVBoxLayout(self)
 
         self.status_label = QLabel("Disconnected", self)
         layout.addWidget(self.status_label)
