@@ -6,7 +6,14 @@ import sys
 
 from PySide6.QtCore import QEvent, QThread, QTimer, Qt
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QApplication, QMainWindow
+from PySide6.QtWidgets import (
+    QApplication,
+    QHBoxLayout,
+    QMainWindow,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from probe_station_gui import (
     Grabber,
@@ -25,8 +32,20 @@ class Main(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Microscope control")
+        self.menuBar().setNativeMenuBar(False)
+
         self.view = MicroscopeView()
-        self.setCentralWidget(self.view)
+        self._minimize_button: QToolButton | None = None
+        self._full_screen_button: QToolButton | None = None
+        self._close_button: QToolButton | None = None
+        central_container = QWidget(self)
+        central_layout = QVBoxLayout(central_container)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+        self._window_controls_bar = self._create_window_controls_bar()
+        central_layout.addWidget(self._window_controls_bar)
+        central_layout.addWidget(self.view, 1)
+        self.setCentralWidget(central_container)
         self.serial_connection = None
         self.serial_port_name: str | None = None
         self.serial_baud_rate: int | None = None
@@ -36,7 +55,10 @@ class Main(QMainWindow):
         self.joystick_dock: CollapsibleDockWidget | None = None
         self.serial_terminal_dock: CollapsibleDockWidget | None = None
         self.serial_connection_dock: CollapsibleDockWidget | None = None
+        self._minimize_action: QAction | None = None
+        self._restore_action: QAction | None = None
         self._full_screen_action: QAction | None = None
+        self._close_action: QAction | None = None
         self.statusBar()
 
         self.grabber = Grabber()
@@ -60,6 +82,7 @@ class Main(QMainWindow):
         self._create_dock_widgets()
 
         self._setup_menus()
+        self._connect_window_control_buttons()
 
         window_menu = self.menuBar().addMenu("Panels")
         if self.joystick_dock is not None:
@@ -78,7 +101,24 @@ class Main(QMainWindow):
         QTimer.singleShot(0, self._auto_connect_if_possible)
 
         self.setStyleSheet(
-            "QMainWindow::separator { width: 8px; height: 8px; background: palette(window); }"
+            """
+            QMainWindow::separator { width: 8px; height: 8px; background: palette(window); }
+            #WindowControlsBar {
+                background-color: #2b2b2b;
+            }
+            #WindowControlsBar QToolButton {
+                color: #f0f0f0;
+                font-size: 16px;
+                padding: 4px 12px;
+                border: none;
+            }
+            #WindowControlsBar QToolButton:hover {
+                background-color: rgba(255, 255, 255, 0.12);
+            }
+            #WindowControlsBar QToolButton:pressed {
+                background-color: rgba(255, 255, 255, 0.24);
+            }
+            """
         )
 
     def on_click(self, dx: float, dy: float, _rel_x: float, _rel_y: float) -> None:
@@ -135,42 +175,44 @@ class Main(QMainWindow):
     def _setup_menus(self) -> None:
         app_menu = self.menuBar().addMenu("Application")
 
-        minimize_action = QAction("Minimize", self)
-        minimize_action.triggered.connect(self.showMinimized)
-        app_menu.addAction(minimize_action)
+        self._minimize_action = QAction("Minimize", self)
+        self._minimize_action.triggered.connect(self.showMinimized)
+        app_menu.addAction(self._minimize_action)
 
-        restore_action = QAction("Restore", self)
-        restore_action.triggered.connect(self.showNormal)
-        app_menu.addAction(restore_action)
+        self._restore_action = QAction("Restore", self)
+        self._restore_action.triggered.connect(self.showNormal)
+        app_menu.addAction(self._restore_action)
 
-        full_screen_action = QAction("Toggle Full Screen", self)
-        full_screen_action.setCheckable(True)
-        full_screen_action.setChecked(True)
+        self._full_screen_action = QAction("Toggle Full Screen", self)
+        self._full_screen_action.setCheckable(True)
+        self._full_screen_action.setChecked(True)
+        self._full_screen_action.triggered.connect(self._toggle_full_screen)
+        app_menu.addAction(self._full_screen_action)
 
-        def toggle_full_screen(checked: bool) -> None:
-            if checked:
-                self.showFullScreen()
-            else:
-                self.showNormal()
-            self._update_full_screen_action_state()
+        if self._minimize_action is not None:
+            self._minimize_action.triggered.connect(
+                lambda: self._set_full_screen_checked(False)
+            )
+        if self._restore_action is not None:
+            self._restore_action.triggered.connect(
+                lambda: self._set_full_screen_checked(False)
+            )
 
-        full_screen_action.triggered.connect(toggle_full_screen)
-        app_menu.addAction(full_screen_action)
-
-        self._full_screen_action = full_screen_action
-
-        minimize_action.triggered.connect(
-            lambda: self._set_full_screen_checked(False)
-        )
-        restore_action.triggered.connect(
-            lambda: self._set_full_screen_checked(False)
-        )
-
-        close_action = QAction("Close", self)
-        close_action.triggered.connect(self.close)
-        app_menu.addAction(close_action)
+        self._close_action = QAction("Close", self)
+        self._close_action.triggered.connect(self.close)
+        app_menu.addAction(self._close_action)
 
         self._update_full_screen_action_state()
+
+    def _connect_window_control_buttons(self) -> None:
+        if self._minimize_button is not None:
+            self._minimize_button.clicked.connect(self._on_minimize_requested)
+        if self._close_button is not None:
+            self._close_button.clicked.connect(self.close)
+        if self._full_screen_button is not None:
+            self._full_screen_button.clicked.connect(
+                self._toggle_full_screen_from_button
+            )
 
     def show_joystick_window(self) -> None:
         if not self.joystick_panel or not self.joystick_dock:
@@ -262,14 +304,74 @@ class Main(QMainWindow):
         self.splitDockWidget(self.joystick_dock, self.serial_terminal_dock, Qt.Vertical)
 
     def _set_full_screen_checked(self, checked: bool) -> None:
-        if not self._full_screen_action:
-            return
-        block = self._full_screen_action.blockSignals(True)
-        self._full_screen_action.setChecked(checked)
-        self._full_screen_action.blockSignals(block)
+        if self._full_screen_action:
+            block = self._full_screen_action.blockSignals(True)
+            self._full_screen_action.setChecked(checked)
+            self._full_screen_action.blockSignals(block)
+        if self._full_screen_button:
+            block = self._full_screen_button.blockSignals(True)
+            self._full_screen_button.setChecked(checked)
+            self._full_screen_button.blockSignals(block)
+        self._update_full_screen_button_icon()
 
     def _update_full_screen_action_state(self) -> None:
         self._set_full_screen_checked(self.isFullScreen())
+
+    def _toggle_full_screen(self, checked: bool) -> None:
+        if checked:
+            self.showFullScreen()
+        else:
+            self.showNormal()
+        self._update_full_screen_action_state()
+
+    def _toggle_full_screen_from_button(self, checked: bool) -> None:
+        if self._full_screen_action:
+            self._set_full_screen_checked(checked)
+        self._toggle_full_screen(checked)
+
+    def _on_minimize_requested(self) -> None:
+        self._set_full_screen_checked(False)
+        self.showMinimized()
+
+    def _update_full_screen_button_icon(self) -> None:
+        if not self._full_screen_button:
+            return
+        if self.isFullScreen():
+            self._full_screen_button.setText("❐")
+            self._full_screen_button.setToolTip("Restore")
+        else:
+            self._full_screen_button.setText("□")
+            self._full_screen_button.setToolTip("Full Screen")
+
+    def _create_window_controls_bar(self) -> QWidget:
+        bar = QWidget(self)
+        bar.setObjectName("WindowControlsBar")
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(12, 6, 12, 6)
+        layout.setSpacing(6)
+
+        layout.addStretch()
+
+        self._minimize_button = QToolButton(bar)
+        self._minimize_button.setText("–")
+        self._minimize_button.setToolTip("Minimize")
+        self._minimize_button.setAutoRaise(True)
+        layout.addWidget(self._minimize_button)
+
+        self._full_screen_button = QToolButton(bar)
+        self._full_screen_button.setCheckable(True)
+        self._full_screen_button.setChecked(True)
+        self._full_screen_button.setToolTip("Full Screen")
+        self._full_screen_button.setAutoRaise(True)
+        layout.addWidget(self._full_screen_button)
+
+        self._close_button = QToolButton(bar)
+        self._close_button.setText("✕")
+        self._close_button.setToolTip("Close")
+        self._close_button.setAutoRaise(True)
+        layout.addWidget(self._close_button)
+
+        return bar
 
 
 def main() -> int:
