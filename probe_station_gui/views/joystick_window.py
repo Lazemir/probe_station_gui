@@ -49,7 +49,10 @@ class JoystickWindow(QWidget):
         self._active_axes: Optional[tuple[tuple[str, int], ...]] = None
         self._key_stack: list[Tuple[str, object]] = []
         self._key_bindings: Dict[tuple, tuple[str, int]] = {}
-        self._feedrate_presets: List[float] = list(self.DEFAULT_FEEDRATE_PRESETS)
+        self._linear_presets: List[float] = list(self.DEFAULT_FEEDRATE_PRESETS)
+        self._rotary_presets: List[float] = list(self.DEFAULT_FEEDRATE_PRESETS)
+        self._linear_default: float = 1.0
+        self._rotary_default: float = 1.0
         self.apply_control_bindings({})
         self._event_filter_installed = False
         self._event_filter_retry_scheduled = False
@@ -99,7 +102,7 @@ class JoystickWindow(QWidget):
 
         root_layout.addLayout(feed_container)
 
-        self._refresh_feedrate_combos()
+        self._refresh_feedrate_combos(force_defaults=True)
 
         grid_layout = QGridLayout()
         self.up_button = QPushButton("↑", self)
@@ -221,10 +224,33 @@ class JoystickWindow(QWidget):
         text = f"{value:.6f}".rstrip("0").rstrip(".")
         return text or "0"
 
-    def _refresh_feedrate_combos(self) -> None:
+    def _refresh_feedrate_combos(self, *, force_defaults: bool = False) -> None:
+        self._refresh_feedrate_combo(
+            self.linear_feedrate_combo,
+            self.linear_custom_feedrate_edit,
+            self._linear_presets,
+            self._linear_default,
+            force_defaults,
+        )
+        self._refresh_feedrate_combo(
+            self.rotary_feedrate_combo,
+            self.rotary_custom_feedrate_edit,
+            self._rotary_presets,
+            self._rotary_default,
+            force_defaults,
+        )
+
+    def _refresh_feedrate_combo(
+        self,
+        combo: QComboBox,
+        editor: QLineEdit,
+        presets: List[float],
+        default_value: float,
+        force_default: bool,
+    ) -> None:
         display_items: List[str] = []
         seen: set[str] = set()
-        for preset in self._feedrate_presets:
+        for preset in presets:
             try:
                 text = self._format_feedrate(float(preset))
             except (TypeError, ValueError):
@@ -238,32 +264,76 @@ class JoystickWindow(QWidget):
                 self._format_feedrate(value) for value in self.DEFAULT_FEEDRATE_PRESETS
             ]
             seen = set(display_items)
+
+        default_text = ""
+        try:
+            if default_value > 0:
+                default_text = self._format_feedrate(float(default_value))
+        except (TypeError, ValueError):
+            default_text = ""
+
+        if default_text and default_text not in seen:
+            display_items.insert(0, default_text)
+            seen.add(default_text)
+
         if self.CUSTOM_FEED_LABEL not in display_items:
             display_items.append(self.CUSTOM_FEED_LABEL)
 
-        combos = (
-            (self.linear_feedrate_combo, self.linear_custom_feedrate_edit),
-            (self.rotary_feedrate_combo, self.rotary_custom_feedrate_edit),
+        current_text = combo.currentText()
+        custom_text = editor.text()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(display_items)
+
+        if force_default and default_text:
+            combo.setCurrentText(default_text)
+        elif current_text in display_items:
+            combo.setCurrentText(current_text)
+        elif current_text == self.CUSTOM_FEED_LABEL or editor.isVisible():
+            combo.setCurrentText(self.CUSTOM_FEED_LABEL)
+            editor.setText(custom_text)
+        else:
+            combo.setCurrentIndex(0)
+
+        combo.blockSignals(False)
+        self._update_custom_visibility(combo, editor, combo.currentIndex())
+
+    def apply_feedrate_settings(
+        self,
+        linear_presets: List[float],
+        linear_default: float,
+        rotary_presets: List[float],
+        rotary_default: float,
+    ) -> None:
+        """Update the selectable feedrate presets and defaults from settings."""
+
+        cleaned_linear = self._clean_presets(linear_presets)
+        cleaned_rotary = self._clean_presets(rotary_presets)
+        default_linear = self._resolve_default(linear_default, cleaned_linear)
+        default_rotary = self._resolve_default(rotary_default, cleaned_rotary)
+
+        if (
+            cleaned_linear == self._linear_presets
+            and cleaned_rotary == self._rotary_presets
+            and abs(default_linear - self._linear_default) <= 1e-9
+            and abs(default_rotary - self._rotary_default) <= 1e-9
+        ):
+            return
+
+        self._linear_presets = cleaned_linear
+        self._rotary_presets = cleaned_rotary
+        self._linear_default = default_linear
+        self._rotary_default = default_rotary
+        self._refresh_feedrate_combos(force_defaults=True)
+        logger.info(
+            "Joystick feedrate settings updated: linear=%s (default=%s) rotary=%s (default=%s)",
+            cleaned_linear,
+            default_linear,
+            cleaned_rotary,
+            default_rotary,
         )
-        for combo, editor in combos:
-            current_text = combo.currentText()
-            custom_text = editor.text()
-            combo.blockSignals(True)
-            combo.clear()
-            combo.addItems(display_items)
-            if current_text in display_items:
-                combo.setCurrentText(current_text)
-            elif current_text == self.CUSTOM_FEED_LABEL or editor.isVisible():
-                combo.setCurrentText(self.CUSTOM_FEED_LABEL)
-                editor.setText(custom_text)
-            else:
-                combo.setCurrentIndex(0)
-            combo.blockSignals(False)
-            self._update_custom_visibility(combo, editor, combo.currentIndex())
 
-    def apply_feedrate_presets(self, presets: List[float]) -> None:
-        """Update the selectable feedrate presets from settings."""
-
+    def _clean_presets(self, presets: List[float]) -> List[float]:
         cleaned: List[float] = []
         seen: set[float] = set()
         for value in presets:
@@ -280,11 +350,22 @@ class JoystickWindow(QWidget):
             cleaned.append(number)
         if not cleaned:
             cleaned = list(self.DEFAULT_FEEDRATE_PRESETS)
-        if cleaned == self._feedrate_presets:
-            return
-        self._feedrate_presets = cleaned
-        self._refresh_feedrate_combos()
-        logger.info("Joystick feedrate presets updated: %s", cleaned)
+        cleaned.sort()
+        return cleaned
+
+    def _resolve_default(self, default_value: float, presets: List[float]) -> float:
+        if not presets:
+            return self.DEFAULT_FEEDRATE_PRESETS[0]
+        try:
+            candidate = float(default_value)
+        except (TypeError, ValueError):
+            candidate = presets[0]
+        if candidate <= 0:
+            candidate = presets[0]
+        for value in presets:
+            if abs(value - candidate) <= 1e-9:
+                return value
+        return presets[0]
 
     def set_serial(self, serial_connection: Optional[serial.Serial]) -> None:
         """Assign the serial connection used for jogging commands."""

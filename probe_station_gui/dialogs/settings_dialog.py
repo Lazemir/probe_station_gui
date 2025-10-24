@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from typing import Dict, List, cast
+from typing import Dict, List, Sequence, cast
 
 from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QDoubleValidator, QKeyEvent, QKeySequence
@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLineEdit,
     QLabel,
@@ -26,6 +27,8 @@ from PySide6.QtWidgets import (
 from probe_station_gui.qt_compat import keyboard_modifiers_to_int
 from probe_station_gui.settings_manager import (
     CONTROL_ACTIONS,
+    FeedrateGroup,
+    FeedrateSettings,
     KeyBinding,
     LoggingSettings,
     Settings,
@@ -221,17 +224,37 @@ class LoggingSettingsWidget(QWidget):
         logging_settings.file = self._file_edit.text().strip()
 
 
-class FeedrateSettingsWidget(QWidget):
-    """Tab that lets users manage preset feed rates."""
+class FeedrateGroupEditor(QWidget):
+    """Editor for a single feedrate group including presets and default selection."""
 
-    def __init__(self, presets: List[float], parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        title: str,
+        units: str,
+        group: FeedrateGroup,
+        fallback_presets: Sequence[float],
+        fallback_default: float,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
-        self._presets: List[float] = list(presets)
+        self._fallback_presets = [float(value) for value in fallback_presets]
+        self._fallback_presets.sort()
+        self._fallback_default = float(fallback_default)
+        self._presets: List[float] = sorted(group.presets) if group.presets else list(self._fallback_presets)
+        if not self._presets:
+            self._presets = list(self._fallback_presets)
+        self._default_value: float = group.default
+        if not self._presets:
+            self._default_value = self._fallback_default
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
 
-        layout.addWidget(QLabel("Preset feed rates (positive values only):", self))
+        group_box = QGroupBox(title, self)
+        outer_layout.addWidget(group_box)
+        layout = QVBoxLayout(group_box)
+
+        layout.addWidget(QLabel(f"Preset feed rates for {units} (positive values):", self))
 
         self._list = QListWidget(self)
         self._list.setSelectionMode(QListWidget.SingleSelection)
@@ -255,22 +278,61 @@ class FeedrateSettingsWidget(QWidget):
         action_row.addStretch(1)
         layout.addLayout(action_row)
 
+        default_row = QHBoxLayout()
+        default_row.addWidget(QLabel("Default preset:", self))
+        self._default_combo = QComboBox(self)
+        default_row.addWidget(self._default_combo)
+        default_row.addStretch(1)
+        layout.addLayout(default_row)
+
         self._add_button.clicked.connect(self._add_value)
         self._remove_button.clicked.connect(self._remove_selected)
         self._list.itemSelectionChanged.connect(self._update_buttons)
+        self._default_combo.currentIndexChanged.connect(self._on_default_changed)
 
         self._refresh_list()
         self._update_buttons()
 
-    def to_settings(self, settings: Settings) -> None:
-        """Write the configured presets back to the settings container."""
+    def group(self) -> FeedrateGroup:
+        """Return the configured feedrate group."""
 
-        settings.feedrate_presets = list(self._presets)
+        presets = list(self._presets)
+        if not presets:
+            presets = list(self._fallback_presets)
+        default_value = self._default_value
+        if default_value <= 0 or all(not math.isclose(default_value, value, rel_tol=1e-9, abs_tol=1e-9) for value in presets):
+            default_value = presets[0] if presets else self._fallback_default
+        return FeedrateGroup(presets=presets, default=default_value)
 
     def _refresh_list(self) -> None:
+        self._presets.sort()
         self._list.clear()
         for value in self._presets:
             self._list.addItem(self._format_value(value))
+        if not any(math.isclose(self._default_value, value, rel_tol=1e-9, abs_tol=1e-9) for value in self._presets):
+            if self._presets:
+                self._default_value = self._presets[0]
+            else:
+                self._default_value = self._fallback_default
+        self._refresh_default_options()
+
+    def _refresh_default_options(self) -> None:
+        values = list(self._presets) if self._presets else list(self._fallback_presets)
+        if not values:
+            values = [self._fallback_default]
+        texts = [self._format_value(value) for value in values]
+        desired_text = self._format_value(self._default_value)
+
+        self._default_choices = values
+        self._default_combo.blockSignals(True)
+        self._default_combo.clear()
+        self._default_combo.addItems(texts)
+        if desired_text in texts:
+            self._default_combo.setCurrentText(desired_text)
+        else:
+            self._default_combo.setCurrentIndex(0)
+            self._default_value = values[0]
+        self._default_combo.blockSignals(False)
 
     def _update_buttons(self) -> None:
         self._remove_button.setEnabled(bool(self._list.selectedItems()))
@@ -293,8 +355,8 @@ class FeedrateSettingsWidget(QWidget):
                 insert_index = index
                 break
         self._presets.insert(insert_index, value)
-        self._refresh_list()
         self._value_edit.clear()
+        self._refresh_list()
 
     def _remove_selected(self) -> None:
         selected_indexes = self._list.selectedIndexes()
@@ -305,10 +367,57 @@ class FeedrateSettingsWidget(QWidget):
                 del self._presets[index]
         self._refresh_list()
 
+    def _on_default_changed(self) -> None:
+        index = self._default_combo.currentIndex()
+        if 0 <= index < len(self._default_choices):
+            self._default_value = self._default_choices[index]
+
     @staticmethod
     def _format_value(value: float) -> str:
         text = f"{value:.6f}".rstrip("0").rstrip(".")
         return text or "0"
+
+
+class FeedrateSettingsWidget(QWidget):
+    """Tab that lets users manage linear and rotary feed rates."""
+
+    DEFAULT_PRESETS = (0.01, 0.1, 1.0, 10.0, 100.0)
+    DEFAULT_VALUE = 1.0
+
+    def __init__(self, feedrates: FeedrateSettings, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self._linear_editor = FeedrateGroupEditor(
+            "Linear feed rates",
+            "mm/min",
+            feedrates.linear,
+            self.DEFAULT_PRESETS,
+            self.DEFAULT_VALUE,
+            self,
+        )
+        layout.addWidget(self._linear_editor)
+
+        self._rotary_editor = FeedrateGroupEditor(
+            "Rotary feed rates",
+            "deg/min",
+            feedrates.rotary,
+            self.DEFAULT_PRESETS,
+            self.DEFAULT_VALUE,
+            self,
+        )
+        layout.addWidget(self._rotary_editor)
+        layout.addStretch(1)
+
+    def to_settings(self, settings: Settings) -> None:
+        """Write the configured presets back to the settings container."""
+
+        settings.feedrates = FeedrateSettings(
+            linear=self._linear_editor.group(),
+            rotary=self._rotary_editor.group(),
+        )
 
 class SettingsDialog(QDialog):
     """Main settings dialog with tabbed sections."""
@@ -326,7 +435,7 @@ class SettingsDialog(QDialog):
 
         self._controls_tab = ControlsSettingsWidget(self._settings, self)
         self._logging_tab = LoggingSettingsWidget(self._settings.logging, self)
-        self._feedrate_tab = FeedrateSettingsWidget(self._settings.feedrate_presets, self)
+        self._feedrate_tab = FeedrateSettingsWidget(self._settings.feedrates, self)
         self._tabs.addTab(self._controls_tab, "Controls")
         self._tabs.addTab(self._feedrate_tab, "Feedrates")
         self._tabs.addTab(self._logging_tab, "Logging")

@@ -197,9 +197,20 @@ class Main(QMainWindow):
             bindings = self.settings_manager.control_bindings()
             self.joystick_panel.apply_control_bindings(bindings)
             logger.debug("Joystick bindings reapplied from settings")
-            presets = self.settings_manager.feedrate_presets()
-            self.joystick_panel.apply_feedrate_presets(presets)
-            logger.debug("Joystick feedrate presets reapplied: %s", presets)
+            feedrates = self.settings_manager.feedrate_configuration()
+            self.joystick_panel.apply_feedrate_settings(
+                feedrates.linear.presets,
+                feedrates.linear.default,
+                feedrates.rotary.presets,
+                feedrates.rotary.default,
+            )
+            logger.debug(
+                "Joystick feedrate settings reapplied: linear=%s (default=%s) rotary=%s (default=%s)",
+                feedrates.linear.presets,
+                feedrates.linear.default,
+                feedrates.rotary.presets,
+                feedrates.rotary.default,
+            )
 
     def _open_settings_dialog(self) -> None:
         dialog = SettingsDialog(self.settings_manager.settings, self)
@@ -277,8 +288,12 @@ class Main(QMainWindow):
         self.addDockWidget(Qt.LeftDockWidgetArea, self.serial_connection_dock)
 
         self.joystick_panel = JoystickWindow(self)
-        self.joystick_panel.apply_feedrate_presets(
-            self.settings_manager.feedrate_presets()
+        feedrates = self.settings_manager.feedrate_configuration()
+        self.joystick_panel.apply_feedrate_settings(
+            feedrates.linear.presets,
+            feedrates.linear.default,
+            feedrates.rotary.presets,
+            feedrates.rotary.default,
         )
         self.joystick_panel.set_serial(self.serial_connection)
         self.joystick_dock = CollapsibleDockWidget("Joystick", self)

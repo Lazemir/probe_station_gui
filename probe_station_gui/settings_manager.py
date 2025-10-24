@@ -9,7 +9,7 @@ import platform
 from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Tuple
 
 from probe_station_gui.logging_config import configure_logging
 
@@ -77,12 +77,41 @@ class LoggingSettings:
 
 
 @dataclass
+class FeedrateGroup:
+    """Collection of presets and a default value for a motion family."""
+
+    presets: List[float] = field(default_factory=list)
+    default: float = 1.0
+
+    def clone(self) -> "FeedrateGroup":
+        """Return a deep copy of the feedrate group."""
+
+        return FeedrateGroup(presets=list(self.presets), default=self.default)
+
+
+@dataclass
+class FeedrateSettings:
+    """Configuration for linear and rotary feed rates."""
+
+    linear: FeedrateGroup = field(default_factory=FeedrateGroup)
+    rotary: FeedrateGroup = field(default_factory=FeedrateGroup)
+
+    def clone(self) -> "FeedrateSettings":
+        """Return a deep copy of the feedrate configuration."""
+
+        return FeedrateSettings(
+            linear=self.linear.clone(),
+            rotary=self.rotary.clone(),
+        )
+
+
+@dataclass
 class Settings:
     """Container for all configurable values."""
 
     controls: Dict[str, List[KeyBinding]] = field(default_factory=dict)
     logging: LoggingSettings = field(default_factory=LoggingSettings)
-    feedrate_presets: List[float] = field(default_factory=list)
+    feedrates: FeedrateSettings = field(default_factory=FeedrateSettings)
 
     def clone(self) -> "Settings":
         """Create a deep copy of the settings container."""
@@ -90,7 +119,7 @@ class Settings:
         return Settings(
             controls={key: list(value) for key, value in self.controls.items()},
             logging=self.logging.clone(),
-            feedrate_presets=list(self.feedrate_presets),
+            feedrates=self.feedrates.clone(),
         )
 
     def to_dict(self) -> dict:
@@ -102,7 +131,16 @@ class Settings:
                 for key, bindings in self.controls.items()
             },
             "logging": self.logging.to_dict(),
-            "feedrate_presets": self.feedrate_presets,
+            "feedrates": {
+                "linear": {
+                    "presets": self.feedrates.linear.presets,
+                    "default": self.feedrates.linear.default,
+                },
+                "rotary": {
+                    "presets": self.feedrates.rotary.presets,
+                    "default": self.feedrates.rotary.default,
+                },
+            },
         }
 
 
@@ -112,6 +150,9 @@ class SettingsManager:
     CONFIG_FILENAME = "settings.json"
     DEFAULT_LOG_FILENAME = "probe-station-gui.log"
     DEFAULT_FEEDRATE_PRESETS: tuple[float, ...] = (0.01, 0.1, 1.0, 10.0, 100.0)
+    DEFAULT_FEEDRATE_DEFAULT: float = 1.0
+    LINEAR_GROUP = "linear"
+    ROTARY_GROUP = "rotary"
 
     def __init__(self) -> None:
         self._config_dir = self._determine_config_dir()
@@ -131,7 +172,7 @@ class SettingsManager:
     def replace(self, settings: Settings) -> None:
         """Replace the stored settings with the provided instance."""
 
-        self._settings = settings
+        self._settings = self._normalise_settings(settings)
         self.apply()
 
     def save(self) -> None:
@@ -224,9 +265,33 @@ class SettingsManager:
         else:
             logging_section["file"] = log_path
 
-        presets_section = data.get("feedrate_presets")
-        if not isinstance(presets_section, list):
-            data["feedrate_presets"] = list(self.DEFAULT_FEEDRATE_PRESETS)
+        feedrates_section = data.get("feedrates")
+        legacy_presets = data.get("feedrate_presets")
+        if not isinstance(feedrates_section, dict):
+            presets = self._parse_feedrate_list(legacy_presets)
+            feedrates_section = {
+                self.LINEAR_GROUP: {
+                    "presets": presets,
+                    "default": self.DEFAULT_FEEDRATE_DEFAULT,
+                },
+                self.ROTARY_GROUP: {
+                    "presets": presets,
+                    "default": self.DEFAULT_FEEDRATE_DEFAULT,
+                },
+            }
+            data["feedrates"] = feedrates_section
+        else:
+            if self.LINEAR_GROUP not in feedrates_section:
+                feedrates_section[self.LINEAR_GROUP] = {
+                    "presets": list(self.DEFAULT_FEEDRATE_PRESETS),
+                    "default": self.DEFAULT_FEEDRATE_DEFAULT,
+                }
+            if self.ROTARY_GROUP not in feedrates_section:
+                feedrates_section[self.ROTARY_GROUP] = {
+                    "presets": list(self.DEFAULT_FEEDRATE_PRESETS),
+                    "default": self.DEFAULT_FEEDRATE_DEFAULT,
+                }
+            data["feedrates"] = feedrates_section
 
         with self._config_path.open("w", encoding="utf-8") as target:
             json.dump(data, target, indent=2, ensure_ascii=False)
@@ -258,12 +323,13 @@ class SettingsManager:
             self._logger.debug(
                 "Log file path missing in settings; defaulting to %s", default_log
             )
-        presets_raw = raw.get("feedrate_presets") if isinstance(raw, dict) else None
-        feedrate_presets = self._parse_feedrate_presets(presets_raw)
+        feedrates_raw = raw.get("feedrates") if isinstance(raw, dict) else None
+        legacy_presets = raw.get("feedrate_presets") if isinstance(raw, dict) else None
+        feedrates = self._parse_feedrates(feedrates_raw, legacy_presets)
         return Settings(
             controls=controls,
             logging=logging_settings,
-            feedrate_presets=feedrate_presets,
+            feedrates=feedrates,
         )
 
     def _parse_logging(self, raw_logging) -> LoggingSettings:
@@ -278,10 +344,58 @@ class SettingsManager:
                 file_value = file_raw
         return LoggingSettings(level=level.upper(), file=file_value)
 
-    def _parse_feedrate_presets(self, raw_presets) -> List[float]:
-        """Normalise the feedrate preset list from persisted data."""
+    def _parse_feedrates(self, raw_feedrates, legacy_presets) -> FeedrateSettings:
+        """Normalise persisted feedrate data supporting legacy layouts."""
+
+        linear_group, rotary_group = self._parse_feedrate_groups(raw_feedrates, legacy_presets)
+        return FeedrateSettings(
+            linear=linear_group,
+            rotary=rotary_group,
+        )
+
+    def _parse_feedrate_groups(
+        self,
+        raw_feedrates,
+        legacy_presets,
+    ) -> Tuple[FeedrateGroup, FeedrateGroup]:
+        presets_fallback = self._parse_feedrate_list(legacy_presets)
+        if not isinstance(raw_feedrates, dict):
+            linear = self._normalise_feedrate_group(
+                FeedrateGroup(presets=presets_fallback, default=self.DEFAULT_FEEDRATE_DEFAULT)
+            )
+            rotary = self._normalise_feedrate_group(
+                FeedrateGroup(presets=presets_fallback, default=self.DEFAULT_FEEDRATE_DEFAULT)
+            )
+            return linear, rotary
+
+        linear_raw = raw_feedrates.get(self.LINEAR_GROUP)
+        rotary_raw = raw_feedrates.get(self.ROTARY_GROUP)
+        linear = self._normalise_feedrate_group(self._group_from_raw(linear_raw))
+        rotary = self._normalise_feedrate_group(self._group_from_raw(rotary_raw))
+        return linear, rotary
+
+    def _group_from_raw(self, raw_group) -> FeedrateGroup:
+        """Build a feedrate group dataclass from persisted data."""
+
+        presets = []
+        default = self.DEFAULT_FEEDRATE_DEFAULT
+        if isinstance(raw_group, dict):
+            presets = self._parse_feedrate_list(raw_group.get("presets"))
+            default_raw = raw_group.get("default")
+            try:
+                if isinstance(default_raw, (int, float, str)):
+                    default = float(default_raw)
+            except (TypeError, ValueError):
+                default = self.DEFAULT_FEEDRATE_DEFAULT
+        else:
+            presets = list(self.DEFAULT_FEEDRATE_PRESETS)
+        return FeedrateGroup(presets=presets, default=default)
+
+    def _parse_feedrate_list(self, raw_presets) -> List[float]:
+        """Normalise a preset list to positive unique floats preserving order."""
 
         parsed: List[float] = []
+        seen: set[float] = set()
         if isinstance(raw_presets, Iterable) and not isinstance(raw_presets, (str, bytes)):
             for value in raw_presets:
                 try:
@@ -290,16 +404,64 @@ class SettingsManager:
                     continue
                 if number <= 0:
                     continue
+                key = round(number, 9)
+                if key in seen:
+                    continue
+                seen.add(key)
                 parsed.append(number)
         if not parsed:
             parsed = list(self.DEFAULT_FEEDRATE_PRESETS)
         return parsed
 
-    def feedrate_presets(self) -> List[float]:
-        """Return the configured feedrate presets ensuring defaults exist."""
+    def _normalise_feedrate_group(self, group: FeedrateGroup) -> FeedrateGroup:
+        """Ensure the feedrate group contains valid presets and defaults."""
 
-        presets = [value for value in self._settings.feedrate_presets if value > 0]
-        if not presets:
-            presets = list(self.DEFAULT_FEEDRATE_PRESETS)
-        return presets
+        presets = self._parse_feedrate_list(group.presets)
+        presets.sort()
+        default_value = group.default if group.default > 0 else self.DEFAULT_FEEDRATE_DEFAULT
+        default_text = self._select_default(default_value, presets)
+        return FeedrateGroup(presets=presets, default=default_text)
+
+    def _select_default(self, candidate: float, presets: List[float]) -> float:
+        """Choose a default value from the preset list."""
+
+        try:
+            candidate_value = float(candidate)
+        except (TypeError, ValueError):
+            candidate_value = self.DEFAULT_FEEDRATE_DEFAULT
+
+        if candidate_value <= 0:
+            candidate_value = self.DEFAULT_FEEDRATE_DEFAULT
+
+        if presets:
+            for value in presets:
+                if abs(value - candidate_value) <= 1e-9:
+                    return value
+            return presets[0]
+
+        return self.DEFAULT_FEEDRATE_DEFAULT
+
+    def _normalise_settings(self, settings: Settings) -> Settings:
+        """Return a copy of the settings with feedrates normalised."""
+
+        clone = settings.clone()
+        clone.feedrates = FeedrateSettings(
+            linear=self._normalise_feedrate_group(clone.feedrates.linear),
+            rotary=self._normalise_feedrate_group(clone.feedrates.rotary),
+        )
+        return clone
+
+    def feedrate_group(self, motion_type: str) -> FeedrateGroup:
+        """Return a feedrate group for the requested motion family."""
+
+        if motion_type == self.LINEAR_GROUP:
+            return self._settings.feedrates.linear.clone()
+        if motion_type == self.ROTARY_GROUP:
+            return self._settings.feedrates.rotary.clone()
+        raise ValueError(f"Unknown feedrate motion type: {motion_type}")
+
+    def feedrate_configuration(self) -> FeedrateSettings:
+        """Return the full feedrate configuration clone."""
+
+        return self._settings.feedrates.clone()
 
