@@ -1,0 +1,124 @@
+{
+  "controls": {
+    "move_y_positive": [
+      {
+        "qt_key": 87,
+        "modifiers": 0,
+        "text": "w"
+      },
+      {
+        "qt_key": 16777235,
+        "modifiers": 0,
+        "text": ""
+      },
+      {
+        "qt_key": 1062,
+        "modifiers": 0,
+        "text": "ц"
+      }
+    ],
+    "move_y_negative": [
+      {
+        "qt_key": 83,
+        "modifiers": 0,
+        "text": "s"
+      },
+      {
+        "qt_key": 16777237,
+        "modifiers": 0,
+        "text": ""
+      },
+      {
+        "qt_key": 1067,
+        "modifiers": 0,
+        "text": "ы"
+      }
+    ],
+    "move_x_negative": [
+      {
+        "qt_key": 65,
+        "modifiers": 0,
+        "text": "a"
+      },
+      {
+        "qt_key": 16777234,
+        "modifiers": 0,
+        "text": ""
+      },
+      {
+        "qt_key": 1060,
+        "modifiers": 0,
+        "text": "ф"
+      }
+    ],
+    "move_x_positive": [
+      {
+        "qt_key": 68,
+        "modifiers": 0,
+        "text": "d"
+      },
+      {
+        "qt_key": 16777236,
+        "modifiers": 0,
+        "text": ""
+      },
+      {
+        "qt_key": 1074,
+        "modifiers": 0,
+        "text": "в"
+      }
+    ],
+    "rotate_b_negative": [
+      {
+        "qt_key": 81,
+        "modifiers": 0,
+        "text": "q"
+      },
+      {
+        "qt_key": 1081,
+        "modifiers": 0,
+        "text": "й"
+      }
+    ],
+    "rotate_b_positive": [
+      {
+        "qt_key": 69,
+        "modifiers": 0,
+        "text": "e"
+      },
+      {
+        "qt_key": 1091,
+        "modifiers": 0,
+        "text": "у"
+      }
+    ]
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "probe-station-gui.log"
+  },
+  "feedrates": {
+    "linear": {
+      "presets": [
+        1.0,
+        3.0,
+        10.0,
+        30.0,
+        100.0,
+        300.0
+      ],
+      "default": 10.0
+    },
+    "rotary": {
+      "presets": [
+        1.0,
+        3.0,
+        10.0,
+        30.0,
+        90.0,
+        360.0
+      ],
+      "default": 30.0
+    }
+  }
+}

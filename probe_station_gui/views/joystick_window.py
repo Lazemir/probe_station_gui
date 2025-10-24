@@ -2,51 +2,59 @@
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+import logging
+from typing import Dict, List, Optional, Tuple
 
 import serial
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, QTimer, Qt
 from PySide6.QtGui import QCloseEvent, QDoubleValidator
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
+    QApplication,
     QComboBox,
     QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
+
+from probe_station_gui.qt_compat import keyboard_modifiers_to_int
+from probe_station_gui.settings_manager import CONTROL_ACTIONS, KeyBinding
+
+
+logger = logging.getLogger(__name__)
 
 
 class JoystickWindow(QWidget):
     """Widget that provides directional jogging controls."""
 
     JOG_DISTANCE_MM = 10.0
-    FEED_RATES = ["30", "60", "90", "120", "180", "Custom..."]
-
-    KEY_DIRECTION_MAP = {
-        Qt.Key_Up: ("Y", 1),
-        Qt.Key_W: ("Y", 1),
-        Qt.Key_Down: ("Y", -1),
-        Qt.Key_S: ("Y", -1),
-        Qt.Key_Left: ("X", -1),
-        Qt.Key_A: ("X", -1),
-        Qt.Key_Right: ("X", 1),
-        Qt.Key_D: ("X", 1),
-    }
-
-    CHAR_DIRECTION_MAP = {
-        "w": ("Y", 1),
-        "s": ("Y", -1),
-        "a": ("X", -1),
-        "d": ("X", 1),
-        "ц": ("Y", 1),
-        "ы": ("Y", -1),
-        "ф": ("X", -1),
-        "в": ("X", 1),
-    }
+    ROTATE_DISTANCE_DEG = 5.0
+    DEFAULT_LINEAR_FEEDRATE_PRESETS: tuple[float, ...] = (
+        1.0,
+        3.0,
+        10.0,
+        30.0,
+        100.0,
+        300.0,
+    )
+    DEFAULT_ROTARY_FEEDRATE_PRESETS: tuple[float, ...] = (
+        1.0,
+        3.0,
+        10.0,
+        30.0,
+        90.0,
+        360.0,
+    )
+    CUSTOM_FEED_LABEL = "Custom..."
+    LINEAR_AXES = {"X", "Y", "Z"}
+    ROTATIONAL_AXES = {"A", "B", "C"}
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -55,25 +63,61 @@ class JoystickWindow(QWidget):
         self.serial_connection: Optional[serial.Serial] = None
         self._active_axes: Optional[tuple[tuple[str, int], ...]] = None
         self._key_stack: list[Tuple[str, object]] = []
+        self._key_bindings: Dict[tuple, tuple[str, int]] = {}
+        self._linear_presets: List[float] = list(self.DEFAULT_LINEAR_FEEDRATE_PRESETS)
+        self._rotary_presets: List[float] = list(self.DEFAULT_ROTARY_FEEDRATE_PRESETS)
+        self._linear_default: float = 1.0
+        self._rotary_default: float = 1.0
+        self.apply_control_bindings({})
+        self._event_filter_installed = False
+        self._event_filter_retry_scheduled = False
+        self._install_event_filter()
 
         root_layout = QVBoxLayout(self)
         self.status_label = QLabel("Disconnected", self)
         root_layout.addWidget(self.status_label)
 
-        feed_layout = QHBoxLayout()
-        feed_layout.addWidget(QLabel("Feed rate (mm/min):", self))
-        self.feedrate_combo = QComboBox(self)
-        self.feedrate_combo.addItems(self.FEED_RATES)
-        self.feedrate_combo.currentIndexChanged.connect(self._on_feedrate_changed)
-        feed_layout.addWidget(self.feedrate_combo)
+        feed_container = QVBoxLayout()
 
-        self.custom_feedrate_edit = QLineEdit(self)
-        self.custom_feedrate_edit.setPlaceholderText("Enter custom rate")
-        self.custom_feedrate_edit.setValidator(QDoubleValidator(0.1, 10000.0, 2, self))
-        self.custom_feedrate_edit.setVisible(False)
-        feed_layout.addWidget(self.custom_feedrate_edit)
+        linear_feed_layout = QHBoxLayout()
+        linear_feed_layout.addWidget(QLabel("Linear feed (mm/min):", self))
+        self.linear_feedrate_combo = QComboBox(self)
+        self.linear_feedrate_combo.currentIndexChanged.connect(
+            self._on_linear_feedrate_changed
+        )
+        linear_feed_layout.addWidget(self.linear_feedrate_combo)
 
-        root_layout.addLayout(feed_layout)
+        self.linear_custom_feedrate_edit = QLineEdit(self)
+        self.linear_custom_feedrate_edit.setPlaceholderText("Enter custom rate")
+        self.linear_custom_feedrate_edit.setValidator(
+            QDoubleValidator(0.000001, 1000000.0, 6, self)
+        )
+        self.linear_custom_feedrate_edit.setVisible(False)
+        linear_feed_layout.addWidget(self.linear_custom_feedrate_edit)
+
+        feed_container.addLayout(linear_feed_layout)
+
+        rotary_feed_layout = QHBoxLayout()
+        rotary_feed_layout.addWidget(QLabel("Rotary feed (deg/min):", self))
+        self.rotary_feedrate_combo = QComboBox(self)
+        self.rotary_feedrate_combo.currentIndexChanged.connect(
+            self._on_rotary_feedrate_changed
+        )
+        rotary_feed_layout.addWidget(self.rotary_feedrate_combo)
+
+        self.rotary_custom_feedrate_edit = QLineEdit(self)
+        self.rotary_custom_feedrate_edit.setPlaceholderText("Enter custom rate")
+        self.rotary_custom_feedrate_edit.setValidator(
+            QDoubleValidator(0.000001, 1000000.0, 6, self)
+        )
+        self.rotary_custom_feedrate_edit.setVisible(False)
+        rotary_feed_layout.addWidget(self.rotary_custom_feedrate_edit)
+
+        feed_container.addLayout(rotary_feed_layout)
+
+        root_layout.addLayout(feed_container)
+
+        self._refresh_feedrate_combos(force_defaults=True)
 
         grid_layout = QGridLayout()
         self.up_button = QPushButton("↑", self)
@@ -88,6 +132,18 @@ class JoystickWindow(QWidget):
 
         root_layout.addLayout(grid_layout)
 
+        rotate_layout = QHBoxLayout()
+        rotate_layout.addStretch(1)
+        rotate_layout.addWidget(QLabel("Rotate B:", self))
+        self.rotate_negative_button = QPushButton("↻", self)
+        self.rotate_positive_button = QPushButton("↺", self)
+        self.rotate_negative_button.setToolTip("Rotate clockwise (B-)")
+        self.rotate_positive_button.setToolTip("Rotate counter-clockwise (B+)")
+        rotate_layout.addWidget(self.rotate_negative_button)
+        rotate_layout.addWidget(self.rotate_positive_button)
+        rotate_layout.addStretch(1)
+        root_layout.addLayout(rotate_layout)
+
         self.up_button.pressed.connect(lambda: self.start_jog("Y", 1))
         self.up_button.released.connect(self.stop_jog)
         self.down_button.pressed.connect(lambda: self.start_jog("Y", -1))
@@ -96,6 +152,10 @@ class JoystickWindow(QWidget):
         self.left_button.released.connect(self.stop_jog)
         self.right_button.pressed.connect(lambda: self.start_jog("X", 1))
         self.right_button.released.connect(self.stop_jog)
+        self.rotate_negative_button.pressed.connect(lambda: self.start_jog("B", -1))
+        self.rotate_negative_button.released.connect(self.stop_jog)
+        self.rotate_positive_button.pressed.connect(lambda: self.start_jog("B", 1))
+        self.rotate_positive_button.released.connect(self.stop_jog)
 
         home_layout = QHBoxLayout()
         self.home_all_button = QPushButton("Home All", self)
@@ -122,11 +182,219 @@ class JoystickWindow(QWidget):
         root_layout.addStretch(1)
         self._update_enabled_state()
 
-    def _on_feedrate_changed(self, index: int) -> None:
-        is_custom = self.feedrate_combo.itemText(index) == "Custom..."
-        self.custom_feedrate_edit.setVisible(is_custom)
+    def _install_event_filter(self) -> None:
+        if self._event_filter_installed:
+            return
+        app = QApplication.instance()
+        if app is None:
+            if not self._event_filter_retry_scheduled:
+                self._event_filter_retry_scheduled = True
+                QTimer.singleShot(0, self._install_event_filter)
+            logger.warning(
+                "QApplication instance unavailable; joystick event filter deferred"
+            )
+            return
+        app.installEventFilter(self)
+        self._event_filter_installed = True
+        self._event_filter_retry_scheduled = False
+        logger.debug("Joystick event filter installed")
+
+    def _remove_event_filter(self) -> None:
+        if not self._event_filter_installed:
+            return
+        app = QApplication.instance()
+        if app is None:
+            return
+        app.removeEventFilter(self)
+        self._event_filter_installed = False
+        self._event_filter_retry_scheduled = False
+        logger.debug("Joystick event filter removed")
+
+    def _on_linear_feedrate_changed(self, index: int) -> None:
+        self._update_custom_visibility(
+            self.linear_feedrate_combo,
+            self.linear_custom_feedrate_edit,
+            index,
+        )
+
+    def _on_rotary_feedrate_changed(self, index: int) -> None:
+        self._update_custom_visibility(
+            self.rotary_feedrate_combo,
+            self.rotary_custom_feedrate_edit,
+            index,
+        )
+
+    def _update_custom_visibility(
+        self, combo: QComboBox, editor: QLineEdit, index: int
+    ) -> None:
+        if index < 0:
+            editor.setVisible(False)
+            return
+        is_custom = combo.itemText(index) == self.CUSTOM_FEED_LABEL
+        editor.setVisible(is_custom)
         if is_custom:
-            self.custom_feedrate_edit.setFocus()
+            editor.setFocus()
+
+    def _format_feedrate(self, value: float) -> str:
+        text = f"{value:.6f}".rstrip("0").rstrip(".")
+        return text or "0"
+
+    def _refresh_feedrate_combos(self, *, force_defaults: bool = False) -> None:
+        self._refresh_feedrate_combo(
+            self.linear_feedrate_combo,
+            self.linear_custom_feedrate_edit,
+            self._linear_presets,
+            self._linear_default,
+            force_defaults,
+            fallback=self.DEFAULT_LINEAR_FEEDRATE_PRESETS,
+        )
+        self._refresh_feedrate_combo(
+            self.rotary_feedrate_combo,
+            self.rotary_custom_feedrate_edit,
+            self._rotary_presets,
+            self._rotary_default,
+            force_defaults,
+            fallback=self.DEFAULT_ROTARY_FEEDRATE_PRESETS,
+        )
+
+    def _refresh_feedrate_combo(
+        self,
+        combo: QComboBox,
+        editor: QLineEdit,
+        presets: List[float],
+        default_value: float,
+        force_default: bool,
+        *,
+        fallback: tuple[float, ...],
+    ) -> None:
+        display_items: List[str] = []
+        seen: set[str] = set()
+        for preset in presets:
+            try:
+                text = self._format_feedrate(float(preset))
+            except (TypeError, ValueError):
+                continue
+            if text in seen:
+                continue
+            display_items.append(text)
+            seen.add(text)
+        if not display_items:
+            display_items = [self._format_feedrate(value) for value in fallback]
+            seen = set(display_items)
+
+        default_text = ""
+        try:
+            if default_value > 0:
+                default_text = self._format_feedrate(float(default_value))
+        except (TypeError, ValueError):
+            default_text = ""
+
+        if default_text and default_text not in seen:
+            display_items.insert(0, default_text)
+            seen.add(default_text)
+
+        if self.CUSTOM_FEED_LABEL not in display_items:
+            display_items.append(self.CUSTOM_FEED_LABEL)
+
+        current_text = combo.currentText()
+        custom_text = editor.text()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(display_items)
+
+        if force_default and default_text:
+            combo.setCurrentText(default_text)
+        elif current_text in display_items:
+            combo.setCurrentText(current_text)
+        elif current_text == self.CUSTOM_FEED_LABEL or editor.isVisible():
+            combo.setCurrentText(self.CUSTOM_FEED_LABEL)
+            editor.setText(custom_text)
+        else:
+            combo.setCurrentIndex(0)
+
+        combo.blockSignals(False)
+        self._update_custom_visibility(combo, editor, combo.currentIndex())
+
+    def apply_feedrate_settings(
+        self,
+        linear_presets: List[float],
+        linear_default: float,
+        rotary_presets: List[float],
+        rotary_default: float,
+    ) -> None:
+        """Update the selectable feedrate presets and defaults from settings."""
+
+        cleaned_linear = self._clean_presets(
+            linear_presets, self.DEFAULT_LINEAR_FEEDRATE_PRESETS
+        )
+        cleaned_rotary = self._clean_presets(
+            rotary_presets, self.DEFAULT_ROTARY_FEEDRATE_PRESETS
+        )
+        default_linear = self._resolve_default(
+            linear_default, cleaned_linear, self.DEFAULT_LINEAR_FEEDRATE_PRESETS
+        )
+        default_rotary = self._resolve_default(
+            rotary_default, cleaned_rotary, self.DEFAULT_ROTARY_FEEDRATE_PRESETS
+        )
+
+        if (
+            cleaned_linear == self._linear_presets
+            and cleaned_rotary == self._rotary_presets
+            and abs(default_linear - self._linear_default) <= 1e-9
+            and abs(default_rotary - self._rotary_default) <= 1e-9
+        ):
+            return
+
+        self._linear_presets = cleaned_linear
+        self._rotary_presets = cleaned_rotary
+        self._linear_default = default_linear
+        self._rotary_default = default_rotary
+        self._refresh_feedrate_combos(force_defaults=True)
+        logger.info(
+            "Joystick feedrate settings updated: linear=%s (default=%s) rotary=%s (default=%s)",
+            cleaned_linear,
+            default_linear,
+            cleaned_rotary,
+            default_rotary,
+        )
+
+    def _clean_presets(
+        self, presets: List[float], fallback: tuple[float, ...]
+    ) -> List[float]:
+        cleaned: List[float] = []
+        seen: set[float] = set()
+        for value in presets:
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                continue
+            if number <= 0:
+                continue
+            key = round(number, 9)
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(number)
+        if not cleaned:
+            cleaned = list(fallback)
+        cleaned.sort()
+        return cleaned
+
+    def _resolve_default(
+        self, default_value: float, presets: List[float], fallback: tuple[float, ...]
+    ) -> float:
+        if not presets:
+            return fallback[0]
+        try:
+            candidate = float(default_value)
+        except (TypeError, ValueError):
+            candidate = presets[0]
+        if candidate <= 0:
+            candidate = presets[0]
+        for value in presets:
+            if abs(value - candidate) <= 1e-9:
+                return value
+        return presets[0]
 
     def set_serial(self, serial_connection: Optional[serial.Serial]) -> None:
         """Assign the serial connection used for jogging commands."""
@@ -137,23 +405,34 @@ class JoystickWindow(QWidget):
         if not serial_connection or not serial_connection.is_open:
             self._active_axes = None
             self._key_stack.clear()
+            logger.debug("Joystick serial detached")
         if serial_connection and serial_connection.is_open:
             self.status_label.setText(
                 f"Connected to {serial_connection.port} @ {serial_connection.baudrate}"
             )
+            logger.info(
+                "Joystick connected to %s @ %s baud",
+                serial_connection.port,
+                serial_connection.baudrate,
+            )
         else:
             self.status_label.setText("Disconnected")
+            logger.info("Joystick disconnected from serial link")
         self._update_enabled_state()
 
     def _update_enabled_state(self) -> None:
         enabled = bool(self.serial_connection and self.serial_connection.is_open)
         for widget in (
-            self.feedrate_combo,
-            self.custom_feedrate_edit,
+            self.linear_feedrate_combo,
+            self.linear_custom_feedrate_edit,
+            self.rotary_feedrate_combo,
+            self.rotary_custom_feedrate_edit,
             self.up_button,
             self.down_button,
             self.left_button,
             self.right_button,
+            self.rotate_negative_button,
+            self.rotate_positive_button,
             self.home_all_button,
             self.home_xy_button,
             self.home_z_button,
@@ -162,23 +441,8 @@ class JoystickWindow(QWidget):
         ):
             widget.setEnabled(enabled)
 
-    def get_feedrate(self) -> Optional[float]:
-        text = self.feedrate_combo.currentText()
-        if text == "Custom...":
-            text = self.custom_feedrate_edit.text().strip()
-            if not text:
-                self._show_warning("Please enter a custom feed rate.")
-                return None
-        try:
-            value = float(text)
-            if value <= 0:
-                raise ValueError
-            return value
-        except ValueError:
-            self._show_warning("Feed rate must be a positive number.")
-            return None
-
     def start_jog(self, axis: str, direction: int) -> None:
+        logger.debug("Start jog requested: axis=%s direction=%s", axis, direction)
         self._apply_axes(((axis, direction),))
 
     def stop_jog(self) -> None:
@@ -189,6 +453,7 @@ class JoystickWindow(QWidget):
             return
         self._active_axes = None
         self.send_command(b"\x85")
+        logger.debug("Stop jog command issued")
 
     def _apply_axes(self, axes: tuple[tuple[str, int], ...]) -> None:
         axes_sorted = tuple(sorted(axes, key=lambda item: item[0]))
@@ -200,7 +465,7 @@ class JoystickWindow(QWidget):
         if not self.serial_connection or not self.serial_connection.is_open:
             self._active_axes = None
             return
-        feedrate = self.get_feedrate()
+        feedrate = self._feedrate_for_axes(axes_sorted)
         if feedrate is None:
             self.stop_jog()
             return
@@ -208,11 +473,103 @@ class JoystickWindow(QWidget):
             self.stop_jog()
         parts: list[str] = []
         for axis, direction in axes_sorted:
-            distance = direction * self.JOG_DISTANCE_MM
+            distance = direction * self._distance_for_axis(axis)
             parts.append(f"{axis}{distance:.3f}")
         command = f"$J=G91 G21 {' '.join(parts)} F{feedrate}\n"
         self.send_command(command)
         self._active_axes = axes_sorted
+        logger.debug("Jog command sent: %s", command.strip())
+
+    def _distance_for_axis(self, axis: str) -> float:
+        if axis == "B":
+            return self.ROTATE_DISTANCE_DEG
+        return self.JOG_DISTANCE_MM
+
+    def _feedrate_for_axes(
+        self, axes: tuple[tuple[str, int], ...]
+    ) -> Optional[float]:
+        has_rotary = any(axis in self.ROTATIONAL_AXES for axis, _ in axes)
+        has_linear = any(axis in self.LINEAR_AXES for axis, _ in axes)
+
+        linear_feed: Optional[float] = None
+        rotary_feed: Optional[float] = None
+
+        if has_linear:
+            linear_feed = self._read_feedrate(
+                self.linear_feedrate_combo,
+                self.linear_custom_feedrate_edit,
+                "millimetres per minute",
+            )
+            if linear_feed is None:
+                return None
+
+        if has_rotary:
+            rotary_feed = self._read_feedrate(
+                self.rotary_feedrate_combo,
+                self.rotary_custom_feedrate_edit,
+                "degrees per minute",
+            )
+            if rotary_feed is None:
+                return None
+
+        if has_linear and has_rotary:
+            feed_candidates: list[float] = []
+
+            if linear_feed is not None:
+                feed_candidates.append(linear_feed)
+
+            max_linear_distance = max(
+                (self._distance_for_axis(axis) for axis, _ in axes if axis in self.LINEAR_AXES),
+                default=self.JOG_DISTANCE_MM,
+            )
+            for axis, _ in axes:
+                if axis not in self.ROTATIONAL_AXES or rotary_feed is None:
+                    continue
+                axis_distance = self._distance_for_axis(axis)
+                if axis_distance <= 0:
+                    continue
+                equivalent_linear = rotary_feed * (max_linear_distance / axis_distance)
+                feed_candidates.append(equivalent_linear)
+
+            if not feed_candidates:
+                return linear_feed or rotary_feed
+
+            chosen_feed = min(feed_candidates)
+            logger.debug(
+                "Mixed jog feed resolved: candidates=%s chosen=%s", feed_candidates, chosen_feed
+            )
+            return chosen_feed
+
+        if has_linear:
+            return linear_feed
+
+        if has_rotary:
+            return rotary_feed
+
+        return None
+
+    def _read_feedrate(
+        self, combo: QComboBox, editor: QLineEdit, units: str
+    ) -> Optional[float]:
+        text = combo.currentText()
+        if text == self.CUSTOM_FEED_LABEL:
+            text = editor.text().strip()
+            if not text:
+                self._show_warning(
+                    f"Please enter a custom feed rate ({units})."
+                )
+                return None
+        try:
+            value = float(text)
+            if value <= 0:
+                raise ValueError
+            return value
+        except ValueError:
+            self._show_warning(
+                f"Feed rate must be a positive number ({units})."
+            )
+            logger.warning("Invalid feed rate '%s' for %s jog", text, units)
+            return None
 
     def _update_active_jog(self) -> None:
         unique_axes: dict[str, int] = {}
@@ -223,6 +580,7 @@ class JoystickWindow(QWidget):
             axis, direction = mapping
             unique_axes[axis] = direction
         axes = tuple(unique_axes.items())
+        logger.debug("Active keys mapped to axes: %s", axes)
         self._apply_axes(axes)
 
     def _home_xy(self) -> None:
@@ -234,41 +592,31 @@ class JoystickWindow(QWidget):
 
     def send_command(self, command: str | bytes) -> None:
         if not self.serial_connection or not self.serial_connection.is_open:
+            logger.debug("Discarded command because serial is closed: %s", command)
             return
         try:
             data = command if isinstance(command, bytes) else command.encode("ascii")
             self.serial_connection.write(data)
             self.serial_connection.flush()
+            if isinstance(command, bytes):
+                logger.debug("Command written to serial (bytes): %s", command.hex())
+            else:
+                logger.debug("Command written to serial: %s", command.strip())
         except serial.SerialException as error:  # pragma: no cover - best effort guard
             self._show_warning(f"Serial communication error: {error}")
             self.set_serial(None)
+            logger.exception("Serial communication error: %s", error)
 
     def _show_warning(self, message: str) -> None:
         QMessageBox.warning(self, "Joystick", message)
 
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
-        if event.isAutoRepeat():
-            event.ignore()
-            return
-        identifier, mapping = self._mapping_from_event(event)
-        if identifier and mapping:
-            if identifier not in self._key_stack:
-                self._key_stack.append(identifier)
-                self._update_active_jog()
-            event.accept()
+        if self._handle_key_press_event(event):
             return
         super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event) -> None:  # type: ignore[override]
-        if event.isAutoRepeat():
-            event.ignore()
-            return
-        identifier, mapping = self._mapping_from_event(event)
-        if identifier and mapping:
-            if identifier in self._key_stack:
-                self._key_stack.remove(identifier)
-                self._update_active_jog()
-            event.accept()
+        if self._handle_key_release_event(event):
             return
         super().keyReleaseEvent(event)
 
@@ -277,38 +625,196 @@ class JoystickWindow(QWidget):
         self.stop_jog()
         super().focusOutEvent(event)
 
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._install_event_filter()
+
     def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]
         self._key_stack.clear()
         self.stop_jog()
+        self._remove_event_filter()
         super().closeEvent(event)
+
+    def eventFilter(self, obj, event):  # type: ignore[override]
+        if event.type() in (QEvent.KeyPress, QEvent.KeyRelease, QEvent.ShortcutOverride):
+            event_type_name = {
+                QEvent.KeyPress: "KeyPress",
+                QEvent.KeyRelease: "KeyRelease",
+                QEvent.ShortcutOverride: "ShortcutOverride",
+            }.get(event.type(), str(int(event.type())))
+            key_value = event.key() if hasattr(event, "key") else None
+            text_value = event.text() if hasattr(event, "text") else ""
+            modifiers_value = (
+                keyboard_modifiers_to_int(event.modifiers())
+                if hasattr(event, "modifiers")
+                else 0
+            )
+            source_name = (
+                obj.objectName()
+                if hasattr(obj, "objectName") and obj.objectName()
+                else obj.__class__.__name__ if hasattr(obj, "__class__") else str(obj)
+            )
+            logger.debug(
+                "Global key event: type=%s key=%s text=%r modifiers=%s source=%s",
+                event_type_name,
+                key_value,
+                text_value,
+                modifiers_value,
+                source_name,
+            )
+        if event.type() in (QEvent.KeyPress, QEvent.ShortcutOverride):
+            if self._should_process_global_event(obj) and self._handle_key_press_event(event):
+                event.accept()
+                return True
+        elif event.type() == QEvent.KeyRelease:
+            if self._should_process_global_event(obj) and self._handle_key_release_event(event):
+                event.accept()
+                return True
+        return super().eventFilter(obj, event)
+
+    def _should_process_global_event(self, obj) -> bool:
+        if not self.isVisible():
+            logger.debug("Ignoring global key event because joystick is hidden")
+            return False
+        window = self.window()
+        if window is None or not window.isActiveWindow():
+            logger.debug("Ignoring global key event because joystick window is not active")
+            return False
+        focus_widget = window.focusWidget()
+        if focus_widget is not None and self._is_text_entry_widget(focus_widget):
+            logger.debug(
+                "Ignoring global key event because focus widget %s expects text",
+                focus_widget.objectName() or focus_widget.__class__.__name__,
+            )
+            return False
+        if isinstance(obj, QWidget) and self._is_text_entry_widget(obj):
+            logger.debug(
+                "Ignoring global key event originating from text widget %s",
+                obj.objectName() or obj.__class__.__name__,
+            )
+            return False
+        return True
+
+    def _handle_key_press_event(self, event) -> bool:
+        if event.isAutoRepeat():
+            event.ignore()
+            logger.debug(
+                "Ignored auto-repeat key press: key=%s text=%s modifiers=%s",
+                event.key(),
+                event.text(),
+                keyboard_modifiers_to_int(event.modifiers()),
+            )
+            return True
+        identifier, mapping = self._mapping_from_event(event)
+        if identifier and mapping:
+            if identifier not in self._key_stack:
+                self._key_stack.append(identifier)
+                self._update_active_jog()
+            event.accept()
+            logger.debug(
+                "Processed key press: key=%s text=%s modifiers=%s -> %s",
+                event.key(),
+                event.text(),
+                keyboard_modifiers_to_int(event.modifiers()),
+                mapping,
+            )
+            return True
+        logger.debug(
+            "No mapping for key press: key=%s text=%s modifiers=%s",
+            event.key(),
+            event.text(),
+            keyboard_modifiers_to_int(event.modifiers()),
+        )
+        return False
+
+    def _handle_key_release_event(self, event) -> bool:
+        if event.isAutoRepeat():
+            event.ignore()
+            logger.debug(
+                "Ignored auto-repeat key release: key=%s text=%s modifiers=%s",
+                event.key(),
+                event.text(),
+                keyboard_modifiers_to_int(event.modifiers()),
+            )
+            return True
+        identifier, mapping = self._mapping_from_event(event)
+        if identifier and mapping:
+            if identifier in self._key_stack:
+                self._key_stack.remove(identifier)
+                self._update_active_jog()
+            event.accept()
+            logger.debug(
+                "Processed key release: key=%s text=%s modifiers=%s -> %s",
+                event.key(),
+                event.text(),
+                keyboard_modifiers_to_int(event.modifiers()),
+                mapping,
+            )
+            return True
+        logger.debug(
+            "No mapping for key release: key=%s text=%s modifiers=%s",
+            event.key(),
+            event.text(),
+            keyboard_modifiers_to_int(event.modifiers()),
+        )
+        return False
+
+    @staticmethod
+    def _is_text_entry_widget(widget: Optional[QWidget]) -> bool:
+        if widget is None:
+            return False
+        if isinstance(widget, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)):
+            return True
+        parent = widget.parentWidget()
+        if parent is not None and parent is not widget:
+            return JoystickWindow._is_text_entry_widget(parent)
+        return False
 
     def _mapping_from_event(
         self, event
     ) -> tuple[Optional[Tuple[str, object]], Optional[tuple[str, int]]]:
         key = event.key()
-        mapping = self.KEY_DIRECTION_MAP.get(key)
+        modifiers = keyboard_modifiers_to_int(event.modifiers())
+        mapping = self._key_bindings.get(("key", key, modifiers))
         if mapping:
-            return ("key", key), mapping
+            return ("key", (key, modifiers)), mapping
 
         text = event.text()
         if text:
             normalized = text.casefold()
-            mapping = self.CHAR_DIRECTION_MAP.get(normalized)
+            mapping = self._key_bindings.get(("text", normalized))
             if mapping:
-                return ("char", normalized), mapping
+                return ("text", normalized), mapping
 
-        if 0 < key <= 0x10FFFF:
-            normalized = chr(key).casefold()
-            mapping = self.CHAR_DIRECTION_MAP.get(normalized)
-            if mapping:
-                return ("charcode", normalized), mapping
+        for identifier, mapping in self._key_bindings.items():
+            if identifier[0] == "key" and identifier[1] == key:
+                return ("key", (identifier[1], identifier[2])), mapping
 
         return (None, None)
 
     def _mapping_from_identifier(self, identifier: Tuple[str, object]) -> Optional[tuple[str, int]]:
         kind, value = identifier
         if kind == "key":
-            return self.KEY_DIRECTION_MAP.get(value)  # type: ignore[arg-type]
-        if kind in {"char", "charcode"}:
-            return self.CHAR_DIRECTION_MAP.get(value)  # type: ignore[arg-type]
+            key, modifiers = value  # type: ignore[misc]
+            return self._key_bindings.get(("key", key, modifiers))
+        if kind == "text":
+            return self._key_bindings.get(("text", value))
         return None
+
+    def apply_control_bindings(self, bindings: Dict[str, list[KeyBinding]]) -> None:
+        """Update the joystick key map based on the provided settings."""
+
+        mapping: Dict[tuple, tuple[str, int]] = {}
+        for action in CONTROL_ACTIONS:
+            for binding in bindings.get(action.key, []):
+                mapping[("key", binding.qt_key, binding.modifiers)] = (
+                    action.axis,
+                    action.direction,
+                )
+                if binding.text:
+                    mapping[("text", binding.text.casefold())] = (
+                        action.axis,
+                        action.direction,
+                    )
+        self._key_bindings = mapping
+        logger.info("Joystick key bindings updated: %d entries", len(self._key_bindings))

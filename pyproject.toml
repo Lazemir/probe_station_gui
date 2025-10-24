@@ -21,3 +21,6 @@ packages = [
     "probe_station_gui.views",
     "probe_station_gui.dialogs",
 ]
+
+[tool.setuptools.package-data]
+"probe_station_gui" = ["default_settings.json"]

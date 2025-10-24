@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 
 from PySide6.QtCore import QEvent, QThread, QTimer, Qt
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QMainWindow, QVBoxLayout, QWidget
 
 from probe_station_gui import (
     Grabber,
@@ -15,8 +16,13 @@ from probe_station_gui import (
     StageController,
     SerialTerminalWindow,
 )
+from probe_station_gui.dialogs.settings_dialog import SettingsDialog
+from probe_station_gui.settings_manager import SettingsManager
 from probe_station_gui.views.dock_widgets import CollapsibleDockWidget
 from probe_station_gui.views.serial_connection_panel import SerialConnectionPanel
+
+
+logger = logging.getLogger(__name__)
 
 
 class Main(QMainWindow):
@@ -37,6 +43,7 @@ class Main(QMainWindow):
         self.serial_connection = None
         self.serial_port_name: str | None = None
         self.serial_baud_rate: int | None = None
+        self.settings_manager: SettingsManager = SettingsManager()
         self.joystick_panel: JoystickWindow | None = None
         self.serial_terminal_panel: SerialTerminalWindow | None = None
         self.serial_connection_panel: SerialConnectionPanel | None = None
@@ -70,6 +77,7 @@ class Main(QMainWindow):
         self._create_dock_widgets()
 
         self._setup_menus()
+        self._apply_settings()
         window_menu = self.menuBar().addMenu("Panels")
         if self.joystick_dock is not None:
             joystick_action = self.joystick_dock.toggleViewAction()
@@ -96,7 +104,7 @@ class Main(QMainWindow):
         self.stage_controller.request_move(dx, dy)
 
     def on_error(self, message: str) -> None:
-        print("Camera error:", message)
+        logger.error("Camera error: %s", message)
 
     def on_serial_connected(self, serial_port) -> None:
         if self.serial_connection and self.serial_connection.is_open:
@@ -108,8 +116,10 @@ class Main(QMainWindow):
         except TypeError:
             baud_rate = int(float(serial_port.baudrate))
         self.serial_baud_rate = baud_rate
-        print(
-            f"Serial connected: {self.serial_connection.port} @ {self.serial_connection.baudrate} baud"
+        logger.info(
+            "Serial connected: %s @ %s baud",
+            self.serial_connection.port,
+            self.serial_connection.baudrate,
         )
         self.stage_controller.set_serial(self.serial_connection)
         if self.joystick_panel and self.joystick_dock:
@@ -129,7 +139,7 @@ class Main(QMainWindow):
         if self.serial_connection and self.serial_connection.is_open:
             self.serial_connection.close()
         self.serial_connection = None
-        print("Serial disconnected")
+        logger.info("Serial disconnected")
         self.stage_controller.set_serial(None)
         auto_retry = self.sender() is not self.serial_connection_panel
         if self.serial_connection_panel:
@@ -141,6 +151,7 @@ class Main(QMainWindow):
 
     def _auto_connect_if_possible(self) -> None:
         if self.serial_connection_panel and not self.serial_connection:
+            logger.debug("Attempting auto-connect through connection panel")
             self.serial_connection_panel.auto_connect()
 
     def _setup_menus(self) -> None:
@@ -158,6 +169,12 @@ class Main(QMainWindow):
         self._maximize_action.setCheckable(True)
         self._maximize_action.setChecked(True)
         self._maximize_action.triggered.connect(self._toggle_maximized)
+
+        settings_menu = self.menuBar().addMenu("Settings")
+        settings_action = QAction("Settings…", self)
+        settings_action.triggered.connect(self._open_settings_dialog)
+        settings_menu.addAction(settings_action)
+
         app_menu.addAction(self._maximize_action)
 
         if self._minimize_action is not None:
@@ -174,6 +191,37 @@ class Main(QMainWindow):
         app_menu.addAction(self._close_action)
 
         self._update_maximize_action_state()
+
+    def _apply_settings(self) -> None:
+        if self.joystick_panel:
+            bindings = self.settings_manager.control_bindings()
+            self.joystick_panel.apply_control_bindings(bindings)
+            logger.debug("Joystick bindings reapplied from settings")
+            feedrates = self.settings_manager.feedrate_configuration()
+            self.joystick_panel.apply_feedrate_settings(
+                feedrates.linear.presets,
+                feedrates.linear.default,
+                feedrates.rotary.presets,
+                feedrates.rotary.default,
+            )
+            logger.debug(
+                "Joystick feedrate settings reapplied: linear=%s (default=%s) rotary=%s (default=%s)",
+                feedrates.linear.presets,
+                feedrates.linear.default,
+                feedrates.rotary.presets,
+                feedrates.rotary.default,
+            )
+
+    def _open_settings_dialog(self) -> None:
+        dialog = SettingsDialog(self.settings_manager.settings, self)
+        if dialog.exec() != QDialog.Accepted:
+            logger.debug("Settings dialog cancelled")
+            return
+        new_settings = dialog.result_settings()
+        self.settings_manager.replace(new_settings)
+        self.settings_manager.save()
+        self._apply_settings()
+        logger.info("Settings updated from dialog")
 
     def show_joystick_window(self) -> None:
         if not self.joystick_panel or not self.joystick_dock:
@@ -240,6 +288,13 @@ class Main(QMainWindow):
         self.addDockWidget(Qt.LeftDockWidgetArea, self.serial_connection_dock)
 
         self.joystick_panel = JoystickWindow(self)
+        feedrates = self.settings_manager.feedrate_configuration()
+        self.joystick_panel.apply_feedrate_settings(
+            feedrates.linear.presets,
+            feedrates.linear.default,
+            feedrates.rotary.presets,
+            feedrates.rotary.default,
+        )
         self.joystick_panel.set_serial(self.serial_connection)
         self.joystick_dock = CollapsibleDockWidget("Joystick", self)
         self.joystick_dock.setObjectName("JoystickDock")
