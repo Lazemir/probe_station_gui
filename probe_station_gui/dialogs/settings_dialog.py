@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, cast
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QKeySequence
+from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtGui import QKeyEvent, QKeySequence
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -40,17 +40,42 @@ class KeyCaptureDialog(QDialog):
         )
         self._binding: KeyBinding | None = None
 
-    def keyPressEvent(self, event) -> None:  # type: ignore[override]
-        key = event.key()
-        if key in (Qt.Key_Escape, Qt.Key_Cancel):
-            self.reject()
-            return
-        self._binding = KeyBinding(
-            qt_key=int(key),
-            modifiers=int(event.modifiers()),
-            text=event.text(),
-        )
-        self.accept()
+    def event(self, event) -> bool:  # type: ignore[override]
+        if event.type() == QEvent.ShortcutOverride:
+            event.accept()
+            return True
+
+        if event.type() == QEvent.KeyPress:
+            key_event = cast(QKeyEvent, event)
+            key = key_event.key()
+            if key in (Qt.Key_Escape, Qt.Key_Cancel):
+                self.reject()
+                return True
+            if key in (
+                Qt.Key_Shift,
+                Qt.Key_Control,
+                Qt.Key_Meta,
+                Qt.Key_Alt,
+                Qt.Key_AltGr,
+                Qt.Key_Super_L,
+                Qt.Key_Super_R,
+            ):
+                return True
+            if key == Qt.Key_unknown:
+                return True
+            self._binding = KeyBinding(
+                qt_key=int(key),
+                modifiers=int(key_event.modifiers()),
+                text=key_event.text(),
+            )
+            self.accept()
+            return True
+
+        return super().event(event)
+
+    def reject(self) -> None:  # type: ignore[override]
+        self._binding = None
+        super().reject()
 
     def binding(self) -> KeyBinding | None:
         """Return the captured binding if one was recorded."""

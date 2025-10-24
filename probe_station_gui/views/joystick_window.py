@@ -28,6 +28,8 @@ class JoystickWindow(QWidget):
     JOG_DISTANCE_MM = 10.0
     ROTATE_DISTANCE_DEG = 5.0
     FEED_RATES = ["30", "60", "90", "120", "180", "Custom..."]
+    LINEAR_AXES = {"X", "Y", "Z"}
+    ROTATIONAL_AXES = {"A", "B", "C"}
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -43,20 +45,47 @@ class JoystickWindow(QWidget):
         self.status_label = QLabel("Disconnected", self)
         root_layout.addWidget(self.status_label)
 
-        feed_layout = QHBoxLayout()
-        feed_layout.addWidget(QLabel("Feed rate (mm/min):", self))
-        self.feedrate_combo = QComboBox(self)
-        self.feedrate_combo.addItems(self.FEED_RATES)
-        self.feedrate_combo.currentIndexChanged.connect(self._on_feedrate_changed)
-        feed_layout.addWidget(self.feedrate_combo)
+        feed_container = QVBoxLayout()
 
-        self.custom_feedrate_edit = QLineEdit(self)
-        self.custom_feedrate_edit.setPlaceholderText("Enter custom rate")
-        self.custom_feedrate_edit.setValidator(QDoubleValidator(0.1, 10000.0, 2, self))
-        self.custom_feedrate_edit.setVisible(False)
-        feed_layout.addWidget(self.custom_feedrate_edit)
+        linear_feed_layout = QHBoxLayout()
+        linear_feed_layout.addWidget(QLabel("Linear feed (mm/min):", self))
+        self.linear_feedrate_combo = QComboBox(self)
+        self.linear_feedrate_combo.addItems(self.FEED_RATES)
+        self.linear_feedrate_combo.currentIndexChanged.connect(
+            self._on_linear_feedrate_changed
+        )
+        linear_feed_layout.addWidget(self.linear_feedrate_combo)
 
-        root_layout.addLayout(feed_layout)
+        self.linear_custom_feedrate_edit = QLineEdit(self)
+        self.linear_custom_feedrate_edit.setPlaceholderText("Enter custom rate")
+        self.linear_custom_feedrate_edit.setValidator(
+            QDoubleValidator(0.1, 10000.0, 2, self)
+        )
+        self.linear_custom_feedrate_edit.setVisible(False)
+        linear_feed_layout.addWidget(self.linear_custom_feedrate_edit)
+
+        feed_container.addLayout(linear_feed_layout)
+
+        rotary_feed_layout = QHBoxLayout()
+        rotary_feed_layout.addWidget(QLabel("Rotary feed (deg/min):", self))
+        self.rotary_feedrate_combo = QComboBox(self)
+        self.rotary_feedrate_combo.addItems(self.FEED_RATES)
+        self.rotary_feedrate_combo.currentIndexChanged.connect(
+            self._on_rotary_feedrate_changed
+        )
+        rotary_feed_layout.addWidget(self.rotary_feedrate_combo)
+
+        self.rotary_custom_feedrate_edit = QLineEdit(self)
+        self.rotary_custom_feedrate_edit.setPlaceholderText("Enter custom rate")
+        self.rotary_custom_feedrate_edit.setValidator(
+            QDoubleValidator(0.1, 10000.0, 2, self)
+        )
+        self.rotary_custom_feedrate_edit.setVisible(False)
+        rotary_feed_layout.addWidget(self.rotary_custom_feedrate_edit)
+
+        feed_container.addLayout(rotary_feed_layout)
+
+        root_layout.addLayout(feed_container)
 
         grid_layout = QGridLayout()
         self.up_button = QPushButton("↑", self)
@@ -73,11 +102,13 @@ class JoystickWindow(QWidget):
 
         rotate_layout = QHBoxLayout()
         rotate_layout.addStretch(1)
-        self.rotate_ccw_button = QPushButton("⟲", self)
-        self.rotate_cw_button = QPushButton("⟳", self)
         rotate_layout.addWidget(QLabel("Rotate B:", self))
-        rotate_layout.addWidget(self.rotate_ccw_button)
-        rotate_layout.addWidget(self.rotate_cw_button)
+        self.rotate_negative_button = QPushButton("B-", self)
+        self.rotate_positive_button = QPushButton("B+", self)
+        self.rotate_negative_button.setToolTip("Rotate clockwise (B-)")
+        self.rotate_positive_button.setToolTip("Rotate counter-clockwise (B+)")
+        rotate_layout.addWidget(self.rotate_negative_button)
+        rotate_layout.addWidget(self.rotate_positive_button)
         rotate_layout.addStretch(1)
         root_layout.addLayout(rotate_layout)
 
@@ -89,10 +120,10 @@ class JoystickWindow(QWidget):
         self.left_button.released.connect(self.stop_jog)
         self.right_button.pressed.connect(lambda: self.start_jog("X", 1))
         self.right_button.released.connect(self.stop_jog)
-        self.rotate_ccw_button.pressed.connect(lambda: self.start_jog("B", -1))
-        self.rotate_ccw_button.released.connect(self.stop_jog)
-        self.rotate_cw_button.pressed.connect(lambda: self.start_jog("B", 1))
-        self.rotate_cw_button.released.connect(self.stop_jog)
+        self.rotate_negative_button.pressed.connect(lambda: self.start_jog("B", -1))
+        self.rotate_negative_button.released.connect(self.stop_jog)
+        self.rotate_positive_button.pressed.connect(lambda: self.start_jog("B", 1))
+        self.rotate_positive_button.released.connect(self.stop_jog)
 
         home_layout = QHBoxLayout()
         self.home_all_button = QPushButton("Home All", self)
@@ -119,11 +150,27 @@ class JoystickWindow(QWidget):
         root_layout.addStretch(1)
         self._update_enabled_state()
 
-    def _on_feedrate_changed(self, index: int) -> None:
-        is_custom = self.feedrate_combo.itemText(index) == "Custom..."
-        self.custom_feedrate_edit.setVisible(is_custom)
+    def _on_linear_feedrate_changed(self, index: int) -> None:
+        self._update_custom_visibility(
+            self.linear_feedrate_combo,
+            self.linear_custom_feedrate_edit,
+            index,
+        )
+
+    def _on_rotary_feedrate_changed(self, index: int) -> None:
+        self._update_custom_visibility(
+            self.rotary_feedrate_combo,
+            self.rotary_custom_feedrate_edit,
+            index,
+        )
+
+    def _update_custom_visibility(
+        self, combo: QComboBox, editor: QLineEdit, index: int
+    ) -> None:
+        is_custom = combo.itemText(index) == "Custom..."
+        editor.setVisible(is_custom)
         if is_custom:
-            self.custom_feedrate_edit.setFocus()
+            editor.setFocus()
 
     def set_serial(self, serial_connection: Optional[serial.Serial]) -> None:
         """Assign the serial connection used for jogging commands."""
@@ -145,14 +192,16 @@ class JoystickWindow(QWidget):
     def _update_enabled_state(self) -> None:
         enabled = bool(self.serial_connection and self.serial_connection.is_open)
         for widget in (
-            self.feedrate_combo,
-            self.custom_feedrate_edit,
+            self.linear_feedrate_combo,
+            self.linear_custom_feedrate_edit,
+            self.rotary_feedrate_combo,
+            self.rotary_custom_feedrate_edit,
             self.up_button,
             self.down_button,
             self.left_button,
             self.right_button,
-            self.rotate_ccw_button,
-            self.rotate_cw_button,
+            self.rotate_negative_button,
+            self.rotate_positive_button,
             self.home_all_button,
             self.home_xy_button,
             self.home_z_button,
@@ -160,22 +209,6 @@ class JoystickWindow(QWidget):
             self.reset_button,
         ):
             widget.setEnabled(enabled)
-
-    def get_feedrate(self) -> Optional[float]:
-        text = self.feedrate_combo.currentText()
-        if text == "Custom...":
-            text = self.custom_feedrate_edit.text().strip()
-            if not text:
-                self._show_warning("Please enter a custom feed rate.")
-                return None
-        try:
-            value = float(text)
-            if value <= 0:
-                raise ValueError
-            return value
-        except ValueError:
-            self._show_warning("Feed rate must be a positive number.")
-            return None
 
     def start_jog(self, axis: str, direction: int) -> None:
         self._apply_axes(((axis, direction),))
@@ -199,7 +232,7 @@ class JoystickWindow(QWidget):
         if not self.serial_connection or not self.serial_connection.is_open:
             self._active_axes = None
             return
-        feedrate = self.get_feedrate()
+        feedrate = self._feedrate_for_axes(axes_sorted)
         if feedrate is None:
             self.stop_jog()
             return
@@ -217,6 +250,50 @@ class JoystickWindow(QWidget):
         if axis == "B":
             return self.ROTATE_DISTANCE_DEG
         return self.JOG_DISTANCE_MM
+
+    def _feedrate_for_axes(
+        self, axes: tuple[tuple[str, int], ...]
+    ) -> Optional[float]:
+        has_rotary = any(axis in self.ROTATIONAL_AXES for axis, _ in axes)
+        has_linear = any(axis in self.LINEAR_AXES for axis, _ in axes)
+        if has_rotary and has_linear:
+            self._show_warning(
+                "Cannot jog rotary and linear axes at the same time. Release one of the keys first."
+            )
+            return None
+        if has_rotary:
+            return self._read_feedrate(
+                self.rotary_feedrate_combo,
+                self.rotary_custom_feedrate_edit,
+                "degrees per minute",
+            )
+        return self._read_feedrate(
+            self.linear_feedrate_combo,
+            self.linear_custom_feedrate_edit,
+            "millimetres per minute",
+        )
+
+    def _read_feedrate(
+        self, combo: QComboBox, editor: QLineEdit, units: str
+    ) -> Optional[float]:
+        text = combo.currentText()
+        if text == "Custom...":
+            text = editor.text().strip()
+            if not text:
+                self._show_warning(
+                    f"Please enter a custom feed rate ({units})."
+                )
+                return None
+        try:
+            value = float(text)
+            if value <= 0:
+                raise ValueError
+            return value
+        except ValueError:
+            self._show_warning(
+                f"Feed rate must be a positive number ({units})."
+            )
+            return None
 
     def _update_active_jog(self) -> None:
         unique_axes: dict[str, int] = {}
