@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from probe_station_gui.qt_compat import keyboard_modifiers_to_int
 from probe_station_gui.settings_manager import CONTROL_ACTIONS, KeyBinding
 
 
@@ -419,7 +420,11 @@ class JoystickWindow(QWidget):
             }.get(event.type(), str(int(event.type())))
             key_value = event.key() if hasattr(event, "key") else None
             text_value = event.text() if hasattr(event, "text") else ""
-            modifiers_value = int(event.modifiers()) if hasattr(event, "modifiers") else 0
+            modifiers_value = (
+                keyboard_modifiers_to_int(event.modifiers())
+                if hasattr(event, "modifiers")
+                else 0
+            )
             source_name = (
                 obj.objectName()
                 if hasattr(obj, "objectName") and obj.objectName()
@@ -473,7 +478,7 @@ class JoystickWindow(QWidget):
                 "Ignored auto-repeat key press: key=%s text=%s modifiers=%s",
                 event.key(),
                 event.text(),
-                int(event.modifiers()),
+                keyboard_modifiers_to_int(event.modifiers()),
             )
             return True
         identifier, mapping = self._mapping_from_event(event)
@@ -486,7 +491,7 @@ class JoystickWindow(QWidget):
                 "Processed key press: key=%s text=%s modifiers=%s -> %s",
                 event.key(),
                 event.text(),
-                int(event.modifiers()),
+                keyboard_modifiers_to_int(event.modifiers()),
                 mapping,
             )
             return True
@@ -494,7 +499,7 @@ class JoystickWindow(QWidget):
             "No mapping for key press: key=%s text=%s modifiers=%s",
             event.key(),
             event.text(),
-            int(event.modifiers()),
+            keyboard_modifiers_to_int(event.modifiers()),
         )
         return False
 
@@ -505,7 +510,7 @@ class JoystickWindow(QWidget):
                 "Ignored auto-repeat key release: key=%s text=%s modifiers=%s",
                 event.key(),
                 event.text(),
-                int(event.modifiers()),
+                keyboard_modifiers_to_int(event.modifiers()),
             )
             return True
         identifier, mapping = self._mapping_from_event(event)
@@ -518,7 +523,7 @@ class JoystickWindow(QWidget):
                 "Processed key release: key=%s text=%s modifiers=%s -> %s",
                 event.key(),
                 event.text(),
-                int(event.modifiers()),
+                keyboard_modifiers_to_int(event.modifiers()),
                 mapping,
             )
             return True
@@ -526,7 +531,7 @@ class JoystickWindow(QWidget):
             "No mapping for key release: key=%s text=%s modifiers=%s",
             event.key(),
             event.text(),
-            int(event.modifiers()),
+            keyboard_modifiers_to_int(event.modifiers()),
         )
         return False
 
@@ -545,7 +550,7 @@ class JoystickWindow(QWidget):
         self, event
     ) -> tuple[Optional[Tuple[str, object]], Optional[tuple[str, int]]]:
         key = event.key()
-        modifiers = int(event.modifiers())
+        modifiers = keyboard_modifiers_to_int(event.modifiers())
         mapping = self._key_bindings.get(("key", key, modifiers))
         if mapping:
             return ("key", (key, modifiers)), mapping

@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from probe_station_gui.qt_compat import keyboard_modifiers_to_int
 from probe_station_gui.settings_manager import (
     CONTROL_ACTIONS,
     KeyBinding,
@@ -72,7 +73,7 @@ class KeyCaptureDialog(QDialog):
                 return True
             self._binding = KeyBinding(
                 qt_key=int(key),
-                modifiers=int(key_event.modifiers()),
+                modifiers=keyboard_modifiers_to_int(key_event.modifiers()),
                 text=key_event.text(),
             )
             self.accept()
