@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMainWindow,
     QMessageBox,
     QPushButton,
     QVBoxLayout,
@@ -21,8 +20,8 @@ from PySide6.QtWidgets import (
 )
 
 
-class JoystickWindow(QMainWindow):
-    """Floating window that provides directional jogging controls."""
+class JoystickWindow(QWidget):
+    """Widget that provides directional jogging controls."""
 
     JOG_DISTANCE_MM = 10.0
     FEED_RATES = ["30", "60", "90", "120", "180", "Custom..."]
@@ -51,17 +50,13 @@ class JoystickWindow(QMainWindow):
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Joystick Controls")
         self.setFocusPolicy(Qt.StrongFocus)
 
         self.serial_connection: Optional[serial.Serial] = None
         self._active_axes: Optional[tuple[tuple[str, int], ...]] = None
         self._key_stack: list[Tuple[str, object]] = []
 
-        central = QWidget(self)
-        self.setCentralWidget(central)
-
-        root_layout = QVBoxLayout(central)
+        root_layout = QVBoxLayout(self)
         self.status_label = QLabel("Disconnected", self)
         root_layout.addWidget(self.status_label)
 
