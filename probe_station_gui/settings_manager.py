@@ -26,8 +26,8 @@ CONTROL_ACTIONS: tuple[ControlAction, ...] = (
     ControlAction("move_y_negative", "Y", -1, "Move Down"),
     ControlAction("move_x_negative", "X", -1, "Move Left"),
     ControlAction("move_x_positive", "X", 1, "Move Right"),
-    ControlAction("rotate_b_negative", "B", -1, "Rotate B -"),
-    ControlAction("rotate_b_positive", "B", 1, "Rotate B +"),
+    ControlAction("rotate_b_negative", "B", -1, "Rotate B ↻ (clockwise)"),
+    ControlAction("rotate_b_positive", "B", 1, "Rotate B ↺ (counter-clockwise)"),
 )
 
 

@@ -5,16 +5,20 @@ from __future__ import annotations
 from typing import Dict, Optional, Tuple
 
 import serial
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QCloseEvent, QDoubleValidator
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
+    QApplication,
     QComboBox,
     QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -40,6 +44,8 @@ class JoystickWindow(QWidget):
         self._key_stack: list[Tuple[str, object]] = []
         self._key_bindings: Dict[tuple, tuple[str, int]] = {}
         self.apply_control_bindings({})
+        self._event_filter_installed = False
+        self._install_event_filter()
 
         root_layout = QVBoxLayout(self)
         self.status_label = QLabel("Disconnected", self)
@@ -103,8 +109,8 @@ class JoystickWindow(QWidget):
         rotate_layout = QHBoxLayout()
         rotate_layout.addStretch(1)
         rotate_layout.addWidget(QLabel("Rotate B:", self))
-        self.rotate_negative_button = QPushButton("B-", self)
-        self.rotate_positive_button = QPushButton("B+", self)
+        self.rotate_negative_button = QPushButton("↻", self)
+        self.rotate_positive_button = QPushButton("↺", self)
         self.rotate_negative_button.setToolTip("Rotate clockwise (B-)")
         self.rotate_positive_button.setToolTip("Rotate counter-clockwise (B+)")
         rotate_layout.addWidget(self.rotate_negative_button)
@@ -149,6 +155,24 @@ class JoystickWindow(QWidget):
 
         root_layout.addStretch(1)
         self._update_enabled_state()
+
+    def _install_event_filter(self) -> None:
+        if self._event_filter_installed:
+            return
+        app = QApplication.instance()
+        if app is None:
+            return
+        app.installEventFilter(self)
+        self._event_filter_installed = True
+
+    def _remove_event_filter(self) -> None:
+        if not self._event_filter_installed:
+            return
+        app = QApplication.instance()
+        if app is None:
+            return
+        app.removeEventFilter(self)
+        self._event_filter_installed = False
 
     def _on_linear_feedrate_changed(self, index: int) -> None:
         self._update_custom_visibility(
@@ -328,28 +352,12 @@ class JoystickWindow(QWidget):
         QMessageBox.warning(self, "Joystick", message)
 
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
-        if event.isAutoRepeat():
-            event.ignore()
-            return
-        identifier, mapping = self._mapping_from_event(event)
-        if identifier and mapping:
-            if identifier not in self._key_stack:
-                self._key_stack.append(identifier)
-                self._update_active_jog()
-            event.accept()
+        if self._handle_key_press_event(event):
             return
         super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event) -> None:  # type: ignore[override]
-        if event.isAutoRepeat():
-            event.ignore()
-            return
-        identifier, mapping = self._mapping_from_event(event)
-        if identifier and mapping:
-            if identifier in self._key_stack:
-                self._key_stack.remove(identifier)
-                self._update_active_jog()
-            event.accept()
+        if self._handle_key_release_event(event):
             return
         super().keyReleaseEvent(event)
 
@@ -361,7 +369,67 @@ class JoystickWindow(QWidget):
     def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]
         self._key_stack.clear()
         self.stop_jog()
+        self._remove_event_filter()
         super().closeEvent(event)
+
+    def eventFilter(self, obj, event):  # type: ignore[override]
+        if event.type() == QEvent.KeyPress:
+            if self._should_process_global_event(obj) and self._handle_key_press_event(event):
+                return True
+        elif event.type() == QEvent.KeyRelease:
+            if self._should_process_global_event(obj) and self._handle_key_release_event(event):
+                return True
+        return super().eventFilter(obj, event)
+
+    def _should_process_global_event(self, obj) -> bool:
+        if not self.isVisible():
+            return False
+        window = self.window()
+        if window is None or not window.isActiveWindow():
+            return False
+        focus_widget = window.focusWidget()
+        if focus_widget is not None and self._is_text_entry_widget(focus_widget):
+            return False
+        if isinstance(obj, QWidget) and self._is_text_entry_widget(obj):
+            return False
+        return True
+
+    def _handle_key_press_event(self, event) -> bool:
+        if event.isAutoRepeat():
+            event.ignore()
+            return True
+        identifier, mapping = self._mapping_from_event(event)
+        if identifier and mapping:
+            if identifier not in self._key_stack:
+                self._key_stack.append(identifier)
+                self._update_active_jog()
+            event.accept()
+            return True
+        return False
+
+    def _handle_key_release_event(self, event) -> bool:
+        if event.isAutoRepeat():
+            event.ignore()
+            return True
+        identifier, mapping = self._mapping_from_event(event)
+        if identifier and mapping:
+            if identifier in self._key_stack:
+                self._key_stack.remove(identifier)
+                self._update_active_jog()
+            event.accept()
+            return True
+        return False
+
+    @staticmethod
+    def _is_text_entry_widget(widget: Optional[QWidget]) -> bool:
+        if widget is None:
+            return False
+        if isinstance(widget, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)):
+            return True
+        parent = widget.parentWidget()
+        if parent is not None and parent is not widget:
+            return JoystickWindow._is_text_entry_widget(parent)
+        return False
 
     def _mapping_from_event(
         self, event
