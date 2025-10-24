@@ -36,7 +36,22 @@ class JoystickWindow(QWidget):
 
     JOG_DISTANCE_MM = 10.0
     ROTATE_DISTANCE_DEG = 5.0
-    DEFAULT_FEEDRATE_PRESETS: tuple[float, ...] = (0.01, 0.1, 1.0, 10.0, 100.0)
+    DEFAULT_LINEAR_FEEDRATE_PRESETS: tuple[float, ...] = (
+        1.0,
+        3.0,
+        10.0,
+        30.0,
+        100.0,
+        300.0,
+    )
+    DEFAULT_ROTARY_FEEDRATE_PRESETS: tuple[float, ...] = (
+        1.0,
+        3.0,
+        10.0,
+        30.0,
+        90.0,
+        360.0,
+    )
     CUSTOM_FEED_LABEL = "Custom..."
     LINEAR_AXES = {"X", "Y", "Z"}
     ROTATIONAL_AXES = {"A", "B", "C"}
@@ -49,8 +64,8 @@ class JoystickWindow(QWidget):
         self._active_axes: Optional[tuple[tuple[str, int], ...]] = None
         self._key_stack: list[Tuple[str, object]] = []
         self._key_bindings: Dict[tuple, tuple[str, int]] = {}
-        self._linear_presets: List[float] = list(self.DEFAULT_FEEDRATE_PRESETS)
-        self._rotary_presets: List[float] = list(self.DEFAULT_FEEDRATE_PRESETS)
+        self._linear_presets: List[float] = list(self.DEFAULT_LINEAR_FEEDRATE_PRESETS)
+        self._rotary_presets: List[float] = list(self.DEFAULT_ROTARY_FEEDRATE_PRESETS)
         self._linear_default: float = 1.0
         self._rotary_default: float = 1.0
         self.apply_control_bindings({})
@@ -231,6 +246,7 @@ class JoystickWindow(QWidget):
             self._linear_presets,
             self._linear_default,
             force_defaults,
+            fallback=self.DEFAULT_LINEAR_FEEDRATE_PRESETS,
         )
         self._refresh_feedrate_combo(
             self.rotary_feedrate_combo,
@@ -238,6 +254,7 @@ class JoystickWindow(QWidget):
             self._rotary_presets,
             self._rotary_default,
             force_defaults,
+            fallback=self.DEFAULT_ROTARY_FEEDRATE_PRESETS,
         )
 
     def _refresh_feedrate_combo(
@@ -247,6 +264,8 @@ class JoystickWindow(QWidget):
         presets: List[float],
         default_value: float,
         force_default: bool,
+        *,
+        fallback: tuple[float, ...],
     ) -> None:
         display_items: List[str] = []
         seen: set[str] = set()
@@ -260,9 +279,7 @@ class JoystickWindow(QWidget):
             display_items.append(text)
             seen.add(text)
         if not display_items:
-            display_items = [
-                self._format_feedrate(value) for value in self.DEFAULT_FEEDRATE_PRESETS
-            ]
+            display_items = [self._format_feedrate(value) for value in fallback]
             seen = set(display_items)
 
         default_text = ""
@@ -307,10 +324,18 @@ class JoystickWindow(QWidget):
     ) -> None:
         """Update the selectable feedrate presets and defaults from settings."""
 
-        cleaned_linear = self._clean_presets(linear_presets)
-        cleaned_rotary = self._clean_presets(rotary_presets)
-        default_linear = self._resolve_default(linear_default, cleaned_linear)
-        default_rotary = self._resolve_default(rotary_default, cleaned_rotary)
+        cleaned_linear = self._clean_presets(
+            linear_presets, self.DEFAULT_LINEAR_FEEDRATE_PRESETS
+        )
+        cleaned_rotary = self._clean_presets(
+            rotary_presets, self.DEFAULT_ROTARY_FEEDRATE_PRESETS
+        )
+        default_linear = self._resolve_default(
+            linear_default, cleaned_linear, self.DEFAULT_LINEAR_FEEDRATE_PRESETS
+        )
+        default_rotary = self._resolve_default(
+            rotary_default, cleaned_rotary, self.DEFAULT_ROTARY_FEEDRATE_PRESETS
+        )
 
         if (
             cleaned_linear == self._linear_presets
@@ -333,7 +358,9 @@ class JoystickWindow(QWidget):
             default_rotary,
         )
 
-    def _clean_presets(self, presets: List[float]) -> List[float]:
+    def _clean_presets(
+        self, presets: List[float], fallback: tuple[float, ...]
+    ) -> List[float]:
         cleaned: List[float] = []
         seen: set[float] = set()
         for value in presets:
@@ -349,13 +376,15 @@ class JoystickWindow(QWidget):
             seen.add(key)
             cleaned.append(number)
         if not cleaned:
-            cleaned = list(self.DEFAULT_FEEDRATE_PRESETS)
+            cleaned = list(fallback)
         cleaned.sort()
         return cleaned
 
-    def _resolve_default(self, default_value: float, presets: List[float]) -> float:
+    def _resolve_default(
+        self, default_value: float, presets: List[float], fallback: tuple[float, ...]
+    ) -> float:
         if not presets:
-            return self.DEFAULT_FEEDRATE_PRESETS[0]
+            return fallback[0]
         try:
             candidate = float(default_value)
         except (TypeError, ValueError):

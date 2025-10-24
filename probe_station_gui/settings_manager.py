@@ -149,7 +149,22 @@ class SettingsManager:
 
     CONFIG_FILENAME = "settings.json"
     DEFAULT_LOG_FILENAME = "probe-station-gui.log"
-    DEFAULT_FEEDRATE_PRESETS: tuple[float, ...] = (0.01, 0.1, 1.0, 10.0, 100.0)
+    DEFAULT_LINEAR_FEEDRATE_PRESETS: tuple[float, ...] = (
+        1.0,
+        3.0,
+        10.0,
+        30.0,
+        100.0,
+        300.0,
+    )
+    DEFAULT_ROTARY_FEEDRATE_PRESETS: tuple[float, ...] = (
+        1.0,
+        3.0,
+        10.0,
+        30.0,
+        90.0,
+        360.0,
+    )
     DEFAULT_FEEDRATE_DEFAULT: float = 1.0
     LINEAR_GROUP = "linear"
     ROTARY_GROUP = "rotary"
@@ -268,14 +283,22 @@ class SettingsManager:
         feedrates_section = data.get("feedrates")
         legacy_presets = data.get("feedrate_presets")
         if not isinstance(feedrates_section, dict):
-            presets = self._parse_feedrate_list(legacy_presets)
+            legacy_raw_present = bool(legacy_presets)
+            linear_presets = self._parse_feedrate_list(
+                legacy_presets,
+                fallback=self.DEFAULT_LINEAR_FEEDRATE_PRESETS,
+            )
+            if legacy_raw_present:
+                rotary_presets = list(linear_presets)
+            else:
+                rotary_presets = list(self.DEFAULT_ROTARY_FEEDRATE_PRESETS)
             feedrates_section = {
                 self.LINEAR_GROUP: {
-                    "presets": presets,
+                    "presets": linear_presets,
                     "default": self.DEFAULT_FEEDRATE_DEFAULT,
                 },
                 self.ROTARY_GROUP: {
-                    "presets": presets,
+                    "presets": rotary_presets,
                     "default": self.DEFAULT_FEEDRATE_DEFAULT,
                 },
             }
@@ -283,12 +306,12 @@ class SettingsManager:
         else:
             if self.LINEAR_GROUP not in feedrates_section:
                 feedrates_section[self.LINEAR_GROUP] = {
-                    "presets": list(self.DEFAULT_FEEDRATE_PRESETS),
+                    "presets": list(self.DEFAULT_LINEAR_FEEDRATE_PRESETS),
                     "default": self.DEFAULT_FEEDRATE_DEFAULT,
                 }
             if self.ROTARY_GROUP not in feedrates_section:
                 feedrates_section[self.ROTARY_GROUP] = {
-                    "presets": list(self.DEFAULT_FEEDRATE_PRESETS),
+                    "presets": list(self.DEFAULT_ROTARY_FEEDRATE_PRESETS),
                     "default": self.DEFAULT_FEEDRATE_DEFAULT,
                 }
             data["feedrates"] = feedrates_section
@@ -347,7 +370,9 @@ class SettingsManager:
     def _parse_feedrates(self, raw_feedrates, legacy_presets) -> FeedrateSettings:
         """Normalise persisted feedrate data supporting legacy layouts."""
 
-        linear_group, rotary_group = self._parse_feedrate_groups(raw_feedrates, legacy_presets)
+        linear_group, rotary_group = self._parse_feedrate_groups(
+            raw_feedrates, legacy_presets
+        )
         return FeedrateSettings(
             linear=linear_group,
             rotary=rotary_group,
@@ -358,29 +383,59 @@ class SettingsManager:
         raw_feedrates,
         legacy_presets,
     ) -> Tuple[FeedrateGroup, FeedrateGroup]:
-        presets_fallback = self._parse_feedrate_list(legacy_presets)
+        linear_defaults = self.DEFAULT_LINEAR_FEEDRATE_PRESETS
+        rotary_defaults = self.DEFAULT_ROTARY_FEEDRATE_PRESETS
+        presets_fallback = self._parse_feedrate_list(
+            legacy_presets,
+            fallback=linear_defaults,
+        )
+        legacy_raw_present = bool(legacy_presets)
+        rotary_fallback_defaults = (
+            tuple(presets_fallback)
+            if legacy_raw_present
+            else tuple(rotary_defaults)
+        )
         if not isinstance(raw_feedrates, dict):
             linear = self._normalise_feedrate_group(
-                FeedrateGroup(presets=presets_fallback, default=self.DEFAULT_FEEDRATE_DEFAULT)
+                FeedrateGroup(
+                    presets=presets_fallback, default=self.DEFAULT_FEEDRATE_DEFAULT
+                ),
+                fallback=linear_defaults,
             )
+            rotary_source = list(rotary_fallback_defaults)
             rotary = self._normalise_feedrate_group(
-                FeedrateGroup(presets=presets_fallback, default=self.DEFAULT_FEEDRATE_DEFAULT)
+                FeedrateGroup(
+                    presets=rotary_source, default=self.DEFAULT_FEEDRATE_DEFAULT
+                ),
+                fallback=rotary_defaults,
             )
             return linear, rotary
 
         linear_raw = raw_feedrates.get(self.LINEAR_GROUP)
         rotary_raw = raw_feedrates.get(self.ROTARY_GROUP)
-        linear = self._normalise_feedrate_group(self._group_from_raw(linear_raw))
-        rotary = self._normalise_feedrate_group(self._group_from_raw(rotary_raw))
+        linear = self._normalise_feedrate_group(
+            self._group_from_raw(linear_raw, fallback=linear_defaults),
+            fallback=linear_defaults,
+        )
+        rotary = self._normalise_feedrate_group(
+            self._group_from_raw(
+                rotary_raw, fallback=rotary_fallback_defaults
+            ),
+            fallback=rotary_defaults,
+        )
         return linear, rotary
 
-    def _group_from_raw(self, raw_group) -> FeedrateGroup:
+    def _group_from_raw(
+        self, raw_group, *, fallback: Tuple[float, ...]
+    ) -> FeedrateGroup:
         """Build a feedrate group dataclass from persisted data."""
 
         presets = []
         default = self.DEFAULT_FEEDRATE_DEFAULT
         if isinstance(raw_group, dict):
-            presets = self._parse_feedrate_list(raw_group.get("presets"))
+            presets = self._parse_feedrate_list(
+                raw_group.get("presets"), fallback=fallback
+            )
             default_raw = raw_group.get("default")
             try:
                 if isinstance(default_raw, (int, float, str)):
@@ -388,10 +443,12 @@ class SettingsManager:
             except (TypeError, ValueError):
                 default = self.DEFAULT_FEEDRATE_DEFAULT
         else:
-            presets = list(self.DEFAULT_FEEDRATE_PRESETS)
+            presets = list(fallback)
         return FeedrateGroup(presets=presets, default=default)
 
-    def _parse_feedrate_list(self, raw_presets) -> List[float]:
+    def _parse_feedrate_list(
+        self, raw_presets, *, fallback: Tuple[float, ...]
+    ) -> List[float]:
         """Normalise a preset list to positive unique floats preserving order."""
 
         parsed: List[float] = []
@@ -410,19 +467,23 @@ class SettingsManager:
                 seen.add(key)
                 parsed.append(number)
         if not parsed:
-            parsed = list(self.DEFAULT_FEEDRATE_PRESETS)
+            parsed = list(fallback)
         return parsed
 
-    def _normalise_feedrate_group(self, group: FeedrateGroup) -> FeedrateGroup:
+    def _normalise_feedrate_group(
+        self, group: FeedrateGroup, *, fallback: Tuple[float, ...]
+    ) -> FeedrateGroup:
         """Ensure the feedrate group contains valid presets and defaults."""
 
-        presets = self._parse_feedrate_list(group.presets)
+        presets = self._parse_feedrate_list(group.presets, fallback=fallback)
         presets.sort()
         default_value = group.default if group.default > 0 else self.DEFAULT_FEEDRATE_DEFAULT
-        default_text = self._select_default(default_value, presets)
+        default_text = self._select_default(default_value, presets, fallback=fallback)
         return FeedrateGroup(presets=presets, default=default_text)
 
-    def _select_default(self, candidate: float, presets: List[float]) -> float:
+    def _select_default(
+        self, candidate: float, presets: List[float], *, fallback: Tuple[float, ...]
+    ) -> float:
         """Choose a default value from the preset list."""
 
         try:
@@ -439,15 +500,19 @@ class SettingsManager:
                     return value
             return presets[0]
 
-        return self.DEFAULT_FEEDRATE_DEFAULT
+        return fallback[0] if fallback else self.DEFAULT_FEEDRATE_DEFAULT
 
     def _normalise_settings(self, settings: Settings) -> Settings:
         """Return a copy of the settings with feedrates normalised."""
 
         clone = settings.clone()
         clone.feedrates = FeedrateSettings(
-            linear=self._normalise_feedrate_group(clone.feedrates.linear),
-            rotary=self._normalise_feedrate_group(clone.feedrates.rotary),
+            linear=self._normalise_feedrate_group(
+                clone.feedrates.linear, fallback=self.DEFAULT_LINEAR_FEEDRATE_PRESETS
+            ),
+            rotary=self._normalise_feedrate_group(
+                clone.feedrates.rotary, fallback=self.DEFAULT_ROTARY_FEEDRATE_PRESETS
+            ),
         )
         return clone
 
