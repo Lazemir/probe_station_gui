@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import serial
 from PySide6.QtCore import QEvent, QTimer, Qt
@@ -36,7 +36,8 @@ class JoystickWindow(QWidget):
 
     JOG_DISTANCE_MM = 10.0
     ROTATE_DISTANCE_DEG = 5.0
-    FEED_RATES = ["30", "60", "90", "120", "180", "Custom..."]
+    DEFAULT_FEEDRATE_PRESETS: tuple[float, ...] = (0.01, 0.1, 1.0, 10.0, 100.0)
+    CUSTOM_FEED_LABEL = "Custom..."
     LINEAR_AXES = {"X", "Y", "Z"}
     ROTATIONAL_AXES = {"A", "B", "C"}
 
@@ -48,6 +49,7 @@ class JoystickWindow(QWidget):
         self._active_axes: Optional[tuple[tuple[str, int], ...]] = None
         self._key_stack: list[Tuple[str, object]] = []
         self._key_bindings: Dict[tuple, tuple[str, int]] = {}
+        self._feedrate_presets: List[float] = list(self.DEFAULT_FEEDRATE_PRESETS)
         self.apply_control_bindings({})
         self._event_filter_installed = False
         self._event_filter_retry_scheduled = False
@@ -62,7 +64,6 @@ class JoystickWindow(QWidget):
         linear_feed_layout = QHBoxLayout()
         linear_feed_layout.addWidget(QLabel("Linear feed (mm/min):", self))
         self.linear_feedrate_combo = QComboBox(self)
-        self.linear_feedrate_combo.addItems(self.FEED_RATES)
         self.linear_feedrate_combo.currentIndexChanged.connect(
             self._on_linear_feedrate_changed
         )
@@ -71,7 +72,7 @@ class JoystickWindow(QWidget):
         self.linear_custom_feedrate_edit = QLineEdit(self)
         self.linear_custom_feedrate_edit.setPlaceholderText("Enter custom rate")
         self.linear_custom_feedrate_edit.setValidator(
-            QDoubleValidator(0.1, 10000.0, 2, self)
+            QDoubleValidator(0.000001, 1000000.0, 6, self)
         )
         self.linear_custom_feedrate_edit.setVisible(False)
         linear_feed_layout.addWidget(self.linear_custom_feedrate_edit)
@@ -81,7 +82,6 @@ class JoystickWindow(QWidget):
         rotary_feed_layout = QHBoxLayout()
         rotary_feed_layout.addWidget(QLabel("Rotary feed (deg/min):", self))
         self.rotary_feedrate_combo = QComboBox(self)
-        self.rotary_feedrate_combo.addItems(self.FEED_RATES)
         self.rotary_feedrate_combo.currentIndexChanged.connect(
             self._on_rotary_feedrate_changed
         )
@@ -90,7 +90,7 @@ class JoystickWindow(QWidget):
         self.rotary_custom_feedrate_edit = QLineEdit(self)
         self.rotary_custom_feedrate_edit.setPlaceholderText("Enter custom rate")
         self.rotary_custom_feedrate_edit.setValidator(
-            QDoubleValidator(0.1, 10000.0, 2, self)
+            QDoubleValidator(0.000001, 1000000.0, 6, self)
         )
         self.rotary_custom_feedrate_edit.setVisible(False)
         rotary_feed_layout.addWidget(self.rotary_custom_feedrate_edit)
@@ -98,6 +98,8 @@ class JoystickWindow(QWidget):
         feed_container.addLayout(rotary_feed_layout)
 
         root_layout.addLayout(feed_container)
+
+        self._refresh_feedrate_combos()
 
         grid_layout = QGridLayout()
         self.up_button = QPushButton("↑", self)
@@ -207,10 +209,82 @@ class JoystickWindow(QWidget):
     def _update_custom_visibility(
         self, combo: QComboBox, editor: QLineEdit, index: int
     ) -> None:
-        is_custom = combo.itemText(index) == "Custom..."
+        if index < 0:
+            editor.setVisible(False)
+            return
+        is_custom = combo.itemText(index) == self.CUSTOM_FEED_LABEL
         editor.setVisible(is_custom)
         if is_custom:
             editor.setFocus()
+
+    def _format_feedrate(self, value: float) -> str:
+        text = f"{value:.6f}".rstrip("0").rstrip(".")
+        return text or "0"
+
+    def _refresh_feedrate_combos(self) -> None:
+        display_items: List[str] = []
+        seen: set[str] = set()
+        for preset in self._feedrate_presets:
+            try:
+                text = self._format_feedrate(float(preset))
+            except (TypeError, ValueError):
+                continue
+            if text in seen:
+                continue
+            display_items.append(text)
+            seen.add(text)
+        if not display_items:
+            display_items = [
+                self._format_feedrate(value) for value in self.DEFAULT_FEEDRATE_PRESETS
+            ]
+            seen = set(display_items)
+        if self.CUSTOM_FEED_LABEL not in display_items:
+            display_items.append(self.CUSTOM_FEED_LABEL)
+
+        combos = (
+            (self.linear_feedrate_combo, self.linear_custom_feedrate_edit),
+            (self.rotary_feedrate_combo, self.rotary_custom_feedrate_edit),
+        )
+        for combo, editor in combos:
+            current_text = combo.currentText()
+            custom_text = editor.text()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(display_items)
+            if current_text in display_items:
+                combo.setCurrentText(current_text)
+            elif current_text == self.CUSTOM_FEED_LABEL or editor.isVisible():
+                combo.setCurrentText(self.CUSTOM_FEED_LABEL)
+                editor.setText(custom_text)
+            else:
+                combo.setCurrentIndex(0)
+            combo.blockSignals(False)
+            self._update_custom_visibility(combo, editor, combo.currentIndex())
+
+    def apply_feedrate_presets(self, presets: List[float]) -> None:
+        """Update the selectable feedrate presets from settings."""
+
+        cleaned: List[float] = []
+        seen: set[float] = set()
+        for value in presets:
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                continue
+            if number <= 0:
+                continue
+            key = round(number, 9)
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(number)
+        if not cleaned:
+            cleaned = list(self.DEFAULT_FEEDRATE_PRESETS)
+        if cleaned == self._feedrate_presets:
+            return
+        self._feedrate_presets = cleaned
+        self._refresh_feedrate_combos()
+        logger.info("Joystick feedrate presets updated: %s", cleaned)
 
     def set_serial(self, serial_connection: Optional[serial.Serial]) -> None:
         """Assign the serial connection used for jogging commands."""
@@ -368,7 +442,7 @@ class JoystickWindow(QWidget):
         self, combo: QComboBox, editor: QLineEdit, units: str
     ) -> Optional[float]:
         text = combo.currentText()
-        if text == "Custom...":
+        if text == self.CUSTOM_FEED_LABEL:
             text = editor.text().strip()
             if not text:
                 self._show_warning(

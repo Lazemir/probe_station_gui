@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import math
 from typing import Dict, List, cast
 
 from PySide6.QtCore import QEvent, Qt, Signal
-from PySide6.QtGui import QKeyEvent, QKeySequence
+from PySide6.QtGui import QDoubleValidator, QKeyEvent, QKeySequence
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -220,6 +221,95 @@ class LoggingSettingsWidget(QWidget):
         logging_settings.file = self._file_edit.text().strip()
 
 
+class FeedrateSettingsWidget(QWidget):
+    """Tab that lets users manage preset feed rates."""
+
+    def __init__(self, presets: List[float], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._presets: List[float] = list(presets)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        layout.addWidget(QLabel("Preset feed rates (positive values only):", self))
+
+        self._list = QListWidget(self)
+        self._list.setSelectionMode(QListWidget.SingleSelection)
+        layout.addWidget(self._list)
+
+        input_row = QHBoxLayout()
+        self._value_edit = QLineEdit(self)
+        self._value_edit.setPlaceholderText("Enter feed rate (e.g. 0.5)")
+        validator = QDoubleValidator(0.000001, 1000000.0, 6, self)
+        validator.setNotation(QDoubleValidator.StandardNotation)
+        self._value_edit.setValidator(validator)
+        input_row.addWidget(self._value_edit)
+
+        self._add_button = QPushButton("Add", self)
+        input_row.addWidget(self._add_button)
+        layout.addLayout(input_row)
+
+        action_row = QHBoxLayout()
+        self._remove_button = QPushButton("Remove Selected", self)
+        action_row.addWidget(self._remove_button)
+        action_row.addStretch(1)
+        layout.addLayout(action_row)
+
+        self._add_button.clicked.connect(self._add_value)
+        self._remove_button.clicked.connect(self._remove_selected)
+        self._list.itemSelectionChanged.connect(self._update_buttons)
+
+        self._refresh_list()
+        self._update_buttons()
+
+    def to_settings(self, settings: Settings) -> None:
+        """Write the configured presets back to the settings container."""
+
+        settings.feedrate_presets = list(self._presets)
+
+    def _refresh_list(self) -> None:
+        self._list.clear()
+        for value in self._presets:
+            self._list.addItem(self._format_value(value))
+
+    def _update_buttons(self) -> None:
+        self._remove_button.setEnabled(bool(self._list.selectedItems()))
+
+    def _add_value(self) -> None:
+        text = self._value_edit.text().strip()
+        if not text:
+            return
+        try:
+            value = float(text)
+        except ValueError:
+            return
+        if value <= 0:
+            return
+        if any(math.isclose(value, existing, rel_tol=1e-9, abs_tol=1e-9) for existing in self._presets):
+            return
+        insert_index = len(self._presets)
+        for index, existing in enumerate(self._presets):
+            if value < existing:
+                insert_index = index
+                break
+        self._presets.insert(insert_index, value)
+        self._refresh_list()
+        self._value_edit.clear()
+
+    def _remove_selected(self) -> None:
+        selected_indexes = self._list.selectedIndexes()
+        if not selected_indexes:
+            return
+        for index in sorted((idx.row() for idx in selected_indexes), reverse=True):
+            if 0 <= index < len(self._presets):
+                del self._presets[index]
+        self._refresh_list()
+
+    @staticmethod
+    def _format_value(value: float) -> str:
+        text = f"{value:.6f}".rstrip("0").rstrip(".")
+        return text or "0"
+
 class SettingsDialog(QDialog):
     """Main settings dialog with tabbed sections."""
 
@@ -236,7 +326,9 @@ class SettingsDialog(QDialog):
 
         self._controls_tab = ControlsSettingsWidget(self._settings, self)
         self._logging_tab = LoggingSettingsWidget(self._settings.logging, self)
+        self._feedrate_tab = FeedrateSettingsWidget(self._settings.feedrate_presets, self)
         self._tabs.addTab(self._controls_tab, "Controls")
+        self._tabs.addTab(self._feedrate_tab, "Feedrates")
         self._tabs.addTab(self._logging_tab, "Logging")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel, self)
@@ -246,6 +338,7 @@ class SettingsDialog(QDialog):
 
     def accept(self) -> None:  # type: ignore[override]
         self._controls_tab.to_settings(self._settings)
+        self._feedrate_tab.to_settings(self._settings)
         self._logging_tab.to_settings(self._settings.logging)
         super().accept()
 

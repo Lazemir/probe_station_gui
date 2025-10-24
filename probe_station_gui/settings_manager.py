@@ -82,6 +82,7 @@ class Settings:
 
     controls: Dict[str, List[KeyBinding]] = field(default_factory=dict)
     logging: LoggingSettings = field(default_factory=LoggingSettings)
+    feedrate_presets: List[float] = field(default_factory=list)
 
     def clone(self) -> "Settings":
         """Create a deep copy of the settings container."""
@@ -89,6 +90,7 @@ class Settings:
         return Settings(
             controls={key: list(value) for key, value in self.controls.items()},
             logging=self.logging.clone(),
+            feedrate_presets=list(self.feedrate_presets),
         )
 
     def to_dict(self) -> dict:
@@ -100,6 +102,7 @@ class Settings:
                 for key, bindings in self.controls.items()
             },
             "logging": self.logging.to_dict(),
+            "feedrate_presets": self.feedrate_presets,
         }
 
 
@@ -108,6 +111,7 @@ class SettingsManager:
 
     CONFIG_FILENAME = "settings.json"
     DEFAULT_LOG_FILENAME = "probe-station-gui.log"
+    DEFAULT_FEEDRATE_PRESETS: tuple[float, ...] = (0.01, 0.1, 1.0, 10.0, 100.0)
 
     def __init__(self) -> None:
         self._config_dir = self._determine_config_dir()
@@ -220,6 +224,10 @@ class SettingsManager:
         else:
             logging_section["file"] = log_path
 
+        presets_section = data.get("feedrate_presets")
+        if not isinstance(presets_section, list):
+            data["feedrate_presets"] = list(self.DEFAULT_FEEDRATE_PRESETS)
+
         with self._config_path.open("w", encoding="utf-8") as target:
             json.dump(data, target, indent=2, ensure_ascii=False)
 
@@ -250,7 +258,13 @@ class SettingsManager:
             self._logger.debug(
                 "Log file path missing in settings; defaulting to %s", default_log
             )
-        return Settings(controls=controls, logging=logging_settings)
+        presets_raw = raw.get("feedrate_presets") if isinstance(raw, dict) else None
+        feedrate_presets = self._parse_feedrate_presets(presets_raw)
+        return Settings(
+            controls=controls,
+            logging=logging_settings,
+            feedrate_presets=feedrate_presets,
+        )
 
     def _parse_logging(self, raw_logging) -> LoggingSettings:
         """Create a logging configuration from persisted data."""
@@ -263,4 +277,29 @@ class SettingsManager:
             if isinstance(file_raw, str):
                 file_value = file_raw
         return LoggingSettings(level=level.upper(), file=file_value)
+
+    def _parse_feedrate_presets(self, raw_presets) -> List[float]:
+        """Normalise the feedrate preset list from persisted data."""
+
+        parsed: List[float] = []
+        if isinstance(raw_presets, Iterable) and not isinstance(raw_presets, (str, bytes)):
+            for value in raw_presets:
+                try:
+                    number = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if number <= 0:
+                    continue
+                parsed.append(number)
+        if not parsed:
+            parsed = list(self.DEFAULT_FEEDRATE_PRESETS)
+        return parsed
+
+    def feedrate_presets(self) -> List[float]:
+        """Return the configured feedrate presets ensuring defaults exist."""
+
+        presets = [value for value in self._settings.feedrate_presets if value > 0]
+        if not presets:
+            presets = list(self.DEFAULT_FEEDRATE_PRESETS)
+        return presets
 
