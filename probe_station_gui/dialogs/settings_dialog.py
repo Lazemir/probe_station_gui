@@ -7,10 +7,12 @@ from typing import Dict, List, cast
 from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QKeyEvent, QKeySequence
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
     QHBoxLayout,
+    QLineEdit,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -20,7 +22,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from probe_station_gui.settings_manager import CONTROL_ACTIONS, KeyBinding, Settings
+from probe_station_gui.settings_manager import (
+    CONTROL_ACTIONS,
+    KeyBinding,
+    LoggingSettings,
+    Settings,
+)
 
 
 class KeyCaptureDialog(QDialog):
@@ -183,6 +190,35 @@ class ControlsSettingsWidget(QWidget):
         settings.controls = controls
 
 
+class LoggingSettingsWidget(QWidget):
+    """Tab that exposes logging configuration."""
+
+    LEVEL_OPTIONS = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+
+    def __init__(self, logging_settings: LoggingSettings, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        layout = QFormLayout(self)
+        layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+
+        self._level_combo = QComboBox(self)
+        self._level_combo.addItems(self.LEVEL_OPTIONS)
+        current_level = logging_settings.level.upper()
+        if current_level in self.LEVEL_OPTIONS:
+            self._level_combo.setCurrentText(current_level)
+        layout.addRow(QLabel("Verbosity", self), self._level_combo)
+
+        self._file_edit = QLineEdit(self)
+        self._file_edit.setPlaceholderText("Leave blank for the default log file")
+        self._file_edit.setText(logging_settings.file)
+        layout.addRow(QLabel("Log file", self), self._file_edit)
+
+    def to_settings(self, logging_settings: LoggingSettings) -> None:
+        """Persist the widget state into the provided settings object."""
+
+        logging_settings.level = self._level_combo.currentText()
+        logging_settings.file = self._file_edit.text().strip()
+
+
 class SettingsDialog(QDialog):
     """Main settings dialog with tabbed sections."""
 
@@ -198,7 +234,9 @@ class SettingsDialog(QDialog):
         root_layout.addWidget(self._tabs)
 
         self._controls_tab = ControlsSettingsWidget(self._settings, self)
+        self._logging_tab = LoggingSettingsWidget(self._settings.logging, self)
         self._tabs.addTab(self._controls_tab, "Controls")
+        self._tabs.addTab(self._logging_tab, "Logging")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel, self)
         buttons.accepted.connect(self.accept)
@@ -207,6 +245,7 @@ class SettingsDialog(QDialog):
 
     def accept(self) -> None:  # type: ignore[override]
         self._controls_tab.to_settings(self._settings)
+        self._logging_tab.to_settings(self._settings.logging)
         super().accept()
 
     def result_settings(self) -> Settings:

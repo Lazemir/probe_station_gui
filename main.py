@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 
 from PySide6.QtCore import QEvent, QThread, QTimer, Qt
@@ -19,6 +20,9 @@ from probe_station_gui.dialogs.settings_dialog import SettingsDialog
 from probe_station_gui.settings_manager import SettingsManager
 from probe_station_gui.views.dock_widgets import CollapsibleDockWidget
 from probe_station_gui.views.serial_connection_panel import SerialConnectionPanel
+
+
+logger = logging.getLogger(__name__)
 
 
 class Main(QMainWindow):
@@ -100,7 +104,7 @@ class Main(QMainWindow):
         self.stage_controller.request_move(dx, dy)
 
     def on_error(self, message: str) -> None:
-        print("Camera error:", message)
+        logger.error("Camera error: %s", message)
 
     def on_serial_connected(self, serial_port) -> None:
         if self.serial_connection and self.serial_connection.is_open:
@@ -112,8 +116,10 @@ class Main(QMainWindow):
         except TypeError:
             baud_rate = int(float(serial_port.baudrate))
         self.serial_baud_rate = baud_rate
-        print(
-            f"Serial connected: {self.serial_connection.port} @ {self.serial_connection.baudrate} baud"
+        logger.info(
+            "Serial connected: %s @ %s baud",
+            self.serial_connection.port,
+            self.serial_connection.baudrate,
         )
         self.stage_controller.set_serial(self.serial_connection)
         if self.joystick_panel and self.joystick_dock:
@@ -133,7 +139,7 @@ class Main(QMainWindow):
         if self.serial_connection and self.serial_connection.is_open:
             self.serial_connection.close()
         self.serial_connection = None
-        print("Serial disconnected")
+        logger.info("Serial disconnected")
         self.stage_controller.set_serial(None)
         auto_retry = self.sender() is not self.serial_connection_panel
         if self.serial_connection_panel:
@@ -145,6 +151,7 @@ class Main(QMainWindow):
 
     def _auto_connect_if_possible(self) -> None:
         if self.serial_connection_panel and not self.serial_connection:
+            logger.debug("Attempting auto-connect through connection panel")
             self.serial_connection_panel.auto_connect()
 
     def _setup_menus(self) -> None:
@@ -189,15 +196,18 @@ class Main(QMainWindow):
         if self.joystick_panel:
             bindings = self.settings_manager.control_bindings()
             self.joystick_panel.apply_control_bindings(bindings)
+            logger.debug("Joystick bindings reapplied from settings")
 
     def _open_settings_dialog(self) -> None:
         dialog = SettingsDialog(self.settings_manager.settings, self)
         if dialog.exec() != QDialog.Accepted:
+            logger.debug("Settings dialog cancelled")
             return
         new_settings = dialog.result_settings()
         self.settings_manager.replace(new_settings)
         self.settings_manager.save()
         self._apply_settings()
+        logger.info("Settings updated from dialog")
 
     def show_joystick_window(self) -> None:
         if not self.joystick_panel or not self.joystick_dock:

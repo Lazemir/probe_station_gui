@@ -26,5 +26,9 @@
     "rotate_b_positive": [
       {"qt_key": 69, "modifiers": 0, "text": "e"}
     ]
+  },
+  "logging": {
+    "level": "INFO",
+    "file": ""
   }
 }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Dict, Optional, Tuple
 
 import serial
@@ -24,6 +25,9 @@ from PySide6.QtWidgets import (
 )
 
 from probe_station_gui.settings_manager import CONTROL_ACTIONS, KeyBinding
+
+
+logger = logging.getLogger(__name__)
 
 
 class JoystickWindow(QWidget):
@@ -161,9 +165,11 @@ class JoystickWindow(QWidget):
             return
         app = QApplication.instance()
         if app is None:
+            logger.warning("QApplication instance unavailable; joystick event filter deferred")
             return
         app.installEventFilter(self)
         self._event_filter_installed = True
+        logger.debug("Joystick event filter installed")
 
     def _remove_event_filter(self) -> None:
         if not self._event_filter_installed:
@@ -173,6 +179,7 @@ class JoystickWindow(QWidget):
             return
         app.removeEventFilter(self)
         self._event_filter_installed = False
+        logger.debug("Joystick event filter removed")
 
     def _on_linear_feedrate_changed(self, index: int) -> None:
         self._update_custom_visibility(
@@ -205,12 +212,19 @@ class JoystickWindow(QWidget):
         if not serial_connection or not serial_connection.is_open:
             self._active_axes = None
             self._key_stack.clear()
+            logger.debug("Joystick serial detached")
         if serial_connection and serial_connection.is_open:
             self.status_label.setText(
                 f"Connected to {serial_connection.port} @ {serial_connection.baudrate}"
             )
+            logger.info(
+                "Joystick connected to %s @ %s baud",
+                serial_connection.port,
+                serial_connection.baudrate,
+            )
         else:
             self.status_label.setText("Disconnected")
+            logger.info("Joystick disconnected from serial link")
         self._update_enabled_state()
 
     def _update_enabled_state(self) -> None:
@@ -235,6 +249,7 @@ class JoystickWindow(QWidget):
             widget.setEnabled(enabled)
 
     def start_jog(self, axis: str, direction: int) -> None:
+        logger.debug("Start jog requested: axis=%s direction=%s", axis, direction)
         self._apply_axes(((axis, direction),))
 
     def stop_jog(self) -> None:
@@ -245,6 +260,7 @@ class JoystickWindow(QWidget):
             return
         self._active_axes = None
         self.send_command(b"\x85")
+        logger.debug("Stop jog command issued")
 
     def _apply_axes(self, axes: tuple[tuple[str, int], ...]) -> None:
         axes_sorted = tuple(sorted(axes, key=lambda item: item[0]))
@@ -269,6 +285,7 @@ class JoystickWindow(QWidget):
         command = f"$J=G91 G21 {' '.join(parts)} F{feedrate}\n"
         self.send_command(command)
         self._active_axes = axes_sorted
+        logger.debug("Jog command sent: %s", command.strip())
 
     def _distance_for_axis(self, axis: str) -> float:
         if axis == "B":
@@ -284,6 +301,7 @@ class JoystickWindow(QWidget):
             self._show_warning(
                 "Cannot jog rotary and linear axes at the same time. Release one of the keys first."
             )
+            logger.warning("Rejected mixed jog request: axes=%s", axes)
             return None
         if has_rotary:
             return self._read_feedrate(
@@ -317,6 +335,7 @@ class JoystickWindow(QWidget):
             self._show_warning(
                 f"Feed rate must be a positive number ({units})."
             )
+            logger.warning("Invalid feed rate '%s' for %s jog", text, units)
             return None
 
     def _update_active_jog(self) -> None:
@@ -328,6 +347,7 @@ class JoystickWindow(QWidget):
             axis, direction = mapping
             unique_axes[axis] = direction
         axes = tuple(unique_axes.items())
+        logger.debug("Active keys mapped to axes: %s", axes)
         self._apply_axes(axes)
 
     def _home_xy(self) -> None:
@@ -339,14 +359,20 @@ class JoystickWindow(QWidget):
 
     def send_command(self, command: str | bytes) -> None:
         if not self.serial_connection or not self.serial_connection.is_open:
+            logger.debug("Discarded command because serial is closed: %s", command)
             return
         try:
             data = command if isinstance(command, bytes) else command.encode("ascii")
             self.serial_connection.write(data)
             self.serial_connection.flush()
+            if isinstance(command, bytes):
+                logger.debug("Command written to serial (bytes): %s", command.hex())
+            else:
+                logger.debug("Command written to serial: %s", command.strip())
         except serial.SerialException as error:  # pragma: no cover - best effort guard
             self._show_warning(f"Serial communication error: {error}")
             self.set_serial(None)
+            logger.exception("Serial communication error: %s", error)
 
     def _show_warning(self, message: str) -> None:
         QMessageBox.warning(self, "Joystick", message)
@@ -383,20 +409,36 @@ class JoystickWindow(QWidget):
 
     def _should_process_global_event(self, obj) -> bool:
         if not self.isVisible():
+            logger.debug("Ignoring global key event because joystick is hidden")
             return False
         window = self.window()
         if window is None or not window.isActiveWindow():
+            logger.debug("Ignoring global key event because joystick window is not active")
             return False
         focus_widget = window.focusWidget()
         if focus_widget is not None and self._is_text_entry_widget(focus_widget):
+            logger.debug(
+                "Ignoring global key event because focus widget %s expects text",
+                focus_widget.objectName() or focus_widget.__class__.__name__,
+            )
             return False
         if isinstance(obj, QWidget) and self._is_text_entry_widget(obj):
+            logger.debug(
+                "Ignoring global key event originating from text widget %s",
+                obj.objectName() or obj.__class__.__name__,
+            )
             return False
         return True
 
     def _handle_key_press_event(self, event) -> bool:
         if event.isAutoRepeat():
             event.ignore()
+            logger.debug(
+                "Ignored auto-repeat key press: key=%s text=%s modifiers=%s",
+                event.key(),
+                event.text(),
+                int(event.modifiers()),
+            )
             return True
         identifier, mapping = self._mapping_from_event(event)
         if identifier and mapping:
@@ -404,12 +446,31 @@ class JoystickWindow(QWidget):
                 self._key_stack.append(identifier)
                 self._update_active_jog()
             event.accept()
+            logger.debug(
+                "Processed key press: key=%s text=%s modifiers=%s -> %s",
+                event.key(),
+                event.text(),
+                int(event.modifiers()),
+                mapping,
+            )
             return True
+        logger.debug(
+            "No mapping for key press: key=%s text=%s modifiers=%s",
+            event.key(),
+            event.text(),
+            int(event.modifiers()),
+        )
         return False
 
     def _handle_key_release_event(self, event) -> bool:
         if event.isAutoRepeat():
             event.ignore()
+            logger.debug(
+                "Ignored auto-repeat key release: key=%s text=%s modifiers=%s",
+                event.key(),
+                event.text(),
+                int(event.modifiers()),
+            )
             return True
         identifier, mapping = self._mapping_from_event(event)
         if identifier and mapping:
@@ -417,7 +478,20 @@ class JoystickWindow(QWidget):
                 self._key_stack.remove(identifier)
                 self._update_active_jog()
             event.accept()
+            logger.debug(
+                "Processed key release: key=%s text=%s modifiers=%s -> %s",
+                event.key(),
+                event.text(),
+                int(event.modifiers()),
+                mapping,
+            )
             return True
+        logger.debug(
+            "No mapping for key release: key=%s text=%s modifiers=%s",
+            event.key(),
+            event.text(),
+            int(event.modifiers()),
+        )
         return False
 
     @staticmethod
@@ -478,3 +552,4 @@ class JoystickWindow(QWidget):
                         action.direction,
                     )
         self._key_bindings = mapping
+        logger.info("Joystick key bindings updated: %d entries", len(self._key_bindings))

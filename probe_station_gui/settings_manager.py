@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import platform
 from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
 from typing import Dict, Iterable, List
+
+from probe_station_gui.logging_config import configure_logging
 
 
 @dataclass(frozen=True)
@@ -56,15 +59,37 @@ class KeyBinding:
 
 
 @dataclass
+class LoggingSettings:
+    """Configuration for application logging."""
+
+    level: str = "INFO"
+    file: str = ""
+
+    def clone(self) -> "LoggingSettings":
+        """Return a copy of the logging preferences."""
+
+        return LoggingSettings(level=self.level, file=self.file)
+
+    def to_dict(self) -> dict[str, str]:
+        """Serialize the logging preferences."""
+
+        return {"level": self.level, "file": self.file}
+
+
+@dataclass
 class Settings:
     """Container for all configurable values."""
 
     controls: Dict[str, List[KeyBinding]] = field(default_factory=dict)
+    logging: LoggingSettings = field(default_factory=LoggingSettings)
 
     def clone(self) -> "Settings":
         """Create a deep copy of the settings container."""
 
-        return Settings({key: list(value) for key, value in self.controls.items()})
+        return Settings(
+            controls={key: list(value) for key, value in self.controls.items()},
+            logging=self.logging.clone(),
+        )
 
     def to_dict(self) -> dict:
         """Convert the settings into a JSON serializable structure."""
@@ -73,7 +98,8 @@ class Settings:
             "controls": {
                 key: [binding.to_dict() for binding in bindings]
                 for key, bindings in self.controls.items()
-            }
+            },
+            "logging": self.logging.to_dict(),
         }
 
 
@@ -81,12 +107,16 @@ class SettingsManager:
     """Load, persist, and expose user configurable settings."""
 
     CONFIG_FILENAME = "settings.json"
+    DEFAULT_LOG_FILENAME = "probe-station-gui.log"
 
     def __init__(self) -> None:
         self._config_dir = self._determine_config_dir()
         self._config_path = self._config_dir / self.CONFIG_FILENAME
+        self._logger = logging.getLogger(__name__)
+        self._logger.debug("Configuration directory resolved to %s", self._config_dir)
         self._ensure_default_file()
         self._settings = self._load()
+        self.apply()
 
     @property
     def settings(self) -> Settings:
@@ -98,6 +128,7 @@ class SettingsManager:
         """Replace the stored settings with the provided instance."""
 
         self._settings = settings
+        self.apply()
 
     def save(self) -> None:
         """Persist the current settings to disk."""
@@ -106,6 +137,19 @@ class SettingsManager:
         self._config_dir.mkdir(parents=True, exist_ok=True)
         with self._config_path.open("w", encoding="utf-8") as handle:
             json.dump(data, handle, indent=2, ensure_ascii=False)
+        self._logger.info("Settings saved to %s", self._config_path)
+
+    def apply(self) -> None:
+        """Apply runtime-affecting settings such as logging configuration."""
+
+        log_path = self.log_file_path()
+        level_name = self.logging_level_name()
+        configure_logging(log_path, level_name)
+        self._logger.info(
+            "Logging configured at level %s (file: %s)",
+            level_name,
+            log_path,
+        )
 
     def control_bindings(self) -> Dict[str, List[KeyBinding]]:
         """Return the control bindings ensuring defaults are present."""
@@ -114,6 +158,24 @@ class SettingsManager:
         for action in CONTROL_ACTIONS:
             controls.setdefault(action.key, [])
         return controls
+
+    def logging_level_name(self) -> str:
+        """Return the configured logging level name."""
+
+        return (self._settings.logging.level or "INFO").upper()
+
+    def log_file_path(self) -> Path:
+        """Return the resolved log file path based on the settings."""
+
+        file_setting = (self._settings.logging.file or "").strip()
+        if file_setting:
+            path = Path(file_setting)
+            if not path.is_absolute():
+                path = self._config_dir / path
+        else:
+            path = self._config_dir / self.DEFAULT_LOG_FILENAME
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
 
     def _determine_config_dir(self) -> Path:
         """Compute the directory where configuration files should live."""
@@ -142,12 +204,14 @@ class SettingsManager:
         )
         with default_resource.open("rb") as source, self._config_path.open("wb") as target:
             target.write(source.read())
+        self._logger.info("Default settings copied to %s", self._config_path)
 
     def _load(self) -> Settings:
         """Load settings from disk and normalise the structure."""
 
         with self._config_path.open("r", encoding="utf-8") as handle:
             raw = json.load(handle)
+        self._logger.debug("Loaded settings from %s", self._config_path)
         controls_raw = raw.get("controls", {}) if isinstance(raw, dict) else {}
         controls: Dict[str, List[KeyBinding]] = {}
         for key, values in controls_raw.items():
@@ -159,5 +223,19 @@ class SettingsManager:
             controls[key] = bindings
         for action in CONTROL_ACTIONS:
             controls.setdefault(action.key, [])
-        return Settings(controls)
+        logging_raw = raw.get("logging", {}) if isinstance(raw, dict) else {}
+        logging_settings = self._parse_logging(logging_raw)
+        return Settings(controls=controls, logging=logging_settings)
+
+    def _parse_logging(self, raw_logging) -> LoggingSettings:
+        """Create a logging configuration from persisted data."""
+
+        level = "INFO"
+        file_value = ""
+        if isinstance(raw_logging, dict):
+            level = str(raw_logging.get("level", level))
+            file_raw = raw_logging.get("file", file_value)
+            if isinstance(file_raw, str):
+                file_value = file_raw
+        return LoggingSettings(level=level.upper(), file=file_value)
 
