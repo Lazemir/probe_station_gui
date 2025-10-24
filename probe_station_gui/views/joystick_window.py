@@ -6,7 +6,7 @@ import logging
 from typing import Dict, Optional, Tuple
 
 import serial
-from PySide6.QtCore import QEvent, Qt
+from PySide6.QtCore import QEvent, QTimer, Qt
 from PySide6.QtGui import QCloseEvent, QDoubleValidator
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
@@ -49,6 +49,7 @@ class JoystickWindow(QWidget):
         self._key_bindings: Dict[tuple, tuple[str, int]] = {}
         self.apply_control_bindings({})
         self._event_filter_installed = False
+        self._event_filter_retry_scheduled = False
         self._install_event_filter()
 
         root_layout = QVBoxLayout(self)
@@ -165,10 +166,16 @@ class JoystickWindow(QWidget):
             return
         app = QApplication.instance()
         if app is None:
-            logger.warning("QApplication instance unavailable; joystick event filter deferred")
+            if not self._event_filter_retry_scheduled:
+                self._event_filter_retry_scheduled = True
+                QTimer.singleShot(0, self._install_event_filter)
+            logger.warning(
+                "QApplication instance unavailable; joystick event filter deferred"
+            )
             return
         app.installEventFilter(self)
         self._event_filter_installed = True
+        self._event_filter_retry_scheduled = False
         logger.debug("Joystick event filter installed")
 
     def _remove_event_filter(self) -> None:
@@ -179,6 +186,7 @@ class JoystickWindow(QWidget):
             return
         app.removeEventFilter(self)
         self._event_filter_installed = False
+        self._event_filter_retry_scheduled = False
         logger.debug("Joystick event filter removed")
 
     def _on_linear_feedrate_changed(self, index: int) -> None:
@@ -392,6 +400,10 @@ class JoystickWindow(QWidget):
         self.stop_jog()
         super().focusOutEvent(event)
 
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._install_event_filter()
+
     def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]
         self._key_stack.clear()
         self.stop_jog()
@@ -399,11 +411,35 @@ class JoystickWindow(QWidget):
         super().closeEvent(event)
 
     def eventFilter(self, obj, event):  # type: ignore[override]
-        if event.type() == QEvent.KeyPress:
+        if event.type() in (QEvent.KeyPress, QEvent.KeyRelease, QEvent.ShortcutOverride):
+            event_type_name = {
+                QEvent.KeyPress: "KeyPress",
+                QEvent.KeyRelease: "KeyRelease",
+                QEvent.ShortcutOverride: "ShortcutOverride",
+            }.get(event.type(), str(int(event.type())))
+            key_value = event.key() if hasattr(event, "key") else None
+            text_value = event.text() if hasattr(event, "text") else ""
+            modifiers_value = int(event.modifiers()) if hasattr(event, "modifiers") else 0
+            source_name = (
+                obj.objectName()
+                if hasattr(obj, "objectName") and obj.objectName()
+                else obj.__class__.__name__ if hasattr(obj, "__class__") else str(obj)
+            )
+            logger.debug(
+                "Global key event: type=%s key=%s text=%r modifiers=%s source=%s",
+                event_type_name,
+                key_value,
+                text_value,
+                modifiers_value,
+                source_name,
+            )
+        if event.type() in (QEvent.KeyPress, QEvent.ShortcutOverride):
             if self._should_process_global_event(obj) and self._handle_key_press_event(event):
+                event.accept()
                 return True
         elif event.type() == QEvent.KeyRelease:
             if self._should_process_global_event(obj) and self._handle_key_release_event(event):
+                event.accept()
                 return True
         return super().eventFilter(obj, event)
 

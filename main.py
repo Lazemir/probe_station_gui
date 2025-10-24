@@ -171,9 +171,9 @@ class Main(QMainWindow):
         self._maximize_action.triggered.connect(self._toggle_maximized)
 
         settings_menu = self.menuBar().addMenu("Settings")
-        preferences_action = QAction("Controls…", self)
-        preferences_action.triggered.connect(self._open_settings_dialog)
-        settings_menu.addAction(preferences_action)
+        settings_action = QAction("Settings…", self)
+        settings_action.triggered.connect(self._open_settings_dialog)
+        settings_menu.addAction(settings_action)
 
         app_menu.addAction(self._maximize_action)
 
