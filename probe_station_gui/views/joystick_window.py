@@ -306,23 +306,63 @@ class JoystickWindow(QWidget):
     ) -> Optional[float]:
         has_rotary = any(axis in self.ROTATIONAL_AXES for axis, _ in axes)
         has_linear = any(axis in self.LINEAR_AXES for axis, _ in axes)
-        if has_rotary and has_linear:
-            self._show_warning(
-                "Cannot jog rotary and linear axes at the same time. Release one of the keys first."
+
+        linear_feed: Optional[float] = None
+        rotary_feed: Optional[float] = None
+
+        if has_linear:
+            linear_feed = self._read_feedrate(
+                self.linear_feedrate_combo,
+                self.linear_custom_feedrate_edit,
+                "millimetres per minute",
             )
-            logger.warning("Rejected mixed jog request: axes=%s", axes)
-            return None
+            if linear_feed is None:
+                return None
+
         if has_rotary:
-            return self._read_feedrate(
+            rotary_feed = self._read_feedrate(
                 self.rotary_feedrate_combo,
                 self.rotary_custom_feedrate_edit,
                 "degrees per minute",
             )
-        return self._read_feedrate(
-            self.linear_feedrate_combo,
-            self.linear_custom_feedrate_edit,
-            "millimetres per minute",
-        )
+            if rotary_feed is None:
+                return None
+
+        if has_linear and has_rotary:
+            feed_candidates: list[float] = []
+
+            if linear_feed is not None:
+                feed_candidates.append(linear_feed)
+
+            max_linear_distance = max(
+                (self._distance_for_axis(axis) for axis, _ in axes if axis in self.LINEAR_AXES),
+                default=self.JOG_DISTANCE_MM,
+            )
+            for axis, _ in axes:
+                if axis not in self.ROTATIONAL_AXES or rotary_feed is None:
+                    continue
+                axis_distance = self._distance_for_axis(axis)
+                if axis_distance <= 0:
+                    continue
+                equivalent_linear = rotary_feed * (max_linear_distance / axis_distance)
+                feed_candidates.append(equivalent_linear)
+
+            if not feed_candidates:
+                return linear_feed or rotary_feed
+
+            chosen_feed = min(feed_candidates)
+            logger.debug(
+                "Mixed jog feed resolved: candidates=%s chosen=%s", feed_candidates, chosen_feed
+            )
+            return chosen_feed
+
+        if has_linear:
+            return linear_feed
+
+        if has_rotary:
+            return rotary_feed
+
+        return None
 
     def _read_feedrate(
         self, combo: QComboBox, editor: QLineEdit, units: str

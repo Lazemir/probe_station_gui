@@ -202,8 +202,27 @@ class SettingsManager:
         default_resource = resources.files("probe_station_gui").joinpath(
             "default_settings.json"
         )
-        with default_resource.open("rb") as source, self._config_path.open("wb") as target:
-            target.write(source.read())
+        log_path = str(self._config_dir / self.DEFAULT_LOG_FILENAME)
+
+        try:
+            with default_resource.open("r", encoding="utf-8") as source:
+                data = json.load(source)
+        except (FileNotFoundError, json.JSONDecodeError):
+            data = {}
+
+        if not isinstance(data, dict):
+            data = {}
+
+        logging_section = data.get("logging")
+        if not isinstance(logging_section, dict):
+            logging_section = {"level": "INFO", "file": log_path}
+            data["logging"] = logging_section
+        else:
+            logging_section["file"] = log_path
+
+        with self._config_path.open("w", encoding="utf-8") as target:
+            json.dump(data, target, indent=2, ensure_ascii=False)
+
         self._logger.info("Default settings copied to %s", self._config_path)
 
     def _load(self) -> Settings:
@@ -225,6 +244,12 @@ class SettingsManager:
             controls.setdefault(action.key, [])
         logging_raw = raw.get("logging", {}) if isinstance(raw, dict) else {}
         logging_settings = self._parse_logging(logging_raw)
+        if not logging_settings.file:
+            default_log = str(self._config_dir / self.DEFAULT_LOG_FILENAME)
+            logging_settings.file = default_log
+            self._logger.debug(
+                "Log file path missing in settings; defaulting to %s", default_log
+            )
         return Settings(controls=controls, logging=logging_settings)
 
     def _parse_logging(self, raw_logging) -> LoggingSettings:
