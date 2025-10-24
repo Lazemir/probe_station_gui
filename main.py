@@ -6,7 +6,7 @@ import sys
 
 from PySide6.QtCore import QEvent, QThread, QTimer, Qt
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QMainWindow, QVBoxLayout, QWidget
 
 from probe_station_gui import (
     Grabber,
@@ -15,6 +15,8 @@ from probe_station_gui import (
     StageController,
     SerialTerminalWindow,
 )
+from probe_station_gui.dialogs.settings_dialog import SettingsDialog
+from probe_station_gui.settings_manager import SettingsManager
 from probe_station_gui.views.dock_widgets import CollapsibleDockWidget
 from probe_station_gui.views.serial_connection_panel import SerialConnectionPanel
 
@@ -37,6 +39,7 @@ class Main(QMainWindow):
         self.serial_connection = None
         self.serial_port_name: str | None = None
         self.serial_baud_rate: int | None = None
+        self.settings_manager: SettingsManager = SettingsManager()
         self.joystick_panel: JoystickWindow | None = None
         self.serial_terminal_panel: SerialTerminalWindow | None = None
         self.serial_connection_panel: SerialConnectionPanel | None = None
@@ -70,6 +73,7 @@ class Main(QMainWindow):
         self._create_dock_widgets()
 
         self._setup_menus()
+        self._apply_settings()
         window_menu = self.menuBar().addMenu("Panels")
         if self.joystick_dock is not None:
             joystick_action = self.joystick_dock.toggleViewAction()
@@ -158,6 +162,12 @@ class Main(QMainWindow):
         self._maximize_action.setCheckable(True)
         self._maximize_action.setChecked(True)
         self._maximize_action.triggered.connect(self._toggle_maximized)
+
+        settings_menu = self.menuBar().addMenu("Settings")
+        preferences_action = QAction("Controls…", self)
+        preferences_action.triggered.connect(self._open_settings_dialog)
+        settings_menu.addAction(preferences_action)
+
         app_menu.addAction(self._maximize_action)
 
         if self._minimize_action is not None:
@@ -174,6 +184,20 @@ class Main(QMainWindow):
         app_menu.addAction(self._close_action)
 
         self._update_maximize_action_state()
+
+    def _apply_settings(self) -> None:
+        if self.joystick_panel:
+            bindings = self.settings_manager.control_bindings()
+            self.joystick_panel.apply_control_bindings(bindings)
+
+    def _open_settings_dialog(self) -> None:
+        dialog = SettingsDialog(self.settings_manager.settings, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        new_settings = dialog.result_settings()
+        self.settings_manager.replace(new_settings)
+        self.settings_manager.save()
+        self._apply_settings()
 
     def show_joystick_window(self) -> None:
         if not self.joystick_panel or not self.joystick_dock:

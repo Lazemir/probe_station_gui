@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import serial
 from PySide6.QtCore import Qt
@@ -19,34 +19,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from probe_station_gui.settings_manager import CONTROL_ACTIONS, KeyBinding
+
 
 class JoystickWindow(QWidget):
     """Widget that provides directional jogging controls."""
 
     JOG_DISTANCE_MM = 10.0
+    ROTATE_DISTANCE_DEG = 5.0
     FEED_RATES = ["30", "60", "90", "120", "180", "Custom..."]
-
-    KEY_DIRECTION_MAP = {
-        Qt.Key_Up: ("Y", 1),
-        Qt.Key_W: ("Y", 1),
-        Qt.Key_Down: ("Y", -1),
-        Qt.Key_S: ("Y", -1),
-        Qt.Key_Left: ("X", -1),
-        Qt.Key_A: ("X", -1),
-        Qt.Key_Right: ("X", 1),
-        Qt.Key_D: ("X", 1),
-    }
-
-    CHAR_DIRECTION_MAP = {
-        "w": ("Y", 1),
-        "s": ("Y", -1),
-        "a": ("X", -1),
-        "d": ("X", 1),
-        "ц": ("Y", 1),
-        "ы": ("Y", -1),
-        "ф": ("X", -1),
-        "в": ("X", 1),
-    }
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -55,6 +36,8 @@ class JoystickWindow(QWidget):
         self.serial_connection: Optional[serial.Serial] = None
         self._active_axes: Optional[tuple[tuple[str, int], ...]] = None
         self._key_stack: list[Tuple[str, object]] = []
+        self._key_bindings: Dict[tuple, tuple[str, int]] = {}
+        self.apply_control_bindings({})
 
         root_layout = QVBoxLayout(self)
         self.status_label = QLabel("Disconnected", self)
@@ -88,6 +71,16 @@ class JoystickWindow(QWidget):
 
         root_layout.addLayout(grid_layout)
 
+        rotate_layout = QHBoxLayout()
+        rotate_layout.addStretch(1)
+        self.rotate_ccw_button = QPushButton("⟲", self)
+        self.rotate_cw_button = QPushButton("⟳", self)
+        rotate_layout.addWidget(QLabel("Rotate B:", self))
+        rotate_layout.addWidget(self.rotate_ccw_button)
+        rotate_layout.addWidget(self.rotate_cw_button)
+        rotate_layout.addStretch(1)
+        root_layout.addLayout(rotate_layout)
+
         self.up_button.pressed.connect(lambda: self.start_jog("Y", 1))
         self.up_button.released.connect(self.stop_jog)
         self.down_button.pressed.connect(lambda: self.start_jog("Y", -1))
@@ -96,6 +89,10 @@ class JoystickWindow(QWidget):
         self.left_button.released.connect(self.stop_jog)
         self.right_button.pressed.connect(lambda: self.start_jog("X", 1))
         self.right_button.released.connect(self.stop_jog)
+        self.rotate_ccw_button.pressed.connect(lambda: self.start_jog("B", -1))
+        self.rotate_ccw_button.released.connect(self.stop_jog)
+        self.rotate_cw_button.pressed.connect(lambda: self.start_jog("B", 1))
+        self.rotate_cw_button.released.connect(self.stop_jog)
 
         home_layout = QHBoxLayout()
         self.home_all_button = QPushButton("Home All", self)
@@ -154,6 +151,8 @@ class JoystickWindow(QWidget):
             self.down_button,
             self.left_button,
             self.right_button,
+            self.rotate_ccw_button,
+            self.rotate_cw_button,
             self.home_all_button,
             self.home_xy_button,
             self.home_z_button,
@@ -208,11 +207,16 @@ class JoystickWindow(QWidget):
             self.stop_jog()
         parts: list[str] = []
         for axis, direction in axes_sorted:
-            distance = direction * self.JOG_DISTANCE_MM
+            distance = direction * self._distance_for_axis(axis)
             parts.append(f"{axis}{distance:.3f}")
         command = f"$J=G91 G21 {' '.join(parts)} F{feedrate}\n"
         self.send_command(command)
         self._active_axes = axes_sorted
+
+    def _distance_for_axis(self, axis: str) -> float:
+        if axis == "B":
+            return self.ROTATE_DISTANCE_DEG
+        return self.JOG_DISTANCE_MM
 
     def _update_active_jog(self) -> None:
         unique_axes: dict[str, int] = {}
@@ -286,29 +290,46 @@ class JoystickWindow(QWidget):
         self, event
     ) -> tuple[Optional[Tuple[str, object]], Optional[tuple[str, int]]]:
         key = event.key()
-        mapping = self.KEY_DIRECTION_MAP.get(key)
+        modifiers = int(event.modifiers())
+        mapping = self._key_bindings.get(("key", key, modifiers))
         if mapping:
-            return ("key", key), mapping
+            return ("key", (key, modifiers)), mapping
 
         text = event.text()
         if text:
             normalized = text.casefold()
-            mapping = self.CHAR_DIRECTION_MAP.get(normalized)
+            mapping = self._key_bindings.get(("text", normalized))
             if mapping:
-                return ("char", normalized), mapping
+                return ("text", normalized), mapping
 
-        if 0 < key <= 0x10FFFF:
-            normalized = chr(key).casefold()
-            mapping = self.CHAR_DIRECTION_MAP.get(normalized)
-            if mapping:
-                return ("charcode", normalized), mapping
+        for identifier, mapping in self._key_bindings.items():
+            if identifier[0] == "key" and identifier[1] == key:
+                return ("key", (identifier[1], identifier[2])), mapping
 
         return (None, None)
 
     def _mapping_from_identifier(self, identifier: Tuple[str, object]) -> Optional[tuple[str, int]]:
         kind, value = identifier
         if kind == "key":
-            return self.KEY_DIRECTION_MAP.get(value)  # type: ignore[arg-type]
-        if kind in {"char", "charcode"}:
-            return self.CHAR_DIRECTION_MAP.get(value)  # type: ignore[arg-type]
+            key, modifiers = value  # type: ignore[misc]
+            return self._key_bindings.get(("key", key, modifiers))
+        if kind == "text":
+            return self._key_bindings.get(("text", value))
         return None
+
+    def apply_control_bindings(self, bindings: Dict[str, list[KeyBinding]]) -> None:
+        """Update the joystick key map based on the provided settings."""
+
+        mapping: Dict[tuple, tuple[str, int]] = {}
+        for action in CONTROL_ACTIONS:
+            for binding in bindings.get(action.key, []):
+                mapping[("key", binding.qt_key, binding.modifiers)] = (
+                    action.axis,
+                    action.direction,
+                )
+                if binding.text:
+                    mapping[("text", binding.text.casefold())] = (
+                        action.axis,
+                        action.direction,
+                    )
+        self._key_bindings = mapping
