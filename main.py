@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
+from pathlib import Path
 import sys
 
-from PySide6.QtCore import QEvent, QThread, QTimer, Qt
-from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QApplication, QDialog, QMainWindow, QVBoxLayout, QWidget
+from PySide6.QtCore import QThread, QTimer, Qt, QUrl
+from PySide6.QtGui import QAction, QDesktopServices
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QMainWindow,
+    QPlainTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
 
 from probe_station_gui import (
     Grabber,
@@ -50,12 +59,16 @@ class Main(QMainWindow):
         self.joystick_dock: CollapsibleDockWidget | None = None
         self.serial_terminal_dock: CollapsibleDockWidget | None = None
         self.serial_connection_dock: CollapsibleDockWidget | None = None
-        self._minimize_action: QAction | None = None
-        self._restore_action: QAction | None = None
-        self._maximize_action: QAction | None = None
-        self._close_action: QAction | None = None
         self.statusBar()
-
+        self._status_log = QPlainTextEdit(self)
+        self._status_log.setReadOnly(True)
+        self._status_log.setMaximumHeight(80)
+        self._status_log.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self._status_log.document().setMaximumBlockCount(200)
+        self.statusBar().addPermanentWidget(self._status_log, 1)
+        self._status_log_path = (
+            self.settings_manager.log_file_path().with_name("status-history.log")
+        )
         self.grabber = Grabber()
         self.thread = QThread()
         self.grabber.moveToThread(self.thread)
@@ -66,11 +79,12 @@ class Main(QMainWindow):
         self.thread.start()
 
         self.stage_controller = StageController()
-        self.stage_controller.status_message.connect(self.statusBar().showMessage)
+        self.stage_controller.status_message.connect(self._show_status)
         self.stage_controller.movement_finished.connect(self.on_move_finished)
         self.stage_controller.calibration_changed.connect(self.on_calibration_changed)
+        self.stage_controller.autofocus_finished.connect(self.on_autofocus_finished)
         self.stage_controller.movement_started.connect(
-            lambda: self.statusBar().showMessage("Moving stage…")
+            lambda: self._show_status("Moving stage...")
         )
         self.grabber.frame_ready.connect(self.stage_controller.on_frame_ready)
 
@@ -105,6 +119,32 @@ class Main(QMainWindow):
 
     def on_error(self, message: str) -> None:
         logger.error("Camera error: %s", message)
+
+    def _show_status(self, message: str, timeout_ms: int = 0) -> None:
+        if message:
+            self.statusBar().showMessage(message, timeout_ms)
+            self._status_log.appendPlainText(message)
+            self._append_status_log(message)
+
+    def _append_status_log(self, message: str) -> None:
+        if not message:
+            return
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = f"{timestamp} {message}\n"
+        path: Path = self._status_log_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(line)
+        except OSError as exc:
+            logger.warning("Failed to write status log: %s", exc)
+
+    def _open_status_log(self) -> None:
+        path: Path = self._status_log_path
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def on_serial_connected(self, serial_port) -> None:
         if self.serial_connection and self.serial_connection.is_open:
@@ -157,40 +197,15 @@ class Main(QMainWindow):
     def _setup_menus(self) -> None:
         app_menu = self.menuBar().addMenu("Application")
 
-        self._minimize_action = QAction("Minimize", self)
-        self._minimize_action.triggered.connect(self.showMinimized)
-        app_menu.addAction(self._minimize_action)
-
-        self._restore_action = QAction("Restore", self)
-        self._restore_action.triggered.connect(self.showNormal)
-        app_menu.addAction(self._restore_action)
-
-        self._maximize_action = QAction("Toggle Maximized", self)
-        self._maximize_action.setCheckable(True)
-        self._maximize_action.setChecked(True)
-        self._maximize_action.triggered.connect(self._toggle_maximized)
-
         settings_menu = self.menuBar().addMenu("Settings")
         settings_action = QAction("Settings…", self)
         settings_action.triggered.connect(self._open_settings_dialog)
         settings_menu.addAction(settings_action)
 
-        app_menu.addAction(self._maximize_action)
+        open_log_action = QAction("Open Status Log…", self)
+        open_log_action.triggered.connect(self._open_status_log)
+        app_menu.addAction(open_log_action)
 
-        if self._minimize_action is not None:
-            self._minimize_action.triggered.connect(
-                lambda: self._set_maximized_checked(False)
-            )
-        if self._restore_action is not None:
-            self._restore_action.triggered.connect(
-                lambda: self._set_maximized_checked(False)
-            )
-
-        self._close_action = QAction("Close", self)
-        self._close_action.triggered.connect(self.close)
-        app_menu.addAction(self._close_action)
-
-        self._update_maximize_action_state()
 
     def _apply_settings(self) -> None:
         if self.joystick_panel:
@@ -247,10 +262,16 @@ class Main(QMainWindow):
         if success:
             self.view.clear_target_cross()
         if message:
-            self.statusBar().showMessage(message, 5000)
+            self._show_status(message, 5000)
+
+    def on_autofocus_finished(self, success: bool, message: str) -> None:
+        if message:
+            self._show_status(message, 5000)
+        if not success:
+            logger.error("Autofocus failed: %s", message)
 
     def on_calibration_changed(self, mm_per_pixel_x: float, mm_per_pixel_y: float) -> None:
-        self.statusBar().showMessage(
+        self._show_status(
             f"Calibration: ΔX {mm_per_pixel_x:.6f} mm/px, ΔY {mm_per_pixel_y:.6f} mm/px",
             5000,
         )
@@ -269,11 +290,6 @@ class Main(QMainWindow):
         if self.serial_connection_panel:
             self.serial_connection_panel.shutdown()
         event.accept()
-
-    def changeEvent(self, event) -> None:  # type: ignore[override]
-        super().changeEvent(event)
-        if event.type() == QEvent.WindowStateChange:
-            QTimer.singleShot(0, self._update_maximize_action_state)
 
     def _create_dock_widgets(self) -> None:
         self.serial_connection_panel = SerialConnectionPanel(self)
@@ -296,6 +312,21 @@ class Main(QMainWindow):
             feedrates.rotary.default,
         )
         self.joystick_panel.set_serial(self.serial_connection)
+        self.joystick_panel.autofocus_requested.connect(
+            self.stage_controller.request_autofocus
+        )
+        self.joystick_panel.home_axis_requested.connect(
+            self.stage_controller.request_home_axis
+        )
+        self.joystick_panel.home_all_requested.connect(
+            self.stage_controller.request_home_all
+        )
+        self.stage_controller.homing_status_changed.connect(
+            self.joystick_panel.set_homing_status
+        )
+        self.joystick_panel.reset_requested.connect(
+            self.stage_controller.cancel_active_task
+        )
         self.joystick_dock = CollapsibleDockWidget("Joystick", self)
         self.joystick_dock.setObjectName("JoystickDock")
         self.joystick_dock.setWidget(self.joystick_panel)
@@ -318,23 +349,6 @@ class Main(QMainWindow):
         )
         self.addDockWidget(Qt.LeftDockWidgetArea, self.serial_terminal_dock)
         self.splitDockWidget(self.joystick_dock, self.serial_terminal_dock, Qt.Vertical)
-
-    def _set_maximized_checked(self, checked: bool) -> None:
-        if self._maximize_action:
-            block = self._maximize_action.blockSignals(True)
-            self._maximize_action.setChecked(checked)
-            self._maximize_action.blockSignals(block)
-
-    def _update_maximize_action_state(self) -> None:
-        self._set_maximized_checked(self.isMaximized())
-
-    def _toggle_maximized(self, checked: bool) -> None:
-        if checked:
-            self.showMaximized()
-        else:
-            self.showNormal()
-        self._update_maximize_action_state()
-
 
 def main() -> int:
     app = QApplication(sys.argv)

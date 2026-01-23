@@ -13,10 +13,18 @@ import numpy as np
 import serial
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QImage
+try:
+    from scipy import optimize as scipy_optimize
+except ImportError:  # pragma: no cover - optional dependency for autofocus
+    scipy_optimize = None
 
 
 class StageControllerError(RuntimeError):
     """Raised when the stage controller cannot complete an operation."""
+
+
+class AxisStateError(StageControllerError):
+    """Raised when axis state prevents the requested operation."""
 
 
 @dataclass
@@ -54,7 +62,8 @@ class MoveVector:
 @dataclass
 class _Status:
     state: str
-    position: Optional[tuple[float, float, float]] = None
+    position: Optional[tuple[float, ...]] = None
+    homed_axes: Optional[set[str]] = None
 
 
 class StageController(QObject):
@@ -63,6 +72,8 @@ class StageController(QObject):
     calibration_changed: Signal = Signal(float, float)
     movement_started: Signal = Signal()
     movement_finished: Signal = Signal(bool, str)
+    autofocus_finished: Signal = Signal(bool, str)
+    homing_status_changed: Signal = Signal(object)
     status_message: Signal = Signal(str)
 
     CALIBRATION_PIXEL_TARGET = 120.0
@@ -70,10 +81,25 @@ class StageController(QObject):
     CALIBRATION_STEP_MM = 0.2
     CALIBRATION_MAX_STEPS = 25
     DEFAULT_FEEDRATE = 600.0
+    AUTOFOCUS_RANGE_MM = 0.0
+    AUTOFOCUS_INITIAL_STEP_MM = 0.5
+    AUTOFOCUS_FINE_STEP_MM = 0.02
+    AUTOFOCUS_REFINEMENT_RANGE_MM = 2.0
+    AUTOFOCUS_SAMPLES = 2
+    AUTOFOCUS_ACCEPT_RATIO = 0.98
+    AUTOFOCUS_MAXFUN = 35
+    AUTOFOCUS_ANNEALING_MAXITER = 12
+    A_ZERO_TOLERANCE = 1e-3
 
     STATUS_PATTERN = re.compile(
-        r"<(?P<state>[A-Za-z]+)(?:\|[^>]*?MPos:(?P<mpos>-?\d+\.?\d*,-?\d+\.?\d*,-?\d+\.?\d*))?"
+        r"<(?P<state>[A-Za-z]+)(?:\|[^>]*?MPos:(?P<mpos>-?\d+\.?\d*(?:,-?\d+\.?\d*)*))?"
     )
+    AXIS_RANGE_PATTERN = re.compile(
+        r"^\[MSG:INFO: Axis (?P<axis>[A-Za-z]) \((?P<min>-?\d+\.?\d*),(?P<max>-?\d+\.?\d*)\)\]"
+    )
+    HOMED_PATTERN = re.compile(r"\|H:([A-Za-z]+)")
+    HOMED_MSG_PATTERN = re.compile(r"^\[MSG:Homed:(?P<axes>[A-Za-z]+)\]")
+    AXIS_INDEX = {"X": 0, "Y": 1, "Z": 2, "A": 3, "B": 4, "C": 5}
 
     def __init__(self) -> None:
         super().__init__()
@@ -84,6 +110,10 @@ class StageController(QObject):
         self._frame_condition = threading.Condition()
         self._task_lock = threading.Lock()
         self._active_thread: Optional[threading.Thread] = None
+        self._cancel_event = threading.Event()
+        self._axis_limits: dict[str, tuple[float, float]] = {}
+        self._homed_axes: set[str] = set()
+        self._relative_warning_emitted = False
 
     def set_serial(self, serial_connection: Optional[serial.Serial]) -> None:
         """Assign or clear the serial connection used for stage control."""
@@ -92,6 +122,18 @@ class StageController(QObject):
             self._serial = serial_connection
             if serial_connection is None or not serial_connection.is_open:
                 self._pixels_to_mm = None
+                self._axis_limits.clear()
+                self._update_homing_status(set())
+            else:
+                self._axis_limits.clear()
+                try:
+                    self._ensure_axis_limits(serial_connection)
+                    self.status_message.emit("Axis limits loaded from controller.")
+                except StageControllerError as exc:
+                    self._axis_limits.clear()
+                    self.status_message.emit(str(exc))
+                self._update_homing_status(set())
+                threading.Thread(target=self._poll_status_once, daemon=True).start()
 
     def shutdown(self) -> None:
         """Stop any outstanding background task before application exit."""
@@ -110,6 +152,15 @@ class StageController(QObject):
             self._frame_counter += 1
             self._frame_condition.notify_all()
 
+    def _poll_status_once(self) -> None:
+        serial_connection = self._serial
+        if serial_connection is None or not serial_connection.is_open:
+            return
+        try:
+            self._query_status(serial_connection)
+        except StageControllerError:
+            return
+
     def request_move(self, dx_pixels: float, dy_pixels: float) -> None:
         """Begin an asynchronous move so the clicked point aligns with the cross."""
 
@@ -117,6 +168,7 @@ class StageController(QObject):
             if self._active_thread and self._active_thread.is_alive():
                 self.status_message.emit("Stage is busy. Ignoring the new click.")
                 return
+            self._cancel_event.clear()
             thread = threading.Thread(
                 target=self._run_move,
                 args=(dx_pixels, dy_pixels),
@@ -124,6 +176,53 @@ class StageController(QObject):
             )
             self._active_thread = thread
             thread.start()
+
+    def request_autofocus(self) -> None:
+        """Begin an asynchronous autofocus sweep along the Z axis."""
+
+        with self._task_lock:
+            if self._active_thread and self._active_thread.is_alive():
+                self.status_message.emit("Stage is busy. Ignoring autofocus request.")
+                return
+            self._cancel_event.clear()
+            thread = threading.Thread(target=self._run_autofocus, daemon=True)
+            self._active_thread = thread
+            thread.start()
+
+    def request_home_axis(self, axis: str) -> None:
+        """Home a specific axis via a background task."""
+
+        axis = axis.upper().strip()
+        if not axis:
+            return
+        with self._task_lock:
+            if self._active_thread and self._active_thread.is_alive():
+                self.status_message.emit("Stage is busy. Ignoring home request.")
+                return
+            self._cancel_event.clear()
+            thread = threading.Thread(
+                target=self._run_home, args=(f"$H{axis}",), daemon=True
+            )
+            self._active_thread = thread
+            thread.start()
+
+    def request_home_all(self) -> None:
+        """Home all axes via a background task."""
+
+        with self._task_lock:
+            if self._active_thread and self._active_thread.is_alive():
+                self.status_message.emit("Stage is busy. Ignoring home request.")
+                return
+            self._cancel_event.clear()
+            thread = threading.Thread(target=self._run_home, args=("$H",), daemon=True)
+            self._active_thread = thread
+            thread.start()
+
+    def cancel_active_task(self, reason: str = "Operation cancelled.") -> None:
+        """Signal any active task to stop as soon as possible."""
+
+        self._cancel_event.set()
+        self.status_message.emit(reason)
 
     def is_busy(self) -> bool:
         """Return True when a background movement task is currently running."""
@@ -134,12 +233,14 @@ class StageController(QObject):
     def _run_move(self, dx_pixels: float, dy_pixels: float) -> None:
         self.movement_started.emit()
         try:
+            self._check_cancelled()
             serial_connection = self._serial
             if serial_connection is None or not serial_connection.is_open:
                 raise StageControllerError("Serial connection is not available.")
 
             self.status_message.emit("Ensuring calibration before movement…")
             self._ensure_calibration(serial_connection)
+            self._check_cancelled()
             if self._pixels_to_mm is None:
                 raise StageControllerError("Calibration failed. Cannot move stage.")
 
@@ -182,6 +283,140 @@ class StageController(QObject):
             with self._task_lock:
                 self._active_thread = None
 
+    def _run_autofocus(self) -> None:
+        self.movement_started.emit()
+        try:
+            serial_connection = self._serial
+            if serial_connection is None or not serial_connection.is_open:
+                raise StageControllerError("Serial connection is not available.")
+            if scipy_optimize is None:
+                raise StageControllerError(
+                    "SciPy is required for autofocus optimization. Please install it."
+                )
+            self._relative_warning_emitted = False
+
+            try:
+                self._ensure_axis_a_zero(serial_connection, allow_relative=True)
+            except AxisStateError as exc:
+                self.status_message.emit(str(exc))
+                self.status_message.emit("Autofocus: homing A axis.")
+                self._write_command(serial_connection, "$HA")
+                self._wait_for_ok(serial_connection)
+                self._wait_for_idle(serial_connection)
+                self._ensure_axis_a_zero(
+                    serial_connection, allow_missing_homing=True, allow_relative=True
+                )
+
+            self._ensure_axis_limits(serial_connection)
+            local_range = 1.0
+            fine_step = float(self.AUTOFOCUS_FINE_STEP_MM)
+            if fine_step <= 0:
+                raise StageControllerError("Autofocus parameters are invalid.")
+            with self._frame_condition:
+                frame_counter = self._frame_counter
+
+            status = self._query_status(serial_connection)
+            if status is None or status.position is None:
+                raise StageControllerError("Unable to read Z position for autofocus.")
+            self._require_homed_axes(status, {"Z"}, allow_relative=True)
+            start_z = float(status.position[2])
+            z_limits = self._axis_limits.get("Z")
+            if not z_limits:
+                raise StageControllerError("Z axis limits unavailable.")
+            min_z, max_z = z_limits
+            if start_z < min_z or start_z > max_z:
+                raise StageControllerError(
+                    f"Current Z position {start_z:.3f} is outside limits ({min_z:.3f}, {max_z:.3f})."
+                )
+            lower_limit = max(min_z - start_z, -local_range)
+            upper_limit = min(max_z - start_z, local_range)
+            if upper_limit <= lower_limit:
+                raise StageControllerError("Z axis range near current position is empty.")
+
+            current_offset = 0.0
+
+            def move_to_offset(target_offset: float, timeout: float = 3.0) -> np.ndarray:
+                nonlocal current_offset, frame_counter
+                self._check_cancelled()
+                target_offset = max(lower_limit, min(upper_limit, target_offset))
+                delta = target_offset - current_offset
+                if abs(delta) < 1e-6:
+                    frame, frame_counter = self._get_frame_snapshot(timeout=timeout)
+                else:
+                    self._send_relative_move(
+                        serial_connection, MoveVector(z=delta), allow_relative=True
+                    )
+                    frame, frame_counter = self._wait_for_new_frame(
+                        frame_counter, timeout=timeout
+                    )
+                if frame is None:
+                    raise StageControllerError(
+                        "Camera did not update during autofocus movement."
+                    )
+                current_offset = target_offset
+                return frame
+
+            def focus_at(offset: float) -> float:
+                offset = max(lower_limit, min(upper_limit, offset))
+                samples = max(1, int(self.AUTOFOCUS_SAMPLES))
+                total = 0.0
+                for _ in range(samples):
+                    frame = move_to_offset(offset, timeout=2.5)
+                    total += self._focus_metric(frame)
+                return total / samples
+
+            self.status_message.emit(
+                f"Autofocus: local search within ±{local_range:.3f} mm."
+            )
+            start_score = focus_at(0.0)
+
+            self.status_message.emit("Autofocus: local refinement.")
+            result = scipy_optimize.minimize_scalar(
+                lambda x: -focus_at(x),
+                bounds=(lower_limit, upper_limit),
+                method="bounded",
+                options={"xatol": fine_step, "maxiter": self.AUTOFOCUS_MAXFUN},
+            )
+            best_offset = float(result.x)
+            best_score = -float(result.fun)
+
+            if best_score < start_score * self.AUTOFOCUS_ACCEPT_RATIO:
+                move_to_offset(0.0, timeout=3.0)
+                message = (
+                    "Autofocus complete. Best focus was worse than start; kept current position."
+                )
+                self.autofocus_finished.emit(True, message)
+                return
+
+            move_to_offset(best_offset, timeout=3.0)
+            message = (
+                "Autofocus complete. "
+                f"Best score {best_score:.2f} at offset {best_offset:+.3f} mm."
+            )
+            self.autofocus_finished.emit(True, message)
+        except StageControllerError as exc:
+            self.autofocus_finished.emit(False, str(exc))
+        finally:
+            with self._task_lock:
+                self._active_thread = None
+
+    def _run_home(self, command: str) -> None:
+        self.movement_started.emit()
+        try:
+            serial_connection = self._serial
+            if serial_connection is None or not serial_connection.is_open:
+                raise StageControllerError("Serial connection is not available.")
+            self.status_message.emit(f"Homing: {command}")
+            self._write_command(serial_connection, command)
+            self._wait_for_ok(serial_connection, timeout=30.0)
+            self._wait_for_idle(serial_connection, timeout=30.0)
+            self.movement_finished.emit(True, "Homing complete.")
+        except StageControllerError as exc:
+            self.movement_finished.emit(False, str(exc))
+        finally:
+            with self._task_lock:
+                self._active_thread = None
+
     def _ensure_calibration(self, serial_connection: serial.Serial) -> None:
         if self._pixels_to_mm is not None:
             return
@@ -193,6 +428,7 @@ class StageController(QObject):
         start_status = self._query_status(serial_connection)
         if start_status is None or start_status.position is None:
             raise StageControllerError("Unable to read machine position for calibration.")
+        self._require_homed_axes(start_status, {"X", "Y"})
 
         origin = start_status.position
         try:
@@ -247,6 +483,7 @@ class StageController(QObject):
             status = self._query_status(serial_connection)
             if status is None or status.position is None:
                 raise StageControllerError("Unable to query position during calibration.")
+            self._require_homed_axes(status, {axis})
             current = status.position
             total_mm = current[index] - origin[index]
             shift_x, shift_y = self._estimate_shift(reference_frame, new_frame)
@@ -267,6 +504,7 @@ class StageController(QObject):
         status = self._query_status(serial_connection)
         if status is None or status.position is None:
             return
+        self._require_homed_axes(status, {"X", "Y"})
         current = status.position
         delta_x = origin[0] - current[0]
         delta_y = origin[1] - current[1]
@@ -313,10 +551,19 @@ class StageController(QObject):
         return (float(np.linalg.norm(column_x)), float(np.linalg.norm(column_y)))
 
     def _send_relative_move(
-        self, serial_connection: serial.Serial, move: MoveVector
+        self,
+        serial_connection: serial.Serial,
+        move: MoveVector,
+        *,
+        allow_relative: bool = False,
     ) -> None:
         if move.is_zero():
             return
+        self._ensure_axis_a_zero(serial_connection, allow_relative=allow_relative)
+        self._ensure_axis_limits(serial_connection)
+        self._check_relative_move_limits(
+            serial_connection, move, allow_relative=allow_relative
+        )
         self._write_command(serial_connection, "G21")
         self._wait_for_ok(serial_connection)
         self._write_command(serial_connection, "G91")
@@ -335,7 +582,98 @@ class StageController(QObject):
         self._wait_for_ok(serial_connection)
         self._wait_for_idle(serial_connection)
 
+    def _check_relative_move_limits(
+        self,
+        serial_connection: serial.Serial,
+        move: MoveVector,
+        *,
+        allow_relative: bool = False,
+    ) -> None:
+        if not self._axis_limits:
+            return
+        status = self._query_status(serial_connection)
+        if status is None or not status.position:
+            return
+        positions = status.position
+        requested_axes = {
+            axis for axis, delta in move.items() if abs(delta) >= 1e-6
+        }
+        if requested_axes:
+            self._require_homed_axes(
+                status, requested_axes, allow_relative=allow_relative
+            )
+        for axis, delta in move.items():
+            if abs(delta) < 1e-6:
+                continue
+            idx = self.AXIS_INDEX.get(axis)
+            if idx is None or idx >= len(positions):
+                continue
+            limits = self._axis_limits.get(axis)
+            if not limits:
+                continue
+            min_value, max_value = limits
+            target = positions[idx] + delta
+            if target < min_value or target > max_value:
+                raise StageControllerError(
+                    f"{axis} move {delta:+.3f} exceeds limits ({min_value:.3f}, {max_value:.3f})."
+                )
+
+    def _read_startup_limits(
+        self, serial_connection: serial.Serial, timeout: float = 3.5
+    ) -> None:
+        try:
+            serial_connection.reset_input_buffer()
+        except AttributeError:
+            pass
+        self._write_command(serial_connection, "$Startup/Show")
+        deadline = time.monotonic() + timeout
+        limits: dict[str, tuple[float, float]] | None = None
+        lines: list[str] = []
+        while time.monotonic() < deadline:
+            self._check_cancelled()
+            try:
+                raw = serial_connection.readline()
+            except serial.SerialException as exc:  # pragma: no cover - hardware interaction
+                raise StageControllerError(f"Serial read failed: {exc}") from exc
+            line = raw.decode("ascii", errors="ignore").strip()
+            if not line:
+                continue
+            lower = line.lower()
+            lines.append(line)
+            if lower == "ok":
+                break
+            if lower.startswith("alarm"):
+                raise StageControllerError(f"Controller alarm: {line}")
+            if lower.startswith("error") or line.startswith("[MSG:ERR:"):
+                raise StageControllerError(f"Controller reported: {line}")
+        limits = self._parse_startup_limits(lines)
+        if limits:
+            self._axis_limits.update(limits)
+
+    def _ensure_axis_limits(self, serial_connection: serial.Serial) -> None:
+        if not self._axis_limits:
+            self._read_startup_limits(serial_connection)
+        if not self._axis_limits:
+            raise StageControllerError("Axis limits unavailable from startup message.")
+
+    @staticmethod
+    def _parse_startup_limits(lines: list[str]) -> dict[str, tuple[float, float]]:
+        limits: dict[str, tuple[float, float]] = {}
+        for line in lines:
+            match = StageController.AXIS_RANGE_PATTERN.match(line)
+            if not match:
+                continue
+            axis = match.group("axis").upper()
+            try:
+                min_value = float(match.group("min"))
+                max_value = float(match.group("max"))
+            except ValueError:
+                continue
+            limits[axis] = (min_value, max_value)
+        return limits
+
     def _write_command(self, serial_connection: serial.Serial, command: str) -> None:
+        self._check_cancelled()
         data = (command.strip() + "\n").encode("ascii")
         try:
             serial_connection.write(data)
@@ -346,6 +684,7 @@ class StageController(QObject):
     def _wait_for_ok(self, serial_connection: serial.Serial, timeout: float = 5.0) -> None:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            self._check_cancelled()
             try:
                 raw = serial_connection.readline()
             except serial.SerialException as exc:  # pragma: no cover - hardware interaction
@@ -353,8 +692,19 @@ class StageController(QObject):
             line = raw.decode("ascii", errors="ignore").strip()
             if not line:
                 continue
+            homed_msg = self.HOMED_MSG_PATTERN.match(line)
+            if homed_msg:
+                axes = set(homed_msg.group("axes").upper())
+                if self._homed_axes:
+                    axes = set(self._homed_axes).union(axes)
+                self._update_homing_status(axes)
+                continue
             if line.lower() == "ok":
                 return
+            if line.lower().startswith("alarm"):
+                raise StageControllerError(f"Controller alarm: {line}")
+            if line.startswith("[MSG:ERR:"):
+                raise StageControllerError(f"Controller reported: {line}")
             if line.lower().startswith("error"):
                 raise StageControllerError(f"Controller reported: {line}")
         raise StageControllerError("Timeout waiting for controller acknowledgement.")
@@ -362,9 +712,12 @@ class StageController(QObject):
     def _wait_for_idle(self, serial_connection: serial.Serial, timeout: float = 10.0) -> None:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            self._check_cancelled()
             status = self._query_status(serial_connection)
             if status and status.state.lower() == "idle":
                 return
+            if status and status.state.lower() == "alarm":
+                raise StageControllerError("Controller entered ALARM state.")
             time.sleep(0.1)
         raise StageControllerError("Controller did not return to IDLE state in time.")
 
@@ -376,12 +729,22 @@ class StageController(QObject):
             raise StageControllerError(f"Serial query failed: {exc}") from exc
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            self._check_cancelled()
             try:
                 raw = serial_connection.readline()
             except serial.SerialException as exc:  # pragma: no cover - hardware interaction
                 raise StageControllerError(f"Serial read failed: {exc}") from exc
             line = raw.decode("ascii", errors="ignore").strip()
             if not line:
+                continue
+            if line.lower().startswith("alarm"):
+                raise StageControllerError(f"Controller alarm: {line}")
+            homed_msg = self.HOMED_MSG_PATTERN.match(line)
+            if homed_msg:
+                axes = set(homed_msg.group("axes").upper())
+                if self._homed_axes:
+                    axes = set(self._homed_axes).union(axes)
+                self._update_homing_status(axes)
                 continue
             match = self.STATUS_PATTERN.search(line)
             if not match:
@@ -392,12 +755,64 @@ class StageController(QObject):
             if mpos:
                 try:
                     coords = tuple(float(value) for value in mpos.split(","))
-                    if len(coords) == 3:
+                    if coords:
                         position = coords
                 except ValueError:
                     position = None
-            return _Status(state=state, position=position)
+            homed_axes = None
+            homed_match = self.HOMED_PATTERN.search(line)
+            if homed_match:
+                homed_axes = set(homed_match.group(1).upper())
+                self._update_homing_status(homed_axes)
+            return _Status(state=state, position=position, homed_axes=homed_axes)
         return None
+
+    def _require_homed_axes(
+        self, status: _Status, axes: set[str], *, allow_relative: bool = False
+    ) -> None:
+        effective_homed = status.homed_axes
+        if effective_homed is None and self._homed_axes:
+            effective_homed = set(self._homed_axes)
+        if effective_homed is None:
+            if allow_relative:
+                if not self._relative_warning_emitted:
+                    self.status_message.emit(
+                        "Homing status unavailable; using relative coordinates."
+                    )
+                    self._relative_warning_emitted = True
+                return
+            raise AxisStateError("Homing status unavailable; cannot read coordinates.")
+        missing = axes.difference(effective_homed)
+        if missing:
+            if allow_relative:
+                if not self._relative_warning_emitted:
+                    ordered = ", ".join(sorted(missing))
+                    self.status_message.emit(
+                        f"Axes not homed: {ordered}. Using relative coordinates."
+                    )
+                    self._relative_warning_emitted = True
+                return
+            ordered = ", ".join(sorted(missing))
+            raise AxisStateError(f"Axes not homed: {ordered}.")
+
+    def _ensure_axis_a_zero(
+        self,
+        serial_connection: serial.Serial,
+        *,
+        allow_missing_homing: bool = False,
+        allow_relative: bool = False,
+    ) -> None:
+        status = self._query_status(serial_connection)
+        if status is None or status.position is None:
+            raise AxisStateError("Unable to read A axis position.")
+        if not allow_missing_homing:
+            self._require_homed_axes(status, {"A"}, allow_relative=allow_relative)
+        idx = self.AXIS_INDEX.get("A")
+        if idx is None or idx >= len(status.position):
+            raise AxisStateError("A axis position unavailable.")
+        a_position = float(status.position[idx])
+        if abs(a_position) > self.A_ZERO_TOLERANCE:
+            raise AxisStateError(f"A axis not at zero (A={a_position:.3f}).")
 
     def _get_frame_snapshot(
         self, timeout: float = 2.0
@@ -416,6 +831,7 @@ class StageController(QObject):
         with self._frame_condition:
             deadline = time.monotonic() + timeout
             while self._frame_counter <= previous_counter:
+                self._check_cancelled()
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return (None, self._frame_counter)
@@ -431,6 +847,21 @@ class StageController(QObject):
         window = cv2.createHanningWindow((a.shape[1], a.shape[0]), cv2.CV_32F)
         (shift_x, shift_y), _ = cv2.phaseCorrelate(a, b, window)
         return float(shift_x), float(-shift_y)
+
+    @staticmethod
+    def _focus_metric(frame: np.ndarray) -> float:
+        lap = cv2.Laplacian(frame, cv2.CV_64F)
+        return float(lap.var())
+
+    def _check_cancelled(self) -> None:
+        if self._cancel_event.is_set():
+            raise StageControllerError("Operation cancelled.")
+
+    def _update_homing_status(self, homed_axes: set[str]) -> None:
+        if homed_axes == self._homed_axes:
+            return
+        self._homed_axes = set(homed_axes)
+        self.homing_status_changed.emit(set(self._homed_axes))
 
     @staticmethod
     def _qimage_to_gray(image: QImage) -> np.ndarray:

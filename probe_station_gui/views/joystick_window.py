@@ -6,8 +6,8 @@ import logging
 from typing import Dict, List, Optional, Tuple
 
 import serial
-from PySide6.QtCore import QEvent, QTimer, Qt
-from PySide6.QtGui import QCloseEvent, QDoubleValidator
+from PySide6.QtCore import QEvent, QRectF, QTimer, Qt, Signal
+from PySide6.QtGui import QColor, QCloseEvent, QDoubleValidator, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
@@ -31,8 +31,44 @@ from probe_station_gui.settings_manager import CONTROL_ACTIONS, KeyBinding
 logger = logging.getLogger(__name__)
 
 
+class _SpinnerOverlay(QWidget):
+    """Lightweight spinner overlay drawn with QPainter."""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self._angle = 0
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+
+    def set_angle(self, angle: int) -> None:
+        self._angle = angle % 360
+        self.update()
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        size = min(self.width(), self.height())
+        if size <= 8:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        rect = QRectF(3, 3, self.width() - 6, self.height() - 6)
+        bg_pen = QPen(QColor("#bdbdbd"), 2)
+        bg_pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(bg_pen)
+        painter.drawEllipse(rect)
+        pen = QPen(QColor("#1565c0"), 2)
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
+        painter.drawArc(rect, int(self._angle * 16), int(120 * 16))
+
+
 class JoystickWindow(QWidget):
     """Widget that provides directional jogging controls."""
+
+    autofocus_requested = Signal()
+    reset_requested = Signal()
+    home_axis_requested = Signal(str)
+    home_all_requested = Signal()
 
     JOG_DISTANCE_MM = 10.0
     ROTATE_DISTANCE_DEG = 5.0
@@ -55,6 +91,24 @@ class JoystickWindow(QWidget):
     CUSTOM_FEED_LABEL = "Custom..."
     LINEAR_AXES = {"X", "Y", "Z"}
     ROTATIONAL_AXES = {"A", "B", "C"}
+    HOMING_AXES = ("X", "Y", "Z", "A")
+    HOMED_STYLE = (
+        "QPushButton { padding: 2px 6px; border-radius: 4px; background: #1565c0; color: #f5f5f5; }"
+        "QPushButton:pressed { background: #0d47a1; }"
+        "QPushButton:checked { background: #1565c0; }"
+        "QPushButton[homing=\"true\"] { background: #e6e6e6; color: #9e9e9e; border: 1px solid #cfcfcf; }"
+        "QPushButton[homing=\"true\"]:pressed { background: #e0e0e0; }"
+        "QPushButton:disabled { color: #9e9e9e; }"
+    )
+    NOT_HOMED_STYLE = (
+        "QPushButton { padding: 2px 6px; border-radius: 4px; background: #f0b429; color: #1f1f1f; }"
+        "QPushButton:pressed { background: #d89b19; }"
+        "QPushButton:checked { background: #f0b429; }"
+        "QPushButton[homing=\"true\"] { background: #e6e6e6; color: #9e9e9e; border: 1px solid #cfcfcf; }"
+        "QPushButton[homing=\"true\"]:pressed { background: #e0e0e0; }"
+        "QPushButton:disabled { color: #9e9e9e; }"
+    )
+    ALL_HOMED_STYLE = HOMED_STYLE
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -68,6 +122,14 @@ class JoystickWindow(QWidget):
         self._rotary_presets: List[float] = list(self.DEFAULT_ROTARY_FEEDRATE_PRESETS)
         self._linear_default: float = 1.0
         self._rotary_default: float = 1.0
+        self._homing_buttons: dict[str, QPushButton] = {}
+        self._homing_targets: dict[str, QPushButton] = {}
+        self._homing_text: dict[str, str] = {}
+        self._homing_overlays: dict[str, _SpinnerOverlay] = {}
+        self._homing_spinner_angle = 0
+        self._homing_animation_timer = QTimer(self)
+        self._homing_animation_timer.setInterval(90)
+        self._homing_animation_timer.timeout.connect(self._advance_homing_spinner)
         self.apply_control_bindings({})
         self._event_filter_installed = False
         self._event_filter_retry_scheduled = False
@@ -132,6 +194,18 @@ class JoystickWindow(QWidget):
 
         root_layout.addLayout(grid_layout)
 
+        focus_layout = QHBoxLayout()
+        focus_layout.addStretch(1)
+        focus_layout.addWidget(QLabel("Focus (Z):", self))
+        self.focus_down_button = QPushButton("Z-", self)
+        self.focus_up_button = QPushButton("Z+", self)
+        self.focus_down_button.setToolTip("Focus down (Z-)")
+        self.focus_up_button.setToolTip("Focus up (Z+)")
+        focus_layout.addWidget(self.focus_down_button)
+        focus_layout.addWidget(self.focus_up_button)
+        focus_layout.addStretch(1)
+        root_layout.addLayout(focus_layout)
+
         rotate_layout = QHBoxLayout()
         rotate_layout.addStretch(1)
         rotate_layout.addWidget(QLabel("Rotate B:", self))
@@ -156,15 +230,30 @@ class JoystickWindow(QWidget):
         self.rotate_negative_button.released.connect(self.stop_jog)
         self.rotate_positive_button.pressed.connect(lambda: self.start_jog("B", 1))
         self.rotate_positive_button.released.connect(self.stop_jog)
+        self.focus_down_button.pressed.connect(lambda: self.start_jog("Z", -1))
+        self.focus_down_button.released.connect(self.stop_jog)
+        self.focus_up_button.pressed.connect(lambda: self.start_jog("Z", 1))
+        self.focus_up_button.released.connect(self.stop_jog)
 
-        home_layout = QHBoxLayout()
-        self.home_all_button = QPushButton("Home All", self)
-        self.home_xy_button = QPushButton("Home XY", self)
-        self.home_z_button = QPushButton("Home Z", self)
-        home_layout.addWidget(self.home_all_button)
-        home_layout.addWidget(self.home_xy_button)
-        home_layout.addWidget(self.home_z_button)
-        root_layout.addLayout(home_layout)
+        homing_layout = QHBoxLayout()
+        homing_layout.addWidget(QLabel("Homing:", self))
+        for axis in self.HOMING_AXES:
+            button = QPushButton(axis, self)
+            button.setFixedSize(28, 28)
+            button.setCheckable(True)
+            button.setToolTip(f"Home {axis}")
+            button.clicked.connect(lambda checked=False, axis=axis: self._home_axis(axis))
+            self._set_homing_button_state(button, False, all_homed=False)
+            homing_layout.addWidget(button)
+            self._homing_buttons[axis] = button
+        self.home_all_button = QPushButton("ALL", self)
+        self.home_all_button.setFixedSize(42, 28)
+        self.home_all_button.setCheckable(True)
+        self.home_all_button.setToolTip("Home all axes")
+        self.home_all_button.clicked.connect(self._home_all)
+        self._set_homing_button_state(self.home_all_button, False, all_homed=False)
+        homing_layout.addWidget(self.home_all_button)
+        root_layout.addLayout(homing_layout)
 
         safety_layout = QHBoxLayout()
         self.unlock_button = QPushButton("Unlock", self)
@@ -173,9 +262,11 @@ class JoystickWindow(QWidget):
         safety_layout.addWidget(self.reset_button)
         root_layout.addLayout(safety_layout)
 
-        self.home_all_button.clicked.connect(lambda: self.send_command("$H\n"))
-        self.home_xy_button.clicked.connect(self._home_xy)
-        self.home_z_button.clicked.connect(lambda: self.send_command("$HZ\n"))
+        self.autofocus_button = QPushButton("Autofocus", self)
+        self.autofocus_button.setToolTip("Run Z-axis autofocus sweep")
+        self.autofocus_button.clicked.connect(self.autofocus_requested.emit)
+        root_layout.addWidget(self.autofocus_button)
+
         self.unlock_button.clicked.connect(lambda: self.send_command("$X\n"))
         self.reset_button.clicked.connect(self._send_reset)
 
@@ -418,6 +509,9 @@ class JoystickWindow(QWidget):
         else:
             self.status_label.setText("Disconnected")
             logger.info("Joystick disconnected from serial link")
+            self._stop_homing_animation("ALL")
+            for axis in self.HOMING_AXES:
+                self._stop_homing_animation(axis)
         self._update_enabled_state()
 
     def _update_enabled_state(self) -> None:
@@ -433,13 +527,16 @@ class JoystickWindow(QWidget):
             self.right_button,
             self.rotate_negative_button,
             self.rotate_positive_button,
+            self.focus_down_button,
+            self.focus_up_button,
             self.home_all_button,
-            self.home_xy_button,
-            self.home_z_button,
             self.unlock_button,
             self.reset_button,
+            self.autofocus_button,
         ):
             widget.setEnabled(enabled)
+        for button in self._homing_buttons.values():
+            button.setEnabled(enabled)
 
     def start_jog(self, axis: str, direction: int) -> None:
         logger.debug("Start jog requested: axis=%s direction=%s", axis, direction)
@@ -583,11 +680,93 @@ class JoystickWindow(QWidget):
         logger.debug("Active keys mapped to axes: %s", axes)
         self._apply_axes(axes)
 
-    def _home_xy(self) -> None:
-        self.send_command("$HX\n")
-        self.send_command("$HY\n")
+    def set_homing_status(self, homed_axes: set[str]) -> None:
+        active_axes = set(homed_axes).intersection(self.HOMING_AXES)
+        all_homed = active_axes == set(self.HOMING_AXES)
+        for axis, button in self._homing_buttons.items():
+            if axis in active_axes:
+                self._stop_homing_animation(axis)
+                self._set_homing_button_state(button, True, all_homed=all_homed)
+            elif axis not in self._homing_targets:
+                self._set_homing_button_state(button, False, all_homed=all_homed)
+        if all_homed:
+            self._stop_homing_animation("ALL")
+            self._set_homing_button_state(self.home_all_button, True, all_homed=True)
+        elif "ALL" not in self._homing_targets:
+            self._set_homing_button_state(self.home_all_button, False, all_homed=False)
+
+    def _set_homing_button_state(
+        self, button: QPushButton, homed: bool, *, all_homed: bool = False
+    ) -> None:
+        button.setProperty("homing", False)
+        button.setProperty("all_homed", all_homed)
+        button.setChecked(False)
+        if all_homed:
+            button.setStyleSheet(self.ALL_HOMED_STYLE)
+        else:
+            button.setStyleSheet(self.HOMED_STYLE if homed else self.NOT_HOMED_STYLE)
+
+    def _home_all(self) -> None:
+        self._start_homing_animation("ALL", self.home_all_button)
+        self.home_all_requested.emit()
+
+    def _home_axis(self, axis: str) -> None:
+        button = self._homing_buttons.get(axis)
+        if button is not None:
+            self._start_homing_animation(axis, button)
+        self.home_axis_requested.emit(axis)
+
+    def _start_homing_animation(self, key: str, button: QPushButton) -> None:
+        if key in self._homing_targets:
+            return
+        base_text = button.text()
+        self._homing_targets[key] = button
+        self._homing_text[key] = base_text
+        overlay = _SpinnerOverlay(button)
+        overlay.setGeometry(button.rect())
+        overlay.show()
+        overlay.raise_()
+        self._homing_overlays[key] = overlay
+        button.setProperty("homing", True)
+        button.setChecked(True)
+        button.setEnabled(False)
+        button.setStyleSheet(button.styleSheet())
+        self._advance_homing_spinner()
+        if not self._homing_animation_timer.isActive():
+            self._homing_animation_timer.start()
+
+    def _stop_homing_animation(self, key: str) -> None:
+        button = self._homing_targets.pop(key, None)
+        base_text = self._homing_text.pop(key, None)
+        overlay = self._homing_overlays.pop(key, None)
+        if button is None:
+            return
+        button.setProperty("homing", False)
+        button.setChecked(False)
+        if not self._homing_targets:
+            button.setEnabled(True)
+        if base_text is not None:
+            button.setText(base_text)
+        if overlay is not None:
+            overlay.hide()
+            overlay.deleteLater()
+        button.setStyleSheet(button.styleSheet())
+        button.setEnabled(True)
+        if not self._homing_targets:
+            self._homing_animation_timer.stop()
+            self._homing_spinner_angle = 0
+
+    def _advance_homing_spinner(self) -> None:
+        if not self._homing_targets:
+            return
+        self._homing_spinner_angle = (self._homing_spinner_angle + 30) % 360
+        for key in self._homing_targets:
+            overlay = self._homing_overlays.get(key)
+            if overlay is not None:
+                overlay.set_angle(self._homing_spinner_angle)
 
     def _send_reset(self) -> None:
+        self.reset_requested.emit()
         self.send_command(b"\x18")
 
     def send_command(self, command: str | bytes) -> None:
@@ -679,13 +858,6 @@ class JoystickWindow(QWidget):
         window = self.window()
         if window is None or not window.isActiveWindow():
             logger.debug("Ignoring global key event because joystick window is not active")
-            return False
-        focus_widget = window.focusWidget()
-        if focus_widget is not None and self._is_text_entry_widget(focus_widget):
-            logger.debug(
-                "Ignoring global key event because focus widget %s expects text",
-                focus_widget.objectName() or focus_widget.__class__.__name__,
-            )
             return False
         if isinstance(obj, QWidget) and self._is_text_entry_widget(obj):
             logger.debug(
