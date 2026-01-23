@@ -25,14 +25,5 @@ pip install -e .
 python main.py
 ```
 
-## Notes
-- Settings live in `probe_station_gui/default_settings.json` and a user config dir (see `SettingsManager._determine_config_dir`).
-- Autofocus uses SciPy and does a local Z search.
-
-## Development
-- Avoid running hardware-dependent code in automation.
-- When changing serial behavior, review both `StageController` and `SerialTerminalWindow`.
-- Keep `SettingsManager`, `settings_dialog.py`, and `joystick_window.py` in sync when updating controls/feedrates.
-
 ## License
 TBD
