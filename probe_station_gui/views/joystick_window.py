@@ -71,6 +71,8 @@ class JoystickWindow(QWidget):
     reset_requested = Signal()
     home_axis_requested = Signal(str)
     home_all_requested = Signal()
+    needles_raise_requested = Signal()
+    needles_lower_requested = Signal()
 
     JOG_DISTANCE_MM = 10.0
     ROTATE_DISTANCE_DEG = 5.0
@@ -111,6 +113,22 @@ class JoystickWindow(QWidget):
         "QPushButton:disabled { color: #9e9e9e; }"
     )
     ALL_HOMED_STYLE = HOMED_STYLE
+    NEEDLES_UP_STYLE = (
+        "QPushButton { padding: 2px 6px; border-radius: 4px; background: #1565c0; color: #f5f5f5; }"
+        "QPushButton:pressed { background: #0d47a1; }"
+        "QPushButton:checked { background: #1565c0; }"
+        "QPushButton[homing=\"true\"] { background: #e6e6e6; color: #9e9e9e; border: 1px solid #cfcfcf; }"
+        "QPushButton[homing=\"true\"]:pressed { background: #e0e0e0; }"
+        "QPushButton:disabled { color: #9e9e9e; }"
+    )
+    NEEDLES_DOWN_STYLE = (
+        "QPushButton { padding: 2px 6px; border-radius: 4px; background: #f0b429; color: #1f1f1f; }"
+        "QPushButton:pressed { background: #d89b19; }"
+        "QPushButton:checked { background: #f0b429; }"
+        "QPushButton[homing=\"true\"] { background: #e6e6e6; color: #9e9e9e; border: 1px solid #cfcfcf; }"
+        "QPushButton[homing=\"true\"]:pressed { background: #e0e0e0; }"
+        "QPushButton:disabled { color: #9e9e9e; }"
+    )
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -131,9 +149,18 @@ class JoystickWindow(QWidget):
         self._homing_overlays: dict[str, _SpinnerOverlay] = {}
         self._homing_spinner_angle = 0
         self._axis_a_ready = False
+        self._needles_known = False
+        self._needles_up = False
+        self._needle_targets: dict[str, QPushButton] = {}
+        self._needle_text: dict[str, str] = {}
+        self._needle_overlays: dict[str, _SpinnerOverlay] = {}
+        self._needle_spinner_angle = 0
         self._homing_animation_timer = QTimer(self)
         self._homing_animation_timer.setInterval(90)
         self._homing_animation_timer.timeout.connect(self._advance_homing_spinner)
+        self._needle_animation_timer = QTimer(self)
+        self._needle_animation_timer.setInterval(90)
+        self._needle_animation_timer.timeout.connect(self._advance_needle_spinner)
         self.apply_control_bindings({})
         self._event_filter_installed = False
         self._event_filter_retry_scheduled = False
@@ -259,6 +286,25 @@ class JoystickWindow(QWidget):
         homing_layout.addWidget(self.home_all_button)
         root_layout.addLayout(homing_layout)
 
+        needles_layout = QHBoxLayout()
+        needles_layout.addWidget(QLabel("Needles:", self))
+        self.needles_raise_button = QPushButton("Raise", self)
+        self.needles_lower_button = QPushButton("Lower", self)
+        self.needles_raise_button.setCheckable(True)
+        self.needles_lower_button.setCheckable(True)
+        self.needles_raise_button.setToolTip("Raise needles (home A)")
+        self.needles_lower_button.setToolTip("Lower needles (calibrated)")
+        self.needles_raise_button.clicked.connect(self._raise_needles)
+        self.needles_lower_button.clicked.connect(self._lower_needles)
+        needles_layout.addWidget(self.needles_raise_button)
+        needles_layout.addWidget(self.needles_lower_button)
+        root_layout.addLayout(needles_layout)
+
+        self.needles_status = QLabel("Needles: unknown", self)
+        self.needles_status.setAlignment(Qt.AlignCenter)
+        self.needles_status.setFixedHeight(18)
+        root_layout.addWidget(self.needles_status)
+
         safety_layout = QHBoxLayout()
         self.unlock_button = QPushButton("Unlock", self)
         self.reset_button = QPushButton("Reset", self)
@@ -276,6 +322,7 @@ class JoystickWindow(QWidget):
 
         root_layout.addStretch(1)
         self._update_enabled_state()
+        self.set_needles_state(False, False)
 
     def _install_event_filter(self) -> None:
         if self._event_filter_installed:
@@ -527,6 +574,8 @@ class JoystickWindow(QWidget):
             self.rotary_feedrate_combo,
             self.rotary_custom_feedrate_edit,
             self.home_all_button,
+            self.needles_raise_button,
+            self.needles_lower_button,
             self.unlock_button,
             self.reset_button,
         ):
@@ -553,17 +602,44 @@ class JoystickWindow(QWidget):
             self._key_stack.clear()
         self._update_enabled_state()
 
+    def set_needles_state(self, raised: bool, known: bool) -> None:
+        self._needles_up = raised
+        self._needles_known = known
+        if raised and known:
+            self.needles_raise_button.setStyleSheet(self.NEEDLES_UP_STYLE)
+            self.needles_lower_button.setStyleSheet(self.NEEDLES_DOWN_STYLE)
+            self.needles_status.setText("Needles: up")
+            self.needles_status.setStyleSheet(
+                "QLabel { background: #2e7d32; color: #f5f5f5; border-radius: 3px; padding: 2px; }"
+            )
+        else:
+            self.needles_raise_button.setStyleSheet(self.NEEDLES_DOWN_STYLE)
+            self.needles_lower_button.setStyleSheet(self.NEEDLES_DOWN_STYLE)
+            if known:
+                self.needles_status.setText("Needles: down")
+            else:
+                self.needles_status.setText("Needles: unknown")
+            self.needles_status.setStyleSheet(
+                "QLabel { background: #f0b429; color: #1f1f1f; border-radius: 3px; padding: 2px; }"
+            )
+
+    def set_needles_action_started(self, action: str) -> None:
+        if action == "raise":
+            self._start_needle_animation("raise", self.needles_raise_button)
+        elif action == "lower":
+            self._start_needle_animation("lower", self.needles_lower_button)
+
+    def set_needles_action_finished(self, success: bool, message: str, action: str) -> None:
+        if action == "raise":
+            self._stop_needle_animation("raise")
+        elif action == "lower":
+            self._stop_needle_animation("lower")
+        if not success:
+            self._show_warning(message)
+
     def _move_safety_check(self) -> bool:
-        if self.stage_controller is None:
-            if not self._axis_a_ready:
-                logger.debug("Jog blocked because A axis is not homed/zero")
-                return False
-            return True
-        try:
-            self.stage_controller.check_motion_safety()
-        except Exception as exc:  # StageControllerError: avoid circular import
-            self._show_warning(str(exc))
-            logger.debug("Jog blocked by safety check: %s", exc)
+        if not self._axis_a_ready:
+            logger.debug("Jog blocked because A axis is not homed/zero")
             return False
         return True
 
@@ -753,6 +829,14 @@ class JoystickWindow(QWidget):
             self._start_homing_animation(axis, button)
         self.home_axis_requested.emit(axis)
 
+    def _raise_needles(self) -> None:
+        self._start_needle_animation("raise", self.needles_raise_button)
+        self.needles_raise_requested.emit()
+
+    def _lower_needles(self) -> None:
+        self._start_needle_animation("lower", self.needles_lower_button)
+        self.needles_lower_requested.emit()
+
     def _start_homing_animation(self, key: str, button: QPushButton) -> None:
         if key in self._homing_targets:
             return
@@ -801,6 +885,58 @@ class JoystickWindow(QWidget):
             overlay = self._homing_overlays.get(key)
             if overlay is not None:
                 overlay.set_angle(self._homing_spinner_angle)
+
+    def _start_needle_animation(self, key: str, button: QPushButton) -> None:
+        if key in self._needle_targets:
+            return
+        base_text = button.text()
+        self._needle_targets[key] = button
+        self._needle_text[key] = base_text
+        overlay = _SpinnerOverlay(button)
+        overlay.setGeometry(button.rect())
+        overlay.show()
+        overlay.raise_()
+        self._needle_overlays[key] = overlay
+        button.setProperty("homing", True)
+        button.setChecked(True)
+        self.needles_raise_button.setEnabled(False)
+        self.needles_lower_button.setEnabled(False)
+        button.setStyleSheet(button.styleSheet())
+        self._advance_needle_spinner()
+        if not self._needle_animation_timer.isActive():
+            self._needle_animation_timer.start()
+
+    def stop_needle_animation(self) -> None:
+        for key in list(self._needle_targets.keys()):
+            self._stop_needle_animation(key)
+
+    def _stop_needle_animation(self, key: str) -> None:
+        button = self._needle_targets.pop(key, None)
+        base_text = self._needle_text.pop(key, None)
+        overlay = self._needle_overlays.pop(key, None)
+        if button is None:
+            return
+        button.setProperty("homing", False)
+        button.setChecked(False)
+        if base_text is not None:
+            button.setText(base_text)
+        if overlay is not None:
+            overlay.hide()
+            overlay.deleteLater()
+        button.setStyleSheet(button.styleSheet())
+        if not self._needle_targets:
+            self._needle_animation_timer.stop()
+            self._needle_spinner_angle = 0
+            self._update_enabled_state()
+
+    def _advance_needle_spinner(self) -> None:
+        if not self._needle_targets:
+            return
+        self._needle_spinner_angle = (self._needle_spinner_angle + 30) % 360
+        for key in self._needle_targets:
+            overlay = self._needle_overlays.get(key)
+            if overlay is not None:
+                overlay.set_angle(self._needle_spinner_angle)
 
     def _send_reset(self) -> None:
         self.reset_requested.emit()
@@ -878,7 +1014,13 @@ class JoystickWindow(QWidget):
                 modifiers_value,
                 source_name,
             )
-        if event.type() in (QEvent.KeyPress, QEvent.ShortcutOverride):
+        if event.type() == QEvent.ShortcutOverride:
+            if self._should_process_global_event(obj):
+                identifier, mapping = self._mapping_from_event(event)
+                if identifier and mapping:
+                    event.accept()
+                    return True
+        elif event.type() == QEvent.KeyPress:
             if self._should_process_global_event(obj) and self._handle_key_press_event(event):
                 event.accept()
                 return True
@@ -912,9 +1054,10 @@ class JoystickWindow(QWidget):
         return True
 
     def _handle_key_press_event(self, event) -> bool:
-        if not self._move_safety_check():
-            event.ignore()
-            return True
+        if not self._key_stack:
+            if not self._move_safety_check():
+                event.ignore()
+                return True
         if event.isAutoRepeat():
             event.ignore()
             logger.debug(
@@ -947,9 +1090,6 @@ class JoystickWindow(QWidget):
         return False
 
     def _handle_key_release_event(self, event) -> bool:
-        if not self._move_safety_check():
-            event.ignore()
-            return True
         if event.isAutoRepeat():
             event.ignore()
             logger.debug(

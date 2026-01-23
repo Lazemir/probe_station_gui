@@ -75,6 +75,9 @@ class StageController(QObject):
     autofocus_finished: Signal = Signal(bool, str)
     homing_status_changed: Signal = Signal(object)
     axis_a_ready_changed: Signal = Signal(bool)
+    needles_state_changed: Signal = Signal(bool, bool)
+    needles_action_started: Signal = Signal(str)
+    needles_action_finished: Signal = Signal(bool, str, str)
     status_message: Signal = Signal(str)
 
     CALIBRATION_PIXEL_TARGET = 120.0
@@ -116,6 +119,9 @@ class StageController(QObject):
         self._homed_axes: set[str] = set()
         self._relative_warning_emitted = False
         self._axis_a_ready = False
+        self._needles_up = False
+        self._needles_known = False
+        self._needle_down_offset: Optional[float] = None
 
     def set_serial(self, serial_connection: Optional[serial.Serial]) -> None:
         """Assign or clear the serial connection used for stage control."""
@@ -126,7 +132,7 @@ class StageController(QObject):
                 self._pixels_to_mm = None
                 self._axis_limits.clear()
                 self._update_homing_status(set())
-                self._update_axis_a_ready(False)
+                self._set_needles_state(False, known=False)
             else:
                 self._axis_limits.clear()
                 try:
@@ -136,7 +142,7 @@ class StageController(QObject):
                     self._axis_limits.clear()
                     self.status_message.emit(str(exc))
                 self._update_homing_status(set())
-                self._update_axis_a_ready(False)
+                self._set_needles_state(False, known=False)
                 threading.Thread(target=self._poll_status_once, daemon=True).start()
 
     def check_motion_safety(self) -> None:
@@ -145,7 +151,7 @@ class StageController(QObject):
         serial_connection = self._serial
         if serial_connection is None or not serial_connection.is_open:
             raise StageControllerError("Serial connection is not available.")
-        self._move_safety_check(serial_connection)
+        self._move_safety_check()
 
     def shutdown(self) -> None:
         """Stop any outstanding background task before application exit."""
@@ -230,6 +236,41 @@ class StageController(QObject):
             self._active_thread = thread
             thread.start()
 
+    def request_needles_raise(self) -> None:
+        """Raise the needles by homing the A axis."""
+
+        with self._task_lock:
+            if self._active_thread and self._active_thread.is_alive():
+                self.status_message.emit("Stage is busy. Ignoring needle raise request.")
+                return
+            self._cancel_event.clear()
+            thread = threading.Thread(
+                target=self._run_needles_action, args=("raise",), daemon=True
+            )
+            self._active_thread = thread
+            thread.start()
+
+    def request_needles_lower(self) -> None:
+        """Lower the needles to the calibrated down position."""
+
+        with self._task_lock:
+            if self._active_thread and self._active_thread.is_alive():
+                self.status_message.emit("Stage is busy. Ignoring needle lower request.")
+                return
+            self._cancel_event.clear()
+            thread = threading.Thread(
+                target=self._run_needles_action, args=("lower",), daemon=True
+            )
+            self._active_thread = thread
+            thread.start()
+
+    def invalidate_needles_state(self, reason: str = "") -> None:
+        """Mark needles state unknown after manual A-axis changes."""
+
+        if reason:
+            self.status_message.emit(reason)
+        self._set_needles_state(False, known=False)
+
     def cancel_active_task(self, reason: str = "Operation cancelled.") -> None:
         """Signal any active task to stop as soon as possible."""
 
@@ -249,7 +290,7 @@ class StageController(QObject):
             serial_connection = self._serial
             if serial_connection is None or not serial_connection.is_open:
                 raise StageControllerError("Serial connection is not available.")
-            self._move_safety_check(serial_connection)
+            self._move_safety_check()
 
             self.status_message.emit("Ensuring calibration before movement…")
             self._ensure_calibration(serial_connection)
@@ -307,17 +348,13 @@ class StageController(QObject):
                     "SciPy is required for autofocus optimization. Please install it."
                 )
             self._relative_warning_emitted = False
-            self._move_safety_check(serial_connection)
-
-            try:
-                self._ensure_axis_a_zero(serial_connection)
-            except AxisStateError as exc:
-                self.status_message.emit(str(exc))
+            if not self._needles_up:
                 self.status_message.emit("Autofocus: homing A axis.")
                 self._write_command(serial_connection, "$HA")
                 self._wait_for_ok(serial_connection, timeout=30.0)
                 self._wait_for_idle(serial_connection, timeout=30.0)
-                self._ensure_axis_a_zero(serial_connection)
+                self._set_needles_state(True, known=True)
+            self._move_safety_check()
 
             self._ensure_axis_limits(serial_connection)
             local_range = 1.0
@@ -422,6 +459,8 @@ class StageController(QObject):
             self._write_command(serial_connection, command)
             self._wait_for_ok(serial_connection, timeout=30.0)
             self._wait_for_idle(serial_connection, timeout=30.0)
+            if command.upper() in ("$H", "$HA"):
+                self._set_needles_state(True, known=True)
             self.movement_finished.emit(True, "Homing complete.")
         except StageControllerError as exc:
             self.movement_finished.emit(False, str(exc))
@@ -526,6 +565,49 @@ class StageController(QObject):
         self.status_message.emit("Returning stage to calibration origin…")
         self._send_relative_move(serial_connection, move)
 
+    def _run_needles_action(self, action: str) -> None:
+        self.needles_action_started.emit(action)
+        try:
+            serial_connection = self._serial
+            if serial_connection is None or not serial_connection.is_open:
+                raise StageControllerError("Serial connection is not available.")
+            if action == "raise":
+                self.status_message.emit("Needles: raising (home A).")
+                self._write_command(serial_connection, "$HA")
+                self._wait_for_ok(serial_connection, timeout=30.0)
+                self._wait_for_idle(serial_connection, timeout=30.0)
+                self._set_needles_state(True, known=True)
+                self.needles_action_finished.emit(True, "Needles raised.", action)
+                return
+            if action == "lower":
+                if self._needle_down_offset is None:
+                    raise StageControllerError(
+                        "Needle down calibration missing; cannot lower."
+                    )
+                status = self._query_status(serial_connection)
+                if status is None or status.position is None:
+                    raise StageControllerError("Unable to read A position for needles.")
+                self._require_homed_axes(status, {"A"})
+                idx = self.AXIS_INDEX.get("A")
+                if idx is None or idx >= len(status.position):
+                    raise StageControllerError("A axis position unavailable.")
+                current_a = float(status.position[idx])
+                delta = float(self._needle_down_offset) - current_a
+                if abs(delta) < 1e-6:
+                    self._set_needles_state(False, known=True)
+                    self.needles_action_finished.emit(True, "Needles already lowered.", action)
+                    return
+                self._send_relative_move(serial_connection, MoveVector(a=delta))
+                self._set_needles_state(False, known=True)
+                self.needles_action_finished.emit(True, "Needles lowered.", action)
+                return
+            raise StageControllerError(f"Unknown needle action: {action}.")
+        except StageControllerError as exc:
+            self.needles_action_finished.emit(False, str(exc), action)
+        finally:
+            with self._task_lock:
+                self._active_thread = None
+
     def _update_calibration_from_measurement(
         self,
         expected_pixels: np.ndarray,
@@ -571,7 +653,7 @@ class StageController(QObject):
     ) -> None:
         if move.is_zero():
             return
-        self._move_safety_check(serial_connection)
+        self._move_safety_check()
         self._ensure_axis_limits(serial_connection)
         self._check_relative_move_limits(
             serial_connection, move, allow_relative=allow_relative
@@ -630,10 +712,13 @@ class StageController(QObject):
                     f"{axis} move {delta:+.3f} exceeds limits ({min_value:.3f}, {max_value:.3f})."
                 )
 
-    def _move_safety_check(self, serial_connection: serial.Serial) -> None:
+    def _move_safety_check(self) -> None:
         """Validate motion safety prerequisites before any move."""
 
-        self._ensure_axis_a_zero(serial_connection, allow_relative=False)
+        if not self._needles_known:
+            raise AxisStateError("Needle position unknown. Home/raise A before moving.")
+        if not self._needles_up:
+            raise AxisStateError("Needles are down. Raise A before moving.")
 
     def _read_startup_limits(
         self, serial_connection: serial.Serial, timeout: float = 3.5
@@ -781,17 +866,6 @@ class StageController(QObject):
             if homed_match:
                 homed_axes = set(homed_match.group(1).upper())
                 self._update_homing_status(homed_axes)
-            if position is not None:
-                effective_homed = homed_axes or self._homed_axes
-                idx = self.AXIS_INDEX.get("A")
-                ready = False
-                if idx is not None and idx < len(position):
-                    a_pos = float(position[idx])
-                    ready = (
-                        "A" in effective_homed
-                        and abs(a_pos) <= self.A_ZERO_TOLERANCE
-                    )
-                self._update_axis_a_ready(ready)
             return _Status(state=state, position=position, homed_axes=homed_axes)
         return None
 
@@ -800,6 +874,14 @@ class StageController(QObject):
             return
         self._axis_a_ready = ready
         self.axis_a_ready_changed.emit(ready)
+
+    def _set_needles_state(self, raised: bool, *, known: bool) -> None:
+        if self._needles_up == raised and self._needles_known == known:
+            return
+        self._needles_up = raised
+        self._needles_known = known
+        self._update_axis_a_ready(raised and known)
+        self.needles_state_changed.emit(raised, known)
 
     def _require_homed_axes(
         self, status: _Status, axes: set[str], *, allow_relative: bool = False

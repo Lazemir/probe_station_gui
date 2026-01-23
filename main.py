@@ -322,11 +322,26 @@ class Main(QMainWindow):
         self.joystick_panel.home_all_requested.connect(
             self.stage_controller.request_home_all
         )
+        self.joystick_panel.needles_raise_requested.connect(
+            self.stage_controller.request_needles_raise
+        )
+        self.joystick_panel.needles_lower_requested.connect(
+            self.stage_controller.request_needles_lower
+        )
         self.stage_controller.homing_status_changed.connect(
             self.joystick_panel.set_homing_status
         )
         self.stage_controller.axis_a_ready_changed.connect(
             self.joystick_panel.set_axis_a_ready
+        )
+        self.stage_controller.needles_state_changed.connect(
+            self.joystick_panel.set_needles_state
+        )
+        self.stage_controller.needles_action_started.connect(
+            self.joystick_panel.set_needles_action_started
+        )
+        self.stage_controller.needles_action_finished.connect(
+            self.joystick_panel.set_needles_action_finished
         )
         self.joystick_panel.reset_requested.connect(
             self.stage_controller.cancel_active_task

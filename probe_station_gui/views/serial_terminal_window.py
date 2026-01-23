@@ -134,6 +134,10 @@ class SerialTerminalWindow(QWidget):
             self._append_system_message(f"Serial write failed: {error}")
             self.set_serial(None)
             return
+        if self.stage_controller:
+            self.stage_controller.invalidate_needles_state(
+                "Manual serial command sent; needle position unknown."
+            )
         self._append_local_echo("\u2418")
 
     def send_current_line(self) -> None:
@@ -155,6 +159,10 @@ class SerialTerminalWindow(QWidget):
             self._append_system_message(f"Serial write failed: {error}")
             self.set_serial(None)
             return
+        if self.stage_controller:
+            self.stage_controller.invalidate_needles_state(
+                "Manual serial command sent; needle position unknown."
+            )
         if text:
             self._append_local_echo(text)
             self._command_history.append(text)
