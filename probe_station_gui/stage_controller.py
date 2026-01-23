@@ -155,6 +155,8 @@ class StageController(QObject):
             raise StageControllerError("Serial connection is not available.")
         self._move_safety_check()
 
+    # Jog stop confirmation is handled in the joystick layer to avoid serial contention.
+
     def shutdown(self) -> None:
         """Stop any outstanding background task before application exit."""
 

@@ -161,6 +161,7 @@ class JoystickWindow(QWidget):
         self._needle_animation_timer = QTimer(self)
         self._needle_animation_timer.setInterval(90)
         self._needle_animation_timer.timeout.connect(self._advance_needle_spinner)
+        self._jog_stop_resend_pending = False
         self.apply_control_bindings({})
         self._event_filter_installed = False
         self._event_filter_retry_scheduled = False
@@ -656,10 +657,9 @@ class JoystickWindow(QWidget):
         if not self.serial_connection or not self.serial_connection.is_open:
             self._active_axes = None
             return
-        if self._active_axes is None:
-            return
         self._active_axes = None
         self.send_command(b"\x85")
+        self._schedule_jog_stop_resend()
         logger.debug("Stop jog command issued")
 
     def _apply_axes(self, axes: tuple[tuple[str, int], ...]) -> None:
@@ -1116,6 +1116,8 @@ class JoystickWindow(QWidget):
             if identifier in self._key_stack:
                 self._key_stack.remove(identifier)
                 self._update_active_jog()
+            if not self._key_stack:
+                self.stop_jog()
             event.accept()
             logger.debug(
                 "Processed key release: key=%s text=%s modifiers=%s -> %s",
@@ -1125,6 +1127,19 @@ class JoystickWindow(QWidget):
                 mapping,
             )
             return True
+        removed = self._remove_stale_key(event)
+        if removed:
+            self._update_active_jog()
+            if not self._key_stack:
+                self.stop_jog()
+            event.accept()
+            logger.debug(
+                "Recovered key release: key=%s text=%s modifiers=%s",
+                event.key(),
+                event.text(),
+                keyboard_modifiers_to_int(event.modifiers()),
+            )
+            return True
         logger.debug(
             "No mapping for key release: key=%s text=%s modifiers=%s",
             event.key(),
@@ -1132,6 +1147,39 @@ class JoystickWindow(QWidget):
             keyboard_modifiers_to_int(event.modifiers()),
         )
         return False
+
+    def _remove_stale_key(self, event) -> bool:
+        if not self._key_stack:
+            return False
+        key = event.key()
+        text = event.text().casefold() if event.text() else ""
+        removed = False
+        for identifier in list(self._key_stack):
+            kind, value = identifier
+            if kind == "key":
+                if isinstance(value, tuple) and value[0] == key:
+                    self._key_stack.remove(identifier)
+                    removed = True
+            elif kind == "text" and text and value == text:
+                self._key_stack.remove(identifier)
+                removed = True
+        return removed
+
+    def _schedule_jog_stop_resend(self) -> None:
+        if self._jog_stop_resend_pending:
+            return
+        self._jog_stop_resend_pending = True
+
+        def resend() -> None:
+            self._jog_stop_resend_pending = False
+            if self._key_stack:
+                return
+            if not self.serial_connection or not self.serial_connection.is_open:
+                return
+            self.send_command(b"\x85")
+            logger.debug("Resent stop jog command")
+
+        QTimer.singleShot(120, resend)
 
     @staticmethod
     def _is_text_entry_widget(widget: Optional[QWidget]) -> bool:
