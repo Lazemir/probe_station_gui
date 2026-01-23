@@ -304,6 +304,7 @@ class Main(QMainWindow):
         self.addDockWidget(Qt.LeftDockWidgetArea, self.serial_connection_dock)
 
         self.joystick_panel = JoystickWindow(self)
+        self.joystick_panel.set_stage_controller(self.stage_controller)
         feedrates = self.settings_manager.feedrate_configuration()
         self.joystick_panel.apply_feedrate_settings(
             feedrates.linear.presets,
@@ -323,6 +324,9 @@ class Main(QMainWindow):
         )
         self.stage_controller.homing_status_changed.connect(
             self.joystick_panel.set_homing_status
+        )
+        self.stage_controller.axis_a_ready_changed.connect(
+            self.joystick_panel.set_axis_a_ready
         )
         self.joystick_panel.reset_requested.connect(
             self.stage_controller.cancel_active_task

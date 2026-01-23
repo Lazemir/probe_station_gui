@@ -74,6 +74,7 @@ class StageController(QObject):
     movement_finished: Signal = Signal(bool, str)
     autofocus_finished: Signal = Signal(bool, str)
     homing_status_changed: Signal = Signal(object)
+    axis_a_ready_changed: Signal = Signal(bool)
     status_message: Signal = Signal(str)
 
     CALIBRATION_PIXEL_TARGET = 120.0
@@ -114,6 +115,7 @@ class StageController(QObject):
         self._axis_limits: dict[str, tuple[float, float]] = {}
         self._homed_axes: set[str] = set()
         self._relative_warning_emitted = False
+        self._axis_a_ready = False
 
     def set_serial(self, serial_connection: Optional[serial.Serial]) -> None:
         """Assign or clear the serial connection used for stage control."""
@@ -124,6 +126,7 @@ class StageController(QObject):
                 self._pixels_to_mm = None
                 self._axis_limits.clear()
                 self._update_homing_status(set())
+                self._update_axis_a_ready(False)
             else:
                 self._axis_limits.clear()
                 try:
@@ -133,7 +136,16 @@ class StageController(QObject):
                     self._axis_limits.clear()
                     self.status_message.emit(str(exc))
                 self._update_homing_status(set())
+                self._update_axis_a_ready(False)
                 threading.Thread(target=self._poll_status_once, daemon=True).start()
+
+    def check_motion_safety(self) -> None:
+        """Public motion safety gate; raises StageControllerError when unsafe."""
+
+        serial_connection = self._serial
+        if serial_connection is None or not serial_connection.is_open:
+            raise StageControllerError("Serial connection is not available.")
+        self._move_safety_check(serial_connection)
 
     def shutdown(self) -> None:
         """Stop any outstanding background task before application exit."""
@@ -237,6 +249,7 @@ class StageController(QObject):
             serial_connection = self._serial
             if serial_connection is None or not serial_connection.is_open:
                 raise StageControllerError("Serial connection is not available.")
+            self._move_safety_check(serial_connection)
 
             self.status_message.emit("Ensuring calibration before movement…")
             self._ensure_calibration(serial_connection)
@@ -294,18 +307,17 @@ class StageController(QObject):
                     "SciPy is required for autofocus optimization. Please install it."
                 )
             self._relative_warning_emitted = False
+            self._move_safety_check(serial_connection)
 
             try:
-                self._ensure_axis_a_zero(serial_connection, allow_relative=True)
+                self._ensure_axis_a_zero(serial_connection)
             except AxisStateError as exc:
                 self.status_message.emit(str(exc))
                 self.status_message.emit("Autofocus: homing A axis.")
                 self._write_command(serial_connection, "$HA")
-                self._wait_for_ok(serial_connection)
-                self._wait_for_idle(serial_connection)
-                self._ensure_axis_a_zero(
-                    serial_connection, allow_missing_homing=True, allow_relative=True
-                )
+                self._wait_for_ok(serial_connection, timeout=30.0)
+                self._wait_for_idle(serial_connection, timeout=30.0)
+                self._ensure_axis_a_zero(serial_connection)
 
             self._ensure_axis_limits(serial_connection)
             local_range = 1.0
@@ -559,7 +571,7 @@ class StageController(QObject):
     ) -> None:
         if move.is_zero():
             return
-        self._ensure_axis_a_zero(serial_connection, allow_relative=allow_relative)
+        self._move_safety_check(serial_connection)
         self._ensure_axis_limits(serial_connection)
         self._check_relative_move_limits(
             serial_connection, move, allow_relative=allow_relative
@@ -617,6 +629,11 @@ class StageController(QObject):
                 raise StageControllerError(
                     f"{axis} move {delta:+.3f} exceeds limits ({min_value:.3f}, {max_value:.3f})."
                 )
+
+    def _move_safety_check(self, serial_connection: serial.Serial) -> None:
+        """Validate motion safety prerequisites before any move."""
+
+        self._ensure_axis_a_zero(serial_connection, allow_relative=False)
 
     def _read_startup_limits(
         self, serial_connection: serial.Serial, timeout: float = 3.5
@@ -764,8 +781,25 @@ class StageController(QObject):
             if homed_match:
                 homed_axes = set(homed_match.group(1).upper())
                 self._update_homing_status(homed_axes)
+            if position is not None:
+                effective_homed = homed_axes or self._homed_axes
+                idx = self.AXIS_INDEX.get("A")
+                ready = False
+                if idx is not None and idx < len(position):
+                    a_pos = float(position[idx])
+                    ready = (
+                        "A" in effective_homed
+                        and abs(a_pos) <= self.A_ZERO_TOLERANCE
+                    )
+                self._update_axis_a_ready(ready)
             return _Status(state=state, position=position, homed_axes=homed_axes)
         return None
+
+    def _update_axis_a_ready(self, ready: bool) -> None:
+        if ready == self._axis_a_ready:
+            return
+        self._axis_a_ready = ready
+        self.axis_a_ready_changed.emit(ready)
 
     def _require_homed_axes(
         self, status: _Status, axes: set[str], *, allow_relative: bool = False

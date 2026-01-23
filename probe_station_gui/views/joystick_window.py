@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import serial
 from PySide6.QtCore import QEvent, QRectF, QTimer, Qt, Signal
@@ -27,6 +27,8 @@ from PySide6.QtWidgets import (
 from probe_station_gui.qt_compat import keyboard_modifiers_to_int
 from probe_station_gui.settings_manager import CONTROL_ACTIONS, KeyBinding
 
+if TYPE_CHECKING:
+    from probe_station_gui.stage_controller import StageController
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +117,7 @@ class JoystickWindow(QWidget):
         self.setFocusPolicy(Qt.StrongFocus)
 
         self.serial_connection: Optional[serial.Serial] = None
+        self.stage_controller: Optional["StageController"] = None
         self._active_axes: Optional[tuple[tuple[str, int], ...]] = None
         self._key_stack: list[Tuple[str, object]] = []
         self._key_bindings: Dict[tuple, tuple[str, int]] = {}
@@ -127,6 +130,7 @@ class JoystickWindow(QWidget):
         self._homing_text: dict[str, str] = {}
         self._homing_overlays: dict[str, _SpinnerOverlay] = {}
         self._homing_spinner_angle = 0
+        self._axis_a_ready = False
         self._homing_animation_timer = QTimer(self)
         self._homing_animation_timer.setInterval(90)
         self._homing_animation_timer.timeout.connect(self._advance_homing_spinner)
@@ -516,11 +520,18 @@ class JoystickWindow(QWidget):
 
     def _update_enabled_state(self) -> None:
         enabled = bool(self.serial_connection and self.serial_connection.is_open)
+        motion_enabled = enabled and self._axis_a_ready
         for widget in (
             self.linear_feedrate_combo,
             self.linear_custom_feedrate_edit,
             self.rotary_feedrate_combo,
             self.rotary_custom_feedrate_edit,
+            self.home_all_button,
+            self.unlock_button,
+            self.reset_button,
+        ):
+            widget.setEnabled(enabled)
+        for widget in (
             self.up_button,
             self.down_button,
             self.left_button,
@@ -529,17 +540,40 @@ class JoystickWindow(QWidget):
             self.rotate_positive_button,
             self.focus_down_button,
             self.focus_up_button,
-            self.home_all_button,
-            self.unlock_button,
-            self.reset_button,
             self.autofocus_button,
         ):
-            widget.setEnabled(enabled)
+            widget.setEnabled(motion_enabled)
         for button in self._homing_buttons.values():
             button.setEnabled(enabled)
 
+    def set_axis_a_ready(self, ready: bool) -> None:
+        self._axis_a_ready = ready
+        if not ready:
+            self.stop_jog()
+            self._key_stack.clear()
+        self._update_enabled_state()
+
+    def _move_safety_check(self) -> bool:
+        if self.stage_controller is None:
+            if not self._axis_a_ready:
+                logger.debug("Jog blocked because A axis is not homed/zero")
+                return False
+            return True
+        try:
+            self.stage_controller.check_motion_safety()
+        except Exception as exc:  # StageControllerError: avoid circular import
+            self._show_warning(str(exc))
+            logger.debug("Jog blocked by safety check: %s", exc)
+            return False
+        return True
+
+    def set_stage_controller(self, stage_controller: Optional["StageController"]) -> None:
+        self.stage_controller = stage_controller
+
     def start_jog(self, axis: str, direction: int) -> None:
         logger.debug("Start jog requested: axis=%s direction=%s", axis, direction)
+        if not self._move_safety_check():
+            return
         self._apply_axes(((axis, direction),))
 
     def stop_jog(self) -> None:
@@ -553,6 +587,9 @@ class JoystickWindow(QWidget):
         logger.debug("Stop jog command issued")
 
     def _apply_axes(self, axes: tuple[tuple[str, int], ...]) -> None:
+        if not self._move_safety_check():
+            self.stop_jog()
+            return
         axes_sorted = tuple(sorted(axes, key=lambda item: item[0]))
         if not axes_sorted:
             self.stop_jog()
@@ -859,6 +896,9 @@ class JoystickWindow(QWidget):
         if window is None or not window.isActiveWindow():
             logger.debug("Ignoring global key event because joystick window is not active")
             return False
+        if not self._axis_a_ready:
+            logger.debug("Ignoring global key event because A axis is not homed/zero")
+            return False
         if isinstance(obj, QWidget) and self._is_text_entry_widget(obj):
             logger.debug(
                 "Ignoring global key event originating from text widget %s",
@@ -868,6 +908,9 @@ class JoystickWindow(QWidget):
         return True
 
     def _handle_key_press_event(self, event) -> bool:
+        if not self._move_safety_check():
+            event.ignore()
+            return True
         if event.isAutoRepeat():
             event.ignore()
             logger.debug(
@@ -900,6 +943,9 @@ class JoystickWindow(QWidget):
         return False
 
     def _handle_key_release_event(self, event) -> bool:
+        if not self._move_safety_check():
+            event.ignore()
+            return True
         if event.isAutoRepeat():
             event.ignore()
             logger.debug(
