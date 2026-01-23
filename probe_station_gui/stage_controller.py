@@ -75,6 +75,8 @@ class StageController(QObject):
     autofocus_finished: Signal = Signal(bool, str)
     homing_status_changed: Signal = Signal(object)
     axis_a_ready_changed: Signal = Signal(bool)
+    homing_action_started: Signal = Signal(str)
+    homing_action_finished: Signal = Signal(bool, str, str)
     needles_state_changed: Signal = Signal(bool, bool)
     needles_action_started: Signal = Signal(str)
     needles_action_finished: Signal = Signal(bool, str, str)
@@ -219,9 +221,10 @@ class StageController(QObject):
                 return
             self._cancel_event.clear()
             thread = threading.Thread(
-                target=self._run_home, args=(f"$H{axis}",), daemon=True
+                target=self._run_home, args=(f"$H{axis}", axis), daemon=True
             )
             self._active_thread = thread
+            self.homing_action_started.emit(axis)
             thread.start()
 
     def request_home_all(self) -> None:
@@ -232,8 +235,11 @@ class StageController(QObject):
                 self.status_message.emit("Stage is busy. Ignoring home request.")
                 return
             self._cancel_event.clear()
-            thread = threading.Thread(target=self._run_home, args=("$H",), daemon=True)
+            thread = threading.Thread(
+                target=self._run_home, args=("$H", "ALL"), daemon=True
+            )
             self._active_thread = thread
+            self.homing_action_started.emit("ALL")
             thread.start()
 
     def request_needles_raise(self) -> None:
@@ -276,6 +282,8 @@ class StageController(QObject):
 
         self._cancel_event.set()
         self.status_message.emit(reason)
+        self._update_homing_status(set())
+        self._set_needles_state(False, known=False)
 
     def is_busy(self) -> bool:
         """Return True when a background movement task is currently running."""
@@ -449,7 +457,7 @@ class StageController(QObject):
             with self._task_lock:
                 self._active_thread = None
 
-    def _run_home(self, command: str) -> None:
+    def _run_home(self, command: str, axis_key: str) -> None:
         self.movement_started.emit()
         try:
             serial_connection = self._serial
@@ -462,8 +470,10 @@ class StageController(QObject):
             if command.upper() in ("$H", "$HA"):
                 self._set_needles_state(True, known=True)
             self.movement_finished.emit(True, "Homing complete.")
+            self.homing_action_finished.emit(True, "Homing complete.", axis_key)
         except StageControllerError as exc:
             self.movement_finished.emit(False, str(exc))
+            self.homing_action_finished.emit(False, str(exc), axis_key)
         finally:
             with self._task_lock:
                 self._active_thread = None

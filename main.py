@@ -331,6 +331,12 @@ class Main(QMainWindow):
         self.stage_controller.homing_status_changed.connect(
             self.joystick_panel.set_homing_status
         )
+        self.stage_controller.homing_action_started.connect(
+            self.joystick_panel.set_homing_action_started
+        )
+        self.stage_controller.homing_action_finished.connect(
+            self.joystick_panel.set_homing_action_finished
+        )
         self.stage_controller.axis_a_ready_changed.connect(
             self.joystick_panel.set_axis_a_ready
         )

@@ -820,14 +820,26 @@ class JoystickWindow(QWidget):
             button.setStyleSheet(self.HOMED_STYLE if homed else self.NOT_HOMED_STYLE)
 
     def _home_all(self) -> None:
-        self._start_homing_animation("ALL", self.home_all_button)
         self.home_all_requested.emit()
 
     def _home_axis(self, axis: str) -> None:
-        button = self._homing_buttons.get(axis)
-        if button is not None:
-            self._start_homing_animation(axis, button)
         self.home_axis_requested.emit(axis)
+
+    def set_homing_action_started(self, axis_key: str) -> None:
+        if axis_key == "ALL":
+            self._start_homing_animation("ALL", self.home_all_button)
+            return
+        button = self._homing_buttons.get(axis_key)
+        if button is not None:
+            self._start_homing_animation(axis_key, button)
+
+    def set_homing_action_finished(self, success: bool, message: str, axis_key: str) -> None:
+        if axis_key == "ALL":
+            self._stop_homing_animation("ALL")
+        else:
+            self._stop_homing_animation(axis_key)
+        if not success:
+            self._show_warning(message)
 
     def _raise_needles(self) -> None:
         self._start_needle_animation("raise", self.needles_raise_button)
