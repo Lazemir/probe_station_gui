@@ -899,6 +899,10 @@ class JoystickWindow(QWidget):
         if not self._axis_a_ready:
             logger.debug("Ignoring global key event because A axis is not homed/zero")
             return False
+        focus_widget = QApplication.instance().focusWidget() if QApplication.instance() else None
+        if self._is_text_entry_widget(focus_widget) or self._is_terminal_widget(focus_widget):
+            logger.debug("Ignoring global key event because focus is in terminal/text input")
+            return False
         if isinstance(obj, QWidget) and self._is_text_entry_widget(obj):
             logger.debug(
                 "Ignoring global key event originating from text widget %s",
@@ -986,6 +990,15 @@ class JoystickWindow(QWidget):
         parent = widget.parentWidget()
         if parent is not None and parent is not widget:
             return JoystickWindow._is_text_entry_widget(parent)
+        return False
+
+    @staticmethod
+    def _is_terminal_widget(widget: Optional[QWidget]) -> bool:
+        current = widget
+        while current is not None:
+            if current.__class__.__name__ == "SerialTerminalWindow":
+                return True
+            current = current.parentWidget()
         return False
 
     def _mapping_from_event(
