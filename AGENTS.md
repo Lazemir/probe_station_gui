@@ -1,4 +1,4 @@
-## Overview
+﻿## Overview
 - This repo is a PySide6 GUI for a FluidNC-powered probe station with camera-driven click-to-move.
 - Entry point: `main.py` -> `Main` window with docked panels and the microscope view.
 - Hardware dependencies: a Spinnaker/rotpy camera and a FluidNC controller over serial.
@@ -20,9 +20,12 @@
 - Calibration uses phase correlation on frames to estimate pixel shift per mm.
 - Stage commands are issued in relative mode (`G91`) with a fixed default feed rate in `StageController`.
 - Joystick jog uses `$J=G91 G21 ...` and supports mixed linear/rotary axes.
-- Motion safety: all movement is gated by `StageController._move_safety_check()` (A axis must be homed and at zero).
-- Joystick/keyboard motion also calls `StageController.check_motion_safety()` to query `?` and enforce A-axis safety.
-- Autofocus performs a local refinement within ±1 mm of current Z (SciPy required) and auto-homes A if needed.
+- Motion safety: all movement is gated by `StageController._move_safety_check()` (needles must be known and raised). A-axis homing maps to “needles up.”
+- Needles UI: `JoystickWindow` has Raise/Lower buttons with spinner; status bar is green when raised, yellow when down/unknown.
+- Manual serial commands (terminal send/Ctrl+X) invalidate needles state via `StageController.invalidate_needles_state`.
+- Autofocus performs a local refinement within ±1 mm of current Z (SciPy required) and auto-homes A if needles are not up.
+- Homing buttons only show spinners after the homing task is accepted; they stop on ALARM/error via `homing_action_finished`.
+- Keyboard jog stop: on key release, a `0x85` stop is sent and resent once after 120 ms if no keys remain; no status polling to avoid lag.
 
 ## Settings and logging
 - Default settings file: `probe_station_gui/default_settings.json`.
@@ -37,3 +40,4 @@
 ## How to run (local)
 - Install deps from `pyproject.toml` (PySide6, numpy, opencv-python, rotpy).
 - Run `python main.py`.
+
