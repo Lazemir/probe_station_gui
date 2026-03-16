@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -29,6 +30,7 @@ from probe_station_gui.settings_manager import (
     CONTROL_ACTIONS,
     FeedrateGroup,
     FeedrateSettings,
+    JogSettings,
     KeyBinding,
     LoggingSettings,
     Settings,
@@ -419,6 +421,40 @@ class FeedrateSettingsWidget(QWidget):
             rotary=self._rotary_editor.group(),
         )
 
+
+class JogSettingsWidget(QWidget):
+    """Tab that exposes joystick jog distances."""
+
+    def __init__(self, jog_settings: JogSettings, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        layout = QFormLayout(self)
+        layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+
+        self._linear_distance_spin = QDoubleSpinBox(self)
+        self._linear_distance_spin.setDecimals(3)
+        self._linear_distance_spin.setRange(0.001, 1000.0)
+        self._linear_distance_spin.setSingleStep(1.0)
+        self._linear_distance_spin.setSuffix(" mm")
+        self._linear_distance_spin.setValue(jog_settings.linear_distance_mm)
+        layout.addRow(QLabel("Linear jog distance", self), self._linear_distance_spin)
+
+        self._rotary_distance_spin = QDoubleSpinBox(self)
+        self._rotary_distance_spin.setDecimals(3)
+        self._rotary_distance_spin.setRange(0.001, 3600.0)
+        self._rotary_distance_spin.setSingleStep(1.0)
+        self._rotary_distance_spin.setSuffix(" deg")
+        self._rotary_distance_spin.setValue(jog_settings.rotary_distance_deg)
+        layout.addRow(QLabel("Rotary jog distance", self), self._rotary_distance_spin)
+
+    def to_settings(self, settings: Settings) -> None:
+        """Persist the widget state into the provided settings object."""
+
+        settings.jog = JogSettings(
+            linear_distance_mm=self._linear_distance_spin.value(),
+            rotary_distance_deg=self._rotary_distance_spin.value(),
+        )
+
+
 class SettingsDialog(QDialog):
     """Main settings dialog with tabbed sections."""
 
@@ -436,7 +472,9 @@ class SettingsDialog(QDialog):
         self._controls_tab = ControlsSettingsWidget(self._settings, self)
         self._logging_tab = LoggingSettingsWidget(self._settings.logging, self)
         self._feedrate_tab = FeedrateSettingsWidget(self._settings.feedrates, self)
+        self._jog_tab = JogSettingsWidget(self._settings.jog, self)
         self._tabs.addTab(self._controls_tab, "Controls")
+        self._tabs.addTab(self._jog_tab, "Jog")
         self._tabs.addTab(self._feedrate_tab, "Feedrates")
         self._tabs.addTab(self._logging_tab, "Logging")
 
@@ -447,6 +485,7 @@ class SettingsDialog(QDialog):
 
     def accept(self) -> None:  # type: ignore[override]
         self._controls_tab.to_settings(self._settings)
+        self._jog_tab.to_settings(self._settings)
         self._feedrate_tab.to_settings(self._settings)
         self._logging_tab.to_settings(self._settings.logging)
         super().accept()

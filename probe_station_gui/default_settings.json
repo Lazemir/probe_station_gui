@@ -97,6 +97,10 @@
     "level": "INFO",
     "file": "probe-station-gui.log"
   },
+  "jog": {
+    "linear_distance_mm": 25.0,
+    "rotary_distance_deg": 5.0
+  },
   "feedrates": {
     "linear": {
       "presets": [

@@ -212,6 +212,16 @@ class Main(QMainWindow):
             bindings = self.settings_manager.control_bindings()
             self.joystick_panel.apply_control_bindings(bindings)
             logger.debug("Joystick bindings reapplied from settings")
+            jog = self.settings_manager.jog_configuration()
+            self.joystick_panel.apply_jog_settings(
+                jog.linear_distance_mm,
+                jog.rotary_distance_deg,
+            )
+            logger.debug(
+                "Joystick jog settings reapplied: linear_distance_mm=%s rotary_distance_deg=%s",
+                jog.linear_distance_mm,
+                jog.rotary_distance_deg,
+            )
             feedrates = self.settings_manager.feedrate_configuration()
             self.joystick_panel.apply_feedrate_settings(
                 feedrates.linear.presets,
@@ -305,6 +315,11 @@ class Main(QMainWindow):
 
         self.joystick_panel = JoystickWindow(self)
         self.joystick_panel.set_stage_controller(self.stage_controller)
+        jog = self.settings_manager.jog_configuration()
+        self.joystick_panel.apply_jog_settings(
+            jog.linear_distance_mm,
+            jog.rotary_distance_deg,
+        )
         feedrates = self.settings_manager.feedrate_configuration()
         self.joystick_panel.apply_feedrate_settings(
             feedrates.linear.presets,

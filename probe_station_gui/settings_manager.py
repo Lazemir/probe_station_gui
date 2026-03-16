@@ -106,12 +106,37 @@ class FeedrateSettings:
 
 
 @dataclass
+class JogSettings:
+    """Configuration for joystick jog distances."""
+
+    linear_distance_mm: float = 25.0
+    rotary_distance_deg: float = 5.0
+
+    def clone(self) -> "JogSettings":
+        """Return a copy of the jog preferences."""
+
+        return JogSettings(
+            linear_distance_mm=self.linear_distance_mm,
+            rotary_distance_deg=self.rotary_distance_deg,
+        )
+
+    def to_dict(self) -> dict[str, float]:
+        """Serialize the jog preferences."""
+
+        return {
+            "linear_distance_mm": self.linear_distance_mm,
+            "rotary_distance_deg": self.rotary_distance_deg,
+        }
+
+
+@dataclass
 class Settings:
     """Container for all configurable values."""
 
     controls: Dict[str, List[KeyBinding]] = field(default_factory=dict)
     logging: LoggingSettings = field(default_factory=LoggingSettings)
     feedrates: FeedrateSettings = field(default_factory=FeedrateSettings)
+    jog: JogSettings = field(default_factory=JogSettings)
 
     def clone(self) -> "Settings":
         """Create a deep copy of the settings container."""
@@ -120,6 +145,7 @@ class Settings:
             controls={key: list(value) for key, value in self.controls.items()},
             logging=self.logging.clone(),
             feedrates=self.feedrates.clone(),
+            jog=self.jog.clone(),
         )
 
     def to_dict(self) -> dict:
@@ -141,6 +167,7 @@ class Settings:
                     "default": self.feedrates.rotary.default,
                 },
             },
+            "jog": self.jog.to_dict(),
         }
 
 
@@ -166,6 +193,8 @@ class SettingsManager:
         360.0,
     )
     DEFAULT_FEEDRATE_DEFAULT: float = 1.0
+    DEFAULT_LINEAR_JOG_DISTANCE_MM: float = 25.0
+    DEFAULT_ROTARY_JOG_DISTANCE_DEG: float = 5.0
     LINEAR_GROUP = "linear"
     ROTARY_GROUP = "rotary"
 
@@ -316,6 +345,21 @@ class SettingsManager:
                 }
             data["feedrates"] = feedrates_section
 
+        jog_section = data.get("jog")
+        if not isinstance(jog_section, dict):
+            jog_section = {
+                "linear_distance_mm": self.DEFAULT_LINEAR_JOG_DISTANCE_MM,
+                "rotary_distance_deg": self.DEFAULT_ROTARY_JOG_DISTANCE_DEG,
+            }
+            data["jog"] = jog_section
+        else:
+            jog_section.setdefault(
+                "linear_distance_mm", self.DEFAULT_LINEAR_JOG_DISTANCE_MM
+            )
+            jog_section.setdefault(
+                "rotary_distance_deg", self.DEFAULT_ROTARY_JOG_DISTANCE_DEG
+            )
+
         with self._config_path.open("w", encoding="utf-8") as target:
             json.dump(data, target, indent=2, ensure_ascii=False)
 
@@ -349,10 +393,12 @@ class SettingsManager:
         feedrates_raw = raw.get("feedrates") if isinstance(raw, dict) else None
         legacy_presets = raw.get("feedrate_presets") if isinstance(raw, dict) else None
         feedrates = self._parse_feedrates(feedrates_raw, legacy_presets)
+        jog_raw = raw.get("jog") if isinstance(raw, dict) else None
         return Settings(
             controls=controls,
             logging=logging_settings,
             feedrates=feedrates,
+            jog=self._parse_jog(jog_raw),
         )
 
     def _parse_logging(self, raw_logging) -> LoggingSettings:
@@ -376,6 +422,33 @@ class SettingsManager:
         return FeedrateSettings(
             linear=linear_group,
             rotary=rotary_group,
+        )
+
+    def _parse_jog(self, raw_jog) -> JogSettings:
+        """Normalise persisted jog settings."""
+
+        linear_distance = self.DEFAULT_LINEAR_JOG_DISTANCE_MM
+        rotary_distance = self.DEFAULT_ROTARY_JOG_DISTANCE_DEG
+        if isinstance(raw_jog, dict):
+            candidate = raw_jog.get("linear_distance_mm", linear_distance)
+            try:
+                if isinstance(candidate, (int, float, str)):
+                    linear_distance = float(candidate)
+            except (TypeError, ValueError):
+                linear_distance = self.DEFAULT_LINEAR_JOG_DISTANCE_MM
+            candidate = raw_jog.get("rotary_distance_deg", rotary_distance)
+            try:
+                if isinstance(candidate, (int, float, str)):
+                    rotary_distance = float(candidate)
+            except (TypeError, ValueError):
+                rotary_distance = self.DEFAULT_ROTARY_JOG_DISTANCE_DEG
+        if linear_distance <= 0:
+            linear_distance = self.DEFAULT_LINEAR_JOG_DISTANCE_MM
+        if rotary_distance <= 0:
+            rotary_distance = self.DEFAULT_ROTARY_JOG_DISTANCE_DEG
+        return JogSettings(
+            linear_distance_mm=linear_distance,
+            rotary_distance_deg=rotary_distance,
         )
 
     def _parse_feedrate_groups(
@@ -503,7 +576,7 @@ class SettingsManager:
         return fallback[0] if fallback else self.DEFAULT_FEEDRATE_DEFAULT
 
     def _normalise_settings(self, settings: Settings) -> Settings:
-        """Return a copy of the settings with feedrates normalised."""
+        """Return a copy of the settings with runtime values normalised."""
 
         clone = settings.clone()
         clone.feedrates = FeedrateSettings(
@@ -514,6 +587,7 @@ class SettingsManager:
                 clone.feedrates.rotary, fallback=self.DEFAULT_ROTARY_FEEDRATE_PRESETS
             ),
         )
+        clone.jog = self._parse_jog(clone.jog.to_dict())
         return clone
 
     def feedrate_group(self, motion_type: str) -> FeedrateGroup:
@@ -529,4 +603,9 @@ class SettingsManager:
         """Return the full feedrate configuration clone."""
 
         return self._settings.feedrates.clone()
+
+    def jog_configuration(self) -> JogSettings:
+        """Return the current jog configuration clone."""
+
+        return self._settings.jog.clone()
 

@@ -74,8 +74,8 @@ class JoystickWindow(QWidget):
     needles_raise_requested = Signal()
     needles_lower_requested = Signal()
 
-    JOG_DISTANCE_MM = 10.0
-    ROTATE_DISTANCE_DEG = 5.0
+    DEFAULT_JOG_DISTANCE_MM = 25.0
+    DEFAULT_ROTATE_DISTANCE_DEG = 5.0
     DEFAULT_LINEAR_FEEDRATE_PRESETS: tuple[float, ...] = (
         1.0,
         3.0,
@@ -143,6 +143,8 @@ class JoystickWindow(QWidget):
         self._rotary_presets: List[float] = list(self.DEFAULT_ROTARY_FEEDRATE_PRESETS)
         self._linear_default: float = 1.0
         self._rotary_default: float = 1.0
+        self._linear_jog_distance_mm: float = self.DEFAULT_JOG_DISTANCE_MM
+        self._rotary_jog_distance_deg: float = self.DEFAULT_ROTATE_DISTANCE_DEG
         self._homing_buttons: dict[str, QPushButton] = {}
         self._homing_targets: dict[str, QPushButton] = {}
         self._homing_text: dict[str, str] = {}
@@ -501,6 +503,19 @@ class JoystickWindow(QWidget):
             default_rotary,
         )
 
+    def apply_jog_settings(
+        self, linear_distance_mm: float, rotary_distance_deg: float
+    ) -> None:
+        """Update the jog distance used for linear and rotary axes."""
+
+        self._linear_jog_distance_mm = max(0.001, float(linear_distance_mm))
+        self._rotary_jog_distance_deg = max(0.001, float(rotary_distance_deg))
+        logger.debug(
+            "Joystick jog distance updated: linear_distance_mm=%s rotary_distance_deg=%s",
+            self._linear_jog_distance_mm,
+            self._rotary_jog_distance_deg,
+        )
+
     def _clean_presets(
         self, presets: List[float], fallback: tuple[float, ...]
     ) -> List[float]:
@@ -692,8 +707,8 @@ class JoystickWindow(QWidget):
 
     def _distance_for_axis(self, axis: str) -> float:
         if axis == "B":
-            return self.ROTATE_DISTANCE_DEG
-        return self.JOG_DISTANCE_MM
+            return self._rotary_jog_distance_deg
+        return self._linear_jog_distance_mm
 
     def _feedrate_for_axes(
         self, axes: tuple[tuple[str, int], ...]
@@ -730,7 +745,7 @@ class JoystickWindow(QWidget):
 
             max_linear_distance = max(
                 (self._distance_for_axis(axis) for axis, _ in axes if axis in self.LINEAR_AXES),
-                default=self.JOG_DISTANCE_MM,
+                default=self._linear_jog_distance_mm,
             )
             for axis, _ in axes:
                 if axis not in self.ROTATIONAL_AXES or rotary_feed is None:
