@@ -671,6 +671,30 @@ class StageController(QObject):
             if serial_connection is None or not serial_connection.is_open:
                 raise StageControllerError("Serial connection is not available.")
             if action == "raise":
+                status = self._query_status(serial_connection)
+                effective_homed = status.homed_axes if status else None
+                if effective_homed is None and self._homed_axes:
+                    effective_homed = set(self._homed_axes)
+                if (
+                    status is not None
+                    and status.position is not None
+                    and effective_homed is not None
+                    and "A" in effective_homed
+                ):
+                    idx = self.AXIS_INDEX.get("A")
+                    if idx is None or idx >= len(status.position):
+                        raise StageControllerError("A axis position unavailable.")
+                    current_a = float(status.position[idx])
+                    if abs(current_a) >= 1e-6:
+                        self.status_message.emit("Needles: raising to A zero.")
+                        self._send_relative_move(
+                            serial_connection,
+                            MoveVector(a=-current_a),
+                            ignore_needle_safety=True,
+                        )
+                    self._update_needles_from_a_position(0.0)
+                    self.needles_action_finished.emit(True, "Needles raised.", action)
+                    return
                 self.status_message.emit("Needles: raising (home A).")
                 self._write_command(serial_connection, "$HA")
                 self._wait_for_ok(serial_connection, timeout=30.0)
