@@ -103,6 +103,7 @@
   },
   "needle_calibration": {
     "visa_resource": "",
+    "dcr_range": 3,
     "short_threshold_ohm": 10.0,
     "poll_interval_ms": 250,
     "lower_direction": "negative",

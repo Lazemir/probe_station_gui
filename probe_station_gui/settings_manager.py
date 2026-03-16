@@ -134,6 +134,7 @@ class NeedleCalibrationSettings:
     """Configuration for needle calibration and the external LCR meter."""
 
     visa_resource: str = ""
+    dcr_range: int = 3
     short_threshold_ohm: float = 10.0
     poll_interval_ms: int = 250
     lower_direction: str = "negative"
@@ -145,6 +146,7 @@ class NeedleCalibrationSettings:
 
         return NeedleCalibrationSettings(
             visa_resource=self.visa_resource,
+            dcr_range=self.dcr_range,
             short_threshold_ohm=self.short_threshold_ohm,
             poll_interval_ms=self.poll_interval_ms,
             lower_direction=self.lower_direction,
@@ -157,6 +159,7 @@ class NeedleCalibrationSettings:
 
         return {
             "visa_resource": self.visa_resource,
+            "dcr_range": self.dcr_range,
             "short_threshold_ohm": self.short_threshold_ohm,
             "poll_interval_ms": self.poll_interval_ms,
             "lower_direction": self.lower_direction,
@@ -236,6 +239,7 @@ class SettingsManager:
     DEFAULT_FEEDRATE_DEFAULT: float = 1.0
     DEFAULT_LINEAR_JOG_DISTANCE_MM: float = 25.0
     DEFAULT_ROTARY_JOG_DISTANCE_DEG: float = 5.0
+    DEFAULT_LCR_DCR_RANGE: int = 3
     DEFAULT_SHORT_THRESHOLD_OHM: float = 10.0
     DEFAULT_LCR_POLL_INTERVAL_MS: int = 250
     DEFAULT_LOWER_DIRECTION: str = "negative"
@@ -408,6 +412,7 @@ class SettingsManager:
         if not isinstance(needle_section, dict):
             needle_section = {
                 "visa_resource": "",
+                "dcr_range": self.DEFAULT_LCR_DCR_RANGE,
                 "short_threshold_ohm": self.DEFAULT_SHORT_THRESHOLD_OHM,
                 "poll_interval_ms": self.DEFAULT_LCR_POLL_INTERVAL_MS,
                 "lower_direction": self.DEFAULT_LOWER_DIRECTION,
@@ -417,6 +422,7 @@ class SettingsManager:
             data["needle_calibration"] = needle_section
         else:
             needle_section.setdefault("visa_resource", "")
+            needle_section.setdefault("dcr_range", self.DEFAULT_LCR_DCR_RANGE)
             needle_section.setdefault(
                 "short_threshold_ohm", self.DEFAULT_SHORT_THRESHOLD_OHM
             )
@@ -530,6 +536,7 @@ class SettingsManager:
         """Normalise persisted needle calibration settings."""
 
         visa_resource = ""
+        dcr_range = self.DEFAULT_LCR_DCR_RANGE
         short_threshold_ohm = self.DEFAULT_SHORT_THRESHOLD_OHM
         poll_interval_ms = self.DEFAULT_LCR_POLL_INTERVAL_MS
         lower_direction = self.DEFAULT_LOWER_DIRECTION
@@ -539,6 +546,11 @@ class SettingsManager:
             resource_raw = raw_needle_calibration.get("visa_resource", visa_resource)
             if isinstance(resource_raw, str):
                 visa_resource = resource_raw.strip()
+            candidate = raw_needle_calibration.get("dcr_range", dcr_range)
+            try:
+                dcr_range = int(float(candidate))
+            except (TypeError, ValueError):
+                dcr_range = self.DEFAULT_LCR_DCR_RANGE
             candidate = raw_needle_calibration.get(
                 "short_threshold_ohm", short_threshold_ohm
             )
@@ -573,6 +585,8 @@ class SettingsManager:
                     "down_position_configured", down_position_configured
                 )
             )
+        if dcr_range < 0 or dcr_range > 8:
+            dcr_range = self.DEFAULT_LCR_DCR_RANGE
         if short_threshold_ohm < 0:
             short_threshold_ohm = self.DEFAULT_SHORT_THRESHOLD_OHM
         if poll_interval_ms < 50:
@@ -581,6 +595,7 @@ class SettingsManager:
             lower_direction = self.DEFAULT_LOWER_DIRECTION
         return NeedleCalibrationSettings(
             visa_resource=visa_resource,
+            dcr_range=dcr_range,
             short_threshold_ohm=short_threshold_ohm,
             poll_interval_ms=poll_interval_ms,
             lower_direction=lower_direction,

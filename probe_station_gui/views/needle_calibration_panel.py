@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 from PySide6.QtCore import Qt, Signal
@@ -157,7 +158,10 @@ class NeedleCalibrationPanel(QWidget):
             self._short_label.setText("Unknown")
             self._short_label.setStyleSheet("")
             return
-        self._resistance_label.setText(f"{resistance_ohm:.6g} ohm")
+        if not math.isfinite(resistance_ohm):
+            self._resistance_label.setText("OL")
+        else:
+            self._resistance_label.setText(f"{resistance_ohm:.6g} ohm")
         self._short_label.setText("Short" if is_short else "Open")
         if is_short:
             self._short_label.setStyleSheet("QLabel { color: #2e7d32; font-weight: 600; }")

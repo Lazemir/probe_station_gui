@@ -347,6 +347,7 @@ class Main(QMainWindow):
         )
         self.lcr_controller.apply_configuration(
             resource_name=needle_settings.visa_resource,
+            dcr_range=needle_settings.dcr_range,
             short_threshold_ohm=needle_settings.short_threshold_ohm,
             poll_interval_ms=needle_settings.poll_interval_ms,
         )

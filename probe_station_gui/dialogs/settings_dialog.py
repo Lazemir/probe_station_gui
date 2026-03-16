@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QSpinBox,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -474,6 +475,12 @@ class NeedleCalibrationSettingsWidget(QWidget):
         self._visa_resource_edit.setText(calibration_settings.visa_resource)
         layout.addRow(QLabel("LCR resource", self), self._visa_resource_edit)
 
+        self._dcr_range_spin = QSpinBox(self)
+        self._dcr_range_spin.setRange(0, 8)
+        self._dcr_range_spin.setSingleStep(1)
+        self._dcr_range_spin.setValue(calibration_settings.dcr_range)
+        layout.addRow(QLabel("DCR range", self), self._dcr_range_spin)
+
         self._short_threshold_spin = QDoubleSpinBox(self)
         self._short_threshold_spin.setDecimals(3)
         self._short_threshold_spin.setRange(0.0, 1_000_000.0)
@@ -519,6 +526,7 @@ class NeedleCalibrationSettingsWidget(QWidget):
 
         settings.needle_calibration = NeedleCalibrationSettings(
             visa_resource=self._visa_resource_edit.text().strip(),
+            dcr_range=int(self._dcr_range_spin.value()),
             short_threshold_ohm=self._short_threshold_spin.value(),
             poll_interval_ms=int(self._poll_interval_spin.value()),
             lower_direction=str(
