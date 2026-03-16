@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime
 from pathlib import Path
 import sys
 
 from PySide6.QtCore import QThread, QTimer, Qt, QUrl
-from PySide6.QtGui import QAction, QDesktopServices
+from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
+    QHBoxLayout,
+    QLabel,
     QMainWindow,
     QPlainTextEdit,
+    QPushButton,
     QVBoxLayout,
     QWidget,
 )
@@ -37,6 +41,10 @@ logger = logging.getLogger(__name__)
 class Main(QMainWindow):
     """Main application window wiring the camera view and serial dialog."""
 
+    ALIGNMENT_MODE_SHORTCUT = "Ctrl+Alt+A"
+    ALIGNMENT_CAPTURE_SHORTCUT = "Space"
+    ALIGNMENT_TARGET_ANGLES = (-180.0, -90.0, 0.0, 90.0, 180.0)
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Microscope control")
@@ -59,6 +67,18 @@ class Main(QMainWindow):
         self.joystick_dock: CollapsibleDockWidget | None = None
         self.serial_terminal_dock: CollapsibleDockWidget | None = None
         self.serial_connection_dock: CollapsibleDockWidget | None = None
+        self.alignment_dock: CollapsibleDockWidget | None = None
+        self._alignment_mode_enabled = False
+        self._alignment_positions: list[tuple[float, float]] = []
+        self._alignment_action: QAction | None = None
+        self._alignment_capture_action: QAction | None = None
+        self._alignment_exit_action: QAction | None = None
+        self._alignment_status_label: QLabel | None = None
+        self._alignment_center_label: QLabel | None = None
+        self._alignment_cursor_label: QLabel | None = None
+        self._alignment_capture_button: QPushButton | None = None
+        self._alignment_reset_button: QPushButton | None = None
+        self._alignment_exit_button: QPushButton | None = None
         self.statusBar()
         self._status_log = QPlainTextEdit(self)
         self._status_log.setReadOnly(True)
@@ -74,6 +94,8 @@ class Main(QMainWindow):
         self.grabber.moveToThread(self.thread)
         self.thread.started.connect(self.grabber.start)
         self.view.clicked.connect(self.on_click)
+        self.view.hovered.connect(self._on_view_hover)
+        self.view.hover_left.connect(self._on_view_hover_left)
         self.grabber.frame_ready.connect(self.view.set_frame)
         self.grabber.error.connect(self.on_error)
         self.thread.start()
@@ -115,10 +137,26 @@ class Main(QMainWindow):
         )
 
     def on_click(self, dx: float, dy: float, _rel_x: float, _rel_y: float) -> None:
+        if self._alignment_mode_enabled:
+            self._capture_alignment_marker(dx, dy)
+            return
         self.stage_controller.request_move(dx, dy)
 
     def on_error(self, message: str) -> None:
         logger.error("Camera error: %s", message)
+
+    def _on_view_hover(
+        self, dx: float, dy: float, _rel_x: float, _rel_y: float
+    ) -> None:
+        preview = self.stage_controller.preview_clicked_point_xy(dx, dy)
+        if preview is None:
+            self._update_coordinate_display()
+            return
+        center_xy, cursor_xy = preview
+        self._update_coordinate_display(center_xy=center_xy, cursor_xy=cursor_xy)
+
+    def _on_view_hover_left(self) -> None:
+        self._update_coordinate_display(cursor_xy=None)
 
     def _show_status(self, message: str, timeout_ms: int = 0) -> None:
         if message:
@@ -188,6 +226,8 @@ class Main(QMainWindow):
             self.joystick_panel.set_serial(None)
         if self.serial_terminal_panel:
             self.serial_terminal_panel.set_serial(None)
+        if self._alignment_mode_enabled:
+            self._exit_alignment_mode()
 
     def _auto_connect_if_possible(self) -> None:
         if self.serial_connection_panel and not self.serial_connection:
@@ -196,6 +236,7 @@ class Main(QMainWindow):
 
     def _setup_menus(self) -> None:
         app_menu = self.menuBar().addMenu("Application")
+        tools_menu = self.menuBar().addMenu("Tools")
 
         settings_menu = self.menuBar().addMenu("Settings")
         settings_action = QAction("Settings…", self)
@@ -206,6 +247,30 @@ class Main(QMainWindow):
         open_log_action.triggered.connect(self._open_status_log)
         app_menu.addAction(open_log_action)
 
+
+        self._alignment_action = QAction("Chip Alignment Mode", self)
+        self._alignment_action.setCheckable(True)
+        self._alignment_action.setShortcut(QKeySequence(self.ALIGNMENT_MODE_SHORTCUT))
+        self._alignment_action.setShortcutContext(Qt.ApplicationShortcut)
+        self._alignment_action.toggled.connect(self._set_alignment_mode_enabled)
+        tools_menu.addAction(self._alignment_action)
+        self.addAction(self._alignment_action)
+
+        self._alignment_capture_action = QAction("Capture Alignment Marker", self)
+        self._alignment_capture_action.setShortcut(
+            QKeySequence(self.ALIGNMENT_CAPTURE_SHORTCUT)
+        )
+        self._alignment_capture_action.setShortcutContext(Qt.ApplicationShortcut)
+        self._alignment_capture_action.triggered.connect(
+            self._capture_alignment_marker
+        )
+        self.addAction(self._alignment_capture_action)
+
+        self._alignment_exit_action = QAction("Exit Alignment Mode", self)
+        self._alignment_exit_action.setShortcut(QKeySequence(Qt.Key_Escape))
+        self._alignment_exit_action.setShortcutContext(Qt.ApplicationShortcut)
+        self._alignment_exit_action.triggered.connect(self._exit_alignment_mode)
+        self.addAction(self._alignment_exit_action)
 
     def _apply_settings(self) -> None:
         if self.joystick_panel:
@@ -247,6 +312,210 @@ class Main(QMainWindow):
         self.settings_manager.save()
         self._apply_settings()
         logger.info("Settings updated from dialog")
+
+    def _set_alignment_mode_enabled(self, enabled: bool) -> None:
+        self._alignment_mode_enabled = enabled
+        self._alignment_positions.clear()
+        self.view.clear_target_cross()
+        self.view.set_alignment_mode(enabled)
+        self._update_alignment_ui()
+        self._update_coordinate_display(cursor_xy=None)
+        if self.alignment_dock:
+            self.alignment_dock.setVisible(enabled)
+            if enabled:
+                self.alignment_dock.raise_()
+        if enabled:
+            self._show_status(
+                "Chip alignment mode enabled. Center marker 1 and capture it, then move to marker 2.",
+                6000,
+            )
+        else:
+            self._show_status("Chip alignment mode disabled.", 3000)
+
+    def _exit_alignment_mode(self) -> None:
+        if self._alignment_action and self._alignment_action.isChecked():
+            self._alignment_action.setChecked(False)
+
+    def _reset_alignment_capture(self) -> None:
+        self._alignment_positions.clear()
+        self._update_alignment_ui()
+        if self._alignment_mode_enabled:
+            self._show_status(
+                "Chip alignment capture reset. Center marker 1 and capture it again.",
+                5000,
+            )
+
+    def _zero_b_axis(self) -> None:
+        try:
+            self.stage_controller.zero_b_axis()
+        except Exception as exc:
+            self._show_status(str(exc), 5000)
+
+    def _reset_click_calibration(self) -> None:
+        try:
+            self.stage_controller.reset_calibration()
+        except Exception as exc:
+            self._show_status(str(exc), 5000)
+
+    def _capture_alignment_marker(
+        self, dx_pixels: float = 0.0, dy_pixels: float = 0.0
+    ) -> None:
+        if not self._alignment_mode_enabled:
+            return
+        try:
+            center_xy, captured = self.stage_controller.resolve_clicked_point_xy(
+                dx_pixels,
+                dy_pixels,
+            )
+        except Exception as exc:
+            self._show_status(str(exc), 5000)
+            return
+        self._update_coordinate_display(center_xy=center_xy, cursor_xy=captured)
+        if len(self._alignment_positions) >= 2:
+            self._alignment_positions.clear()
+        self._alignment_positions.append(captured)
+        self._update_alignment_ui()
+
+        if len(self._alignment_positions) == 1:
+            self._show_status(
+                f"Chip alignment: marker 1 captured at X={captured[0]:.3f}, Y={captured[1]:.3f}. Move to marker 2 and capture it.",
+                6000,
+            )
+            return
+
+        rotation_deg = self._calculate_alignment_rotation(
+            self._alignment_positions[0],
+            self._alignment_positions[1],
+        )
+        self._alignment_positions.clear()
+        self._update_alignment_ui()
+
+        if rotation_deg is None:
+            self._show_status(
+                "Chip alignment markers are too close together. Capture two distinct markers.",
+                5000,
+            )
+            return
+        if abs(rotation_deg) < 1e-3:
+            self._show_status(
+                "Chip alignment markers are already aligned.",
+                5000,
+            )
+            return
+
+        self._show_status(
+            f"Chip alignment: rotating B by {rotation_deg:+.3f} deg.",
+            5000,
+        )
+        self.stage_controller.request_rotate_b(rotation_deg)
+
+    def _update_alignment_ui(self) -> None:
+        if self._alignment_capture_button is not None:
+            next_index = 1 if not self._alignment_positions else 2
+            self._alignment_capture_button.setText(f"Capture Marker {next_index}")
+            self._alignment_capture_button.setEnabled(self._alignment_mode_enabled)
+        if self._alignment_reset_button is not None:
+            self._alignment_reset_button.setEnabled(
+                self._alignment_mode_enabled and bool(self._alignment_positions)
+            )
+        if self._alignment_exit_button is not None:
+            self._alignment_exit_button.setEnabled(self._alignment_mode_enabled)
+        if self._alignment_status_label is not None:
+            if not self._alignment_mode_enabled:
+                text = "Alignment mode is off."
+            elif not self._alignment_positions:
+                text = (
+                    "Click the first marker to record that exact point, or use Capture/Space "
+                    "to record the crosshair center."
+                )
+            else:
+                first = self._alignment_positions[0]
+                text = (
+                    f"Marker 1: X={first[0]:.3f}, Y={first[1]:.3f}\n"
+                    "Now move to marker 2 and click it, or capture the center."
+                )
+            self._alignment_status_label.setText(text)
+        if self._alignment_mode_enabled:
+            if not self._alignment_positions:
+                instruction = "Alignment mode: click marker 1 or press Space for the center."
+            else:
+                instruction = "Alignment mode: move to marker 2, then click it or press Space."
+        else:
+            instruction = ""
+        self.view.set_alignment_instruction(instruction)
+
+    def _update_coordinate_display(
+        self,
+        *,
+        center_xy: tuple[float, float] | None = None,
+        cursor_xy: tuple[float, float] | None = None,
+    ) -> None:
+        latest = self.stage_controller.latest_stage_position()
+        if center_xy is None and latest is not None and len(latest) >= 2:
+            center_xy = (float(latest[0]), float(latest[1]))
+        if self._alignment_center_label is not None:
+            self._alignment_center_label.setText(
+                self._format_coordinate_label("Center", center_xy)
+            )
+        if self._alignment_cursor_label is not None:
+            self._alignment_cursor_label.setText(
+                self._format_coordinate_label("Cursor", cursor_xy)
+            )
+
+    def _format_coordinate_label(
+        self, prefix: str, fluidnc_xy: tuple[float, float] | None
+    ) -> str:
+        if fluidnc_xy is None:
+            return f"{prefix}: unavailable"
+        systems = self._resolve_coordinate_systems(fluidnc_xy)
+        parts = [
+            f"{name} X={coords[0]:.3f}, Y={coords[1]:.3f}"
+            for name, coords in systems.items()
+        ]
+        return f"{prefix}: " + " | ".join(parts)
+
+    def _resolve_coordinate_systems(
+        self, fluidnc_xy: tuple[float, float]
+    ) -> dict[str, tuple[float, float]]:
+        coordinates = {"FluidNC abs": fluidnc_xy}
+        chip_xy = self._resolve_chip_coordinates(fluidnc_xy)
+        if chip_xy is not None:
+            coordinates["Chip"] = chip_xy
+        return coordinates
+
+    def _resolve_chip_coordinates(
+        self, fluidnc_xy: tuple[float, float]
+    ) -> tuple[float, float] | None:
+        """Hook for future chip-coordinate mappings."""
+
+        _ = fluidnc_xy
+        return None
+
+    @classmethod
+    def _calculate_alignment_rotation(
+        cls,
+        first_position: tuple[float, float],
+        second_position: tuple[float, float],
+    ) -> float | None:
+        dx = second_position[0] - first_position[0]
+        dy = second_position[1] - first_position[1]
+        if math.hypot(dx, dy) <= 1e-6:
+            return None
+        angle_deg = math.degrees(math.atan2(dy, dx))
+        best_delta = min(
+            (
+                cls._normalise_angle(target - angle_deg)
+                for target in cls.ALIGNMENT_TARGET_ANGLES
+            ),
+            key=lambda value: abs(value),
+        )
+        if abs(best_delta) > 45.0:
+            return None
+        return best_delta
+
+    @staticmethod
+    def _normalise_angle(angle_deg: float) -> float:
+        return ((angle_deg + 180.0) % 360.0) - 180.0
 
     def show_joystick_window(self) -> None:
         if not self.joystick_panel or not self.joystick_dock:
@@ -343,6 +612,10 @@ class Main(QMainWindow):
         self.joystick_panel.needles_lower_requested.connect(
             self.stage_controller.request_needles_lower
         )
+        self.joystick_panel.zero_b_requested.connect(self._zero_b_axis)
+        self.joystick_panel.reset_calibration_requested.connect(
+            self._reset_click_calibration
+        )
         self.stage_controller.homing_status_changed.connect(
             self.joystick_panel.set_homing_status
         )
@@ -389,6 +662,48 @@ class Main(QMainWindow):
         )
         self.addDockWidget(Qt.LeftDockWidgetArea, self.serial_terminal_dock)
         self.splitDockWidget(self.joystick_dock, self.serial_terminal_dock, Qt.Vertical)
+
+        alignment_panel = QWidget(self)
+        alignment_layout = QVBoxLayout(alignment_panel)
+        alignment_layout.setContentsMargins(8, 8, 8, 8)
+        alignment_layout.setSpacing(8)
+
+        self._alignment_status_label = QLabel(alignment_panel)
+        self._alignment_status_label.setWordWrap(True)
+        alignment_layout.addWidget(self._alignment_status_label)
+
+        self._alignment_center_label = QLabel(alignment_panel)
+        self._alignment_center_label.setWordWrap(True)
+        alignment_layout.addWidget(self._alignment_center_label)
+
+        self._alignment_cursor_label = QLabel(alignment_panel)
+        self._alignment_cursor_label.setWordWrap(True)
+        alignment_layout.addWidget(self._alignment_cursor_label)
+
+        button_row = QHBoxLayout()
+        self._alignment_capture_button = QPushButton("Capture Marker 1", alignment_panel)
+        self._alignment_capture_button.clicked.connect(self._capture_alignment_marker)
+        button_row.addWidget(self._alignment_capture_button)
+        self._alignment_reset_button = QPushButton("Reset", alignment_panel)
+        self._alignment_reset_button.clicked.connect(self._reset_alignment_capture)
+        button_row.addWidget(self._alignment_reset_button)
+        alignment_layout.addLayout(button_row)
+
+        self._alignment_exit_button = QPushButton("Exit Mode", alignment_panel)
+        self._alignment_exit_button.clicked.connect(self._exit_alignment_mode)
+        alignment_layout.addWidget(self._alignment_exit_button)
+        alignment_layout.addStretch(1)
+
+        self.alignment_dock = CollapsibleDockWidget("Chip Alignment", self)
+        self.alignment_dock.setObjectName("ChipAlignmentDock")
+        self.alignment_dock.setWidget(alignment_panel)
+        self.alignment_dock.setAllowedAreas(
+            Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea
+        )
+        self.addDockWidget(Qt.RightDockWidgetArea, self.alignment_dock)
+        self.alignment_dock.setVisible(False)
+        self._update_alignment_ui()
+        self._update_coordinate_display()
 
 def main() -> int:
     app = QApplication(sys.argv)
