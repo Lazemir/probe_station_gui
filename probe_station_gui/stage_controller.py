@@ -106,6 +106,8 @@ class StageController(QObject):
     SPIRAL_SEGMENTS_PER_TURN = 180
     SPIRAL_MIN_TURNS_PER_SWEEP = 0.25
     SPIRAL_MAX_TURNS_PER_SWEEP = 50.0
+    B_AXIS_SOFT_LIMIT_DEG = 45.0
+    MAX_CLICK_MOVE_MM = 10.0
 
     STATUS_PATTERN = re.compile(
         r"<(?P<state>[A-Za-z]+)(?:\|[^>]*?MPos:(?P<mpos>-?\d+\.?\d*(?:,-?\d+\.?\d*)*))?"
@@ -121,6 +123,7 @@ class StageController(QObject):
         super().__init__()
         self._serial: Optional[serial.Serial] = None
         self._pixels_to_mm: Optional[np.ndarray] = None
+        self._last_stage_position: Optional[tuple[float, ...]] = None
         self._latest_frame: Optional[np.ndarray] = None
         self._frame_counter = 0
         self._frame_condition = threading.Condition()
@@ -136,6 +139,7 @@ class StageController(QObject):
         self._needle_down_offset: Optional[float] = None
         self._needle_lower_direction_sign = -1.0
         self._oscillation_active = False
+        self._b_axis_zero_position: Optional[float] = None
 
     def set_serial(self, serial_connection: Optional[serial.Serial]) -> None:
         """Assign or clear the serial connection used for stage control."""
@@ -144,14 +148,19 @@ class StageController(QObject):
             self._serial = serial_connection
             if serial_connection is None or not serial_connection.is_open:
                 self._pixels_to_mm = None
+                self._last_stage_position = None
                 self._axis_limits.clear()
+                self._b_axis_zero_position = None
                 self._update_homing_status(set())
                 self._set_needles_state(False, known=False)
             else:
                 self._axis_limits.clear()
+                self._b_axis_zero_position = None
                 try:
                     self._ensure_axis_limits(serial_connection)
-                    self.status_message.emit("Axis limits loaded from controller.")
+                    self.status_message.emit(
+                        "Axis limits loaded from controller. B uses app soft limit ±45 deg."
+                    )
                 except StageControllerError as exc:
                     self._axis_limits.clear()
                     self.status_message.emit(str(exc))
@@ -206,6 +215,22 @@ class StageController(QObject):
             thread = threading.Thread(
                 target=self._run_move,
                 args=(dx_pixels, dy_pixels),
+                daemon=True,
+            )
+            self._active_thread = thread
+            thread.start()
+
+    def request_rotate_b(self, delta_deg: float) -> None:
+        """Rotate the B axis by a relative angle in the background."""
+
+        with self._task_lock:
+            if self._active_thread and self._active_thread.is_alive():
+                self.status_message.emit("Stage is busy. Ignoring B rotation request.")
+                return
+            self._cancel_event.clear()
+            thread = threading.Thread(
+                target=self._run_rotate_b,
+                args=(float(delta_deg),),
                 daemon=True,
             )
             self._active_thread = thread
@@ -380,6 +405,95 @@ class StageController(QObject):
         with self._task_lock:
             return bool(self._active_thread and self._active_thread.is_alive())
 
+    def current_stage_position(self) -> tuple[float, ...]:
+        """Return the latest controller-reported machine position."""
+
+        with self._task_lock:
+            if self._active_thread and self._active_thread.is_alive():
+                raise StageControllerError("Stage is busy. Wait for the current operation to finish.")
+            serial_connection = self._serial
+            if serial_connection is None or not serial_connection.is_open:
+                raise StageControllerError("Serial connection is not available.")
+            status = self._query_status(serial_connection)
+        if status is None or status.position is None:
+            raise StageControllerError("Unable to read stage position.")
+        if status.state.lower() in {"jog", "run"}:
+            raise StageControllerError("Wait for the stage to stop before capturing a marker.")
+        self._ensure_b_axis_zero_reference(status)
+        return tuple(float(value) for value in status.position)
+
+    def latest_stage_position(self) -> tuple[float, ...] | None:
+        """Return the most recently observed machine position, if any."""
+
+        if self._last_stage_position is None:
+            return None
+        return tuple(self._last_stage_position)
+
+    def resolve_clicked_point_xy(
+        self, dx_pixels: float, dy_pixels: float
+    ) -> tuple[tuple[float, float], tuple[float, float]]:
+        """Resolve the center and clicked image point to absolute FluidNC XY."""
+
+        with self._task_lock:
+            if self._active_thread and self._active_thread.is_alive():
+                raise StageControllerError(
+                    "Stage is busy. Wait for the current operation to finish."
+                )
+            serial_connection = self._serial
+            if serial_connection is None or not serial_connection.is_open:
+                raise StageControllerError("Serial connection is not available.")
+            status = self._query_status(serial_connection)
+            if status is None or status.position is None:
+                raise StageControllerError("Unable to read stage position.")
+            self._ensure_calibration(serial_connection)
+        if self._pixels_to_mm is None:
+            raise StageControllerError("Calibration failed. Cannot resolve clicked position.")
+        return self._resolve_xy_from_center(
+            tuple(float(value) for value in status.position),
+            dx_pixels,
+            dy_pixels,
+        )
+
+    def preview_clicked_point_xy(
+        self, dx_pixels: float, dy_pixels: float
+    ) -> tuple[tuple[float, float], tuple[float, float]] | None:
+        """Project a hovered image point using cached position/calibration only."""
+
+        if self._pixels_to_mm is None or self._last_stage_position is None:
+            return None
+        return self._resolve_xy_from_center(
+            self._last_stage_position,
+            dx_pixels,
+            dy_pixels,
+        )
+
+    def zero_b_axis(self) -> None:
+        """Set the current B machine position as the application zero reference."""
+
+        with self._task_lock:
+            if self._active_thread and self._active_thread.is_alive():
+                raise StageControllerError(
+                    "Stage is busy. Wait for the current operation to finish."
+                )
+            serial_connection = self._serial
+            if serial_connection is None or not serial_connection.is_open:
+                raise StageControllerError("Serial connection is not available.")
+            status = self._query_status(serial_connection)
+        if status is None or status.position is None:
+            raise StageControllerError("Unable to read B axis position.")
+        self._set_b_axis_zero_reference(status)
+
+    def reset_calibration(self, reason: str = "Click calibration reset.") -> None:
+        """Clear the click-to-move calibration so it is rebuilt on next use."""
+
+        with self._task_lock:
+            if self._active_thread and self._active_thread.is_alive():
+                raise StageControllerError(
+                    "Stage is busy. Wait for the current operation to finish."
+                )
+            self._pixels_to_mm = None
+        self.status_message.emit(reason)
+
     def _run_move(self, dx_pixels: float, dy_pixels: float) -> None:
         self.movement_started.emit()
         try:
@@ -407,6 +521,12 @@ class StageController(QObject):
             # negate the calibrated conversion when turning pixel error into mm.
             mm_vector = -(self._pixels_to_mm @ pixel_vector)
             move = MoveVector(x=float(mm_vector[0]), y=float(mm_vector[1]))
+            move_magnitude = float(np.linalg.norm(mm_vector))
+            if move_magnitude > self.MAX_CLICK_MOVE_MM:
+                self._pixels_to_mm = None
+                raise StageControllerError(
+                    "Predicted click move is too large; calibration was reset. Recalibrate and try again."
+                )
 
             self.status_message.emit(
                 f"Jogging stage ΔX={move.x:.3f} mm ΔY={move.y:.3f} mm"
@@ -428,6 +548,32 @@ class StageController(QObject):
             )
 
             self.movement_finished.emit(True, message)
+        except StageControllerError as exc:
+            self.movement_finished.emit(False, str(exc))
+        finally:
+            with self._task_lock:
+                self._active_thread = None
+
+    def _run_rotate_b(self, delta_deg: float) -> None:
+        self.movement_started.emit()
+        try:
+            self._check_cancelled()
+            serial_connection = self._serial
+            if serial_connection is None or not serial_connection.is_open:
+                raise StageControllerError("Serial connection is not available.")
+            if abs(delta_deg) < 1e-3:
+                self.movement_finished.emit(True, "Chip is already aligned.")
+                return
+            self.status_message.emit(f"Chip alignment: rotating B by {delta_deg:+.3f} deg.")
+            self._send_relative_move(
+                serial_connection,
+                MoveVector(b=delta_deg),
+                allow_relative=True,
+            )
+            self.movement_finished.emit(
+                True,
+                f"Chip alignment rotation complete (B {delta_deg:+.3f} deg).",
+            )
         except StageControllerError as exc:
             self.movement_finished.emit(False, str(exc))
         finally:
@@ -956,12 +1102,13 @@ class StageController(QObject):
         *,
         allow_relative: bool = False,
     ) -> None:
-        if not self._axis_limits:
+        if not self._axis_limits and abs(move.b) < 1e-6:
             return
         status = self._query_status(serial_connection)
         if status is None or not status.position:
             return
         positions = status.position
+        self._ensure_b_axis_zero_reference(status)
         requested_axes = {
             axis for axis, delta in move.items() if abs(delta) >= 1e-6
         }
@@ -974,6 +1121,15 @@ class StageController(QObject):
                 continue
             idx = self.AXIS_INDEX.get(axis)
             if idx is None or idx >= len(positions):
+                continue
+            if axis == "B":
+                current_b = self._relative_b_position(status)
+                limit = self.B_AXIS_SOFT_LIMIT_DEG
+                target_b = current_b + delta
+                if target_b < -limit or target_b > limit:
+                    raise StageControllerError(
+                        f"B move {delta:+.3f} exceeds software limit ({-limit:.3f}, {limit:.3f}) relative to B zero."
+                    )
                 continue
             limits = self._axis_limits.get(axis)
             if not limits:
@@ -1023,6 +1179,7 @@ class StageController(QObject):
                 raise StageControllerError(f"Controller reported: {line}")
         limits = self._parse_startup_limits(lines)
         if limits:
+            limits.pop("B", None)
             self._axis_limits.update(limits)
 
     def _ensure_axis_limits(self, serial_connection: serial.Serial) -> None:
@@ -1132,6 +1289,7 @@ class StageController(QObject):
                     coords = tuple(float(value) for value in mpos.split(","))
                     if coords:
                         position = coords
+                        self._last_stage_position = coords
                 except ValueError:
                     position = None
             homed_axes = None
@@ -1139,8 +1297,62 @@ class StageController(QObject):
             if homed_match:
                 homed_axes = set(homed_match.group(1).upper())
                 self._update_homing_status(homed_axes)
-            return _Status(state=state, position=position, homed_axes=homed_axes)
+            status = _Status(state=state, position=position, homed_axes=homed_axes)
+            self._ensure_b_axis_zero_reference(status)
+            return status
         return None
+
+    def _ensure_b_axis_zero_reference(self, status: _Status) -> None:
+        if self._b_axis_zero_position is not None:
+            return
+        if status.position is None:
+            return
+        self._set_b_axis_zero_reference(status, emit_status=False)
+
+    def _set_b_axis_zero_reference(
+        self, status: _Status, *, emit_status: bool = True
+    ) -> None:
+        if status.position is None:
+            raise StageControllerError("Unable to read B axis position.")
+        idx = self.AXIS_INDEX.get("B")
+        if idx is None or idx >= len(status.position):
+            raise StageControllerError("B axis position unavailable.")
+        self._b_axis_zero_position = float(status.position[idx])
+        if emit_status:
+            self.status_message.emit(
+                f"B zero reference set to current position ({self._b_axis_zero_position:.3f})."
+            )
+
+    def _relative_b_position(self, status: _Status) -> float:
+        if status.position is None:
+            raise StageControllerError("B axis position unavailable.")
+        idx = self.AXIS_INDEX.get("B")
+        if idx is None or idx >= len(status.position):
+            raise StageControllerError("B axis position unavailable.")
+        self._ensure_b_axis_zero_reference(status)
+        zero = self._b_axis_zero_position
+        if zero is None:
+            raise StageControllerError("B zero reference is not initialized.")
+        return float(status.position[idx]) - zero
+
+    def _resolve_xy_from_center(
+        self,
+        center_position: tuple[float, ...],
+        dx_pixels: float,
+        dy_pixels: float,
+    ) -> tuple[tuple[float, float], tuple[float, float]]:
+        if self._pixels_to_mm is None:
+            raise StageControllerError("Calibration is unavailable.")
+        if len(center_position) < 2:
+            raise StageControllerError("X/Y coordinates are unavailable.")
+        center_xy = (float(center_position[0]), float(center_position[1]))
+        pixel_vector = np.array([dx_pixels, dy_pixels], dtype=float)
+        mm_vector = -(self._pixels_to_mm @ pixel_vector)
+        target_xy = (
+            center_xy[0] + float(mm_vector[0]),
+            center_xy[1] + float(mm_vector[1]),
+        )
+        return center_xy, target_xy
 
     def _update_axis_a_ready(self, ready: bool) -> None:
         if ready == self._axis_a_ready:

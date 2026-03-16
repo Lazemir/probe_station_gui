@@ -73,6 +73,8 @@ class JoystickWindow(QWidget):
     home_all_requested = Signal()
     needles_raise_requested = Signal()
     needles_lower_requested = Signal()
+    zero_b_requested = Signal()
+    reset_calibration_requested = Signal()
 
     DEFAULT_JOG_DISTANCE_MM = 25.0
     DEFAULT_ROTATE_DISTANCE_DEG = 5.0
@@ -245,10 +247,13 @@ class JoystickWindow(QWidget):
         rotate_layout.addWidget(QLabel("Rotate B:", self))
         self.rotate_negative_button = QPushButton("↻", self)
         self.rotate_positive_button = QPushButton("↺", self)
+        self.zero_b_button = QPushButton("Zero B", self)
         self.rotate_negative_button.setToolTip("Rotate clockwise (B-)")
         self.rotate_positive_button.setToolTip("Rotate counter-clockwise (B+)")
+        self.zero_b_button.setToolTip("Use the current B position as zero")
         rotate_layout.addWidget(self.rotate_negative_button)
         rotate_layout.addWidget(self.rotate_positive_button)
+        rotate_layout.addWidget(self.zero_b_button)
         rotate_layout.addStretch(1)
         root_layout.addLayout(rotate_layout)
 
@@ -264,6 +269,7 @@ class JoystickWindow(QWidget):
         self.rotate_negative_button.released.connect(self.stop_jog)
         self.rotate_positive_button.pressed.connect(lambda: self.start_jog("B", 1))
         self.rotate_positive_button.released.connect(self.stop_jog)
+        self.zero_b_button.clicked.connect(self.zero_b_requested.emit)
         self.focus_down_button.pressed.connect(lambda: self.start_jog("Z", -1))
         self.focus_down_button.released.connect(self.stop_jog)
         self.focus_up_button.pressed.connect(lambda: self.start_jog("Z", 1))
@@ -311,8 +317,10 @@ class JoystickWindow(QWidget):
         safety_layout = QHBoxLayout()
         self.unlock_button = QPushButton("Unlock", self)
         self.reset_button = QPushButton("Reset", self)
+        self.reset_calibration_button = QPushButton("Reset Cal", self)
         safety_layout.addWidget(self.unlock_button)
         safety_layout.addWidget(self.reset_button)
+        safety_layout.addWidget(self.reset_calibration_button)
         root_layout.addLayout(safety_layout)
 
         self.autofocus_button = QPushButton("Autofocus", self)
@@ -322,6 +330,9 @@ class JoystickWindow(QWidget):
 
         self.unlock_button.clicked.connect(lambda: self.send_command("$X\n"))
         self.reset_button.clicked.connect(self._send_reset)
+        self.reset_calibration_button.clicked.connect(
+            self.reset_calibration_requested.emit
+        )
 
         root_layout.addStretch(1)
         self._update_enabled_state()
@@ -594,6 +605,8 @@ class JoystickWindow(QWidget):
             self.needles_lower_button,
             self.unlock_button,
             self.reset_button,
+            self.zero_b_button,
+            self.reset_calibration_button,
         ):
             widget.setEnabled(enabled)
         for widget in (
