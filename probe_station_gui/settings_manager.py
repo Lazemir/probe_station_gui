@@ -130,6 +130,42 @@ class JogSettings:
 
 
 @dataclass
+class NeedleCalibrationSettings:
+    """Configuration for needle calibration and the external LCR meter."""
+
+    visa_resource: str = ""
+    short_threshold_ohm: float = 10.0
+    poll_interval_ms: int = 250
+    lower_direction: str = "negative"
+    down_position_mm: float = 0.0
+    down_position_configured: bool = False
+
+    def clone(self) -> "NeedleCalibrationSettings":
+        """Return a copy of the needle calibration settings."""
+
+        return NeedleCalibrationSettings(
+            visa_resource=self.visa_resource,
+            short_threshold_ohm=self.short_threshold_ohm,
+            poll_interval_ms=self.poll_interval_ms,
+            lower_direction=self.lower_direction,
+            down_position_mm=self.down_position_mm,
+            down_position_configured=self.down_position_configured,
+        )
+
+    def to_dict(self) -> dict[str, float | int | str | bool]:
+        """Serialize the needle calibration preferences."""
+
+        return {
+            "visa_resource": self.visa_resource,
+            "short_threshold_ohm": self.short_threshold_ohm,
+            "poll_interval_ms": self.poll_interval_ms,
+            "lower_direction": self.lower_direction,
+            "down_position_mm": self.down_position_mm,
+            "down_position_configured": self.down_position_configured,
+        }
+
+
+@dataclass
 class Settings:
     """Container for all configurable values."""
 
@@ -137,6 +173,9 @@ class Settings:
     logging: LoggingSettings = field(default_factory=LoggingSettings)
     feedrates: FeedrateSettings = field(default_factory=FeedrateSettings)
     jog: JogSettings = field(default_factory=JogSettings)
+    needle_calibration: NeedleCalibrationSettings = field(
+        default_factory=NeedleCalibrationSettings
+    )
 
     def clone(self) -> "Settings":
         """Create a deep copy of the settings container."""
@@ -146,6 +185,7 @@ class Settings:
             logging=self.logging.clone(),
             feedrates=self.feedrates.clone(),
             jog=self.jog.clone(),
+            needle_calibration=self.needle_calibration.clone(),
         )
 
     def to_dict(self) -> dict:
@@ -168,6 +208,7 @@ class Settings:
                 },
             },
             "jog": self.jog.to_dict(),
+            "needle_calibration": self.needle_calibration.to_dict(),
         }
 
 
@@ -195,6 +236,9 @@ class SettingsManager:
     DEFAULT_FEEDRATE_DEFAULT: float = 1.0
     DEFAULT_LINEAR_JOG_DISTANCE_MM: float = 25.0
     DEFAULT_ROTARY_JOG_DISTANCE_DEG: float = 5.0
+    DEFAULT_SHORT_THRESHOLD_OHM: float = 10.0
+    DEFAULT_LCR_POLL_INTERVAL_MS: int = 250
+    DEFAULT_LOWER_DIRECTION: str = "negative"
     LINEAR_GROUP = "linear"
     ROTARY_GROUP = "rotary"
 
@@ -360,6 +404,31 @@ class SettingsManager:
                 "rotary_distance_deg", self.DEFAULT_ROTARY_JOG_DISTANCE_DEG
             )
 
+        needle_section = data.get("needle_calibration")
+        if not isinstance(needle_section, dict):
+            needle_section = {
+                "visa_resource": "",
+                "short_threshold_ohm": self.DEFAULT_SHORT_THRESHOLD_OHM,
+                "poll_interval_ms": self.DEFAULT_LCR_POLL_INTERVAL_MS,
+                "lower_direction": self.DEFAULT_LOWER_DIRECTION,
+                "down_position_mm": 0.0,
+                "down_position_configured": False,
+            }
+            data["needle_calibration"] = needle_section
+        else:
+            needle_section.setdefault("visa_resource", "")
+            needle_section.setdefault(
+                "short_threshold_ohm", self.DEFAULT_SHORT_THRESHOLD_OHM
+            )
+            needle_section.setdefault(
+                "poll_interval_ms", self.DEFAULT_LCR_POLL_INTERVAL_MS
+            )
+            needle_section.setdefault(
+                "lower_direction", self.DEFAULT_LOWER_DIRECTION
+            )
+            needle_section.setdefault("down_position_mm", 0.0)
+            needle_section.setdefault("down_position_configured", False)
+
         with self._config_path.open("w", encoding="utf-8") as target:
             json.dump(data, target, indent=2, ensure_ascii=False)
 
@@ -394,11 +463,15 @@ class SettingsManager:
         legacy_presets = raw.get("feedrate_presets") if isinstance(raw, dict) else None
         feedrates = self._parse_feedrates(feedrates_raw, legacy_presets)
         jog_raw = raw.get("jog") if isinstance(raw, dict) else None
+        needle_calibration_raw = (
+            raw.get("needle_calibration") if isinstance(raw, dict) else None
+        )
         return Settings(
             controls=controls,
             logging=logging_settings,
             feedrates=feedrates,
             jog=self._parse_jog(jog_raw),
+            needle_calibration=self._parse_needle_calibration(needle_calibration_raw),
         )
 
     def _parse_logging(self, raw_logging) -> LoggingSettings:
@@ -449,6 +522,70 @@ class SettingsManager:
         return JogSettings(
             linear_distance_mm=linear_distance,
             rotary_distance_deg=rotary_distance,
+        )
+
+    def _parse_needle_calibration(
+        self, raw_needle_calibration
+    ) -> NeedleCalibrationSettings:
+        """Normalise persisted needle calibration settings."""
+
+        visa_resource = ""
+        short_threshold_ohm = self.DEFAULT_SHORT_THRESHOLD_OHM
+        poll_interval_ms = self.DEFAULT_LCR_POLL_INTERVAL_MS
+        lower_direction = self.DEFAULT_LOWER_DIRECTION
+        down_position_mm = 0.0
+        down_position_configured = False
+        if isinstance(raw_needle_calibration, dict):
+            resource_raw = raw_needle_calibration.get("visa_resource", visa_resource)
+            if isinstance(resource_raw, str):
+                visa_resource = resource_raw.strip()
+            candidate = raw_needle_calibration.get(
+                "short_threshold_ohm", short_threshold_ohm
+            )
+            try:
+                if isinstance(candidate, (int, float, str)):
+                    short_threshold_ohm = float(candidate)
+            except (TypeError, ValueError):
+                short_threshold_ohm = self.DEFAULT_SHORT_THRESHOLD_OHM
+            candidate = raw_needle_calibration.get(
+                "poll_interval_ms", poll_interval_ms
+            )
+            try:
+                if isinstance(candidate, (int, float, str)):
+                    poll_interval_ms = int(float(candidate))
+            except (TypeError, ValueError):
+                poll_interval_ms = self.DEFAULT_LCR_POLL_INTERVAL_MS
+            direction_raw = raw_needle_calibration.get(
+                "lower_direction", lower_direction
+            )
+            if isinstance(direction_raw, str):
+                lower_direction = direction_raw.strip().lower()
+            candidate = raw_needle_calibration.get(
+                "down_position_mm", down_position_mm
+            )
+            try:
+                if isinstance(candidate, (int, float, str)):
+                    down_position_mm = float(candidate)
+            except (TypeError, ValueError):
+                down_position_mm = 0.0
+            down_position_configured = bool(
+                raw_needle_calibration.get(
+                    "down_position_configured", down_position_configured
+                )
+            )
+        if short_threshold_ohm < 0:
+            short_threshold_ohm = self.DEFAULT_SHORT_THRESHOLD_OHM
+        if poll_interval_ms < 50:
+            poll_interval_ms = self.DEFAULT_LCR_POLL_INTERVAL_MS
+        if lower_direction not in {"negative", "positive"}:
+            lower_direction = self.DEFAULT_LOWER_DIRECTION
+        return NeedleCalibrationSettings(
+            visa_resource=visa_resource,
+            short_threshold_ohm=short_threshold_ohm,
+            poll_interval_ms=poll_interval_ms,
+            lower_direction=lower_direction,
+            down_position_mm=down_position_mm,
+            down_position_configured=down_position_configured,
         )
 
     def _parse_feedrate_groups(
@@ -588,6 +725,9 @@ class SettingsManager:
             ),
         )
         clone.jog = self._parse_jog(clone.jog.to_dict())
+        clone.needle_calibration = self._parse_needle_calibration(
+            clone.needle_calibration.to_dict()
+        )
         return clone
 
     def feedrate_group(self, motion_type: str) -> FeedrateGroup:
@@ -608,4 +748,9 @@ class SettingsManager:
         """Return the current jog configuration clone."""
 
         return self._settings.jog.clone()
+
+    def needle_calibration_configuration(self) -> NeedleCalibrationSettings:
+        """Return the current needle calibration configuration clone."""
+
+        return self._settings.needle_calibration.clone()
 

@@ -16,6 +16,12 @@ dependencies = [
     "scipy",
 ]
 
+[project.optional-dependencies]
+lcr = [
+    "pyvisa",
+    "qcodes",
+]
+
 [tool.setuptools]
 packages = [
     "probe_station_gui",

@@ -80,6 +80,8 @@ class StageController(QObject):
     needles_state_changed: Signal = Signal(bool, bool)
     needles_action_started: Signal = Signal(str)
     needles_action_finished: Signal = Signal(bool, str, str)
+    needle_height_changed: Signal = Signal(float)
+    oscillation_state_changed: Signal = Signal(bool, str)
     status_message: Signal = Signal(str)
 
     CALIBRATION_PIXEL_TARGET = 120.0
@@ -96,6 +98,14 @@ class StageController(QObject):
     AUTOFOCUS_MAXFUN = 35
     AUTOFOCUS_ANNEALING_MAXITER = 12
     A_ZERO_TOLERANCE = 1e-3
+    OSCILLATION_MIN_AMPLITUDE_MM = 0.001
+    OSCILLATION_MAX_AMPLITUDE_MM = 10.0
+    OSCILLATION_MIN_FEEDRATE = 1.0
+    OSCILLATION_MAX_FEEDRATE = 5000.0
+    LINEAR_SEGMENTS_PER_SWEEP = 40
+    SPIRAL_SEGMENTS_PER_TURN = 180
+    SPIRAL_MIN_TURNS_PER_SWEEP = 0.25
+    SPIRAL_MAX_TURNS_PER_SWEEP = 50.0
 
     STATUS_PATTERN = re.compile(
         r"<(?P<state>[A-Za-z]+)(?:\|[^>]*?MPos:(?P<mpos>-?\d+\.?\d*(?:,-?\d+\.?\d*)*))?"
@@ -124,6 +134,8 @@ class StageController(QObject):
         self._needles_up = False
         self._needles_known = False
         self._needle_down_offset: Optional[float] = None
+        self._needle_lower_direction_sign = -1.0
+        self._oscillation_active = False
 
     def set_serial(self, serial_connection: Optional[serial.Serial]) -> None:
         """Assign or clear the serial connection used for stage control."""
@@ -271,6 +283,81 @@ class StageController(QObject):
             )
             self._active_thread = thread
             thread.start()
+
+    def apply_needle_calibration(
+        self,
+        *,
+        down_position_mm: Optional[float],
+        lower_direction: str,
+    ) -> None:
+        """Apply the persisted needle calibration settings."""
+
+        self._needle_down_offset = down_position_mm
+        self._needle_lower_direction_sign = (
+            1.0 if lower_direction.strip().lower() == "positive" else -1.0
+        )
+
+    def request_needles_adjust(self, step_mm: float) -> None:
+        """Adjust the A axis for needle calibration without the XY safety gate."""
+
+        with self._task_lock:
+            if self._active_thread and self._active_thread.is_alive():
+                self.status_message.emit("Stage is busy. Ignoring needle adjustment.")
+                return
+            self._cancel_event.clear()
+            thread = threading.Thread(
+                target=self._run_needles_adjust, args=(float(step_mm),), daemon=True
+            )
+            self._active_thread = thread
+            self.needles_action_started.emit("adjust")
+            thread.start()
+
+    def request_oscillation(
+        self, mode: str, amplitude_mm: float, feedrate: float, turns_per_sweep: float = 3.0
+    ) -> None:
+        """Start one of the repeated motion patterns."""
+
+        mode_key = mode.upper().strip()
+        with self._task_lock:
+            if self._active_thread and self._active_thread.is_alive():
+                self.status_message.emit("Stage is busy. Ignoring oscillation request.")
+                return
+            self._cancel_event.clear()
+            thread = threading.Thread(
+                target=self._run_oscillation,
+                args=(
+                    mode_key,
+                    float(amplitude_mm),
+                    float(feedrate),
+                    float(turns_per_sweep),
+                ),
+                daemon=True,
+            )
+            self._active_thread = thread
+            thread.start()
+
+    def request_stop_oscillation(self) -> None:
+        """Stop the active oscillation task if one is running."""
+
+        if not self._oscillation_active:
+            return
+        self._cancel_event.set()
+        self.status_message.emit("Oscillation stop requested.")
+
+    def current_a_position(self) -> Optional[float]:
+        """Return the current machine A coordinate when it can be queried safely."""
+
+        serial_connection = self._serial
+        if serial_connection is None or not serial_connection.is_open:
+            return None
+        with self._task_lock:
+            if self._active_thread and self._active_thread.is_alive():
+                return None
+        a_position = self._read_current_a_position(serial_connection)
+        if a_position is None:
+            return None
+        self.needle_height_changed.emit(a_position)
+        return a_position
 
     def invalidate_needles_state(self, reason: str = "") -> None:
         """Mark needles state unknown after manual A-axis changes."""
@@ -588,7 +675,7 @@ class StageController(QObject):
                 self._write_command(serial_connection, "$HA")
                 self._wait_for_ok(serial_connection, timeout=30.0)
                 self._wait_for_idle(serial_connection, timeout=30.0)
-                self._set_needles_state(True, known=True)
+                self._update_needles_from_a_position(0.0)
                 self.needles_action_finished.emit(True, "Needles raised.", action)
                 return
             if action == "lower":
@@ -606,17 +693,134 @@ class StageController(QObject):
                 current_a = float(status.position[idx])
                 delta = float(self._needle_down_offset) - current_a
                 if abs(delta) < 1e-6:
-                    self._set_needles_state(False, known=True)
+                    self._update_needles_from_a_position(float(self._needle_down_offset))
                     self.needles_action_finished.emit(True, "Needles already lowered.", action)
                     return
-                self._send_relative_move(serial_connection, MoveVector(a=delta))
-                self._set_needles_state(False, known=True)
+                self._send_relative_move(
+                    serial_connection,
+                    MoveVector(a=delta),
+                    ignore_needle_safety=True,
+                )
+                self._update_needles_from_a_position(float(self._needle_down_offset))
                 self.needles_action_finished.emit(True, "Needles lowered.", action)
                 return
             raise StageControllerError(f"Unknown needle action: {action}.")
         except StageControllerError as exc:
             self.needles_action_finished.emit(False, str(exc), action)
         finally:
+            with self._task_lock:
+                self._active_thread = None
+
+    def _run_needles_adjust(self, step_mm: float) -> None:
+        action = "adjust"
+        try:
+            serial_connection = self._serial
+            if serial_connection is None or not serial_connection.is_open:
+                raise StageControllerError("Serial connection is not available.")
+            if abs(step_mm) < 1e-6:
+                self.needles_action_finished.emit(True, "Needle position unchanged.", action)
+                return
+            status = self._query_status(serial_connection)
+            if status is None or status.position is None:
+                raise StageControllerError("Unable to read A position for needles.")
+            self._require_homed_axes(status, {"A"})
+            self._send_relative_move(
+                serial_connection,
+                MoveVector(a=step_mm),
+                ignore_needle_safety=True,
+            )
+            current_a = self._read_current_a_position(serial_connection)
+            if current_a is None:
+                raise StageControllerError("Unable to confirm A position after move.")
+            self._update_needles_from_a_position(current_a)
+            direction = "lowered" if step_mm * self._needle_lower_direction_sign > 0 else "raised"
+            self.needles_action_finished.emit(
+                True,
+                f"Needles {direction} by {abs(step_mm):.3f} mm.",
+                action,
+            )
+        except StageControllerError as exc:
+            self.needles_action_finished.emit(False, str(exc), action)
+        finally:
+            with self._task_lock:
+                self._active_thread = None
+
+    def _run_oscillation(
+        self, mode: str, amplitude_mm: float, feedrate: float, turns_per_sweep: float
+    ) -> None:
+        try:
+            serial_connection = self._serial
+            if serial_connection is None or not serial_connection.is_open:
+                raise StageControllerError("Serial connection is not available.")
+            if mode not in {"X", "Y", "SPIRAL"}:
+                raise StageControllerError(
+                    f"Oscillation mode {mode} is not supported."
+                )
+            if not (
+                self.OSCILLATION_MIN_AMPLITUDE_MM
+                <= amplitude_mm
+                <= self.OSCILLATION_MAX_AMPLITUDE_MM
+            ):
+                raise StageControllerError(
+                    f"Oscillation amplitude must be between "
+                    f"{self.OSCILLATION_MIN_AMPLITUDE_MM:.3f} and "
+                    f"{self.OSCILLATION_MAX_AMPLITUDE_MM:.3f} mm."
+                )
+            if not (self.OSCILLATION_MIN_FEEDRATE <= feedrate <= self.OSCILLATION_MAX_FEEDRATE):
+                raise StageControllerError(
+                    f"Oscillation feedrate must be between "
+                    f"{self.OSCILLATION_MIN_FEEDRATE:.1f} and "
+                    f"{self.OSCILLATION_MAX_FEEDRATE:.1f} mm/min."
+                )
+            if mode == "SPIRAL" and not (
+                self.SPIRAL_MIN_TURNS_PER_SWEEP
+                <= turns_per_sweep
+                <= self.SPIRAL_MAX_TURNS_PER_SWEEP
+            ):
+                raise StageControllerError(
+                    f"Spiral turns per sweep must be between "
+                    f"{self.SPIRAL_MIN_TURNS_PER_SWEEP:.2f} and "
+                    f"{self.SPIRAL_MAX_TURNS_PER_SWEEP:.2f}."
+                )
+            self._oscillation_active = True
+            self.oscillation_state_changed.emit(True, mode)
+            self.status_message.emit(
+                f"Oscillation started in {mode}: amplitude={amplitude_mm:.3f} mm, "
+                f"feedrate={feedrate:.1f} mm/min."
+            )
+            self._write_command(serial_connection, "G21")
+            self._wait_for_ok(serial_connection)
+            self._write_command(serial_connection, "G91")
+            self._wait_for_ok(serial_connection)
+            if mode == "SPIRAL":
+                self._run_spiral_pattern(
+                    serial_connection,
+                    amplitude_mm=amplitude_mm,
+                    feedrate=feedrate,
+                    turns_per_sweep=turns_per_sweep,
+                )
+            else:
+                self._run_linear_pattern(
+                    serial_connection,
+                    axis=mode,
+                    amplitude_mm=amplitude_mm,
+                    feedrate=feedrate,
+                )
+            self._write_command(serial_connection, "G90")
+            self._wait_for_ok(serial_connection)
+            self.status_message.emit("Oscillation stopped.")
+        except StageControllerError as exc:
+            try:
+                if serial_connection is not None and serial_connection.is_open:
+                    self._cancel_event.clear()
+                    self._write_command(serial_connection, "G90")
+                    self._wait_for_ok(serial_connection)
+            except StageControllerError:
+                pass
+            self.status_message.emit(str(exc))
+        finally:
+            self._oscillation_active = False
+            self.oscillation_state_changed.emit(False, mode)
             with self._task_lock:
                 self._active_thread = None
 
@@ -662,10 +866,13 @@ class StageController(QObject):
         move: MoveVector,
         *,
         allow_relative: bool = False,
+        ignore_needle_safety: bool = False,
+        feedrate: Optional[float] = None,
     ) -> None:
         if move.is_zero():
             return
-        self._move_safety_check()
+        if not ignore_needle_safety:
+            self._move_safety_check()
         self._ensure_axis_limits(serial_connection)
         self._check_relative_move_limits(
             serial_connection, move, allow_relative=allow_relative
@@ -681,12 +888,42 @@ class StageController(QObject):
         ]
         if not move_parts:
             return
-        move = "G1 " + " ".join(move_parts) + f" F{self.DEFAULT_FEEDRATE:.0f}"
+        effective_feedrate = (
+            self.DEFAULT_FEEDRATE if feedrate is None else max(1.0, float(feedrate))
+        )
+        move = "G1 " + " ".join(move_parts) + f" F{effective_feedrate:.0f}"
         self._write_command(serial_connection, move)
         self._wait_for_ok(serial_connection)
         self._write_command(serial_connection, "G90")
         self._wait_for_ok(serial_connection)
         self._wait_for_idle(serial_connection)
+
+    def _write_relative_g1_unchecked(
+        self,
+        serial_connection: serial.Serial,
+        move: MoveVector,
+        *,
+        feedrate: Optional[float] = None,
+    ) -> None:
+        """Send a single relative G1 move assuming the controller is already in G91."""
+
+        if move.is_zero():
+            return
+        move_parts: list[str] = [
+            f"{axis}{value:.4f}"
+            for axis, value in move.items()
+            if abs(value) >= 1e-6
+        ]
+        if not move_parts:
+            return
+        effective_feedrate = (
+            self.DEFAULT_FEEDRATE if feedrate is None else max(1.0, float(feedrate))
+        )
+        self._write_command(
+            serial_connection,
+            "G1 " + " ".join(move_parts) + f" F{effective_feedrate:.0f}",
+        )
+        self._wait_for_ok(serial_connection)
 
     def _check_relative_move_limits(
         self,
@@ -894,6 +1131,120 @@ class StageController(QObject):
         self._needles_known = known
         self._update_axis_a_ready(raised and known)
         self.needles_state_changed.emit(raised, known)
+
+    def _update_needles_from_a_position(self, a_position: float) -> None:
+        """Update the coarse needles state using the current A coordinate."""
+
+        self.needle_height_changed.emit(a_position)
+        self._set_needles_state(abs(a_position) <= self.A_ZERO_TOLERANCE, known=True)
+
+    def _read_current_a_position(
+        self, serial_connection: serial.Serial
+    ) -> Optional[float]:
+        """Read the current machine A coordinate from the controller."""
+
+        status = self._query_status(serial_connection)
+        if status is None or status.position is None:
+            return None
+        idx = self.AXIS_INDEX.get("A")
+        if idx is None or idx >= len(status.position):
+            return None
+        return float(status.position[idx])
+
+    def _move_vector_for_axis(self, axis: str, delta: float) -> MoveVector:
+        """Create a single-axis move vector."""
+
+        if axis == "X":
+            return MoveVector(x=delta)
+        if axis == "Y":
+            return MoveVector(y=delta)
+        if axis == "Z":
+            return MoveVector(z=delta)
+        if axis == "A":
+            return MoveVector(a=delta)
+        if axis == "B":
+            return MoveVector(b=delta)
+        if axis == "C":
+            return MoveVector(c=delta)
+        raise StageControllerError(f"Unsupported axis: {axis}")
+
+    def _run_linear_pattern(
+        self,
+        serial_connection: serial.Serial,
+        *,
+        axis: str,
+        amplitude_mm: float,
+        feedrate: float,
+    ) -> None:
+        """Run endless edge-to-edge motion along a single axis."""
+
+        current_offset = 0.0
+        target_offset = amplitude_mm
+        direction = 1.0
+        segment_length = max(
+            0.001, amplitude_mm / float(self.LINEAR_SEGMENTS_PER_SWEEP)
+        )
+        while not self._cancel_event.is_set():
+            self._check_cancelled()
+            remaining = target_offset - current_offset
+            if abs(remaining) < 1e-6:
+                direction *= -1.0
+                target_offset = amplitude_mm * direction
+                continue
+            step = float(np.sign(remaining)) * min(abs(remaining), segment_length)
+            self._write_relative_g1_unchecked(
+                serial_connection,
+                self._move_vector_for_axis(axis, step),
+                feedrate=feedrate,
+            )
+            current_offset += step
+
+    def _run_spiral_pattern(
+        self,
+        serial_connection: serial.Serial,
+        *,
+        amplitude_mm: float,
+        feedrate: float,
+        turns_per_sweep: float,
+    ) -> None:
+        """Run a smooth forward-winding spiral around the current point."""
+
+        phase = 0.0
+        phase_step = (2.0 * np.pi) / float(self.SPIRAL_SEGMENTS_PER_TURN)
+        start_angle = np.pi / 2.0
+        last_x = 0.0
+        last_y = 0.0
+        while not self._cancel_event.is_set():
+            self._check_cancelled()
+            phase += phase_step
+            radius = amplitude_mm * 0.5 * (1.0 - float(np.cos(phase)))
+            angle = start_angle + (2.0 * turns_per_sweep * phase)
+            next_x = radius * float(np.cos(angle))
+            next_y = radius * float(np.sin(angle))
+            self._write_relative_g1_unchecked(
+                serial_connection,
+                MoveVector(x=next_x - last_x, y=next_y - last_y),
+                feedrate=feedrate,
+            )
+            last_x = next_x
+            last_y = next_y
+
+    def _ensure_oscillation_limits(
+        self, axis: str, center_position: float, amplitude_mm: float
+    ) -> None:
+        """Validate that the oscillation window stays inside the known soft limits."""
+
+        limits = self._axis_limits.get(axis)
+        if not limits:
+            return
+        min_value, max_value = limits
+        lower = center_position - amplitude_mm
+        upper = center_position + amplitude_mm
+        if lower < min_value or upper > max_value:
+            raise StageControllerError(
+                f"Oscillation window for {axis} exceeds limits "
+                f"({min_value:.3f}, {max_value:.3f})."
+            )
 
     def _require_homed_axes(
         self, status: _Status, axes: set[str], *, allow_relative: bool = False

@@ -8,6 +8,7 @@ from typing import Dict, List, Sequence, cast
 from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QDoubleValidator, QKeyEvent, QKeySequence
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -33,6 +34,7 @@ from probe_station_gui.settings_manager import (
     JogSettings,
     KeyBinding,
     LoggingSettings,
+    NeedleCalibrationSettings,
     Settings,
 )
 
@@ -455,6 +457,78 @@ class JogSettingsWidget(QWidget):
         )
 
 
+class NeedleCalibrationSettingsWidget(QWidget):
+    """Tab that exposes LCR and needle calibration settings."""
+
+    def __init__(
+        self,
+        calibration_settings: NeedleCalibrationSettings,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        layout = QFormLayout(self)
+        layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+
+        self._visa_resource_edit = QLineEdit(self)
+        self._visa_resource_edit.setPlaceholderText("COM4 or ASRL4::INSTR")
+        self._visa_resource_edit.setText(calibration_settings.visa_resource)
+        layout.addRow(QLabel("LCR resource", self), self._visa_resource_edit)
+
+        self._short_threshold_spin = QDoubleSpinBox(self)
+        self._short_threshold_spin.setDecimals(3)
+        self._short_threshold_spin.setRange(0.0, 1_000_000.0)
+        self._short_threshold_spin.setSingleStep(0.5)
+        self._short_threshold_spin.setSuffix(" ohm")
+        self._short_threshold_spin.setValue(calibration_settings.short_threshold_ohm)
+        layout.addRow(QLabel("Short threshold", self), self._short_threshold_spin)
+
+        self._poll_interval_spin = QDoubleSpinBox(self)
+        self._poll_interval_spin.setDecimals(0)
+        self._poll_interval_spin.setRange(50, 10_000)
+        self._poll_interval_spin.setSingleStep(50)
+        self._poll_interval_spin.setSuffix(" ms")
+        self._poll_interval_spin.setValue(calibration_settings.poll_interval_ms)
+        layout.addRow(QLabel("Polling interval", self), self._poll_interval_spin)
+
+        self._lower_direction_combo = QComboBox(self)
+        self._lower_direction_combo.addItem("Negative A", "negative")
+        self._lower_direction_combo.addItem("Positive A", "positive")
+        current_index = self._lower_direction_combo.findData(
+            calibration_settings.lower_direction
+        )
+        if current_index >= 0:
+            self._lower_direction_combo.setCurrentIndex(current_index)
+        layout.addRow(QLabel("Lowering direction", self), self._lower_direction_combo)
+
+        self._configured_checkbox = QCheckBox("Calibrated down height is configured", self)
+        self._configured_checkbox.setChecked(
+            calibration_settings.down_position_configured
+        )
+        layout.addRow(self._configured_checkbox)
+
+        self._down_position_spin = QDoubleSpinBox(self)
+        self._down_position_spin.setDecimals(4)
+        self._down_position_spin.setRange(-1000.0, 1000.0)
+        self._down_position_spin.setSingleStep(0.01)
+        self._down_position_spin.setSuffix(" mm")
+        self._down_position_spin.setValue(calibration_settings.down_position_mm)
+        layout.addRow(QLabel("Calibrated down A position", self), self._down_position_spin)
+
+    def to_settings(self, settings: Settings) -> None:
+        """Persist the widget state into the provided settings object."""
+
+        settings.needle_calibration = NeedleCalibrationSettings(
+            visa_resource=self._visa_resource_edit.text().strip(),
+            short_threshold_ohm=self._short_threshold_spin.value(),
+            poll_interval_ms=int(self._poll_interval_spin.value()),
+            lower_direction=str(
+                self._lower_direction_combo.currentData() or "negative"
+            ),
+            down_position_mm=self._down_position_spin.value(),
+            down_position_configured=self._configured_checkbox.isChecked(),
+        )
+
+
 class SettingsDialog(QDialog):
     """Main settings dialog with tabbed sections."""
 
@@ -473,8 +547,12 @@ class SettingsDialog(QDialog):
         self._logging_tab = LoggingSettingsWidget(self._settings.logging, self)
         self._feedrate_tab = FeedrateSettingsWidget(self._settings.feedrates, self)
         self._jog_tab = JogSettingsWidget(self._settings.jog, self)
+        self._needle_calibration_tab = NeedleCalibrationSettingsWidget(
+            self._settings.needle_calibration, self
+        )
         self._tabs.addTab(self._controls_tab, "Controls")
         self._tabs.addTab(self._jog_tab, "Jog")
+        self._tabs.addTab(self._needle_calibration_tab, "Needles")
         self._tabs.addTab(self._feedrate_tab, "Feedrates")
         self._tabs.addTab(self._logging_tab, "Logging")
 
@@ -486,6 +564,7 @@ class SettingsDialog(QDialog):
     def accept(self) -> None:  # type: ignore[override]
         self._controls_tab.to_settings(self._settings)
         self._jog_tab.to_settings(self._settings)
+        self._needle_calibration_tab.to_settings(self._settings)
         self._feedrate_tab.to_settings(self._settings)
         self._logging_tab.to_settings(self._settings.logging)
         super().accept()

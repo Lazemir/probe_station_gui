@@ -26,8 +26,11 @@ from probe_station_gui import (
     SerialTerminalWindow,
 )
 from probe_station_gui.dialogs.settings_dialog import SettingsDialog
+from probe_station_gui.lcr_meter import LCRMeterController
 from probe_station_gui.settings_manager import SettingsManager
 from probe_station_gui.views.dock_widgets import CollapsibleDockWidget
+from probe_station_gui.views.needle_calibration_panel import NeedleCalibrationPanel
+from probe_station_gui.views.oscillation_panel import OscillationPanel
 from probe_station_gui.views.serial_connection_panel import SerialConnectionPanel
 
 
@@ -56,9 +59,14 @@ class Main(QMainWindow):
         self.joystick_panel: JoystickWindow | None = None
         self.serial_terminal_panel: SerialTerminalWindow | None = None
         self.serial_connection_panel: SerialConnectionPanel | None = None
+        self.needle_calibration_panel: NeedleCalibrationPanel | None = None
+        self.oscillation_panel: OscillationPanel | None = None
         self.joystick_dock: CollapsibleDockWidget | None = None
         self.serial_terminal_dock: CollapsibleDockWidget | None = None
         self.serial_connection_dock: CollapsibleDockWidget | None = None
+        self.needle_calibration_dock: CollapsibleDockWidget | None = None
+        self.oscillation_dock: CollapsibleDockWidget | None = None
+        self._needle_calibration_active = False
         self.statusBar()
         self._status_log = QPlainTextEdit(self)
         self._status_log.setReadOnly(True)
@@ -83,10 +91,19 @@ class Main(QMainWindow):
         self.stage_controller.movement_finished.connect(self.on_move_finished)
         self.stage_controller.calibration_changed.connect(self.on_calibration_changed)
         self.stage_controller.autofocus_finished.connect(self.on_autofocus_finished)
+        self.stage_controller.needle_height_changed.connect(self._on_needle_height_changed)
+        self.stage_controller.oscillation_state_changed.connect(
+            self._on_oscillation_state_changed
+        )
         self.stage_controller.movement_started.connect(
             lambda: self._show_status("Moving stage...")
         )
         self.grabber.frame_ready.connect(self.stage_controller.on_frame_ready)
+        self.lcr_controller = LCRMeterController()
+        self.lcr_controller.status_message.connect(self._show_status)
+        self._needle_height_timer = QTimer(self)
+        self._needle_height_timer.setInterval(400)
+        self._needle_height_timer.timeout.connect(self._refresh_needle_height)
 
         self._create_dock_widgets()
 
@@ -105,6 +122,14 @@ class Main(QMainWindow):
             connection_action = self.serial_connection_dock.toggleViewAction()
             connection_action.setText("Connection")
             window_menu.addAction(connection_action)
+        if self.needle_calibration_dock is not None:
+            needle_action = self.needle_calibration_dock.toggleViewAction()
+            needle_action.setText("Needle Calibration")
+            window_menu.addAction(needle_action)
+        if self.oscillation_dock is not None:
+            oscillation_action = self.oscillation_dock.toggleViewAction()
+            oscillation_action.setText("Oscillation")
+            window_menu.addAction(oscillation_action)
 
         QTimer.singleShot(0, self._auto_connect_if_possible)
 
@@ -180,6 +205,8 @@ class Main(QMainWindow):
             self.serial_connection.close()
         self.serial_connection = None
         logger.info("Serial disconnected")
+        self.stage_controller.request_stop_oscillation()
+        self._stop_needle_calibration()
         self.stage_controller.set_serial(None)
         auto_retry = self.sender() is not self.serial_connection_panel
         if self.serial_connection_panel:
@@ -188,6 +215,10 @@ class Main(QMainWindow):
             self.joystick_panel.set_serial(None)
         if self.serial_terminal_panel:
             self.serial_terminal_panel.set_serial(None)
+        if self.needle_calibration_panel:
+            self.needle_calibration_panel.set_current_a(None)
+        if self.oscillation_panel:
+            self.oscillation_panel.set_running(False, "")
 
     def _auto_connect_if_possible(self) -> None:
         if self.serial_connection_panel and not self.serial_connection:
@@ -235,6 +266,31 @@ class Main(QMainWindow):
                 feedrates.linear.default,
                 feedrates.rotary.presets,
                 feedrates.rotary.default,
+            )
+        needle_settings = self.settings_manager.needle_calibration_configuration()
+        self.stage_controller.apply_needle_calibration(
+            down_position_mm=(
+                needle_settings.down_position_mm
+                if needle_settings.down_position_configured
+                else None
+            ),
+            lower_direction=needle_settings.lower_direction,
+        )
+        self.lcr_controller.apply_configuration(
+            resource_name=needle_settings.visa_resource,
+            short_threshold_ohm=needle_settings.short_threshold_ohm,
+            poll_interval_ms=needle_settings.poll_interval_ms,
+        )
+        if self.needle_calibration_panel:
+            self.needle_calibration_panel.apply_configuration(
+                resource_name=needle_settings.visa_resource,
+                saved_height=(
+                    needle_settings.down_position_mm
+                    if needle_settings.down_position_configured
+                    else None
+                ),
+                lower_direction=needle_settings.lower_direction,
+                short_threshold_ohm=needle_settings.short_threshold_ohm,
             )
 
     def _open_settings_dialog(self) -> None:
@@ -296,7 +352,9 @@ class Main(QMainWindow):
             self.joystick_panel.set_serial(None)
         if self.serial_terminal_panel:
             self.serial_terminal_panel.set_serial(None)
+        self.stage_controller.request_stop_oscillation()
         self.stage_controller.shutdown()
+        self.lcr_controller.shutdown()
         if self.serial_connection_panel:
             self.serial_connection_panel.shutdown()
         event.accept()
@@ -378,6 +436,65 @@ class Main(QMainWindow):
             self.serial_connection_dock, self.joystick_dock, Qt.Vertical
         )
 
+        self.needle_calibration_panel = NeedleCalibrationPanel(self)
+        self.needle_calibration_panel.connect_requested.connect(
+            self.lcr_controller.request_connect
+        )
+        self.needle_calibration_panel.disconnect_requested.connect(
+            self.lcr_controller.request_disconnect
+        )
+        self.needle_calibration_panel.start_requested.connect(
+            self._start_needle_calibration
+        )
+        self.needle_calibration_panel.stop_requested.connect(
+            self._stop_needle_calibration
+        )
+        self.needle_calibration_panel.adjust_requested.connect(
+            self.stage_controller.request_needles_adjust
+        )
+        self.needle_calibration_panel.save_current_requested.connect(
+            self._save_current_needle_height
+        )
+        self.needle_calibration_panel.lower_to_saved_requested.connect(
+            self.stage_controller.request_needles_lower
+        )
+        self.needle_calibration_panel.raise_needles_requested.connect(
+            self.stage_controller.request_needles_raise
+        )
+        self.lcr_controller.connection_changed.connect(
+            self._on_lcr_connection_changed
+        )
+        self.lcr_controller.reading_updated.connect(
+            self._on_lcr_reading_updated
+        )
+        self.needle_calibration_dock = CollapsibleDockWidget(
+            "Needle Calibration", self
+        )
+        self.needle_calibration_dock.setObjectName("NeedleCalibrationDock")
+        self.needle_calibration_dock.setWidget(self.needle_calibration_panel)
+        self.needle_calibration_dock.setAllowedAreas(
+            Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea
+        )
+        self.addDockWidget(Qt.RightDockWidgetArea, self.needle_calibration_dock)
+
+        self.oscillation_panel = OscillationPanel(self)
+        self.oscillation_panel.start_requested.connect(
+            self.stage_controller.request_oscillation
+        )
+        self.oscillation_panel.stop_requested.connect(
+            self.stage_controller.request_stop_oscillation
+        )
+        self.oscillation_dock = CollapsibleDockWidget("Oscillation", self)
+        self.oscillation_dock.setObjectName("OscillationDock")
+        self.oscillation_dock.setWidget(self.oscillation_panel)
+        self.oscillation_dock.setAllowedAreas(
+            Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea
+        )
+        self.addDockWidget(Qt.RightDockWidgetArea, self.oscillation_dock)
+        self.splitDockWidget(
+            self.needle_calibration_dock, self.oscillation_dock, Qt.Vertical
+        )
+
         self.serial_terminal_panel = SerialTerminalWindow(self)
         self.serial_terminal_panel.set_stage_controller(self.stage_controller)
         self.serial_terminal_panel.set_serial(self.serial_connection)
@@ -389,6 +506,72 @@ class Main(QMainWindow):
         )
         self.addDockWidget(Qt.LeftDockWidgetArea, self.serial_terminal_dock)
         self.splitDockWidget(self.joystick_dock, self.serial_terminal_dock, Qt.Vertical)
+
+    def _start_needle_calibration(self) -> None:
+        if self.serial_connection is None or not self.serial_connection.is_open:
+            self._show_status("Connect the stage controller before needle calibration.")
+            return
+        if not self.lcr_controller.is_connected():
+            self._show_status("Connect the LCR meter before starting calibration.")
+            return
+        self._needle_calibration_active = True
+        self._needle_height_timer.start()
+        if self.needle_calibration_panel:
+            self.needle_calibration_panel.set_calibration_active(True)
+        self.stage_controller.request_needles_raise()
+        self._show_status(
+            "Needle calibration started. Move above metal and lower the needles in steps until the LCR reports a short."
+        )
+
+    def _stop_needle_calibration(self) -> None:
+        self._needle_calibration_active = False
+        self._needle_height_timer.stop()
+        if self.needle_calibration_panel:
+            self.needle_calibration_panel.set_calibration_active(False)
+        self._show_status("Needle calibration stopped.")
+
+    def _refresh_needle_height(self) -> None:
+        if not self._needle_calibration_active:
+            return
+        a_position = self.stage_controller.current_a_position()
+        if a_position is None:
+            return
+        self._on_needle_height_changed(a_position)
+
+    def _on_needle_height_changed(self, a_position: float) -> None:
+        if self.needle_calibration_panel:
+            self.needle_calibration_panel.set_current_a(a_position)
+
+    def _on_lcr_connection_changed(
+        self, connected: bool, backend_name: str, description: str
+    ) -> None:
+        if self.needle_calibration_panel:
+            self.needle_calibration_panel.set_connection_state(
+                connected, backend_name, description
+            )
+            if not connected:
+                self.needle_calibration_panel.set_reading(None, False)
+
+    def _on_lcr_reading_updated(self, resistance_ohm: float, is_short: bool) -> None:
+        if self.needle_calibration_panel:
+            self.needle_calibration_panel.set_reading(resistance_ohm, is_short)
+
+    def _save_current_needle_height(self) -> None:
+        a_position = self.stage_controller.current_a_position()
+        if a_position is None:
+            self._show_status("Unable to read A position. Wait for the stage to become idle.")
+            return
+        settings = self.settings_manager.settings.clone()
+        settings.needle_calibration.down_position_mm = a_position
+        settings.needle_calibration.down_position_configured = True
+        self.settings_manager.replace(settings)
+        self.settings_manager.save()
+        self._apply_settings()
+        self._show_status(f"Saved needle down height at A={a_position:.4f} mm.")
+
+    def _on_oscillation_state_changed(self, running: bool, axis: str) -> None:
+        if self.oscillation_panel:
+            self.oscillation_panel.set_running(running, axis)
 
 def main() -> int:
     app = QApplication(sys.argv)
