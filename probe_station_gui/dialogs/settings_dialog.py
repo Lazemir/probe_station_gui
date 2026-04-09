@@ -384,7 +384,7 @@ class FeedrateGroupEditor(QWidget):
 
 
 class FeedrateSettingsWidget(QWidget):
-    """Tab that lets users manage linear and rotary feed rates."""
+    """Tab that lets users manage linear feed rates."""
 
     DEFAULT_PRESETS = (0.01, 0.1, 1.0, 10.0, 100.0)
     DEFAULT_VALUE = 1.0
@@ -405,15 +405,6 @@ class FeedrateSettingsWidget(QWidget):
         )
         layout.addWidget(self._linear_editor)
 
-        self._rotary_editor = FeedrateGroupEditor(
-            "Rotary feed rates",
-            "deg/min",
-            feedrates.rotary,
-            self.DEFAULT_PRESETS,
-            self.DEFAULT_VALUE,
-            self,
-        )
-        layout.addWidget(self._rotary_editor)
         layout.addStretch(1)
 
     def to_settings(self, settings: Settings) -> None:
@@ -421,7 +412,7 @@ class FeedrateSettingsWidget(QWidget):
 
         settings.feedrates = FeedrateSettings(
             linear=self._linear_editor.group(),
-            rotary=self._rotary_editor.group(),
+            rotary=settings.feedrates.rotary,
         )
 
 
@@ -441,20 +432,12 @@ class JogSettingsWidget(QWidget):
         self._linear_distance_spin.setValue(jog_settings.linear_distance_mm)
         layout.addRow(QLabel("Linear jog distance", self), self._linear_distance_spin)
 
-        self._rotary_distance_spin = QDoubleSpinBox(self)
-        self._rotary_distance_spin.setDecimals(3)
-        self._rotary_distance_spin.setRange(0.001, 3600.0)
-        self._rotary_distance_spin.setSingleStep(1.0)
-        self._rotary_distance_spin.setSuffix(" deg")
-        self._rotary_distance_spin.setValue(jog_settings.rotary_distance_deg)
-        layout.addRow(QLabel("Rotary jog distance", self), self._rotary_distance_spin)
-
     def to_settings(self, settings: Settings) -> None:
         """Persist the widget state into the provided settings object."""
 
         settings.jog = JogSettings(
             linear_distance_mm=self._linear_distance_spin.value(),
-            rotary_distance_deg=self._rotary_distance_spin.value(),
+            rotary_distance_deg=settings.jog.rotary_distance_deg,
         )
 
 

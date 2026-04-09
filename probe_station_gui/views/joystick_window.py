@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import serial
 from PySide6.QtCore import QEvent, QRectF, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QCloseEvent, QDoubleValidator, QPainter, QPen
+from PySide6.QtGui import QColor, QCloseEvent, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
-    QComboBox,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSlider,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -76,7 +77,6 @@ class JoystickWindow(QWidget):
     home_all_requested = Signal()
     needles_raise_requested = Signal()
     needles_lower_requested = Signal()
-    zero_b_requested = Signal()
     reset_calibration_requested = Signal()
 
     DEFAULT_JOG_DISTANCE_MM = 25.0
@@ -89,19 +89,12 @@ class JoystickWindow(QWidget):
         100.0,
         300.0,
     )
-    DEFAULT_ROTARY_FEEDRATE_PRESETS: tuple[float, ...] = (
-        1.0,
-        3.0,
-        10.0,
-        30.0,
-        90.0,
-        360.0,
-    )
     KEYBOARD_JOG_SYNC_DEBOUNCE_MS = 30
-    CUSTOM_FEED_LABEL = "Custom..."
     LINEAR_AXES = {"X", "Y", "Z"}
-    ROTATIONAL_AXES = {"A", "B", "C"}
     HOMING_AXES = ("X", "Y", "Z", "A")
+    LINEAR_FEEDRATE_SCALE = 10
+    MIN_LINEAR_FEEDRATE = 0.1
+    MAX_LINEAR_FEEDRATE = 1000.0
     HOMED_STYLE = (
         "QPushButton { padding: 2px 6px; border-radius: 4px; background: #1565c0; color: #f5f5f5; }"
         "QPushButton:pressed { background: #0d47a1; }"
@@ -146,11 +139,10 @@ class JoystickWindow(QWidget):
         self._key_stack: list[Tuple[str, object]] = []
         self._key_bindings: Dict[tuple, tuple[str, int]] = {}
         self._linear_presets: List[float] = list(self.DEFAULT_LINEAR_FEEDRATE_PRESETS)
-        self._rotary_presets: List[float] = list(self.DEFAULT_ROTARY_FEEDRATE_PRESETS)
         self._linear_default: float = 1.0
-        self._rotary_default: float = 1.0
         self._linear_jog_distance_mm: float = self.DEFAULT_JOG_DISTANCE_MM
-        self._rotary_jog_distance_deg: float = self.DEFAULT_ROTATE_DISTANCE_DEG
+        self._linear_feedrate_value: float = self._linear_default
+        self._last_feedrate_wheel_at = 0.0
         self._homing_buttons: dict[str, QPushButton] = {}
         self._homing_targets: dict[str, QPushButton] = {}
         self._homing_text: dict[str, str] = {}
@@ -187,43 +179,26 @@ class JoystickWindow(QWidget):
 
         linear_feed_layout = QHBoxLayout()
         linear_feed_layout.addWidget(QLabel("Linear feed (mm/min):", self))
-        self.linear_feedrate_combo = QComboBox(self)
-        self.linear_feedrate_combo.currentIndexChanged.connect(
-            self._on_linear_feedrate_changed
-        )
-        linear_feed_layout.addWidget(self.linear_feedrate_combo)
-
-        self.linear_custom_feedrate_edit = QLineEdit(self)
-        self.linear_custom_feedrate_edit.setPlaceholderText("Enter custom rate")
-        self.linear_custom_feedrate_edit.setValidator(
-            QDoubleValidator(0.000001, 1000000.0, 6, self)
-        )
-        self.linear_custom_feedrate_edit.setVisible(False)
-        linear_feed_layout.addWidget(self.linear_custom_feedrate_edit)
+        self.linear_feedrate_value_label = QLabel(self)
+        self.linear_feedrate_value_label.setMinimumWidth(90)
+        self.linear_feedrate_value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        linear_feed_layout.addWidget(self.linear_feedrate_value_label)
 
         feed_container.addLayout(linear_feed_layout)
 
-        rotary_feed_layout = QHBoxLayout()
-        rotary_feed_layout.addWidget(QLabel("Rotary feed (deg/min):", self))
-        self.rotary_feedrate_combo = QComboBox(self)
-        self.rotary_feedrate_combo.currentIndexChanged.connect(
-            self._on_rotary_feedrate_changed
+        self.linear_feedrate_slider = QSlider(Qt.Horizontal, self)
+        self.linear_feedrate_slider.setRange(
+            int(self.MIN_LINEAR_FEEDRATE * self.LINEAR_FEEDRATE_SCALE),
+            int(self.MAX_LINEAR_FEEDRATE * self.LINEAR_FEEDRATE_SCALE),
         )
-        rotary_feed_layout.addWidget(self.rotary_feedrate_combo)
-
-        self.rotary_custom_feedrate_edit = QLineEdit(self)
-        self.rotary_custom_feedrate_edit.setPlaceholderText("Enter custom rate")
-        self.rotary_custom_feedrate_edit.setValidator(
-            QDoubleValidator(0.000001, 1000000.0, 6, self)
+        self.linear_feedrate_slider.valueChanged.connect(
+            self._on_linear_feedrate_slider_changed
         )
-        self.rotary_custom_feedrate_edit.setVisible(False)
-        rotary_feed_layout.addWidget(self.rotary_custom_feedrate_edit)
-
-        feed_container.addLayout(rotary_feed_layout)
+        feed_container.addWidget(self.linear_feedrate_slider)
 
         root_layout.addLayout(feed_container)
 
-        self._refresh_feedrate_combos(force_defaults=True)
+        self._set_linear_feedrate(self._linear_default, reissue_if_active=False)
 
         grid_layout = QGridLayout()
         self.up_button = QPushButton("↑", self)
@@ -252,7 +227,8 @@ class JoystickWindow(QWidget):
 
         rotate_layout = QHBoxLayout()
         rotate_layout.addStretch(1)
-        rotate_layout.addWidget(QLabel("Rotate B:", self))
+        self.rotate_label = QLabel("Rotate B:", self)
+        rotate_layout.addWidget(self.rotate_label)
         self.rotate_negative_button = QPushButton("↻", self)
         self.rotate_positive_button = QPushButton("↺", self)
         self.zero_b_button = QPushButton("Zero B", self)
@@ -264,6 +240,11 @@ class JoystickWindow(QWidget):
         rotate_layout.addWidget(self.zero_b_button)
         rotate_layout.addStretch(1)
         root_layout.addLayout(rotate_layout)
+        rotate_layout.setEnabled(False)
+        self.rotate_label.hide()
+        self.rotate_negative_button.hide()
+        self.rotate_positive_button.hide()
+        self.zero_b_button.hide()
 
         self.up_button.pressed.connect(lambda: self.start_jog("Y", 1))
         self.up_button.released.connect(self.stop_jog)
@@ -273,11 +254,6 @@ class JoystickWindow(QWidget):
         self.left_button.released.connect(self.stop_jog)
         self.right_button.pressed.connect(lambda: self.start_jog("X", 1))
         self.right_button.released.connect(self.stop_jog)
-        self.rotate_negative_button.pressed.connect(lambda: self.start_jog("B", -1))
-        self.rotate_negative_button.released.connect(self.stop_jog)
-        self.rotate_positive_button.pressed.connect(lambda: self.start_jog("B", 1))
-        self.rotate_positive_button.released.connect(self.stop_jog)
-        self.zero_b_button.clicked.connect(self.zero_b_requested.emit)
         self.focus_down_button.pressed.connect(lambda: self.start_jog("Z", -1))
         self.focus_down_button.released.connect(self.stop_jog)
         self.focus_up_button.pressed.connect(lambda: self.start_jog("Z", 1))
@@ -374,110 +350,40 @@ class JoystickWindow(QWidget):
         self._event_filter_retry_scheduled = False
         logger.debug("Joystick event filter removed")
 
-    def _on_linear_feedrate_changed(self, index: int) -> None:
-        self._update_custom_visibility(
-            self.linear_feedrate_combo,
-            self.linear_custom_feedrate_edit,
-            index,
-        )
-
-    def _on_rotary_feedrate_changed(self, index: int) -> None:
-        self._update_custom_visibility(
-            self.rotary_feedrate_combo,
-            self.rotary_custom_feedrate_edit,
-            index,
-        )
-
-    def _update_custom_visibility(
-        self, combo: QComboBox, editor: QLineEdit, index: int
-    ) -> None:
-        if index < 0:
-            editor.setVisible(False)
-            return
-        is_custom = combo.itemText(index) == self.CUSTOM_FEED_LABEL
-        editor.setVisible(is_custom)
-        if is_custom:
-            editor.setFocus()
-
     def _format_feedrate(self, value: float) -> str:
-        text = f"{value:.6f}".rstrip("0").rstrip(".")
-        return text or "0"
+        return f"{float(value):.1f} mm/min"
 
-    def _refresh_feedrate_combos(self, *, force_defaults: bool = False) -> None:
-        self._refresh_feedrate_combo(
-            self.linear_feedrate_combo,
-            self.linear_custom_feedrate_edit,
-            self._linear_presets,
-            self._linear_default,
-            force_defaults,
-            fallback=self.DEFAULT_LINEAR_FEEDRATE_PRESETS,
-        )
-        self._refresh_feedrate_combo(
-            self.rotary_feedrate_combo,
-            self.rotary_custom_feedrate_edit,
-            self._rotary_presets,
-            self._rotary_default,
-            force_defaults,
-            fallback=self.DEFAULT_ROTARY_FEEDRATE_PRESETS,
-        )
+    def _slider_value_from_feedrate(self, value: float) -> int:
+        bounded = min(self.MAX_LINEAR_FEEDRATE, max(self.MIN_LINEAR_FEEDRATE, float(value)))
+        return int(round(bounded * self.LINEAR_FEEDRATE_SCALE))
 
-    def _refresh_feedrate_combo(
+    def _feedrate_from_slider_value(self, slider_value: int) -> float:
+        return float(slider_value) / float(self.LINEAR_FEEDRATE_SCALE)
+
+    def _set_linear_feedrate(
         self,
-        combo: QComboBox,
-        editor: QLineEdit,
-        presets: List[float],
-        default_value: float,
-        force_default: bool,
+        value: float,
         *,
-        fallback: tuple[float, ...],
+        reissue_if_active: bool,
     ) -> None:
-        display_items: List[str] = []
-        seen: set[str] = set()
-        for preset in presets:
-            try:
-                text = self._format_feedrate(float(preset))
-            except (TypeError, ValueError):
-                continue
-            if text in seen:
-                continue
-            display_items.append(text)
-            seen.add(text)
-        if not display_items:
-            display_items = [self._format_feedrate(value) for value in fallback]
-            seen = set(display_items)
+        bounded = min(self.MAX_LINEAR_FEEDRATE, max(self.MIN_LINEAR_FEEDRATE, float(value)))
+        if abs(bounded - self._linear_feedrate_value) <= 1e-9 and not reissue_if_active:
+            return
+        self._linear_feedrate_value = bounded
+        slider_value = self._slider_value_from_feedrate(bounded)
+        if self.linear_feedrate_slider.value() != slider_value:
+            self.linear_feedrate_slider.blockSignals(True)
+            self.linear_feedrate_slider.setValue(slider_value)
+            self.linear_feedrate_slider.blockSignals(False)
+        self.linear_feedrate_value_label.setText(self._format_feedrate(bounded))
+        if reissue_if_active:
+            self._restart_active_jog_with_current_feedrate()
 
-        default_text = ""
-        try:
-            if default_value > 0:
-                default_text = self._format_feedrate(float(default_value))
-        except (TypeError, ValueError):
-            default_text = ""
-
-        if default_text and default_text not in seen:
-            display_items.insert(0, default_text)
-            seen.add(default_text)
-
-        if self.CUSTOM_FEED_LABEL not in display_items:
-            display_items.append(self.CUSTOM_FEED_LABEL)
-
-        current_text = combo.currentText()
-        custom_text = editor.text()
-        combo.blockSignals(True)
-        combo.clear()
-        combo.addItems(display_items)
-
-        if force_default and default_text:
-            combo.setCurrentText(default_text)
-        elif current_text in display_items:
-            combo.setCurrentText(current_text)
-        elif current_text == self.CUSTOM_FEED_LABEL or editor.isVisible():
-            combo.setCurrentText(self.CUSTOM_FEED_LABEL)
-            editor.setText(custom_text)
-        else:
-            combo.setCurrentIndex(0)
-
-        combo.blockSignals(False)
-        self._update_custom_visibility(combo, editor, combo.currentIndex())
+    def _on_linear_feedrate_slider_changed(self, slider_value: int) -> None:
+        self._set_linear_feedrate(
+            self._feedrate_from_slider_value(slider_value),
+            reissue_if_active=True,
+        )
 
     def apply_feedrate_settings(
         self,
@@ -486,92 +392,42 @@ class JoystickWindow(QWidget):
         rotary_presets: List[float],
         rotary_default: float,
     ) -> None:
-        """Update the selectable feedrate presets and defaults from settings."""
+        """Apply only the linear default feedrate used by jog controls."""
 
-        cleaned_linear = self._clean_presets(
-            linear_presets, self.DEFAULT_LINEAR_FEEDRATE_PRESETS
+        cleaned_linear = sorted(
+            {
+                max(self.MIN_LINEAR_FEEDRATE, min(self.MAX_LINEAR_FEEDRATE, float(value)))
+                for value in linear_presets
+                if isinstance(value, (int, float))
+            }
         )
-        cleaned_rotary = self._clean_presets(
-            rotary_presets, self.DEFAULT_ROTARY_FEEDRATE_PRESETS
+        if cleaned_linear:
+            self._linear_presets = list(cleaned_linear)
+        try:
+            candidate = float(linear_default)
+        except (TypeError, ValueError):
+            candidate = self._linear_presets[0] if self._linear_presets else 10.0
+        self._linear_default = min(
+            self.MAX_LINEAR_FEEDRATE,
+            max(self.MIN_LINEAR_FEEDRATE, candidate),
         )
-        default_linear = self._resolve_default(
-            linear_default, cleaned_linear, self.DEFAULT_LINEAR_FEEDRATE_PRESETS
-        )
-        default_rotary = self._resolve_default(
-            rotary_default, cleaned_rotary, self.DEFAULT_ROTARY_FEEDRATE_PRESETS
-        )
-
-        if (
-            cleaned_linear == self._linear_presets
-            and cleaned_rotary == self._rotary_presets
-            and abs(default_linear - self._linear_default) <= 1e-9
-            and abs(default_rotary - self._rotary_default) <= 1e-9
-        ):
-            return
-
-        self._linear_presets = cleaned_linear
-        self._rotary_presets = cleaned_rotary
-        self._linear_default = default_linear
-        self._rotary_default = default_rotary
-        self._refresh_feedrate_combos(force_defaults=True)
+        self._set_linear_feedrate(self._linear_default, reissue_if_active=False)
         logger.info(
-            "Joystick feedrate settings updated: linear=%s (default=%s) rotary=%s (default=%s)",
-            cleaned_linear,
-            default_linear,
-            cleaned_rotary,
-            default_rotary,
+            "Joystick feedrate settings updated: linear=%s (default=%s)",
+            self._linear_presets,
+            self._linear_default,
         )
 
     def apply_jog_settings(
         self, linear_distance_mm: float, rotary_distance_deg: float
     ) -> None:
-        """Update the jog distance used for linear and rotary axes."""
+        """Update the jog distance used for linear axes."""
 
         self._linear_jog_distance_mm = max(0.001, float(linear_distance_mm))
-        self._rotary_jog_distance_deg = max(0.001, float(rotary_distance_deg))
         logger.debug(
-            "Joystick jog distance updated: linear_distance_mm=%s rotary_distance_deg=%s",
+            "Joystick jog distance updated: linear_distance_mm=%s",
             self._linear_jog_distance_mm,
-            self._rotary_jog_distance_deg,
         )
-
-    def _clean_presets(
-        self, presets: List[float], fallback: tuple[float, ...]
-    ) -> List[float]:
-        cleaned: List[float] = []
-        seen: set[float] = set()
-        for value in presets:
-            try:
-                number = float(value)
-            except (TypeError, ValueError):
-                continue
-            if number <= 0:
-                continue
-            key = round(number, 9)
-            if key in seen:
-                continue
-            seen.add(key)
-            cleaned.append(number)
-        if not cleaned:
-            cleaned = list(fallback)
-        cleaned.sort()
-        return cleaned
-
-    def _resolve_default(
-        self, default_value: float, presets: List[float], fallback: tuple[float, ...]
-    ) -> float:
-        if not presets:
-            return fallback[0]
-        try:
-            candidate = float(default_value)
-        except (TypeError, ValueError):
-            candidate = presets[0]
-        if candidate <= 0:
-            candidate = presets[0]
-        for value in presets:
-            if abs(value - candidate) <= 1e-9:
-                return value
-        return presets[0]
 
     def set_serial(self, serial_connection: Optional[serial.Serial]) -> None:
         """Assign the serial connection used for jogging commands."""
@@ -604,16 +460,12 @@ class JoystickWindow(QWidget):
         enabled = bool(self.serial_connection and self.serial_connection.is_open)
         motion_enabled = enabled and self._axis_a_ready
         for widget in (
-            self.linear_feedrate_combo,
-            self.linear_custom_feedrate_edit,
-            self.rotary_feedrate_combo,
-            self.rotary_custom_feedrate_edit,
+            self.linear_feedrate_slider,
             self.home_all_button,
             self.needles_raise_button,
             self.needles_lower_button,
             self.unlock_button,
             self.reset_button,
-            self.zero_b_button,
             self.reset_calibration_button,
         ):
             widget.setEnabled(enabled)
@@ -622,8 +474,6 @@ class JoystickWindow(QWidget):
             self.down_button,
             self.left_button,
             self.right_button,
-            self.rotate_negative_button,
-            self.rotate_positive_button,
             self.focus_down_button,
             self.focus_up_button,
             self.autofocus_button,
@@ -693,6 +543,13 @@ class JoystickWindow(QWidget):
         self.motion_axis_requested.emit(axis.upper())
         self._apply_axes(((axis, direction),))
 
+    def _restart_active_jog_with_current_feedrate(self) -> None:
+        axes = self._active_axes
+        if not axes:
+            return
+        self.stop_jog()
+        self._apply_axes(axes)
+
     def stop_jog(self) -> None:
         had_active_axes = self._active_axes is not None
         logger.debug(
@@ -750,95 +607,17 @@ class JoystickWindow(QWidget):
         logger.debug("TIMING jog_command_sent command=%s", command.strip())
 
     def _distance_for_axis(self, axis: str) -> float:
-        if axis == "B":
-            return self._rotary_jog_distance_deg
         return self._linear_jog_distance_mm
 
     def _feedrate_for_axes(
         self, axes: tuple[tuple[str, int], ...]
     ) -> Optional[float]:
-        has_rotary = any(axis in self.ROTATIONAL_AXES for axis, _ in axes)
         has_linear = any(axis in self.LINEAR_AXES for axis, _ in axes)
 
-        linear_feed: Optional[float] = None
-        rotary_feed: Optional[float] = None
-
         if has_linear:
-            linear_feed = self._read_feedrate(
-                self.linear_feedrate_combo,
-                self.linear_custom_feedrate_edit,
-                "millimetres per minute",
-            )
-            if linear_feed is None:
-                return None
-
-        if has_rotary:
-            rotary_feed = self._read_feedrate(
-                self.rotary_feedrate_combo,
-                self.rotary_custom_feedrate_edit,
-                "degrees per minute",
-            )
-            if rotary_feed is None:
-                return None
-
-        if has_linear and has_rotary:
-            feed_candidates: list[float] = []
-
-            if linear_feed is not None:
-                feed_candidates.append(linear_feed)
-
-            max_linear_distance = max(
-                (self._distance_for_axis(axis) for axis, _ in axes if axis in self.LINEAR_AXES),
-                default=self._linear_jog_distance_mm,
-            )
-            for axis, _ in axes:
-                if axis not in self.ROTATIONAL_AXES or rotary_feed is None:
-                    continue
-                axis_distance = self._distance_for_axis(axis)
-                if axis_distance <= 0:
-                    continue
-                equivalent_linear = rotary_feed * (max_linear_distance / axis_distance)
-                feed_candidates.append(equivalent_linear)
-
-            if not feed_candidates:
-                return linear_feed or rotary_feed
-
-            chosen_feed = min(feed_candidates)
-            logger.debug(
-                "Mixed jog feed resolved: candidates=%s chosen=%s", feed_candidates, chosen_feed
-            )
-            return chosen_feed
-
-        if has_linear:
-            return linear_feed
-
-        if has_rotary:
-            return rotary_feed
+            return self._linear_feedrate_value
 
         return None
-
-    def _read_feedrate(
-        self, combo: QComboBox, editor: QLineEdit, units: str
-    ) -> Optional[float]:
-        text = combo.currentText()
-        if text == self.CUSTOM_FEED_LABEL:
-            text = editor.text().strip()
-            if not text:
-                self._show_warning(
-                    f"Please enter a custom feed rate ({units})."
-                )
-                return None
-        try:
-            value = float(text)
-            if value <= 0:
-                raise ValueError
-            return value
-        except ValueError:
-            self._show_warning(
-                f"Feed rate must be a positive number ({units})."
-            )
-            logger.warning("Invalid feed rate '%s' for %s jog", text, units)
-            return None
 
     def _compute_active_axes(self) -> tuple[tuple[str, int], ...]:
         unique_axes: dict[str, int] = {}
@@ -1070,6 +849,39 @@ class JoystickWindow(QWidget):
     def _show_warning(self, message: str) -> None:
         QMessageBox.warning(self, "Joystick", message)
 
+    def wheelEvent(self, event) -> None:  # type: ignore[override]
+        if not self._apply_wheel_delta(event.angleDelta().y()):
+            super().wheelEvent(event)
+            return
+        event.accept()
+
+    def _apply_wheel_delta(self, delta_y: int) -> bool:
+        if delta_y == 0:
+            return False
+        now = time.monotonic()
+        dt = now - self._last_feedrate_wheel_at if self._last_feedrate_wheel_at else 1.0
+        self._last_feedrate_wheel_at = now
+        notch_units = abs(delta_y) / 120.0
+        base_step = max(0.2, self._linear_feedrate_value * 0.03)
+        speed_multiplier = 1.0
+        if dt < 0.25:
+            speed_multiplier += min(5.0, (0.25 - dt) * 12.0)
+        step = base_step * notch_units * speed_multiplier
+        if delta_y < 0:
+            step = -step
+        self._set_linear_feedrate(
+            self._linear_feedrate_value + step,
+            reissue_if_active=self._active_axes is not None,
+        )
+        logger.debug(
+            "Feedrate wheel applied: delta=%s step=%s value=%s active_axes=%s",
+            delta_y,
+            step,
+            self._linear_feedrate_value,
+            self._active_axes,
+        )
+        return True
+
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
         if self._handle_key_press_event(event):
             return
@@ -1134,6 +946,10 @@ class JoystickWindow(QWidget):
                 return True
         elif event.type() == QEvent.KeyRelease:
             if self._should_process_global_event(obj) and self._handle_key_release_event(event):
+                event.accept()
+                return True
+        elif event.type() == QEvent.Wheel:
+            if self._should_process_global_event(obj) and self._handle_wheel_event(event, obj):
                 event.accept()
                 return True
         return super().eventFilter(obj, event)
@@ -1254,6 +1070,12 @@ class JoystickWindow(QWidget):
             keyboard_modifiers_to_int(event.modifiers()),
         )
         return False
+
+    def _handle_wheel_event(self, event, obj) -> bool:
+        widget = obj if isinstance(obj, QWidget) else None
+        if self._is_text_entry_widget(widget) or self._is_terminal_widget(widget):
+            return False
+        return self._apply_wheel_delta(event.angleDelta().y())
 
     def _remove_stale_key(self, event) -> bool:
         if not self._key_stack:

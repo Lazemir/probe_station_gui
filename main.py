@@ -1304,7 +1304,6 @@ class Main(QMainWindow):
         self.joystick_panel.needles_lower_requested.connect(
             self.stage_controller.request_needles_lower
         )
-        self.joystick_panel.zero_b_requested.connect(self._zero_b_axis)
         self.joystick_panel.reset_calibration_requested.connect(
             self._reset_click_calibration
         )
