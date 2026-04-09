@@ -97,6 +97,7 @@ class JoystickWindow(QWidget):
         90.0,
         360.0,
     )
+    KEYBOARD_JOG_SYNC_DEBOUNCE_MS = 30
     CUSTOM_FEED_LABEL = "Custom..."
     LINEAR_AXES = {"X", "Y", "Z"}
     ROTATIONAL_AXES = {"A", "B", "C"}
@@ -168,6 +169,10 @@ class JoystickWindow(QWidget):
         self._needle_animation_timer = QTimer(self)
         self._needle_animation_timer.setInterval(90)
         self._needle_animation_timer.timeout.connect(self._advance_needle_spinner)
+        self._jog_state_sync_timer = QTimer(self)
+        self._jog_state_sync_timer.setSingleShot(True)
+        self._jog_state_sync_timer.setInterval(self.KEYBOARD_JOG_SYNC_DEBOUNCE_MS)
+        self._jog_state_sync_timer.timeout.connect(self._sync_active_jog_state)
         self._jog_stop_resend_pending = False
         self.apply_control_bindings({})
         self._event_filter_installed = False
@@ -673,6 +678,9 @@ class JoystickWindow(QWidget):
         if not self._axis_a_ready:
             logger.debug("Jog blocked because A axis is not homed/zero")
             return False
+        if self.stage_controller is not None and self.stage_controller.is_busy():
+            logger.debug("Jog blocked because stage controller is busy")
+            return False
         return True
 
     def set_stage_controller(self, stage_controller: Optional["StageController"]) -> None:
@@ -832,7 +840,7 @@ class JoystickWindow(QWidget):
             logger.warning("Invalid feed rate '%s' for %s jog", text, units)
             return None
 
-    def _update_active_jog(self) -> None:
+    def _compute_active_axes(self) -> tuple[tuple[str, int], ...]:
         unique_axes: dict[str, int] = {}
         for identifier in self._key_stack:
             mapping = self._mapping_from_identifier(identifier)
@@ -840,8 +848,19 @@ class JoystickWindow(QWidget):
                 continue
             axis, direction = mapping
             unique_axes[axis] = direction
-        axes = tuple(unique_axes.items())
+        return tuple(unique_axes.items())
+
+    def _schedule_active_jog_update(self) -> None:
+        if self._jog_state_sync_timer.isActive():
+            self._jog_state_sync_timer.stop()
+        self._jog_state_sync_timer.start()
+
+    def _sync_active_jog_state(self) -> None:
+        axes = self._compute_active_axes()
         logger.debug("Active keys mapped to axes: %s", axes)
+        if not axes:
+            self.stop_jog()
+            return
         self._apply_axes(axes)
 
     def set_homing_status(self, homed_axes: set[str]) -> None:
@@ -1009,6 +1028,24 @@ class JoystickWindow(QWidget):
         if not self.serial_connection or not self.serial_connection.is_open:
             logger.debug("Discarded command because serial is closed: %s", command)
             return
+        if self.stage_controller is not None:
+            try:
+                if isinstance(command, bytes) and command == b"\x85":
+                    self.stage_controller.queue_jog_stop()
+                    return
+                if isinstance(command, bytes) and command == b"\x18":
+                    self.stage_controller.queue_soft_reset()
+                    return
+                if isinstance(command, str) and command.startswith("$J="):
+                    self.stage_controller.queue_jog_command(command)
+                    return
+                if isinstance(command, str):
+                    self.stage_controller.queue_manual_command(command)
+                    return
+            except Exception as error:  # pragma: no cover - UI safety guard
+                self._show_warning(str(error))
+                logger.exception("Failed to queue controller command: %s", error)
+                return
         try:
             data = command if isinstance(command, bytes) else command.encode("ascii")
             if isinstance(command, str) and command.startswith("$J="):
@@ -1149,7 +1186,7 @@ class JoystickWindow(QWidget):
             )
             if identifier not in self._key_stack:
                 self._key_stack.append(identifier)
-                self._update_active_jog()
+                self._schedule_active_jog_update()
             event.accept()
             logger.debug(
                 "Processed key press: key=%s text=%s modifiers=%s -> %s",
@@ -1181,9 +1218,7 @@ class JoystickWindow(QWidget):
         if identifier and mapping:
             if identifier in self._key_stack:
                 self._key_stack.remove(identifier)
-                self._update_active_jog()
-            if not self._key_stack:
-                self.stop_jog()
+                self._schedule_active_jog_update()
             event.accept()
             logger.debug(
                 "TIMING keyrelease_received key=%s text=%s modifiers=%s mapping=%s remaining=%s",
@@ -1203,9 +1238,7 @@ class JoystickWindow(QWidget):
             return True
         removed = self._remove_stale_key(event)
         if removed:
-            self._update_active_jog()
-            if not self._key_stack:
-                self.stop_jog()
+            self._schedule_active_jog_update()
             event.accept()
             logger.debug(
                 "Recovered key release: key=%s text=%s modifiers=%s",

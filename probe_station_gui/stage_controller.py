@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
+from queue import Empty, PriorityQueue
 import re
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import cv2
@@ -70,6 +71,16 @@ class _Status:
     homed_axes: Optional[set[str]] = None
 
 
+@dataclass(order=True)
+class _QueuedSerialWrite:
+    priority: int
+    sequence: int
+    kind: str = field(compare=False)
+    payload: bytes = field(compare=False)
+    description: str = field(compare=False)
+    generation: int = field(compare=False, default=0)
+
+
 class StageController(QObject):
     """Translate mouse clicks into stage movements via serial commands."""
 
@@ -113,6 +124,10 @@ class StageController(QObject):
     SPIRAL_MAX_TURNS_PER_SWEEP = 50.0
     B_AXIS_SOFT_LIMIT_DEG = 45.0
     MAX_CLICK_MOVE_MM = 10.0
+    SERIAL_PRIORITY_JOG_STOP = 0
+    SERIAL_PRIORITY_JOG_COMMAND = 10
+    SERIAL_PRIORITY_SOFT_RESET = 20
+    SERIAL_PRIORITY_TERMINAL = 30
 
     STATUS_PATTERN = re.compile(
         r"<(?P<state>[A-Za-z]+)(?:\|[^>]*?MPos:(?P<mpos>-?\d+\.?\d*(?:,-?\d+\.?\d*)*))?"
@@ -146,12 +161,24 @@ class StageController(QObject):
         self._needle_lower_direction_sign = -1.0
         self._oscillation_active = False
         self._b_axis_zero_position: Optional[float] = None
+        self._serial_session_lock = threading.RLock()
+        self._queued_write_sequence = 0
+        self._queued_jog_generation = 0
+        self._async_write_queue: PriorityQueue[_QueuedSerialWrite] = PriorityQueue()
+        self._async_write_shutdown = threading.Event()
+        self._async_write_thread = threading.Thread(
+            target=self._run_async_write_worker,
+            daemon=True,
+        )
+        self._async_write_thread.start()
 
     def set_serial(self, serial_connection: Optional[serial.Serial]) -> None:
         """Assign or clear the serial connection used for stage control."""
 
         with self._task_lock:
             self._serial = serial_connection
+            self._queued_jog_generation += 1
+            self._clear_pending_async_writes()
             if serial_connection is None or not serial_connection.is_open:
                 self._pixels_to_mm = None
                 self._last_stage_position = None
@@ -163,7 +190,8 @@ class StageController(QObject):
                 self._axis_limits.clear()
                 self._b_axis_zero_position = None
                 try:
-                    self._ensure_axis_limits(serial_connection)
+                    with self._serial_session_lock:
+                        self._ensure_axis_limits(serial_connection)
                     self.status_message.emit(
                         "Axis limits loaded from controller. B uses app soft limit ±45 deg."
                     )
@@ -191,6 +219,18 @@ class StageController(QObject):
             thread = self._active_thread
         if thread and thread.is_alive():
             thread.join(timeout=2.0)
+        self._async_write_shutdown.set()
+        self._async_write_queue.put(
+            _QueuedSerialWrite(
+                priority=9999,
+                sequence=self._next_queued_write_sequence(),
+                kind="shutdown",
+                payload=b"",
+                description="shutdown",
+            )
+        )
+        if self._async_write_thread.is_alive():
+            self._async_write_thread.join(timeout=2.0)
 
     def on_frame_ready(self, frame: QImage) -> None:
         """Receive camera frames and cache them as grayscale numpy arrays."""
@@ -206,7 +246,12 @@ class StageController(QObject):
         if serial_connection is None or not serial_connection.is_open:
             return
         try:
-            self._query_status(serial_connection)
+            if not self._serial_session_lock.acquire(blocking=False):
+                return
+            try:
+                self._query_status(serial_connection)
+            finally:
+                self._serial_session_lock.release()
         except StageControllerError:
             return
 
@@ -407,7 +452,8 @@ class StageController(QObject):
         with self._task_lock:
             if self._active_thread and self._active_thread.is_alive():
                 return None
-        a_position = self._read_current_a_position(serial_connection)
+        with self._serial_session_lock:
+            a_position = self._read_current_a_position(serial_connection)
         if a_position is None:
             return None
         self.needle_height_changed.emit(a_position)
@@ -443,7 +489,8 @@ class StageController(QObject):
             serial_connection = self._serial
             if serial_connection is None or not serial_connection.is_open:
                 raise StageControllerError("Serial connection is not available.")
-            status = self._query_status(serial_connection)
+            with self._serial_session_lock:
+                status = self._query_status(serial_connection)
         if status is None or status.position is None:
             raise StageControllerError("Unable to read stage position.")
         if status.state.lower() in {"jog", "run"}:
@@ -463,6 +510,8 @@ class StageController(QObject):
 
         with self._task_lock:
             if self._active_thread and self._active_thread.is_alive():
+                return
+            if not self._async_write_queue.empty():
                 return
             serial_connection = self._serial
             if serial_connection is None or not serial_connection.is_open:
@@ -505,10 +554,11 @@ class StageController(QObject):
             serial_connection = self._serial
             if serial_connection is None or not serial_connection.is_open:
                 raise StageControllerError("Serial connection is not available.")
-            status = self._query_status(serial_connection)
-            if status is None or status.position is None:
-                raise StageControllerError("Unable to read stage position.")
-            self._ensure_calibration(serial_connection)
+            with self._serial_session_lock:
+                status = self._query_status(serial_connection)
+                if status is None or status.position is None:
+                    raise StageControllerError("Unable to read stage position.")
+                self._ensure_calibration(serial_connection)
         if self._pixels_to_mm is None:
             raise StageControllerError("Calibration failed. Cannot resolve clicked position.")
         return self._resolve_xy_from_center(
@@ -541,10 +591,77 @@ class StageController(QObject):
             serial_connection = self._serial
             if serial_connection is None or not serial_connection.is_open:
                 raise StageControllerError("Serial connection is not available.")
-            status = self._query_status(serial_connection)
+            with self._serial_session_lock:
+                status = self._query_status(serial_connection)
         if status is None or status.position is None:
             raise StageControllerError("Unable to read B axis position.")
         self._set_b_axis_zero_reference(status)
+
+    def queue_jog_command(self, command: str) -> None:
+        """Queue the latest jog command for asynchronous serial delivery."""
+
+        if self.is_busy():
+            raise StageControllerError("Stage is busy. Wait for the current operation to finish.")
+        stripped = command.strip()
+        if not stripped:
+            return
+        self._queued_jog_generation += 1
+        self._async_write_queue.put(
+            _QueuedSerialWrite(
+                priority=self.SERIAL_PRIORITY_JOG_COMMAND,
+                sequence=self._next_queued_write_sequence(),
+                kind="jog_command",
+                payload=(stripped + "\n").encode("ascii"),
+                description=stripped,
+                generation=self._queued_jog_generation,
+            )
+        )
+
+    def queue_jog_stop(self) -> None:
+        """Queue a jog stop command without blocking the UI thread."""
+
+        # Invalidate any queued-but-not-yet-written jog command so a late $J
+        # cannot arrive after the stop and keep motion alive.
+        self._queued_jog_generation += 1
+        self._async_write_queue.put(
+            _QueuedSerialWrite(
+                priority=self.SERIAL_PRIORITY_JOG_STOP,
+                sequence=self._next_queued_write_sequence(),
+                kind="jog_stop",
+                payload=b"\x85",
+                description="0x85",
+                generation=self._queued_jog_generation,
+            )
+        )
+
+    def queue_soft_reset(self) -> None:
+        """Queue a FluidNC soft reset without blocking the UI thread."""
+
+        self._async_write_queue.put(
+            _QueuedSerialWrite(
+                priority=self.SERIAL_PRIORITY_SOFT_RESET,
+                sequence=self._next_queued_write_sequence(),
+                kind="soft_reset",
+                payload=b"\x18",
+                description="CTRL-X",
+            )
+        )
+
+    def queue_manual_command(self, command: str) -> None:
+        """Queue a manual terminal command without blocking the UI thread."""
+
+        if self.is_busy():
+            raise StageControllerError("Cannot send while automated move is running.")
+        payload = command if command.endswith("\n") else f"{command}\n"
+        self._async_write_queue.put(
+            _QueuedSerialWrite(
+                priority=self.SERIAL_PRIORITY_TERMINAL,
+                sequence=self._next_queued_write_sequence(),
+                kind="terminal",
+                payload=payload.encode("utf-8"),
+                description=payload.rstrip(),
+            )
+        )
 
     def reset_calibration(self, reason: str = "Click calibration reset.") -> None:
         """Clear the click-to-move calibration so it is rebuilt on next use."""
@@ -1305,6 +1422,58 @@ class StageController(QObject):
                 continue
             limits[axis] = (min_value, max_value)
         return limits
+
+    def _next_queued_write_sequence(self) -> int:
+        sequence = self._queued_write_sequence
+        self._queued_write_sequence += 1
+        return sequence
+
+    def _clear_pending_async_writes(self) -> None:
+        while True:
+            try:
+                self._async_write_queue.get_nowait()
+                self._async_write_queue.task_done()
+            except Empty:
+                break
+
+    def _run_async_write_worker(self) -> None:
+        while not self._async_write_shutdown.is_set():
+            job = self._async_write_queue.get()
+            try:
+                if job.kind == "shutdown":
+                    return
+                if job.kind == "jog_command" and job.generation != self._queued_jog_generation:
+                    continue
+                serial_connection = self._serial
+                if serial_connection is None or not serial_connection.is_open:
+                    continue
+                with self._serial_session_lock:
+                    self._write_async_job(serial_connection, job)
+            except StageControllerError as exc:
+                self.status_message.emit(str(exc))
+            finally:
+                self._async_write_queue.task_done()
+
+    def _write_async_job(
+        self, serial_connection: serial.Serial, job: _QueuedSerialWrite
+    ) -> None:
+        try:
+            if job.kind == "jog_command":
+                logger.debug("TIMING jog_serial_write_begin command=%s", job.description)
+            elif job.kind == "jog_stop":
+                logger.debug("TIMING jog_stop_write_begin command=0x85")
+            elif job.kind == "soft_reset":
+                logger.debug("SERIAL TRACE terminal_write CTRL-X")
+            elif job.kind == "terminal":
+                logger.debug("SERIAL TRACE terminal_write payload=%r", job.description)
+            serial_connection.write(job.payload)
+            serial_connection.flush()
+            if job.kind == "jog_command":
+                logger.debug("TIMING jog_serial_write_flushed command=%s", job.description)
+            elif job.kind == "jog_stop":
+                logger.debug("TIMING jog_stop_write_flushed command=0x85")
+        except serial.SerialException as exc:  # pragma: no cover - hardware interaction
+            raise StageControllerError(f"Serial write failed: {exc}") from exc
 
     def _write_command(self, serial_connection: serial.Serial, command: str) -> None:
         self._check_cancelled()

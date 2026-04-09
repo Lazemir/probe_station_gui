@@ -137,6 +137,15 @@ class SerialTerminalWindow(QWidget):
         if not self.serial_connection or not self.serial_connection.is_open:
             self._append_system_message("Cannot send: no active connection.")
             return
+        if self.stage_controller is not None:
+            try:
+                self.stage_controller.queue_soft_reset()
+            except Exception as error:  # pragma: no cover - UI safety guard
+                self._append_system_message(str(error))
+                return
+            self.manual_command_sent.emit("CTRL-X")
+            self._append_local_echo("\u2418")
+            return
         try:
             self.serial_connection.write(b"\x18")
             self.serial_connection.flush()
@@ -158,6 +167,22 @@ class SerialTerminalWindow(QWidget):
         if not self.serial_connection or not self.serial_connection.is_open:
             self._append_system_message("Cannot send: no active connection.")
             self.input_edit.selectAll()
+            return
+        if self.stage_controller is not None:
+            try:
+                self.stage_controller.queue_manual_command(text)
+            except Exception as error:  # pragma: no cover - UI safety guard
+                self._append_system_message(str(error))
+                self.input_edit.selectAll()
+                return
+            self.manual_command_sent.emit(text or "\u240d")
+            if text:
+                self._append_local_echo(text)
+                self._command_history.append(text)
+            else:
+                self._append_local_echo("\u240d")
+            self._history_position = len(self._command_history)
+            self.input_edit.clear()
             return
         payload = text if text.endswith("\n") else f"{text}\n"
         try:
