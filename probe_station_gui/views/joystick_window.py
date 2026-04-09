@@ -25,7 +25,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from probe_station_gui.qt_compat import keyboard_modifiers_to_int
+from probe_station_gui.qt_compat import (
+    derive_native_scan_code_from_qt_key,
+    keyboard_modifiers_to_int,
+    native_scan_code_to_int,
+)
 from probe_station_gui.settings_manager import CONTROL_ACTIONS, KeyBinding
 
 if TYPE_CHECKING:
@@ -89,7 +93,8 @@ class JoystickWindow(QWidget):
         100.0,
         300.0,
     )
-    KEYBOARD_JOG_SYNC_DEBOUNCE_MS = 30
+    KEYBOARD_JOG_SYNC_DEBOUNCE_MS = 10
+    KEYBOARD_JOG_SECONDARY_AXIS_ACTIVATION_MS = 180
     LINEAR_AXES = {"X", "Y", "Z"}
     HOMING_AXES = ("X", "Y", "Z", "A")
     LINEAR_FEEDRATE_SCALE = 10
@@ -137,6 +142,7 @@ class JoystickWindow(QWidget):
         self.stage_controller: Optional["StageController"] = None
         self._active_axes: Optional[tuple[tuple[str, int], ...]] = None
         self._key_stack: list[Tuple[str, object]] = []
+        self._pending_key_activations: dict[Tuple[str, object], QTimer] = {}
         self._key_bindings: Dict[tuple, tuple[str, int]] = {}
         self._linear_presets: List[float] = list(self.DEFAULT_LINEAR_FEEDRATE_PRESETS)
         self._linear_default: float = 1.0
@@ -165,6 +171,7 @@ class JoystickWindow(QWidget):
         self._jog_state_sync_timer.setSingleShot(True)
         self._jog_state_sync_timer.setInterval(self.KEYBOARD_JOG_SYNC_DEBOUNCE_MS)
         self._jog_state_sync_timer.timeout.connect(self._sync_active_jog_state)
+        self._pending_jog_axes: Optional[tuple[tuple[str, int], ...]] = None
         self._jog_stop_resend_pending = False
         self.apply_control_bindings({})
         self._event_filter_installed = False
@@ -437,7 +444,9 @@ class JoystickWindow(QWidget):
         self.serial_connection = serial_connection
         if not serial_connection or not serial_connection.is_open:
             self._active_axes = None
+            self._pending_jog_axes = None
             self._key_stack.clear()
+            self._clear_pending_key_activations()
             logger.debug("Joystick serial detached")
         if serial_connection and serial_connection.is_open:
             self.status_label.setText(
@@ -486,7 +495,9 @@ class JoystickWindow(QWidget):
         self._axis_a_ready = ready
         if not ready:
             self.stop_jog()
+            self._pending_jog_axes = None
             self._key_stack.clear()
+            self._clear_pending_key_activations()
         self._update_enabled_state()
 
     def set_needles_state(self, raised: bool, known: bool) -> None:
@@ -559,10 +570,13 @@ class JoystickWindow(QWidget):
         )
         if not self.serial_connection or not self.serial_connection.is_open:
             self._active_axes = None
+            self._pending_jog_axes = None
+            self._clear_pending_key_activations()
             if had_active_axes:
                 self.jog_stopped.emit()
             return
         self._active_axes = None
+        self._pending_jog_axes = None
         self.send_command(b"\x85")
         self._schedule_jog_stop_resend()
         if had_active_axes:
@@ -630,17 +644,39 @@ class JoystickWindow(QWidget):
         return tuple(unique_axes.items())
 
     def _schedule_active_jog_update(self) -> None:
+        axes = self._compute_active_axes()
+        self._pending_jog_axes = axes
+        interval = self._jog_sync_interval_for_axes(axes)
         if self._jog_state_sync_timer.isActive():
             self._jog_state_sync_timer.stop()
+        self._jog_state_sync_timer.setInterval(interval)
         self._jog_state_sync_timer.start()
+        logger.debug(
+            "Scheduled jog state sync: axes=%s interval_ms=%s active_axes=%s",
+            axes,
+            interval,
+            self._active_axes,
+        )
 
     def _sync_active_jog_state(self) -> None:
-        axes = self._compute_active_axes()
+        axes = self._pending_jog_axes
+        if axes is None:
+            axes = self._compute_active_axes()
+        self._pending_jog_axes = None
         logger.debug("Active keys mapped to axes: %s", axes)
         if not axes:
             self.stop_jog()
             return
         self._apply_axes(axes)
+
+    def _jog_sync_interval_for_axes(
+        self, axes: tuple[tuple[str, int], ...]
+    ) -> int:
+        if not axes:
+            return self.KEYBOARD_JOG_SYNC_DEBOUNCE_MS
+        if not (self._active_axes or ()):
+            return 0
+        return self.KEYBOARD_JOG_SYNC_DEBOUNCE_MS
 
     def set_homing_status(self, homed_axes: set[str]) -> None:
         active_axes = set(homed_axes).intersection(self.HOMING_AXES)
@@ -893,6 +929,8 @@ class JoystickWindow(QWidget):
         super().keyReleaseEvent(event)
 
     def focusOutEvent(self, event) -> None:  # type: ignore[override]
+        self._pending_jog_axes = None
+        self._clear_pending_key_activations()
         self._key_stack.clear()
         self.stop_jog()
         super().focusOutEvent(event)
@@ -902,6 +940,8 @@ class JoystickWindow(QWidget):
         self._install_event_filter()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]
+        self._pending_jog_axes = None
+        self._clear_pending_key_activations()
         self._key_stack.clear()
         self.stop_jog()
         self._remove_event_filter()
@@ -915,6 +955,11 @@ class JoystickWindow(QWidget):
                 QEvent.ShortcutOverride: "ShortcutOverride",
             }.get(event.type(), str(int(event.type())))
             key_value = event.key() if hasattr(event, "key") else None
+            scan_code_value = (
+                native_scan_code_to_int(event.nativeScanCode())
+                if hasattr(event, "nativeScanCode")
+                else 0
+            )
             text_value = event.text() if hasattr(event, "text") else ""
             modifiers_value = (
                 keyboard_modifiers_to_int(event.modifiers())
@@ -927,9 +972,10 @@ class JoystickWindow(QWidget):
                 else obj.__class__.__name__ if hasattr(obj, "__class__") else str(obj)
             )
             logger.debug(
-                "Global key event: type=%s key=%s text=%r modifiers=%s source=%s",
+                "Global key event: type=%s key=%s scan=%s text=%r modifiers=%s source=%s",
                 event_type_name,
                 key_value,
+                scan_code_value,
                 text_value,
                 modifiers_value,
                 source_name,
@@ -985,8 +1031,9 @@ class JoystickWindow(QWidget):
         if event.isAutoRepeat():
             event.ignore()
             logger.debug(
-                "Ignored auto-repeat key press: key=%s text=%s modifiers=%s",
+                "Ignored auto-repeat key press: key=%s scan=%s text=%s modifiers=%s",
                 event.key(),
+                self._event_scan_code(event),
                 event.text(),
                 keyboard_modifiers_to_int(event.modifiers()),
             )
@@ -994,27 +1041,28 @@ class JoystickWindow(QWidget):
         identifier, mapping = self._mapping_from_event(event)
         if identifier and mapping:
             logger.debug(
-                "TIMING keypress_received key=%s text=%s modifiers=%s mapping=%s",
+                "TIMING keypress_received key=%s scan=%s text=%s modifiers=%s mapping=%s",
                 event.key(),
+                self._event_scan_code(event),
                 event.text(),
                 keyboard_modifiers_to_int(event.modifiers()),
                 mapping,
             )
-            if identifier not in self._key_stack:
-                self._key_stack.append(identifier)
-                self._schedule_active_jog_update()
+            self._register_pressed_mapping(identifier, mapping)
             event.accept()
             logger.debug(
-                "Processed key press: key=%s text=%s modifiers=%s -> %s",
+                "Processed key press: key=%s scan=%s text=%s modifiers=%s -> %s",
                 event.key(),
+                self._event_scan_code(event),
                 event.text(),
                 keyboard_modifiers_to_int(event.modifiers()),
                 mapping,
             )
             return True
         logger.debug(
-            "No mapping for key press: key=%s text=%s modifiers=%s",
+            "No mapping for key press: key=%s scan=%s text=%s modifiers=%s",
             event.key(),
+            self._event_scan_code(event),
             event.text(),
             keyboard_modifiers_to_int(event.modifiers()),
         )
@@ -1024,29 +1072,44 @@ class JoystickWindow(QWidget):
         if event.isAutoRepeat():
             event.ignore()
             logger.debug(
-                "Ignored auto-repeat key release: key=%s text=%s modifiers=%s",
+                "Ignored auto-repeat key release: key=%s scan=%s text=%s modifiers=%s",
                 event.key(),
+                self._event_scan_code(event),
                 event.text(),
                 keyboard_modifiers_to_int(event.modifiers()),
             )
             return True
         identifier, mapping = self._mapping_from_event(event)
         if identifier and mapping:
+            if self._cancel_pending_key_activation(identifier):
+                event.accept()
+                logger.debug(
+                    "Cancelled pending key activation: key=%s scan=%s text=%s modifiers=%s mapping=%s",
+                    event.key(),
+                    self._event_scan_code(event),
+                    event.text(),
+                    keyboard_modifiers_to_int(event.modifiers()),
+                    mapping,
+                )
+                return True
             if identifier in self._key_stack:
                 self._key_stack.remove(identifier)
+                self._promote_pending_keys_if_needed()
                 self._schedule_active_jog_update()
             event.accept()
             logger.debug(
-                "TIMING keyrelease_received key=%s text=%s modifiers=%s mapping=%s remaining=%s",
+                "TIMING keyrelease_received key=%s scan=%s text=%s modifiers=%s mapping=%s remaining=%s",
                 event.key(),
+                self._event_scan_code(event),
                 event.text(),
                 keyboard_modifiers_to_int(event.modifiers()),
                 mapping,
                 self._key_stack,
             )
             logger.debug(
-                "Processed key release: key=%s text=%s modifiers=%s -> %s",
+                "Processed key release: key=%s scan=%s text=%s modifiers=%s -> %s",
                 event.key(),
+                self._event_scan_code(event),
                 event.text(),
                 keyboard_modifiers_to_int(event.modifiers()),
                 mapping,
@@ -1054,18 +1117,21 @@ class JoystickWindow(QWidget):
             return True
         removed = self._remove_stale_key(event)
         if removed:
+            self._promote_pending_keys_if_needed()
             self._schedule_active_jog_update()
             event.accept()
             logger.debug(
-                "Recovered key release: key=%s text=%s modifiers=%s",
+                "Recovered key release: key=%s scan=%s text=%s modifiers=%s",
                 event.key(),
+                self._event_scan_code(event),
                 event.text(),
                 keyboard_modifiers_to_int(event.modifiers()),
             )
             return True
         logger.debug(
-            "No mapping for key release: key=%s text=%s modifiers=%s",
+            "No mapping for key release: key=%s scan=%s text=%s modifiers=%s",
             event.key(),
+            self._event_scan_code(event),
             event.text(),
             keyboard_modifiers_to_int(event.modifiers()),
         )
@@ -1081,18 +1147,101 @@ class JoystickWindow(QWidget):
         if not self._key_stack:
             return False
         key = event.key()
-        text = event.text().casefold() if event.text() else ""
+        scan_code = self._event_scan_code(event)
         removed = False
         for identifier in list(self._key_stack):
             kind, value = identifier
-            if kind == "key":
+            if kind == "scan":
+                if isinstance(value, tuple) and value[0] == scan_code and scan_code:
+                    self._key_stack.remove(identifier)
+                    removed = True
+            elif kind == "key":
                 if isinstance(value, tuple) and value[0] == key:
                     self._key_stack.remove(identifier)
                     removed = True
-            elif kind == "text" and text and value == text:
-                self._key_stack.remove(identifier)
-                removed = True
         return removed
+
+    def _register_pressed_mapping(
+        self, identifier: Tuple[str, object], mapping: tuple[str, int]
+    ) -> None:
+        if identifier in self._key_stack:
+            return
+        if identifier in self._pending_key_activations:
+            return
+
+        axis, _direction = mapping
+        active_axes = {active_axis for active_axis, _ in (self._active_axes or ())}
+        pressed_axes = {
+            axis_name
+            for pending_identifier in self._key_stack
+            if (resolved := self._mapping_from_identifier(pending_identifier)) is not None
+            for axis_name, _ in (resolved,)
+        }
+        current_axes = active_axes.union(pressed_axes)
+
+        if not current_axes or axis in current_axes:
+            self._key_stack.append(identifier)
+            self._schedule_active_jog_update()
+            return
+
+        self._schedule_pending_key_activation(identifier, mapping)
+
+    def _schedule_pending_key_activation(
+        self, identifier: Tuple[str, object], mapping: tuple[str, int]
+    ) -> None:
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.setInterval(self.KEYBOARD_JOG_SECONDARY_AXIS_ACTIVATION_MS)
+        timer.timeout.connect(
+            lambda ident=identifier, resolved_mapping=mapping: self._activate_pending_key(
+                ident, resolved_mapping
+            )
+        )
+        self._pending_key_activations[identifier] = timer
+        timer.start()
+        logger.debug(
+            "Deferred secondary axis activation for %s by %s ms mapping=%s",
+            identifier,
+            self.KEYBOARD_JOG_SECONDARY_AXIS_ACTIVATION_MS,
+            mapping,
+        )
+
+    def _activate_pending_key(
+        self, identifier: Tuple[str, object], mapping: tuple[str, int]
+    ) -> None:
+        timer = self._pending_key_activations.pop(identifier, None)
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+        if identifier in self._key_stack:
+            return
+        self._key_stack.append(identifier)
+        self._schedule_active_jog_update()
+        logger.debug("Activated deferred secondary axis for %s mapping=%s", identifier, mapping)
+
+    def _cancel_pending_key_activation(self, identifier: Tuple[str, object]) -> bool:
+        timer = self._pending_key_activations.pop(identifier, None)
+        if timer is None:
+            return False
+        timer.stop()
+        timer.deleteLater()
+        return True
+
+    def _clear_pending_key_activations(self) -> None:
+        for identifier in list(self._pending_key_activations.keys()):
+            self._cancel_pending_key_activation(identifier)
+
+    def _promote_pending_keys_if_needed(self) -> None:
+        if self._key_stack:
+            return
+        if not self._pending_key_activations:
+            return
+        for identifier in list(self._pending_key_activations.keys()):
+            mapping = self._mapping_from_identifier(identifier)
+            if mapping is None:
+                self._cancel_pending_key_activation(identifier)
+                continue
+            self._activate_pending_key(identifier, mapping)
 
     def _schedule_jog_stop_resend(self) -> None:
         if self._jog_stop_resend_pending:
@@ -1134,17 +1283,20 @@ class JoystickWindow(QWidget):
         self, event
     ) -> tuple[Optional[Tuple[str, object]], Optional[tuple[str, int]]]:
         key = event.key()
+        scan_code = self._event_scan_code(event)
         modifiers = keyboard_modifiers_to_int(event.modifiers())
+
+        if scan_code:
+            mapping = self._key_bindings.get(("scan", scan_code, modifiers))
+            if mapping:
+                return ("scan", (scan_code, modifiers)), mapping
+            for identifier, mapping in self._key_bindings.items():
+                if identifier[0] == "scan" and identifier[1] == scan_code:
+                    return ("scan", (identifier[1], identifier[2])), mapping
+
         mapping = self._key_bindings.get(("key", key, modifiers))
         if mapping:
             return ("key", (key, modifiers)), mapping
-
-        text = event.text()
-        if text:
-            normalized = text.casefold()
-            mapping = self._key_bindings.get(("text", normalized))
-            if mapping:
-                return ("text", normalized), mapping
 
         for identifier, mapping in self._key_bindings.items():
             if identifier[0] == "key" and identifier[1] == key:
@@ -1154,11 +1306,12 @@ class JoystickWindow(QWidget):
 
     def _mapping_from_identifier(self, identifier: Tuple[str, object]) -> Optional[tuple[str, int]]:
         kind, value = identifier
+        if kind == "scan":
+            scan_code, modifiers = value  # type: ignore[misc]
+            return self._key_bindings.get(("scan", scan_code, modifiers))
         if kind == "key":
             key, modifiers = value  # type: ignore[misc]
             return self._key_bindings.get(("key", key, modifiers))
-        if kind == "text":
-            return self._key_bindings.get(("text", value))
         return None
 
     def apply_control_bindings(self, bindings: Dict[str, list[KeyBinding]]) -> None:
@@ -1167,14 +1320,31 @@ class JoystickWindow(QWidget):
         mapping: Dict[tuple, tuple[str, int]] = {}
         for action in CONTROL_ACTIONS:
             for binding in bindings.get(action.key, []):
+                scan_code = int(binding.native_scan_code or 0)
+                if not scan_code:
+                    scan_code = derive_native_scan_code_from_qt_key(binding.qt_key)
+                if scan_code:
+                    mapping[("scan", scan_code, binding.modifiers)] = (
+                        action.axis,
+                        action.direction,
+                    )
                 mapping[("key", binding.qt_key, binding.modifiers)] = (
                     action.axis,
                     action.direction,
                 )
-                if binding.text:
-                    mapping[("text", binding.text.casefold())] = (
-                        action.axis,
-                        action.direction,
-                    )
         self._key_bindings = mapping
+        self._key_stack = [
+            identifier
+            for identifier in self._key_stack
+            if self._mapping_from_identifier(identifier) is not None
+        ]
         logger.info("Joystick key bindings updated: %d entries", len(self._key_bindings))
+
+    @staticmethod
+    def _event_scan_code(event) -> int:
+        native_scan = getattr(event, "nativeScanCode", None)
+        if native_scan is None:
+            return 0
+        if callable(native_scan):
+            return native_scan_code_to_int(native_scan())
+        return native_scan_code_to_int(native_scan)

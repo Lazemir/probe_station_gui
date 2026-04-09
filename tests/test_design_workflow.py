@@ -153,6 +153,45 @@ class DesignDocumentTest(unittest.TestCase):
         self.assertEqual(document.top_cell_name, "MAIN")
         self.assertEqual(document.layer_keys(), ((1, 0),))
 
+    def test_snap_point_info_prefers_vertex_or_segment_from_cached_geometry(self) -> None:
+        document = DesignDocument(
+            path=REPO_ROOT / "tests" / "fixtures" / "synthetic.gds",
+            library=object(),
+            top_cell=object(),
+            top_cell_name="TOP",
+            cell_names=("TOP",),
+            dbu=1e-6,
+            user_unit=1e-9,
+            bounds=(0.0, 0.0, 10.0, 10.0),
+            polygons_by_layer={
+                (1, 0): (
+                    np.asarray([[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]]),
+                )
+            },
+            visible_layers=frozenset({(1, 0)}),
+            snap_vertices=np.asarray(
+                [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0], [0.0, 0.0]],
+                dtype=float,
+            ),
+            snap_segment_starts=np.asarray(
+                [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]],
+                dtype=float,
+            ),
+            snap_segment_ends=np.asarray(
+                [[10.0, 0.0], [10.0, 10.0], [0.0, 10.0], [0.0, 0.0]],
+                dtype=float,
+            ),
+        )
+
+        vertex_snap = document.snap_point_info((9.95, 9.95))
+        segment_snap = document.snap_point_info((4.0, 1.0))
+
+        self.assertEqual(vertex_snap.mode, "vertex")
+        self.assertEqual(vertex_snap.point, (10.0, 10.0))
+        self.assertEqual(segment_snap.mode, "segment")
+        self.assertAlmostEqual(segment_snap.point[0], 4.0)
+        self.assertAlmostEqual(segment_snap.point[1], 0.0)
+
 
 class DesignScriptTest(unittest.TestCase):
     def _make_document(self) -> DesignDocument:

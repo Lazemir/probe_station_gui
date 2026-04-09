@@ -38,12 +38,18 @@ class KeyBinding:
 
     qt_key: int
     modifiers: int = 0
+    native_scan_code: int = 0
     text: str = ""
 
     def to_dict(self) -> dict[str, int | str]:
         """Serialize the binding for persistence."""
 
-        return {"qt_key": self.qt_key, "modifiers": self.modifiers, "text": self.text}
+        return {
+            "qt_key": self.qt_key,
+            "modifiers": self.modifiers,
+            "native_scan_code": self.native_scan_code,
+            "text": self.text,
+        }
 
     @staticmethod
     def from_dict(data: dict) -> "KeyBinding":
@@ -52,6 +58,7 @@ class KeyBinding:
         return KeyBinding(
             qt_key=int(data.get("qt_key", 0)),
             modifiers=int(data.get("modifiers", 0)),
+            native_scan_code=int(data.get("native_scan_code", 0)),
             text=str(data.get("text", "")),
         )
 

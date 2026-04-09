@@ -6,7 +6,7 @@ import importlib
 import math
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, ClassVar, Iterable, Optional
 
 import numpy as np
 
@@ -77,6 +77,17 @@ class ResidualSummary:
     count: int = 0
     rms: float = 0.0
     max_error: float = 0.0
+
+
+@dataclass(frozen=True)
+class SnapResult:
+    """Nearest visible snap target for a design-space point."""
+
+    point: Point2D
+    mode: str
+    distance: float
+    segment_start: Point2D | None = None
+    segment_end: Point2D | None = None
 
 
 @dataclass(frozen=True)
@@ -208,6 +219,8 @@ class DesignRegistration:
 class DesignDocument:
     """Loaded GDS design and display-ready polygon geometry."""
 
+    SNAP_VERTEX_PRIORITY_RATIO: ClassVar[float] = 1.5
+
     path: Path
     library: Any
     top_cell: Any
@@ -218,6 +231,18 @@ class DesignDocument:
     bounds: tuple[float, float, float, float]
     polygons_by_layer: dict[LayerKey, tuple[np.ndarray, ...]]
     visible_layers: frozenset[LayerKey]
+    snap_vertices: np.ndarray = field(
+        default_factory=lambda: np.empty((0, 2), dtype=float),
+        repr=False,
+    )
+    snap_segment_starts: np.ndarray = field(
+        default_factory=lambda: np.empty((0, 2), dtype=float),
+        repr=False,
+    )
+    snap_segment_ends: np.ndarray = field(
+        default_factory=lambda: np.empty((0, 2), dtype=float),
+        repr=False,
+    )
 
     @classmethod
     def load(cls, path: str | Path) -> "DesignDocument":
@@ -279,6 +304,10 @@ class DesignDocument:
             effective_layers = frozenset(layer for layer in visible_layers if layer in layers)
             if not effective_layers:
                 effective_layers = layers
+        snap_vertices, snap_segment_starts, snap_segment_ends = cls._build_snap_geometry(
+            polygons_by_layer,
+            effective_layers,
+        )
         dbu = float(getattr(library, "unit", 1e-6))
         precision = float(getattr(library, "precision", dbu))
         user_unit = precision if precision > 0 else dbu
@@ -293,6 +322,9 @@ class DesignDocument:
             bounds=bounds,
             polygons_by_layer=polygons_by_layer,
             visible_layers=effective_layers,
+            snap_vertices=snap_vertices,
+            snap_segment_starts=snap_segment_starts,
+            snap_segment_ends=snap_segment_ends,
         )
 
     def with_top_cell(self, top_cell_name: str) -> "DesignDocument":
@@ -308,8 +340,10 @@ class DesignDocument:
     def with_visible_layers(self, layers: Iterable[LayerKey]) -> "DesignDocument":
         """Return a copy with a different visible layer subset."""
 
-        return replace(
-            self,
+        return self._from_components(
+            path=self.path,
+            library=self.library,
+            top_cell_name=self.top_cell_name,
             visible_layers=frozenset(
                 layer for layer in layers if layer in self.polygons_by_layer
             ),
@@ -332,30 +366,76 @@ class DesignDocument:
     def snap_point(self, point: Point2D) -> Point2D:
         """Snap a design-space point to the nearest visible vertex or segment."""
 
+        return self.snap_point_info(point).point
+
+    def snap_point_info(self, point: Point2D) -> SnapResult:
+        """Return the nearest visible snap target and its geometry metadata."""
+
         target = np.asarray(point, dtype=float)
-        best_point = target
-        best_distance_sq = float("inf")
-        for polygons in self.visible_polygons().values():
-            for polygon in polygons:
-                if len(polygon) == 0:
-                    continue
-                closed = polygon
-                if len(polygon) > 1 and not np.allclose(polygon[0], polygon[-1]):
-                    closed = np.vstack((polygon, polygon[0]))
-                for vertex in closed:
-                    delta = target - vertex
-                    distance_sq = float(delta @ delta)
-                    if distance_sq < best_distance_sq:
-                        best_distance_sq = distance_sq
-                        best_point = np.asarray(vertex, dtype=float)
-                for start, end in zip(closed[:-1], closed[1:]):
-                    snapped = self._project_point_to_segment(target, start, end)
-                    delta = target - snapped
-                    distance_sq = float(delta @ delta)
-                    if distance_sq < best_distance_sq:
-                        best_distance_sq = distance_sq
-                        best_point = snapped
-        return (float(best_point[0]), float(best_point[1]))
+        vertex_point = target
+        vertex_distance_sq = float("inf")
+        segment_point = target
+        segment_distance_sq = float("inf")
+        segment_start: Point2D | None = None
+        segment_end: Point2D | None = None
+
+        if len(self.snap_vertices):
+            vertex_delta = self.snap_vertices - target
+            vertex_distance_sq_array = np.einsum("ij,ij->i", vertex_delta, vertex_delta)
+            vertex_index = int(np.argmin(vertex_distance_sq_array))
+            vertex_distance_sq = float(vertex_distance_sq_array[vertex_index])
+            vertex_point = np.asarray(self.snap_vertices[vertex_index], dtype=float)
+
+        if len(self.snap_segment_starts):
+            segments = self.snap_segment_ends - self.snap_segment_starts
+            lengths_sq = np.einsum("ij,ij->i", segments, segments)
+            valid_lengths = np.maximum(lengths_sq, 1e-18)
+            projections = np.einsum(
+                "ij,ij->i",
+                np.broadcast_to(target, self.snap_segment_starts.shape)
+                - self.snap_segment_starts,
+                segments,
+            ) / valid_lengths
+            projections = np.clip(projections, 0.0, 1.0)
+            snapped_points = self.snap_segment_starts + segments * projections[:, np.newaxis]
+            segment_delta = snapped_points - target
+            segment_distance_sq_array = np.einsum("ij,ij->i", segment_delta, segment_delta)
+            segment_index = int(np.argmin(segment_distance_sq_array))
+            segment_distance_sq = float(segment_distance_sq_array[segment_index])
+            segment_point = np.asarray(snapped_points[segment_index], dtype=float)
+            start = self.snap_segment_starts[segment_index]
+            end = self.snap_segment_ends[segment_index]
+            segment_start = (float(start[0]), float(start[1]))
+            segment_end = (float(end[0]), float(end[1]))
+
+        if (
+            vertex_distance_sq < float("inf")
+            and (
+                segment_distance_sq == float("inf")
+                or vertex_distance_sq
+                <= segment_distance_sq * (self.SNAP_VERTEX_PRIORITY_RATIO ** 2)
+            )
+        ):
+            return SnapResult(
+                point=(float(vertex_point[0]), float(vertex_point[1])),
+                mode="vertex",
+                distance=math.sqrt(max(0.0, vertex_distance_sq)),
+            )
+
+        if segment_distance_sq < float("inf"):
+            return SnapResult(
+                point=(float(segment_point[0]), float(segment_point[1])),
+                mode="segment",
+                distance=math.sqrt(max(0.0, segment_distance_sq)),
+                segment_start=segment_start,
+                segment_end=segment_end,
+            )
+
+        return SnapResult(
+            point=(float(target[0]), float(target[1])),
+            mode="free",
+            distance=0.0,
+        )
 
     def dbu_to_um(self, value: float) -> float:
         """Convert design database units to micrometers."""
@@ -458,6 +538,36 @@ class DesignDocument:
         return (min(mins_x), min(mins_y), max(maxs_x), max(maxs_y))
 
     @staticmethod
+    def _build_snap_geometry(
+        polygons_by_layer: dict[LayerKey, tuple[np.ndarray, ...]],
+        visible_layers: Iterable[LayerKey],
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        vertices: list[np.ndarray] = []
+        segment_starts: list[np.ndarray] = []
+        segment_ends: list[np.ndarray] = []
+        for layer_key in visible_layers:
+            for polygon in polygons_by_layer.get(layer_key, ()):
+                if len(polygon) == 0:
+                    continue
+                closed = polygon
+                if len(polygon) > 1 and not np.allclose(polygon[0], polygon[-1]):
+                    closed = np.vstack((polygon, polygon[0]))
+                vertices.append(np.asarray(closed, dtype=float))
+                if len(closed) > 1:
+                    segment_starts.append(np.asarray(closed[:-1], dtype=float))
+                    segment_ends.append(np.asarray(closed[1:], dtype=float))
+        vertex_array = (
+            np.vstack(vertices) if vertices else np.empty((0, 2), dtype=float)
+        )
+        segment_start_array = (
+            np.vstack(segment_starts) if segment_starts else np.empty((0, 2), dtype=float)
+        )
+        segment_end_array = (
+            np.vstack(segment_ends) if segment_ends else np.empty((0, 2), dtype=float)
+        )
+        return vertex_array, segment_start_array, segment_end_array
+
+    @staticmethod
     def _project_point_to_segment(
         point: np.ndarray, start: np.ndarray, end: np.ndarray
     ) -> np.ndarray:
@@ -478,4 +588,5 @@ __all__ = [
     "MeasurementTarget",
     "Point2D",
     "ResidualSummary",
+    "SnapResult",
 ]

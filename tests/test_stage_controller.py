@@ -16,11 +16,24 @@ def _install_pyside6_stubs() -> None:
         def __init__(self, *args, **kwargs) -> None:
             pass
 
+    class Qt:  # noqa: N801 - mimic Qt namespace
+        KeyboardModifier = int
+        KeyboardModifiers = int
+        Key_Left = 16777234
+        Key_Up = 16777235
+        Key_Right = 16777236
+        Key_Down = 16777237
+        Key_Space = 32
+        Key_Tab = 16777217
+        Key_Return = 16777220
+        Key_Enter = 16777221
+
     class QImage:  # noqa: N801 - mimic Qt type name
         pass
 
     qtcore.QObject = QObject
     qtcore.Signal = Signal
+    qtcore.Qt = Qt
     qtgui.QImage = QImage
 
     pyside6 = types.ModuleType("PySide6")
@@ -56,7 +69,9 @@ def _load_stage_controller():
     return module
 
 
-StageController = _load_stage_controller().StageController
+_stage_controller_module = _load_stage_controller()
+StageController = _stage_controller_module.StageController
+QueuedSerialWrite = _stage_controller_module._QueuedSerialWrite
 
 
 class StageControllerStartupLimitsTest(unittest.TestCase):
@@ -134,6 +149,42 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
 
         self.assertEqual(movement_results[-1][0], False)
         self.assertIn("Serial connection is not available", movement_results[-1][1])
+
+
+class StageControllerJogQueueTest(unittest.TestCase):
+    def test_superseded_jog_command_is_dropped_before_write(self) -> None:
+        controller = StageController()
+        controller.SERIAL_JOG_COMMAND_SETTLE_S = 0.0
+        controller._queued_jog_generation = 2
+        job = QueuedSerialWrite(
+            priority=controller.SERIAL_PRIORITY_JOG_COMMAND,
+            sequence=1,
+            kind="jog_command",
+            payload=b"$J=G91 G21 X250.000 F10.0\n",
+            description="$J=G91 G21 X250.000 F10.0",
+            generation=1,
+        )
+
+        ready = controller._await_current_jog_command(job)
+
+        self.assertFalse(ready)
+
+    def test_current_jog_command_survives_settle_window(self) -> None:
+        controller = StageController()
+        controller.SERIAL_JOG_COMMAND_SETTLE_S = 0.0
+        controller._queued_jog_generation = 3
+        job = QueuedSerialWrite(
+            priority=controller.SERIAL_PRIORITY_JOG_COMMAND,
+            sequence=1,
+            kind="jog_command",
+            payload=b"$J=G91 G21 Y250.000 F10.0\n",
+            description="$J=G91 G21 Y250.000 F10.0",
+            generation=3,
+        )
+
+        ready = controller._await_current_jog_command(job)
+
+        self.assertTrue(ready)
 
 
 if __name__ == "__main__":

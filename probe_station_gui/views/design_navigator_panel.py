@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import math
+import logging
 from pathlib import Path
+from time import perf_counter, monotonic
 
 import numpy as np
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -25,7 +27,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..design_model import DesignDocument, LayerKey, MeasurementTarget, Point2D
+from ..design_model import (
+    DesignDocument,
+    LayerKey,
+    MeasurementTarget,
+    Point2D,
+    SnapResult,
+)
 
 try:  # pragma: no cover - optional runtime dependency
     import pyqtgraph as pg
@@ -33,10 +41,16 @@ except ImportError:  # pragma: no cover - optional runtime dependency
     pg = None
 
 
+logger = logging.getLogger(__name__)
+
+
 class _DesignPlotPane(QWidget):
     """Thin wrapper around pyqtgraph for design rendering."""
 
     calibration_point_selected = Signal(int, float, float)
+    hover_snap_changed = Signal(object)
+    HOVER_SNAP_LOG_INTERVAL_S = 0.2
+    HOVER_SNAP_SLOW_MS = 8.0
 
     def __init__(self, *, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -48,6 +62,10 @@ class _DesignPlotPane(QWidget):
         self._fov_design_size: Point2D | None = None
         self._check_design_marks: list[Point2D] = []
         self._layer_items: list[object] = []
+        self._hover_snap: SnapResult | None = None
+        self._pending_hover_scene_pos = None
+        self._last_hover_log_at = 0.0
+        self._last_hover_log_signature: tuple[float, float, str] | None = None
         self._plot = None
 
         layout = QVBoxLayout(self)
@@ -75,6 +93,17 @@ class _DesignPlotPane(QWidget):
         self._plot.plotItem.hideAxis("left")
 
         self._route_item = self._plot.plot([], [], pen=pg.mkPen("#4dd0e1", width=2))
+        self._hover_segment_item = self._plot.plot(
+            [],
+            [],
+            pen=pg.mkPen("#ffffff", width=2),
+        )
+        self._hover_item = pg.ScatterPlotItem(
+            pen=pg.mkPen("#ffffff", width=2),
+            brush=pg.mkBrush(255, 255, 255, 60),
+            size=14,
+            symbol="+",
+        )
         self._target_item = pg.ScatterPlotItem(
             pen=pg.mkPen("#4dd0e1", width=1),
             brush=pg.mkBrush(77, 208, 225, 150),
@@ -110,6 +139,11 @@ class _DesignPlotPane(QWidget):
             symbol="x",
         )
         self._fov_item = self._plot.plot([], [], pen=pg.mkPen("#81c784", width=1))
+        self._hover_timer = QTimer(self)
+        self._hover_timer.setSingleShot(True)
+        self._hover_timer.setInterval(16)
+        self._hover_timer.timeout.connect(self._flush_hover_snap)
+        self._plot.addItem(self._hover_item)
         self._plot.addItem(self._target_item)
         self._plot.addItem(self._selected_target_item)
         self._plot.addItem(self._current_item)
@@ -117,10 +151,13 @@ class _DesignPlotPane(QWidget):
         self._plot.addItem(self._source_mark_2_item)
         self._plot.addItem(self._check_mark_item)
         self._plot.scene().sigMouseClicked.connect(self._on_mouse_clicked)
+        self._plot.scene().sigMouseMoved.connect(self._on_mouse_moved)
         layout.addWidget(self._plot, 1)
 
     def set_document(self, document: DesignDocument | None) -> None:
         self._document = document
+        if document is None:
+            self._set_hover_snap(None)
         self._redraw_document()
         self._redraw_overlays()
 
@@ -248,9 +285,10 @@ class _DesignPlotPane(QWidget):
             )
         else:
             self._check_mark_item.setData([], [])
+        self._redraw_hover()
 
     def _on_mouse_clicked(self, event) -> None:  # pragma: no cover - UI interaction
-        if self._plot is None:
+        if self._plot is None or self._document is None:
             return
         if event.button() == Qt.LeftButton:
             slot = 0
@@ -262,7 +300,107 @@ class _DesignPlotPane(QWidget):
         if not self._plot.sceneBoundingRect().contains(position):
             return
         view_point = self._plot.getViewBox().mapSceneToView(position)
-        self.calibration_point_selected.emit(slot, float(view_point.x()), float(view_point.y()))
+        raw_point = (float(view_point.x()), float(view_point.y()))
+        started = perf_counter()
+        snap_result = self._document.snap_point_info(raw_point)
+        elapsed_ms = (perf_counter() - started) * 1000.0
+        self._set_hover_snap(snap_result)
+        logger.debug(
+            "DESIGN SNAP click raw=(%.3f, %.3f) snapped=(%.3f, %.3f) mode=%s dist=%.4f elapsed_ms=%.2f",
+            raw_point[0],
+            raw_point[1],
+            snap_result.point[0],
+            snap_result.point[1],
+            snap_result.mode,
+            snap_result.distance,
+            elapsed_ms,
+        )
+        self.calibration_point_selected.emit(
+            slot,
+            snap_result.point[0],
+            snap_result.point[1],
+        )
+
+    def _on_mouse_moved(self, position) -> None:  # pragma: no cover - UI interaction
+        self._pending_hover_scene_pos = position
+        if not self._hover_timer.isActive():
+            self._hover_timer.start()
+
+    def _flush_hover_snap(self) -> None:  # pragma: no cover - UI interaction
+        if self._plot is None or self._document is None:
+            self._set_hover_snap(None)
+            return
+        position = self._pending_hover_scene_pos
+        self._pending_hover_scene_pos = None
+        if position is None or not self._plot.sceneBoundingRect().contains(position):
+            self._set_hover_snap(None)
+            return
+        view_point = self._plot.getViewBox().mapSceneToView(position)
+        raw_point = (float(view_point.x()), float(view_point.y()))
+        started = perf_counter()
+        snap_result = self._document.snap_point_info(raw_point)
+        elapsed_ms = (perf_counter() - started) * 1000.0
+        self._set_hover_snap(snap_result)
+        self._log_hover_snap(raw_point, snap_result, elapsed_ms)
+
+    def _set_hover_snap(self, snap_result: SnapResult | None) -> None:
+        self._hover_snap = snap_result
+        self._redraw_hover()
+        self.hover_snap_changed.emit(snap_result)
+
+    def _redraw_hover(self) -> None:
+        if self._plot is None or self._hover_snap is None:
+            if self._plot is not None:
+                self._hover_item.setData([], [])
+                self._hover_segment_item.setData([], [])
+            return
+        point = self._hover_snap.point
+        self._hover_item.setData([point[0]], [point[1]])
+        if (
+            self._hover_snap.mode == "segment"
+            and self._hover_snap.segment_start is not None
+            and self._hover_snap.segment_end is not None
+        ):
+            self._hover_segment_item.setData(
+                [self._hover_snap.segment_start[0], self._hover_snap.segment_end[0]],
+                [self._hover_snap.segment_start[1], self._hover_snap.segment_end[1]],
+            )
+        else:
+            self._hover_segment_item.setData([], [])
+
+    def _log_hover_snap(
+        self,
+        raw_point: Point2D,
+        snap_result: SnapResult,
+        elapsed_ms: float,
+    ) -> None:
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        signature = (
+            round(snap_result.point[0], 3),
+            round(snap_result.point[1], 3),
+            snap_result.mode,
+        )
+        now = monotonic()
+        should_log = (
+            elapsed_ms >= self.HOVER_SNAP_SLOW_MS
+            or signature != self._last_hover_log_signature
+            or (now - self._last_hover_log_at) >= self.HOVER_SNAP_LOG_INTERVAL_S
+        )
+        if not should_log:
+            return
+        logger.debug(
+            "DESIGN SNAP hover raw=(%.3f, %.3f) snapped=(%.3f, %.3f) mode=%s dist=%.4f elapsed_ms=%.2f",
+            raw_point[0],
+            raw_point[1],
+            snap_result.point[0],
+            snap_result.point[1],
+            snap_result.mode,
+            snap_result.distance,
+            elapsed_ms,
+        )
+        self._last_hover_log_at = now
+        self._last_hover_log_signature = signature
 
     @staticmethod
     def _set_slot_item_data(item, point: Point2D | None) -> None:
@@ -308,6 +446,10 @@ class DesignNavigatorPanel(QWidget):
         self._availability_label = QLabel(self)
         self._availability_label.setWordWrap(True)
         root_layout.addWidget(self._availability_label)
+        self._snap_hint_label = QLabel("Hover snap: move over a line or corner.", self)
+        self._snap_hint_label.setWordWrap(True)
+        self._snap_hint_label.setStyleSheet("QLabel { color: #b0bec5; }")
+        root_layout.addWidget(self._snap_hint_label)
 
         file_group = QGroupBox("Design", self)
         file_layout = QGridLayout(file_group)
@@ -537,6 +679,16 @@ class DesignNavigatorPanel(QWidget):
     def set_status_message(self, text: str) -> None:
         self._availability_label.setText(text)
 
+    def set_hover_snap(self, snap_result: SnapResult | None) -> None:
+        if snap_result is None:
+            self._snap_hint_label.setText("Hover snap: move over a line or corner.")
+            return
+        label = "Corner" if snap_result.mode == "vertex" else "Line"
+        self._snap_hint_label.setText(
+            f"Hover snap: {label} at X={snap_result.point[0]:.3f}, "
+            f"Y={snap_result.point[1]:.3f} | distance {snap_result.distance:.4f}"
+        )
+
     def _update_mark_labels(self) -> None:
         self._mark_1_label.setText(self._format_mark_label("Mark 1 (LMB)", self._source_design_marks[0]))
         self._mark_2_label.setText(self._format_mark_label("Mark 2 (RMB)", self._source_design_marks[1]))
@@ -664,13 +816,13 @@ class DesignLayoutWindow(QWidget):
         root_layout.setSpacing(8)
 
         self._main_view = _DesignPlotPane(parent=self)
+        self.navigator_panel = DesignNavigatorPanel(self)
+        self.navigator_panel.setMinimumWidth(420)
         self._main_view.calibration_point_selected.connect(
             self.calibration_point_selected.emit
         )
+        self._main_view.hover_snap_changed.connect(self.navigator_panel.set_hover_snap)
         root_layout.addWidget(self._main_view, 1)
-
-        self.navigator_panel = DesignNavigatorPanel(self)
-        self.navigator_panel.setMinimumWidth(420)
         root_layout.addWidget(self.navigator_panel, 0)
 
     def set_document(self, document: DesignDocument | None) -> None:

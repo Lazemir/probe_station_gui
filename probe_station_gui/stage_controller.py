@@ -128,6 +128,7 @@ class StageController(QObject):
     SERIAL_PRIORITY_JOG_COMMAND = 10
     SERIAL_PRIORITY_SOFT_RESET = 20
     SERIAL_PRIORITY_TERMINAL = 30
+    SERIAL_JOG_COMMAND_SETTLE_S = 0.03
 
     STATUS_PATTERN = re.compile(
         r"<(?P<state>[A-Za-z]+)(?:\|[^>]*?MPos:(?P<mpos>-?\d+\.?\d*(?:,-?\d+\.?\d*)*))?"
@@ -164,6 +165,9 @@ class StageController(QObject):
         self._serial_session_lock = threading.RLock()
         self._queued_write_sequence = 0
         self._queued_jog_generation = 0
+        self._last_stage_state: Optional[str] = None
+        self._last_status_timestamp: Optional[float] = None
+        self._last_jog_write_timestamp: Optional[float] = None
         self._async_write_queue: PriorityQueue[_QueuedSerialWrite] = PriorityQueue()
         self._async_write_shutdown = threading.Event()
         self._async_write_thread = threading.Thread(
@@ -182,6 +186,9 @@ class StageController(QObject):
             if serial_connection is None or not serial_connection.is_open:
                 self._pixels_to_mm = None
                 self._last_stage_position = None
+                self._last_stage_state = None
+                self._last_status_timestamp = None
+                self._last_jog_write_timestamp = None
                 self._axis_limits.clear()
                 self._b_axis_zero_position = None
                 self._update_homing_status(set())
@@ -504,6 +511,21 @@ class StageController(QObject):
         if self._last_stage_position is None:
             return None
         return tuple(self._last_stage_position)
+
+    def latest_stage_state(self) -> str | None:
+        """Return the most recently observed controller motion state."""
+
+        return self._last_stage_state
+
+    def last_status_timestamp(self) -> float | None:
+        """Return monotonic time of the most recent parsed status frame."""
+
+        return self._last_status_timestamp
+
+    def last_jog_write_timestamp(self) -> float | None:
+        """Return monotonic time when the last jog command was flushed."""
+
+        return self._last_jog_write_timestamp
 
     def request_status_refresh(self) -> None:
         """Poll controller position in a background thread when idle."""
@@ -1442,7 +1464,7 @@ class StageController(QObject):
             try:
                 if job.kind == "shutdown":
                     return
-                if job.kind == "jog_command" and job.generation != self._queued_jog_generation:
+                if job.kind == "jog_command" and not self._await_current_jog_command(job):
                     continue
                 serial_connection = self._serial
                 if serial_connection is None or not serial_connection.is_open:
@@ -1453,6 +1475,35 @@ class StageController(QObject):
                 self.status_message.emit(str(exc))
             finally:
                 self._async_write_queue.task_done()
+
+    def _await_current_jog_command(self, job: _QueuedSerialWrite) -> bool:
+        if job.kind != "jog_command":
+            return True
+
+        deadline = time.monotonic() + self.SERIAL_JOG_COMMAND_SETTLE_S
+        while time.monotonic() < deadline:
+            if self._async_write_shutdown.is_set():
+                return False
+            if job.generation != self._queued_jog_generation:
+                logger.debug(
+                    "TIMING jog_command_dropped_superseded command=%s generation=%s current_generation=%s",
+                    job.description,
+                    job.generation,
+                    self._queued_jog_generation,
+                )
+                return False
+            remaining = deadline - time.monotonic()
+            time.sleep(min(0.005, remaining))
+
+        if job.generation != self._queued_jog_generation:
+            logger.debug(
+                "TIMING jog_command_dropped_superseded command=%s generation=%s current_generation=%s",
+                job.description,
+                job.generation,
+                self._queued_jog_generation,
+            )
+            return False
+        return True
 
     def _write_async_job(
         self, serial_connection: serial.Serial, job: _QueuedSerialWrite
@@ -1469,6 +1520,7 @@ class StageController(QObject):
             serial_connection.write(job.payload)
             serial_connection.flush()
             if job.kind == "jog_command":
+                self._last_jog_write_timestamp = time.monotonic()
                 logger.debug("TIMING jog_serial_write_flushed command=%s", job.description)
             elif job.kind == "jog_stop":
                 logger.debug("TIMING jog_stop_write_flushed command=0x85")
@@ -1564,6 +1616,8 @@ class StageController(QObject):
             if not match:
                 continue
             state = match.group("state")
+            self._last_stage_state = state
+            self._last_status_timestamp = time.monotonic()
             mpos = match.group("mpos")
             position = None
             if mpos:

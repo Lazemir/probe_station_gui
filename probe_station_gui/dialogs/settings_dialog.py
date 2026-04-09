@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from probe_station_gui.qt_compat import keyboard_modifiers_to_int
+from probe_station_gui.qt_compat import keyboard_modifiers_to_int, native_scan_code_to_int
 from probe_station_gui.settings_manager import (
     CONTROL_ACTIONS,
     FeedrateGroup,
@@ -83,6 +83,7 @@ class KeyCaptureDialog(QDialog):
             self._binding = KeyBinding(
                 qt_key=int(key),
                 modifiers=keyboard_modifiers_to_int(key_event.modifiers()),
+                native_scan_code=native_scan_code_to_int(key_event.nativeScanCode()),
                 text=key_event.text(),
             )
             self.accept()
@@ -171,9 +172,15 @@ class KeyBindingListEditor(QWidget):
             sequence = QKeySequence(binding.qt_key)
         sequence_text = sequence.toString(QKeySequence.NativeText)
         if sequence_text:
+            if binding.native_scan_code:
+                return f"{sequence_text} [physical]"
             return sequence_text
         if binding.text:
+            if binding.native_scan_code:
+                return f"{binding.text} [physical]"
             return binding.text
+        if binding.native_scan_code:
+            return f"Scan {binding.native_scan_code} [physical]"
         return f"Key {binding.qt_key}"
 
 

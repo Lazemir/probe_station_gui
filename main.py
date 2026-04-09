@@ -60,6 +60,9 @@ class Main(QMainWindow):
     DESIGN_SPACING_RATIO_TOLERANCE = 0.35
     MANUAL_JOG_UPDATE_MS = 50
     MANUAL_JOG_SETTLE_POLL_DELAYS_MS = (180, 420)
+    MANUAL_JOG_IGNORE_IDLE_AFTER_COMMAND_S = 0.25
+    MANUAL_JOG_RECONCILE_SMOOTH_THRESHOLD_MM = 0.35
+    MANUAL_JOG_RECONCILE_SMOOTH_ALPHA = 0.35
     TERMINAL_REFRESH_DELAYS_MS = (180, 500)
     TERMINAL_RESET_REFRESH_DELAYS_MS = (500, 1100, 1800)
     TERMINAL_RESUME_AFTER_JOG_MS = 180
@@ -116,6 +119,7 @@ class Main(QMainWindow):
         self._manual_jog_stage_xy: tuple[float, float] | None = None
         self._manual_jog_velocity_xy: tuple[float, float] | None = None
         self._manual_jog_last_timestamp: float | None = None
+        self._manual_jog_last_prediction_log_at = 0.0
         self._last_reported_b_position: float | None = None
         self._design_session = DesignSession()
         self.statusBar()
@@ -404,7 +408,7 @@ class Main(QMainWindow):
         document = self._design_session.document
         if document is None:
             return
-        snapped_point = document.snap_point((float(x_value), float(y_value)))
+        snapped_point = (float(x_value), float(y_value))
         self._last_selected_design_point = snapped_point
         self._design_session.set_source_design_mark(slot, snapped_point)
         self._refresh_design_panel()
@@ -754,6 +758,7 @@ class Main(QMainWindow):
                 xy_components[axis] = distance
         path_length = math.hypot(xy_components["X"], xy_components["Y"])
         if path_length <= 1e-9:
+            logger.debug("DESIGN MINIMAP prediction_stop_requested command=%s", commanded_distances)
             self._manual_jog_velocity_xy = None
             self._manual_jog_timer.stop()
             self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
@@ -769,13 +774,37 @@ class Main(QMainWindow):
         elif self._current_design_stage_xy is not None:
             self._manual_jog_stage_xy = self._current_design_stage_xy
         self._manual_jog_last_timestamp = time.monotonic()
+        self._manual_jog_last_prediction_log_at = 0.0
+        logger.debug(
+            "DESIGN MINIMAP prediction_start stage=%s design=%s velocity=(%.4f, %.4f) feedrate=%.3f command=%s",
+            self._format_optional_point(self._manual_jog_stage_xy),
+            self._format_optional_point(
+                self._design_session.design_from_stage(self._manual_jog_stage_xy)
+                if self._manual_jog_stage_xy is not None
+                else None
+            ),
+            self._manual_jog_velocity_xy[0],
+            self._manual_jog_velocity_xy[1],
+            float(feedrate),
+            commanded_distances,
+        )
         if not self._manual_jog_timer.isActive():
             self._manual_jog_timer.start()
 
     def _on_manual_jog_stopped(self) -> None:
+        logger.debug(
+            "DESIGN MINIMAP prediction_stop stage=%s design=%s",
+            self._format_optional_point(self._manual_jog_stage_xy),
+            self._format_optional_point(
+                self._design_session.design_from_stage(self._manual_jog_stage_xy)
+                if self._manual_jog_stage_xy is not None
+                else None
+            ),
+        )
         self._manual_jog_timer.stop()
         self._manual_jog_velocity_xy = None
         self._manual_jog_last_timestamp = None
+        self._manual_jog_last_prediction_log_at = 0.0
         if self.serial_terminal_panel is not None:
             QTimer.singleShot(
                 self.TERMINAL_RESUME_AFTER_JOG_MS,
@@ -805,6 +834,18 @@ class Main(QMainWindow):
             float(self._manual_jog_stage_xy[0] + self._manual_jog_velocity_xy[0] * dt),
             float(self._manual_jog_stage_xy[1] + self._manual_jog_velocity_xy[1] * dt),
         )
+        if now - self._manual_jog_last_prediction_log_at >= 0.15:
+            logger.debug(
+                "DESIGN MINIMAP prediction_tick stage=%s design=%s dt=%.4f velocity=(%.4f, %.4f)",
+                self._format_optional_point(self._manual_jog_stage_xy),
+                self._format_optional_point(
+                    self._design_session.design_from_stage(self._manual_jog_stage_xy)
+                ),
+                dt,
+                self._manual_jog_velocity_xy[0],
+                self._manual_jog_velocity_xy[1],
+            )
+            self._manual_jog_last_prediction_log_at = now
         self._update_coordinate_display(center_xy=self._manual_jog_stage_xy)
         self._update_design_position(self._manual_jog_stage_xy)
 
@@ -1159,7 +1200,17 @@ class Main(QMainWindow):
                     "Design registration cleared after B-axis motion."
                 )
             self._last_reported_b_position = current_b
+        predicted_stage_xy = (
+            self._manual_jog_stage_xy
+            if self._manual_jog_velocity_xy is not None
+            else None
+        )
         center_xy = (float(position[0]), float(position[1]))
+        if self._should_ignore_manual_jog_status_sample(center_xy):
+            return
+        if predicted_stage_xy is not None:
+            self._log_design_position_reconcile(predicted_stage_xy, center_xy)
+            center_xy = self._smooth_manual_jog_actual_position(predicted_stage_xy, center_xy)
         self._manual_jog_stage_xy = center_xy
         if self._manual_jog_velocity_xy is not None:
             self._manual_jog_last_timestamp = time.monotonic()
@@ -1215,6 +1266,86 @@ class Main(QMainWindow):
             source_design_marks=self._design_session.source_design_marks_compact(),
             check_design_marks=self._design_session.check_design_marks,
         )
+
+    def _log_design_position_reconcile(
+        self,
+        predicted_stage_xy: tuple[float, float],
+        actual_stage_xy: tuple[float, float],
+    ) -> None:
+        state = self.stage_controller.latest_stage_state()
+        predicted_design_xy = self._design_session.design_from_stage(predicted_stage_xy)
+        actual_design_xy = self._design_session.design_from_stage(actual_stage_xy)
+        delta_x = float(actual_stage_xy[0] - predicted_stage_xy[0])
+        delta_y = float(actual_stage_xy[1] - predicted_stage_xy[1])
+        logger.debug(
+            "DESIGN MINIMAP reconcile predicted_stage=%s actual_stage=%s delta=(%.4f, %.4f) delta_norm=%.4f state=%s predicted_design=%s actual_design=%s",
+            self._format_optional_point(predicted_stage_xy),
+            self._format_optional_point(actual_stage_xy),
+            delta_x,
+            delta_y,
+            math.hypot(delta_x, delta_y),
+            state,
+            self._format_optional_point(predicted_design_xy),
+            self._format_optional_point(actual_design_xy),
+        )
+
+    def _should_ignore_manual_jog_status_sample(
+        self,
+        actual_stage_xy: tuple[float, float],
+    ) -> bool:
+        if self._manual_jog_velocity_xy is None:
+            return False
+        state = (self.stage_controller.latest_stage_state() or "").lower()
+        if state != "idle":
+            return False
+        last_jog_write = self.stage_controller.last_jog_write_timestamp()
+        if last_jog_write is None:
+            return False
+        age = time.monotonic() - last_jog_write
+        if age > self.MANUAL_JOG_IGNORE_IDLE_AFTER_COMMAND_S:
+            return False
+        logger.debug(
+            "DESIGN MINIMAP ignored_idle_sample stage=%s age=%.3f state=%s",
+            self._format_optional_point(actual_stage_xy),
+            age,
+            state,
+        )
+        return True
+
+    def _smooth_manual_jog_actual_position(
+        self,
+        predicted_stage_xy: tuple[float, float],
+        actual_stage_xy: tuple[float, float],
+    ) -> tuple[float, float]:
+        delta_x = float(actual_stage_xy[0] - predicted_stage_xy[0])
+        delta_y = float(actual_stage_xy[1] - predicted_stage_xy[1])
+        delta_norm = math.hypot(delta_x, delta_y)
+        state = (self.stage_controller.latest_stage_state() or "").lower()
+        if (
+            delta_norm <= self.MANUAL_JOG_RECONCILE_SMOOTH_THRESHOLD_MM
+            or state not in {"jog", "run"}
+        ):
+            return actual_stage_xy
+        alpha = self.MANUAL_JOG_RECONCILE_SMOOTH_ALPHA
+        smoothed = (
+            float(predicted_stage_xy[0] + delta_x * alpha),
+            float(predicted_stage_xy[1] + delta_y * alpha),
+        )
+        logger.debug(
+            "DESIGN MINIMAP reconcile_smoothed predicted_stage=%s actual_stage=%s smoothed_stage=%s delta_norm=%.4f alpha=%.2f",
+            self._format_optional_point(predicted_stage_xy),
+            self._format_optional_point(actual_stage_xy),
+            self._format_optional_point(smoothed),
+            delta_norm,
+            alpha,
+        )
+        return smoothed
+
+    @staticmethod
+    def _format_optional_point(point: tuple[float, float] | None) -> str:
+        if point is None:
+            return "None"
+        return f"({float(point[0]):.4f}, {float(point[1]):.4f})"
 
     def _resolve_design_fov_size(self) -> tuple[float, float] | None:
         registration = self._design_session.registration
