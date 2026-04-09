@@ -224,6 +224,7 @@ class SettingsManager:
     """Load, persist, and expose user configurable settings."""
 
     CONFIG_FILENAME = "settings.json"
+    CONTROLLER_STATE_FILENAME = "controller-state.json"
     DEFAULT_LOG_FILENAME = "probe-station-gui.log"
     DEFAULT_LINEAR_FEEDRATE_PRESETS: tuple[float, ...] = (
         1.0,
@@ -323,6 +324,44 @@ class SettingsManager:
             path = self._default_log_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
+
+    def load_controller_state(self) -> dict | None:
+        """Load persisted controller runtime state, if present."""
+
+        path = self._config_dir / self.CONTROLLER_STATE_FILENAME
+        if not path.exists():
+            return None
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            self._logger.warning("Failed to load controller state from %s: %s", path, exc)
+            return None
+        if not isinstance(data, dict):
+            return None
+        return data
+
+    def save_controller_state(self, data: dict | None) -> None:
+        """Persist controller runtime state alongside user settings."""
+
+        path = self._config_dir / self.CONTROLLER_STATE_FILENAME
+        if not data:
+            self.clear_controller_state()
+            return
+        self._config_dir.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2, ensure_ascii=False)
+
+    def clear_controller_state(self) -> None:
+        """Remove persisted controller runtime state."""
+
+        path = self._config_dir / self.CONTROLLER_STATE_FILENAME
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            self._logger.warning("Failed to clear controller state %s: %s", path, exc)
 
     def _determine_config_dir(self) -> Path:
         """Compute the directory where configuration files should live."""

@@ -100,6 +100,7 @@ class StageControllerStartupLimitsTest(unittest.TestCase):
 class _FakeSerial:
     def __init__(self) -> None:
         self.is_open = True
+        self.probe_station_reboot_detected = False
 
 
 class StageControllerAbsoluteMoveTest(unittest.TestCase):
@@ -185,6 +186,256 @@ class StageControllerJogQueueTest(unittest.TestCase):
         ready = controller._await_current_jog_command(job)
 
         self.assertTrue(ready)
+
+
+class StageControllerNeedlesStateTest(unittest.TestCase):
+    def test_status_without_a_homing_keeps_needles_unknown(self) -> None:
+        controller = StageController()
+        emitted = []
+        controller.needles_state_changed = types.SimpleNamespace(
+            emit=lambda raised, known: emitted.append((raised, known))
+        )
+        controller.axis_a_ready_changed = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        controller.needle_height_changed = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+
+        controller._update_needles_from_status(
+            types.SimpleNamespace(
+                state="Idle",
+                position=(0.0, 0.0, 0.0, 0.0),
+                homed_axes=None,
+            )
+        )
+
+        self.assertEqual(emitted, [])
+        self.assertFalse(controller._needles_known)
+        self.assertFalse(controller._needles_up)
+
+    def test_status_with_a_homing_marks_needles_up_when_a_is_zero(self) -> None:
+        controller = StageController()
+        emitted = []
+        controller.needles_state_changed = types.SimpleNamespace(
+            emit=lambda raised, known: emitted.append((raised, known))
+        )
+        controller.axis_a_ready_changed = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        controller.needle_height_changed = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+
+        controller._update_needles_from_status(
+            types.SimpleNamespace(
+                state="Idle",
+                position=(0.0, 0.0, 0.0, 0.0),
+                homed_axes={"A"},
+            )
+        )
+
+        self.assertEqual(emitted[-1], (True, True))
+
+
+class StageControllerStartupSyncTest(unittest.TestCase):
+    def test_startup_sync_homes_a_when_not_reported_homed(self) -> None:
+        controller = StageController()
+        controller._serial = _FakeSerial()
+        controller._ensure_axis_limits = lambda _serial: None
+        controller._query_status = lambda _serial: types.SimpleNamespace(
+            state="Idle",
+            position=(0.0, 0.0, 0.0, 0.0),
+            homed_axes={"X", "Y"},
+        )
+        performed = []
+        controller._perform_home_command = (
+            lambda _serial, command: performed.append(command)
+        )
+        controller.status_message = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        controller.movement_started = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        controller.movement_finished = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        controller.homing_action_started = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        controller.homing_action_finished = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+
+        controller._run_startup_sync(auto_home_a=True)
+
+        self.assertEqual(performed, ["$HA"])
+
+    def test_startup_sync_skips_a_homing_when_axis_is_homed(self) -> None:
+        controller = StageController()
+        controller._serial = _FakeSerial()
+        controller._ensure_axis_limits = lambda _serial: None
+        controller._query_status = lambda _serial: types.SimpleNamespace(
+            state="Idle",
+            position=(0.0, 0.0, 0.0, 0.0),
+            homed_axes={"X", "Y", "A"},
+        )
+        performed = []
+        controller._perform_home_command = (
+            lambda _serial, command: performed.append(command)
+        )
+        controller.status_message = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        controller.movement_started = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        controller.movement_finished = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        controller.homing_action_started = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        controller.homing_action_finished = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+
+        controller._run_startup_sync(auto_home_a=True)
+
+        self.assertEqual(performed, [])
+
+
+class StageControllerReconnectStateTest(unittest.TestCase):
+    def test_disconnect_preserves_cached_state_but_marks_it_stale(self) -> None:
+        controller = StageController()
+        controller._last_stage_position = (1.0, 2.0, 3.0, 0.0)
+        controller._homed_axes = {"X", "Y", "A"}
+        controller._needles_up = True
+        controller._needles_known = True
+        controller._axis_a_ready = True
+        axis_ready = []
+        controller.axis_a_ready_changed = types.SimpleNamespace(
+            emit=lambda ready: axis_ready.append(bool(ready))
+        )
+
+        controller.set_serial(None)
+
+        self.assertEqual(controller._last_stage_position, (1.0, 2.0, 3.0, 0.0))
+        self.assertEqual(controller._homed_axes, {"X", "Y", "A"})
+        self.assertTrue(controller._needles_up)
+        self.assertTrue(controller._needles_known)
+        self.assertTrue(controller._controller_state_stale)
+        self.assertFalse(controller._axis_a_ready)
+        self.assertEqual(axis_ready[-1], False)
+
+    def test_reconnect_without_reboot_keeps_cached_state_until_sync(self) -> None:
+        controller = StageController()
+        controller._last_stage_position = (1.0, 2.0, 3.0, 0.0)
+        controller._homed_axes = {"X", "Y", "A"}
+        controller._needles_up = True
+        controller._needles_known = True
+        fake_serial = _FakeSerial()
+
+        controller.set_serial(fake_serial)
+
+        self.assertEqual(controller._last_stage_position, (1.0, 2.0, 3.0, 0.0))
+        self.assertEqual(controller._homed_axes, {"X", "Y", "A"})
+        self.assertTrue(controller._needles_up)
+        self.assertTrue(controller._needles_known)
+        self.assertTrue(controller._controller_state_stale)
+        self.assertFalse(controller._axis_a_ready)
+
+    def test_reconnect_with_reboot_clears_cached_state(self) -> None:
+        controller = StageController()
+        controller._last_stage_position = (1.0, 2.0, 3.0, 0.0)
+        controller._homed_axes = {"X", "Y", "A"}
+        controller._needles_up = True
+        controller._needles_known = True
+        state_changes = []
+        controller.needles_state_changed = types.SimpleNamespace(
+            emit=lambda raised, known: state_changes.append((raised, known))
+        )
+        controller.homing_status_changed = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        controller.axis_a_ready_changed = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        fake_serial = _FakeSerial()
+        fake_serial.probe_station_reboot_detected = True
+
+        controller.set_serial(fake_serial)
+
+        self.assertIsNone(controller._last_stage_position)
+        self.assertEqual(controller._homed_axes, set())
+        self.assertFalse(controller._needles_up)
+        self.assertFalse(controller._needles_known)
+        self.assertTrue(controller._controller_state_stale)
+        self.assertEqual(state_changes[-1], (False, False))
+
+    def test_import_cached_state_restores_state_but_keeps_it_stale(self) -> None:
+        controller = StageController()
+        positions = []
+        controller.stage_position_changed = types.SimpleNamespace(
+            emit=lambda position: positions.append(tuple(position))
+        )
+        controller.homing_status_changed = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        controller.needles_state_changed = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        controller.axis_a_ready_changed = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+
+        controller.import_cached_controller_state(
+            {
+                "last_stage_position": [1.0, 2.0, 3.0, 0.0],
+                "last_stage_state": "Idle",
+                "homed_axes": ["X", "Y", "A"],
+                "needles_up": True,
+                "needles_known": True,
+            }
+        )
+
+        self.assertEqual(controller._last_stage_position, (1.0, 2.0, 3.0, 0.0))
+        self.assertEqual(controller._homed_axes, {"X", "Y", "A"})
+        self.assertTrue(controller._needles_up)
+        self.assertTrue(controller._needles_known)
+        self.assertTrue(controller._controller_state_stale)
+        self.assertFalse(controller._axis_a_ready)
+        self.assertEqual(positions[-1], (1.0, 2.0, 3.0, 0.0))
+
+    def test_perform_home_command_marks_a_ready_and_updates_homing(self) -> None:
+        controller = StageController()
+        controller._serial = _FakeSerial()
+        controller._controller_state_stale = True
+        controller.status_message = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        controller.axis_a_ready_changed = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        controller.needles_state_changed = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        controller.homing_status_changed = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        controller._write_command = lambda *_args, **_kwargs: None
+        controller._wait_for_ok = lambda *_args, **_kwargs: None
+        controller._wait_for_idle = lambda *_args, **_kwargs: None
+
+        controller.set_serial(_FakeSerial())
+        controller._perform_home_command(controller._serial, "$HA")
+
+        self.assertIn("A", controller._homed_axes)
+        self.assertFalse(controller._controller_state_stale)
+        self.assertTrue(controller._needles_up)
+        self.assertTrue(controller._needles_known)
+        self.assertTrue(controller._axis_a_ready)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import time
 from typing import Optional
 
 import serial
@@ -15,6 +17,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from serial.tools import list_ports
+
+
+logger = logging.getLogger(__name__)
 
 
 class SerialConnectionPanel(QWidget):
@@ -264,15 +269,61 @@ class _SerialConnectWorker(QObject):
     @Slot()
     def run(self) -> None:
         try:
-            connection = serial.Serial(
-                port=self._port_name,
-                baudrate=self._baud_rate,
-                timeout=1,
-            )
+            connection = serial.Serial()
+            connection.port = self._port_name
+            connection.baudrate = self._baud_rate
+            connection.timeout = 1
+            connection.rtscts = False
+            connection.dsrdtr = False
+            try:
+                connection.rts = False
+                connection.dtr = False
+            except (AttributeError, ValueError):
+                pass
+            connection.open()
+            try:
+                connection.rts = False
+                connection.dtr = False
+            except (AttributeError, ValueError):
+                pass
         except serial.SerialException as exc:
             self.failed.emit(f"Connection failed: {exc}")
             self.finished.emit()
             return
+
+        startup_lines: list[str] = []
+        reboot_detected = False
+        try:
+            original_timeout = connection.timeout
+            connection.timeout = 0.05
+            deadline = time.monotonic() + 0.35
+            while time.monotonic() < deadline:
+                try:
+                    raw = connection.readline()
+                except serial.SerialException:
+                    break
+                line = raw.decode("ascii", errors="ignore").strip()
+                if not line:
+                    continue
+                startup_lines.append(line)
+                upper = line.upper()
+                if "[VER:" in upper or "FLUIDNC" in upper or "GRBL" in upper:
+                    reboot_detected = True
+            connection.timeout = original_timeout
+        except Exception:
+            logger.debug("Initial serial banner probe failed", exc_info=True)
+
+        try:
+            setattr(connection, "probe_station_reboot_detected", reboot_detected)
+            setattr(connection, "probe_station_startup_lines", tuple(startup_lines))
+        except Exception:
+            logger.debug("Unable to attach serial connection metadata", exc_info=True)
+        if startup_lines:
+            logger.debug(
+                "Serial connect banner probe lines=%s reboot_detected=%s",
+                startup_lines,
+                reboot_detected,
+            )
 
         self.connected.emit(connection, self._port_name, self._baud_rate)
         self.finished.emit()

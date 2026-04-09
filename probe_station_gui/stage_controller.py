@@ -168,6 +168,7 @@ class StageController(QObject):
         self._last_stage_state: Optional[str] = None
         self._last_status_timestamp: Optional[float] = None
         self._last_jog_write_timestamp: Optional[float] = None
+        self._controller_state_stale = False
         self._async_write_queue: PriorityQueue[_QueuedSerialWrite] = PriorityQueue()
         self._async_write_shutdown = threading.Event()
         self._async_write_thread = threading.Thread(
@@ -185,29 +186,110 @@ class StageController(QObject):
             self._clear_pending_async_writes()
             if serial_connection is None or not serial_connection.is_open:
                 self._pixels_to_mm = None
-                self._last_stage_position = None
                 self._last_stage_state = None
                 self._last_status_timestamp = None
                 self._last_jog_write_timestamp = None
                 self._axis_limits.clear()
                 self._b_axis_zero_position = None
-                self._update_homing_status(set())
-                self._set_needles_state(False, known=False)
+                self._controller_state_stale = bool(
+                    self._last_stage_position is not None
+                    or self._homed_axes
+                    or self._needles_known
+                )
+                self._refresh_axis_a_ready_from_state()
             else:
                 self._axis_limits.clear()
                 self._b_axis_zero_position = None
-                try:
-                    with self._serial_session_lock:
-                        self._ensure_axis_limits(serial_connection)
-                    self.status_message.emit(
-                        "Axis limits loaded from controller. B uses app soft limit ±45 deg."
+                self._controller_state_stale = True
+                if bool(
+                    getattr(serial_connection, "probe_station_reboot_detected", False)
+                ):
+                    logger.warning(
+                        "Controller reboot detected on serial connect; clearing cached homing and position state."
                     )
-                except StageControllerError as exc:
-                    self._axis_limits.clear()
-                    self.status_message.emit(str(exc))
-                self._update_homing_status(set())
-                self._set_needles_state(False, known=False)
-                threading.Thread(target=self._poll_status_once, daemon=True).start()
+                    self._last_stage_position = None
+                    self._last_stage_state = None
+                    self._update_homing_status(set())
+                    self._set_needles_state(False, known=False)
+                else:
+                    self._refresh_axis_a_ready_from_state()
+
+    def export_cached_controller_state(self) -> dict[str, object] | None:
+        """Return controller state suitable for persistence across app restarts."""
+
+        if (
+            self._last_stage_position is None
+            and not self._homed_axes
+            and not self._needles_known
+        ):
+            return None
+        return {
+            "last_stage_position": (
+                list(self._last_stage_position)
+                if self._last_stage_position is not None
+                else None
+            ),
+            "last_stage_state": self._last_stage_state,
+            "homed_axes": sorted(self._homed_axes),
+            "needles_up": bool(self._needles_up),
+            "needles_known": bool(self._needles_known),
+        }
+
+    def import_cached_controller_state(self, data: dict[str, object]) -> None:
+        """Restore controller state persisted from a previous application run."""
+
+        position_raw = data.get("last_stage_position")
+        position = None
+        if isinstance(position_raw, (list, tuple)):
+            try:
+                coords = tuple(float(value) for value in position_raw)
+                if coords:
+                    position = coords
+            except (TypeError, ValueError):
+                position = None
+        state_raw = data.get("last_stage_state")
+        if isinstance(state_raw, str) and state_raw.strip():
+            self._last_stage_state = state_raw.strip()
+        self._last_stage_position = position
+        self._controller_state_stale = True
+        homed_raw = data.get("homed_axes")
+        homed_axes: set[str] = set()
+        if isinstance(homed_raw, (list, tuple)):
+            for value in homed_raw:
+                if isinstance(value, str) and value.strip():
+                    homed_axes.add(value.strip().upper())
+        self._update_homing_status(homed_axes)
+        self._set_needles_state(
+            bool(data.get("needles_up", False)),
+            known=bool(data.get("needles_known", False)),
+        )
+        self._refresh_axis_a_ready_from_state()
+        if position is not None:
+            self.stage_position_changed.emit(tuple(position))
+
+    def clear_cached_controller_state(self) -> None:
+        """Forget locally cached controller state."""
+
+        self._last_stage_position = None
+        self._last_stage_state = None
+        self._update_homing_status(set())
+        self._set_needles_state(False, known=False)
+
+    def request_startup_sync(self, *, auto_home_a: bool = True) -> None:
+        """Load controller state after connect and optionally home A."""
+
+        with self._task_lock:
+            if self._active_thread and self._active_thread.is_alive():
+                self.status_message.emit("Stage is busy. Skipping startup sync.")
+                return
+            self._cancel_event.clear()
+            thread = threading.Thread(
+                target=self._run_startup_sync,
+                args=(bool(auto_home_a),),
+                daemon=True,
+            )
+            self._active_thread = thread
+            thread.start()
 
     def check_motion_safety(self) -> None:
         """Public motion safety gate; raises StageControllerError when unsafe."""
@@ -939,17 +1021,65 @@ class StageController(QObject):
             serial_connection = self._serial
             if serial_connection is None or not serial_connection.is_open:
                 raise StageControllerError("Serial connection is not available.")
-            self.status_message.emit(f"Homing: {command}")
-            self._write_command(serial_connection, command)
-            self._wait_for_ok(serial_connection, timeout=30.0)
-            self._wait_for_idle(serial_connection, timeout=30.0)
-            if command.upper() in ("$H", "$HA"):
-                self._set_needles_state(True, known=True)
+            self._perform_home_command(serial_connection, command)
             self.movement_finished.emit(True, "Homing complete.")
             self.homing_action_finished.emit(True, "Homing complete.", axis_key)
         except StageControllerError as exc:
             self.movement_finished.emit(False, str(exc))
             self.homing_action_finished.emit(False, str(exc), axis_key)
+        finally:
+            with self._task_lock:
+                self._active_thread = None
+
+    def _run_startup_sync(self, auto_home_a: bool) -> None:
+        try:
+            serial_connection = self._serial
+            if serial_connection is None or not serial_connection.is_open:
+                raise StageControllerError("Serial connection is not available.")
+
+            self.status_message.emit("Loading controller startup state...")
+            with self._serial_session_lock:
+                self._ensure_axis_limits(serial_connection)
+                status = self._query_status(serial_connection)
+            if status is None:
+                raise StageControllerError("Unable to read startup controller status.")
+
+            self.status_message.emit(
+                "Axis limits loaded from controller. B uses app soft limit ±45 deg."
+            )
+
+            effective_homed = status.homed_axes
+            if effective_homed is None and self._homed_axes:
+                effective_homed = set(self._homed_axes)
+            if effective_homed:
+                ordered = ", ".join(sorted(effective_homed))
+                self.status_message.emit(f"Homed axes: {ordered}.")
+            else:
+                self.status_message.emit("Controller did not report any homed axes.")
+
+            self._controller_state_stale = False
+            self._refresh_axis_a_ready_from_state()
+
+            if not auto_home_a:
+                return
+
+            if effective_homed is None or "A" not in effective_homed:
+                self.movement_started.emit()
+                self.homing_action_started.emit("A")
+                try:
+                    self.status_message.emit("A axis not homed. Homing needles on startup.")
+                    with self._serial_session_lock:
+                        self._perform_home_command(serial_connection, "$HA")
+                    self.movement_finished.emit(True, "Startup A homing complete.")
+                    self.homing_action_finished.emit(
+                        True, "Startup A homing complete.", "A"
+                    )
+                except StageControllerError as exc:
+                    self.movement_finished.emit(False, str(exc))
+                    self.homing_action_finished.emit(False, str(exc), "A")
+                    raise
+        except StageControllerError as exc:
+            self.status_message.emit(str(exc))
         finally:
             with self._task_lock:
                 self._active_thread = None
@@ -1618,6 +1748,7 @@ class StageController(QObject):
             state = match.group("state")
             self._last_stage_state = state
             self._last_status_timestamp = time.monotonic()
+            self._controller_state_stale = False
             mpos = match.group("mpos")
             position = None
             if mpos:
@@ -1627,8 +1758,6 @@ class StageController(QObject):
                         position = coords
                         self._last_stage_position = coords
                         a_idx = self.AXIS_INDEX.get("A")
-                        if a_idx is not None and a_idx < len(coords):
-                            self._update_needles_from_a_position(float(coords[a_idx]))
                         self.stage_position_changed.emit(tuple(coords))
                 except ValueError:
                     position = None
@@ -1638,6 +1767,7 @@ class StageController(QObject):
                 homed_axes = set(homed_match.group(1).upper())
                 self._update_homing_status(homed_axes)
             status = _Status(state=state, position=position, homed_axes=homed_axes)
+            self._update_needles_from_status(status)
             self._ensure_b_axis_zero_reference(status)
             return status
         return None
@@ -1700,18 +1830,50 @@ class StageController(QObject):
         self._axis_a_ready = ready
         self.axis_a_ready_changed.emit(ready)
 
+    def _refresh_axis_a_ready_from_state(self) -> None:
+        ready = (
+            self._needles_up
+            and self._needles_known
+            and not self._controller_state_stale
+            and self._serial is not None
+            and self._serial.is_open
+        )
+        self._update_axis_a_ready(bool(ready))
+
     def _set_needles_state(self, raised: bool, *, known: bool) -> None:
         if self._needles_up == raised and self._needles_known == known:
+            self._refresh_axis_a_ready_from_state()
             return
         self._needles_up = raised
         self._needles_known = known
-        self._update_axis_a_ready(raised and known)
+        self._refresh_axis_a_ready_from_state()
         self.needles_state_changed.emit(raised, known)
 
     def _update_needles_from_a_position(self, a_position: float) -> None:
         """Update the coarse needles state using the current A coordinate."""
 
         self.needle_height_changed.emit(a_position)
+        self._set_needles_state(abs(a_position) <= self.A_ZERO_TOLERANCE, known=True)
+
+    def _update_needles_from_status(self, status: _Status) -> None:
+        """Update needle state only when A homing is actually known."""
+
+        if status.position is None:
+            return
+        idx = self.AXIS_INDEX.get("A")
+        if idx is None or idx >= len(status.position):
+            return
+
+        a_position = float(status.position[idx])
+        self.needle_height_changed.emit(a_position)
+
+        effective_homed = status.homed_axes
+        if effective_homed is None and self._homed_axes:
+            effective_homed = set(self._homed_axes)
+        if effective_homed is None or "A" not in effective_homed:
+            self._set_needles_state(False, known=False)
+            return
+
         self._set_needles_state(abs(a_position) <= self.A_ZERO_TOLERANCE, known=True)
 
     def _read_current_a_position(
@@ -1726,6 +1888,25 @@ class StageController(QObject):
         if idx is None or idx >= len(status.position):
             return None
         return float(status.position[idx])
+
+    def _perform_home_command(
+        self, serial_connection: serial.Serial, command: str
+    ) -> None:
+        """Execute a homing command while the caller owns serial access."""
+
+        self.status_message.emit(f"Homing: {command}")
+        self._write_command(serial_connection, command)
+        self._wait_for_ok(serial_connection, timeout=30.0)
+        self._wait_for_idle(serial_connection, timeout=30.0)
+        if command.upper() in ("$H", "$HA"):
+            axes = set(self._homed_axes)
+            if command.upper() == "$H":
+                axes.update({"X", "Y", "Z", "A"})
+            else:
+                axes.add("A")
+            self._update_homing_status(axes)
+            self._controller_state_stale = False
+            self._set_needles_state(True, known=True)
 
     def _move_vector_for_axis(self, axis: str, delta: float) -> MoveVector:
         """Create a single-axis move vector."""

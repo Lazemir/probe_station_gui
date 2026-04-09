@@ -67,6 +67,9 @@ class Main(QMainWindow):
     TERMINAL_RESET_REFRESH_DELAYS_MS = (500, 1100, 1800)
     TERMINAL_RESUME_AFTER_JOG_MS = 180
     B_POSITION_CHANGE_TOLERANCE_DEG = 1e-3
+    STARTUP_AUTO_CONNECT_DELAY_MS = 400
+    SERIAL_STARTUP_SYNC_DELAY_MS = 150
+    STARTUP_FOCUS_DELAY_MS = 120
 
     def __init__(self) -> None:
         super().__init__()
@@ -203,7 +206,10 @@ class Main(QMainWindow):
             alignment_action.setText("Chip Alignment")
             window_menu.addAction(alignment_action)
 
-        QTimer.singleShot(0, self._auto_connect_if_possible)
+        QTimer.singleShot(
+            self.STARTUP_AUTO_CONNECT_DELAY_MS, self._auto_connect_if_possible
+        )
+        QTimer.singleShot(self.STARTUP_FOCUS_DELAY_MS, self._prime_keyboard_focus)
 
         self.setStyleSheet(
             """
@@ -276,6 +282,7 @@ class Main(QMainWindow):
         )
         self._last_reported_b_position = None
         self.stage_controller.set_serial(self.serial_connection)
+        self._restore_persisted_controller_state()
         if self.joystick_panel and self.joystick_dock:
             self.joystick_panel.set_serial(self.serial_connection)
             self.joystick_dock.setVisible(True)
@@ -288,6 +295,9 @@ class Main(QMainWindow):
             self.serial_terminal_dock.raise_()
             if self.serial_terminal_dock.isFloating():
                 self.serial_terminal_dock.activateWindow()
+        QTimer.singleShot(
+            self.SERIAL_STARTUP_SYNC_DELAY_MS, self._run_serial_startup_sync
+        )
         self._refresh_design_position()
 
     def on_serial_disconnected(self) -> None:
@@ -325,6 +335,43 @@ class Main(QMainWindow):
         if self.serial_connection_panel and not self.serial_connection:
             logger.debug("Attempting auto-connect through connection panel")
             self.serial_connection_panel.auto_connect()
+
+    def _run_serial_startup_sync(self) -> None:
+        if self.serial_connection is None or not self.serial_connection.is_open:
+            return
+        self.stage_controller.request_startup_sync(auto_home_a=True)
+
+    def _prime_keyboard_focus(self) -> None:
+        if not self.isVisible():
+            return
+        self.raise_()
+        self.activateWindow()
+        self.view.setFocus(Qt.ActiveWindowFocusReason)
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        QTimer.singleShot(0, self._prime_keyboard_focus)
+
+    def _restore_persisted_controller_state(self) -> None:
+        if self.serial_connection is None or not self.serial_connection.is_open:
+            return
+        if bool(
+            getattr(self.serial_connection, "probe_station_reboot_detected", False)
+        ):
+            self.settings_manager.clear_controller_state()
+            self.stage_controller.clear_cached_controller_state()
+            self._show_status("Controller reboot detected. Cleared cached controller state.")
+            return
+        cached_state = self.settings_manager.load_controller_state()
+        if not cached_state:
+            return
+        self.stage_controller.import_cached_controller_state(cached_state)
+        self._show_status("Restored cached controller state from previous session.")
+
+    def _persist_controller_state(self, *_args) -> None:
+        self.settings_manager.save_controller_state(
+            self.stage_controller.export_cached_controller_state()
+        )
 
     def _setup_menus(self) -> None:
         app_menu = self.menuBar().addMenu("Application")
@@ -1451,6 +1498,7 @@ class Main(QMainWindow):
         self.stage_controller.homing_status_changed.connect(
             self.joystick_panel.set_homing_status
         )
+        self.stage_controller.homing_status_changed.connect(self._persist_controller_state)
         self.stage_controller.homing_action_started.connect(
             self.joystick_panel.set_homing_action_started
         )
@@ -1464,6 +1512,7 @@ class Main(QMainWindow):
         self.stage_controller.needles_state_changed.connect(
             self.joystick_panel.set_needles_state
         )
+        self.stage_controller.needles_state_changed.connect(self._persist_controller_state)
         self.stage_controller.needles_action_started.connect(
             self.joystick_panel.set_needles_action_started
         )
@@ -1473,6 +1522,7 @@ class Main(QMainWindow):
         self.joystick_panel.reset_requested.connect(
             self.stage_controller.cancel_active_task
         )
+        self.stage_controller.stage_position_changed.connect(self._persist_controller_state)
         self.joystick_dock = CollapsibleDockWidget("Joystick", self)
         self.joystick_dock.setObjectName("JoystickDock")
         self.joystick_dock.setWidget(self.joystick_panel)

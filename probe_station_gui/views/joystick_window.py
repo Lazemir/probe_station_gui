@@ -94,7 +94,8 @@ class JoystickWindow(QWidget):
         300.0,
     )
     KEYBOARD_JOG_SYNC_DEBOUNCE_MS = 10
-    KEYBOARD_JOG_SECONDARY_AXIS_ACTIVATION_MS = 180
+    KEYBOARD_JOG_SECONDARY_AXIS_ACTIVATION_MS = 320
+    KEYBOARD_JOG_DIAGONAL_CHORD_WINDOW_MS = 90
     LINEAR_AXES = {"X", "Y", "Z"}
     HOMING_AXES = ("X", "Y", "Z", "A")
     LINEAR_FEEDRATE_SCALE = 10
@@ -142,6 +143,7 @@ class JoystickWindow(QWidget):
         self.stage_controller: Optional["StageController"] = None
         self._active_axes: Optional[tuple[tuple[str, int], ...]] = None
         self._key_stack: list[Tuple[str, object]] = []
+        self._key_press_times: dict[Tuple[str, object], float] = {}
         self._pending_key_activations: dict[Tuple[str, object], QTimer] = {}
         self._key_bindings: Dict[tuple, tuple[str, int]] = {}
         self._linear_presets: List[float] = list(self.DEFAULT_LINEAR_FEEDRATE_PRESETS)
@@ -446,6 +448,7 @@ class JoystickWindow(QWidget):
             self._active_axes = None
             self._pending_jog_axes = None
             self._key_stack.clear()
+            self._key_press_times.clear()
             self._clear_pending_key_activations()
             logger.debug("Joystick serial detached")
         if serial_connection and serial_connection.is_open:
@@ -497,6 +500,7 @@ class JoystickWindow(QWidget):
             self.stop_jog()
             self._pending_jog_axes = None
             self._key_stack.clear()
+            self._key_press_times.clear()
             self._clear_pending_key_activations()
         self._update_enabled_state()
 
@@ -932,6 +936,7 @@ class JoystickWindow(QWidget):
         self._pending_jog_axes = None
         self._clear_pending_key_activations()
         self._key_stack.clear()
+        self._key_press_times.clear()
         self.stop_jog()
         super().focusOutEvent(event)
 
@@ -943,6 +948,7 @@ class JoystickWindow(QWidget):
         self._pending_jog_axes = None
         self._clear_pending_key_activations()
         self._key_stack.clear()
+        self._key_press_times.clear()
         self.stop_jog()
         self._remove_event_filter()
         super().closeEvent(event)
@@ -1005,13 +1011,31 @@ class JoystickWindow(QWidget):
             logger.debug("Ignoring global key event because joystick is hidden")
             return False
         window = self.window()
-        if window is None or not window.isActiveWindow():
-            logger.debug("Ignoring global key event because joystick window is not active")
+        app = QApplication.instance()
+        active_window = app.activeWindow() if app is not None else None
+        if window is None:
+            logger.debug("Ignoring global key event because joystick window is unavailable")
+            return False
+        if active_window is None:
+            logger.debug("Ignoring global key event because application has no active window")
+            return False
+        if active_window is not window and obj is not active_window:
+            try:
+                obj_window = obj.window() if hasattr(obj, "window") else None
+            except RuntimeError:
+                obj_window = None
+            if obj_window is not window:
+                logger.debug(
+                    "Ignoring global key event because active window does not belong to joystick host"
+                )
+                return False
+        if not window.isActiveWindow() and active_window is not window:
+            logger.debug("Ignoring global key event because joystick host window is not active")
             return False
         if not self._axis_a_ready:
             logger.debug("Ignoring global key event because A axis is not homed/zero")
             return False
-        focus_widget = QApplication.instance().focusWidget() if QApplication.instance() else None
+        focus_widget = app.focusWidget() if app else None
         if self._is_text_entry_widget(focus_widget) or self._is_terminal_widget(focus_widget):
             logger.debug("Ignoring global key event because focus is in terminal/text input")
             return False
@@ -1082,6 +1106,7 @@ class JoystickWindow(QWidget):
         identifier, mapping = self._mapping_from_event(event)
         if identifier and mapping:
             if self._cancel_pending_key_activation(identifier):
+                self._key_press_times.pop(identifier, None)
                 event.accept()
                 logger.debug(
                     "Cancelled pending key activation: key=%s scan=%s text=%s modifiers=%s mapping=%s",
@@ -1094,6 +1119,7 @@ class JoystickWindow(QWidget):
                 return True
             if identifier in self._key_stack:
                 self._key_stack.remove(identifier)
+                self._key_press_times.pop(identifier, None)
                 self._promote_pending_keys_if_needed()
                 self._schedule_active_jog_update()
             event.accept()
@@ -1154,10 +1180,12 @@ class JoystickWindow(QWidget):
             if kind == "scan":
                 if isinstance(value, tuple) and value[0] == scan_code and scan_code:
                     self._key_stack.remove(identifier)
+                    self._key_press_times.pop(identifier, None)
                     removed = True
             elif kind == "key":
                 if isinstance(value, tuple) and value[0] == key:
                     self._key_stack.remove(identifier)
+                    self._key_press_times.pop(identifier, None)
                     removed = True
         return removed
 
@@ -1168,6 +1196,7 @@ class JoystickWindow(QWidget):
             return
         if identifier in self._pending_key_activations:
             return
+        self._key_press_times[identifier] = time.monotonic()
 
         axis, _direction = mapping
         active_axes = {active_axis for active_axis, _ in (self._active_axes or ())}
@@ -1184,14 +1213,22 @@ class JoystickWindow(QWidget):
             self._schedule_active_jog_update()
             return
 
-        self._schedule_pending_key_activation(identifier, mapping)
+        self._schedule_pending_key_activation(
+            identifier,
+            mapping,
+            activation_delay_ms=self._secondary_axis_activation_delay_ms(),
+        )
 
     def _schedule_pending_key_activation(
-        self, identifier: Tuple[str, object], mapping: tuple[str, int]
+        self,
+        identifier: Tuple[str, object],
+        mapping: tuple[str, int],
+        *,
+        activation_delay_ms: int,
     ) -> None:
         timer = QTimer(self)
         timer.setSingleShot(True)
-        timer.setInterval(self.KEYBOARD_JOG_SECONDARY_AXIS_ACTIVATION_MS)
+        timer.setInterval(int(max(0, activation_delay_ms)))
         timer.timeout.connect(
             lambda ident=identifier, resolved_mapping=mapping: self._activate_pending_key(
                 ident, resolved_mapping
@@ -1202,7 +1239,7 @@ class JoystickWindow(QWidget):
         logger.debug(
             "Deferred secondary axis activation for %s by %s ms mapping=%s",
             identifier,
-            self.KEYBOARD_JOG_SECONDARY_AXIS_ACTIVATION_MS,
+            int(max(0, activation_delay_ms)),
             mapping,
         )
 
@@ -1242,6 +1279,28 @@ class JoystickWindow(QWidget):
                 self._cancel_pending_key_activation(identifier)
                 continue
             self._activate_pending_key(identifier, mapping)
+
+    def _secondary_axis_activation_delay_ms(self) -> int:
+        linear_press_times = [
+            self._key_press_times.get(identifier)
+            for identifier in self._key_stack
+            if (resolved := self._mapping_from_identifier(identifier)) is not None
+            and resolved[0] in self.LINEAR_AXES
+        ]
+        linear_press_times = [
+            float(value) for value in linear_press_times if isinstance(value, (int, float))
+        ]
+        if not linear_press_times:
+            return self.KEYBOARD_JOG_SECONDARY_AXIS_ACTIVATION_MS
+        elapsed_ms = (time.monotonic() - max(linear_press_times)) * 1000.0
+        if elapsed_ms <= self.KEYBOARD_JOG_DIAGONAL_CHORD_WINDOW_MS:
+            logger.debug(
+                "Immediate diagonal chord accepted: elapsed_ms=%.1f threshold_ms=%s",
+                elapsed_ms,
+                self.KEYBOARD_JOG_DIAGONAL_CHORD_WINDOW_MS,
+            )
+            return 0
+        return self.KEYBOARD_JOG_SECONDARY_AXIS_ACTIVATION_MS
 
     def _schedule_jog_stop_resend(self) -> None:
         if self._jog_stop_resend_pending:
@@ -1338,6 +1397,11 @@ class JoystickWindow(QWidget):
             for identifier in self._key_stack
             if self._mapping_from_identifier(identifier) is not None
         ]
+        self._key_press_times = {
+            identifier: timestamp
+            for identifier, timestamp in self._key_press_times.items()
+            if self._mapping_from_identifier(identifier) is not None
+        }
         logger.info("Joystick key bindings updated: %d entries", len(self._key_bindings))
 
     @staticmethod
