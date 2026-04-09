@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 
 import numpy as np
@@ -9,6 +10,8 @@ from PySide6.QtCore import QObject, Signal, Slot
 from PySide6.QtGui import QImage
 from rotpy.camera import CameraList
 from rotpy.system import SpinSystem
+
+logger = logging.getLogger(__name__)
 
 
 class Grabber(QObject):
@@ -20,6 +23,7 @@ class Grabber(QObject):
     def __init__(self) -> None:
         super().__init__()
         self._running = False
+        self._frame_index = 0
 
     @Slot()
     def start(self) -> None:
@@ -57,6 +61,13 @@ class Grabber(QObject):
                 array = array[:, : width * 3].reshape(height, width, 3)
 
                 qimg = QImage(array.data, width, height, width * 3, QImage.Format_RGB888)
+                self._frame_index += 1
+                logger.debug(
+                    "TIMING camera_frame_ready index=%s size=%sx%s",
+                    self._frame_index,
+                    width,
+                    height,
+                )
                 self.frame_ready.emit(qimg.copy())
 
             cam.end_acquisition()

@@ -69,6 +69,9 @@ class JoystickWindow(QWidget):
 
     autofocus_requested = Signal()
     reset_requested = Signal()
+    motion_axis_requested = Signal(str)
+    jog_command_changed = Signal(object, float)
+    jog_stopped = Signal()
     home_axis_requested = Signal(str)
     home_all_requested = Signal()
     needles_raise_requested = Signal()
@@ -676,18 +679,29 @@ class JoystickWindow(QWidget):
         self.stage_controller = stage_controller
 
     def start_jog(self, axis: str, direction: int) -> None:
-        logger.debug("Start jog requested: axis=%s direction=%s", axis, direction)
+        logger.debug("TIMING start_jog_requested axis=%s direction=%s", axis, direction)
         if not self._move_safety_check():
             return
+        self.motion_axis_requested.emit(axis.upper())
         self._apply_axes(((axis, direction),))
 
     def stop_jog(self) -> None:
+        had_active_axes = self._active_axes is not None
+        logger.debug(
+            "TIMING stop_jog_requested active_axes=%s key_stack=%s",
+            self._active_axes,
+            self._key_stack,
+        )
         if not self.serial_connection or not self.serial_connection.is_open:
             self._active_axes = None
+            if had_active_axes:
+                self.jog_stopped.emit()
             return
         self._active_axes = None
         self.send_command(b"\x85")
         self._schedule_jog_stop_resend()
+        if had_active_axes:
+            self.jog_stopped.emit()
         logger.debug("Stop jog command issued")
 
     def _apply_axes(self, axes: tuple[tuple[str, int], ...]) -> None:
@@ -710,13 +724,22 @@ class JoystickWindow(QWidget):
         if self._active_axes is not None:
             self.stop_jog()
         parts: list[str] = []
+        commanded_distances: list[tuple[str, float]] = []
         for axis, direction in axes_sorted:
             distance = direction * self._distance_for_axis(axis)
+            commanded_distances.append((axis, distance))
             parts.append(f"{axis}{distance:.3f}")
         command = f"$J=G91 G21 {' '.join(parts)} F{feedrate}\n"
+        logger.debug(
+            "TIMING jog_command_prepared axes=%s feedrate=%s command=%s",
+            commanded_distances,
+            feedrate,
+            command.strip(),
+        )
         self.send_command(command)
         self._active_axes = axes_sorted
-        logger.debug("Jog command sent: %s", command.strip())
+        self.jog_command_changed.emit(tuple(commanded_distances), float(feedrate))
+        logger.debug("TIMING jog_command_sent command=%s", command.strip())
 
     def _distance_for_axis(self, axis: str) -> float:
         if axis == "B":
@@ -988,8 +1011,16 @@ class JoystickWindow(QWidget):
             return
         try:
             data = command if isinstance(command, bytes) else command.encode("ascii")
+            if isinstance(command, str) and command.startswith("$J="):
+                logger.debug("TIMING jog_serial_write_begin command=%s", command.strip())
+            elif isinstance(command, bytes) and command == b"\x85":
+                logger.debug("TIMING jog_stop_write_begin command=0x85")
             self.serial_connection.write(data)
             self.serial_connection.flush()
+            if isinstance(command, str) and command.startswith("$J="):
+                logger.debug("TIMING jog_serial_write_flushed command=%s", command.strip())
+            elif isinstance(command, bytes) and command == b"\x85":
+                logger.debug("TIMING jog_stop_write_flushed command=0x85")
             if isinstance(command, bytes):
                 logger.debug("Command written to serial (bytes): %s", command.hex())
             else:
@@ -1109,6 +1140,13 @@ class JoystickWindow(QWidget):
             return True
         identifier, mapping = self._mapping_from_event(event)
         if identifier and mapping:
+            logger.debug(
+                "TIMING keypress_received key=%s text=%s modifiers=%s mapping=%s",
+                event.key(),
+                event.text(),
+                keyboard_modifiers_to_int(event.modifiers()),
+                mapping,
+            )
             if identifier not in self._key_stack:
                 self._key_stack.append(identifier)
                 self._update_active_jog()
@@ -1147,6 +1185,14 @@ class JoystickWindow(QWidget):
             if not self._key_stack:
                 self.stop_jog()
             event.accept()
+            logger.debug(
+                "TIMING keyrelease_received key=%s text=%s modifiers=%s mapping=%s remaining=%s",
+                event.key(),
+                event.text(),
+                keyboard_modifiers_to_int(event.modifiers()),
+                mapping,
+                self._key_stack,
+            )
             logger.debug(
                 "Processed key release: key=%s text=%s modifiers=%s -> %s",
                 event.key(),

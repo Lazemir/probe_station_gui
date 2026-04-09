@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Optional, TYPE_CHECKING
 
 import serial
@@ -19,6 +20,9 @@ from PySide6.QtWidgets import (
 
 if TYPE_CHECKING:
     from ..stage_controller import StageController
+
+
+logger = logging.getLogger(__name__)
 
 
 class SerialInputLineEdit(QLineEdit):
@@ -51,6 +55,7 @@ class SerialInputLineEdit(QLineEdit):
 class SerialTerminalWindow(QWidget):
     """Widget that echoes FluidNC serial traffic."""
 
+    manual_command_sent = Signal(str)
     POLL_INTERVAL_MS = 100
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
@@ -58,6 +63,7 @@ class SerialTerminalWindow(QWidget):
 
         self.serial_connection: Optional[serial.Serial] = None
         self.stage_controller: Optional["StageController"] = None
+        self._poll_paused = False
 
         layout = QVBoxLayout(self)
 
@@ -114,12 +120,16 @@ class SerialTerminalWindow(QWidget):
             self.status_label.setText(
                 f"Connected to {serial_connection.port} @ {serial_connection.baudrate}"
             )
-            if not self.poll_timer.isActive():
-                self.poll_timer.start()
         else:
             self.status_label.setText("Disconnected")
-            self.poll_timer.stop()
+        self.poll_timer.stop()
         self._update_enabled_state()
+
+    def set_live_poll_paused(self, paused: bool) -> None:
+        """Keep terminal background reads disabled while sharing the controller serial."""
+
+        self._poll_paused = bool(paused)
+        self.poll_timer.stop()
 
     def send_control_x(self) -> None:
         """Send a Ctrl+X (soft reset) control character."""
@@ -130,14 +140,12 @@ class SerialTerminalWindow(QWidget):
         try:
             self.serial_connection.write(b"\x18")
             self.serial_connection.flush()
+            logger.debug("SERIAL TRACE terminal_write CTRL-X")
         except serial.SerialException as error:  # pragma: no cover - safety guard
             self._append_system_message(f"Serial write failed: {error}")
             self.set_serial(None)
             return
-        if self.stage_controller:
-            self.stage_controller.invalidate_needles_state(
-                "Manual serial command sent; needle position unknown."
-            )
+        self.manual_command_sent.emit("CTRL-X")
         self._append_local_echo("\u2418")
 
     def send_current_line(self) -> None:
@@ -155,14 +163,12 @@ class SerialTerminalWindow(QWidget):
         try:
             self.serial_connection.write(payload.encode("utf-8"))
             self.serial_connection.flush()
+            logger.debug("SERIAL TRACE terminal_write payload=%r", payload.rstrip())
         except serial.SerialException as error:  # pragma: no cover - safety guard
             self._append_system_message(f"Serial write failed: {error}")
             self.set_serial(None)
             return
-        if self.stage_controller:
-            self.stage_controller.invalidate_needles_state(
-                "Manual serial command sent; needle position unknown."
-            )
+        self.manual_command_sent.emit(text or "\u240d")
         if text:
             self._append_local_echo(text)
             self._command_history.append(text)
@@ -187,6 +193,10 @@ class SerialTerminalWindow(QWidget):
         self.output_edit.moveCursor(QTextCursor.End)
 
     def _poll_serial(self) -> None:
+        if self.stage_controller is not None:
+            return
+        if self._poll_paused:
+            return
         if not self.serial_connection or not self.serial_connection.is_open:
             self.poll_timer.stop()
             self._update_enabled_state()
@@ -195,6 +205,8 @@ class SerialTerminalWindow(QWidget):
             return
         try:
             waiting = self.serial_connection.in_waiting
+            if waiting:
+                logger.debug("SERIAL TRACE terminal_in_waiting bytes=%s", waiting)
         except serial.SerialException as error:  # pragma: no cover - safety guard
             self._append_system_message(f"Serial read failed: {error}")
             self.set_serial(None)
@@ -208,6 +220,7 @@ class SerialTerminalWindow(QWidget):
             self.set_serial(None)
             return
         if data:
+            logger.debug("SERIAL TRACE terminal_read bytes=%r", data[:200])
             self._append_remote_message(data)
 
     def _update_enabled_state(self) -> None:

@@ -299,6 +299,9 @@ class SettingsManager:
     def logging_level_name(self) -> str:
         """Return the configured logging level name."""
 
+        override = os.environ.get("PROBE_STATION_LOG_LEVEL", "").strip()
+        if override:
+            return override.upper()
         return (self._settings.logging.level or "INFO").upper()
 
     def log_file_path(self) -> Path:
@@ -308,9 +311,11 @@ class SettingsManager:
         if file_setting:
             path = Path(file_setting)
             if not path.is_absolute():
-                path = self._config_dir / path
+                path = self._determine_log_dir() / path
+            elif self._is_legacy_default_log_path(path):
+                path = self._default_log_path()
         else:
-            path = self._config_dir / self.DEFAULT_LOG_FILENAME
+            path = self._default_log_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -330,6 +335,33 @@ class SettingsManager:
             return Path(xdg) / "probe-station-gui"
         return Path.home() / ".config" / "probe-station-gui"
 
+    def _determine_log_dir(self) -> Path:
+        """Compute the directory where log files should live."""
+
+        system = platform.system()
+        if system == "Windows":
+            base = os.environ.get("LOCALAPPDATA")
+            if base:
+                return Path(base) / "ProbeStationGUI" / "Logs"
+            return Path.home() / "AppData" / "Local" / "ProbeStationGUI" / "Logs"
+        if system == "Darwin":
+            return Path.home() / "Library" / "Logs" / "ProbeStationGUI"
+        xdg_state = os.environ.get("XDG_STATE_HOME")
+        if xdg_state:
+            return Path(xdg_state) / "probe-station-gui"
+        return Path.home() / ".local" / "state" / "probe-station-gui"
+
+    def _default_log_path(self) -> Path:
+        return self._determine_log_dir() / self.DEFAULT_LOG_FILENAME
+
+    def _is_legacy_default_log_path(self, path: Path) -> bool:
+        try:
+            resolved = path.expanduser().resolve()
+        except OSError:
+            resolved = path.expanduser()
+        legacy = (self._config_dir / self.DEFAULT_LOG_FILENAME).expanduser()
+        return resolved == legacy
+
     def _ensure_default_file(self) -> None:
         """Copy the default settings file when the user configuration is missing."""
 
@@ -339,7 +371,7 @@ class SettingsManager:
         default_resource = resources.files("probe_station_gui").joinpath(
             "default_settings.json"
         )
-        log_path = str(self._config_dir / self.DEFAULT_LOG_FILENAME)
+        log_path = str(self._default_log_path())
 
         try:
             with default_resource.open("r", encoding="utf-8") as source:
@@ -460,7 +492,7 @@ class SettingsManager:
         logging_raw = raw.get("logging", {}) if isinstance(raw, dict) else {}
         logging_settings = self._parse_logging(logging_raw)
         if not logging_settings.file:
-            default_log = str(self._config_dir / self.DEFAULT_LOG_FILENAME)
+            default_log = str(self._default_log_path())
             logging_settings.file = default_log
             self._logger.debug(
                 "Log file path missing in settings; defaulting to %s", default_log

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import threading
 import time
@@ -17,6 +18,9 @@ try:
     from scipy import optimize as scipy_optimize
 except ImportError:  # pragma: no cover - optional dependency for autofocus
     scipy_optimize = None
+
+
+logger = logging.getLogger(__name__)
 
 
 class StageControllerError(RuntimeError):
@@ -72,6 +76,7 @@ class StageController(QObject):
     calibration_changed: Signal = Signal(float, float)
     movement_started: Signal = Signal()
     movement_finished: Signal = Signal(bool, str)
+    stage_position_changed: Signal = Signal(object)
     autofocus_finished: Signal = Signal(bool, str)
     homing_status_changed: Signal = Signal(object)
     axis_a_ready_changed: Signal = Signal(bool)
@@ -129,6 +134,7 @@ class StageController(QObject):
         self._frame_condition = threading.Condition()
         self._task_lock = threading.Lock()
         self._active_thread: Optional[threading.Thread] = None
+        self._status_refresh_thread: Optional[threading.Thread] = None
         self._cancel_event = threading.Event()
         self._axis_limits: dict[str, tuple[float, float]] = {}
         self._homed_axes: set[str] = set()
@@ -204,6 +210,13 @@ class StageController(QObject):
         except StageControllerError:
             return
 
+    def _run_status_refresh(self) -> None:
+        try:
+            self._poll_status_once()
+        finally:
+            with self._task_lock:
+                self._status_refresh_thread = None
+
     def request_move(self, dx_pixels: float, dy_pixels: float) -> None:
         """Begin an asynchronous move so the clicked point aligns with the cross."""
 
@@ -215,6 +228,22 @@ class StageController(QObject):
             thread = threading.Thread(
                 target=self._run_move,
                 args=(dx_pixels, dy_pixels),
+                daemon=True,
+            )
+            self._active_thread = thread
+            thread.start()
+
+    def request_move_to_xy(self, target_x_mm: float, target_y_mm: float) -> None:
+        """Move to an absolute X/Y machine-space coordinate in the background."""
+
+        with self._task_lock:
+            if self._active_thread and self._active_thread.is_alive():
+                self.status_message.emit("Stage is busy. Ignoring absolute move request.")
+                return
+            self._cancel_event.clear()
+            thread = threading.Thread(
+                target=self._run_move_to_xy,
+                args=(float(target_x_mm), float(target_y_mm)),
                 daemon=True,
             )
             self._active_thread = thread
@@ -429,6 +458,40 @@ class StageController(QObject):
             return None
         return tuple(self._last_stage_position)
 
+    def request_status_refresh(self) -> None:
+        """Poll controller position in a background thread when idle."""
+
+        with self._task_lock:
+            if self._active_thread and self._active_thread.is_alive():
+                return
+            serial_connection = self._serial
+            if serial_connection is None or not serial_connection.is_open:
+                return
+            if (
+                self._status_refresh_thread is not None
+                and self._status_refresh_thread.is_alive()
+            ):
+                return
+            thread = threading.Thread(target=self._run_status_refresh, daemon=True)
+            self._status_refresh_thread = thread
+            thread.start()
+
+    def current_fov_size_mm(self) -> tuple[float, float] | None:
+        """Estimate the camera field of view in millimeters from click calibration."""
+
+        if self._pixels_to_mm is None:
+            return None
+        with self._frame_condition:
+            frame = self._latest_frame
+            if frame is None:
+                return None
+            height_px, width_px = frame.shape[:2]
+        column_x = self._pixels_to_mm[:, 0]
+        column_y = self._pixels_to_mm[:, 1]
+        width_mm = float(np.linalg.norm(column_x) * float(width_px))
+        height_mm = float(np.linalg.norm(column_y) * float(height_px))
+        return (width_mm, height_mm)
+
     def resolve_clicked_point_xy(
         self, dx_pixels: float, dy_pixels: float
     ) -> tuple[tuple[float, float], tuple[float, float]]:
@@ -548,6 +611,45 @@ class StageController(QObject):
             )
 
             self.movement_finished.emit(True, message)
+        except StageControllerError as exc:
+            self.movement_finished.emit(False, str(exc))
+        finally:
+            with self._task_lock:
+                self._active_thread = None
+
+    def _run_move_to_xy(self, target_x_mm: float, target_y_mm: float) -> None:
+        self.movement_started.emit()
+        try:
+            self._check_cancelled()
+            serial_connection = self._serial
+            if serial_connection is None or not serial_connection.is_open:
+                raise StageControllerError("Serial connection is not available.")
+            self._move_safety_check()
+            status = self._query_status(serial_connection)
+            if status is None or status.position is None:
+                raise StageControllerError("Unable to read current stage position.")
+            self._require_homed_axes(status, {"X", "Y"})
+            current_x = float(status.position[0])
+            current_y = float(status.position[1])
+            delta_x = float(target_x_mm) - current_x
+            delta_y = float(target_y_mm) - current_y
+            move = MoveVector(x=delta_x, y=delta_y)
+            if move.is_zero(tol=1e-5):
+                self.movement_finished.emit(True, "Target already at requested X/Y.")
+                return
+            self.status_message.emit(
+                f"Moving to X={target_x_mm:.3f} mm, Y={target_y_mm:.3f} mm"
+            )
+            self._send_relative_move(serial_connection, move)
+            self._wait_for_idle(serial_connection)
+            updated_status = self._query_status(serial_connection)
+            if updated_status and updated_status.position is not None:
+                self._last_stage_position = tuple(float(v) for v in updated_status.position)
+                self.stage_position_changed.emit(tuple(self._last_stage_position))
+            self.movement_finished.emit(
+                True,
+                f"Arrived at X={target_x_mm:.3f} mm, Y={target_y_mm:.3f} mm.",
+            )
         except StageControllerError as exc:
             self.movement_finished.emit(False, str(exc))
         finally:
@@ -1208,8 +1310,10 @@ class StageController(QObject):
         self._check_cancelled()
         data = (command.strip() + "\n").encode("ascii")
         try:
+            logger.debug("SERIAL TRACE stage_write command=%s", command.strip())
             serial_connection.write(data)
             serial_connection.flush()
+            logger.debug("SERIAL TRACE stage_write_flushed command=%s", command.strip())
         except serial.SerialException as exc:  # pragma: no cover - hardware interaction
             raise StageControllerError(f"Serial write failed: {exc}") from exc
 
@@ -1224,6 +1328,7 @@ class StageController(QObject):
             line = raw.decode("ascii", errors="ignore").strip()
             if not line:
                 continue
+            logger.debug("SERIAL TRACE stage_readline wait_for_ok line=%r", line)
             homed_msg = self.HOMED_MSG_PATTERN.match(line)
             if homed_msg:
                 axes = set(homed_msg.group("axes").upper())
@@ -1246,6 +1351,11 @@ class StageController(QObject):
         while time.monotonic() < deadline:
             self._check_cancelled()
             status = self._query_status(serial_connection)
+            logger.debug(
+                "SERIAL TRACE wait_for_idle status=%s position=%s",
+                None if status is None else status.state,
+                None if status is None else status.position,
+            )
             if status and status.state.lower() == "idle":
                 return
             if status and status.state.lower() == "alarm":
@@ -1255,8 +1365,10 @@ class StageController(QObject):
 
     def _query_status(self, serial_connection: serial.Serial, timeout: float = 1.5) -> Optional[_Status]:
         try:
+            logger.debug("SERIAL TRACE stage_query_status write=?")
             serial_connection.write(b"?\n")
             serial_connection.flush()
+            logger.debug("SERIAL TRACE stage_query_status flushed=?")
         except serial.SerialException as exc:  # pragma: no cover - hardware interaction
             raise StageControllerError(f"Serial query failed: {exc}") from exc
         deadline = time.monotonic() + timeout
@@ -1269,6 +1381,7 @@ class StageController(QObject):
             line = raw.decode("ascii", errors="ignore").strip()
             if not line:
                 continue
+            logger.debug("SERIAL TRACE stage_readline query_status line=%r", line)
             if line.lower().startswith("alarm"):
                 raise StageControllerError(f"Controller alarm: {line}")
             homed_msg = self.HOMED_MSG_PATTERN.match(line)
@@ -1290,6 +1403,10 @@ class StageController(QObject):
                     if coords:
                         position = coords
                         self._last_stage_position = coords
+                        a_idx = self.AXIS_INDEX.get("A")
+                        if a_idx is not None and a_idx < len(coords):
+                            self._update_needles_from_a_position(float(coords[a_idx]))
+                        self.stage_position_changed.emit(tuple(coords))
                 except ValueError:
                     position = None
             homed_axes = None

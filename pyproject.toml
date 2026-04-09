@@ -9,9 +9,11 @@ description = "Graphical interface for controlling a microscope probe station"
 authors = [{ name = "Probe Station Team" }]
 requires-python = ">=3.9"
 dependencies = [
+    "gdstk",
     "numpy",
     "opencv-python",
     "PySide6",
+    "pyqtgraph",
     "rotpy",
     "scipy",
 ]

@@ -1,0 +1,282 @@
+import importlib.util
+import sys
+import tempfile
+import textwrap
+import types
+import unittest
+from pathlib import Path
+
+import numpy as np
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _ensure_package_stub() -> None:
+    package_name = "probe_station_gui"
+    if package_name in sys.modules:
+        return
+    package = types.ModuleType(package_name)
+    package.__path__ = [str(REPO_ROOT / package_name)]
+    sys.modules[package_name] = package
+
+
+def _load_module(module_name: str, relative_path: str):
+    _ensure_package_stub()
+    module_path = REPO_ROOT / relative_path
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+design_model = _load_module(
+    "probe_station_gui.design_model", "probe_station_gui/design_model.py"
+)
+design_script = _load_module(
+    "probe_station_gui.design_script", "probe_station_gui/design_script.py"
+)
+design_session = _load_module(
+    "probe_station_gui.design_session", "probe_station_gui/design_session.py"
+)
+
+DesignDocument = design_model.DesignDocument
+DesignModelError = design_model.DesignModelError
+DesignRegistration = design_model.DesignRegistration
+MeasurementTarget = design_model.MeasurementTarget
+ScriptContext = design_script.ScriptContext
+DesignScriptError = design_script.DesignScriptError
+load_measurement_plan = design_script.load_measurement_plan
+AlignmentPreparation = design_session.AlignmentPreparation
+DesignSession = design_session.DesignSession
+
+
+class _FakeCell:
+    def __init__(self, name, polygons_by_spec):
+        self.name = name
+        self._polygons_by_spec = polygons_by_spec
+
+    def get_polygons(self, *args, **kwargs):
+        return self._polygons_by_spec
+
+
+class _FakeLibrary:
+    def __init__(self, cells):
+        self.cells = cells
+        self.unit = 1e-6
+        self.precision = 1e-9
+
+    def top_level(self):
+        return [self.cells[0]]
+
+
+class DesignRegistrationTest(unittest.TestCase):
+    def test_similarity_registration_roundtrip(self) -> None:
+        registration = DesignRegistration.from_marks(
+            [(0.0, 0.0), (10.0, 0.0)],
+            [(1.0, 2.0), (21.0, 2.0)],
+            check_design_marks=[(5.0, 5.0)],
+            check_stage_marks=[(11.0, 12.0)],
+        )
+
+        self.assertTrue(registration.valid)
+        self.assertEqual(registration.residual_summary.count, 1)
+        self.assertAlmostEqual(registration.residual_summary.rms, 0.0)
+        self.assertEqual(registration.design_to_stage((5.0, 5.0)), (11.0, 12.0))
+        self.assertEqual(registration.stage_to_design((11.0, 12.0)), (5.0, 5.0))
+
+    def test_registration_requires_two_marks(self) -> None:
+        with self.assertRaises(DesignModelError):
+            DesignRegistration.from_marks([(0.0, 0.0)], [(1.0, 1.0)])
+
+
+class DesignDocumentTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._original_gdstk = sys.modules.get("gdstk")
+
+    def tearDown(self) -> None:
+        if self._original_gdstk is None:
+            sys.modules.pop("gdstk", None)
+        else:
+            sys.modules["gdstk"] = self._original_gdstk
+
+    def test_load_document_and_switch_layers(self) -> None:
+        cell_main = _FakeCell(
+            "TOP",
+            {
+                (1, 0): [np.asarray([[0.0, 0.0], [10.0, 0.0], [10.0, 5.0]])],
+                (2, 0): [np.asarray([[20.0, 20.0], [25.0, 20.0], [25.0, 30.0]])],
+            },
+        )
+        cell_alt = _FakeCell(
+            "ALT",
+            {
+                (3, 1): [np.asarray([[1.0, 1.0], [2.0, 1.0], [2.0, 2.0]])],
+            },
+        )
+        fake_library = _FakeLibrary([cell_main, cell_alt])
+        gdstk_stub = types.ModuleType("gdstk")
+        gdstk_stub.read_gds = lambda _path: fake_library
+        sys.modules["gdstk"] = gdstk_stub
+
+        document = DesignDocument.load(REPO_ROOT / "tests" / "fixtures" / "synthetic.gds")
+
+        self.assertEqual(document.top_cell_name, "TOP")
+        self.assertEqual(document.layer_keys(), ((1, 0), (2, 0)))
+        self.assertEqual(document.bounds, (0.0, 0.0, 25.0, 30.0))
+        self.assertEqual(document.visible_layers, frozenset({(1, 0), (2, 0)}))
+
+        filtered = document.with_visible_layers({(2, 0)})
+        self.assertEqual(filtered.visible_layers, frozenset({(2, 0)}))
+
+        alt_document = document.with_top_cell("ALT")
+        self.assertEqual(alt_document.top_cell_name, "ALT")
+        self.assertEqual(alt_document.layer_keys(), ((3, 1),))
+
+    def test_load_document_falls_back_to_first_cell_with_geometry(self) -> None:
+        cell_empty = _FakeCell("EMPTY_TOP", {})
+        cell_main = _FakeCell(
+            "MAIN",
+            {
+                (1, 0): [np.asarray([[0.0, 0.0], [10.0, 0.0], [10.0, 5.0]])],
+            },
+        )
+        fake_library = _FakeLibrary([cell_empty, cell_main])
+        gdstk_stub = types.ModuleType("gdstk")
+        gdstk_stub.read_gds = lambda _path: fake_library
+        sys.modules["gdstk"] = gdstk_stub
+
+        document = DesignDocument.load(REPO_ROOT / "tests" / "fixtures" / "synthetic.gds")
+
+        self.assertEqual(document.top_cell_name, "MAIN")
+        self.assertEqual(document.layer_keys(), ((1, 0),))
+
+
+class DesignScriptTest(unittest.TestCase):
+    def _make_document(self) -> DesignDocument:
+        return DesignDocument(
+            path=REPO_ROOT / "tests" / "fixtures" / "synthetic.gds",
+            library=object(),
+            top_cell=object(),
+            top_cell_name="TOP",
+            cell_names=("TOP",),
+            dbu=1e-6,
+            user_unit=1e-9,
+            bounds=(0.0, 0.0, 100.0, 200.0),
+            polygons_by_layer={(1, 0): (np.asarray([[0.0, 0.0], [1.0, 0.0]]),)},
+            visible_layers=frozenset({(1, 0)}),
+        )
+
+    def test_load_measurement_plan(self) -> None:
+        document = self._make_document()
+        context = ScriptContext(document)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            script_path = Path(tmpdir) / "plan.py"
+            script_path.write_text(
+                textwrap.dedent(
+                    """
+                    def build_plan(context):
+                        return [
+                            {
+                                "id": "t1",
+                                "label": "Target 1",
+                                "design_center": (10.0, 20.0),
+                                "group": "A",
+                            },
+                            {
+                                "id": "t2",
+                                "label": "Target 2",
+                                "design_center": (30.0, 40.0),
+                            },
+                        ]
+                    """
+                ),
+                encoding="utf-8",
+            )
+
+            module, targets = load_measurement_plan(script_path, context)
+
+        self.assertTrue(module.__name__.startswith("probe_station_plan_"))
+        self.assertEqual([target.id for target in targets], ["t1", "t2"])
+        self.assertEqual(targets[0].group, "A")
+
+    def test_load_measurement_plan_requires_entrypoint(self) -> None:
+        document = self._make_document()
+        context = ScriptContext(document)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            script_path = Path(tmpdir) / "bad_plan.py"
+            script_path.write_text("VALUE = 1\n", encoding="utf-8")
+            with self.assertRaises(DesignScriptError):
+                load_measurement_plan(script_path, context)
+
+
+class DesignSessionTest(unittest.TestCase):
+    def test_registration_invalidation_marks_registration_stale(self) -> None:
+        session = DesignSession()
+        session.source_design_marks = [(0.0, 0.0), (10.0, 0.0)]
+        session.source_stage_marks = [(1.0, 2.0), (21.0, 2.0)]
+        session._rebuild_registration()
+
+        self.assertIsNotNone(session.registration)
+        self.assertTrue(session.registration.valid)
+
+        session.invalidate_registration("Controller reset.")
+
+        assert session.registration is not None
+        self.assertFalse(session.registration.valid)
+        self.assertEqual(session.registration_status, "Controller reset.")
+        self.assertEqual(session.registration.stale_reason, "Controller reset.")
+
+    def test_target_navigation(self) -> None:
+        session = DesignSession()
+        session.set_targets(
+            [
+                MeasurementTarget(id="a", label="A", design_center=(0.0, 0.0)),
+                MeasurementTarget(id="b", label="B", design_center=(1.0, 1.0)),
+            ]
+        )
+
+        self.assertEqual(session.current_target().id, "a")
+        self.assertEqual(session.select_next_target().id, "b")
+        self.assertEqual(session.select_previous_target().id, "a")
+
+    def test_prepare_and_apply_source_alignment(self) -> None:
+        session = DesignSession()
+        session.document = DesignDocument(
+            path=REPO_ROOT / "tests" / "fixtures" / "synthetic.gds",
+            library=object(),
+            top_cell=object(),
+            top_cell_name="TOP",
+            cell_names=("TOP",),
+            dbu=1e-6,
+            user_unit=1e-9,
+            bounds=(0.0, 0.0, 100.0, 100.0),
+            polygons_by_layer={(1, 0): (np.asarray([[0.0, 0.0], [1.0, 0.0]]),)},
+            visible_layers=frozenset({(1, 0)}),
+        )
+        session.capture_source_pair((0.0, 0.0), (10.0, 10.0))
+        session.capture_source_pair((1000.0, 0.0), (10.0, 11.0))
+
+        preparation = session.prepare_source_alignment()
+
+        self.assertAlmostEqual(preparation.rotation_deg, -90.0)
+        self.assertAlmostEqual(preparation.design_distance_mm, 1.0)
+        self.assertAlmostEqual(preparation.stage_distance_mm, 1.0)
+        self.assertAlmostEqual(preparation.distance_ratio, 1.0)
+        self.assertAlmostEqual(preparation.stage_marks_after_rotation[0][0], 9.0)
+        self.assertAlmostEqual(preparation.stage_marks_after_rotation[0][1], 11.0)
+
+        session.apply_prepared_alignment(preparation)
+
+        assert session.registration is not None
+        self.assertTrue(session.registration.valid)
+        mapped = session.stage_from_design((500.0, 0.0))
+        assert mapped is not None
+        self.assertAlmostEqual(mapped[0], 9.5)
+        self.assertAlmostEqual(mapped[1], 11.0)
+
+
+if __name__ == "__main__":
+    unittest.main()

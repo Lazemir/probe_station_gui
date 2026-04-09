@@ -25,5 +25,18 @@ pip install -e .
 python main.py
 ```
 
+## Windows `.venv`
+For a reproducible Windows setup from this repo:
+
+```cmd
+scripts\bootstrap_venv.cmd
+scripts\run_gui.cmd
+```
+
+Notes:
+- Build `.venv` only after the repository is moved to its final folder. Windows virtual environments are path-bound.
+- The repo can live in a shared writable directory for all users of the machine.
+- Settings and logs are already per-user and go to `%APPDATA%\ProbeStationGUI`.
+
 ## License
 TBD
