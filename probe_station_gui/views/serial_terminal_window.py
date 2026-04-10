@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Optional, TYPE_CHECKING
 
 import serial
@@ -57,6 +58,9 @@ class SerialTerminalWindow(QWidget):
 
     manual_command_sent = Signal(str)
     POLL_INTERVAL_MS = 100
+    MANUAL_RESPONSE_TIMEOUT_S = 0.8
+    MANUAL_RESPONSE_IDLE_GRACE_S = 0.2
+    RESET_RESPONSE_TIMEOUT_S = 2.5
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -64,6 +68,8 @@ class SerialTerminalWindow(QWidget):
         self.serial_connection: Optional[serial.Serial] = None
         self.stage_controller: Optional["StageController"] = None
         self._poll_paused = False
+        self._capture_manual_output = False
+        self._capture_deadline = 0.0
 
         layout = QVBoxLayout(self)
 
@@ -111,25 +117,28 @@ class SerialTerminalWindow(QWidget):
         """Assign the stage controller to coordinate serial access."""
 
         self.stage_controller = stage_controller
+        self._sync_poll_timer()
 
     def set_serial(self, serial_connection: Optional[serial.Serial]) -> None:
         """Attach or detach the active serial connection."""
 
         self.serial_connection = serial_connection
+        self._capture_manual_output = False
+        self._capture_deadline = 0.0
         if serial_connection and serial_connection.is_open:
             self.status_label.setText(
                 f"Connected to {serial_connection.port} @ {serial_connection.baudrate}"
             )
         else:
             self.status_label.setText("Disconnected")
-        self.poll_timer.stop()
         self._update_enabled_state()
+        self._sync_poll_timer()
 
     def set_live_poll_paused(self, paused: bool) -> None:
         """Keep terminal background reads disabled while sharing the controller serial."""
 
         self._poll_paused = bool(paused)
-        self.poll_timer.stop()
+        self._sync_poll_timer()
 
     def send_control_x(self) -> None:
         """Send a Ctrl+X (soft reset) control character."""
@@ -139,10 +148,11 @@ class SerialTerminalWindow(QWidget):
             return
         if self.stage_controller is not None:
             try:
-                self.stage_controller.queue_soft_reset()
+                self.stage_controller.queue_soft_reset(source="serial_terminal_ctrl_x")
             except Exception as error:  # pragma: no cover - UI safety guard
                 self._append_system_message(str(error))
                 return
+            self._arm_manual_response_capture(self.RESET_RESPONSE_TIMEOUT_S)
             self.manual_command_sent.emit("CTRL-X")
             self._append_local_echo("\u2418")
             return
@@ -154,6 +164,7 @@ class SerialTerminalWindow(QWidget):
             self._append_system_message(f"Serial write failed: {error}")
             self.set_serial(None)
             return
+        self._arm_manual_response_capture(self.RESET_RESPONSE_TIMEOUT_S)
         self.manual_command_sent.emit("CTRL-X")
         self._append_local_echo("\u2418")
 
@@ -175,6 +186,7 @@ class SerialTerminalWindow(QWidget):
                 self._append_system_message(str(error))
                 self.input_edit.selectAll()
                 return
+            self._arm_manual_response_capture(self.MANUAL_RESPONSE_TIMEOUT_S)
             self.manual_command_sent.emit(text or "\u240d")
             if text:
                 self._append_local_echo(text)
@@ -193,6 +205,7 @@ class SerialTerminalWindow(QWidget):
             self._append_system_message(f"Serial write failed: {error}")
             self.set_serial(None)
             return
+        self._arm_manual_response_capture(self.MANUAL_RESPONSE_TIMEOUT_S)
         self.manual_command_sent.emit(text or "\u240d")
         if text:
             self._append_local_echo(text)
@@ -218,15 +231,28 @@ class SerialTerminalWindow(QWidget):
         self.output_edit.moveCursor(QTextCursor.End)
 
     def _poll_serial(self) -> None:
-        if self.stage_controller is not None:
-            return
         if self._poll_paused:
             return
         if not self.serial_connection or not self.serial_connection.is_open:
             self.poll_timer.stop()
             self._update_enabled_state()
             return
-        if self.stage_controller and self.stage_controller.is_busy():
+        if not self._capture_manual_output:
+            return
+        if time.monotonic() >= self._capture_deadline:
+            self._capture_manual_output = False
+            self._sync_poll_timer()
+            return
+        if self.stage_controller is not None:
+            try:
+                data = self.stage_controller.read_pending_serial_output()
+            except Exception as error:  # pragma: no cover - UI safety guard
+                self._append_system_message(str(error))
+                self.set_serial(None)
+                return
+            if data:
+                self._append_remote_message(data)
+                self._extend_manual_response_capture()
             return
         try:
             waiting = self.serial_connection.in_waiting
@@ -247,6 +273,31 @@ class SerialTerminalWindow(QWidget):
         if data:
             logger.debug("SERIAL TRACE terminal_read bytes=%r", data[:200])
             self._append_remote_message(data)
+            self._extend_manual_response_capture()
+
+    def _sync_poll_timer(self) -> None:
+        should_poll = bool(
+            not self._poll_paused
+            and self.serial_connection is not None
+            and self.serial_connection.is_open
+            and self._capture_manual_output
+        )
+        if should_poll:
+            if not self.poll_timer.isActive():
+                self.poll_timer.start()
+        else:
+            self.poll_timer.stop()
+
+    def _arm_manual_response_capture(self, timeout_s: float) -> None:
+        self._capture_manual_output = True
+        self._capture_deadline = time.monotonic() + max(0.05, float(timeout_s))
+        self._sync_poll_timer()
+
+    def _extend_manual_response_capture(self) -> None:
+        self._capture_deadline = max(
+            self._capture_deadline,
+            time.monotonic() + self.MANUAL_RESPONSE_IDLE_GRACE_S,
+        )
 
     def _update_enabled_state(self) -> None:
         enabled = bool(self.serial_connection and self.serial_connection.is_open)

@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import platform
+import re
 from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
@@ -29,6 +30,18 @@ CONTROL_ACTIONS: tuple[ControlAction, ...] = (
     ControlAction("move_y_negative", "Y", -1, "Move Down"),
     ControlAction("move_x_negative", "X", -1, "Move Left"),
     ControlAction("move_x_positive", "X", 1, "Move Right"),
+)
+
+WORK_COORDINATE_SYSTEMS: tuple[str, ...] = (
+    "G54",
+    "G55",
+    "G56",
+    "G57",
+    "G58",
+    "G59",
+    "G59.1",
+    "G59.2",
+    "G59.3",
 )
 
 
@@ -174,6 +187,33 @@ class NeedleCalibrationSettings:
 
 
 @dataclass
+class CoordinateSystemSettings:
+    """Configuration for work-coordinate system selection."""
+
+    position_mode: str = "work"
+    startup_mode: str = "controller"
+    preferred_system: str = "G54"
+
+    def clone(self) -> "CoordinateSystemSettings":
+        """Return a copy of the coordinate-system preferences."""
+
+        return CoordinateSystemSettings(
+            position_mode=self.position_mode,
+            startup_mode=self.startup_mode,
+            preferred_system=self.preferred_system,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        """Serialize coordinate-system preferences."""
+
+        return {
+            "position_mode": self.position_mode,
+            "startup_mode": self.startup_mode,
+            "preferred_system": self.preferred_system,
+        }
+
+
+@dataclass
 class Settings:
     """Container for all configurable values."""
 
@@ -183,6 +223,9 @@ class Settings:
     jog: JogSettings = field(default_factory=JogSettings)
     needle_calibration: NeedleCalibrationSettings = field(
         default_factory=NeedleCalibrationSettings
+    )
+    coordinate_system: CoordinateSystemSettings = field(
+        default_factory=CoordinateSystemSettings
     )
 
     def clone(self) -> "Settings":
@@ -194,6 +237,7 @@ class Settings:
             feedrates=self.feedrates.clone(),
             jog=self.jog.clone(),
             needle_calibration=self.needle_calibration.clone(),
+            coordinate_system=self.coordinate_system.clone(),
         )
 
     def to_dict(self) -> dict:
@@ -217,6 +261,7 @@ class Settings:
             },
             "jog": self.jog.to_dict(),
             "needle_calibration": self.needle_calibration.to_dict(),
+            "coordinate_system": self.coordinate_system.to_dict(),
         }
 
 
@@ -249,8 +294,12 @@ class SettingsManager:
     DEFAULT_SHORT_THRESHOLD_OHM: float = 10.0
     DEFAULT_LCR_POLL_INTERVAL_MS: int = 250
     DEFAULT_LOWER_DIRECTION: str = "negative"
+    DEFAULT_POSITION_MODE: str = "work"
+    DEFAULT_COORDINATE_STARTUP_MODE: str = "controller"
+    DEFAULT_COORDINATE_SYSTEM: str = "G54"
     LINEAR_GROUP = "linear"
     ROTARY_GROUP = "rotary"
+    CYRILLIC_PATTERN = re.compile(r"[\u0400-\u04FF]")
 
     def __init__(self) -> None:
         self._config_dir = self._determine_config_dir()
@@ -511,6 +560,25 @@ class SettingsManager:
             needle_section.setdefault("down_position_mm", 0.0)
             needle_section.setdefault("down_position_configured", False)
 
+        coordinate_section = data.get("coordinate_system")
+        if not isinstance(coordinate_section, dict):
+            coordinate_section = {
+                "position_mode": self.DEFAULT_POSITION_MODE,
+                "startup_mode": self.DEFAULT_COORDINATE_STARTUP_MODE,
+                "preferred_system": self.DEFAULT_COORDINATE_SYSTEM,
+            }
+            data["coordinate_system"] = coordinate_section
+        else:
+            coordinate_section.setdefault(
+                "position_mode", self.DEFAULT_POSITION_MODE
+            )
+            coordinate_section.setdefault(
+                "startup_mode", self.DEFAULT_COORDINATE_STARTUP_MODE
+            )
+            coordinate_section.setdefault(
+                "preferred_system", self.DEFAULT_COORDINATE_SYSTEM
+            )
+
         with self._config_path.open("w", encoding="utf-8") as target:
             json.dump(data, target, indent=2, ensure_ascii=False)
 
@@ -529,7 +597,9 @@ class SettingsManager:
             if isinstance(values, Iterable):
                 for value in values:
                     if isinstance(value, dict):
-                        bindings.append(KeyBinding.from_dict(value))
+                        binding = KeyBinding.from_dict(value)
+                        if self._should_keep_control_binding(binding):
+                            bindings.append(binding)
             controls[key] = bindings
         for action in CONTROL_ACTIONS:
             controls.setdefault(action.key, [])
@@ -548,12 +618,16 @@ class SettingsManager:
         needle_calibration_raw = (
             raw.get("needle_calibration") if isinstance(raw, dict) else None
         )
+        coordinate_system_raw = (
+            raw.get("coordinate_system") if isinstance(raw, dict) else None
+        )
         return Settings(
             controls=controls,
             logging=logging_settings,
             feedrates=feedrates,
             jog=self._parse_jog(jog_raw),
             needle_calibration=self._parse_needle_calibration(needle_calibration_raw),
+            coordinate_system=self._parse_coordinate_system(coordinate_system_raw),
         )
 
     def _parse_logging(self, raw_logging) -> LoggingSettings:
@@ -678,6 +752,45 @@ class SettingsManager:
             down_position_mm=down_position_mm,
             down_position_configured=down_position_configured,
         )
+
+    def _parse_coordinate_system(self, raw_coordinate_system) -> CoordinateSystemSettings:
+        """Normalise persisted coordinate-system settings."""
+
+        startup_mode = self.DEFAULT_COORDINATE_STARTUP_MODE
+        preferred_system = self.DEFAULT_COORDINATE_SYSTEM
+        position_mode = self.DEFAULT_POSITION_MODE
+        if isinstance(raw_coordinate_system, dict):
+            position_mode_raw = raw_coordinate_system.get(
+                "position_mode", position_mode
+            )
+            if isinstance(position_mode_raw, str):
+                position_mode = position_mode_raw.strip().lower()
+            mode_raw = raw_coordinate_system.get("startup_mode", startup_mode)
+            if isinstance(mode_raw, str):
+                startup_mode = mode_raw.strip().lower()
+            system_raw = raw_coordinate_system.get(
+                "preferred_system", preferred_system
+            )
+            if isinstance(system_raw, str):
+                preferred_system = system_raw.strip().upper()
+        if position_mode not in {"work", "machine"}:
+            position_mode = self.DEFAULT_POSITION_MODE
+        if startup_mode not in {"controller", "fixed"}:
+            startup_mode = self.DEFAULT_COORDINATE_STARTUP_MODE
+        if preferred_system not in WORK_COORDINATE_SYSTEMS:
+            preferred_system = self.DEFAULT_COORDINATE_SYSTEM
+        return CoordinateSystemSettings(
+            position_mode=position_mode,
+            startup_mode=startup_mode,
+            preferred_system=preferred_system,
+        )
+
+    @classmethod
+    def _should_keep_control_binding(cls, binding: KeyBinding) -> bool:
+        text = (binding.text or "").strip()
+        if not text:
+            return True
+        return cls.CYRILLIC_PATTERN.search(text) is None
 
     def _parse_feedrate_groups(
         self,
@@ -844,4 +957,9 @@ class SettingsManager:
         """Return the current needle calibration configuration clone."""
 
         return self._settings.needle_calibration.clone()
+
+    def coordinate_system_configuration(self) -> CoordinateSystemSettings:
+        """Return the current coordinate-system configuration clone."""
+
+        return self._settings.coordinate_system.clone()
 

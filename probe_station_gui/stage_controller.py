@@ -68,6 +68,10 @@ class MoveVector:
 class _Status:
     state: str
     position: Optional[tuple[float, ...]] = None
+    display_position: Optional[tuple[float, ...]] = None
+    work_position: Optional[tuple[float, ...]] = None
+    work_offset: Optional[tuple[float, ...]] = None
+    coordinate_system: Optional[str] = None
     homed_axes: Optional[set[str]] = None
 
 
@@ -130,21 +134,37 @@ class StageController(QObject):
     SERIAL_PRIORITY_TERMINAL = 30
     SERIAL_JOG_COMMAND_SETTLE_S = 0.03
 
-    STATUS_PATTERN = re.compile(
-        r"<(?P<state>[A-Za-z]+)(?:\|[^>]*?MPos:(?P<mpos>-?\d+\.?\d*(?:,-?\d+\.?\d*)*))?"
-    )
+    STATUS_PATTERN = re.compile(r"^<(?P<body>[^>]*)>")
+    STATUS_FIELD_PATTERN = re.compile(r"(?P<key>[A-Za-z]+):(?P<value>.+)")
     AXIS_RANGE_PATTERN = re.compile(
         r"^\[MSG:INFO: Axis (?P<axis>[A-Za-z]) \((?P<min>-?\d+\.?\d*),(?P<max>-?\d+\.?\d*)\)\]"
     )
     HOMED_PATTERN = re.compile(r"\|H:([A-Za-z]+)")
     HOMED_MSG_PATTERN = re.compile(r"^\[MSG:Homed:(?P<axes>[A-Za-z]+)\]")
+    MODAL_STATE_PATTERN = re.compile(r"^\[GC:(?P<modal>[^\]]+)\]$")
+    COORDINATE_OFFSET_PATTERN = re.compile(
+        r"^\[(?P<system>G5(?:4|5|6|7|8|9(?:\.[123])?)):(?P<coords>[^\]]+)\]$"
+    )
     AXIS_INDEX = {"X": 0, "Y": 1, "Z": 2, "A": 3, "B": 4, "C": 5}
+    WORK_COORDINATE_SYSTEMS = (
+        "G54",
+        "G55",
+        "G56",
+        "G57",
+        "G58",
+        "G59",
+        "G59.1",
+        "G59.2",
+        "G59.3",
+    )
+    DEFAULT_WORK_COORDINATE_SYSTEM = "G54"
 
     def __init__(self) -> None:
         super().__init__()
         self._serial: Optional[serial.Serial] = None
         self._pixels_to_mm: Optional[np.ndarray] = None
         self._last_stage_position: Optional[tuple[float, ...]] = None
+        self._last_machine_position: Optional[tuple[float, ...]] = None
         self._latest_frame: Optional[np.ndarray] = None
         self._frame_counter = 0
         self._frame_condition = threading.Condition()
@@ -169,6 +189,12 @@ class StageController(QObject):
         self._last_status_timestamp: Optional[float] = None
         self._last_jog_write_timestamp: Optional[float] = None
         self._controller_state_stale = False
+        self._position_reporting_mode = "work"
+        self._current_status_report_mask: Optional[int] = None
+        self._coordinate_startup_mode = "controller"
+        self._preferred_work_coordinate_system = self.DEFAULT_WORK_COORDINATE_SYSTEM
+        self._active_work_coordinate_system: Optional[str] = None
+        self._controller_coordinate_offsets: dict[str, tuple[float, ...]] = {}
         self._async_write_queue: PriorityQueue[_QueuedSerialWrite] = PriorityQueue()
         self._async_write_shutdown = threading.Event()
         self._async_write_thread = threading.Thread(
@@ -189,6 +215,10 @@ class StageController(QObject):
                 self._last_stage_state = None
                 self._last_status_timestamp = None
                 self._last_jog_write_timestamp = None
+                self._current_status_report_mask = None
+                self._last_machine_position = None
+                self._active_work_coordinate_system = None
+                self._controller_coordinate_offsets.clear()
                 self._axis_limits.clear()
                 self._b_axis_zero_position = None
                 self._controller_state_stale = bool(
@@ -208,7 +238,11 @@ class StageController(QObject):
                         "Controller reboot detected on serial connect; clearing cached homing and position state."
                     )
                     self._last_stage_position = None
+                    self._last_machine_position = None
                     self._last_stage_state = None
+                    self._current_status_report_mask = None
+                    self._active_work_coordinate_system = None
+                    self._controller_coordinate_offsets.clear()
                     self._update_homing_status(set())
                     self._set_needles_state(False, known=False)
                 else:
@@ -229,7 +263,17 @@ class StageController(QObject):
                 if self._last_stage_position is not None
                 else None
             ),
+            "last_machine_position": (
+                list(self._last_machine_position)
+                if self._last_machine_position is not None
+                else None
+            ),
             "last_stage_state": self._last_stage_state,
+            "active_work_coordinate_system": self._active_work_coordinate_system,
+            "controller_coordinate_offsets": {
+                system: list(values)
+                for system, values in self._controller_coordinate_offsets.items()
+            },
             "homed_axes": sorted(self._homed_axes),
             "needles_up": bool(self._needles_up),
             "needles_known": bool(self._needles_known),
@@ -251,6 +295,26 @@ class StageController(QObject):
         if isinstance(state_raw, str) and state_raw.strip():
             self._last_stage_state = state_raw.strip()
         self._last_stage_position = position
+        machine_position_raw = data.get("last_machine_position")
+        machine_position = None
+        if isinstance(machine_position_raw, (list, tuple)):
+            try:
+                coords = tuple(float(value) for value in machine_position_raw)
+                if coords:
+                    machine_position = coords
+            except (TypeError, ValueError):
+                machine_position = None
+        self._last_machine_position = machine_position
+        coordinate_system_raw = data.get("active_work_coordinate_system")
+        if (
+            isinstance(coordinate_system_raw, str)
+            and coordinate_system_raw.strip().upper() in self.WORK_COORDINATE_SYSTEMS
+        ):
+            self._active_work_coordinate_system = coordinate_system_raw.strip().upper()
+        offsets_raw = data.get("controller_coordinate_offsets")
+        self._controller_coordinate_offsets = self._parse_controller_coordinate_offsets(
+            offsets_raw
+        )
         self._controller_state_stale = True
         homed_raw = data.get("homed_axes")
         homed_axes: set[str] = set()
@@ -271,7 +335,10 @@ class StageController(QObject):
         """Forget locally cached controller state."""
 
         self._last_stage_position = None
+        self._last_machine_position = None
         self._last_stage_state = None
+        self._active_work_coordinate_system = None
+        self._controller_coordinate_offsets.clear()
         self._update_homing_status(set())
         self._set_needles_state(False, known=False)
 
@@ -485,6 +552,43 @@ class StageController(QObject):
             1.0 if lower_direction.strip().lower() == "positive" else -1.0
         )
 
+    def apply_coordinate_system_configuration(
+        self,
+        *,
+        position_mode: str,
+        startup_mode: str,
+        preferred_system: str,
+    ) -> None:
+        """Apply coordinate-system preferences loaded from persistent settings."""
+
+        reporting_mode = position_mode.strip().lower()
+        if reporting_mode not in {"work", "machine"}:
+            reporting_mode = "work"
+        mode = startup_mode.strip().lower()
+        if mode not in {"controller", "fixed"}:
+            mode = "controller"
+        system = preferred_system.strip().upper()
+        if system not in self.WORK_COORDINATE_SYSTEMS:
+            system = self.DEFAULT_WORK_COORDINATE_SYSTEM
+        self._position_reporting_mode = reporting_mode
+        self._coordinate_startup_mode = mode
+        self._preferred_work_coordinate_system = system
+
+    def active_coordinate_system(self) -> str | None:
+        """Return the currently active work coordinate system, if known."""
+
+        return self._active_work_coordinate_system
+
+    def coordinate_display_name(self) -> str:
+        """Return the label that matches the coordinates exposed to the GUI."""
+
+        if self._position_reporting_mode == "machine":
+            return "Machine"
+        active = self._active_work_coordinate_system
+        if active:
+            return active
+        return "Machine"
+
     def request_needles_adjust(self, step_mm: float) -> None:
         """Adjust the A axis for needle calibration without the XY safety gate."""
 
@@ -548,6 +652,37 @@ class StageController(QObject):
         self.needle_height_changed.emit(a_position)
         return a_position
 
+    def read_pending_serial_output(self, max_bytes: int | None = None) -> bytes:
+        """Read currently buffered controller output without contending with active tasks."""
+
+        serial_connection = self._serial
+        if serial_connection is None or not serial_connection.is_open:
+            return b""
+        with self._task_lock:
+            if self._active_thread and self._active_thread.is_alive():
+                return b""
+        if not self._serial_session_lock.acquire(blocking=False):
+            return b""
+        try:
+            try:
+                waiting = serial_connection.in_waiting
+            except serial.SerialException as exc:  # pragma: no cover - hardware interaction
+                raise StageControllerError(f"Serial read failed: {exc}") from exc
+            if waiting <= 0:
+                return b""
+            if max_bytes is not None:
+                waiting = min(waiting, max(1, int(max_bytes)))
+            logger.debug("SERIAL TRACE terminal_in_waiting bytes=%s", waiting)
+            try:
+                data = serial_connection.read(waiting)
+            except serial.SerialException as exc:  # pragma: no cover - hardware interaction
+                raise StageControllerError(f"Serial read failed: {exc}") from exc
+            if data:
+                logger.debug("SERIAL TRACE terminal_read bytes=%r", data[:200])
+            return data
+        finally:
+            self._serial_session_lock.release()
+
     def invalidate_needles_state(self, reason: str = "") -> None:
         """Mark needles state unknown after manual A-axis changes."""
 
@@ -570,7 +705,7 @@ class StageController(QObject):
             return bool(self._active_thread and self._active_thread.is_alive())
 
     def current_stage_position(self) -> tuple[float, ...]:
-        """Return the latest controller-reported machine position."""
+        """Return the latest controller position in the active GUI coordinate space."""
 
         with self._task_lock:
             if self._active_thread and self._active_thread.is_alive():
@@ -580,15 +715,15 @@ class StageController(QObject):
                 raise StageControllerError("Serial connection is not available.")
             with self._serial_session_lock:
                 status = self._query_status(serial_connection)
-        if status is None or status.position is None:
+        if status is None or status.display_position is None:
             raise StageControllerError("Unable to read stage position.")
         if status.state.lower() in {"jog", "run"}:
             raise StageControllerError("Wait for the stage to stop before capturing a marker.")
         self._ensure_b_axis_zero_reference(status)
-        return tuple(float(value) for value in status.position)
+        return tuple(float(value) for value in status.display_position)
 
     def latest_stage_position(self) -> tuple[float, ...] | None:
-        """Return the most recently observed machine position, if any."""
+        """Return the most recently observed GUI position, if any."""
 
         if self._last_stage_position is None:
             return None
@@ -660,13 +795,13 @@ class StageController(QObject):
                 raise StageControllerError("Serial connection is not available.")
             with self._serial_session_lock:
                 status = self._query_status(serial_connection)
-                if status is None or status.position is None:
+                if status is None or status.display_position is None:
                     raise StageControllerError("Unable to read stage position.")
                 self._ensure_calibration(serial_connection)
         if self._pixels_to_mm is None:
             raise StageControllerError("Calibration failed. Cannot resolve clicked position.")
         return self._resolve_xy_from_center(
-            tuple(float(value) for value in status.position),
+            tuple(float(value) for value in status.display_position),
             dx_pixels,
             dy_pixels,
         )
@@ -738,7 +873,7 @@ class StageController(QObject):
             )
         )
 
-    def queue_soft_reset(self) -> None:
+    def queue_soft_reset(self, *, source: str = "unknown") -> None:
         """Queue a FluidNC soft reset without blocking the UI thread."""
 
         self._async_write_queue.put(
@@ -747,7 +882,7 @@ class StageController(QObject):
                 sequence=self._next_queued_write_sequence(),
                 kind="soft_reset",
                 payload=b"\x18",
-                description="CTRL-X",
+                description=f"CTRL-X source={source}",
             )
         )
 
@@ -847,11 +982,11 @@ class StageController(QObject):
                 raise StageControllerError("Serial connection is not available.")
             self._move_safety_check()
             status = self._query_status(serial_connection)
-            if status is None or status.position is None:
+            if status is None or status.display_position is None:
                 raise StageControllerError("Unable to read current stage position.")
             self._require_homed_axes(status, {"X", "Y"})
-            current_x = float(status.position[0])
-            current_y = float(status.position[1])
+            current_x = float(status.display_position[0])
+            current_y = float(status.display_position[1])
             delta_x = float(target_x_mm) - current_x
             delta_y = float(target_y_mm) - current_y
             move = MoveVector(x=delta_x, y=delta_y)
@@ -863,10 +998,7 @@ class StageController(QObject):
             )
             self._send_relative_move(serial_connection, move)
             self._wait_for_idle(serial_connection)
-            updated_status = self._query_status(serial_connection)
-            if updated_status and updated_status.position is not None:
-                self._last_stage_position = tuple(float(v) for v in updated_status.position)
-                self.stage_position_changed.emit(tuple(self._last_stage_position))
+            self._query_status(serial_connection)
             self.movement_finished.emit(
                 True,
                 f"Arrived at X={target_x_mm:.3f} mm, Y={target_y_mm:.3f} mm.",
@@ -1040,6 +1172,9 @@ class StageController(QObject):
             self.status_message.emit("Loading controller startup state...")
             with self._serial_session_lock:
                 self._ensure_axis_limits(serial_connection)
+                self._refresh_coordinate_system_state(
+                    serial_connection, apply_preference=True
+                )
                 status = self._query_status(serial_connection)
             if status is None:
                 raise StageControllerError("Unable to read startup controller status.")
@@ -1048,6 +1183,7 @@ class StageController(QObject):
                 "Axis limits loaded from controller. B uses app soft limit ±45 deg."
             )
 
+            self._emit_coordinate_system_status(status)
             effective_homed = status.homed_axes
             if effective_homed is None and self._homed_axes:
                 effective_homed = set(self._homed_axes)
@@ -1520,6 +1656,170 @@ class StageController(QObject):
         if not self._needles_up:
             raise AxisStateError("Needles are down. Raise A before moving.")
 
+    @staticmethod
+    def _desired_status_report_mask_for_mode(position_mode: str) -> int:
+        return 3 if position_mode == "machine" else 2
+
+    @staticmethod
+    def _parse_controller_coordinate_offsets(
+        raw_offsets: object,
+    ) -> dict[str, tuple[float, ...]]:
+        offsets: dict[str, tuple[float, ...]] = {}
+        if not isinstance(raw_offsets, dict):
+            return offsets
+        for system_raw, values_raw in raw_offsets.items():
+            if not isinstance(system_raw, str):
+                continue
+            if not isinstance(values_raw, (list, tuple)):
+                continue
+            system = system_raw.strip().upper()
+            try:
+                values = tuple(float(value) for value in values_raw)
+            except (TypeError, ValueError):
+                continue
+            if values:
+                offsets[system] = values
+        return offsets
+
+    def _ensure_status_report_mask(self, serial_connection: serial.Serial, mask: int) -> None:
+        if self._current_status_report_mask == mask:
+            return
+        self._write_command(serial_connection, f"$10={int(mask)}")
+        self._wait_for_ok(serial_connection)
+        self._current_status_report_mask = int(mask)
+
+    def _read_response_lines(
+        self,
+        serial_connection: serial.Serial,
+        *,
+        timeout: float,
+        description: str,
+    ) -> list[str]:
+        deadline = time.monotonic() + timeout
+        lines: list[str] = []
+        while time.monotonic() < deadline:
+            self._check_cancelled()
+            try:
+                raw = serial_connection.readline()
+            except serial.SerialException as exc:  # pragma: no cover - hardware interaction
+                raise StageControllerError(f"Serial read failed: {exc}") from exc
+            line = raw.decode("ascii", errors="ignore").strip()
+            if not line:
+                continue
+            logger.debug("SERIAL TRACE stage_readline %s line=%r", description, line)
+            homed_msg = self.HOMED_MSG_PATTERN.match(line)
+            if homed_msg:
+                axes = set(homed_msg.group("axes").upper())
+                if self._homed_axes:
+                    axes = set(self._homed_axes).union(axes)
+                self._update_homing_status(axes)
+                continue
+            lower = line.lower()
+            if lower == "ok":
+                return lines
+            if lower.startswith("alarm"):
+                raise StageControllerError(f"Controller alarm: {line}")
+            if lower.startswith("error") or line.startswith("[MSG:ERR:"):
+                raise StageControllerError(f"Controller reported: {line}")
+            lines.append(line)
+        raise StageControllerError(
+            f"Timeout waiting for controller response: {description}."
+        )
+
+    def _query_active_coordinate_system(
+        self, serial_connection: serial.Serial, timeout: float = 2.0
+    ) -> str | None:
+        self._write_command(serial_connection, "$G")
+        lines = self._read_response_lines(
+            serial_connection, timeout=timeout, description="$G"
+        )
+        for line in lines:
+            modal_match = self.MODAL_STATE_PATTERN.match(line)
+            if not modal_match:
+                continue
+            tokens = modal_match.group("modal").split()
+            for token in tokens:
+                candidate = token.strip().upper()
+                if candidate in self.WORK_COORDINATE_SYSTEMS:
+                    return candidate
+        return None
+
+    def _query_work_coordinate_offsets(
+        self, serial_connection: serial.Serial, timeout: float = 2.5
+    ) -> dict[str, tuple[float, ...]]:
+        self._write_command(serial_connection, "$#")
+        lines = self._read_response_lines(
+            serial_connection, timeout=timeout, description="$#"
+        )
+        offsets: dict[str, tuple[float, ...]] = {}
+        for line in lines:
+            match = self.COORDINATE_OFFSET_PATTERN.match(line)
+            if not match:
+                continue
+            coords = self._parse_float_tuple(match.group("coords"))
+            if coords is None:
+                continue
+            offsets[match.group("system").upper()] = coords
+        return offsets
+
+    def _refresh_coordinate_system_state(
+        self,
+        serial_connection: serial.Serial,
+        *,
+        apply_preference: bool,
+    ) -> None:
+        desired_mask = self._desired_status_report_mask_for_mode(
+            self._position_reporting_mode
+        )
+        self._ensure_status_report_mask(serial_connection, desired_mask)
+        if (
+            self._position_reporting_mode != "machine"
+            and apply_preference
+            and self._coordinate_startup_mode == "fixed"
+        ):
+            self._write_command(serial_connection, self._preferred_work_coordinate_system)
+            self._wait_for_ok(serial_connection)
+        detected_system = None if self._position_reporting_mode == "machine" else None
+        try:
+            if self._position_reporting_mode != "machine":
+                detected_system = self._query_active_coordinate_system(serial_connection)
+        except StageControllerError as exc:
+            logger.warning("Unable to query active coordinate system: %s", exc)
+        if (
+            detected_system is None
+            and self._position_reporting_mode != "machine"
+            and self._coordinate_startup_mode == "fixed"
+        ):
+            detected_system = self._preferred_work_coordinate_system
+        elif detected_system is None and self._position_reporting_mode != "machine":
+            detected_system = self._preferred_work_coordinate_system
+        self._active_work_coordinate_system = (
+            None if self._position_reporting_mode == "machine" else detected_system
+        )
+        if self._position_reporting_mode != "machine":
+            try:
+                self._controller_coordinate_offsets = self._query_work_coordinate_offsets(
+                    serial_connection
+                )
+            except StageControllerError as exc:
+                logger.warning("Unable to load work coordinate offsets: %s", exc)
+
+    def _emit_coordinate_system_status(self, status: _Status | None) -> None:
+        if self._position_reporting_mode == "machine":
+            self.status_message.emit("Coordinate system: machine coordinates ($10=3).")
+            return
+        coordinate_system = self._active_work_coordinate_system
+        if not coordinate_system:
+            self.status_message.emit("Coordinate system: work coordinates ($10=2).")
+            return
+        offset = None if status is None else status.work_offset
+        if offset is not None and len(offset) >= 2:
+            self.status_message.emit(
+                f"Coordinate system: {coordinate_system} (X={offset[0]:.3f}, Y={offset[1]:.3f})."
+            )
+            return
+        self.status_message.emit(f"Coordinate system: {coordinate_system}.")
+
     def _read_startup_limits(
         self, serial_connection: serial.Serial, timeout: float = 3.5
     ) -> None:
@@ -1644,7 +1944,7 @@ class StageController(QObject):
             elif job.kind == "jog_stop":
                 logger.debug("TIMING jog_stop_write_begin command=0x85")
             elif job.kind == "soft_reset":
-                logger.debug("SERIAL TRACE terminal_write CTRL-X")
+                logger.debug("SERIAL TRACE terminal_write %s", job.description)
             elif job.kind == "terminal":
                 logger.debug("SERIAL TRACE terminal_write payload=%r", job.description)
             serial_connection.write(job.payload)
@@ -1715,6 +2015,34 @@ class StageController(QObject):
         raise StageControllerError("Controller did not return to IDLE state in time.")
 
     def _query_status(self, serial_connection: serial.Serial, timeout: float = 1.5) -> Optional[_Status]:
+        desired_mask = self._desired_status_report_mask_for_mode(
+            self._position_reporting_mode
+        )
+        self._ensure_status_report_mask(serial_connection, desired_mask)
+        status = self._read_status_frame(serial_connection, timeout=timeout)
+        if status is None:
+            return None
+        if self._position_reporting_mode == "work":
+            status.display_position = status.work_position
+            if status.position is None:
+                machine_status = self._query_machine_status_snapshot(
+                    serial_connection, timeout=timeout
+                )
+                if machine_status is not None and machine_status.position is not None:
+                    status.position = machine_status.position
+        else:
+            status.display_position = status.position
+        self._last_stage_state = status.state
+        self._last_status_timestamp = time.monotonic()
+        self._controller_state_stale = False
+        self._update_cached_positions(status)
+        self._update_needles_from_status(status)
+        self._ensure_b_axis_zero_reference(status)
+        return status
+
+    def _read_status_frame(
+        self, serial_connection: serial.Serial, *, timeout: float
+    ) -> Optional[_Status]:
         try:
             logger.debug("SERIAL TRACE stage_query_status write=?")
             serial_connection.write(b"?\n")
@@ -1742,35 +2070,131 @@ class StageController(QObject):
                     axes = set(self._homed_axes).union(axes)
                 self._update_homing_status(axes)
                 continue
-            match = self.STATUS_PATTERN.search(line)
-            if not match:
+            status = self._parse_status_line(line)
+            if status is None:
                 continue
-            state = match.group("state")
-            self._last_stage_state = state
-            self._last_status_timestamp = time.monotonic()
-            self._controller_state_stale = False
-            mpos = match.group("mpos")
-            position = None
-            if mpos:
-                try:
-                    coords = tuple(float(value) for value in mpos.split(","))
-                    if coords:
-                        position = coords
-                        self._last_stage_position = coords
-                        a_idx = self.AXIS_INDEX.get("A")
-                        self.stage_position_changed.emit(tuple(coords))
-                except ValueError:
-                    position = None
-            homed_axes = None
             homed_match = self.HOMED_PATTERN.search(line)
             if homed_match:
-                homed_axes = set(homed_match.group(1).upper())
-                self._update_homing_status(homed_axes)
-            status = _Status(state=state, position=position, homed_axes=homed_axes)
-            self._update_needles_from_status(status)
-            self._ensure_b_axis_zero_reference(status)
+                status.homed_axes = set(homed_match.group(1).upper())
+                self._update_homing_status(status.homed_axes)
             return status
         return None
+
+    def _query_machine_status_snapshot(
+        self, serial_connection: serial.Serial, timeout: float = 1.5
+    ) -> Optional[_Status]:
+        machine_mask = self._desired_status_report_mask_for_mode("machine")
+        desired_mask = self._desired_status_report_mask_for_mode(
+            self._position_reporting_mode
+        )
+        self._ensure_status_report_mask(serial_connection, machine_mask)
+        try:
+            status = self._read_status_frame(serial_connection, timeout=timeout)
+            if status is not None:
+                status.display_position = status.position
+            return status
+        finally:
+            if desired_mask != machine_mask:
+                self._ensure_status_report_mask(serial_connection, desired_mask)
+
+    def _parse_status_line(self, line: str) -> Optional[_Status]:
+        match = self.STATUS_PATTERN.search(line)
+        if not match:
+            return None
+        body = match.group("body")
+        parts = body.split("|")
+        if not parts:
+            return None
+        state = parts[0].strip()
+        if not state:
+            return None
+
+        machine_position: tuple[float, ...] | None = None
+        work_position: tuple[float, ...] | None = None
+        work_offset: tuple[float, ...] | None = None
+        for part in parts[1:]:
+            field_match = self.STATUS_FIELD_PATTERN.match(part)
+            if not field_match:
+                continue
+            key = field_match.group("key")
+            value = field_match.group("value")
+            if key == "MPos":
+                machine_position = self._parse_float_tuple(value)
+            elif key == "WPos":
+                work_position = self._parse_float_tuple(value)
+            elif key == "WCO":
+                work_offset = self._parse_float_tuple(value)
+
+        coordinate_system = self._active_work_coordinate_system
+        if machine_position is None and work_position is not None and work_offset is not None:
+            machine_position = self._combine_coordinate_vectors(
+                work_position, work_offset, operator="+"
+            )
+        if work_position is None and machine_position is not None and work_offset is not None:
+            work_position = self._combine_coordinate_vectors(
+                machine_position, work_offset, operator="-"
+            )
+        if (
+            work_offset is None
+            and machine_position is not None
+            and work_position is not None
+        ):
+            work_offset = self._combine_coordinate_vectors(
+                machine_position, work_position, operator="-"
+            )
+            if coordinate_system and work_offset is not None:
+                self._controller_coordinate_offsets[coordinate_system] = work_offset
+
+        return _Status(
+            state=state,
+            position=machine_position,
+            display_position=work_position if work_position is not None else machine_position,
+            work_position=work_position,
+            work_offset=work_offset,
+            coordinate_system=coordinate_system,
+        )
+
+    @staticmethod
+    def _parse_float_tuple(raw: str) -> tuple[float, ...] | None:
+        try:
+            values = tuple(float(part) for part in raw.split(","))
+        except ValueError:
+            return None
+        return values if values else None
+
+    @staticmethod
+    def _combine_coordinate_vectors(
+        left: tuple[float, ...],
+        right: tuple[float, ...],
+        *,
+        operator: str,
+    ) -> tuple[float, ...] | None:
+        size = min(len(left), len(right))
+        if size <= 0:
+            return None
+        if operator == "+":
+            return tuple(float(left[idx]) + float(right[idx]) for idx in range(size))
+        if operator == "-":
+            return tuple(float(left[idx]) - float(right[idx]) for idx in range(size))
+        raise ValueError(f"Unsupported coordinate operator: {operator}")
+
+    def _update_cached_positions(self, status: _Status) -> None:
+        if status.coordinate_system:
+            self._active_work_coordinate_system = status.coordinate_system
+        if status.position is not None:
+            self._last_machine_position = tuple(float(v) for v in status.position)
+        if status.display_position is not None:
+            coords = tuple(float(v) for v in status.display_position)
+            self._last_stage_position = coords
+            self.stage_position_changed.emit(coords)
+        if (
+            status.coordinate_system
+            and status.work_offset is not None
+            and status.coordinate_system in self.WORK_COORDINATE_SYSTEMS
+        ):
+            self._controller_coordinate_offsets[status.coordinate_system] = tuple(
+                float(v) for v in status.work_offset
+            )
 
     def _ensure_b_axis_zero_reference(self, status: _Status) -> None:
         if self._b_axis_zero_position is not None:

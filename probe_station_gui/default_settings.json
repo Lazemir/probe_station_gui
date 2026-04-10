@@ -10,11 +10,6 @@
         "qt_key": 16777235,
         "modifiers": 0,
         "text": ""
-      },
-      {
-        "qt_key": 1062,
-        "modifiers": 0,
-        "text": "ц"
       }
     ],
     "move_y_negative": [
@@ -27,11 +22,6 @@
         "qt_key": 16777237,
         "modifiers": 0,
         "text": ""
-      },
-      {
-        "qt_key": 1067,
-        "modifiers": 0,
-        "text": "ы"
       }
     ],
     "move_x_negative": [
@@ -44,11 +34,6 @@
         "qt_key": 16777234,
         "modifiers": 0,
         "text": ""
-      },
-      {
-        "qt_key": 1060,
-        "modifiers": 0,
-        "text": "ф"
       }
     ],
     "move_x_positive": [
@@ -61,11 +46,6 @@
         "qt_key": 16777236,
         "modifiers": 0,
         "text": ""
-      },
-      {
-        "qt_key": 1074,
-        "modifiers": 0,
-        "text": "в"
       }
     ],
     "rotate_b_negative": [
@@ -73,11 +53,6 @@
         "qt_key": 81,
         "modifiers": 0,
         "text": "q"
-      },
-      {
-        "qt_key": 1081,
-        "modifiers": 0,
-        "text": "й"
       }
     ],
     "rotate_b_positive": [
@@ -85,11 +60,6 @@
         "qt_key": 69,
         "modifiers": 0,
         "text": "e"
-      },
-      {
-        "qt_key": 1091,
-        "modifiers": 0,
-        "text": "у"
       }
     ]
   },
@@ -109,6 +79,11 @@
     "lower_direction": "negative",
     "down_position_mm": 0.0,
     "down_position_configured": false
+  },
+  "coordinate_system": {
+    "position_mode": "work",
+    "startup_mode": "controller",
+    "preferred_system": "G54"
   },
   "feedrates": {
     "linear": {

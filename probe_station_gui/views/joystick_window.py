@@ -853,7 +853,7 @@ class JoystickWindow(QWidget):
                     self.stage_controller.queue_jog_stop()
                     return
                 if isinstance(command, bytes) and command == b"\x18":
-                    self.stage_controller.queue_soft_reset()
+                    self.stage_controller.queue_soft_reset(source="joystick_reset_button")
                     return
                 if isinstance(command, str) and command.startswith("$J="):
                     self.stage_controller.queue_jog_command(command)

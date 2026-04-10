@@ -424,8 +424,6 @@ class DesignNavigatorPanel(QWidget):
     layer_visibility_changed = Signal(int, int, bool)
     load_script_requested = Signal(str)
     reload_script_requested = Signal()
-    capture_chip_point_requested = Signal(int)
-    clear_registration_requested = Signal()
     move_to_target_requested = Signal(str)
     next_target_requested = Signal()
     previous_target_requested = Signal()
@@ -475,8 +473,14 @@ class DesignNavigatorPanel(QWidget):
         layer_layout.addWidget(self._layer_list)
         root_layout.addWidget(layer_group)
 
-        registration_group = QGroupBox("Calibration", self)
+        registration_group = QGroupBox("Registration", self)
         registration_layout = QVBoxLayout(registration_group)
+        self._registration_hint_label = QLabel(
+            "Use left click for design point 1 and right click for design point 2 in the layout view.",
+            registration_group,
+        )
+        self._registration_hint_label.setWordWrap(True)
+        registration_layout.addWidget(self._registration_hint_label)
         self._calibration_prompt_label = QLabel(registration_group)
         self._calibration_prompt_label.setWordWrap(True)
         registration_layout.addWidget(self._calibration_prompt_label)
@@ -499,25 +503,6 @@ class DesignNavigatorPanel(QWidget):
         self._registration_status_label = QLabel("No design registration.", registration_group)
         self._registration_status_label.setWordWrap(True)
         registration_layout.addWidget(self._registration_status_label)
-        capture_row = QHBoxLayout()
-        self._capture_chip_point_1_button = QPushButton("Capture Chip Point 1", registration_group)
-        self._capture_chip_point_1_button.setStyleSheet("QPushButton { color: #ffd54f; }")
-        self._capture_chip_point_2_button = QPushButton("Capture Chip Point 2", registration_group)
-        self._capture_chip_point_2_button.setStyleSheet("QPushButton { color: #ff7043; }")
-        capture_row.addWidget(self._capture_chip_point_1_button)
-        capture_row.addWidget(self._capture_chip_point_2_button)
-        registration_layout.addLayout(capture_row)
-        self._clear_registration_button = QPushButton("Restart Calibration", registration_group)
-        registration_layout.addWidget(self._clear_registration_button)
-        self._capture_chip_point_1_button.clicked.connect(
-            lambda: self.capture_chip_point_requested.emit(0)
-        )
-        self._capture_chip_point_2_button.clicked.connect(
-            lambda: self.capture_chip_point_requested.emit(1)
-        )
-        self._clear_registration_button.clicked.connect(
-            self.clear_registration_requested.emit
-        )
         root_layout.addWidget(registration_group)
 
         script_group = QGroupBox("Measurement Plan", self)
@@ -701,7 +686,7 @@ class DesignNavigatorPanel(QWidget):
             messages.append("pyqtgraph not installed: design window is disabled.")
         else:
             messages.append(
-                "Left click sets mark 1, right click sets mark 2. Then capture matching chip points."
+                "Load a GDS for registered navigation. Use the Alignment dock when you want to capture chip points."
             )
         self._availability_label.setText(" ".join(messages))
 
@@ -714,13 +699,6 @@ class DesignNavigatorPanel(QWidget):
         self._reload_script_button.setEnabled(
             has_document and self._script_label.text() != "No script loaded."
         )
-        self._capture_chip_point_1_button.setEnabled(
-            has_document and self._source_design_marks[0] is not None
-        )
-        self._capture_chip_point_2_button.setEnabled(
-            has_document and self._source_design_marks[1] is not None
-        )
-        self._clear_registration_button.setEnabled(has_document)
         has_targets = bool(self._targets)
         has_selection = self._selected_target_id is not None
         self._previous_button.setEnabled(has_targets)
@@ -799,15 +777,16 @@ class DesignNavigatorPanel(QWidget):
 
 
 class DesignLayoutWindow(QWidget):
-    """Honest top-level design window with layout and controls combined."""
+    """Top-level design window combining the layout view and design controls."""
 
     calibration_point_selected = Signal(int, float, float)
+    hover_snap_changed = Signal(object)
     visibility_changed = Signal(bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         _ = parent
         super().__init__(None)
-        self.setWindowTitle("Design")
+        self.setWindowTitle("Design Window")
         self.setWindowFlag(Qt.Window, True)
         self.resize(1480, 920)
 
@@ -821,7 +800,7 @@ class DesignLayoutWindow(QWidget):
         self._main_view.calibration_point_selected.connect(
             self.calibration_point_selected.emit
         )
-        self._main_view.hover_snap_changed.connect(self.navigator_panel.set_hover_snap)
+        self._main_view.hover_snap_changed.connect(self.hover_snap_changed.emit)
         root_layout.addWidget(self._main_view, 1)
         root_layout.addWidget(self.navigator_panel, 0)
 
@@ -848,6 +827,34 @@ class DesignLayoutWindow(QWidget):
 
     def set_stage_registration_marks(self, source_stage_marks: list[Point2D | None]) -> None:
         self.navigator_panel.set_stage_registration_marks(source_stage_marks)
+
+    def set_script_path(self, script_path: str | None) -> None:
+        self.navigator_panel.set_script_path(script_path)
+
+    def set_calibration_prompt(self, text: str) -> None:
+        self.navigator_panel.set_calibration_prompt(text)
+
+    def set_registration_status(self, text: str) -> None:
+        self.navigator_panel.set_registration_status(text)
+
+    def set_status_message(self, text: str) -> None:
+        self.navigator_panel.set_status_message(text)
+
+    def set_hover_snap(self, snap_result: SnapResult | None) -> None:
+        self.navigator_panel.set_hover_snap(snap_result)
+
+    def set_current_position(
+        self,
+        stage_xy: Point2D | None,
+        design_xy: Point2D | None,
+        *,
+        fov_design_size: Point2D | None = None,
+    ) -> None:
+        self.navigator_panel.set_current_position(
+            stage_xy,
+            design_xy,
+            fov_design_size=fov_design_size,
+        )
 
     def set_current_design_position(
         self,

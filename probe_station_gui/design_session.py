@@ -90,6 +90,20 @@ class DesignSession:
         self.registration = None
         self.registration_status = "No design registration."
 
+    def clear_source_stage_marks(self) -> None:
+        """Drop captured stage-side marks while preserving selected design marks."""
+
+        self.source_stage_marks = [None, None]
+        self.check_design_marks.clear()
+        self.check_stage_marks.clear()
+        self.registration = None
+        self.registration_status = self.calibration_prompt()
+
+    def has_complete_source_design_marks(self) -> bool:
+        """Return whether both design-side source marks are selected."""
+
+        return all(point is not None for point in self.source_design_marks)
+
     def capture_source_pair(self, design_point: Point2D, stage_point: Point2D) -> int:
         """Append a matched design/stage pair for simplified calibration."""
 

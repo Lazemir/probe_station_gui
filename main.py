@@ -4,21 +4,20 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import time
 from datetime import datetime
 from pathlib import Path
 import sys
 
+import numpy as np
 from PySide6.QtCore import QThread, QTimer, Qt, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
-    QHBoxLayout,
-    QLabel,
     QMainWindow,
     QPlainTextEdit,
-    QPushButton,
     QVBoxLayout,
     QWidget,
 )
@@ -36,6 +35,7 @@ from probe_station_gui.design_session import AlignmentPreparation, DesignSession
 from probe_station_gui.dialogs.settings_dialog import SettingsDialog
 from probe_station_gui.lcr_meter import LCRMeterController
 from probe_station_gui.settings_manager import SettingsManager
+from probe_station_gui.views.alignment_panel import AlignmentPanel
 from probe_station_gui.views.design_navigator_panel import (
     DesignLayoutWindow,
     DesignNavigatorPanel,
@@ -52,7 +52,6 @@ logger = logging.getLogger(__name__)
 class Main(QMainWindow):
     """Main application window wiring the camera view and serial dialog."""
 
-    ALIGNMENT_MODE_SHORTCUT = "Ctrl+Alt+A"
     ALIGNMENT_CAPTURE_SHORTCUT = "Space"
     ALIGNMENT_TARGET_ANGLES = (-180.0, -90.0, 0.0, 90.0, 180.0)
     DESIGN_POSITION_REFRESH_MS = 800
@@ -63,6 +62,7 @@ class Main(QMainWindow):
     MANUAL_JOG_IGNORE_IDLE_AFTER_COMMAND_S = 0.25
     MANUAL_JOG_RECONCILE_SMOOTH_THRESHOLD_MM = 0.35
     MANUAL_JOG_RECONCILE_SMOOTH_ALPHA = 0.35
+    MANUAL_JOG_STATUS_SETTLE_HOLD_S = 0.8
     TERMINAL_REFRESH_DELAYS_MS = (180, 500)
     TERMINAL_RESET_REFRESH_DELAYS_MS = (500, 1100, 1800)
     TERMINAL_RESUME_AFTER_JOG_MS = 180
@@ -92,37 +92,33 @@ class Main(QMainWindow):
         self.serial_connection_panel: SerialConnectionPanel | None = None
         self.needle_calibration_panel: NeedleCalibrationPanel | None = None
         self.oscillation_panel: OscillationPanel | None = None
+        self.alignment_panel: AlignmentPanel | None = None
         self.design_navigator_panel: DesignNavigatorPanel | None = None
         self.design_layout_window: DesignLayoutWindow | None = None
-        self.oscillation_window: QMainWindow | None = None
         self.joystick_dock: CollapsibleDockWidget | None = None
         self.serial_terminal_dock: CollapsibleDockWidget | None = None
         self.serial_connection_dock: CollapsibleDockWidget | None = None
         self.needle_calibration_dock: CollapsibleDockWidget | None = None
-        self.design_navigator_dock: CollapsibleDockWidget | None = None
-        self._needle_calibration_active = False
+        self.oscillation_dock: CollapsibleDockWidget | None = None
         self.alignment_dock: CollapsibleDockWidget | None = None
-        self._alignment_mode_enabled = False
-        self._alignment_positions: list[tuple[float, float]] = []
-        self._alignment_action: QAction | None = None
+        self._needle_calibration_active = False
         self._alignment_capture_action: QAction | None = None
         self._alignment_exit_action: QAction | None = None
-        self._alignment_status_label: QLabel | None = None
-        self._alignment_center_label: QLabel | None = None
-        self._alignment_cursor_label: QLabel | None = None
-        self._alignment_capture_button: QPushButton | None = None
-        self._alignment_reset_button: QPushButton | None = None
-        self._alignment_exit_button: QPushButton | None = None
         self._design_layout_window_action: QAction | None = None
-        self._oscillation_window_action: QAction | None = None
         self._last_selected_design_point: tuple[float, float] | None = None
         self._current_design_stage_xy: tuple[float, float] | None = None
         self._pending_design_stage_xy: tuple[float, float] | None = None
         self._pending_alignment_preparation: AlignmentPreparation | None = None
+        self._pending_quick_alignment_rotation = False
+        self._manual_alignment_pick_slot: int | None = None
+        self._manual_alignment_points: list[tuple[float, float] | None] = [None, None]
         self._manual_jog_stage_xy: tuple[float, float] | None = None
         self._manual_jog_velocity_xy: tuple[float, float] | None = None
         self._manual_jog_last_timestamp: float | None = None
         self._manual_jog_last_prediction_log_at = 0.0
+        self._manual_jog_waiting_for_fresh_status = False
+        self._manual_jog_settle_until = 0.0
+        self._manual_jog_stop_status_timestamp: float | None = None
         self._last_reported_b_position: float | None = None
         self._design_session = DesignSession()
         self.statusBar()
@@ -184,27 +180,6 @@ class Main(QMainWindow):
 
         self._setup_menus()
         self._apply_settings()
-        window_menu = self.menuBar().addMenu("Panels")
-        if self.joystick_dock is not None:
-            joystick_action = self.joystick_dock.toggleViewAction()
-            joystick_action.setText("Joystick")
-            window_menu.addAction(joystick_action)
-        if self.serial_terminal_dock is not None:
-            terminal_action = self.serial_terminal_dock.toggleViewAction()
-            terminal_action.setText("Serial Terminal")
-            window_menu.addAction(terminal_action)
-        if self.serial_connection_dock is not None:
-            connection_action = self.serial_connection_dock.toggleViewAction()
-            connection_action.setText("Connection")
-            window_menu.addAction(connection_action)
-        if self.needle_calibration_dock is not None:
-            needle_action = self.needle_calibration_dock.toggleViewAction()
-            needle_action.setText("Needle Calibration")
-            window_menu.addAction(needle_action)
-        if self.alignment_dock is not None:
-            alignment_action = self.alignment_dock.toggleViewAction()
-            alignment_action.setText("Chip Alignment")
-            window_menu.addAction(alignment_action)
 
         QTimer.singleShot(
             self.STARTUP_AUTO_CONNECT_DELAY_MS, self._auto_connect_if_possible
@@ -218,8 +193,8 @@ class Main(QMainWindow):
         )
 
     def on_click(self, dx: float, dy: float, _rel_x: float, _rel_y: float) -> None:
-        if self._alignment_mode_enabled:
-            self._capture_alignment_marker(dx, dy)
+        if self._manual_alignment_pick_slot is not None:
+            self._capture_manual_alignment_clicked(dx, dy)
             return
         self.stage_controller.request_move(dx, dy)
 
@@ -309,6 +284,9 @@ class Main(QMainWindow):
         self._manual_jog_stage_xy = None
         self._manual_jog_velocity_xy = None
         self._manual_jog_last_timestamp = None
+        self._manual_jog_waiting_for_fresh_status = False
+        self._manual_jog_settle_until = 0.0
+        self._manual_jog_stop_status_timestamp = None
         logger.info("Serial disconnected")
         self.stage_controller.request_stop_oscillation()
         self._stop_needle_calibration()
@@ -324,8 +302,7 @@ class Main(QMainWindow):
             self.needle_calibration_panel.set_current_a(None)
         if self.oscillation_panel:
             self.oscillation_panel.set_running(False, "")
-        if self._alignment_mode_enabled:
-            self._exit_alignment_mode()
+        self._reset_manual_alignment(cancel_pick=True)
         self._invalidate_design_registration(
             "Design registration cleared after serial disconnect."
         )
@@ -375,16 +352,16 @@ class Main(QMainWindow):
 
     def _setup_menus(self) -> None:
         app_menu = self.menuBar().addMenu("Application")
-        tools_menu = self.menuBar().addMenu("Tools")
-        design_menu = self.menuBar().addMenu("Design")
-        oscillation_menu = self.menuBar().addMenu("Oscillation")
+        panels_menu = self.menuBar().addMenu("Tools")
+        calibration_menu = self.menuBar().addMenu("Calibration")
 
-        settings_menu = self.menuBar().addMenu("Settings")
         settings_action = QAction("Settings…", self)
+        settings_action.setText("Settings...")
         settings_action.triggered.connect(self._open_settings_dialog)
-        settings_menu.addAction(settings_action)
+        app_menu.addAction(settings_action)
 
         open_log_action = QAction("Open Status Log…", self)
+        open_log_action.setText("Open Status Log...")
         open_log_action.triggered.connect(self._open_status_log)
         app_menu.addAction(open_log_action)
 
@@ -393,34 +370,46 @@ class Main(QMainWindow):
         self._design_layout_window_action.toggled.connect(
             self._toggle_design_layout_window
         )
-        design_menu.addAction(self._design_layout_window_action)
+        calibration_menu.addAction(self._design_layout_window_action)
 
-        self._oscillation_window_action = QAction("Open Controls", self)
-        self._oscillation_window_action.triggered.connect(self._show_oscillation_window)
-        oscillation_menu.addAction(self._oscillation_window_action)
+        for dock, title in (
+            (self.oscillation_dock, "Oscillation"),
+            (self.serial_connection_dock, "Connection"),
+            (self.joystick_dock, "Joystick"),
+            (self.serial_terminal_dock, "Serial Terminal"),
+        ):
+            if dock is None:
+                continue
+            action = dock.toggleViewAction()
+            action.setText(title)
+            panels_menu.addAction(action)
 
-        self._alignment_action = QAction("Chip Alignment Mode", self)
-        self._alignment_action.setCheckable(True)
-        self._alignment_action.setShortcut(QKeySequence(self.ALIGNMENT_MODE_SHORTCUT))
-        self._alignment_action.setShortcutContext(Qt.ApplicationShortcut)
-        self._alignment_action.toggled.connect(self._set_alignment_mode_enabled)
-        tools_menu.addAction(self._alignment_action)
-        self.addAction(self._alignment_action)
+        for dock, title in (
+            (self.alignment_dock, "Alignment"),
+            (self.needle_calibration_dock, "Needle Calibration"),
+        ):
+            if dock is None:
+                continue
+            action = dock.toggleViewAction()
+            action.setText(title)
+            calibration_menu.addAction(action)
 
-        self._alignment_capture_action = QAction("Capture Alignment Marker", self)
+        self._alignment_capture_action = QAction("Capture Alignment Point", self)
         self._alignment_capture_action.setShortcut(
             QKeySequence(self.ALIGNMENT_CAPTURE_SHORTCUT)
         )
         self._alignment_capture_action.setShortcutContext(Qt.ApplicationShortcut)
         self._alignment_capture_action.triggered.connect(
-            self._capture_alignment_marker
+            self._capture_manual_alignment_center_shortcut
         )
         self.addAction(self._alignment_capture_action)
 
-        self._alignment_exit_action = QAction("Exit Alignment Mode", self)
+        self._alignment_exit_action = QAction("Cancel Alignment Pick", self)
         self._alignment_exit_action.setShortcut(QKeySequence(Qt.Key_Escape))
         self._alignment_exit_action.setShortcutContext(Qt.ApplicationShortcut)
-        self._alignment_exit_action.triggered.connect(self._exit_alignment_mode)
+        self._alignment_exit_action.triggered.connect(
+            self._cancel_manual_alignment_pick
+        )
         self.addAction(self._alignment_exit_action)
 
     def _toggle_design_layout_window(self, visible: bool) -> None:
@@ -432,6 +421,7 @@ class Main(QMainWindow):
             return
         if visible:
             self.design_layout_window.show_and_raise()
+            self._collapse_alignment_panel_if_ready()
         else:
             self.design_layout_window.hide()
 
@@ -441,13 +431,8 @@ class Main(QMainWindow):
         self._design_layout_window_action.blockSignals(True)
         self._design_layout_window_action.setChecked(visible)
         self._design_layout_window_action.blockSignals(False)
-
-    def _show_oscillation_window(self) -> None:
-        if self.oscillation_window is None:
-            return
-        self.oscillation_window.show()
-        self.oscillation_window.raise_()
-        self.oscillation_window.activateWindow()
+        if visible:
+            self._collapse_alignment_panel_if_ready()
 
     def _on_design_layout_point_selected(
         self, slot: int, x_value: float, y_value: float
@@ -455,7 +440,13 @@ class Main(QMainWindow):
         document = self._design_session.document
         if document is None:
             return
+        if slot not in (0, 1):
+            return
         snapped_point = (float(x_value), float(y_value))
+        self._manual_alignment_pick_slot = None
+        self._manual_alignment_points = [None, None]
+        self._pending_alignment_preparation = None
+        self._design_session.clear_source_stage_marks()
         self._last_selected_design_point = snapped_point
         self._design_session.set_source_design_mark(slot, snapped_point)
         self._refresh_design_panel()
@@ -480,20 +471,6 @@ class Main(QMainWindow):
                 jog.linear_distance_mm,
                 jog.rotary_distance_deg,
             )
-            feedrates = self.settings_manager.feedrate_configuration()
-            self.joystick_panel.apply_feedrate_settings(
-                feedrates.linear.presets,
-                feedrates.linear.default,
-                feedrates.rotary.presets,
-                feedrates.rotary.default,
-            )
-            logger.debug(
-                "Joystick feedrate settings reapplied: linear=%s (default=%s) rotary=%s (default=%s)",
-                feedrates.linear.presets,
-                feedrates.linear.default,
-                feedrates.rotary.presets,
-                feedrates.rotary.default,
-            )
         needle_settings = self.settings_manager.needle_calibration_configuration()
         self.stage_controller.apply_needle_calibration(
             down_position_mm=(
@@ -502,6 +479,12 @@ class Main(QMainWindow):
                 else None
             ),
             lower_direction=needle_settings.lower_direction,
+        )
+        coordinate_settings = self.settings_manager.coordinate_system_configuration()
+        self.stage_controller.apply_coordinate_system_configuration(
+            position_mode=coordinate_settings.position_mode,
+            startup_mode=coordinate_settings.startup_mode,
+            preferred_system=coordinate_settings.preferred_system,
         )
         self.lcr_controller.apply_configuration(
             resource_name=needle_settings.visa_resource,
@@ -520,6 +503,9 @@ class Main(QMainWindow):
                 lower_direction=needle_settings.lower_direction,
                 short_threshold_ohm=needle_settings.short_threshold_ohm,
             )
+        if self.serial_connection and self.serial_connection.is_open:
+            self.stage_controller.request_startup_sync(auto_home_a=False)
+        self._update_coordinate_display(cursor_xy=None)
 
     def _open_settings_dialog(self) -> None:
         dialog = SettingsDialog(self.settings_manager.settings, self)
@@ -532,37 +518,117 @@ class Main(QMainWindow):
         self._apply_settings()
         logger.info("Settings updated from dialog")
 
-    def _set_alignment_mode_enabled(self, enabled: bool) -> None:
-        self._alignment_mode_enabled = enabled
-        self._alignment_positions.clear()
-        self.view.clear_target_cross()
-        self.view.set_alignment_mode(enabled)
-        self._update_alignment_ui()
+    def _design_backed_alignment_active(self) -> bool:
+        return self._design_session.has_complete_source_design_marks()
+
+    def _design_window_is_open(self) -> bool:
+        return self.design_layout_window is not None and self.design_layout_window.isVisible()
+
+    def _current_alignment_points(self) -> list[tuple[float, float] | None]:
+        if self._design_backed_alignment_active():
+            return list(self._design_session.source_stage_marks[:2])
+        return list(self._manual_alignment_points[:2])
+
+    def _collapse_alignment_panel_if_ready(self) -> None:
+        if self.alignment_dock is None or not self._design_window_is_open():
+            return
+        registration = self._design_session.registration
+        if registration is not None and registration.valid:
+            self.alignment_dock.set_collapsed(True)
+
+    def _collapse_alignment_panel_if_design_open(self) -> None:
+        if self.alignment_dock is None or not self._design_window_is_open():
+            return
+        self.alignment_dock.set_collapsed(True)
+
+    def _set_alignment_panel_expanded(self) -> None:
+        if self.alignment_dock is None:
+            return
+        self.alignment_dock.setVisible(True)
+        self.alignment_dock.set_collapsed(False)
+        self.alignment_dock.raise_()
+
+    def _arm_manual_alignment_pick(self, slot: int) -> None:
+        if slot not in (0, 1):
+            return
+        self._manual_alignment_pick_slot = slot
+        self._set_alignment_panel_expanded()
+        self._refresh_manual_alignment_ui()
         self._update_coordinate_display(cursor_xy=None)
-        if self.alignment_dock:
-            self.alignment_dock.setVisible(enabled)
-            if enabled:
-                self.alignment_dock.raise_()
-        if enabled:
-            self._show_status(
-                "Chip alignment mode enabled. Center marker 1 and capture it, then move to marker 2.",
-                6000,
-            )
+        self._show_status(
+            f"Chip alignment: pick point {slot + 1} in the image, or press Space to capture the crosshair center.",
+            6000,
+        )
+
+    def _cancel_manual_alignment_pick(self) -> None:
+        if self._manual_alignment_pick_slot is None:
+            return
+        self._manual_alignment_pick_slot = None
+        self._refresh_manual_alignment_ui()
+        self._update_coordinate_display(cursor_xy=None)
+        self._show_status("Chip alignment image pick cancelled.", 3000)
+
+    def _reset_manual_alignment(self, *, cancel_pick: bool = True) -> None:
+        self._manual_alignment_points = [None, None]
+        if cancel_pick:
+            self._manual_alignment_pick_slot = None
+        self._refresh_manual_alignment_ui()
+        self._update_coordinate_display(cursor_xy=None)
+
+    def _reset_alignment_capture_points(self) -> None:
+        if self._design_backed_alignment_active():
+            self._pending_alignment_preparation = None
+            self._pending_quick_alignment_rotation = False
+            self._design_session.clear_source_stage_marks()
+            self._refresh_design_panel()
+            self._refresh_design_position()
         else:
-            self._show_status("Chip alignment mode disabled.", 3000)
+            self._reset_manual_alignment(cancel_pick=False)
+            self._pending_quick_alignment_rotation = False
+        self._manual_alignment_pick_slot = None
+        self._set_alignment_panel_expanded()
+        self._refresh_manual_alignment_ui()
+        self._update_coordinate_display(cursor_xy=None)
 
-    def _exit_alignment_mode(self) -> None:
-        if self._alignment_action and self._alignment_action.isChecked():
-            self._alignment_action.setChecked(False)
+    def _capture_manual_alignment_center_shortcut(self) -> None:
+        if self._manual_alignment_pick_slot is None:
+            return
+        self._capture_manual_alignment_center(self._manual_alignment_pick_slot)
 
-    def _reset_alignment_capture(self) -> None:
-        self._alignment_positions.clear()
-        self._update_alignment_ui()
-        if self._alignment_mode_enabled:
-            self._show_status(
-                "Chip alignment capture reset. Center marker 1 and capture it again.",
-                5000,
-            )
+    def _resolve_alignment_capture_stage_position(
+        self,
+    ) -> tuple[float, float] | None:
+        try:
+            stage_position = self.stage_controller.current_stage_position()
+        except Exception as exc:
+            if str(exc) != "Unable to read stage position.":
+                self._show_status(str(exc), 5000)
+                return None
+            latest = self.stage_controller.latest_stage_position()
+            if latest is None or len(latest) < 2:
+                self.stage_controller.request_status_refresh()
+                self._show_status(str(exc), 5000)
+                return None
+            stage_position = latest
+        if len(stage_position) < 2:
+            self.stage_controller.request_status_refresh()
+            self._show_status("X/Y coordinates are unavailable.", 5000)
+            return None
+        return (float(stage_position[0]), float(stage_position[1]))
+
+    def _capture_manual_alignment_center(self, slot: int) -> None:
+        if slot not in (0, 1):
+            return
+        center_xy = self._resolve_alignment_capture_stage_position()
+        if center_xy is None:
+            return
+        self._capture_manual_alignment_point(slot, center_xy, source="center")
+
+    def _request_alignment_capture(self, slot: int, mode: str) -> None:
+        if mode == "image":
+            self._arm_manual_alignment_pick(slot)
+            return
+        self._capture_manual_alignment_center(slot)
 
     def _zero_b_axis(self) -> None:
         try:
@@ -579,10 +645,11 @@ class Main(QMainWindow):
         except Exception as exc:
             self._show_status(str(exc), 5000)
 
-    def _capture_alignment_marker(
+    def _capture_manual_alignment_clicked(
         self, dx_pixels: float = 0.0, dy_pixels: float = 0.0
     ) -> None:
-        if not self._alignment_mode_enabled:
+        slot = self._manual_alignment_pick_slot
+        if slot is None:
             return
         try:
             center_xy, captured = self.stage_controller.resolve_clicked_point_xy(
@@ -593,36 +660,88 @@ class Main(QMainWindow):
             self._show_status(str(exc), 5000)
             return
         self._update_coordinate_display(center_xy=center_xy, cursor_xy=captured)
-        if len(self._alignment_positions) >= 2:
-            self._alignment_positions.clear()
-        self._alignment_positions.append(captured)
-        self._update_alignment_ui()
+        self._capture_manual_alignment_point(slot, captured, source="image")
 
-        if len(self._alignment_positions) == 1:
+    def _capture_manual_alignment_point(
+        self, slot: int, captured: tuple[float, float], *, source: str
+    ) -> None:
+        if slot not in (0, 1):
+            return
+        self._manual_alignment_pick_slot = None
+        self._refresh_manual_alignment_ui()
+
+        label = "image" if source == "image" else "center"
+        if self._design_backed_alignment_active():
+            self._pending_alignment_preparation = None
+            self._design_session.set_source_stage_mark(slot, captured)
+            self._refresh_design_panel()
+            self._refresh_design_position()
+            pair_count = self._design_session.source_pair_count()
+            if pair_count < 2:
+                self._set_alignment_panel_expanded()
+                self._show_status(
+                    f"Design alignment: point {slot + 1} captured from {label} at X={captured[0]:.3f}, Y={captured[1]:.3f}. Capture the other point next.",
+                    6000,
+                )
+                return
+            try:
+                preparation = self._design_session.prepare_source_alignment()
+            except DesignModelError as exc:
+                self._show_status(str(exc), 7000)
+                return
+            if not self._design_spacing_ratio_is_reasonable(preparation.distance_ratio):
+                self._show_status(
+                    "Design calibration aborted: mark spacing mismatch. "
+                    f"Design {preparation.design_distance_mm:.4f} mm vs chip {preparation.stage_distance_mm:.4f} mm.",
+                    8000,
+                )
+                return
+            if abs(preparation.rotation_deg) < 1e-3:
+                self._design_session.apply_prepared_alignment(preparation)
+                self._refresh_design_panel()
+                self._refresh_design_position()
+                self._collapse_alignment_panel_if_ready()
+                self._show_status(
+                    "Design calibration complete. "
+                    f"Spacing ratio {preparation.distance_ratio:.3f}.",
+                    7000,
+                )
+                return
+            self._pending_alignment_preparation = preparation
+            self._set_alignment_panel_expanded()
             self._show_status(
-                f"Chip alignment: marker 1 captured at X={captured[0]:.3f}, Y={captured[1]:.3f}. Move to marker 2 and capture it.",
+                "Two mark pairs captured. "
+                f"Rotating chip by {preparation.rotation_deg:+.3f} deg to match the design.",
+                7000,
+            )
+            self.stage_controller.request_rotate_b(preparation.rotation_deg)
+            return
+
+        self._manual_alignment_points[slot] = captured
+        self._set_alignment_panel_expanded()
+        self._refresh_manual_alignment_ui()
+        other_slot = 1 - slot
+        if self._manual_alignment_points[other_slot] is None:
+            self._show_status(
+                f"Chip alignment: point {slot + 1} captured from {label} at X={captured[0]:.3f}, Y={captured[1]:.3f}. Capture point {other_slot + 1} next.",
                 6000,
             )
             return
 
-        rotation_deg = self._calculate_alignment_rotation(
-            self._alignment_positions[0],
-            self._alignment_positions[1],
-        )
-        self._alignment_positions.clear()
-        self._update_alignment_ui()
-
+        first_point = self._manual_alignment_points[0]
+        second_point = self._manual_alignment_points[1]
+        if first_point is None or second_point is None:
+            return
+        rotation_deg = self._calculate_alignment_rotation(first_point, second_point)
         if rotation_deg is None:
             self._show_status(
-                "Chip alignment markers are too close together. Capture two distinct markers.",
+                "Chip alignment points are too close together. Capture two distinct points.",
                 5000,
             )
             return
         if abs(rotation_deg) < 1e-3:
-            self._show_status(
-                "Chip alignment markers are already aligned.",
-                5000,
-            )
+            self._collapse_alignment_panel_if_design_open()
+            self._show_status("Chip alignment points are already aligned.", 5000)
             return
 
         self._show_status(
@@ -632,41 +751,25 @@ class Main(QMainWindow):
         self._invalidate_design_registration(
             "Design registration cleared after B-axis rotation."
         )
+        self._pending_quick_alignment_rotation = True
         self.stage_controller.request_rotate_b(rotation_deg)
 
-    def _update_alignment_ui(self) -> None:
-        if self._alignment_capture_button is not None:
-            next_index = 1 if not self._alignment_positions else 2
-            self._alignment_capture_button.setText(f"Capture Marker {next_index}")
-            self._alignment_capture_button.setEnabled(self._alignment_mode_enabled)
-        if self._alignment_reset_button is not None:
-            self._alignment_reset_button.setEnabled(
-                self._alignment_mode_enabled and bool(self._alignment_positions)
+    def _refresh_manual_alignment_ui(self) -> None:
+        if self.alignment_panel is not None:
+            self.alignment_panel.set_design_marks(self._design_session.source_design_marks)
+            self.alignment_panel.set_captured_points(self._current_alignment_points())
+            self.alignment_panel.set_pick_slot(self._manual_alignment_pick_slot)
+            self.alignment_panel.set_registration_status(
+                self._design_session.registration_status
             )
-        if self._alignment_exit_button is not None:
-            self._alignment_exit_button.setEnabled(self._alignment_mode_enabled)
-        if self._alignment_status_label is not None:
-            if not self._alignment_mode_enabled:
-                text = "Alignment mode is off."
-            elif not self._alignment_positions:
-                text = (
-                    "Click the first marker to record that exact point, or use Capture/Space "
-                    "to record the crosshair center."
-                )
-            else:
-                first = self._alignment_positions[0]
-                text = (
-                    f"Marker 1: X={first[0]:.3f}, Y={first[1]:.3f}\n"
-                    "Now move to marker 2 and click it, or capture the center."
-                )
-            self._alignment_status_label.setText(text)
-        if self._alignment_mode_enabled:
-            if not self._alignment_positions:
-                instruction = "Alignment mode: click marker 1 or press Space for the center."
-            else:
-                instruction = "Alignment mode: move to marker 2, then click it or press Space."
-        else:
+        if self._manual_alignment_pick_slot is None:
             instruction = ""
+        else:
+            instruction = (
+                f"Chip alignment: click point {self._manual_alignment_pick_slot + 1} "
+                "or press Space for the center."
+            )
+        self.view.set_alignment_mode(self._manual_alignment_pick_slot is not None)
         self.view.set_alignment_instruction(instruction)
 
     def _update_coordinate_display(
@@ -678,14 +781,38 @@ class Main(QMainWindow):
         latest = self.stage_controller.latest_stage_position()
         if center_xy is None and latest is not None and len(latest) >= 2:
             center_xy = (float(latest[0]), float(latest[1]))
-        if self._alignment_center_label is not None:
-            self._alignment_center_label.setText(
-                self._format_coordinate_label("Center", center_xy)
+        if self.alignment_panel is not None:
+            self.alignment_panel.set_coordinate_labels(
+                self._format_active_coordinate_label("Center", center_xy),
+                self._format_active_coordinate_label("Cursor", cursor_xy),
             )
-        if self._alignment_cursor_label is not None:
-            self._alignment_cursor_label.setText(
-                self._format_coordinate_label("Cursor", cursor_xy)
-            )
+
+    def _preferred_design_stage_xy(self) -> tuple[float, float] | None:
+        if self._manual_jog_velocity_xy is not None and self._manual_jog_stage_xy is not None:
+            return self._manual_jog_stage_xy
+        if self._manual_jog_waiting_for_fresh_status:
+            last_status_timestamp = self.stage_controller.last_status_timestamp()
+            if (
+                last_status_timestamp is not None
+                and self._manual_jog_stop_status_timestamp is not None
+                and last_status_timestamp > self._manual_jog_stop_status_timestamp
+            ):
+                self._manual_jog_waiting_for_fresh_status = False
+                self._manual_jog_settle_until = 0.0
+                self._manual_jog_stop_status_timestamp = None
+            elif (
+                self._manual_jog_stage_xy is not None
+                and time.monotonic() < self._manual_jog_settle_until
+            ):
+                return self._manual_jog_stage_xy
+            else:
+                self._manual_jog_waiting_for_fresh_status = False
+                self._manual_jog_settle_until = 0.0
+                self._manual_jog_stop_status_timestamp = None
+        latest = self.stage_controller.latest_stage_position()
+        if latest is None or len(latest) < 2:
+            return None
+        return (float(latest[0]), float(latest[1]))
 
     def _format_coordinate_label(
         self, prefix: str, fluidnc_xy: tuple[float, float] | None
@@ -699,10 +826,20 @@ class Main(QMainWindow):
         ]
         return f"{prefix}: " + " | ".join(parts)
 
+    def _format_active_coordinate_label(
+        self, prefix: str, fluidnc_xy: tuple[float, float] | None
+    ) -> str:
+        if fluidnc_xy is None:
+            return f"{prefix}: unavailable"
+        return (
+            f"{prefix}: {self.stage_controller.coordinate_display_name()} "
+            f"X={fluidnc_xy[0]:.3f}, Y={fluidnc_xy[1]:.3f}"
+        )
+
     def _resolve_coordinate_systems(
         self, fluidnc_xy: tuple[float, float]
     ) -> dict[str, tuple[float, float]]:
-        coordinates = {"FluidNC abs": fluidnc_xy}
+        coordinates = {f"FluidNC {self.stage_controller.coordinate_display_name()}": fluidnc_xy}
         chip_xy = self._resolve_chip_coordinates(fluidnc_xy)
         if chip_xy is not None:
             coordinates["Chip/Stage registered"] = chip_xy
@@ -790,6 +927,9 @@ class Main(QMainWindow):
     ) -> None:
         if not isinstance(commanded_distances, tuple):
             return
+        self._manual_jog_waiting_for_fresh_status = False
+        self._manual_jog_settle_until = 0.0
+        self._manual_jog_stop_status_timestamp = None
         if self.serial_terminal_panel is not None:
             self.serial_terminal_panel.set_live_poll_paused(True)
         xy_components: dict[str, float] = {"X": 0.0, "Y": 0.0}
@@ -815,15 +955,29 @@ class Main(QMainWindow):
             speed_mm_per_s * xy_components["X"] / path_length,
             speed_mm_per_s * xy_components["Y"] / path_length,
         )
-        latest = self.stage_controller.latest_stage_position()
-        if latest is not None and len(latest) >= 2:
-            self._manual_jog_stage_xy = (float(latest[0]), float(latest[1]))
-        elif self._current_design_stage_xy is not None:
+        stage_source = "tracked"
+        if self._manual_jog_stage_xy is not None:
+            self._manual_jog_stage_xy = (
+                float(self._manual_jog_stage_xy[0]),
+                float(self._manual_jog_stage_xy[1]),
+            )
+        else:
+            latest = self.stage_controller.latest_stage_position()
+            if latest is not None and len(latest) >= 2:
+                self._manual_jog_stage_xy = (float(latest[0]), float(latest[1]))
+                stage_source = "latest_status"
+            elif self._current_design_stage_xy is not None:
+                self._manual_jog_stage_xy = self._current_design_stage_xy
+                stage_source = "current_design"
+            else:
+                stage_source = "unknown"
+        if self._manual_jog_stage_xy is None and self._current_design_stage_xy is not None:
             self._manual_jog_stage_xy = self._current_design_stage_xy
+            stage_source = "current_design"
         self._manual_jog_last_timestamp = time.monotonic()
         self._manual_jog_last_prediction_log_at = 0.0
         logger.debug(
-            "DESIGN MINIMAP prediction_start stage=%s design=%s velocity=(%.4f, %.4f) feedrate=%.3f command=%s",
+            "DESIGN MINIMAP prediction_start stage=%s design=%s velocity=(%.4f, %.4f) feedrate=%.3f command=%s source=%s",
             self._format_optional_point(self._manual_jog_stage_xy),
             self._format_optional_point(
                 self._design_session.design_from_stage(self._manual_jog_stage_xy)
@@ -834,6 +988,7 @@ class Main(QMainWindow):
             self._manual_jog_velocity_xy[1],
             float(feedrate),
             commanded_distances,
+            stage_source,
         )
         if not self._manual_jog_timer.isActive():
             self._manual_jog_timer.start()
@@ -852,6 +1007,11 @@ class Main(QMainWindow):
         self._manual_jog_velocity_xy = None
         self._manual_jog_last_timestamp = None
         self._manual_jog_last_prediction_log_at = 0.0
+        self._manual_jog_waiting_for_fresh_status = self._manual_jog_stage_xy is not None
+        self._manual_jog_settle_until = (
+            time.monotonic() + self.MANUAL_JOG_STATUS_SETTLE_HOLD_S
+        )
+        self._manual_jog_stop_status_timestamp = self.stage_controller.last_status_timestamp()
         if self.serial_terminal_panel is not None:
             QTimer.singleShot(
                 self.TERMINAL_RESUME_AFTER_JOG_MS,
@@ -901,10 +1061,19 @@ class Main(QMainWindow):
             QTimer.singleShot(delay_ms, self.stage_controller.request_status_refresh)
 
     def _on_manual_terminal_command(self, command: str) -> None:
-        if command == "CTRL-X":
-            self._schedule_status_refreshes(self.TERMINAL_RESET_REFRESH_DELAYS_MS)
+        stripped = command.strip().upper()
+        if not stripped:
             return
-        self._schedule_status_refreshes(self.TERMINAL_REFRESH_DELAYS_MS)
+        if re.match(r"^G5(?:4|5|6|7|8|9(?:\.[123])?)$", stripped):
+            self.stage_controller.request_startup_sync(auto_home_a=False)
+            return
+        if (
+            stripped.startswith("$#")
+            or stripped.startswith("$G")
+            or stripped.startswith("$10")
+            or stripped.startswith("G10")
+        ):
+            self.stage_controller.request_startup_sync(auto_home_a=False)
 
     def on_move_finished(self, success: bool, message: str) -> None:
         if self._pending_alignment_preparation is not None:
@@ -914,7 +1083,7 @@ class Main(QMainWindow):
                 self._design_session.apply_prepared_alignment(preparation)
                 self._refresh_design_panel()
                 self._refresh_design_position()
-                self._toggle_design_layout_window(False)
+                self._collapse_alignment_panel_if_ready()
                 self.view.clear_target_cross()
                 self._show_status(
                     "Design calibration complete. "
@@ -929,6 +1098,10 @@ class Main(QMainWindow):
                 )
             self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
             return
+        if self._pending_quick_alignment_rotation:
+            self._pending_quick_alignment_rotation = False
+            if success:
+                self._collapse_alignment_panel_if_design_open()
         if success:
             self.view.clear_target_cross()
             self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
@@ -955,6 +1128,7 @@ class Main(QMainWindow):
             if self.design_navigator_panel:
                 self.design_navigator_panel.set_status_message(str(exc))
             return
+        self._reset_manual_alignment(cancel_pick=True)
         self._design_session.load_document(document)
         self._pending_alignment_preparation = None
         self._last_selected_design_point = None
@@ -970,6 +1144,7 @@ class Main(QMainWindow):
         if self._design_session.document is None:
             return
         document_name = self._design_session.document.path.name
+        self._reset_manual_alignment(cancel_pick=True)
         self._design_session.unload_document()
         self._pending_alignment_preparation = None
         self._last_selected_design_point = None
@@ -1079,66 +1254,6 @@ class Main(QMainWindow):
             4000,
         )
 
-    def _capture_calibration_chip_point(self, slot: int) -> None:
-        if slot not in (0, 1):
-            return
-        design_point = self._design_session.source_design_marks[slot]
-        if design_point is None:
-            self._show_status(
-                f"Choose design mark {slot + 1} in the design window first.",
-                5000,
-            )
-            return
-        try:
-            stage_position = self.stage_controller.current_stage_position()
-        except Exception as exc:
-            self._show_status(str(exc), 6000)
-            return
-        if len(stage_position) < 2:
-            self._show_status("X/Y coordinates are unavailable.", 5000)
-            return
-        stage_xy = (float(stage_position[0]), float(stage_position[1]))
-        self._design_session.set_source_stage_mark(slot, stage_xy)
-        pair_count = self._design_session.source_pair_count()
-        self._refresh_design_panel()
-        self._refresh_design_position()
-        if pair_count < 2:
-            self._show_status(
-                f"Chip mark {slot + 1} captured. Capture the other chip mark to finish calibration.",
-                6000,
-            )
-            return
-        try:
-            preparation = self._design_session.prepare_source_alignment()
-        except DesignModelError as exc:
-            self._show_status(str(exc), 7000)
-            return
-        if not self._design_spacing_ratio_is_reasonable(preparation.distance_ratio):
-            self._show_status(
-                "Design calibration aborted: mark spacing mismatch. "
-                f"Design {preparation.design_distance_mm:.4f} mm vs chip {preparation.stage_distance_mm:.4f} mm.",
-                8000,
-            )
-            return
-        if abs(preparation.rotation_deg) < 1e-3:
-            self._design_session.apply_prepared_alignment(preparation)
-            self._refresh_design_panel()
-            self._refresh_design_position()
-            self._toggle_design_layout_window(False)
-            self._show_status(
-                "Design calibration complete. "
-                f"Spacing ratio {preparation.distance_ratio:.3f}.",
-                7000,
-            )
-            return
-        self._pending_alignment_preparation = preparation
-        self._show_status(
-            "Two mark pairs captured. "
-            f"Rotating chip by {preparation.rotation_deg:+.3f} deg to match the design.",
-            7000,
-        )
-        self.stage_controller.request_rotate_b(preparation.rotation_deg)
-
     def _design_spacing_ratio_is_reasonable(self, ratio: float) -> bool:
         return abs(float(ratio) - 1.0) <= self.DESIGN_SPACING_RATIO_TOLERANCE
 
@@ -1227,6 +1342,7 @@ class Main(QMainWindow):
             self.design_layout_window.set_stage_registration_marks(
                 self._design_session.source_stage_marks
             )
+        self._refresh_manual_alignment_ui()
         self._update_design_position(self._current_design_stage_xy)
 
     def _on_stage_position_changed(self, position: object) -> None:
@@ -1259,6 +1375,10 @@ class Main(QMainWindow):
             self._log_design_position_reconcile(predicted_stage_xy, center_xy)
             center_xy = self._smooth_manual_jog_actual_position(predicted_stage_xy, center_xy)
         self._manual_jog_stage_xy = center_xy
+        if self._manual_jog_waiting_for_fresh_status:
+            self._manual_jog_waiting_for_fresh_status = False
+            self._manual_jog_settle_until = 0.0
+            self._manual_jog_stop_status_timestamp = None
         if self._manual_jog_velocity_xy is not None:
             self._manual_jog_last_timestamp = time.monotonic()
         self._update_coordinate_display(center_xy=center_xy)
@@ -1272,11 +1392,11 @@ class Main(QMainWindow):
         if self.serial_connection is None or not self.serial_connection.is_open:
             self._update_design_position(None)
             return
-        latest = self.stage_controller.latest_stage_position()
-        if latest is None or len(latest) < 2:
+        preferred_stage_xy = self._preferred_design_stage_xy()
+        if preferred_stage_xy is None:
             self.stage_controller.request_status_refresh()
             return
-        self._pending_design_stage_xy = (float(latest[0]), float(latest[1]))
+        self._pending_design_stage_xy = preferred_stage_xy
         self._flush_pending_design_position()
 
     def _flush_pending_design_position(self) -> None:
@@ -1459,13 +1579,6 @@ class Main(QMainWindow):
             jog.linear_distance_mm,
             jog.rotary_distance_deg,
         )
-        feedrates = self.settings_manager.feedrate_configuration()
-        self.joystick_panel.apply_feedrate_settings(
-            feedrates.linear.presets,
-            feedrates.linear.default,
-            feedrates.rotary.presets,
-            feedrates.rotary.default,
-        )
         self.joystick_panel.set_serial(self.serial_connection)
         self.joystick_panel.autofocus_requested.connect(
             self.stage_controller.request_autofocus
@@ -1575,19 +1688,6 @@ class Main(QMainWindow):
         )
         self.addDockWidget(Qt.RightDockWidgetArea, self.needle_calibration_dock)
 
-        self.oscillation_panel = OscillationPanel(self)
-        self.oscillation_panel.start_requested.connect(
-            self.stage_controller.request_oscillation
-        )
-        self.oscillation_panel.stop_requested.connect(
-            self.stage_controller.request_stop_oscillation
-        )
-        self.oscillation_window = QMainWindow(self)
-        self.oscillation_window.setWindowTitle("Oscillation")
-        self.oscillation_window.setWindowFlag(Qt.Window, True)
-        self.oscillation_window.setCentralWidget(self.oscillation_panel)
-        self.oscillation_window.resize(420, 320)
-
         self.serial_terminal_panel = SerialTerminalWindow(self)
         self.serial_terminal_panel.set_stage_controller(self.stage_controller)
         self.serial_terminal_panel.set_serial(self.serial_connection)
@@ -1603,55 +1703,24 @@ class Main(QMainWindow):
         self.addDockWidget(Qt.LeftDockWidgetArea, self.serial_terminal_dock)
         self.splitDockWidget(self.joystick_dock, self.serial_terminal_dock, Qt.Vertical)
 
-        alignment_panel = QWidget(self)
-        alignment_layout = QVBoxLayout(alignment_panel)
-        alignment_layout.setContentsMargins(8, 8, 8, 8)
-        alignment_layout.setSpacing(8)
-
-        self._alignment_status_label = QLabel(alignment_panel)
-        self._alignment_status_label.setWordWrap(True)
-        alignment_layout.addWidget(self._alignment_status_label)
-
-        self._alignment_center_label = QLabel(alignment_panel)
-        self._alignment_center_label.setWordWrap(True)
-        alignment_layout.addWidget(self._alignment_center_label)
-
-        self._alignment_cursor_label = QLabel(alignment_panel)
-        self._alignment_cursor_label.setWordWrap(True)
-        alignment_layout.addWidget(self._alignment_cursor_label)
-
-        button_row = QHBoxLayout()
-        self._alignment_capture_button = QPushButton("Capture Marker 1", alignment_panel)
-        self._alignment_capture_button.clicked.connect(self._capture_alignment_marker)
-        button_row.addWidget(self._alignment_capture_button)
-        self._alignment_reset_button = QPushButton("Reset", alignment_panel)
-        self._alignment_reset_button.clicked.connect(self._reset_alignment_capture)
-        button_row.addWidget(self._alignment_reset_button)
-        alignment_layout.addLayout(button_row)
-
-        self._alignment_exit_button = QPushButton("Exit Mode", alignment_panel)
-        self._alignment_exit_button.clicked.connect(self._exit_alignment_mode)
-        alignment_layout.addWidget(self._alignment_exit_button)
-        alignment_layout.addStretch(1)
-
-        self.alignment_dock = CollapsibleDockWidget("Chip Alignment", self)
-        self.alignment_dock.setObjectName("ChipAlignmentDock")
-        self.alignment_dock.setWidget(alignment_panel)
-        self.alignment_dock.setAllowedAreas(
+        self.oscillation_panel = OscillationPanel(self)
+        self.oscillation_panel.start_requested.connect(
+            self.stage_controller.request_oscillation
+        )
+        self.oscillation_panel.stop_requested.connect(
+            self.stage_controller.request_stop_oscillation
+        )
+        self.oscillation_dock = CollapsibleDockWidget("Oscillation", self)
+        self.oscillation_dock.setObjectName("OscillationDock")
+        self.oscillation_dock.setWidget(self.oscillation_panel)
+        self.oscillation_dock.setAllowedAreas(
             Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea
         )
-        self.addDockWidget(Qt.RightDockWidgetArea, self.alignment_dock)
-        self.alignment_dock.setVisible(False)
-        self._update_alignment_ui()
-        self._update_coordinate_display()
+        self.addDockWidget(Qt.LeftDockWidgetArea, self.oscillation_dock)
+        self.tabifyDockWidget(self.joystick_dock, self.oscillation_dock)
+        self.joystick_dock.raise_()
 
         self.design_layout_window = DesignLayoutWindow()
-        self.design_layout_window.calibration_point_selected.connect(
-            self._on_design_layout_point_selected
-        )
-        self.design_layout_window.visibility_changed.connect(
-            self._on_design_layout_window_visibility_changed
-        )
         self.design_navigator_panel = self.design_layout_window.navigator_panel
         self.design_navigator_panel.load_design_requested.connect(self._load_design_document)
         self.design_navigator_panel.unload_design_requested.connect(
@@ -1667,12 +1736,6 @@ class Main(QMainWindow):
         self.design_navigator_panel.reload_script_requested.connect(
             self._reload_measurement_script
         )
-        self.design_navigator_panel.capture_chip_point_requested.connect(
-            self._capture_calibration_chip_point
-        )
-        self.design_navigator_panel.clear_registration_requested.connect(
-            self._clear_design_registration
-        )
         self.design_navigator_panel.move_to_target_requested.connect(
             self._move_to_design_target
         )
@@ -1685,7 +1748,57 @@ class Main(QMainWindow):
         self.design_navigator_panel.target_selected.connect(
             self._on_design_target_selected
         )
+        self.design_layout_window.calibration_point_selected.connect(
+            self._on_design_layout_point_selected
+        )
+        self.design_layout_window.hover_snap_changed.connect(
+            self.design_navigator_panel.set_hover_snap
+        )
+        self.design_layout_window.visibility_changed.connect(
+            self._on_design_layout_window_visibility_changed
+        )
+        self.alignment_panel = AlignmentPanel(self)
+        self.alignment_panel.open_design_window_requested.connect(
+            lambda: self._toggle_design_layout_window(True)
+        )
+        self.alignment_panel.capture_point_requested.connect(
+            self._request_alignment_capture
+        )
+        self.alignment_panel.reset_points_requested.connect(
+            self._reset_alignment_capture_points
+        )
+        self.alignment_panel.cancel_pick_requested.connect(
+            self._cancel_manual_alignment_pick
+        )
+        self.alignment_panel.clear_registration_requested.connect(
+            self._clear_design_registration
+        )
+        self.alignment_dock = CollapsibleDockWidget("Alignment", self)
+        self.alignment_dock.setObjectName("AlignmentDock")
+        self.alignment_dock.setWidget(self.alignment_panel)
+        self.alignment_dock.setAllowedAreas(
+            Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea
+        )
+        self.addDockWidget(Qt.RightDockWidgetArea, self.alignment_dock)
+        self.splitDockWidget(self.needle_calibration_dock, self.alignment_dock, Qt.Vertical)
+        self._refresh_manual_alignment_ui()
+        self._update_coordinate_display()
         self._refresh_design_panel()
+        self.resizeDocks(
+            [self.serial_connection_dock, self.joystick_dock, self.serial_terminal_dock],
+            [150, 340, 220],
+            Qt.Vertical,
+        )
+        self.resizeDocks(
+            [self.joystick_dock, self.alignment_dock],
+            [360, 520],
+            Qt.Horizontal,
+        )
+        self.resizeDocks(
+            [self.needle_calibration_dock, self.alignment_dock],
+            [320, 260],
+            Qt.Vertical,
+        )
 
     def _start_needle_calibration(self) -> None:
         if self.serial_connection is None or not self.serial_connection.is_open:

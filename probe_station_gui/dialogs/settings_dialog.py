@@ -14,7 +14,6 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
-    QGroupBox,
     QHBoxLayout,
     QLineEdit,
     QLabel,
@@ -22,6 +21,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QPushButton,
     QSpinBox,
+    QFrame,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 from probe_station_gui.qt_compat import keyboard_modifiers_to_int, native_scan_code_to_int
 from probe_station_gui.settings_manager import (
     CONTROL_ACTIONS,
+    CoordinateSystemSettings,
     FeedrateGroup,
     FeedrateSettings,
     JogSettings,
@@ -37,6 +38,7 @@ from probe_station_gui.settings_manager import (
     LoggingSettings,
     NeedleCalibrationSettings,
     Settings,
+    WORK_COORDINATE_SYSTEMS,
 )
 
 
@@ -259,14 +261,17 @@ class FeedrateGroupEditor(QWidget):
         if not self._presets:
             self._default_value = self._fallback_default
 
-        outer_layout = QVBoxLayout(self)
-        outer_layout.setContentsMargins(0, 0, 0, 0)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
 
-        group_box = QGroupBox(title, self)
-        outer_layout.addWidget(group_box)
-        layout = QVBoxLayout(group_box)
+        title_label = QLabel(title, self)
+        title_label.setStyleSheet("font-weight: 600;")
+        layout.addWidget(title_label)
 
-        layout.addWidget(QLabel(f"Preset feed rates for {units} (positive values):", self))
+        units_label = QLabel(f"Preset feed rates for {units} (positive values):", self)
+        units_label.setWordWrap(True)
+        layout.addWidget(units_label)
 
         self._list = QListWidget(self)
         self._list.setSelectionMode(QListWidget.SingleSelection)
@@ -527,6 +532,101 @@ class NeedleCalibrationSettingsWidget(QWidget):
         )
 
 
+class CoordinateSystemSettingsWidget(QWidget):
+    """Tab that exposes WCS startup mode."""
+
+    def __init__(
+        self,
+        coordinate_settings: CoordinateSystemSettings,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+
+        mode_layout = QFormLayout()
+        mode_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+
+        self._position_mode_combo = QComboBox(self)
+        self._position_mode_combo.addItem("Relative WCS coordinates", "work")
+        self._position_mode_combo.addItem("Absolute machine coordinates", "machine")
+        position_index = self._position_mode_combo.findData(
+            coordinate_settings.position_mode
+        )
+        if position_index >= 0:
+            self._position_mode_combo.setCurrentIndex(position_index)
+        mode_layout.addRow(QLabel("Position mode", self), self._position_mode_combo)
+
+        self._startup_mode_combo = QComboBox(self)
+        self._startup_mode_combo.addItem(
+            "Follow controller active system", "controller"
+        )
+        self._startup_mode_combo.addItem(
+            "Force selected system on connect", "fixed"
+        )
+        mode_index = self._startup_mode_combo.findData(
+            coordinate_settings.startup_mode
+        )
+        if mode_index >= 0:
+            self._startup_mode_combo.setCurrentIndex(mode_index)
+        mode_layout.addRow(QLabel("Coordinate mode", self), self._startup_mode_combo)
+
+        self._preferred_system_combo = QComboBox(self)
+        for system in WORK_COORDINATE_SYSTEMS:
+            self._preferred_system_combo.addItem(system, system)
+        preferred_index = self._preferred_system_combo.findData(
+            coordinate_settings.preferred_system
+        )
+        if preferred_index >= 0:
+            self._preferred_system_combo.setCurrentIndex(preferred_index)
+        mode_layout.addRow(QLabel("Preferred WCS", self), self._preferred_system_combo)
+
+        mode_widget = QWidget(self)
+        mode_widget.setLayout(mode_layout)
+        root_layout.addWidget(mode_widget)
+        separator = QFrame(self)
+        separator.setFrameShape(QFrame.HLine)
+        separator.setFrameShadow(QFrame.Sunken)
+        root_layout.addWidget(separator)
+        root_layout.addStretch(1)
+        self._position_mode_combo.currentIndexChanged.connect(
+            self._update_mode_hint_state
+        )
+        self._startup_mode_combo.currentIndexChanged.connect(
+            self._update_mode_hint_state
+        )
+        self._update_mode_hint_state()
+
+    def to_settings(self, settings: Settings) -> None:
+        """Persist the widget state into the provided settings object."""
+
+        startup_mode = str(self._startup_mode_combo.currentData() or "controller")
+        preferred_system = str(self._preferred_system_combo.currentData() or "G54")
+        settings.coordinate_system = CoordinateSystemSettings(
+            position_mode=str(self._position_mode_combo.currentData() or "work"),
+            startup_mode=startup_mode,
+            preferred_system=preferred_system,
+        )
+
+    def _update_mode_hint_state(self) -> None:
+        fixed_mode = str(self._startup_mode_combo.currentData() or "") == "fixed"
+        machine_mode = str(self._position_mode_combo.currentData() or "") == "machine"
+        self._preferred_system_combo.setEnabled(not machine_mode)
+        if machine_mode:
+            self._preferred_system_combo.setToolTip(
+                "Unused in absolute machine-coordinate mode."
+            )
+            return
+        if fixed_mode:
+            self._preferred_system_combo.setToolTip(
+                "This WCS will be sent to the controller on connect."
+            )
+            return
+        self._preferred_system_combo.setToolTip(
+            "Controller-selected WCS will be used."
+        )
+
+
 class SettingsDialog(QDialog):
     """Main settings dialog with tabbed sections."""
 
@@ -543,15 +643,17 @@ class SettingsDialog(QDialog):
 
         self._controls_tab = ControlsSettingsWidget(self._settings, self)
         self._logging_tab = LoggingSettingsWidget(self._settings.logging, self)
-        self._feedrate_tab = FeedrateSettingsWidget(self._settings.feedrates, self)
         self._jog_tab = JogSettingsWidget(self._settings.jog, self)
         self._needle_calibration_tab = NeedleCalibrationSettingsWidget(
             self._settings.needle_calibration, self
         )
+        self._coordinate_system_tab = CoordinateSystemSettingsWidget(
+            self._settings.coordinate_system, self
+        )
         self._tabs.addTab(self._controls_tab, "Controls")
         self._tabs.addTab(self._jog_tab, "Jog")
+        self._tabs.addTab(self._coordinate_system_tab, "Coordinates")
         self._tabs.addTab(self._needle_calibration_tab, "Needles")
-        self._tabs.addTab(self._feedrate_tab, "Feedrates")
         self._tabs.addTab(self._logging_tab, "Logging")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel, self)
@@ -562,8 +664,8 @@ class SettingsDialog(QDialog):
     def accept(self) -> None:  # type: ignore[override]
         self._controls_tab.to_settings(self._settings)
         self._jog_tab.to_settings(self._settings)
+        self._coordinate_system_tab.to_settings(self._settings)
         self._needle_calibration_tab.to_settings(self._settings)
-        self._feedrate_tab.to_settings(self._settings)
         self._logging_tab.to_settings(self._settings.logging)
         super().accept()
 
