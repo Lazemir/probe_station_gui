@@ -227,6 +227,7 @@ class Settings:
     coordinate_system: CoordinateSystemSettings = field(
         default_factory=CoordinateSystemSettings
     )
+    design_last_directory: str = ""
 
     def clone(self) -> "Settings":
         """Create a deep copy of the settings container."""
@@ -238,6 +239,7 @@ class Settings:
             jog=self.jog.clone(),
             needle_calibration=self.needle_calibration.clone(),
             coordinate_system=self.coordinate_system.clone(),
+            design_last_directory=self.design_last_directory,
         )
 
     def to_dict(self) -> dict:
@@ -262,6 +264,7 @@ class Settings:
             "jog": self.jog.to_dict(),
             "needle_calibration": self.needle_calibration.to_dict(),
             "coordinate_system": self.coordinate_system.to_dict(),
+            "design_last_directory": self.design_last_directory,
         }
 
 
@@ -579,6 +582,10 @@ class SettingsManager:
                 "preferred_system", self.DEFAULT_COORDINATE_SYSTEM
             )
 
+        design_last_directory = data.get("design_last_directory")
+        if not isinstance(design_last_directory, str):
+            data["design_last_directory"] = ""
+
         with self._config_path.open("w", encoding="utf-8") as target:
             json.dump(data, target, indent=2, ensure_ascii=False)
 
@@ -621,6 +628,11 @@ class SettingsManager:
         coordinate_system_raw = (
             raw.get("coordinate_system") if isinstance(raw, dict) else None
         )
+        design_last_directory = ""
+        if isinstance(raw, dict):
+            design_last_directory_raw = raw.get("design_last_directory", "")
+            if isinstance(design_last_directory_raw, str):
+                design_last_directory = design_last_directory_raw.strip()
         return Settings(
             controls=controls,
             logging=logging_settings,
@@ -628,6 +640,7 @@ class SettingsManager:
             jog=self._parse_jog(jog_raw),
             needle_calibration=self._parse_needle_calibration(needle_calibration_raw),
             coordinate_system=self._parse_coordinate_system(coordinate_system_raw),
+            design_last_directory=design_last_directory,
         )
 
     def _parse_logging(self, raw_logging) -> LoggingSettings:
@@ -932,6 +945,7 @@ class SettingsManager:
         clone.needle_calibration = self._parse_needle_calibration(
             clone.needle_calibration.to_dict()
         )
+        clone.design_last_directory = clone.design_last_directory.strip()
         return clone
 
     def feedrate_group(self, motion_type: str) -> FeedrateGroup:
@@ -962,4 +976,31 @@ class SettingsManager:
         """Return the current coordinate-system configuration clone."""
 
         return self._settings.coordinate_system.clone()
+
+    def design_last_directory(self) -> Path | None:
+        """Return the most recently used design directory, if any."""
+
+        raw_value = self._settings.design_last_directory.strip()
+        if not raw_value:
+            return None
+        return Path(raw_value)
+
+    def set_design_last_directory(self, directory: str | Path | None) -> None:
+        """Persist the most recently used design directory."""
+
+        if directory is None:
+            new_value = ""
+        else:
+            path = Path(directory).expanduser()
+            try:
+                path = path.resolve()
+            except OSError:
+                pass
+            new_value = str(path)
+        if self._settings.design_last_directory == new_value:
+            return
+        updated = self._settings.clone()
+        updated.design_last_directory = new_value
+        self.replace(updated)
+        self.save()
 

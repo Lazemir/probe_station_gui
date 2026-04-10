@@ -63,6 +63,7 @@ class Main(QMainWindow):
     MANUAL_JOG_RECONCILE_SMOOTH_THRESHOLD_MM = 0.35
     MANUAL_JOG_RECONCILE_SMOOTH_ALPHA = 0.35
     MANUAL_JOG_STATUS_SETTLE_HOLD_S = 0.8
+    PLANNED_MOVE_DURATION_PADDING_S = 0.12
     TERMINAL_REFRESH_DELAYS_MS = (180, 500)
     TERMINAL_RESET_REFRESH_DELAYS_MS = (500, 1100, 1800)
     TERMINAL_RESUME_AFTER_JOG_MS = 180
@@ -119,6 +120,14 @@ class Main(QMainWindow):
         self._manual_jog_waiting_for_fresh_status = False
         self._manual_jog_settle_until = 0.0
         self._manual_jog_stop_status_timestamp: float | None = None
+        self._planned_move_origin_xy: tuple[float, float] | None = None
+        self._planned_move_stage_xy: tuple[float, float] | None = None
+        self._planned_move_target_xy: tuple[float, float] | None = None
+        self._planned_move_started_at: float | None = None
+        self._planned_move_ends_at: float | None = None
+        self._planned_move_waiting_for_fresh_status = False
+        self._planned_move_stop_status_timestamp: float | None = None
+        self._design_snap_enabled = True
         self._last_reported_b_position: float | None = None
         self._design_session = DesignSession()
         self.statusBar()
@@ -138,6 +147,7 @@ class Main(QMainWindow):
         self.view.clicked.connect(self.on_click)
         self.view.hovered.connect(self._on_view_hover)
         self.view.hover_left.connect(self._on_view_hover_left)
+        self.view.design_minimap_clicked.connect(self._move_to_minimap_design_point)
         self.view.design_minimap_double_clicked.connect(
             lambda: self._toggle_design_layout_window(True)
         )
@@ -171,7 +181,7 @@ class Main(QMainWindow):
         self._design_overlay_timer.timeout.connect(self._flush_pending_design_position)
         self._manual_jog_timer = QTimer(self)
         self._manual_jog_timer.setInterval(self.MANUAL_JOG_UPDATE_MS)
-        self._manual_jog_timer.timeout.connect(self._advance_manual_jog_prediction)
+        self._manual_jog_timer.timeout.connect(self._advance_motion_prediction)
         self._needle_height_timer = QTimer(self)
         self._needle_height_timer.setInterval(400)
         self._needle_height_timer.timeout.connect(self._refresh_needle_height)
@@ -287,6 +297,7 @@ class Main(QMainWindow):
         self._manual_jog_waiting_for_fresh_status = False
         self._manual_jog_settle_until = 0.0
         self._manual_jog_stop_status_timestamp = None
+        self._clear_planned_move_prediction(clear_wait_state=True)
         logger.info("Serial disconnected")
         self.stage_controller.request_stop_oscillation()
         self._stop_needle_calibration()
@@ -448,6 +459,7 @@ class Main(QMainWindow):
         self._pending_alignment_preparation = None
         self._design_session.clear_source_stage_marks()
         self._last_selected_design_point = snapped_point
+        self._set_design_snap_enabled(True)
         self._design_session.set_source_design_mark(slot, snapped_point)
         self._refresh_design_panel()
         slot_label = "1" if slot == 0 else "2"
@@ -486,6 +498,12 @@ class Main(QMainWindow):
             startup_mode=coordinate_settings.startup_mode,
             preferred_system=coordinate_settings.preferred_system,
         )
+        if self.design_navigator_panel is not None:
+            self.design_navigator_panel.set_design_dialog_directory(
+                self.settings_manager.design_last_directory()
+            )
+        if self.design_layout_window is not None:
+            self.design_layout_window.set_snap_enabled(self._design_snap_enabled)
         self.lcr_controller.apply_configuration(
             resource_name=needle_settings.visa_resource,
             dcr_range=needle_settings.dcr_range,
@@ -580,6 +598,7 @@ class Main(QMainWindow):
             self._pending_alignment_preparation = None
             self._pending_quick_alignment_rotation = False
             self._design_session.clear_source_stage_marks()
+            self._set_design_snap_enabled(True)
             self._refresh_design_panel()
             self._refresh_design_position()
         else:
@@ -698,6 +717,7 @@ class Main(QMainWindow):
                 return
             if abs(preparation.rotation_deg) < 1e-3:
                 self._design_session.apply_prepared_alignment(preparation)
+                self._set_design_snap_enabled(False)
                 self._refresh_design_panel()
                 self._refresh_design_position()
                 self._collapse_alignment_panel_if_ready()
@@ -790,6 +810,11 @@ class Main(QMainWindow):
     def _preferred_design_stage_xy(self) -> tuple[float, float] | None:
         if self._manual_jog_velocity_xy is not None and self._manual_jog_stage_xy is not None:
             return self._manual_jog_stage_xy
+        if (
+            self._planned_move_started_at is not None
+            and self._planned_move_stage_xy is not None
+        ):
+            return self._planned_move_stage_xy
         if self._manual_jog_waiting_for_fresh_status:
             last_status_timestamp = self.stage_controller.last_status_timestamp()
             if (
@@ -809,6 +834,20 @@ class Main(QMainWindow):
                 self._manual_jog_waiting_for_fresh_status = False
                 self._manual_jog_settle_until = 0.0
                 self._manual_jog_stop_status_timestamp = None
+        if self._planned_move_waiting_for_fresh_status:
+            last_status_timestamp = self.stage_controller.last_status_timestamp()
+            if (
+                last_status_timestamp is not None
+                and self._planned_move_stop_status_timestamp is not None
+                and last_status_timestamp > self._planned_move_stop_status_timestamp
+            ):
+                self._planned_move_waiting_for_fresh_status = False
+                self._planned_move_stop_status_timestamp = None
+            elif self._planned_move_stage_xy is not None:
+                return self._planned_move_stage_xy
+            else:
+                self._planned_move_waiting_for_fresh_status = False
+                self._planned_move_stop_status_timestamp = None
         latest = self.stage_controller.latest_stage_position()
         if latest is None or len(latest) < 2:
             return None
@@ -927,6 +966,7 @@ class Main(QMainWindow):
     ) -> None:
         if not isinstance(commanded_distances, tuple):
             return
+        self._clear_planned_move_prediction(clear_wait_state=True)
         self._manual_jog_waiting_for_fresh_status = False
         self._manual_jog_settle_until = 0.0
         self._manual_jog_stop_status_timestamp = None
@@ -1020,9 +1060,17 @@ class Main(QMainWindow):
             )
         self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
 
+    def _advance_motion_prediction(self) -> None:
+        if self._manual_jog_velocity_xy is not None:
+            self._advance_manual_jog_prediction()
+            return
+        if self._planned_move_started_at is not None:
+            self._advance_planned_move_prediction()
+            return
+        self._manual_jog_timer.stop()
+
     def _advance_manual_jog_prediction(self) -> None:
         if self._manual_jog_velocity_xy is None:
-            self._manual_jog_timer.stop()
             return
         now = time.monotonic()
         if self._manual_jog_last_timestamp is None:
@@ -1056,6 +1104,105 @@ class Main(QMainWindow):
         self._update_coordinate_display(center_xy=self._manual_jog_stage_xy)
         self._update_design_position(self._manual_jog_stage_xy)
 
+    def _advance_planned_move_prediction(self) -> None:
+        if (
+            self._planned_move_origin_xy is None
+            or self._planned_move_target_xy is None
+            or self._planned_move_started_at is None
+            or self._planned_move_ends_at is None
+        ):
+            self._clear_planned_move_prediction(clear_wait_state=False)
+            return
+        now = time.monotonic()
+        duration = max(
+            self._planned_move_ends_at - self._planned_move_started_at,
+            1e-6,
+        )
+        progress = min(
+            1.0,
+            max(0.0, (now - self._planned_move_started_at) / duration),
+        )
+        origin_x, origin_y = self._planned_move_origin_xy
+        target_x, target_y = self._planned_move_target_xy
+        self._planned_move_stage_xy = (
+            float(origin_x + (target_x - origin_x) * progress),
+            float(origin_y + (target_y - origin_y) * progress),
+        )
+        self._update_coordinate_display(center_xy=self._planned_move_stage_xy)
+        self._update_design_position(self._planned_move_stage_xy)
+        if progress >= 1.0:
+            self._planned_move_waiting_for_fresh_status = (
+                self._planned_move_stage_xy is not None
+            )
+            self._planned_move_stop_status_timestamp = (
+                self.stage_controller.last_status_timestamp()
+            )
+            self._planned_move_origin_xy = None
+            self._planned_move_target_xy = None
+            self._planned_move_started_at = None
+            self._planned_move_ends_at = None
+
+    def _clear_planned_move_prediction(self, *, clear_wait_state: bool) -> None:
+        self._planned_move_origin_xy = None
+        self._planned_move_target_xy = None
+        self._planned_move_started_at = None
+        self._planned_move_ends_at = None
+        if clear_wait_state:
+            self._planned_move_stage_xy = None
+            self._planned_move_waiting_for_fresh_status = False
+            self._planned_move_stop_status_timestamp = None
+
+    def _start_planned_move_prediction(
+        self,
+        target_stage_xy: tuple[float, float],
+        *,
+        source_label: str,
+    ) -> None:
+        origin_stage_xy = self._preferred_design_stage_xy()
+        if origin_stage_xy is None:
+            origin_stage_xy = self._current_design_stage_xy
+        if origin_stage_xy is None:
+            latest = self.stage_controller.latest_stage_position()
+            if latest is not None and len(latest) >= 2:
+                origin_stage_xy = (float(latest[0]), float(latest[1]))
+        if origin_stage_xy is None:
+            return
+        distance_mm = math.hypot(
+            float(target_stage_xy[0] - origin_stage_xy[0]),
+            float(target_stage_xy[1] - origin_stage_xy[1]),
+        )
+        if distance_mm <= 1e-6:
+            self._clear_planned_move_prediction(clear_wait_state=True)
+            return
+        speed_mm_per_s = float(self.stage_controller.DEFAULT_FEEDRATE) / 60.0
+        if speed_mm_per_s <= 1e-6:
+            return
+        duration_s = (
+            distance_mm / speed_mm_per_s
+        ) + self.PLANNED_MOVE_DURATION_PADDING_S
+        started_at = time.monotonic()
+        self._manual_jog_waiting_for_fresh_status = False
+        self._manual_jog_settle_until = 0.0
+        self._manual_jog_stop_status_timestamp = None
+        self._planned_move_origin_xy = origin_stage_xy
+        self._planned_move_stage_xy = origin_stage_xy
+        self._planned_move_target_xy = target_stage_xy
+        self._planned_move_started_at = started_at
+        self._planned_move_ends_at = started_at + max(duration_s, 0.05)
+        self._planned_move_waiting_for_fresh_status = False
+        self._planned_move_stop_status_timestamp = None
+        logger.debug(
+            "DESIGN MINIMAP planned_move_start source=%s origin=%s target=%s distance=%.4f duration=%.4f feedrate=%.3f",
+            source_label,
+            self._format_optional_point(origin_stage_xy),
+            self._format_optional_point(target_stage_xy),
+            distance_mm,
+            duration_s,
+            float(self.stage_controller.DEFAULT_FEEDRATE),
+        )
+        if not self._manual_jog_timer.isActive():
+            self._manual_jog_timer.start()
+
     def _schedule_status_refreshes(self, delays_ms: tuple[int, ...]) -> None:
         for delay_ms in delays_ms:
             QTimer.singleShot(delay_ms, self.stage_controller.request_status_refresh)
@@ -1076,11 +1223,36 @@ class Main(QMainWindow):
             self.stage_controller.request_startup_sync(auto_home_a=False)
 
     def on_move_finished(self, success: bool, message: str) -> None:
+        if (
+            self._planned_move_started_at is not None
+            or self._planned_move_waiting_for_fresh_status
+        ):
+            logger.debug(
+                "DESIGN MINIMAP planned_move_finish success=%s stage=%s",
+                success,
+                self._format_optional_point(self._planned_move_stage_xy),
+            )
+            if success:
+                if self._planned_move_target_xy is not None:
+                    self._planned_move_stage_xy = self._planned_move_target_xy
+                self._planned_move_origin_xy = None
+                self._planned_move_target_xy = None
+                self._planned_move_started_at = None
+                self._planned_move_ends_at = None
+                self._planned_move_waiting_for_fresh_status = (
+                    self._planned_move_stage_xy is not None
+                )
+                self._planned_move_stop_status_timestamp = (
+                    self.stage_controller.last_status_timestamp()
+                )
+            else:
+                self._clear_planned_move_prediction(clear_wait_state=True)
         if self._pending_alignment_preparation is not None:
             preparation = self._pending_alignment_preparation
             self._pending_alignment_preparation = None
             if success:
                 self._design_session.apply_prepared_alignment(preparation)
+                self._set_design_snap_enabled(False)
                 self._refresh_design_panel()
                 self._refresh_design_position()
                 self._collapse_alignment_panel_if_ready()
@@ -1132,6 +1304,12 @@ class Main(QMainWindow):
         self._design_session.load_document(document)
         self._pending_alignment_preparation = None
         self._last_selected_design_point = None
+        self._set_design_snap_enabled(True)
+        self.settings_manager.set_design_last_directory(document.path.parent)
+        if self.design_navigator_panel is not None:
+            self.design_navigator_panel.set_design_dialog_directory(
+                document.path.parent
+            )
         self._refresh_design_panel()
         self._refresh_design_position()
         self._toggle_design_layout_window(True)
@@ -1261,6 +1439,7 @@ class Main(QMainWindow):
         self._pending_alignment_preparation = None
         self._last_selected_design_point = None
         self._design_session.clear_registration()
+        self._set_design_snap_enabled(True)
         self._refresh_design_panel()
         self._refresh_design_position()
         self._show_status("Design calibration restarted.", 4000)
@@ -1268,6 +1447,8 @@ class Main(QMainWindow):
     def _invalidate_design_registration(self, reason: str) -> None:
         self._pending_alignment_preparation = None
         self._design_session.invalidate_registration(reason)
+        if self._design_session.document is not None:
+            self._set_design_snap_enabled(True)
         self._refresh_design_panel()
         latest = self.stage_controller.latest_stage_position()
         if latest is not None and len(latest) >= 2:
@@ -1306,6 +1487,48 @@ class Main(QMainWindow):
         self._refresh_design_panel()
         self.stage_controller.request_move_to_xy(stage_xy[0], stage_xy[1])
 
+    def _move_to_minimap_design_point(self, x_value: float, y_value: float) -> None:
+        design_xy = (float(x_value), float(y_value))
+        if not self._move_to_design_coordinate(design_xy, source_label="minimap point"):
+            return
+        self._show_status(
+            f"Moving to minimap point X={design_xy[0]:.3f}, Y={design_xy[1]:.3f}.",
+            3000,
+        )
+
+    def _move_to_design_coordinate(
+        self, design_xy: tuple[float, float], *, source_label: str
+    ) -> bool:
+        document = self._design_session.document
+        if document is None:
+            return False
+        if self.stage_controller.is_busy():
+            self._show_status("Stage is busy. Ignoring design move request.", 3000)
+            return False
+        stage_xy = self._design_session.stage_from_design(design_xy)
+        if stage_xy is None:
+            self._show_status(
+                "Design click-to-move requires completed registration.",
+                5000,
+            )
+            return False
+        self._last_selected_design_point = design_xy
+        self._refresh_design_panel()
+        self._start_planned_move_prediction(
+            (float(stage_xy[0]), float(stage_xy[1])),
+            source_label=source_label,
+        )
+        self.stage_controller.request_move_to_xy(stage_xy[0], stage_xy[1])
+        logger.debug(
+            "DESIGN MOVE source=%s design=(%.3f, %.3f) stage=(%.3f, %.3f)",
+            source_label,
+            design_xy[0],
+            design_xy[1],
+            stage_xy[0],
+            stage_xy[1],
+        )
+        return True
+
     def _refresh_design_panel(self) -> None:
         panel = self.design_navigator_panel
         current_target = self._design_session.current_target()
@@ -1330,10 +1553,15 @@ class Main(QMainWindow):
             )
             panel.set_stage_registration_marks(self._design_session.source_stage_marks)
         if self.design_layout_window is not None:
+            self.design_layout_window.set_snap_enabled(self._design_snap_enabled)
             self.design_layout_window.set_document(self._design_session.document)
             self.design_layout_window.set_targets(
                 self._design_session.targets,
                 selected_target_id=selected_target_id,
+            )
+            self.design_layout_window.set_navigation_enabled(
+                self._design_session.registration is not None
+                and self._design_session.registration.valid
             )
             self.design_layout_window.set_registration_marks(
                 self._design_session.source_design_marks,
@@ -1363,11 +1591,14 @@ class Main(QMainWindow):
                     "Design registration cleared after B-axis motion."
                 )
             self._last_reported_b_position = current_b
-        predicted_stage_xy = (
-            self._manual_jog_stage_xy
-            if self._manual_jog_velocity_xy is not None
-            else None
-        )
+        predicted_stage_xy = None
+        if self._manual_jog_velocity_xy is not None:
+            predicted_stage_xy = self._manual_jog_stage_xy
+        elif (
+            self._planned_move_started_at is not None
+            or self._planned_move_waiting_for_fresh_status
+        ):
+            predicted_stage_xy = self._planned_move_stage_xy
         center_xy = (float(position[0]), float(position[1]))
         if self._should_ignore_manual_jog_status_sample(center_xy):
             return
@@ -1375,10 +1606,14 @@ class Main(QMainWindow):
             self._log_design_position_reconcile(predicted_stage_xy, center_xy)
             center_xy = self._smooth_manual_jog_actual_position(predicted_stage_xy, center_xy)
         self._manual_jog_stage_xy = center_xy
+        self._planned_move_stage_xy = center_xy
         if self._manual_jog_waiting_for_fresh_status:
             self._manual_jog_waiting_for_fresh_status = False
             self._manual_jog_settle_until = 0.0
             self._manual_jog_stop_status_timestamp = None
+        if self._planned_move_waiting_for_fresh_status:
+            self._planned_move_waiting_for_fresh_status = False
+            self._planned_move_stop_status_timestamp = None
         if self._manual_jog_velocity_xy is not None:
             self._manual_jog_last_timestamp = time.monotonic()
         self._update_coordinate_display(center_xy=center_xy)
@@ -1748,8 +1983,14 @@ class Main(QMainWindow):
         self.design_navigator_panel.target_selected.connect(
             self._on_design_target_selected
         )
+        self.design_navigator_panel.snap_enabled_changed.connect(
+            self._on_design_snap_enabled_changed
+        )
         self.design_layout_window.calibration_point_selected.connect(
             self._on_design_layout_point_selected
+        )
+        self.design_layout_window.move_requested.connect(
+            lambda x_value, y_value: self._move_to_design_window_point(x_value, y_value)
         )
         self.design_layout_window.hover_snap_changed.connect(
             self.design_navigator_panel.set_hover_snap
@@ -1800,6 +2041,15 @@ class Main(QMainWindow):
             Qt.Vertical,
         )
 
+    def _move_to_design_window_point(self, x_value: float, y_value: float) -> None:
+        design_xy = (float(x_value), float(y_value))
+        if not self._move_to_design_coordinate(design_xy, source_label="design window"):
+            return
+        self._show_status(
+            f"Moving to design point X={design_xy[0]:.3f}, Y={design_xy[1]:.3f}.",
+            3000,
+        )
+
     def _start_needle_calibration(self) -> None:
         if self.serial_connection is None or not self.serial_connection.is_open:
             self._show_status("Connect the stage controller before needle calibration.")
@@ -1848,6 +2098,15 @@ class Main(QMainWindow):
     def _on_lcr_reading_updated(self, resistance_ohm: float, is_short: bool) -> None:
         if self.needle_calibration_panel:
             self.needle_calibration_panel.set_reading(resistance_ohm, is_short)
+
+    def _set_design_snap_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        self._design_snap_enabled = enabled
+        if self.design_layout_window is not None:
+            self.design_layout_window.set_snap_enabled(enabled)
+
+    def _on_design_snap_enabled_changed(self, enabled: bool) -> None:
+        self._set_design_snap_enabled(enabled)
 
     def _save_current_needle_height(self) -> None:
         a_position = self.stage_controller.current_a_position()

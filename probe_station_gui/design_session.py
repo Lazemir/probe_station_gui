@@ -171,7 +171,7 @@ class DesignSession:
         if self.source_stage_marks[1] is None:
             return "Center chip mark 2 and capture it."
         if self.registration is not None and self.registration.valid:
-            return "Calibration complete. Close the design window or navigate from the minimap."
+            return "Calibration complete. Use the minimap or click in the design window to navigate."
         return "Two mark pairs captured. Waiting for chip rotation to finish."
 
     def prepare_source_alignment(self) -> AlignmentPreparation:

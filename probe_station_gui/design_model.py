@@ -219,7 +219,7 @@ class DesignRegistration:
 class DesignDocument:
     """Loaded GDS design and display-ready polygon geometry."""
 
-    SNAP_VERTEX_PRIORITY_RATIO: ClassVar[float] = 1.5
+    SNAP_VERTEX_PRIORITY_RATIO: ClassVar[float] = 1.8
 
     path: Path
     library: Any

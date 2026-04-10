@@ -85,6 +85,7 @@
     "startup_mode": "controller",
     "preferred_system": "G54"
   },
+  "design_last_directory": "",
   "feedrates": {
     "linear": {
       "presets": [

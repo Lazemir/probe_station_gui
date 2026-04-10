@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QApplication, QWidget
 
 from ..design_model import DesignDocument, MeasurementTarget
 
@@ -15,6 +15,7 @@ class MicroscopeView(QWidget):
     clicked: Signal = Signal(float, float, float, float)
     hovered: Signal = Signal(float, float, float, float)
     hover_left: Signal = Signal()
+    design_minimap_clicked: Signal = Signal(float, float)
     design_minimap_double_clicked: Signal = Signal()
 
     _MINIMAP_MARGIN = 16
@@ -43,6 +44,10 @@ class MicroscopeView(QWidget):
         self._minimap_background: QPixmap | None = None
         self._minimap_cache_key: tuple[object, QSize] | None = None
         self._minimap_rect: QRect | None = None
+        self._pending_minimap_click_point: QPoint | None = None
+        self._minimap_click_timer = QTimer(self)
+        self._minimap_click_timer.setSingleShot(True)
+        self._minimap_click_timer.timeout.connect(self._emit_pending_minimap_click)
 
     def set_frame(self, qimg: QImage) -> None:
         self._pix = QPixmap.fromImage(qimg)
@@ -195,6 +200,9 @@ class MicroscopeView(QWidget):
             return
         point = event.position().toPoint()
         if self._minimap_rect is not None and self._minimap_rect.contains(point):
+            self._pending_minimap_click_point = QPoint(point)
+            self._minimap_click_timer.start(max(1, int(QApplication.doubleClickInterval())))
+            event.accept()
             return
         if not self._display_rect.contains(point):
             return
@@ -227,6 +235,8 @@ class MicroscopeView(QWidget):
             and self._minimap_rect is not None
             and self._minimap_rect.contains(point)
         ):
+            self._minimap_click_timer.stop()
+            self._pending_minimap_click_point = None
             self.design_minimap_double_clicked.emit()
             event.accept()
             return
@@ -497,6 +507,23 @@ class MicroscopeView(QWidget):
         y_pos = offset_y + (top - point[1]) * scale
         return QPointF(float(x_pos), float(y_pos))
 
+    def _map_rect_point_to_design(self, point: QPoint | QPointF, rect: QRect) -> tuple[float, float]:
+        assert self._design_document is not None
+        left, bottom, right, top = self._design_document.bounds
+        width = max(right - left, 1e-9)
+        height = max(top - bottom, 1e-9)
+        pad = 6.0
+        usable_width = max(rect.width() - 2.0 * pad, 1.0)
+        usable_height = max(rect.height() - 2.0 * pad, 1.0)
+        scale = min(usable_width / width, usable_height / height)
+        offset_x = rect.left() + (rect.width() - width * scale) * 0.5
+        offset_y = rect.top() + (rect.height() - height * scale) * 0.5
+        x_value = left + (float(point.x()) - offset_x) / scale
+        y_value = top - (float(point.y()) - offset_y) / scale
+        x_value = min(max(x_value, left), right)
+        y_value = min(max(y_value, bottom), top)
+        return (float(x_value), float(y_value))
+
     def _map_design_point_to_rect_clamped(
         self, point: tuple[float, float], rect: QRect
     ) -> tuple[QPointF, bool]:
@@ -509,6 +536,30 @@ class MicroscopeView(QWidget):
         clamped_y = min(max(mapped.y(), top), bottom)
         inside = abs(clamped_x - mapped.x()) < 1e-6 and abs(clamped_y - mapped.y()) < 1e-6
         return QPointF(clamped_x, clamped_y), inside
+
+    def _emit_pending_minimap_click(self) -> None:
+        if (
+            self._design_document is None
+            or self._minimap_rect is None
+            or self._pending_minimap_click_point is None
+        ):
+            self._pending_minimap_click_point = None
+            return
+        content_rect = QRect(
+            self._minimap_rect.left() + 8,
+            self._minimap_rect.top() + 26,
+            self._minimap_rect.width() - 16,
+            self._minimap_rect.height() - 34,
+        )
+        if content_rect.width() <= 0 or content_rect.height() <= 0:
+            self._pending_minimap_click_point = None
+            return
+        design_point = self._map_rect_point_to_design(
+            self._pending_minimap_click_point,
+            content_rect,
+        )
+        self._pending_minimap_click_point = None
+        self.design_minimap_clicked.emit(design_point[0], design_point[1])
 
     @staticmethod
     def _layer_color(layer_key: tuple[int, int]) -> QColor:

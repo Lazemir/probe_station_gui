@@ -12,6 +12,7 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QGridLayout,
@@ -48,9 +49,12 @@ class _DesignPlotPane(QWidget):
     """Thin wrapper around pyqtgraph for design rendering."""
 
     calibration_point_selected = Signal(int, float, float)
+    move_requested = Signal(float, float)
     hover_snap_changed = Signal(object)
     HOVER_SNAP_LOG_INTERVAL_S = 0.2
     HOVER_SNAP_SLOW_MS = 8.0
+    SNAP_RADIUS_PX = 14.0
+    CURRENT_CROSSHAIR_HALF_SIZE_PX = 8.0
 
     def __init__(self, *, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -61,6 +65,8 @@ class _DesignPlotPane(QWidget):
         self._current_design_position: Point2D | None = None
         self._fov_design_size: Point2D | None = None
         self._check_design_marks: list[Point2D] = []
+        self._navigation_enabled = False
+        self._snap_enabled = True
         self._layer_items: list[object] = []
         self._hover_snap: SnapResult | None = None
         self._pending_hover_scene_pos = None
@@ -115,10 +121,15 @@ class _DesignPlotPane(QWidget):
             size=12,
         )
         self._current_item = pg.ScatterPlotItem(
-            pen=pg.mkPen("#81c784", width=2),
+            pen=pg.mkPen("#81c784", width=1),
             brush=pg.mkBrush(129, 199, 132, 220),
-            size=12,
-            symbol="x",
+            size=3.5,
+            symbol="o",
+        )
+        self._current_crosshair_item = self._plot.plot(
+            [],
+            [],
+            pen=pg.mkPen("#81c784", width=1.5),
         )
         self._source_mark_1_item = pg.ScatterPlotItem(
             pen=pg.mkPen("#ffd54f", width=2),
@@ -198,6 +209,18 @@ class _DesignPlotPane(QWidget):
         self._check_design_marks = list(check_design_marks)
         self._redraw_overlays()
 
+    def set_navigation_enabled(self, enabled: bool) -> None:
+        """Enable click-to-move on the layout plot once registration is valid."""
+
+        self._navigation_enabled = bool(enabled)
+
+    def set_snap_enabled(self, enabled: bool) -> None:
+        """Enable or disable geometry snapping for design clicks and hover."""
+
+        self._snap_enabled = bool(enabled)
+        if not self._snap_enabled:
+            self._set_hover_snap(None)
+
     def focus_bounds(self) -> None:
         if self._plot is None or self._document is None:
             return
@@ -259,9 +282,20 @@ class _DesignPlotPane(QWidget):
             )
 
         if self._current_design_position is None:
+            self._current_crosshair_item.setData([], [])
             self._current_item.setData([], [])
             self._fov_item.setData([], [])
         else:
+            pixel_size = self._data_units_per_screen_pixel()
+            if self._document is None or pixel_size is None:
+                self._current_crosshair_item.setData([], [])
+            else:
+                cx, cy = self._current_design_position
+                half_size = self.CURRENT_CROSSHAIR_HALF_SIZE_PX * pixel_size
+                self._current_crosshair_item.setData(
+                    [cx - half_size, cx + half_size, float("nan"), cx, cx],
+                    [cy, cy, float("nan"), cy - half_size, cy + half_size],
+                )
             self._current_item.setData(
                 [self._current_design_position[0]],
                 [self._current_design_position[1]],
@@ -290,7 +324,9 @@ class _DesignPlotPane(QWidget):
     def _on_mouse_clicked(self, event) -> None:  # pragma: no cover - UI interaction
         if self._plot is None or self._document is None:
             return
-        if event.button() == Qt.LeftButton:
+        if self._navigation_enabled and event.button() == Qt.LeftButton:
+            slot = None
+        elif event.button() == Qt.LeftButton:
             slot = 0
         elif event.button() == Qt.RightButton:
             slot = 1
@@ -302,7 +338,7 @@ class _DesignPlotPane(QWidget):
         view_point = self._plot.getViewBox().mapSceneToView(position)
         raw_point = (float(view_point.x()), float(view_point.y()))
         started = perf_counter()
-        snap_result = self._document.snap_point_info(raw_point)
+        snap_result = self._resolve_snap_result(raw_point)
         elapsed_ms = (perf_counter() - started) * 1000.0
         self._set_hover_snap(snap_result)
         logger.debug(
@@ -315,11 +351,13 @@ class _DesignPlotPane(QWidget):
             snap_result.distance,
             elapsed_ms,
         )
-        self.calibration_point_selected.emit(
-            slot,
-            snap_result.point[0],
-            snap_result.point[1],
-        )
+        if slot is None:
+            self.move_requested.emit(
+                snap_result.point[0],
+                snap_result.point[1],
+            )
+            return
+        self.calibration_point_selected.emit(slot, snap_result.point[0], snap_result.point[1])
 
     def _on_mouse_moved(self, position) -> None:  # pragma: no cover - UI interaction
         self._pending_hover_scene_pos = position
@@ -338,10 +376,55 @@ class _DesignPlotPane(QWidget):
         view_point = self._plot.getViewBox().mapSceneToView(position)
         raw_point = (float(view_point.x()), float(view_point.y()))
         started = perf_counter()
-        snap_result = self._document.snap_point_info(raw_point)
+        snap_result = self._resolve_snap_result(raw_point)
         elapsed_ms = (perf_counter() - started) * 1000.0
         self._set_hover_snap(snap_result)
         self._log_hover_snap(raw_point, snap_result, elapsed_ms)
+
+    def _resolve_snap_result(self, raw_point: Point2D) -> SnapResult:
+        if self._document is None:
+            return SnapResult(point=raw_point, mode="free", distance=0.0)
+        if not self._snap_enabled:
+            return SnapResult(point=raw_point, mode="free", distance=0.0)
+        snap_result = self._document.snap_point_info(raw_point)
+        snap_threshold = self._snap_distance_threshold()
+        if snap_threshold is not None and snap_result.distance > snap_threshold:
+            return SnapResult(point=raw_point, mode="free", distance=0.0)
+        return snap_result
+
+    def _snap_distance_threshold(self) -> float | None:
+        pixel_size = self._data_units_per_screen_pixel()
+        if pixel_size is None or not math.isfinite(pixel_size) or pixel_size <= 0.0:
+            return None
+        return float(pixel_size * self.SNAP_RADIUS_PX)
+
+    def _data_units_per_screen_pixel(self) -> float | None:
+        if self._plot is None:
+            return None
+        view_box = self._plot.getViewBox()
+        try:
+            pixel_size = view_box.viewPixelSize()
+        except Exception:
+            pixel_size = None
+        if (
+            isinstance(pixel_size, tuple)
+            and len(pixel_size) >= 2
+            and all(math.isfinite(float(value)) and abs(float(value)) > 0.0 for value in pixel_size[:2])
+        ):
+            return max(abs(float(pixel_size[0])), abs(float(pixel_size[1])))
+        view_range = view_box.viewRange()
+        if not isinstance(view_range, list) or len(view_range) < 2:
+            return None
+        scene_rect = view_box.sceneBoundingRect()
+        if scene_rect.width() <= 0.0 or scene_rect.height() <= 0.0:
+            return None
+        x_range = view_range[0]
+        y_range = view_range[1]
+        if len(x_range) < 2 or len(y_range) < 2:
+            return None
+        x_units = abs(float(x_range[1]) - float(x_range[0])) / float(scene_rect.width())
+        y_units = abs(float(y_range[1]) - float(y_range[0])) / float(scene_rect.height())
+        return max(x_units, y_units)
 
     def _set_hover_snap(self, snap_result: SnapResult | None) -> None:
         self._hover_snap = snap_result
@@ -428,10 +511,13 @@ class DesignNavigatorPanel(QWidget):
     next_target_requested = Signal()
     previous_target_requested = Signal()
     target_selected = Signal(str)
+    snap_enabled_changed = Signal(bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._document: DesignDocument | None = None
+        self._design_dialog_directory = ""
+        self._snap_enabled = True
         self._source_design_marks: list[Point2D | None] = [None, None]
         self._source_stage_marks: list[Point2D | None] = [None, None]
         self._targets: list[MeasurementTarget] = []
@@ -444,6 +530,10 @@ class DesignNavigatorPanel(QWidget):
         self._availability_label = QLabel(self)
         self._availability_label.setWordWrap(True)
         root_layout.addWidget(self._availability_label)
+        self._snap_checkbox = QCheckBox("Snap To Geometry", self)
+        self._snap_checkbox.setChecked(True)
+        self._snap_checkbox.toggled.connect(self._on_snap_checkbox_toggled)
+        root_layout.addWidget(self._snap_checkbox)
         self._snap_hint_label = QLabel("Hover snap: move over a line or corner.", self)
         self._snap_hint_label.setWordWrap(True)
         self._snap_hint_label.setStyleSheet("QLabel { color: #b0bec5; }")
@@ -664,9 +754,23 @@ class DesignNavigatorPanel(QWidget):
     def set_status_message(self, text: str) -> None:
         self._availability_label.setText(text)
 
+    def set_design_dialog_directory(self, directory: str | Path | None) -> None:
+        """Update the preferred starting directory for opening GDS files."""
+
+        if directory is None:
+            self._design_dialog_directory = ""
+            return
+        self._design_dialog_directory = str(Path(directory))
+
     def set_hover_snap(self, snap_result: SnapResult | None) -> None:
+        if not self._snap_enabled:
+            self._snap_hint_label.setText("Snap off: clicks use the exact cursor position.")
+            return
         if snap_result is None:
             self._snap_hint_label.setText("Hover snap: move over a line or corner.")
+            return
+        if snap_result.mode == "free":
+            self._snap_hint_label.setText("Hover snap: no nearby geometry, click uses the exact cursor position.")
             return
         label = "Corner" if snap_result.mode == "vertex" else "Line"
         self._snap_hint_label.setText(
@@ -686,7 +790,7 @@ class DesignNavigatorPanel(QWidget):
             messages.append("pyqtgraph not installed: design window is disabled.")
         else:
             messages.append(
-                "Load a GDS for registered navigation. Use the Alignment dock when you want to capture chip points."
+                "Load a GDS for registered navigation. Use Alignment to capture chip points, then click in the design view to move."
             )
         self._availability_label.setText(" ".join(messages))
 
@@ -695,6 +799,7 @@ class DesignNavigatorPanel(QWidget):
         self._unload_design_button.setEnabled(has_document)
         self._top_cell_combo.setEnabled(has_document)
         self._layer_list.setEnabled(has_document)
+        self._snap_checkbox.setEnabled(has_document)
         self._load_script_button.setEnabled(has_document)
         self._reload_script_button.setEnabled(
             has_document and self._script_label.text() != "No script loaded."
@@ -706,10 +811,13 @@ class DesignNavigatorPanel(QWidget):
         self._move_button.setEnabled(has_targets and has_selection)
 
     def _choose_design_file(self) -> None:  # pragma: no cover - UI interaction
+        start_directory = self._design_dialog_directory
+        if not start_directory and self._document is not None:
+            start_directory = str(self._document.path.parent)
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Open Design",
-            "",
+            start_directory,
             "Layout files (*.gds *.gdsii *.oas *.oasis);;All files (*)",
         )
         if path:
@@ -731,6 +839,20 @@ class DesignNavigatorPanel(QWidget):
         if cell_name == self._document.top_cell_name:
             return
         self.top_cell_changed.emit(cell_name)
+
+    def set_snap_enabled(self, enabled: bool) -> None:
+        """Update the visible snap toggle state without re-emitting it."""
+
+        self._snap_enabled = bool(enabled)
+        self._snap_checkbox.blockSignals(True)
+        self._snap_checkbox.setChecked(self._snap_enabled)
+        self._snap_checkbox.blockSignals(False)
+        self.set_hover_snap(None)
+
+    def _on_snap_checkbox_toggled(self, checked: bool) -> None:
+        self._snap_enabled = bool(checked)
+        self.set_hover_snap(None)
+        self.snap_enabled_changed.emit(self._snap_enabled)
 
     def _on_layer_item_changed(self, item: QListWidgetItem) -> None:
         layer_key = item.data(Qt.UserRole)
@@ -780,6 +902,7 @@ class DesignLayoutWindow(QWidget):
     """Top-level design window combining the layout view and design controls."""
 
     calibration_point_selected = Signal(int, float, float)
+    move_requested = Signal(float, float)
     hover_snap_changed = Signal(object)
     visibility_changed = Signal(bool)
 
@@ -800,6 +923,7 @@ class DesignLayoutWindow(QWidget):
         self._main_view.calibration_point_selected.connect(
             self.calibration_point_selected.emit
         )
+        self._main_view.move_requested.connect(self.move_requested.emit)
         self._main_view.hover_snap_changed.connect(self.hover_snap_changed.emit)
         root_layout.addWidget(self._main_view, 1)
         root_layout.addWidget(self.navigator_panel, 0)
@@ -824,6 +948,17 @@ class DesignLayoutWindow(QWidget):
     ) -> None:
         self._main_view.set_registration_marks(source_design_marks, check_design_marks)
         self.navigator_panel.set_registration_marks(source_design_marks, check_design_marks)
+
+    def set_navigation_enabled(self, enabled: bool) -> None:
+        """Toggle click-to-move behavior in the design plot."""
+
+        self._main_view.set_navigation_enabled(enabled)
+
+    def set_snap_enabled(self, enabled: bool) -> None:
+        """Toggle geometry snapping in the design plot and sidebar."""
+
+        self._main_view.set_snap_enabled(enabled)
+        self.navigator_panel.set_snap_enabled(enabled)
 
     def set_stage_registration_marks(self, source_stage_marks: list[Point2D | None]) -> None:
         self.navigator_panel.set_stage_registration_marks(source_stage_marks)
