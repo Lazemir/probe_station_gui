@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import platform
+import re
 from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
@@ -29,8 +30,18 @@ CONTROL_ACTIONS: tuple[ControlAction, ...] = (
     ControlAction("move_y_negative", "Y", -1, "Move Down"),
     ControlAction("move_x_negative", "X", -1, "Move Left"),
     ControlAction("move_x_positive", "X", 1, "Move Right"),
-    ControlAction("rotate_b_negative", "B", -1, "Rotate B ↻ (clockwise)"),
-    ControlAction("rotate_b_positive", "B", 1, "Rotate B ↺ (counter-clockwise)"),
+)
+
+WORK_COORDINATE_SYSTEMS: tuple[str, ...] = (
+    "G54",
+    "G55",
+    "G56",
+    "G57",
+    "G58",
+    "G59",
+    "G59.1",
+    "G59.2",
+    "G59.3",
 )
 
 
@@ -40,12 +51,18 @@ class KeyBinding:
 
     qt_key: int
     modifiers: int = 0
+    native_scan_code: int = 0
     text: str = ""
 
     def to_dict(self) -> dict[str, int | str]:
         """Serialize the binding for persistence."""
 
-        return {"qt_key": self.qt_key, "modifiers": self.modifiers, "text": self.text}
+        return {
+            "qt_key": self.qt_key,
+            "modifiers": self.modifiers,
+            "native_scan_code": self.native_scan_code,
+            "text": self.text,
+        }
 
     @staticmethod
     def from_dict(data: dict) -> "KeyBinding":
@@ -54,6 +71,7 @@ class KeyBinding:
         return KeyBinding(
             qt_key=int(data.get("qt_key", 0)),
             modifiers=int(data.get("modifiers", 0)),
+            native_scan_code=int(data.get("native_scan_code", 0)),
             text=str(data.get("text", "")),
         )
 
@@ -130,6 +148,72 @@ class JogSettings:
 
 
 @dataclass
+class NeedleCalibrationSettings:
+    """Configuration for needle calibration and the external LCR meter."""
+
+    visa_resource: str = ""
+    dcr_range: int = 3
+    short_threshold_ohm: float = 10.0
+    poll_interval_ms: int = 250
+    lower_direction: str = "negative"
+    down_position_mm: float = 0.0
+    down_position_configured: bool = False
+
+    def clone(self) -> "NeedleCalibrationSettings":
+        """Return a copy of the needle calibration settings."""
+
+        return NeedleCalibrationSettings(
+            visa_resource=self.visa_resource,
+            dcr_range=self.dcr_range,
+            short_threshold_ohm=self.short_threshold_ohm,
+            poll_interval_ms=self.poll_interval_ms,
+            lower_direction=self.lower_direction,
+            down_position_mm=self.down_position_mm,
+            down_position_configured=self.down_position_configured,
+        )
+
+    def to_dict(self) -> dict[str, float | int | str | bool]:
+        """Serialize the needle calibration preferences."""
+
+        return {
+            "visa_resource": self.visa_resource,
+            "dcr_range": self.dcr_range,
+            "short_threshold_ohm": self.short_threshold_ohm,
+            "poll_interval_ms": self.poll_interval_ms,
+            "lower_direction": self.lower_direction,
+            "down_position_mm": self.down_position_mm,
+            "down_position_configured": self.down_position_configured,
+        }
+
+
+@dataclass
+class CoordinateSystemSettings:
+    """Configuration for work-coordinate system selection."""
+
+    position_mode: str = "work"
+    startup_mode: str = "controller"
+    preferred_system: str = "G54"
+
+    def clone(self) -> "CoordinateSystemSettings":
+        """Return a copy of the coordinate-system preferences."""
+
+        return CoordinateSystemSettings(
+            position_mode=self.position_mode,
+            startup_mode=self.startup_mode,
+            preferred_system=self.preferred_system,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        """Serialize coordinate-system preferences."""
+
+        return {
+            "position_mode": self.position_mode,
+            "startup_mode": self.startup_mode,
+            "preferred_system": self.preferred_system,
+        }
+
+
+@dataclass
 class Settings:
     """Container for all configurable values."""
 
@@ -137,6 +221,13 @@ class Settings:
     logging: LoggingSettings = field(default_factory=LoggingSettings)
     feedrates: FeedrateSettings = field(default_factory=FeedrateSettings)
     jog: JogSettings = field(default_factory=JogSettings)
+    needle_calibration: NeedleCalibrationSettings = field(
+        default_factory=NeedleCalibrationSettings
+    )
+    coordinate_system: CoordinateSystemSettings = field(
+        default_factory=CoordinateSystemSettings
+    )
+    design_last_directory: str = ""
 
     def clone(self) -> "Settings":
         """Create a deep copy of the settings container."""
@@ -146,6 +237,9 @@ class Settings:
             logging=self.logging.clone(),
             feedrates=self.feedrates.clone(),
             jog=self.jog.clone(),
+            needle_calibration=self.needle_calibration.clone(),
+            coordinate_system=self.coordinate_system.clone(),
+            design_last_directory=self.design_last_directory,
         )
 
     def to_dict(self) -> dict:
@@ -168,6 +262,9 @@ class Settings:
                 },
             },
             "jog": self.jog.to_dict(),
+            "needle_calibration": self.needle_calibration.to_dict(),
+            "coordinate_system": self.coordinate_system.to_dict(),
+            "design_last_directory": self.design_last_directory,
         }
 
 
@@ -175,6 +272,7 @@ class SettingsManager:
     """Load, persist, and expose user configurable settings."""
 
     CONFIG_FILENAME = "settings.json"
+    CONTROLLER_STATE_FILENAME = "controller-state.json"
     DEFAULT_LOG_FILENAME = "probe-station-gui.log"
     DEFAULT_LINEAR_FEEDRATE_PRESETS: tuple[float, ...] = (
         1.0,
@@ -195,8 +293,16 @@ class SettingsManager:
     DEFAULT_FEEDRATE_DEFAULT: float = 1.0
     DEFAULT_LINEAR_JOG_DISTANCE_MM: float = 25.0
     DEFAULT_ROTARY_JOG_DISTANCE_DEG: float = 5.0
+    DEFAULT_LCR_DCR_RANGE: int = 3
+    DEFAULT_SHORT_THRESHOLD_OHM: float = 10.0
+    DEFAULT_LCR_POLL_INTERVAL_MS: int = 250
+    DEFAULT_LOWER_DIRECTION: str = "negative"
+    DEFAULT_POSITION_MODE: str = "work"
+    DEFAULT_COORDINATE_STARTUP_MODE: str = "controller"
+    DEFAULT_COORDINATE_SYSTEM: str = "G54"
     LINEAR_GROUP = "linear"
     ROTARY_GROUP = "rotary"
+    CYRILLIC_PATTERN = re.compile(r"[\u0400-\u04FF]")
 
     def __init__(self) -> None:
         self._config_dir = self._determine_config_dir()
@@ -251,6 +357,9 @@ class SettingsManager:
     def logging_level_name(self) -> str:
         """Return the configured logging level name."""
 
+        override = os.environ.get("PROBE_STATION_LOG_LEVEL", "").strip()
+        if override:
+            return override.upper()
         return (self._settings.logging.level or "INFO").upper()
 
     def log_file_path(self) -> Path:
@@ -260,11 +369,51 @@ class SettingsManager:
         if file_setting:
             path = Path(file_setting)
             if not path.is_absolute():
-                path = self._config_dir / path
+                path = self._determine_log_dir() / path
+            elif self._is_legacy_default_log_path(path):
+                path = self._default_log_path()
         else:
-            path = self._config_dir / self.DEFAULT_LOG_FILENAME
+            path = self._default_log_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
+
+    def load_controller_state(self) -> dict | None:
+        """Load persisted controller runtime state, if present."""
+
+        path = self._config_dir / self.CONTROLLER_STATE_FILENAME
+        if not path.exists():
+            return None
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            self._logger.warning("Failed to load controller state from %s: %s", path, exc)
+            return None
+        if not isinstance(data, dict):
+            return None
+        return data
+
+    def save_controller_state(self, data: dict | None) -> None:
+        """Persist controller runtime state alongside user settings."""
+
+        path = self._config_dir / self.CONTROLLER_STATE_FILENAME
+        if not data:
+            self.clear_controller_state()
+            return
+        self._config_dir.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2, ensure_ascii=False)
+
+    def clear_controller_state(self) -> None:
+        """Remove persisted controller runtime state."""
+
+        path = self._config_dir / self.CONTROLLER_STATE_FILENAME
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            self._logger.warning("Failed to clear controller state %s: %s", path, exc)
 
     def _determine_config_dir(self) -> Path:
         """Compute the directory where configuration files should live."""
@@ -282,6 +431,33 @@ class SettingsManager:
             return Path(xdg) / "probe-station-gui"
         return Path.home() / ".config" / "probe-station-gui"
 
+    def _determine_log_dir(self) -> Path:
+        """Compute the directory where log files should live."""
+
+        system = platform.system()
+        if system == "Windows":
+            base = os.environ.get("LOCALAPPDATA")
+            if base:
+                return Path(base) / "ProbeStationGUI" / "Logs"
+            return Path.home() / "AppData" / "Local" / "ProbeStationGUI" / "Logs"
+        if system == "Darwin":
+            return Path.home() / "Library" / "Logs" / "ProbeStationGUI"
+        xdg_state = os.environ.get("XDG_STATE_HOME")
+        if xdg_state:
+            return Path(xdg_state) / "probe-station-gui"
+        return Path.home() / ".local" / "state" / "probe-station-gui"
+
+    def _default_log_path(self) -> Path:
+        return self._determine_log_dir() / self.DEFAULT_LOG_FILENAME
+
+    def _is_legacy_default_log_path(self, path: Path) -> bool:
+        try:
+            resolved = path.expanduser().resolve()
+        except OSError:
+            resolved = path.expanduser()
+        legacy = (self._config_dir / self.DEFAULT_LOG_FILENAME).expanduser()
+        return resolved == legacy
+
     def _ensure_default_file(self) -> None:
         """Copy the default settings file when the user configuration is missing."""
 
@@ -291,7 +467,7 @@ class SettingsManager:
         default_resource = resources.files("probe_station_gui").joinpath(
             "default_settings.json"
         )
-        log_path = str(self._config_dir / self.DEFAULT_LOG_FILENAME)
+        log_path = str(self._default_log_path())
 
         try:
             with default_resource.open("r", encoding="utf-8") as source:
@@ -360,6 +536,56 @@ class SettingsManager:
                 "rotary_distance_deg", self.DEFAULT_ROTARY_JOG_DISTANCE_DEG
             )
 
+        needle_section = data.get("needle_calibration")
+        if not isinstance(needle_section, dict):
+            needle_section = {
+                "visa_resource": "",
+                "dcr_range": self.DEFAULT_LCR_DCR_RANGE,
+                "short_threshold_ohm": self.DEFAULT_SHORT_THRESHOLD_OHM,
+                "poll_interval_ms": self.DEFAULT_LCR_POLL_INTERVAL_MS,
+                "lower_direction": self.DEFAULT_LOWER_DIRECTION,
+                "down_position_mm": 0.0,
+                "down_position_configured": False,
+            }
+            data["needle_calibration"] = needle_section
+        else:
+            needle_section.setdefault("visa_resource", "")
+            needle_section.setdefault("dcr_range", self.DEFAULT_LCR_DCR_RANGE)
+            needle_section.setdefault(
+                "short_threshold_ohm", self.DEFAULT_SHORT_THRESHOLD_OHM
+            )
+            needle_section.setdefault(
+                "poll_interval_ms", self.DEFAULT_LCR_POLL_INTERVAL_MS
+            )
+            needle_section.setdefault(
+                "lower_direction", self.DEFAULT_LOWER_DIRECTION
+            )
+            needle_section.setdefault("down_position_mm", 0.0)
+            needle_section.setdefault("down_position_configured", False)
+
+        coordinate_section = data.get("coordinate_system")
+        if not isinstance(coordinate_section, dict):
+            coordinate_section = {
+                "position_mode": self.DEFAULT_POSITION_MODE,
+                "startup_mode": self.DEFAULT_COORDINATE_STARTUP_MODE,
+                "preferred_system": self.DEFAULT_COORDINATE_SYSTEM,
+            }
+            data["coordinate_system"] = coordinate_section
+        else:
+            coordinate_section.setdefault(
+                "position_mode", self.DEFAULT_POSITION_MODE
+            )
+            coordinate_section.setdefault(
+                "startup_mode", self.DEFAULT_COORDINATE_STARTUP_MODE
+            )
+            coordinate_section.setdefault(
+                "preferred_system", self.DEFAULT_COORDINATE_SYSTEM
+            )
+
+        design_last_directory = data.get("design_last_directory")
+        if not isinstance(design_last_directory, str):
+            data["design_last_directory"] = ""
+
         with self._config_path.open("w", encoding="utf-8") as target:
             json.dump(data, target, indent=2, ensure_ascii=False)
 
@@ -378,14 +604,16 @@ class SettingsManager:
             if isinstance(values, Iterable):
                 for value in values:
                     if isinstance(value, dict):
-                        bindings.append(KeyBinding.from_dict(value))
+                        binding = KeyBinding.from_dict(value)
+                        if self._should_keep_control_binding(binding):
+                            bindings.append(binding)
             controls[key] = bindings
         for action in CONTROL_ACTIONS:
             controls.setdefault(action.key, [])
         logging_raw = raw.get("logging", {}) if isinstance(raw, dict) else {}
         logging_settings = self._parse_logging(logging_raw)
         if not logging_settings.file:
-            default_log = str(self._config_dir / self.DEFAULT_LOG_FILENAME)
+            default_log = str(self._default_log_path())
             logging_settings.file = default_log
             self._logger.debug(
                 "Log file path missing in settings; defaulting to %s", default_log
@@ -394,11 +622,25 @@ class SettingsManager:
         legacy_presets = raw.get("feedrate_presets") if isinstance(raw, dict) else None
         feedrates = self._parse_feedrates(feedrates_raw, legacy_presets)
         jog_raw = raw.get("jog") if isinstance(raw, dict) else None
+        needle_calibration_raw = (
+            raw.get("needle_calibration") if isinstance(raw, dict) else None
+        )
+        coordinate_system_raw = (
+            raw.get("coordinate_system") if isinstance(raw, dict) else None
+        )
+        design_last_directory = ""
+        if isinstance(raw, dict):
+            design_last_directory_raw = raw.get("design_last_directory", "")
+            if isinstance(design_last_directory_raw, str):
+                design_last_directory = design_last_directory_raw.strip()
         return Settings(
             controls=controls,
             logging=logging_settings,
             feedrates=feedrates,
             jog=self._parse_jog(jog_raw),
+            needle_calibration=self._parse_needle_calibration(needle_calibration_raw),
+            coordinate_system=self._parse_coordinate_system(coordinate_system_raw),
+            design_last_directory=design_last_directory,
         )
 
     def _parse_logging(self, raw_logging) -> LoggingSettings:
@@ -450,6 +692,118 @@ class SettingsManager:
             linear_distance_mm=linear_distance,
             rotary_distance_deg=rotary_distance,
         )
+
+    def _parse_needle_calibration(
+        self, raw_needle_calibration
+    ) -> NeedleCalibrationSettings:
+        """Normalise persisted needle calibration settings."""
+
+        visa_resource = ""
+        dcr_range = self.DEFAULT_LCR_DCR_RANGE
+        short_threshold_ohm = self.DEFAULT_SHORT_THRESHOLD_OHM
+        poll_interval_ms = self.DEFAULT_LCR_POLL_INTERVAL_MS
+        lower_direction = self.DEFAULT_LOWER_DIRECTION
+        down_position_mm = 0.0
+        down_position_configured = False
+        if isinstance(raw_needle_calibration, dict):
+            resource_raw = raw_needle_calibration.get("visa_resource", visa_resource)
+            if isinstance(resource_raw, str):
+                visa_resource = resource_raw.strip()
+            candidate = raw_needle_calibration.get("dcr_range", dcr_range)
+            try:
+                dcr_range = int(float(candidate))
+            except (TypeError, ValueError):
+                dcr_range = self.DEFAULT_LCR_DCR_RANGE
+            candidate = raw_needle_calibration.get(
+                "short_threshold_ohm", short_threshold_ohm
+            )
+            try:
+                if isinstance(candidate, (int, float, str)):
+                    short_threshold_ohm = float(candidate)
+            except (TypeError, ValueError):
+                short_threshold_ohm = self.DEFAULT_SHORT_THRESHOLD_OHM
+            candidate = raw_needle_calibration.get(
+                "poll_interval_ms", poll_interval_ms
+            )
+            try:
+                if isinstance(candidate, (int, float, str)):
+                    poll_interval_ms = int(float(candidate))
+            except (TypeError, ValueError):
+                poll_interval_ms = self.DEFAULT_LCR_POLL_INTERVAL_MS
+            direction_raw = raw_needle_calibration.get(
+                "lower_direction", lower_direction
+            )
+            if isinstance(direction_raw, str):
+                lower_direction = direction_raw.strip().lower()
+            candidate = raw_needle_calibration.get(
+                "down_position_mm", down_position_mm
+            )
+            try:
+                if isinstance(candidate, (int, float, str)):
+                    down_position_mm = float(candidate)
+            except (TypeError, ValueError):
+                down_position_mm = 0.0
+            down_position_configured = bool(
+                raw_needle_calibration.get(
+                    "down_position_configured", down_position_configured
+                )
+            )
+        if dcr_range < 0 or dcr_range > 8:
+            dcr_range = self.DEFAULT_LCR_DCR_RANGE
+        if short_threshold_ohm < 0:
+            short_threshold_ohm = self.DEFAULT_SHORT_THRESHOLD_OHM
+        if poll_interval_ms < 50:
+            poll_interval_ms = self.DEFAULT_LCR_POLL_INTERVAL_MS
+        if lower_direction not in {"negative", "positive"}:
+            lower_direction = self.DEFAULT_LOWER_DIRECTION
+        return NeedleCalibrationSettings(
+            visa_resource=visa_resource,
+            dcr_range=dcr_range,
+            short_threshold_ohm=short_threshold_ohm,
+            poll_interval_ms=poll_interval_ms,
+            lower_direction=lower_direction,
+            down_position_mm=down_position_mm,
+            down_position_configured=down_position_configured,
+        )
+
+    def _parse_coordinate_system(self, raw_coordinate_system) -> CoordinateSystemSettings:
+        """Normalise persisted coordinate-system settings."""
+
+        startup_mode = self.DEFAULT_COORDINATE_STARTUP_MODE
+        preferred_system = self.DEFAULT_COORDINATE_SYSTEM
+        position_mode = self.DEFAULT_POSITION_MODE
+        if isinstance(raw_coordinate_system, dict):
+            position_mode_raw = raw_coordinate_system.get(
+                "position_mode", position_mode
+            )
+            if isinstance(position_mode_raw, str):
+                position_mode = position_mode_raw.strip().lower()
+            mode_raw = raw_coordinate_system.get("startup_mode", startup_mode)
+            if isinstance(mode_raw, str):
+                startup_mode = mode_raw.strip().lower()
+            system_raw = raw_coordinate_system.get(
+                "preferred_system", preferred_system
+            )
+            if isinstance(system_raw, str):
+                preferred_system = system_raw.strip().upper()
+        if position_mode not in {"work", "machine"}:
+            position_mode = self.DEFAULT_POSITION_MODE
+        if startup_mode not in {"controller", "fixed"}:
+            startup_mode = self.DEFAULT_COORDINATE_STARTUP_MODE
+        if preferred_system not in WORK_COORDINATE_SYSTEMS:
+            preferred_system = self.DEFAULT_COORDINATE_SYSTEM
+        return CoordinateSystemSettings(
+            position_mode=position_mode,
+            startup_mode=startup_mode,
+            preferred_system=preferred_system,
+        )
+
+    @classmethod
+    def _should_keep_control_binding(cls, binding: KeyBinding) -> bool:
+        text = (binding.text or "").strip()
+        if not text:
+            return True
+        return cls.CYRILLIC_PATTERN.search(text) is None
 
     def _parse_feedrate_groups(
         self,
@@ -588,6 +942,10 @@ class SettingsManager:
             ),
         )
         clone.jog = self._parse_jog(clone.jog.to_dict())
+        clone.needle_calibration = self._parse_needle_calibration(
+            clone.needle_calibration.to_dict()
+        )
+        clone.design_last_directory = clone.design_last_directory.strip()
         return clone
 
     def feedrate_group(self, motion_type: str) -> FeedrateGroup:
@@ -608,4 +966,41 @@ class SettingsManager:
         """Return the current jog configuration clone."""
 
         return self._settings.jog.clone()
+
+    def needle_calibration_configuration(self) -> NeedleCalibrationSettings:
+        """Return the current needle calibration configuration clone."""
+
+        return self._settings.needle_calibration.clone()
+
+    def coordinate_system_configuration(self) -> CoordinateSystemSettings:
+        """Return the current coordinate-system configuration clone."""
+
+        return self._settings.coordinate_system.clone()
+
+    def design_last_directory(self) -> Path | None:
+        """Return the most recently used design directory, if any."""
+
+        raw_value = self._settings.design_last_directory.strip()
+        if not raw_value:
+            return None
+        return Path(raw_value)
+
+    def set_design_last_directory(self, directory: str | Path | None) -> None:
+        """Persist the most recently used design directory."""
+
+        if directory is None:
+            new_value = ""
+        else:
+            path = Path(directory).expanduser()
+            try:
+                path = path.resolve()
+            except OSError:
+                pass
+            new_value = str(path)
+        if self._settings.design_last_directory == new_value:
+            return
+        updated = self._settings.clone()
+        updated.design_last_directory = new_value
+        self.replace(updated)
+        self.save()
 

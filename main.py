@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import logging
+import math
+import re
+import time
 from datetime import datetime
 from pathlib import Path
 import sys
 
+import numpy as np
 from PySide6.QtCore import QThread, QTimer, Qt, QUrl
-from PySide6.QtGui import QAction, QDesktopServices
+from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -25,9 +29,20 @@ from probe_station_gui import (
     StageController,
     SerialTerminalWindow,
 )
+from probe_station_gui.design_model import DesignDocument, DesignModelError
+from probe_station_gui.design_script import ScriptContext, load_measurement_plan
+from probe_station_gui.design_session import AlignmentPreparation, DesignSession
 from probe_station_gui.dialogs.settings_dialog import SettingsDialog
+from probe_station_gui.lcr_meter import LCRMeterController
 from probe_station_gui.settings_manager import SettingsManager
+from probe_station_gui.views.alignment_panel import AlignmentPanel
+from probe_station_gui.views.design_navigator_panel import (
+    DesignLayoutWindow,
+    DesignNavigatorPanel,
+)
 from probe_station_gui.views.dock_widgets import CollapsibleDockWidget
+from probe_station_gui.views.needle_calibration_panel import NeedleCalibrationPanel
+from probe_station_gui.views.oscillation_panel import OscillationPanel
 from probe_station_gui.views.serial_connection_panel import SerialConnectionPanel
 
 
@@ -36,6 +51,26 @@ logger = logging.getLogger(__name__)
 
 class Main(QMainWindow):
     """Main application window wiring the camera view and serial dialog."""
+
+    ALIGNMENT_CAPTURE_SHORTCUT = "Space"
+    ALIGNMENT_TARGET_ANGLES = (-180.0, -90.0, 0.0, 90.0, 180.0)
+    DESIGN_POSITION_REFRESH_MS = 800
+    DESIGN_OVERLAY_UPDATE_MS = 120
+    DESIGN_SPACING_RATIO_TOLERANCE = 0.35
+    MANUAL_JOG_UPDATE_MS = 50
+    MANUAL_JOG_SETTLE_POLL_DELAYS_MS = (180, 420)
+    MANUAL_JOG_IGNORE_IDLE_AFTER_COMMAND_S = 0.25
+    MANUAL_JOG_RECONCILE_SMOOTH_THRESHOLD_MM = 0.35
+    MANUAL_JOG_RECONCILE_SMOOTH_ALPHA = 0.35
+    MANUAL_JOG_STATUS_SETTLE_HOLD_S = 0.8
+    PLANNED_MOVE_DURATION_PADDING_S = 0.12
+    TERMINAL_REFRESH_DELAYS_MS = (180, 500)
+    TERMINAL_RESET_REFRESH_DELAYS_MS = (500, 1100, 1800)
+    TERMINAL_RESUME_AFTER_JOG_MS = 180
+    B_POSITION_CHANGE_TOLERANCE_DEG = 1e-3
+    STARTUP_AUTO_CONNECT_DELAY_MS = 400
+    SERIAL_STARTUP_SYNC_DELAY_MS = 150
+    STARTUP_FOCUS_DELAY_MS = 120
 
     def __init__(self) -> None:
         super().__init__()
@@ -56,9 +91,45 @@ class Main(QMainWindow):
         self.joystick_panel: JoystickWindow | None = None
         self.serial_terminal_panel: SerialTerminalWindow | None = None
         self.serial_connection_panel: SerialConnectionPanel | None = None
+        self.needle_calibration_panel: NeedleCalibrationPanel | None = None
+        self.oscillation_panel: OscillationPanel | None = None
+        self.alignment_panel: AlignmentPanel | None = None
+        self.design_navigator_panel: DesignNavigatorPanel | None = None
+        self.design_layout_window: DesignLayoutWindow | None = None
         self.joystick_dock: CollapsibleDockWidget | None = None
         self.serial_terminal_dock: CollapsibleDockWidget | None = None
         self.serial_connection_dock: CollapsibleDockWidget | None = None
+        self.needle_calibration_dock: CollapsibleDockWidget | None = None
+        self.oscillation_dock: CollapsibleDockWidget | None = None
+        self.alignment_dock: CollapsibleDockWidget | None = None
+        self._needle_calibration_active = False
+        self._alignment_capture_action: QAction | None = None
+        self._alignment_exit_action: QAction | None = None
+        self._design_layout_window_action: QAction | None = None
+        self._last_selected_design_point: tuple[float, float] | None = None
+        self._current_design_stage_xy: tuple[float, float] | None = None
+        self._pending_design_stage_xy: tuple[float, float] | None = None
+        self._pending_alignment_preparation: AlignmentPreparation | None = None
+        self._pending_quick_alignment_rotation = False
+        self._manual_alignment_pick_slot: int | None = None
+        self._manual_alignment_points: list[tuple[float, float] | None] = [None, None]
+        self._manual_jog_stage_xy: tuple[float, float] | None = None
+        self._manual_jog_velocity_xy: tuple[float, float] | None = None
+        self._manual_jog_last_timestamp: float | None = None
+        self._manual_jog_last_prediction_log_at = 0.0
+        self._manual_jog_waiting_for_fresh_status = False
+        self._manual_jog_settle_until = 0.0
+        self._manual_jog_stop_status_timestamp: float | None = None
+        self._planned_move_origin_xy: tuple[float, float] | None = None
+        self._planned_move_stage_xy: tuple[float, float] | None = None
+        self._planned_move_target_xy: tuple[float, float] | None = None
+        self._planned_move_started_at: float | None = None
+        self._planned_move_ends_at: float | None = None
+        self._planned_move_waiting_for_fresh_status = False
+        self._planned_move_stop_status_timestamp: float | None = None
+        self._design_snap_enabled = True
+        self._last_reported_b_position: float | None = None
+        self._design_session = DesignSession()
         self.statusBar()
         self._status_log = QPlainTextEdit(self)
         self._status_log.setReadOnly(True)
@@ -74,6 +145,12 @@ class Main(QMainWindow):
         self.grabber.moveToThread(self.thread)
         self.thread.started.connect(self.grabber.start)
         self.view.clicked.connect(self.on_click)
+        self.view.hovered.connect(self._on_view_hover)
+        self.view.hover_left.connect(self._on_view_hover_left)
+        self.view.design_minimap_clicked.connect(self._move_to_minimap_design_point)
+        self.view.design_minimap_double_clicked.connect(
+            lambda: self._toggle_design_layout_window(True)
+        )
         self.grabber.frame_ready.connect(self.view.set_frame)
         self.grabber.error.connect(self.on_error)
         self.thread.start()
@@ -83,30 +160,41 @@ class Main(QMainWindow):
         self.stage_controller.movement_finished.connect(self.on_move_finished)
         self.stage_controller.calibration_changed.connect(self.on_calibration_changed)
         self.stage_controller.autofocus_finished.connect(self.on_autofocus_finished)
+        self.stage_controller.stage_position_changed.connect(self._on_stage_position_changed)
+        self.stage_controller.needle_height_changed.connect(self._on_needle_height_changed)
+        self.stage_controller.oscillation_state_changed.connect(
+            self._on_oscillation_state_changed
+        )
         self.stage_controller.movement_started.connect(
             lambda: self._show_status("Moving stage...")
         )
         self.grabber.frame_ready.connect(self.stage_controller.on_frame_ready)
+        self.lcr_controller = LCRMeterController()
+        self.lcr_controller.status_message.connect(self._show_status)
+        self._design_position_timer = QTimer(self)
+        self._design_position_timer.setInterval(self.DESIGN_POSITION_REFRESH_MS)
+        self._design_position_timer.timeout.connect(self._refresh_design_position)
+        self._design_position_timer.start()
+        self._design_overlay_timer = QTimer(self)
+        self._design_overlay_timer.setSingleShot(True)
+        self._design_overlay_timer.setInterval(self.DESIGN_OVERLAY_UPDATE_MS)
+        self._design_overlay_timer.timeout.connect(self._flush_pending_design_position)
+        self._manual_jog_timer = QTimer(self)
+        self._manual_jog_timer.setInterval(self.MANUAL_JOG_UPDATE_MS)
+        self._manual_jog_timer.timeout.connect(self._advance_motion_prediction)
+        self._needle_height_timer = QTimer(self)
+        self._needle_height_timer.setInterval(400)
+        self._needle_height_timer.timeout.connect(self._refresh_needle_height)
 
         self._create_dock_widgets()
 
         self._setup_menus()
         self._apply_settings()
-        window_menu = self.menuBar().addMenu("Panels")
-        if self.joystick_dock is not None:
-            joystick_action = self.joystick_dock.toggleViewAction()
-            joystick_action.setText("Joystick")
-            window_menu.addAction(joystick_action)
-        if self.serial_terminal_dock is not None:
-            terminal_action = self.serial_terminal_dock.toggleViewAction()
-            terminal_action.setText("Serial Terminal")
-            window_menu.addAction(terminal_action)
-        if self.serial_connection_dock is not None:
-            connection_action = self.serial_connection_dock.toggleViewAction()
-            connection_action.setText("Connection")
-            window_menu.addAction(connection_action)
 
-        QTimer.singleShot(0, self._auto_connect_if_possible)
+        QTimer.singleShot(
+            self.STARTUP_AUTO_CONNECT_DELAY_MS, self._auto_connect_if_possible
+        )
+        QTimer.singleShot(self.STARTUP_FOCUS_DELAY_MS, self._prime_keyboard_focus)
 
         self.setStyleSheet(
             """
@@ -115,10 +203,26 @@ class Main(QMainWindow):
         )
 
     def on_click(self, dx: float, dy: float, _rel_x: float, _rel_y: float) -> None:
+        if self._manual_alignment_pick_slot is not None:
+            self._capture_manual_alignment_clicked(dx, dy)
+            return
         self.stage_controller.request_move(dx, dy)
 
     def on_error(self, message: str) -> None:
         logger.error("Camera error: %s", message)
+
+    def _on_view_hover(
+        self, dx: float, dy: float, _rel_x: float, _rel_y: float
+    ) -> None:
+        preview = self.stage_controller.preview_clicked_point_xy(dx, dy)
+        if preview is None:
+            self._update_coordinate_display()
+            return
+        center_xy, cursor_xy = preview
+        self._update_coordinate_display(center_xy=center_xy, cursor_xy=cursor_xy)
+
+    def _on_view_hover_left(self) -> None:
+        self._update_coordinate_display(cursor_xy=None)
 
     def _show_status(self, message: str, timeout_ms: int = 0) -> None:
         if message:
@@ -161,7 +265,9 @@ class Main(QMainWindow):
             self.serial_connection.port,
             self.serial_connection.baudrate,
         )
+        self._last_reported_b_position = None
         self.stage_controller.set_serial(self.serial_connection)
+        self._restore_persisted_controller_state()
         if self.joystick_panel and self.joystick_dock:
             self.joystick_panel.set_serial(self.serial_connection)
             self.joystick_dock.setVisible(True)
@@ -174,12 +280,27 @@ class Main(QMainWindow):
             self.serial_terminal_dock.raise_()
             if self.serial_terminal_dock.isFloating():
                 self.serial_terminal_dock.activateWindow()
+        QTimer.singleShot(
+            self.SERIAL_STARTUP_SYNC_DELAY_MS, self._run_serial_startup_sync
+        )
+        self._refresh_design_position()
 
     def on_serial_disconnected(self) -> None:
         if self.serial_connection and self.serial_connection.is_open:
             self.serial_connection.close()
         self.serial_connection = None
+        self._last_reported_b_position = None
+        self._manual_jog_timer.stop()
+        self._manual_jog_stage_xy = None
+        self._manual_jog_velocity_xy = None
+        self._manual_jog_last_timestamp = None
+        self._manual_jog_waiting_for_fresh_status = False
+        self._manual_jog_settle_until = 0.0
+        self._manual_jog_stop_status_timestamp = None
+        self._clear_planned_move_prediction(clear_wait_state=True)
         logger.info("Serial disconnected")
+        self.stage_controller.request_stop_oscillation()
+        self._stop_needle_calibration()
         self.stage_controller.set_serial(None)
         auto_retry = self.sender() is not self.serial_connection_panel
         if self.serial_connection_panel:
@@ -188,24 +309,164 @@ class Main(QMainWindow):
             self.joystick_panel.set_serial(None)
         if self.serial_terminal_panel:
             self.serial_terminal_panel.set_serial(None)
+        if self.needle_calibration_panel:
+            self.needle_calibration_panel.set_current_a(None)
+        if self.oscillation_panel:
+            self.oscillation_panel.set_running(False, "")
+        self._reset_manual_alignment(cancel_pick=True)
+        self._invalidate_design_registration(
+            "Design registration cleared after serial disconnect."
+        )
+        self._update_design_position(None)
 
     def _auto_connect_if_possible(self) -> None:
         if self.serial_connection_panel and not self.serial_connection:
             logger.debug("Attempting auto-connect through connection panel")
             self.serial_connection_panel.auto_connect()
 
+    def _run_serial_startup_sync(self) -> None:
+        if self.serial_connection is None or not self.serial_connection.is_open:
+            return
+        self.stage_controller.request_startup_sync(auto_home_a=True)
+
+    def _prime_keyboard_focus(self) -> None:
+        if not self.isVisible():
+            return
+        self.raise_()
+        self.activateWindow()
+        self.view.setFocus(Qt.ActiveWindowFocusReason)
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        QTimer.singleShot(0, self._prime_keyboard_focus)
+
+    def _restore_persisted_controller_state(self) -> None:
+        if self.serial_connection is None or not self.serial_connection.is_open:
+            return
+        if bool(
+            getattr(self.serial_connection, "probe_station_reboot_detected", False)
+        ):
+            self.settings_manager.clear_controller_state()
+            self.stage_controller.clear_cached_controller_state()
+            self._show_status("Controller reboot detected. Cleared cached controller state.")
+            return
+        cached_state = self.settings_manager.load_controller_state()
+        if not cached_state:
+            return
+        self.stage_controller.import_cached_controller_state(cached_state)
+        self._show_status("Restored cached controller state from previous session.")
+
+    def _persist_controller_state(self, *_args) -> None:
+        self.settings_manager.save_controller_state(
+            self.stage_controller.export_cached_controller_state()
+        )
+
     def _setup_menus(self) -> None:
         app_menu = self.menuBar().addMenu("Application")
+        panels_menu = self.menuBar().addMenu("Tools")
+        calibration_menu = self.menuBar().addMenu("Calibration")
 
-        settings_menu = self.menuBar().addMenu("Settings")
         settings_action = QAction("Settings…", self)
+        settings_action.setText("Settings...")
         settings_action.triggered.connect(self._open_settings_dialog)
-        settings_menu.addAction(settings_action)
+        app_menu.addAction(settings_action)
 
         open_log_action = QAction("Open Status Log…", self)
+        open_log_action.setText("Open Status Log...")
         open_log_action.triggered.connect(self._open_status_log)
         app_menu.addAction(open_log_action)
 
+        self._design_layout_window_action = QAction("Design Window", self)
+        self._design_layout_window_action.setCheckable(True)
+        self._design_layout_window_action.toggled.connect(
+            self._toggle_design_layout_window
+        )
+        calibration_menu.addAction(self._design_layout_window_action)
+
+        for dock, title in (
+            (self.oscillation_dock, "Oscillation"),
+            (self.serial_connection_dock, "Connection"),
+            (self.joystick_dock, "Joystick"),
+            (self.serial_terminal_dock, "Serial Terminal"),
+        ):
+            if dock is None:
+                continue
+            action = dock.toggleViewAction()
+            action.setText(title)
+            panels_menu.addAction(action)
+
+        for dock, title in (
+            (self.alignment_dock, "Alignment"),
+            (self.needle_calibration_dock, "Needle Calibration"),
+        ):
+            if dock is None:
+                continue
+            action = dock.toggleViewAction()
+            action.setText(title)
+            calibration_menu.addAction(action)
+
+        self._alignment_capture_action = QAction("Capture Alignment Point", self)
+        self._alignment_capture_action.setShortcut(
+            QKeySequence(self.ALIGNMENT_CAPTURE_SHORTCUT)
+        )
+        self._alignment_capture_action.setShortcutContext(Qt.ApplicationShortcut)
+        self._alignment_capture_action.triggered.connect(
+            self._capture_manual_alignment_center_shortcut
+        )
+        self.addAction(self._alignment_capture_action)
+
+        self._alignment_exit_action = QAction("Cancel Alignment Pick", self)
+        self._alignment_exit_action.setShortcut(QKeySequence(Qt.Key_Escape))
+        self._alignment_exit_action.setShortcutContext(Qt.ApplicationShortcut)
+        self._alignment_exit_action.triggered.connect(
+            self._cancel_manual_alignment_pick
+        )
+        self.addAction(self._alignment_exit_action)
+
+    def _toggle_design_layout_window(self, visible: bool) -> None:
+        if self.design_layout_window is None:
+            if self._design_layout_window_action is not None:
+                self._design_layout_window_action.blockSignals(True)
+                self._design_layout_window_action.setChecked(False)
+                self._design_layout_window_action.blockSignals(False)
+            return
+        if visible:
+            self.design_layout_window.show_and_raise()
+            self._collapse_alignment_panel_if_ready()
+        else:
+            self.design_layout_window.hide()
+
+    def _on_design_layout_window_visibility_changed(self, visible: bool) -> None:
+        if self._design_layout_window_action is None:
+            return
+        self._design_layout_window_action.blockSignals(True)
+        self._design_layout_window_action.setChecked(visible)
+        self._design_layout_window_action.blockSignals(False)
+        if visible:
+            self._collapse_alignment_panel_if_ready()
+
+    def _on_design_layout_point_selected(
+        self, slot: int, x_value: float, y_value: float
+    ) -> None:
+        document = self._design_session.document
+        if document is None:
+            return
+        if slot not in (0, 1):
+            return
+        snapped_point = (float(x_value), float(y_value))
+        self._manual_alignment_pick_slot = None
+        self._manual_alignment_points = [None, None]
+        self._pending_alignment_preparation = None
+        self._design_session.clear_source_stage_marks()
+        self._last_selected_design_point = snapped_point
+        self._set_design_snap_enabled(True)
+        self._design_session.set_source_design_mark(slot, snapped_point)
+        self._refresh_design_panel()
+        slot_label = "1" if slot == 0 else "2"
+        self._show_status(
+            f"Design mark {slot_label} snapped to X={snapped_point[0]:.3f}, Y={snapped_point[1]:.3f}.",
+            4000,
+        )
 
     def _apply_settings(self) -> None:
         if self.joystick_panel:
@@ -222,20 +483,47 @@ class Main(QMainWindow):
                 jog.linear_distance_mm,
                 jog.rotary_distance_deg,
             )
-            feedrates = self.settings_manager.feedrate_configuration()
-            self.joystick_panel.apply_feedrate_settings(
-                feedrates.linear.presets,
-                feedrates.linear.default,
-                feedrates.rotary.presets,
-                feedrates.rotary.default,
+        needle_settings = self.settings_manager.needle_calibration_configuration()
+        self.stage_controller.apply_needle_calibration(
+            down_position_mm=(
+                needle_settings.down_position_mm
+                if needle_settings.down_position_configured
+                else None
+            ),
+            lower_direction=needle_settings.lower_direction,
+        )
+        coordinate_settings = self.settings_manager.coordinate_system_configuration()
+        self.stage_controller.apply_coordinate_system_configuration(
+            position_mode=coordinate_settings.position_mode,
+            startup_mode=coordinate_settings.startup_mode,
+            preferred_system=coordinate_settings.preferred_system,
+        )
+        if self.design_navigator_panel is not None:
+            self.design_navigator_panel.set_design_dialog_directory(
+                self.settings_manager.design_last_directory()
             )
-            logger.debug(
-                "Joystick feedrate settings reapplied: linear=%s (default=%s) rotary=%s (default=%s)",
-                feedrates.linear.presets,
-                feedrates.linear.default,
-                feedrates.rotary.presets,
-                feedrates.rotary.default,
+        if self.design_layout_window is not None:
+            self.design_layout_window.set_snap_enabled(self._design_snap_enabled)
+        self.lcr_controller.apply_configuration(
+            resource_name=needle_settings.visa_resource,
+            dcr_range=needle_settings.dcr_range,
+            short_threshold_ohm=needle_settings.short_threshold_ohm,
+            poll_interval_ms=needle_settings.poll_interval_ms,
+        )
+        if self.needle_calibration_panel:
+            self.needle_calibration_panel.apply_configuration(
+                resource_name=needle_settings.visa_resource,
+                saved_height=(
+                    needle_settings.down_position_mm
+                    if needle_settings.down_position_configured
+                    else None
+                ),
+                lower_direction=needle_settings.lower_direction,
+                short_threshold_ohm=needle_settings.short_threshold_ohm,
             )
+        if self.serial_connection and self.serial_connection.is_open:
+            self.stage_controller.request_startup_sync(auto_home_a=False)
+        self._update_coordinate_display(cursor_xy=None)
 
     def _open_settings_dialog(self) -> None:
         dialog = SettingsDialog(self.settings_manager.settings, self)
@@ -247,6 +535,405 @@ class Main(QMainWindow):
         self.settings_manager.save()
         self._apply_settings()
         logger.info("Settings updated from dialog")
+
+    def _design_backed_alignment_active(self) -> bool:
+        return self._design_session.has_complete_source_design_marks()
+
+    def _design_window_is_open(self) -> bool:
+        return self.design_layout_window is not None and self.design_layout_window.isVisible()
+
+    def _current_alignment_points(self) -> list[tuple[float, float] | None]:
+        if self._design_backed_alignment_active():
+            return list(self._design_session.source_stage_marks[:2])
+        return list(self._manual_alignment_points[:2])
+
+    def _collapse_alignment_panel_if_ready(self) -> None:
+        if self.alignment_dock is None or not self._design_window_is_open():
+            return
+        registration = self._design_session.registration
+        if registration is not None and registration.valid:
+            self.alignment_dock.set_collapsed(True)
+
+    def _collapse_alignment_panel_if_design_open(self) -> None:
+        if self.alignment_dock is None or not self._design_window_is_open():
+            return
+        self.alignment_dock.set_collapsed(True)
+
+    def _set_alignment_panel_expanded(self) -> None:
+        if self.alignment_dock is None:
+            return
+        self.alignment_dock.setVisible(True)
+        self.alignment_dock.set_collapsed(False)
+        self.alignment_dock.raise_()
+
+    def _arm_manual_alignment_pick(self, slot: int) -> None:
+        if slot not in (0, 1):
+            return
+        self._manual_alignment_pick_slot = slot
+        self._set_alignment_panel_expanded()
+        self._refresh_manual_alignment_ui()
+        self._update_coordinate_display(cursor_xy=None)
+        self._show_status(
+            f"Chip alignment: pick point {slot + 1} in the image, or press Space to capture the crosshair center.",
+            6000,
+        )
+
+    def _cancel_manual_alignment_pick(self) -> None:
+        if self._manual_alignment_pick_slot is None:
+            return
+        self._manual_alignment_pick_slot = None
+        self._refresh_manual_alignment_ui()
+        self._update_coordinate_display(cursor_xy=None)
+        self._show_status("Chip alignment image pick cancelled.", 3000)
+
+    def _reset_manual_alignment(self, *, cancel_pick: bool = True) -> None:
+        self._manual_alignment_points = [None, None]
+        if cancel_pick:
+            self._manual_alignment_pick_slot = None
+        self._refresh_manual_alignment_ui()
+        self._update_coordinate_display(cursor_xy=None)
+
+    def _reset_alignment_capture_points(self) -> None:
+        if self._design_backed_alignment_active():
+            self._pending_alignment_preparation = None
+            self._pending_quick_alignment_rotation = False
+            self._design_session.clear_source_stage_marks()
+            self._set_design_snap_enabled(True)
+            self._refresh_design_panel()
+            self._refresh_design_position()
+        else:
+            self._reset_manual_alignment(cancel_pick=False)
+            self._pending_quick_alignment_rotation = False
+        self._manual_alignment_pick_slot = None
+        self._set_alignment_panel_expanded()
+        self._refresh_manual_alignment_ui()
+        self._update_coordinate_display(cursor_xy=None)
+
+    def _capture_manual_alignment_center_shortcut(self) -> None:
+        if self._manual_alignment_pick_slot is None:
+            return
+        self._capture_manual_alignment_center(self._manual_alignment_pick_slot)
+
+    def _resolve_alignment_capture_stage_position(
+        self,
+    ) -> tuple[float, float] | None:
+        try:
+            stage_position = self.stage_controller.current_stage_position()
+        except Exception as exc:
+            if str(exc) != "Unable to read stage position.":
+                self._show_status(str(exc), 5000)
+                return None
+            latest = self.stage_controller.latest_stage_position()
+            if latest is None or len(latest) < 2:
+                self.stage_controller.request_status_refresh()
+                self._show_status(str(exc), 5000)
+                return None
+            stage_position = latest
+        if len(stage_position) < 2:
+            self.stage_controller.request_status_refresh()
+            self._show_status("X/Y coordinates are unavailable.", 5000)
+            return None
+        return (float(stage_position[0]), float(stage_position[1]))
+
+    def _capture_manual_alignment_center(self, slot: int) -> None:
+        if slot not in (0, 1):
+            return
+        center_xy = self._resolve_alignment_capture_stage_position()
+        if center_xy is None:
+            return
+        self._capture_manual_alignment_point(slot, center_xy, source="center")
+
+    def _request_alignment_capture(self, slot: int, mode: str) -> None:
+        if mode == "image":
+            self._arm_manual_alignment_pick(slot)
+            return
+        self._capture_manual_alignment_center(slot)
+
+    def _zero_b_axis(self) -> None:
+        try:
+            self._invalidate_design_registration(
+                "Design registration cleared after B-axis zeroing."
+            )
+            self.stage_controller.zero_b_axis()
+        except Exception as exc:
+            self._show_status(str(exc), 5000)
+
+    def _reset_click_calibration(self) -> None:
+        try:
+            self.stage_controller.reset_calibration()
+        except Exception as exc:
+            self._show_status(str(exc), 5000)
+
+    def _capture_manual_alignment_clicked(
+        self, dx_pixels: float = 0.0, dy_pixels: float = 0.0
+    ) -> None:
+        slot = self._manual_alignment_pick_slot
+        if slot is None:
+            return
+        try:
+            center_xy, captured = self.stage_controller.resolve_clicked_point_xy(
+                dx_pixels,
+                dy_pixels,
+            )
+        except Exception as exc:
+            self._show_status(str(exc), 5000)
+            return
+        self._update_coordinate_display(center_xy=center_xy, cursor_xy=captured)
+        self._capture_manual_alignment_point(slot, captured, source="image")
+
+    def _capture_manual_alignment_point(
+        self, slot: int, captured: tuple[float, float], *, source: str
+    ) -> None:
+        if slot not in (0, 1):
+            return
+        self._manual_alignment_pick_slot = None
+        self._refresh_manual_alignment_ui()
+
+        label = "image" if source == "image" else "center"
+        if self._design_backed_alignment_active():
+            self._pending_alignment_preparation = None
+            self._design_session.set_source_stage_mark(slot, captured)
+            self._refresh_design_panel()
+            self._refresh_design_position()
+            pair_count = self._design_session.source_pair_count()
+            if pair_count < 2:
+                self._set_alignment_panel_expanded()
+                self._show_status(
+                    f"Design alignment: point {slot + 1} captured from {label} at X={captured[0]:.3f}, Y={captured[1]:.3f}. Capture the other point next.",
+                    6000,
+                )
+                return
+            try:
+                preparation = self._design_session.prepare_source_alignment()
+            except DesignModelError as exc:
+                self._show_status(str(exc), 7000)
+                return
+            if not self._design_spacing_ratio_is_reasonable(preparation.distance_ratio):
+                self._show_status(
+                    "Design calibration aborted: mark spacing mismatch. "
+                    f"Design {preparation.design_distance_mm:.4f} mm vs chip {preparation.stage_distance_mm:.4f} mm.",
+                    8000,
+                )
+                return
+            if abs(preparation.rotation_deg) < 1e-3:
+                self._design_session.apply_prepared_alignment(preparation)
+                self._set_design_snap_enabled(False)
+                self._refresh_design_panel()
+                self._refresh_design_position()
+                self._collapse_alignment_panel_if_ready()
+                self._show_status(
+                    "Design calibration complete. "
+                    f"Spacing ratio {preparation.distance_ratio:.3f}.",
+                    7000,
+                )
+                return
+            self._pending_alignment_preparation = preparation
+            self._set_alignment_panel_expanded()
+            self._show_status(
+                "Two mark pairs captured. "
+                f"Rotating chip by {preparation.rotation_deg:+.3f} deg to match the design.",
+                7000,
+            )
+            self.stage_controller.request_rotate_b(preparation.rotation_deg)
+            return
+
+        self._manual_alignment_points[slot] = captured
+        self._set_alignment_panel_expanded()
+        self._refresh_manual_alignment_ui()
+        other_slot = 1 - slot
+        if self._manual_alignment_points[other_slot] is None:
+            self._show_status(
+                f"Chip alignment: point {slot + 1} captured from {label} at X={captured[0]:.3f}, Y={captured[1]:.3f}. Capture point {other_slot + 1} next.",
+                6000,
+            )
+            return
+
+        first_point = self._manual_alignment_points[0]
+        second_point = self._manual_alignment_points[1]
+        if first_point is None or second_point is None:
+            return
+        rotation_deg = self._calculate_alignment_rotation(first_point, second_point)
+        if rotation_deg is None:
+            self._show_status(
+                "Chip alignment points are too close together. Capture two distinct points.",
+                5000,
+            )
+            return
+        if abs(rotation_deg) < 1e-3:
+            self._collapse_alignment_panel_if_design_open()
+            self._show_status("Chip alignment points are already aligned.", 5000)
+            return
+
+        self._show_status(
+            f"Chip alignment: rotating B by {rotation_deg:+.3f} deg.",
+            5000,
+        )
+        self._invalidate_design_registration(
+            "Design registration cleared after B-axis rotation."
+        )
+        self._pending_quick_alignment_rotation = True
+        self.stage_controller.request_rotate_b(rotation_deg)
+
+    def _refresh_manual_alignment_ui(self) -> None:
+        if self.alignment_panel is not None:
+            self.alignment_panel.set_design_marks(self._design_session.source_design_marks)
+            self.alignment_panel.set_captured_points(self._current_alignment_points())
+            self.alignment_panel.set_pick_slot(self._manual_alignment_pick_slot)
+            self.alignment_panel.set_registration_status(
+                self._design_session.registration_status
+            )
+        if self._manual_alignment_pick_slot is None:
+            instruction = ""
+        else:
+            instruction = (
+                f"Chip alignment: click point {self._manual_alignment_pick_slot + 1} "
+                "or press Space for the center."
+            )
+        self.view.set_alignment_mode(self._manual_alignment_pick_slot is not None)
+        self.view.set_alignment_instruction(instruction)
+
+    def _update_coordinate_display(
+        self,
+        *,
+        center_xy: tuple[float, float] | None = None,
+        cursor_xy: tuple[float, float] | None = None,
+    ) -> None:
+        latest = self.stage_controller.latest_stage_position()
+        if center_xy is None and latest is not None and len(latest) >= 2:
+            center_xy = (float(latest[0]), float(latest[1]))
+        if self.alignment_panel is not None:
+            self.alignment_panel.set_coordinate_labels(
+                self._format_active_coordinate_label("Center", center_xy),
+                self._format_active_coordinate_label("Cursor", cursor_xy),
+            )
+
+    def _preferred_design_stage_xy(self) -> tuple[float, float] | None:
+        if self._manual_jog_velocity_xy is not None and self._manual_jog_stage_xy is not None:
+            return self._manual_jog_stage_xy
+        if (
+            self._planned_move_started_at is not None
+            and self._planned_move_stage_xy is not None
+        ):
+            return self._planned_move_stage_xy
+        if self._manual_jog_waiting_for_fresh_status:
+            last_status_timestamp = self.stage_controller.last_status_timestamp()
+            if (
+                last_status_timestamp is not None
+                and self._manual_jog_stop_status_timestamp is not None
+                and last_status_timestamp > self._manual_jog_stop_status_timestamp
+            ):
+                self._manual_jog_waiting_for_fresh_status = False
+                self._manual_jog_settle_until = 0.0
+                self._manual_jog_stop_status_timestamp = None
+            elif (
+                self._manual_jog_stage_xy is not None
+                and time.monotonic() < self._manual_jog_settle_until
+            ):
+                return self._manual_jog_stage_xy
+            else:
+                self._manual_jog_waiting_for_fresh_status = False
+                self._manual_jog_settle_until = 0.0
+                self._manual_jog_stop_status_timestamp = None
+        if self._planned_move_waiting_for_fresh_status:
+            last_status_timestamp = self.stage_controller.last_status_timestamp()
+            if (
+                last_status_timestamp is not None
+                and self._planned_move_stop_status_timestamp is not None
+                and last_status_timestamp > self._planned_move_stop_status_timestamp
+            ):
+                self._planned_move_waiting_for_fresh_status = False
+                self._planned_move_stop_status_timestamp = None
+            elif self._planned_move_stage_xy is not None:
+                return self._planned_move_stage_xy
+            else:
+                self._planned_move_waiting_for_fresh_status = False
+                self._planned_move_stop_status_timestamp = None
+        latest = self.stage_controller.latest_stage_position()
+        if latest is None or len(latest) < 2:
+            return None
+        return (float(latest[0]), float(latest[1]))
+
+    def _format_coordinate_label(
+        self, prefix: str, fluidnc_xy: tuple[float, float] | None
+    ) -> str:
+        if fluidnc_xy is None:
+            return f"{prefix}: unavailable"
+        systems = self._resolve_coordinate_systems(fluidnc_xy)
+        parts = [
+            f"{name} X={coords[0]:.3f}, Y={coords[1]:.3f}"
+            for name, coords in systems.items()
+        ]
+        return f"{prefix}: " + " | ".join(parts)
+
+    def _format_active_coordinate_label(
+        self, prefix: str, fluidnc_xy: tuple[float, float] | None
+    ) -> str:
+        if fluidnc_xy is None:
+            return f"{prefix}: unavailable"
+        return (
+            f"{prefix}: {self.stage_controller.coordinate_display_name()} "
+            f"X={fluidnc_xy[0]:.3f}, Y={fluidnc_xy[1]:.3f}"
+        )
+
+    def _resolve_coordinate_systems(
+        self, fluidnc_xy: tuple[float, float]
+    ) -> dict[str, tuple[float, float]]:
+        coordinates = {f"FluidNC {self.stage_controller.coordinate_display_name()}": fluidnc_xy}
+        chip_xy = self._resolve_chip_coordinates(fluidnc_xy)
+        if chip_xy is not None:
+            coordinates["Chip/Stage registered"] = chip_xy
+        design_xy = self._resolve_design_coordinates(fluidnc_xy)
+        if design_xy is not None:
+            coordinates["Design"] = design_xy
+        return coordinates
+
+    def _resolve_chip_coordinates(
+        self, fluidnc_xy: tuple[float, float]
+    ) -> tuple[float, float] | None:
+        registration = self._design_session.registration
+        if registration is None or not registration.valid:
+            return None
+        if not registration.source_stage_marks:
+            return None
+        origin = registration.source_stage_marks[0]
+        return (
+            float(fluidnc_xy[0]) - float(origin[0]),
+            float(fluidnc_xy[1]) - float(origin[1]),
+        )
+
+    def _resolve_design_coordinates(
+        self, fluidnc_xy: tuple[float, float]
+    ) -> tuple[float, float] | None:
+        try:
+            return self._design_session.design_from_stage(fluidnc_xy)
+        except Exception:
+            return None
+
+    @classmethod
+    def _calculate_alignment_rotation(
+        cls,
+        first_position: tuple[float, float],
+        second_position: tuple[float, float],
+    ) -> float | None:
+        dx = second_position[0] - first_position[0]
+        dy = second_position[1] - first_position[1]
+        if math.hypot(dx, dy) <= 1e-6:
+            return None
+        angle_deg = math.degrees(math.atan2(dy, dx))
+        best_delta = min(
+            (
+                cls._normalise_angle(target - angle_deg)
+                for target in cls.ALIGNMENT_TARGET_ANGLES
+            ),
+            key=lambda value: abs(value),
+        )
+        if abs(best_delta) > 45.0:
+            return None
+        return best_delta
+
+    @staticmethod
+    def _normalise_angle(angle_deg: float) -> float:
+        return ((angle_deg + 180.0) % 360.0) - 180.0
 
     def show_joystick_window(self) -> None:
         if not self.joystick_panel or not self.joystick_dock:
@@ -268,9 +955,328 @@ class Main(QMainWindow):
         else:
             self.serial_terminal_panel.setFocus(Qt.ActiveWindowFocusReason)
 
+    def _on_manual_motion_axis(self, axis: str) -> None:
+        if axis.upper() == "B":
+            self._invalidate_design_registration(
+                "Design registration cleared after manual B-axis motion."
+            )
+
+    def _on_manual_jog_command_changed(
+        self, commanded_distances: object, feedrate: float
+    ) -> None:
+        if not isinstance(commanded_distances, tuple):
+            return
+        self._clear_planned_move_prediction(clear_wait_state=True)
+        self._manual_jog_waiting_for_fresh_status = False
+        self._manual_jog_settle_until = 0.0
+        self._manual_jog_stop_status_timestamp = None
+        if self.serial_terminal_panel is not None:
+            self.serial_terminal_panel.set_live_poll_paused(True)
+        xy_components: dict[str, float] = {"X": 0.0, "Y": 0.0}
+        for item in commanded_distances:
+            if not isinstance(item, tuple) or len(item) != 2:
+                continue
+            axis = str(item[0]).upper()
+            try:
+                distance = float(item[1])
+            except (TypeError, ValueError):
+                continue
+            if axis in xy_components:
+                xy_components[axis] = distance
+        path_length = math.hypot(xy_components["X"], xy_components["Y"])
+        if path_length <= 1e-9:
+            logger.debug("DESIGN MINIMAP prediction_stop_requested command=%s", commanded_distances)
+            self._manual_jog_velocity_xy = None
+            self._manual_jog_timer.stop()
+            self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
+            return
+        speed_mm_per_s = max(0.0, float(feedrate)) / 60.0
+        self._manual_jog_velocity_xy = (
+            speed_mm_per_s * xy_components["X"] / path_length,
+            speed_mm_per_s * xy_components["Y"] / path_length,
+        )
+        stage_source = "tracked"
+        if self._manual_jog_stage_xy is not None:
+            self._manual_jog_stage_xy = (
+                float(self._manual_jog_stage_xy[0]),
+                float(self._manual_jog_stage_xy[1]),
+            )
+        else:
+            latest = self.stage_controller.latest_stage_position()
+            if latest is not None and len(latest) >= 2:
+                self._manual_jog_stage_xy = (float(latest[0]), float(latest[1]))
+                stage_source = "latest_status"
+            elif self._current_design_stage_xy is not None:
+                self._manual_jog_stage_xy = self._current_design_stage_xy
+                stage_source = "current_design"
+            else:
+                stage_source = "unknown"
+        if self._manual_jog_stage_xy is None and self._current_design_stage_xy is not None:
+            self._manual_jog_stage_xy = self._current_design_stage_xy
+            stage_source = "current_design"
+        self._manual_jog_last_timestamp = time.monotonic()
+        self._manual_jog_last_prediction_log_at = 0.0
+        logger.debug(
+            "DESIGN MINIMAP prediction_start stage=%s design=%s velocity=(%.4f, %.4f) feedrate=%.3f command=%s source=%s",
+            self._format_optional_point(self._manual_jog_stage_xy),
+            self._format_optional_point(
+                self._design_session.design_from_stage(self._manual_jog_stage_xy)
+                if self._manual_jog_stage_xy is not None
+                else None
+            ),
+            self._manual_jog_velocity_xy[0],
+            self._manual_jog_velocity_xy[1],
+            float(feedrate),
+            commanded_distances,
+            stage_source,
+        )
+        if not self._manual_jog_timer.isActive():
+            self._manual_jog_timer.start()
+
+    def _on_manual_jog_stopped(self) -> None:
+        logger.debug(
+            "DESIGN MINIMAP prediction_stop stage=%s design=%s",
+            self._format_optional_point(self._manual_jog_stage_xy),
+            self._format_optional_point(
+                self._design_session.design_from_stage(self._manual_jog_stage_xy)
+                if self._manual_jog_stage_xy is not None
+                else None
+            ),
+        )
+        self._manual_jog_timer.stop()
+        self._manual_jog_velocity_xy = None
+        self._manual_jog_last_timestamp = None
+        self._manual_jog_last_prediction_log_at = 0.0
+        self._manual_jog_waiting_for_fresh_status = self._manual_jog_stage_xy is not None
+        self._manual_jog_settle_until = (
+            time.monotonic() + self.MANUAL_JOG_STATUS_SETTLE_HOLD_S
+        )
+        self._manual_jog_stop_status_timestamp = self.stage_controller.last_status_timestamp()
+        if self.serial_terminal_panel is not None:
+            QTimer.singleShot(
+                self.TERMINAL_RESUME_AFTER_JOG_MS,
+                lambda: self.serial_terminal_panel
+                and self.serial_terminal_panel.set_live_poll_paused(False),
+            )
+        self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
+
+    def _advance_motion_prediction(self) -> None:
+        if self._manual_jog_velocity_xy is not None:
+            self._advance_manual_jog_prediction()
+            return
+        if self._planned_move_started_at is not None:
+            self._advance_planned_move_prediction()
+            return
+        self._manual_jog_timer.stop()
+
+    def _advance_manual_jog_prediction(self) -> None:
+        if self._manual_jog_velocity_xy is None:
+            return
+        now = time.monotonic()
+        if self._manual_jog_last_timestamp is None:
+            self._manual_jog_last_timestamp = now
+            return
+        dt = max(0.0, now - self._manual_jog_last_timestamp)
+        self._manual_jog_last_timestamp = now
+        if dt <= 0.0:
+            return
+        if self._manual_jog_stage_xy is None:
+            latest = self.stage_controller.latest_stage_position()
+            if latest is None or len(latest) < 2:
+                return
+            self._manual_jog_stage_xy = (float(latest[0]), float(latest[1]))
+        self._manual_jog_stage_xy = (
+            float(self._manual_jog_stage_xy[0] + self._manual_jog_velocity_xy[0] * dt),
+            float(self._manual_jog_stage_xy[1] + self._manual_jog_velocity_xy[1] * dt),
+        )
+        if now - self._manual_jog_last_prediction_log_at >= 0.15:
+            logger.debug(
+                "DESIGN MINIMAP prediction_tick stage=%s design=%s dt=%.4f velocity=(%.4f, %.4f)",
+                self._format_optional_point(self._manual_jog_stage_xy),
+                self._format_optional_point(
+                    self._design_session.design_from_stage(self._manual_jog_stage_xy)
+                ),
+                dt,
+                self._manual_jog_velocity_xy[0],
+                self._manual_jog_velocity_xy[1],
+            )
+            self._manual_jog_last_prediction_log_at = now
+        self._update_coordinate_display(center_xy=self._manual_jog_stage_xy)
+        self._update_design_position(self._manual_jog_stage_xy)
+
+    def _advance_planned_move_prediction(self) -> None:
+        if (
+            self._planned_move_origin_xy is None
+            or self._planned_move_target_xy is None
+            or self._planned_move_started_at is None
+            or self._planned_move_ends_at is None
+        ):
+            self._clear_planned_move_prediction(clear_wait_state=False)
+            return
+        now = time.monotonic()
+        duration = max(
+            self._planned_move_ends_at - self._planned_move_started_at,
+            1e-6,
+        )
+        progress = min(
+            1.0,
+            max(0.0, (now - self._planned_move_started_at) / duration),
+        )
+        origin_x, origin_y = self._planned_move_origin_xy
+        target_x, target_y = self._planned_move_target_xy
+        self._planned_move_stage_xy = (
+            float(origin_x + (target_x - origin_x) * progress),
+            float(origin_y + (target_y - origin_y) * progress),
+        )
+        self._update_coordinate_display(center_xy=self._planned_move_stage_xy)
+        self._update_design_position(self._planned_move_stage_xy)
+        if progress >= 1.0:
+            self._planned_move_waiting_for_fresh_status = (
+                self._planned_move_stage_xy is not None
+            )
+            self._planned_move_stop_status_timestamp = (
+                self.stage_controller.last_status_timestamp()
+            )
+            self._planned_move_origin_xy = None
+            self._planned_move_target_xy = None
+            self._planned_move_started_at = None
+            self._planned_move_ends_at = None
+
+    def _clear_planned_move_prediction(self, *, clear_wait_state: bool) -> None:
+        self._planned_move_origin_xy = None
+        self._planned_move_target_xy = None
+        self._planned_move_started_at = None
+        self._planned_move_ends_at = None
+        if clear_wait_state:
+            self._planned_move_stage_xy = None
+            self._planned_move_waiting_for_fresh_status = False
+            self._planned_move_stop_status_timestamp = None
+
+    def _start_planned_move_prediction(
+        self,
+        target_stage_xy: tuple[float, float],
+        *,
+        source_label: str,
+    ) -> None:
+        origin_stage_xy = self._preferred_design_stage_xy()
+        if origin_stage_xy is None:
+            origin_stage_xy = self._current_design_stage_xy
+        if origin_stage_xy is None:
+            latest = self.stage_controller.latest_stage_position()
+            if latest is not None and len(latest) >= 2:
+                origin_stage_xy = (float(latest[0]), float(latest[1]))
+        if origin_stage_xy is None:
+            return
+        distance_mm = math.hypot(
+            float(target_stage_xy[0] - origin_stage_xy[0]),
+            float(target_stage_xy[1] - origin_stage_xy[1]),
+        )
+        if distance_mm <= 1e-6:
+            self._clear_planned_move_prediction(clear_wait_state=True)
+            return
+        speed_mm_per_s = float(self.stage_controller.DEFAULT_FEEDRATE) / 60.0
+        if speed_mm_per_s <= 1e-6:
+            return
+        duration_s = (
+            distance_mm / speed_mm_per_s
+        ) + self.PLANNED_MOVE_DURATION_PADDING_S
+        started_at = time.monotonic()
+        self._manual_jog_waiting_for_fresh_status = False
+        self._manual_jog_settle_until = 0.0
+        self._manual_jog_stop_status_timestamp = None
+        self._planned_move_origin_xy = origin_stage_xy
+        self._planned_move_stage_xy = origin_stage_xy
+        self._planned_move_target_xy = target_stage_xy
+        self._planned_move_started_at = started_at
+        self._planned_move_ends_at = started_at + max(duration_s, 0.05)
+        self._planned_move_waiting_for_fresh_status = False
+        self._planned_move_stop_status_timestamp = None
+        logger.debug(
+            "DESIGN MINIMAP planned_move_start source=%s origin=%s target=%s distance=%.4f duration=%.4f feedrate=%.3f",
+            source_label,
+            self._format_optional_point(origin_stage_xy),
+            self._format_optional_point(target_stage_xy),
+            distance_mm,
+            duration_s,
+            float(self.stage_controller.DEFAULT_FEEDRATE),
+        )
+        if not self._manual_jog_timer.isActive():
+            self._manual_jog_timer.start()
+
+    def _schedule_status_refreshes(self, delays_ms: tuple[int, ...]) -> None:
+        for delay_ms in delays_ms:
+            QTimer.singleShot(delay_ms, self.stage_controller.request_status_refresh)
+
+    def _on_manual_terminal_command(self, command: str) -> None:
+        stripped = command.strip().upper()
+        if not stripped:
+            return
+        if re.match(r"^G5(?:4|5|6|7|8|9(?:\.[123])?)$", stripped):
+            self.stage_controller.request_startup_sync(auto_home_a=False)
+            return
+        if (
+            stripped.startswith("$#")
+            or stripped.startswith("$G")
+            or stripped.startswith("$10")
+            or stripped.startswith("G10")
+        ):
+            self.stage_controller.request_startup_sync(auto_home_a=False)
+
     def on_move_finished(self, success: bool, message: str) -> None:
+        if (
+            self._planned_move_started_at is not None
+            or self._planned_move_waiting_for_fresh_status
+        ):
+            logger.debug(
+                "DESIGN MINIMAP planned_move_finish success=%s stage=%s",
+                success,
+                self._format_optional_point(self._planned_move_stage_xy),
+            )
+            if success:
+                if self._planned_move_target_xy is not None:
+                    self._planned_move_stage_xy = self._planned_move_target_xy
+                self._planned_move_origin_xy = None
+                self._planned_move_target_xy = None
+                self._planned_move_started_at = None
+                self._planned_move_ends_at = None
+                self._planned_move_waiting_for_fresh_status = (
+                    self._planned_move_stage_xy is not None
+                )
+                self._planned_move_stop_status_timestamp = (
+                    self.stage_controller.last_status_timestamp()
+                )
+            else:
+                self._clear_planned_move_prediction(clear_wait_state=True)
+        if self._pending_alignment_preparation is not None:
+            preparation = self._pending_alignment_preparation
+            self._pending_alignment_preparation = None
+            if success:
+                self._design_session.apply_prepared_alignment(preparation)
+                self._set_design_snap_enabled(False)
+                self._refresh_design_panel()
+                self._refresh_design_position()
+                self._collapse_alignment_panel_if_ready()
+                self.view.clear_target_cross()
+                self._show_status(
+                    "Design calibration complete. "
+                    f"Rotation {preparation.rotation_deg:+.3f} deg, "
+                    f"spacing ratio {preparation.distance_ratio:.3f}.",
+                    7000,
+                )
+            else:
+                self._show_status(
+                    f"Design calibration rotation failed: {message}",
+                    7000,
+                )
+            self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
+            return
+        if self._pending_quick_alignment_rotation:
+            self._pending_quick_alignment_rotation = False
+            if success:
+                self._collapse_alignment_panel_if_design_open()
         if success:
             self.view.clear_target_cross()
+            self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
         if message:
             self._show_status(message, 5000)
 
@@ -286,7 +1292,491 @@ class Main(QMainWindow):
             5000,
         )
 
+    def _load_design_document(self, design_path: str) -> None:
+        try:
+            document = DesignDocument.load(design_path)
+        except DesignModelError as exc:
+            self._show_status(str(exc), 6000)
+            if self.design_navigator_panel:
+                self.design_navigator_panel.set_status_message(str(exc))
+            return
+        self._reset_manual_alignment(cancel_pick=True)
+        self._design_session.load_document(document)
+        self._pending_alignment_preparation = None
+        self._last_selected_design_point = None
+        self._set_design_snap_enabled(True)
+        self.settings_manager.set_design_last_directory(document.path.parent)
+        if self.design_navigator_panel is not None:
+            self.design_navigator_panel.set_design_dialog_directory(
+                document.path.parent
+            )
+        self._refresh_design_panel()
+        self._refresh_design_position()
+        self._toggle_design_layout_window(True)
+        self._show_status(
+            f"Loaded design '{document.path.name}' ({document.top_cell_name}).",
+            5000,
+        )
+
+    def _unload_design_document(self) -> None:
+        if self._design_session.document is None:
+            return
+        document_name = self._design_session.document.path.name
+        self._reset_manual_alignment(cancel_pick=True)
+        self._design_session.unload_document()
+        self._pending_alignment_preparation = None
+        self._last_selected_design_point = None
+        self._refresh_design_panel()
+        self._update_design_position(None)
+        self._show_status(f"Unloaded design '{document_name}'.", 5000)
+
+    def _set_design_top_cell(self, top_cell_name: str) -> None:
+        try:
+            self._design_session.set_top_cell(top_cell_name)
+        except DesignModelError as exc:
+            self._show_status(str(exc), 6000)
+            return
+        self._pending_alignment_preparation = None
+        self._last_selected_design_point = None
+        self._refresh_design_panel()
+        self._refresh_design_position()
+        self._show_status(f"Switched design top cell to '{top_cell_name}'.", 5000)
+
+    def _set_design_layer_visibility(
+        self, layer: int, datatype: int, visible: bool
+    ) -> None:
+        document = self._design_session.document
+        if document is None:
+            return
+        visible_layers = set(document.visible_layers)
+        layer_key = (int(layer), int(datatype))
+        if visible:
+            visible_layers.add(layer_key)
+        else:
+            visible_layers.discard(layer_key)
+        try:
+            self._design_session.set_visible_layers(visible_layers)
+        except DesignModelError as exc:
+            self._show_status(str(exc), 5000)
+            return
+        self._refresh_design_panel()
+
+    def _load_measurement_script(self, script_path: str) -> None:
+        document = self._design_session.document
+        if document is None:
+            self._show_status("Load a design before loading a measurement plan.", 5000)
+            return
+        try:
+            module, targets = load_measurement_plan(script_path, ScriptContext(document))
+        except DesignModelError as exc:
+            self._show_status(str(exc), 7000)
+            return
+        self._design_session.script_path = script_path
+        self._design_session.script_module_name = module.__name__
+        self._design_session.set_targets(targets)
+        self._refresh_design_panel()
+        self._show_status(
+            f"Loaded measurement plan '{Path(script_path).name}' with {len(targets)} targets.",
+            5000,
+        )
+
+    def _reload_measurement_script(self) -> None:
+        script_path = self._design_session.script_path
+        if not script_path:
+            self._show_status("No measurement script is loaded.", 5000)
+            return
+        self._load_measurement_script(script_path)
+
+    def _add_design_source_mark(self, x_value: float, y_value: float) -> None:
+        self._design_session.add_source_design_mark((x_value, y_value))
+        self._refresh_design_panel()
+        self._show_status(
+            f"Design source mark captured at X={x_value:.3f}, Y={y_value:.3f}.",
+            4000,
+        )
+
+    def _add_design_check_mark(self, x_value: float, y_value: float) -> None:
+        self._design_session.add_check_design_mark((x_value, y_value))
+        self._refresh_design_panel()
+        self._show_status(
+            f"Design check mark captured at X={x_value:.3f}, Y={y_value:.3f}.",
+            4000,
+        )
+
+    def _capture_stage_source_mark(self) -> None:
+        self._capture_stage_registration_mark(check_mark=False)
+
+    def _capture_stage_check_mark(self) -> None:
+        self._capture_stage_registration_mark(check_mark=True)
+
+    def _capture_stage_registration_mark(self, *, check_mark: bool) -> None:
+        try:
+            stage_position = self.stage_controller.current_stage_position()
+        except Exception as exc:
+            self._show_status(str(exc), 6000)
+            return
+        if len(stage_position) < 2:
+            self._show_status("X/Y coordinates are unavailable.", 5000)
+            return
+        stage_xy = (float(stage_position[0]), float(stage_position[1]))
+        if check_mark:
+            self._design_session.add_check_stage_mark(stage_xy)
+            label = "check"
+        else:
+            self._design_session.add_source_stage_mark(stage_xy)
+            label = "source"
+        self._refresh_design_panel()
+        self._refresh_design_position()
+        self._show_status(
+            f"Stage {label} mark captured at X={stage_xy[0]:.3f}, Y={stage_xy[1]:.3f}.",
+            4000,
+        )
+
+    def _design_spacing_ratio_is_reasonable(self, ratio: float) -> bool:
+        return abs(float(ratio) - 1.0) <= self.DESIGN_SPACING_RATIO_TOLERANCE
+
+    def _clear_design_registration(self) -> None:
+        self._pending_alignment_preparation = None
+        self._last_selected_design_point = None
+        self._design_session.clear_registration()
+        self._set_design_snap_enabled(True)
+        self._refresh_design_panel()
+        self._refresh_design_position()
+        self._show_status("Design calibration restarted.", 4000)
+
+    def _invalidate_design_registration(self, reason: str) -> None:
+        self._pending_alignment_preparation = None
+        self._design_session.invalidate_registration(reason)
+        if self._design_session.document is not None:
+            self._set_design_snap_enabled(True)
+        self._refresh_design_panel()
+        latest = self.stage_controller.latest_stage_position()
+        if latest is not None and len(latest) >= 2:
+            self._update_design_position((float(latest[0]), float(latest[1])))
+        else:
+            self._update_design_position(None)
+
+    def _on_design_target_selected(self, target_id: str) -> None:
+        self._design_session.select_target_by_id(target_id)
+        self._refresh_design_panel()
+
+    def _select_next_design_target(self) -> None:
+        target = self._design_session.select_next_target()
+        self._refresh_design_panel()
+        if target is not None:
+            self._show_status(f"Selected target '{target.label}'.", 3000)
+
+    def _select_previous_design_target(self) -> None:
+        target = self._design_session.select_previous_target()
+        self._refresh_design_panel()
+        if target is not None:
+            self._show_status(f"Selected target '{target.label}'.", 3000)
+
+    def _move_to_design_target(self, target_id: str) -> None:
+        target = self._design_session.select_target_by_id(target_id)
+        if target is None:
+            self._show_status(f"Unknown target '{target_id}'.", 5000)
+            return
+        stage_xy = self._design_session.selected_target_stage_xy()
+        if stage_xy is None:
+            self._show_status(
+                "Design registration is required before moving to a target.",
+                6000,
+            )
+            return
+        self._refresh_design_panel()
+        self.stage_controller.request_move_to_xy(stage_xy[0], stage_xy[1])
+
+    def _move_to_minimap_design_point(self, x_value: float, y_value: float) -> None:
+        design_xy = (float(x_value), float(y_value))
+        if not self._move_to_design_coordinate(design_xy, source_label="minimap point"):
+            return
+        self._show_status(
+            f"Moving to minimap point X={design_xy[0]:.3f}, Y={design_xy[1]:.3f}.",
+            3000,
+        )
+
+    def _move_to_design_coordinate(
+        self, design_xy: tuple[float, float], *, source_label: str
+    ) -> bool:
+        document = self._design_session.document
+        if document is None:
+            return False
+        if self.stage_controller.is_busy():
+            self._show_status("Stage is busy. Ignoring design move request.", 3000)
+            return False
+        stage_xy = self._design_session.stage_from_design(design_xy)
+        if stage_xy is None:
+            self._show_status(
+                "Design click-to-move requires completed registration.",
+                5000,
+            )
+            return False
+        self._last_selected_design_point = design_xy
+        self._refresh_design_panel()
+        self._start_planned_move_prediction(
+            (float(stage_xy[0]), float(stage_xy[1])),
+            source_label=source_label,
+        )
+        self.stage_controller.request_move_to_xy(stage_xy[0], stage_xy[1])
+        logger.debug(
+            "DESIGN MOVE source=%s design=(%.3f, %.3f) stage=(%.3f, %.3f)",
+            source_label,
+            design_xy[0],
+            design_xy[1],
+            stage_xy[0],
+            stage_xy[1],
+        )
+        return True
+
+    def _refresh_design_panel(self) -> None:
+        panel = self.design_navigator_panel
+        current_target = self._design_session.current_target()
+        selected_target_id = current_target.id if current_target else None
+        if panel is not None:
+            panel.set_document(self._design_session.document)
+            panel.set_script_path(self._design_session.script_path)
+            panel.set_targets(
+                self._design_session.targets,
+                selected_target_id=selected_target_id,
+            )
+            if self._pending_alignment_preparation is not None:
+                panel.set_calibration_prompt(
+                    "Calibration step 4/4: chip rotation is in progress."
+                )
+            else:
+                panel.set_calibration_prompt(self._design_session.calibration_prompt())
+            panel.set_registration_status(self._design_session.registration_status)
+            panel.set_registration_marks(
+                self._design_session.source_design_marks,
+                self._design_session.check_design_marks,
+            )
+            panel.set_stage_registration_marks(self._design_session.source_stage_marks)
+        if self.design_layout_window is not None:
+            self.design_layout_window.set_snap_enabled(self._design_snap_enabled)
+            self.design_layout_window.set_document(self._design_session.document)
+            self.design_layout_window.set_targets(
+                self._design_session.targets,
+                selected_target_id=selected_target_id,
+            )
+            self.design_layout_window.set_navigation_enabled(
+                self._design_session.registration is not None
+                and self._design_session.registration.valid
+            )
+            self.design_layout_window.set_registration_marks(
+                self._design_session.source_design_marks,
+                self._design_session.check_design_marks,
+            )
+            self.design_layout_window.set_stage_registration_marks(
+                self._design_session.source_stage_marks
+            )
+        self._refresh_manual_alignment_ui()
+        self._update_design_position(self._current_design_stage_xy)
+
+    def _on_stage_position_changed(self, position: object) -> None:
+        if not isinstance(position, tuple) or len(position) < 2:
+            return
+        logger.debug("TIMING stage_position_changed position=%s", position)
+        if len(position) > 4:
+            current_b = float(position[4])
+            if (
+                self._last_reported_b_position is not None
+                and self._pending_alignment_preparation is None
+                and abs(current_b - self._last_reported_b_position)
+                > self.B_POSITION_CHANGE_TOLERANCE_DEG
+                and self._design_session.registration is not None
+                and self._design_session.registration.valid
+            ):
+                self._invalidate_design_registration(
+                    "Design registration cleared after B-axis motion."
+                )
+            self._last_reported_b_position = current_b
+        predicted_stage_xy = None
+        if self._manual_jog_velocity_xy is not None:
+            predicted_stage_xy = self._manual_jog_stage_xy
+        elif (
+            self._planned_move_started_at is not None
+            or self._planned_move_waiting_for_fresh_status
+        ):
+            predicted_stage_xy = self._planned_move_stage_xy
+        center_xy = (float(position[0]), float(position[1]))
+        if self._should_ignore_manual_jog_status_sample(center_xy):
+            return
+        if predicted_stage_xy is not None:
+            self._log_design_position_reconcile(predicted_stage_xy, center_xy)
+            center_xy = self._smooth_manual_jog_actual_position(predicted_stage_xy, center_xy)
+        self._manual_jog_stage_xy = center_xy
+        self._planned_move_stage_xy = center_xy
+        if self._manual_jog_waiting_for_fresh_status:
+            self._manual_jog_waiting_for_fresh_status = False
+            self._manual_jog_settle_until = 0.0
+            self._manual_jog_stop_status_timestamp = None
+        if self._planned_move_waiting_for_fresh_status:
+            self._planned_move_waiting_for_fresh_status = False
+            self._planned_move_stop_status_timestamp = None
+        if self._manual_jog_velocity_xy is not None:
+            self._manual_jog_last_timestamp = time.monotonic()
+        self._update_coordinate_display(center_xy=center_xy)
+        self._pending_design_stage_xy = center_xy
+        if not self._design_overlay_timer.isActive():
+            self._design_overlay_timer.start()
+
+    def _refresh_design_position(self) -> None:
+        if self._design_session.document is None:
+            return
+        if self.serial_connection is None or not self.serial_connection.is_open:
+            self._update_design_position(None)
+            return
+        preferred_stage_xy = self._preferred_design_stage_xy()
+        if preferred_stage_xy is None:
+            self.stage_controller.request_status_refresh()
+            return
+        self._pending_design_stage_xy = preferred_stage_xy
+        self._flush_pending_design_position()
+
+    def _flush_pending_design_position(self) -> None:
+        stage_xy = self._pending_design_stage_xy
+        self._pending_design_stage_xy = None
+        self._update_design_position(stage_xy)
+
+    def _update_design_position(self, stage_xy: tuple[float, float] | None) -> None:
+        self._current_design_stage_xy = stage_xy
+        design_xy = None
+        fov_design_size = None
+        if stage_xy is not None:
+            design_xy = self._design_session.design_from_stage(stage_xy)
+            fov_design_size = self._resolve_design_fov_size()
+        if self.design_navigator_panel is not None:
+            self.design_navigator_panel.set_current_position(
+                stage_xy,
+                design_xy,
+                fov_design_size=fov_design_size,
+            )
+        if self.design_layout_window is not None:
+            self.design_layout_window.set_current_design_position(
+                design_xy,
+                fov_design_size=fov_design_size,
+            )
+        current_target = self._design_session.current_target()
+        self.view.set_design_minimap_data(
+            document=self._design_session.document,
+            targets=self._design_session.targets,
+            selected_target_id=current_target.id if current_target else None,
+            selected_design_point=self._last_selected_design_point,
+            current_design_position=design_xy,
+            fov_design_size=fov_design_size,
+            source_design_marks=self._design_session.source_design_marks_compact(),
+            check_design_marks=self._design_session.check_design_marks,
+        )
+
+    def _log_design_position_reconcile(
+        self,
+        predicted_stage_xy: tuple[float, float],
+        actual_stage_xy: tuple[float, float],
+    ) -> None:
+        state = self.stage_controller.latest_stage_state()
+        predicted_design_xy = self._design_session.design_from_stage(predicted_stage_xy)
+        actual_design_xy = self._design_session.design_from_stage(actual_stage_xy)
+        delta_x = float(actual_stage_xy[0] - predicted_stage_xy[0])
+        delta_y = float(actual_stage_xy[1] - predicted_stage_xy[1])
+        logger.debug(
+            "DESIGN MINIMAP reconcile predicted_stage=%s actual_stage=%s delta=(%.4f, %.4f) delta_norm=%.4f state=%s predicted_design=%s actual_design=%s",
+            self._format_optional_point(predicted_stage_xy),
+            self._format_optional_point(actual_stage_xy),
+            delta_x,
+            delta_y,
+            math.hypot(delta_x, delta_y),
+            state,
+            self._format_optional_point(predicted_design_xy),
+            self._format_optional_point(actual_design_xy),
+        )
+
+    def _should_ignore_manual_jog_status_sample(
+        self,
+        actual_stage_xy: tuple[float, float],
+    ) -> bool:
+        if self._manual_jog_velocity_xy is None:
+            return False
+        state = (self.stage_controller.latest_stage_state() or "").lower()
+        if state != "idle":
+            return False
+        last_jog_write = self.stage_controller.last_jog_write_timestamp()
+        if last_jog_write is None:
+            return False
+        age = time.monotonic() - last_jog_write
+        if age > self.MANUAL_JOG_IGNORE_IDLE_AFTER_COMMAND_S:
+            return False
+        logger.debug(
+            "DESIGN MINIMAP ignored_idle_sample stage=%s age=%.3f state=%s",
+            self._format_optional_point(actual_stage_xy),
+            age,
+            state,
+        )
+        return True
+
+    def _smooth_manual_jog_actual_position(
+        self,
+        predicted_stage_xy: tuple[float, float],
+        actual_stage_xy: tuple[float, float],
+    ) -> tuple[float, float]:
+        delta_x = float(actual_stage_xy[0] - predicted_stage_xy[0])
+        delta_y = float(actual_stage_xy[1] - predicted_stage_xy[1])
+        delta_norm = math.hypot(delta_x, delta_y)
+        state = (self.stage_controller.latest_stage_state() or "").lower()
+        if (
+            delta_norm <= self.MANUAL_JOG_RECONCILE_SMOOTH_THRESHOLD_MM
+            or state not in {"jog", "run"}
+        ):
+            return actual_stage_xy
+        alpha = self.MANUAL_JOG_RECONCILE_SMOOTH_ALPHA
+        smoothed = (
+            float(predicted_stage_xy[0] + delta_x * alpha),
+            float(predicted_stage_xy[1] + delta_y * alpha),
+        )
+        logger.debug(
+            "DESIGN MINIMAP reconcile_smoothed predicted_stage=%s actual_stage=%s smoothed_stage=%s delta_norm=%.4f alpha=%.2f",
+            self._format_optional_point(predicted_stage_xy),
+            self._format_optional_point(actual_stage_xy),
+            self._format_optional_point(smoothed),
+            delta_norm,
+            alpha,
+        )
+        return smoothed
+
+    @staticmethod
+    def _format_optional_point(point: tuple[float, float] | None) -> str:
+        if point is None:
+            return "None"
+        return f"({float(point[0]):.4f}, {float(point[1]):.4f})"
+
+    def _resolve_design_fov_size(self) -> tuple[float, float] | None:
+        registration = self._design_session.registration
+        if registration is None or not registration.valid:
+            return None
+        stage_fov = self.stage_controller.current_fov_size_mm()
+        if stage_fov is None:
+            return None
+        try:
+            inverse = np.linalg.inv(registration.matrix)
+        except np.linalg.LinAlgError:
+            return None
+        width_vec = inverse @ np.asarray([float(stage_fov[0]), 0.0], dtype=float)
+        height_vec = inverse @ np.asarray([0.0, float(stage_fov[1])], dtype=float)
+        return (float(np.linalg.norm(width_vec)), float(np.linalg.norm(height_vec)))
+
+    def _on_homing_action_finished(
+        self, success: bool, _message: str, axis_key: str
+    ) -> None:
+        if not success:
+            return
+        if axis_key.upper() in {"X", "Y", "B", "ALL"}:
+            self._invalidate_design_registration(
+                f"Design registration cleared after homing {axis_key.upper()}."
+            )
+
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        self._design_position_timer.stop()
+        self._manual_jog_timer.stop()
         self.grabber.stop()
         self.thread.quit()
         self.thread.wait()
@@ -296,7 +1786,11 @@ class Main(QMainWindow):
             self.joystick_panel.set_serial(None)
         if self.serial_terminal_panel:
             self.serial_terminal_panel.set_serial(None)
+        self.stage_controller.request_stop_oscillation()
         self.stage_controller.shutdown()
+        self.lcr_controller.shutdown()
+        if self.design_layout_window is not None:
+            self.design_layout_window.close()
         if self.serial_connection_panel:
             self.serial_connection_panel.shutdown()
         event.accept()
@@ -320,13 +1814,6 @@ class Main(QMainWindow):
             jog.linear_distance_mm,
             jog.rotary_distance_deg,
         )
-        feedrates = self.settings_manager.feedrate_configuration()
-        self.joystick_panel.apply_feedrate_settings(
-            feedrates.linear.presets,
-            feedrates.linear.default,
-            feedrates.rotary.presets,
-            feedrates.rotary.default,
-        )
         self.joystick_panel.set_serial(self.serial_connection)
         self.joystick_panel.autofocus_requested.connect(
             self.stage_controller.request_autofocus
@@ -343,21 +1830,37 @@ class Main(QMainWindow):
         self.joystick_panel.needles_lower_requested.connect(
             self.stage_controller.request_needles_lower
         )
+        self.joystick_panel.reset_calibration_requested.connect(
+            self._reset_click_calibration
+        )
+        self.joystick_panel.motion_axis_requested.connect(self._on_manual_motion_axis)
+        self.joystick_panel.jog_command_changed.connect(
+            self._on_manual_jog_command_changed
+        )
+        self.joystick_panel.jog_stopped.connect(self._on_manual_jog_stopped)
+        self.joystick_panel.reset_requested.connect(
+            lambda: self._invalidate_design_registration(
+                "Design registration cleared after controller reset."
+            )
+        )
         self.stage_controller.homing_status_changed.connect(
             self.joystick_panel.set_homing_status
         )
+        self.stage_controller.homing_status_changed.connect(self._persist_controller_state)
         self.stage_controller.homing_action_started.connect(
             self.joystick_panel.set_homing_action_started
         )
         self.stage_controller.homing_action_finished.connect(
             self.joystick_panel.set_homing_action_finished
         )
+        self.stage_controller.homing_action_finished.connect(self._on_homing_action_finished)
         self.stage_controller.axis_a_ready_changed.connect(
             self.joystick_panel.set_axis_a_ready
         )
         self.stage_controller.needles_state_changed.connect(
             self.joystick_panel.set_needles_state
         )
+        self.stage_controller.needles_state_changed.connect(self._persist_controller_state)
         self.stage_controller.needles_action_started.connect(
             self.joystick_panel.set_needles_action_started
         )
@@ -367,6 +1870,7 @@ class Main(QMainWindow):
         self.joystick_panel.reset_requested.connect(
             self.stage_controller.cancel_active_task
         )
+        self.stage_controller.stage_position_changed.connect(self._persist_controller_state)
         self.joystick_dock = CollapsibleDockWidget("Joystick", self)
         self.joystick_dock.setObjectName("JoystickDock")
         self.joystick_dock.setWidget(self.joystick_panel)
@@ -378,9 +1882,53 @@ class Main(QMainWindow):
             self.serial_connection_dock, self.joystick_dock, Qt.Vertical
         )
 
+        self.needle_calibration_panel = NeedleCalibrationPanel(self)
+        self.needle_calibration_panel.connect_requested.connect(
+            self.lcr_controller.request_connect
+        )
+        self.needle_calibration_panel.disconnect_requested.connect(
+            self.lcr_controller.request_disconnect
+        )
+        self.needle_calibration_panel.start_requested.connect(
+            self._start_needle_calibration
+        )
+        self.needle_calibration_panel.stop_requested.connect(
+            self._stop_needle_calibration
+        )
+        self.needle_calibration_panel.adjust_requested.connect(
+            self.stage_controller.request_needles_adjust
+        )
+        self.needle_calibration_panel.save_current_requested.connect(
+            self._save_current_needle_height
+        )
+        self.needle_calibration_panel.lower_to_saved_requested.connect(
+            self.stage_controller.request_needles_lower
+        )
+        self.needle_calibration_panel.raise_needles_requested.connect(
+            self.stage_controller.request_needles_raise
+        )
+        self.lcr_controller.connection_changed.connect(
+            self._on_lcr_connection_changed
+        )
+        self.lcr_controller.reading_updated.connect(
+            self._on_lcr_reading_updated
+        )
+        self.needle_calibration_dock = CollapsibleDockWidget(
+            "Needle Calibration", self
+        )
+        self.needle_calibration_dock.setObjectName("NeedleCalibrationDock")
+        self.needle_calibration_dock.setWidget(self.needle_calibration_panel)
+        self.needle_calibration_dock.setAllowedAreas(
+            Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea
+        )
+        self.addDockWidget(Qt.RightDockWidgetArea, self.needle_calibration_dock)
+
         self.serial_terminal_panel = SerialTerminalWindow(self)
         self.serial_terminal_panel.set_stage_controller(self.stage_controller)
         self.serial_terminal_panel.set_serial(self.serial_connection)
+        self.serial_terminal_panel.manual_command_sent.connect(
+            self._on_manual_terminal_command
+        )
         self.serial_terminal_dock = CollapsibleDockWidget("Serial Terminal", self)
         self.serial_terminal_dock.setObjectName("SerialTerminalDock")
         self.serial_terminal_dock.setWidget(self.serial_terminal_panel)
@@ -389,6 +1937,193 @@ class Main(QMainWindow):
         )
         self.addDockWidget(Qt.LeftDockWidgetArea, self.serial_terminal_dock)
         self.splitDockWidget(self.joystick_dock, self.serial_terminal_dock, Qt.Vertical)
+
+        self.oscillation_panel = OscillationPanel(self)
+        self.oscillation_panel.start_requested.connect(
+            self.stage_controller.request_oscillation
+        )
+        self.oscillation_panel.stop_requested.connect(
+            self.stage_controller.request_stop_oscillation
+        )
+        self.oscillation_dock = CollapsibleDockWidget("Oscillation", self)
+        self.oscillation_dock.setObjectName("OscillationDock")
+        self.oscillation_dock.setWidget(self.oscillation_panel)
+        self.oscillation_dock.setAllowedAreas(
+            Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea
+        )
+        self.addDockWidget(Qt.LeftDockWidgetArea, self.oscillation_dock)
+        self.tabifyDockWidget(self.joystick_dock, self.oscillation_dock)
+        self.joystick_dock.raise_()
+
+        self.design_layout_window = DesignLayoutWindow()
+        self.design_navigator_panel = self.design_layout_window.navigator_panel
+        self.design_navigator_panel.load_design_requested.connect(self._load_design_document)
+        self.design_navigator_panel.unload_design_requested.connect(
+            self._unload_design_document
+        )
+        self.design_navigator_panel.top_cell_changed.connect(self._set_design_top_cell)
+        self.design_navigator_panel.layer_visibility_changed.connect(
+            self._set_design_layer_visibility
+        )
+        self.design_navigator_panel.load_script_requested.connect(
+            self._load_measurement_script
+        )
+        self.design_navigator_panel.reload_script_requested.connect(
+            self._reload_measurement_script
+        )
+        self.design_navigator_panel.move_to_target_requested.connect(
+            self._move_to_design_target
+        )
+        self.design_navigator_panel.next_target_requested.connect(
+            self._select_next_design_target
+        )
+        self.design_navigator_panel.previous_target_requested.connect(
+            self._select_previous_design_target
+        )
+        self.design_navigator_panel.target_selected.connect(
+            self._on_design_target_selected
+        )
+        self.design_navigator_panel.snap_enabled_changed.connect(
+            self._on_design_snap_enabled_changed
+        )
+        self.design_layout_window.calibration_point_selected.connect(
+            self._on_design_layout_point_selected
+        )
+        self.design_layout_window.move_requested.connect(
+            lambda x_value, y_value: self._move_to_design_window_point(x_value, y_value)
+        )
+        self.design_layout_window.hover_snap_changed.connect(
+            self.design_navigator_panel.set_hover_snap
+        )
+        self.design_layout_window.visibility_changed.connect(
+            self._on_design_layout_window_visibility_changed
+        )
+        self.alignment_panel = AlignmentPanel(self)
+        self.alignment_panel.open_design_window_requested.connect(
+            lambda: self._toggle_design_layout_window(True)
+        )
+        self.alignment_panel.capture_point_requested.connect(
+            self._request_alignment_capture
+        )
+        self.alignment_panel.reset_points_requested.connect(
+            self._reset_alignment_capture_points
+        )
+        self.alignment_panel.cancel_pick_requested.connect(
+            self._cancel_manual_alignment_pick
+        )
+        self.alignment_panel.clear_registration_requested.connect(
+            self._clear_design_registration
+        )
+        self.alignment_dock = CollapsibleDockWidget("Alignment", self)
+        self.alignment_dock.setObjectName("AlignmentDock")
+        self.alignment_dock.setWidget(self.alignment_panel)
+        self.alignment_dock.setAllowedAreas(
+            Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea
+        )
+        self.addDockWidget(Qt.RightDockWidgetArea, self.alignment_dock)
+        self.splitDockWidget(self.needle_calibration_dock, self.alignment_dock, Qt.Vertical)
+        self._refresh_manual_alignment_ui()
+        self._update_coordinate_display()
+        self._refresh_design_panel()
+        self.resizeDocks(
+            [self.serial_connection_dock, self.joystick_dock, self.serial_terminal_dock],
+            [150, 340, 220],
+            Qt.Vertical,
+        )
+        self.resizeDocks(
+            [self.joystick_dock, self.alignment_dock],
+            [360, 520],
+            Qt.Horizontal,
+        )
+        self.resizeDocks(
+            [self.needle_calibration_dock, self.alignment_dock],
+            [320, 260],
+            Qt.Vertical,
+        )
+
+    def _move_to_design_window_point(self, x_value: float, y_value: float) -> None:
+        design_xy = (float(x_value), float(y_value))
+        if not self._move_to_design_coordinate(design_xy, source_label="design window"):
+            return
+        self._show_status(
+            f"Moving to design point X={design_xy[0]:.3f}, Y={design_xy[1]:.3f}.",
+            3000,
+        )
+
+    def _start_needle_calibration(self) -> None:
+        if self.serial_connection is None or not self.serial_connection.is_open:
+            self._show_status("Connect the stage controller before needle calibration.")
+            return
+        if not self.lcr_controller.is_connected():
+            self._show_status("Connect the LCR meter before starting calibration.")
+            return
+        self._needle_calibration_active = True
+        self._needle_height_timer.start()
+        if self.needle_calibration_panel:
+            self.needle_calibration_panel.set_calibration_active(True)
+        self.stage_controller.request_needles_raise()
+        self._show_status(
+            "Needle calibration started. Move above metal and lower the needles in steps until the LCR reports a short."
+        )
+
+    def _stop_needle_calibration(self) -> None:
+        self._needle_calibration_active = False
+        self._needle_height_timer.stop()
+        if self.needle_calibration_panel:
+            self.needle_calibration_panel.set_calibration_active(False)
+        self._show_status("Needle calibration stopped.")
+
+    def _refresh_needle_height(self) -> None:
+        if not self._needle_calibration_active:
+            return
+        a_position = self.stage_controller.current_a_position()
+        if a_position is None:
+            return
+        self._on_needle_height_changed(a_position)
+
+    def _on_needle_height_changed(self, a_position: float) -> None:
+        if self.needle_calibration_panel:
+            self.needle_calibration_panel.set_current_a(a_position)
+
+    def _on_lcr_connection_changed(
+        self, connected: bool, backend_name: str, description: str
+    ) -> None:
+        if self.needle_calibration_panel:
+            self.needle_calibration_panel.set_connection_state(
+                connected, backend_name, description
+            )
+            if not connected:
+                self.needle_calibration_panel.set_reading(None, False)
+
+    def _on_lcr_reading_updated(self, resistance_ohm: float, is_short: bool) -> None:
+        if self.needle_calibration_panel:
+            self.needle_calibration_panel.set_reading(resistance_ohm, is_short)
+
+    def _set_design_snap_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        self._design_snap_enabled = enabled
+        if self.design_layout_window is not None:
+            self.design_layout_window.set_snap_enabled(enabled)
+
+    def _on_design_snap_enabled_changed(self, enabled: bool) -> None:
+        self._set_design_snap_enabled(enabled)
+
+    def _save_current_needle_height(self) -> None:
+        a_position = self.stage_controller.current_a_position()
+        if a_position is None:
+            self._show_status("Unable to read A position. Wait for the stage to become idle.")
+            return
+        settings = self.settings_manager.settings.clone()
+        settings.needle_calibration.down_position_mm = a_position
+        settings.needle_calibration.down_position_configured = True
+        self.settings_manager.replace(settings)
+        self.settings_manager.save()
+        self._apply_settings()
+        self._show_status(f"Saved needle down height at A={a_position:.4f} mm.")
+
+    def _on_oscillation_state_changed(self, running: bool, axis: str) -> None:
+        if self.oscillation_panel:
+            self.oscillation_panel.set_running(running, axis)
 
 def main() -> int:
     app = QApplication(sys.argv)

@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import serial
 from PySide6.QtCore import QEvent, QRectF, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QCloseEvent, QDoubleValidator, QPainter, QPen
+from PySide6.QtGui import QColor, QCloseEvent, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
-    QComboBox,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -19,12 +19,17 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSlider,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
-from probe_station_gui.qt_compat import keyboard_modifiers_to_int
+from probe_station_gui.qt_compat import (
+    derive_native_scan_code_from_qt_key,
+    keyboard_modifiers_to_int,
+    native_scan_code_to_int,
+)
 from probe_station_gui.settings_manager import CONTROL_ACTIONS, KeyBinding
 
 if TYPE_CHECKING:
@@ -69,10 +74,14 @@ class JoystickWindow(QWidget):
 
     autofocus_requested = Signal()
     reset_requested = Signal()
+    motion_axis_requested = Signal(str)
+    jog_command_changed = Signal(object, float)
+    jog_stopped = Signal()
     home_axis_requested = Signal(str)
     home_all_requested = Signal()
     needles_raise_requested = Signal()
     needles_lower_requested = Signal()
+    reset_calibration_requested = Signal()
 
     DEFAULT_JOG_DISTANCE_MM = 25.0
     DEFAULT_ROTATE_DISTANCE_DEG = 5.0
@@ -84,18 +93,14 @@ class JoystickWindow(QWidget):
         100.0,
         300.0,
     )
-    DEFAULT_ROTARY_FEEDRATE_PRESETS: tuple[float, ...] = (
-        1.0,
-        3.0,
-        10.0,
-        30.0,
-        90.0,
-        360.0,
-    )
-    CUSTOM_FEED_LABEL = "Custom..."
+    KEYBOARD_JOG_SYNC_DEBOUNCE_MS = 10
+    KEYBOARD_JOG_SECONDARY_AXIS_ACTIVATION_MS = 320
+    KEYBOARD_JOG_DIAGONAL_CHORD_WINDOW_MS = 90
     LINEAR_AXES = {"X", "Y", "Z"}
-    ROTATIONAL_AXES = {"A", "B", "C"}
     HOMING_AXES = ("X", "Y", "Z", "A")
+    LINEAR_FEEDRATE_SCALE = 10
+    MIN_LINEAR_FEEDRATE = 0.1
+    MAX_LINEAR_FEEDRATE = 1000.0
     HOMED_STYLE = (
         "QPushButton { padding: 2px 6px; border-radius: 4px; background: #1565c0; color: #f5f5f5; }"
         "QPushButton:pressed { background: #0d47a1; }"
@@ -138,13 +143,14 @@ class JoystickWindow(QWidget):
         self.stage_controller: Optional["StageController"] = None
         self._active_axes: Optional[tuple[tuple[str, int], ...]] = None
         self._key_stack: list[Tuple[str, object]] = []
+        self._key_press_times: dict[Tuple[str, object], float] = {}
+        self._pending_key_activations: dict[Tuple[str, object], QTimer] = {}
         self._key_bindings: Dict[tuple, tuple[str, int]] = {}
         self._linear_presets: List[float] = list(self.DEFAULT_LINEAR_FEEDRATE_PRESETS)
-        self._rotary_presets: List[float] = list(self.DEFAULT_ROTARY_FEEDRATE_PRESETS)
         self._linear_default: float = 1.0
-        self._rotary_default: float = 1.0
         self._linear_jog_distance_mm: float = self.DEFAULT_JOG_DISTANCE_MM
-        self._rotary_jog_distance_deg: float = self.DEFAULT_ROTATE_DISTANCE_DEG
+        self._linear_feedrate_value: float = self._linear_default
+        self._last_feedrate_wheel_at = 0.0
         self._homing_buttons: dict[str, QPushButton] = {}
         self._homing_targets: dict[str, QPushButton] = {}
         self._homing_text: dict[str, str] = {}
@@ -163,6 +169,11 @@ class JoystickWindow(QWidget):
         self._needle_animation_timer = QTimer(self)
         self._needle_animation_timer.setInterval(90)
         self._needle_animation_timer.timeout.connect(self._advance_needle_spinner)
+        self._jog_state_sync_timer = QTimer(self)
+        self._jog_state_sync_timer.setSingleShot(True)
+        self._jog_state_sync_timer.setInterval(self.KEYBOARD_JOG_SYNC_DEBOUNCE_MS)
+        self._jog_state_sync_timer.timeout.connect(self._sync_active_jog_state)
+        self._pending_jog_axes: Optional[tuple[tuple[str, int], ...]] = None
         self._jog_stop_resend_pending = False
         self.apply_control_bindings({})
         self._event_filter_installed = False
@@ -177,43 +188,26 @@ class JoystickWindow(QWidget):
 
         linear_feed_layout = QHBoxLayout()
         linear_feed_layout.addWidget(QLabel("Linear feed (mm/min):", self))
-        self.linear_feedrate_combo = QComboBox(self)
-        self.linear_feedrate_combo.currentIndexChanged.connect(
-            self._on_linear_feedrate_changed
-        )
-        linear_feed_layout.addWidget(self.linear_feedrate_combo)
-
-        self.linear_custom_feedrate_edit = QLineEdit(self)
-        self.linear_custom_feedrate_edit.setPlaceholderText("Enter custom rate")
-        self.linear_custom_feedrate_edit.setValidator(
-            QDoubleValidator(0.000001, 1000000.0, 6, self)
-        )
-        self.linear_custom_feedrate_edit.setVisible(False)
-        linear_feed_layout.addWidget(self.linear_custom_feedrate_edit)
+        self.linear_feedrate_value_label = QLabel(self)
+        self.linear_feedrate_value_label.setMinimumWidth(90)
+        self.linear_feedrate_value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        linear_feed_layout.addWidget(self.linear_feedrate_value_label)
 
         feed_container.addLayout(linear_feed_layout)
 
-        rotary_feed_layout = QHBoxLayout()
-        rotary_feed_layout.addWidget(QLabel("Rotary feed (deg/min):", self))
-        self.rotary_feedrate_combo = QComboBox(self)
-        self.rotary_feedrate_combo.currentIndexChanged.connect(
-            self._on_rotary_feedrate_changed
+        self.linear_feedrate_slider = QSlider(Qt.Horizontal, self)
+        self.linear_feedrate_slider.setRange(
+            int(self.MIN_LINEAR_FEEDRATE * self.LINEAR_FEEDRATE_SCALE),
+            int(self.MAX_LINEAR_FEEDRATE * self.LINEAR_FEEDRATE_SCALE),
         )
-        rotary_feed_layout.addWidget(self.rotary_feedrate_combo)
-
-        self.rotary_custom_feedrate_edit = QLineEdit(self)
-        self.rotary_custom_feedrate_edit.setPlaceholderText("Enter custom rate")
-        self.rotary_custom_feedrate_edit.setValidator(
-            QDoubleValidator(0.000001, 1000000.0, 6, self)
+        self.linear_feedrate_slider.valueChanged.connect(
+            self._on_linear_feedrate_slider_changed
         )
-        self.rotary_custom_feedrate_edit.setVisible(False)
-        rotary_feed_layout.addWidget(self.rotary_custom_feedrate_edit)
-
-        feed_container.addLayout(rotary_feed_layout)
+        feed_container.addWidget(self.linear_feedrate_slider)
 
         root_layout.addLayout(feed_container)
 
-        self._refresh_feedrate_combos(force_defaults=True)
+        self._set_linear_feedrate(self._linear_default, reissue_if_active=False)
 
         grid_layout = QGridLayout()
         self.up_button = QPushButton("↑", self)
@@ -242,15 +236,24 @@ class JoystickWindow(QWidget):
 
         rotate_layout = QHBoxLayout()
         rotate_layout.addStretch(1)
-        rotate_layout.addWidget(QLabel("Rotate B:", self))
+        self.rotate_label = QLabel("Rotate B:", self)
+        rotate_layout.addWidget(self.rotate_label)
         self.rotate_negative_button = QPushButton("↻", self)
         self.rotate_positive_button = QPushButton("↺", self)
+        self.zero_b_button = QPushButton("Zero B", self)
         self.rotate_negative_button.setToolTip("Rotate clockwise (B-)")
         self.rotate_positive_button.setToolTip("Rotate counter-clockwise (B+)")
+        self.zero_b_button.setToolTip("Use the current B position as zero")
         rotate_layout.addWidget(self.rotate_negative_button)
         rotate_layout.addWidget(self.rotate_positive_button)
+        rotate_layout.addWidget(self.zero_b_button)
         rotate_layout.addStretch(1)
         root_layout.addLayout(rotate_layout)
+        rotate_layout.setEnabled(False)
+        self.rotate_label.hide()
+        self.rotate_negative_button.hide()
+        self.rotate_positive_button.hide()
+        self.zero_b_button.hide()
 
         self.up_button.pressed.connect(lambda: self.start_jog("Y", 1))
         self.up_button.released.connect(self.stop_jog)
@@ -260,10 +263,6 @@ class JoystickWindow(QWidget):
         self.left_button.released.connect(self.stop_jog)
         self.right_button.pressed.connect(lambda: self.start_jog("X", 1))
         self.right_button.released.connect(self.stop_jog)
-        self.rotate_negative_button.pressed.connect(lambda: self.start_jog("B", -1))
-        self.rotate_negative_button.released.connect(self.stop_jog)
-        self.rotate_positive_button.pressed.connect(lambda: self.start_jog("B", 1))
-        self.rotate_positive_button.released.connect(self.stop_jog)
         self.focus_down_button.pressed.connect(lambda: self.start_jog("Z", -1))
         self.focus_down_button.released.connect(self.stop_jog)
         self.focus_up_button.pressed.connect(lambda: self.start_jog("Z", 1))
@@ -311,8 +310,10 @@ class JoystickWindow(QWidget):
         safety_layout = QHBoxLayout()
         self.unlock_button = QPushButton("Unlock", self)
         self.reset_button = QPushButton("Reset", self)
+        self.reset_calibration_button = QPushButton("Reset Cal", self)
         safety_layout.addWidget(self.unlock_button)
         safety_layout.addWidget(self.reset_button)
+        safety_layout.addWidget(self.reset_calibration_button)
         root_layout.addLayout(safety_layout)
 
         self.autofocus_button = QPushButton("Autofocus", self)
@@ -322,6 +323,9 @@ class JoystickWindow(QWidget):
 
         self.unlock_button.clicked.connect(lambda: self.send_command("$X\n"))
         self.reset_button.clicked.connect(self._send_reset)
+        self.reset_calibration_button.clicked.connect(
+            self.reset_calibration_requested.emit
+        )
 
         root_layout.addStretch(1)
         self._update_enabled_state()
@@ -355,110 +359,40 @@ class JoystickWindow(QWidget):
         self._event_filter_retry_scheduled = False
         logger.debug("Joystick event filter removed")
 
-    def _on_linear_feedrate_changed(self, index: int) -> None:
-        self._update_custom_visibility(
-            self.linear_feedrate_combo,
-            self.linear_custom_feedrate_edit,
-            index,
-        )
-
-    def _on_rotary_feedrate_changed(self, index: int) -> None:
-        self._update_custom_visibility(
-            self.rotary_feedrate_combo,
-            self.rotary_custom_feedrate_edit,
-            index,
-        )
-
-    def _update_custom_visibility(
-        self, combo: QComboBox, editor: QLineEdit, index: int
-    ) -> None:
-        if index < 0:
-            editor.setVisible(False)
-            return
-        is_custom = combo.itemText(index) == self.CUSTOM_FEED_LABEL
-        editor.setVisible(is_custom)
-        if is_custom:
-            editor.setFocus()
-
     def _format_feedrate(self, value: float) -> str:
-        text = f"{value:.6f}".rstrip("0").rstrip(".")
-        return text or "0"
+        return f"{float(value):.1f} mm/min"
 
-    def _refresh_feedrate_combos(self, *, force_defaults: bool = False) -> None:
-        self._refresh_feedrate_combo(
-            self.linear_feedrate_combo,
-            self.linear_custom_feedrate_edit,
-            self._linear_presets,
-            self._linear_default,
-            force_defaults,
-            fallback=self.DEFAULT_LINEAR_FEEDRATE_PRESETS,
-        )
-        self._refresh_feedrate_combo(
-            self.rotary_feedrate_combo,
-            self.rotary_custom_feedrate_edit,
-            self._rotary_presets,
-            self._rotary_default,
-            force_defaults,
-            fallback=self.DEFAULT_ROTARY_FEEDRATE_PRESETS,
-        )
+    def _slider_value_from_feedrate(self, value: float) -> int:
+        bounded = min(self.MAX_LINEAR_FEEDRATE, max(self.MIN_LINEAR_FEEDRATE, float(value)))
+        return int(round(bounded * self.LINEAR_FEEDRATE_SCALE))
 
-    def _refresh_feedrate_combo(
+    def _feedrate_from_slider_value(self, slider_value: int) -> float:
+        return float(slider_value) / float(self.LINEAR_FEEDRATE_SCALE)
+
+    def _set_linear_feedrate(
         self,
-        combo: QComboBox,
-        editor: QLineEdit,
-        presets: List[float],
-        default_value: float,
-        force_default: bool,
+        value: float,
         *,
-        fallback: tuple[float, ...],
+        reissue_if_active: bool,
     ) -> None:
-        display_items: List[str] = []
-        seen: set[str] = set()
-        for preset in presets:
-            try:
-                text = self._format_feedrate(float(preset))
-            except (TypeError, ValueError):
-                continue
-            if text in seen:
-                continue
-            display_items.append(text)
-            seen.add(text)
-        if not display_items:
-            display_items = [self._format_feedrate(value) for value in fallback]
-            seen = set(display_items)
+        bounded = min(self.MAX_LINEAR_FEEDRATE, max(self.MIN_LINEAR_FEEDRATE, float(value)))
+        if abs(bounded - self._linear_feedrate_value) <= 1e-9 and not reissue_if_active:
+            return
+        self._linear_feedrate_value = bounded
+        slider_value = self._slider_value_from_feedrate(bounded)
+        if self.linear_feedrate_slider.value() != slider_value:
+            self.linear_feedrate_slider.blockSignals(True)
+            self.linear_feedrate_slider.setValue(slider_value)
+            self.linear_feedrate_slider.blockSignals(False)
+        self.linear_feedrate_value_label.setText(self._format_feedrate(bounded))
+        if reissue_if_active:
+            self._restart_active_jog_with_current_feedrate()
 
-        default_text = ""
-        try:
-            if default_value > 0:
-                default_text = self._format_feedrate(float(default_value))
-        except (TypeError, ValueError):
-            default_text = ""
-
-        if default_text and default_text not in seen:
-            display_items.insert(0, default_text)
-            seen.add(default_text)
-
-        if self.CUSTOM_FEED_LABEL not in display_items:
-            display_items.append(self.CUSTOM_FEED_LABEL)
-
-        current_text = combo.currentText()
-        custom_text = editor.text()
-        combo.blockSignals(True)
-        combo.clear()
-        combo.addItems(display_items)
-
-        if force_default and default_text:
-            combo.setCurrentText(default_text)
-        elif current_text in display_items:
-            combo.setCurrentText(current_text)
-        elif current_text == self.CUSTOM_FEED_LABEL or editor.isVisible():
-            combo.setCurrentText(self.CUSTOM_FEED_LABEL)
-            editor.setText(custom_text)
-        else:
-            combo.setCurrentIndex(0)
-
-        combo.blockSignals(False)
-        self._update_custom_visibility(combo, editor, combo.currentIndex())
+    def _on_linear_feedrate_slider_changed(self, slider_value: int) -> None:
+        self._set_linear_feedrate(
+            self._feedrate_from_slider_value(slider_value),
+            reissue_if_active=True,
+        )
 
     def apply_feedrate_settings(
         self,
@@ -467,92 +401,42 @@ class JoystickWindow(QWidget):
         rotary_presets: List[float],
         rotary_default: float,
     ) -> None:
-        """Update the selectable feedrate presets and defaults from settings."""
+        """Apply only the linear default feedrate used by jog controls."""
 
-        cleaned_linear = self._clean_presets(
-            linear_presets, self.DEFAULT_LINEAR_FEEDRATE_PRESETS
+        cleaned_linear = sorted(
+            {
+                max(self.MIN_LINEAR_FEEDRATE, min(self.MAX_LINEAR_FEEDRATE, float(value)))
+                for value in linear_presets
+                if isinstance(value, (int, float))
+            }
         )
-        cleaned_rotary = self._clean_presets(
-            rotary_presets, self.DEFAULT_ROTARY_FEEDRATE_PRESETS
+        if cleaned_linear:
+            self._linear_presets = list(cleaned_linear)
+        try:
+            candidate = float(linear_default)
+        except (TypeError, ValueError):
+            candidate = self._linear_presets[0] if self._linear_presets else 10.0
+        self._linear_default = min(
+            self.MAX_LINEAR_FEEDRATE,
+            max(self.MIN_LINEAR_FEEDRATE, candidate),
         )
-        default_linear = self._resolve_default(
-            linear_default, cleaned_linear, self.DEFAULT_LINEAR_FEEDRATE_PRESETS
-        )
-        default_rotary = self._resolve_default(
-            rotary_default, cleaned_rotary, self.DEFAULT_ROTARY_FEEDRATE_PRESETS
-        )
-
-        if (
-            cleaned_linear == self._linear_presets
-            and cleaned_rotary == self._rotary_presets
-            and abs(default_linear - self._linear_default) <= 1e-9
-            and abs(default_rotary - self._rotary_default) <= 1e-9
-        ):
-            return
-
-        self._linear_presets = cleaned_linear
-        self._rotary_presets = cleaned_rotary
-        self._linear_default = default_linear
-        self._rotary_default = default_rotary
-        self._refresh_feedrate_combos(force_defaults=True)
+        self._set_linear_feedrate(self._linear_default, reissue_if_active=False)
         logger.info(
-            "Joystick feedrate settings updated: linear=%s (default=%s) rotary=%s (default=%s)",
-            cleaned_linear,
-            default_linear,
-            cleaned_rotary,
-            default_rotary,
+            "Joystick feedrate settings updated: linear=%s (default=%s)",
+            self._linear_presets,
+            self._linear_default,
         )
 
     def apply_jog_settings(
         self, linear_distance_mm: float, rotary_distance_deg: float
     ) -> None:
-        """Update the jog distance used for linear and rotary axes."""
+        """Update the jog distance used for linear axes."""
 
         self._linear_jog_distance_mm = max(0.001, float(linear_distance_mm))
-        self._rotary_jog_distance_deg = max(0.001, float(rotary_distance_deg))
         logger.debug(
-            "Joystick jog distance updated: linear_distance_mm=%s rotary_distance_deg=%s",
+            "Joystick jog distance updated: linear_distance_mm=%s",
             self._linear_jog_distance_mm,
-            self._rotary_jog_distance_deg,
         )
-
-    def _clean_presets(
-        self, presets: List[float], fallback: tuple[float, ...]
-    ) -> List[float]:
-        cleaned: List[float] = []
-        seen: set[float] = set()
-        for value in presets:
-            try:
-                number = float(value)
-            except (TypeError, ValueError):
-                continue
-            if number <= 0:
-                continue
-            key = round(number, 9)
-            if key in seen:
-                continue
-            seen.add(key)
-            cleaned.append(number)
-        if not cleaned:
-            cleaned = list(fallback)
-        cleaned.sort()
-        return cleaned
-
-    def _resolve_default(
-        self, default_value: float, presets: List[float], fallback: tuple[float, ...]
-    ) -> float:
-        if not presets:
-            return fallback[0]
-        try:
-            candidate = float(default_value)
-        except (TypeError, ValueError):
-            candidate = presets[0]
-        if candidate <= 0:
-            candidate = presets[0]
-        for value in presets:
-            if abs(value - candidate) <= 1e-9:
-                return value
-        return presets[0]
 
     def set_serial(self, serial_connection: Optional[serial.Serial]) -> None:
         """Assign the serial connection used for jogging commands."""
@@ -562,7 +446,10 @@ class JoystickWindow(QWidget):
         self.serial_connection = serial_connection
         if not serial_connection or not serial_connection.is_open:
             self._active_axes = None
+            self._pending_jog_axes = None
             self._key_stack.clear()
+            self._key_press_times.clear()
+            self._clear_pending_key_activations()
             logger.debug("Joystick serial detached")
         if serial_connection and serial_connection.is_open:
             self.status_label.setText(
@@ -585,15 +472,13 @@ class JoystickWindow(QWidget):
         enabled = bool(self.serial_connection and self.serial_connection.is_open)
         motion_enabled = enabled and self._axis_a_ready
         for widget in (
-            self.linear_feedrate_combo,
-            self.linear_custom_feedrate_edit,
-            self.rotary_feedrate_combo,
-            self.rotary_custom_feedrate_edit,
+            self.linear_feedrate_slider,
             self.home_all_button,
             self.needles_raise_button,
             self.needles_lower_button,
             self.unlock_button,
             self.reset_button,
+            self.reset_calibration_button,
         ):
             widget.setEnabled(enabled)
         for widget in (
@@ -601,8 +486,6 @@ class JoystickWindow(QWidget):
             self.down_button,
             self.left_button,
             self.right_button,
-            self.rotate_negative_button,
-            self.rotate_positive_button,
             self.focus_down_button,
             self.focus_up_button,
             self.autofocus_button,
@@ -615,7 +498,10 @@ class JoystickWindow(QWidget):
         self._axis_a_ready = ready
         if not ready:
             self.stop_jog()
+            self._pending_jog_axes = None
             self._key_stack.clear()
+            self._key_press_times.clear()
+            self._clear_pending_key_activations()
         self._update_enabled_state()
 
     def set_needles_state(self, raised: bool, known: bool) -> None:
@@ -657,24 +543,48 @@ class JoystickWindow(QWidget):
         if not self._axis_a_ready:
             logger.debug("Jog blocked because A axis is not homed/zero")
             return False
+        if self.stage_controller is not None and self.stage_controller.is_busy():
+            logger.debug("Jog blocked because stage controller is busy")
+            return False
         return True
 
     def set_stage_controller(self, stage_controller: Optional["StageController"]) -> None:
         self.stage_controller = stage_controller
 
     def start_jog(self, axis: str, direction: int) -> None:
-        logger.debug("Start jog requested: axis=%s direction=%s", axis, direction)
+        logger.debug("TIMING start_jog_requested axis=%s direction=%s", axis, direction)
         if not self._move_safety_check():
             return
+        self.motion_axis_requested.emit(axis.upper())
         self._apply_axes(((axis, direction),))
 
+    def _restart_active_jog_with_current_feedrate(self) -> None:
+        axes = self._active_axes
+        if not axes:
+            return
+        self.stop_jog()
+        self._apply_axes(axes)
+
     def stop_jog(self) -> None:
+        had_active_axes = self._active_axes is not None
+        logger.debug(
+            "TIMING stop_jog_requested active_axes=%s key_stack=%s",
+            self._active_axes,
+            self._key_stack,
+        )
         if not self.serial_connection or not self.serial_connection.is_open:
             self._active_axes = None
+            self._pending_jog_axes = None
+            self._clear_pending_key_activations()
+            if had_active_axes:
+                self.jog_stopped.emit()
             return
         self._active_axes = None
+        self._pending_jog_axes = None
         self.send_command(b"\x85")
         self._schedule_jog_stop_resend()
+        if had_active_axes:
+            self.jog_stopped.emit()
         logger.debug("Stop jog command issued")
 
     def _apply_axes(self, axes: tuple[tuple[str, int], ...]) -> None:
@@ -697,106 +607,37 @@ class JoystickWindow(QWidget):
         if self._active_axes is not None:
             self.stop_jog()
         parts: list[str] = []
+        commanded_distances: list[tuple[str, float]] = []
         for axis, direction in axes_sorted:
             distance = direction * self._distance_for_axis(axis)
+            commanded_distances.append((axis, distance))
             parts.append(f"{axis}{distance:.3f}")
         command = f"$J=G91 G21 {' '.join(parts)} F{feedrate}\n"
+        logger.debug(
+            "TIMING jog_command_prepared axes=%s feedrate=%s command=%s",
+            commanded_distances,
+            feedrate,
+            command.strip(),
+        )
         self.send_command(command)
         self._active_axes = axes_sorted
-        logger.debug("Jog command sent: %s", command.strip())
+        self.jog_command_changed.emit(tuple(commanded_distances), float(feedrate))
+        logger.debug("TIMING jog_command_sent command=%s", command.strip())
 
     def _distance_for_axis(self, axis: str) -> float:
-        if axis == "B":
-            return self._rotary_jog_distance_deg
         return self._linear_jog_distance_mm
 
     def _feedrate_for_axes(
         self, axes: tuple[tuple[str, int], ...]
     ) -> Optional[float]:
-        has_rotary = any(axis in self.ROTATIONAL_AXES for axis, _ in axes)
         has_linear = any(axis in self.LINEAR_AXES for axis, _ in axes)
 
-        linear_feed: Optional[float] = None
-        rotary_feed: Optional[float] = None
-
         if has_linear:
-            linear_feed = self._read_feedrate(
-                self.linear_feedrate_combo,
-                self.linear_custom_feedrate_edit,
-                "millimetres per minute",
-            )
-            if linear_feed is None:
-                return None
-
-        if has_rotary:
-            rotary_feed = self._read_feedrate(
-                self.rotary_feedrate_combo,
-                self.rotary_custom_feedrate_edit,
-                "degrees per minute",
-            )
-            if rotary_feed is None:
-                return None
-
-        if has_linear and has_rotary:
-            feed_candidates: list[float] = []
-
-            if linear_feed is not None:
-                feed_candidates.append(linear_feed)
-
-            max_linear_distance = max(
-                (self._distance_for_axis(axis) for axis, _ in axes if axis in self.LINEAR_AXES),
-                default=self._linear_jog_distance_mm,
-            )
-            for axis, _ in axes:
-                if axis not in self.ROTATIONAL_AXES or rotary_feed is None:
-                    continue
-                axis_distance = self._distance_for_axis(axis)
-                if axis_distance <= 0:
-                    continue
-                equivalent_linear = rotary_feed * (max_linear_distance / axis_distance)
-                feed_candidates.append(equivalent_linear)
-
-            if not feed_candidates:
-                return linear_feed or rotary_feed
-
-            chosen_feed = min(feed_candidates)
-            logger.debug(
-                "Mixed jog feed resolved: candidates=%s chosen=%s", feed_candidates, chosen_feed
-            )
-            return chosen_feed
-
-        if has_linear:
-            return linear_feed
-
-        if has_rotary:
-            return rotary_feed
+            return self._linear_feedrate_value
 
         return None
 
-    def _read_feedrate(
-        self, combo: QComboBox, editor: QLineEdit, units: str
-    ) -> Optional[float]:
-        text = combo.currentText()
-        if text == self.CUSTOM_FEED_LABEL:
-            text = editor.text().strip()
-            if not text:
-                self._show_warning(
-                    f"Please enter a custom feed rate ({units})."
-                )
-                return None
-        try:
-            value = float(text)
-            if value <= 0:
-                raise ValueError
-            return value
-        except ValueError:
-            self._show_warning(
-                f"Feed rate must be a positive number ({units})."
-            )
-            logger.warning("Invalid feed rate '%s' for %s jog", text, units)
-            return None
-
-    def _update_active_jog(self) -> None:
+    def _compute_active_axes(self) -> tuple[tuple[str, int], ...]:
         unique_axes: dict[str, int] = {}
         for identifier in self._key_stack:
             mapping = self._mapping_from_identifier(identifier)
@@ -804,9 +645,42 @@ class JoystickWindow(QWidget):
                 continue
             axis, direction = mapping
             unique_axes[axis] = direction
-        axes = tuple(unique_axes.items())
+        return tuple(unique_axes.items())
+
+    def _schedule_active_jog_update(self) -> None:
+        axes = self._compute_active_axes()
+        self._pending_jog_axes = axes
+        interval = self._jog_sync_interval_for_axes(axes)
+        if self._jog_state_sync_timer.isActive():
+            self._jog_state_sync_timer.stop()
+        self._jog_state_sync_timer.setInterval(interval)
+        self._jog_state_sync_timer.start()
+        logger.debug(
+            "Scheduled jog state sync: axes=%s interval_ms=%s active_axes=%s",
+            axes,
+            interval,
+            self._active_axes,
+        )
+
+    def _sync_active_jog_state(self) -> None:
+        axes = self._pending_jog_axes
+        if axes is None:
+            axes = self._compute_active_axes()
+        self._pending_jog_axes = None
         logger.debug("Active keys mapped to axes: %s", axes)
+        if not axes:
+            self.stop_jog()
+            return
         self._apply_axes(axes)
+
+    def _jog_sync_interval_for_axes(
+        self, axes: tuple[tuple[str, int], ...]
+    ) -> int:
+        if not axes:
+            return self.KEYBOARD_JOG_SYNC_DEBOUNCE_MS
+        if not (self._active_axes or ()):
+            return 0
+        return self.KEYBOARD_JOG_SYNC_DEBOUNCE_MS
 
     def set_homing_status(self, homed_axes: set[str]) -> None:
         active_axes = set(homed_axes).intersection(self.HOMING_AXES)
@@ -973,10 +847,36 @@ class JoystickWindow(QWidget):
         if not self.serial_connection or not self.serial_connection.is_open:
             logger.debug("Discarded command because serial is closed: %s", command)
             return
+        if self.stage_controller is not None:
+            try:
+                if isinstance(command, bytes) and command == b"\x85":
+                    self.stage_controller.queue_jog_stop()
+                    return
+                if isinstance(command, bytes) and command == b"\x18":
+                    self.stage_controller.queue_soft_reset(source="joystick_reset_button")
+                    return
+                if isinstance(command, str) and command.startswith("$J="):
+                    self.stage_controller.queue_jog_command(command)
+                    return
+                if isinstance(command, str):
+                    self.stage_controller.queue_manual_command(command)
+                    return
+            except Exception as error:  # pragma: no cover - UI safety guard
+                self._show_warning(str(error))
+                logger.exception("Failed to queue controller command: %s", error)
+                return
         try:
             data = command if isinstance(command, bytes) else command.encode("ascii")
+            if isinstance(command, str) and command.startswith("$J="):
+                logger.debug("TIMING jog_serial_write_begin command=%s", command.strip())
+            elif isinstance(command, bytes) and command == b"\x85":
+                logger.debug("TIMING jog_stop_write_begin command=0x85")
             self.serial_connection.write(data)
             self.serial_connection.flush()
+            if isinstance(command, str) and command.startswith("$J="):
+                logger.debug("TIMING jog_serial_write_flushed command=%s", command.strip())
+            elif isinstance(command, bytes) and command == b"\x85":
+                logger.debug("TIMING jog_stop_write_flushed command=0x85")
             if isinstance(command, bytes):
                 logger.debug("Command written to serial (bytes): %s", command.hex())
             else:
@@ -989,6 +889,39 @@ class JoystickWindow(QWidget):
     def _show_warning(self, message: str) -> None:
         QMessageBox.warning(self, "Joystick", message)
 
+    def wheelEvent(self, event) -> None:  # type: ignore[override]
+        if not self._apply_wheel_delta(event.angleDelta().y()):
+            super().wheelEvent(event)
+            return
+        event.accept()
+
+    def _apply_wheel_delta(self, delta_y: int) -> bool:
+        if delta_y == 0:
+            return False
+        now = time.monotonic()
+        dt = now - self._last_feedrate_wheel_at if self._last_feedrate_wheel_at else 1.0
+        self._last_feedrate_wheel_at = now
+        notch_units = abs(delta_y) / 120.0
+        base_step = max(0.2, self._linear_feedrate_value * 0.03)
+        speed_multiplier = 1.0
+        if dt < 0.25:
+            speed_multiplier += min(5.0, (0.25 - dt) * 12.0)
+        step = base_step * notch_units * speed_multiplier
+        if delta_y < 0:
+            step = -step
+        self._set_linear_feedrate(
+            self._linear_feedrate_value + step,
+            reissue_if_active=self._active_axes is not None,
+        )
+        logger.debug(
+            "Feedrate wheel applied: delta=%s step=%s value=%s active_axes=%s",
+            delta_y,
+            step,
+            self._linear_feedrate_value,
+            self._active_axes,
+        )
+        return True
+
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
         if self._handle_key_press_event(event):
             return
@@ -1000,7 +933,10 @@ class JoystickWindow(QWidget):
         super().keyReleaseEvent(event)
 
     def focusOutEvent(self, event) -> None:  # type: ignore[override]
+        self._pending_jog_axes = None
+        self._clear_pending_key_activations()
         self._key_stack.clear()
+        self._key_press_times.clear()
         self.stop_jog()
         super().focusOutEvent(event)
 
@@ -1009,7 +945,10 @@ class JoystickWindow(QWidget):
         self._install_event_filter()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]
+        self._pending_jog_axes = None
+        self._clear_pending_key_activations()
         self._key_stack.clear()
+        self._key_press_times.clear()
         self.stop_jog()
         self._remove_event_filter()
         super().closeEvent(event)
@@ -1022,6 +961,11 @@ class JoystickWindow(QWidget):
                 QEvent.ShortcutOverride: "ShortcutOverride",
             }.get(event.type(), str(int(event.type())))
             key_value = event.key() if hasattr(event, "key") else None
+            scan_code_value = (
+                native_scan_code_to_int(event.nativeScanCode())
+                if hasattr(event, "nativeScanCode")
+                else 0
+            )
             text_value = event.text() if hasattr(event, "text") else ""
             modifiers_value = (
                 keyboard_modifiers_to_int(event.modifiers())
@@ -1034,9 +978,10 @@ class JoystickWindow(QWidget):
                 else obj.__class__.__name__ if hasattr(obj, "__class__") else str(obj)
             )
             logger.debug(
-                "Global key event: type=%s key=%s text=%r modifiers=%s source=%s",
+                "Global key event: type=%s key=%s scan=%s text=%r modifiers=%s source=%s",
                 event_type_name,
                 key_value,
+                scan_code_value,
                 text_value,
                 modifiers_value,
                 source_name,
@@ -1055,6 +1000,10 @@ class JoystickWindow(QWidget):
             if self._should_process_global_event(obj) and self._handle_key_release_event(event):
                 event.accept()
                 return True
+        elif event.type() == QEvent.Wheel:
+            if self._should_process_global_event(obj) and self._handle_wheel_event(event, obj):
+                event.accept()
+                return True
         return super().eventFilter(obj, event)
 
     def _should_process_global_event(self, obj) -> bool:
@@ -1062,13 +1011,31 @@ class JoystickWindow(QWidget):
             logger.debug("Ignoring global key event because joystick is hidden")
             return False
         window = self.window()
-        if window is None or not window.isActiveWindow():
-            logger.debug("Ignoring global key event because joystick window is not active")
+        app = QApplication.instance()
+        active_window = app.activeWindow() if app is not None else None
+        if window is None:
+            logger.debug("Ignoring global key event because joystick window is unavailable")
+            return False
+        if active_window is None:
+            logger.debug("Ignoring global key event because application has no active window")
+            return False
+        if active_window is not window and obj is not active_window:
+            try:
+                obj_window = obj.window() if hasattr(obj, "window") else None
+            except RuntimeError:
+                obj_window = None
+            if obj_window is not window:
+                logger.debug(
+                    "Ignoring global key event because active window does not belong to joystick host"
+                )
+                return False
+        if not window.isActiveWindow() and active_window is not window:
+            logger.debug("Ignoring global key event because joystick host window is not active")
             return False
         if not self._axis_a_ready:
             logger.debug("Ignoring global key event because A axis is not homed/zero")
             return False
-        focus_widget = QApplication.instance().focusWidget() if QApplication.instance() else None
+        focus_widget = app.focusWidget() if app else None
         if self._is_text_entry_widget(focus_widget) or self._is_terminal_widget(focus_widget):
             logger.debug("Ignoring global key event because focus is in terminal/text input")
             return False
@@ -1088,29 +1055,38 @@ class JoystickWindow(QWidget):
         if event.isAutoRepeat():
             event.ignore()
             logger.debug(
-                "Ignored auto-repeat key press: key=%s text=%s modifiers=%s",
+                "Ignored auto-repeat key press: key=%s scan=%s text=%s modifiers=%s",
                 event.key(),
+                self._event_scan_code(event),
                 event.text(),
                 keyboard_modifiers_to_int(event.modifiers()),
             )
             return True
         identifier, mapping = self._mapping_from_event(event)
         if identifier and mapping:
-            if identifier not in self._key_stack:
-                self._key_stack.append(identifier)
-                self._update_active_jog()
+            logger.debug(
+                "TIMING keypress_received key=%s scan=%s text=%s modifiers=%s mapping=%s",
+                event.key(),
+                self._event_scan_code(event),
+                event.text(),
+                keyboard_modifiers_to_int(event.modifiers()),
+                mapping,
+            )
+            self._register_pressed_mapping(identifier, mapping)
             event.accept()
             logger.debug(
-                "Processed key press: key=%s text=%s modifiers=%s -> %s",
+                "Processed key press: key=%s scan=%s text=%s modifiers=%s -> %s",
                 event.key(),
+                self._event_scan_code(event),
                 event.text(),
                 keyboard_modifiers_to_int(event.modifiers()),
                 mapping,
             )
             return True
         logger.debug(
-            "No mapping for key press: key=%s text=%s modifiers=%s",
+            "No mapping for key press: key=%s scan=%s text=%s modifiers=%s",
             event.key(),
+            self._event_scan_code(event),
             event.text(),
             keyboard_modifiers_to_int(event.modifiers()),
         )
@@ -1120,23 +1096,46 @@ class JoystickWindow(QWidget):
         if event.isAutoRepeat():
             event.ignore()
             logger.debug(
-                "Ignored auto-repeat key release: key=%s text=%s modifiers=%s",
+                "Ignored auto-repeat key release: key=%s scan=%s text=%s modifiers=%s",
                 event.key(),
+                self._event_scan_code(event),
                 event.text(),
                 keyboard_modifiers_to_int(event.modifiers()),
             )
             return True
         identifier, mapping = self._mapping_from_event(event)
         if identifier and mapping:
+            if self._cancel_pending_key_activation(identifier):
+                self._key_press_times.pop(identifier, None)
+                event.accept()
+                logger.debug(
+                    "Cancelled pending key activation: key=%s scan=%s text=%s modifiers=%s mapping=%s",
+                    event.key(),
+                    self._event_scan_code(event),
+                    event.text(),
+                    keyboard_modifiers_to_int(event.modifiers()),
+                    mapping,
+                )
+                return True
             if identifier in self._key_stack:
                 self._key_stack.remove(identifier)
-                self._update_active_jog()
-            if not self._key_stack:
-                self.stop_jog()
+                self._key_press_times.pop(identifier, None)
+                self._promote_pending_keys_if_needed()
+                self._schedule_active_jog_update()
             event.accept()
             logger.debug(
-                "Processed key release: key=%s text=%s modifiers=%s -> %s",
+                "TIMING keyrelease_received key=%s scan=%s text=%s modifiers=%s mapping=%s remaining=%s",
                 event.key(),
+                self._event_scan_code(event),
+                event.text(),
+                keyboard_modifiers_to_int(event.modifiers()),
+                mapping,
+                self._key_stack,
+            )
+            logger.debug(
+                "Processed key release: key=%s scan=%s text=%s modifiers=%s -> %s",
+                event.key(),
+                self._event_scan_code(event),
                 event.text(),
                 keyboard_modifiers_to_int(event.modifiers()),
                 mapping,
@@ -1144,41 +1143,164 @@ class JoystickWindow(QWidget):
             return True
         removed = self._remove_stale_key(event)
         if removed:
-            self._update_active_jog()
-            if not self._key_stack:
-                self.stop_jog()
+            self._promote_pending_keys_if_needed()
+            self._schedule_active_jog_update()
             event.accept()
             logger.debug(
-                "Recovered key release: key=%s text=%s modifiers=%s",
+                "Recovered key release: key=%s scan=%s text=%s modifiers=%s",
                 event.key(),
+                self._event_scan_code(event),
                 event.text(),
                 keyboard_modifiers_to_int(event.modifiers()),
             )
             return True
         logger.debug(
-            "No mapping for key release: key=%s text=%s modifiers=%s",
+            "No mapping for key release: key=%s scan=%s text=%s modifiers=%s",
             event.key(),
+            self._event_scan_code(event),
             event.text(),
             keyboard_modifiers_to_int(event.modifiers()),
         )
         return False
 
+    def _handle_wheel_event(self, event, obj) -> bool:
+        widget = obj if isinstance(obj, QWidget) else None
+        if self._is_text_entry_widget(widget) or self._is_terminal_widget(widget):
+            return False
+        return self._apply_wheel_delta(event.angleDelta().y())
+
     def _remove_stale_key(self, event) -> bool:
         if not self._key_stack:
             return False
         key = event.key()
-        text = event.text().casefold() if event.text() else ""
+        scan_code = self._event_scan_code(event)
         removed = False
         for identifier in list(self._key_stack):
             kind, value = identifier
-            if kind == "key":
+            if kind == "scan":
+                if isinstance(value, tuple) and value[0] == scan_code and scan_code:
+                    self._key_stack.remove(identifier)
+                    self._key_press_times.pop(identifier, None)
+                    removed = True
+            elif kind == "key":
                 if isinstance(value, tuple) and value[0] == key:
                     self._key_stack.remove(identifier)
+                    self._key_press_times.pop(identifier, None)
                     removed = True
-            elif kind == "text" and text and value == text:
-                self._key_stack.remove(identifier)
-                removed = True
         return removed
+
+    def _register_pressed_mapping(
+        self, identifier: Tuple[str, object], mapping: tuple[str, int]
+    ) -> None:
+        if identifier in self._key_stack:
+            return
+        if identifier in self._pending_key_activations:
+            return
+        self._key_press_times[identifier] = time.monotonic()
+
+        axis, _direction = mapping
+        active_axes = {active_axis for active_axis, _ in (self._active_axes or ())}
+        pressed_axes = {
+            axis_name
+            for pending_identifier in self._key_stack
+            if (resolved := self._mapping_from_identifier(pending_identifier)) is not None
+            for axis_name, _ in (resolved,)
+        }
+        current_axes = active_axes.union(pressed_axes)
+
+        if not current_axes or axis in current_axes:
+            self._key_stack.append(identifier)
+            self._schedule_active_jog_update()
+            return
+
+        self._schedule_pending_key_activation(
+            identifier,
+            mapping,
+            activation_delay_ms=self._secondary_axis_activation_delay_ms(),
+        )
+
+    def _schedule_pending_key_activation(
+        self,
+        identifier: Tuple[str, object],
+        mapping: tuple[str, int],
+        *,
+        activation_delay_ms: int,
+    ) -> None:
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.setInterval(int(max(0, activation_delay_ms)))
+        timer.timeout.connect(
+            lambda ident=identifier, resolved_mapping=mapping: self._activate_pending_key(
+                ident, resolved_mapping
+            )
+        )
+        self._pending_key_activations[identifier] = timer
+        timer.start()
+        logger.debug(
+            "Deferred secondary axis activation for %s by %s ms mapping=%s",
+            identifier,
+            int(max(0, activation_delay_ms)),
+            mapping,
+        )
+
+    def _activate_pending_key(
+        self, identifier: Tuple[str, object], mapping: tuple[str, int]
+    ) -> None:
+        timer = self._pending_key_activations.pop(identifier, None)
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+        if identifier in self._key_stack:
+            return
+        self._key_stack.append(identifier)
+        self._schedule_active_jog_update()
+        logger.debug("Activated deferred secondary axis for %s mapping=%s", identifier, mapping)
+
+    def _cancel_pending_key_activation(self, identifier: Tuple[str, object]) -> bool:
+        timer = self._pending_key_activations.pop(identifier, None)
+        if timer is None:
+            return False
+        timer.stop()
+        timer.deleteLater()
+        return True
+
+    def _clear_pending_key_activations(self) -> None:
+        for identifier in list(self._pending_key_activations.keys()):
+            self._cancel_pending_key_activation(identifier)
+
+    def _promote_pending_keys_if_needed(self) -> None:
+        if self._key_stack:
+            return
+        if not self._pending_key_activations:
+            return
+        for identifier in list(self._pending_key_activations.keys()):
+            mapping = self._mapping_from_identifier(identifier)
+            if mapping is None:
+                self._cancel_pending_key_activation(identifier)
+                continue
+            self._activate_pending_key(identifier, mapping)
+
+    def _secondary_axis_activation_delay_ms(self) -> int:
+        linear_press_times = [
+            self._key_press_times.get(identifier)
+            for identifier in self._key_stack
+            if (resolved := self._mapping_from_identifier(identifier)) is not None
+            and resolved[0] in self.LINEAR_AXES
+        ]
+        linear_press_times = [
+            float(value) for value in linear_press_times if isinstance(value, (int, float))
+        ]
+        if not linear_press_times:
+            return self.KEYBOARD_JOG_SECONDARY_AXIS_ACTIVATION_MS
+        elapsed_ms = (time.monotonic() - max(linear_press_times)) * 1000.0
+        if elapsed_ms <= self.KEYBOARD_JOG_DIAGONAL_CHORD_WINDOW_MS:
+            logger.debug(
+                "Immediate diagonal chord accepted: elapsed_ms=%.1f threshold_ms=%s",
+                elapsed_ms,
+                self.KEYBOARD_JOG_DIAGONAL_CHORD_WINDOW_MS,
+            )
+            return 0
+        return self.KEYBOARD_JOG_SECONDARY_AXIS_ACTIVATION_MS
 
     def _schedule_jog_stop_resend(self) -> None:
         if self._jog_stop_resend_pending:
@@ -1220,17 +1342,20 @@ class JoystickWindow(QWidget):
         self, event
     ) -> tuple[Optional[Tuple[str, object]], Optional[tuple[str, int]]]:
         key = event.key()
+        scan_code = self._event_scan_code(event)
         modifiers = keyboard_modifiers_to_int(event.modifiers())
+
+        if scan_code:
+            mapping = self._key_bindings.get(("scan", scan_code, modifiers))
+            if mapping:
+                return ("scan", (scan_code, modifiers)), mapping
+            for identifier, mapping in self._key_bindings.items():
+                if identifier[0] == "scan" and identifier[1] == scan_code:
+                    return ("scan", (identifier[1], identifier[2])), mapping
+
         mapping = self._key_bindings.get(("key", key, modifiers))
         if mapping:
             return ("key", (key, modifiers)), mapping
-
-        text = event.text()
-        if text:
-            normalized = text.casefold()
-            mapping = self._key_bindings.get(("text", normalized))
-            if mapping:
-                return ("text", normalized), mapping
 
         for identifier, mapping in self._key_bindings.items():
             if identifier[0] == "key" and identifier[1] == key:
@@ -1240,11 +1365,12 @@ class JoystickWindow(QWidget):
 
     def _mapping_from_identifier(self, identifier: Tuple[str, object]) -> Optional[tuple[str, int]]:
         kind, value = identifier
+        if kind == "scan":
+            scan_code, modifiers = value  # type: ignore[misc]
+            return self._key_bindings.get(("scan", scan_code, modifiers))
         if kind == "key":
             key, modifiers = value  # type: ignore[misc]
             return self._key_bindings.get(("key", key, modifiers))
-        if kind == "text":
-            return self._key_bindings.get(("text", value))
         return None
 
     def apply_control_bindings(self, bindings: Dict[str, list[KeyBinding]]) -> None:
@@ -1253,14 +1379,36 @@ class JoystickWindow(QWidget):
         mapping: Dict[tuple, tuple[str, int]] = {}
         for action in CONTROL_ACTIONS:
             for binding in bindings.get(action.key, []):
+                scan_code = int(binding.native_scan_code or 0)
+                if not scan_code:
+                    scan_code = derive_native_scan_code_from_qt_key(binding.qt_key)
+                if scan_code:
+                    mapping[("scan", scan_code, binding.modifiers)] = (
+                        action.axis,
+                        action.direction,
+                    )
                 mapping[("key", binding.qt_key, binding.modifiers)] = (
                     action.axis,
                     action.direction,
                 )
-                if binding.text:
-                    mapping[("text", binding.text.casefold())] = (
-                        action.axis,
-                        action.direction,
-                    )
         self._key_bindings = mapping
+        self._key_stack = [
+            identifier
+            for identifier in self._key_stack
+            if self._mapping_from_identifier(identifier) is not None
+        ]
+        self._key_press_times = {
+            identifier: timestamp
+            for identifier, timestamp in self._key_press_times.items()
+            if self._mapping_from_identifier(identifier) is not None
+        }
         logger.info("Joystick key bindings updated: %d entries", len(self._key_bindings))
+
+    @staticmethod
+    def _event_scan_code(event) -> int:
+        native_scan = getattr(event, "nativeScanCode", None)
+        if native_scan is None:
+            return 0
+        if callable(native_scan):
+            return native_scan_code_to_int(native_scan())
+        return native_scan_code_to_int(native_scan)

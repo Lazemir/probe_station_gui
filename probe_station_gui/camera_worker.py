@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
+import logging
 import time
 
 import numpy as np
 from PySide6.QtCore import QObject, Signal, Slot
 from PySide6.QtGui import QImage
-from rotpy.camera import CameraList
-from rotpy.system import SpinSystem
+
+try:  # pragma: no cover - optional runtime dependency
+    from rotpy.camera import CameraList
+    from rotpy.system import SpinSystem
+    _ROTPY_IMPORT_ERROR: Exception | None = None
+except Exception as exc:  # pragma: no cover - optional runtime dependency
+    CameraList = None
+    SpinSystem = None
+    _ROTPY_IMPORT_ERROR = exc
+
+logger = logging.getLogger(__name__)
 
 
 class Grabber(QObject):
@@ -20,10 +30,17 @@ class Grabber(QObject):
     def __init__(self) -> None:
         super().__init__()
         self._running = False
+        self._frame_index = 0
 
     @Slot()
     def start(self) -> None:
         self._running = True
+        if CameraList is None or SpinSystem is None:
+            message = "Camera backend unavailable"
+            if _ROTPY_IMPORT_ERROR is not None:
+                message = f"{message}: {_ROTPY_IMPORT_ERROR}"
+            self.error.emit(message)
+            return
         try:
             system = SpinSystem()
             cams = CameraList.create_from_system(system, True, True)
@@ -57,6 +74,13 @@ class Grabber(QObject):
                 array = array[:, : width * 3].reshape(height, width, 3)
 
                 qimg = QImage(array.data, width, height, width * 3, QImage.Format_RGB888)
+                self._frame_index += 1
+                logger.debug(
+                    "TIMING camera_frame_ready index=%s size=%sx%s",
+                    self._frame_index,
+                    width,
+                    height,
+                )
                 self.frame_ready.emit(qimg.copy())
 
             cam.end_acquisition()
