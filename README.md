@@ -1,37 +1,37 @@
 # Probe Station GUI
 
-`Probe Station GUI` это программа для управления зондовой станцией с контроллером FluidNC и камерой микроскопа. Приложение показывает живое изображение, позволяет двигать столик вручную и по клику, выполнять хоуминг, управлять иглами, запускать автофокус, работать через встроенный терминал и, при необходимости, привязывать реальные координаты к GDS/OAS-дизайну.
+`Probe Station GUI` is an operator-facing control interface for a probe station built around `FluidNC` and a microscope camera.
 
-Ниже приведена инструкция именно для оператора установки: что умеет программа, что нужно для запуска и как ей пользоваться.
+The application can:
+- display the live camera image;
+- move the stage manually and by click;
+- run `homing`;
+- raise and lower the needles through axis `A`;
+- run `autofocus`;
+- work with `GDS/OAS` layouts;
+- align a chip using two points;
+- move through the design minimap and the full design map;
+- send direct controller commands through `Serial Terminal`;
+- run repeated motion patterns from the `Oscillation` panel.
 
-## Возможности
+## Main Safety Rule
 
-### Основные
-- живое изображение с камеры;
-- перемещение столика по клику в изображении;
-- ручной джог по осям X, Y и Z;
-- хоуминг отдельных осей или всех сразу;
-- подъём и опускание игл через ось A;
-- автофокус по Z;
-- отправка команд в контроллер через панель `Serial Terminal`;
-- сохранение настроек и последнего известного состояния контроллера.
+Any `XY` motion must happen only with the needles raised.
 
-### Дополнительные
-- выравнивание чипа по двум маркерам с поворотом по оси B;
-- загрузка GDS/OAS-дизайна и привязка координат столика к координатам дизайна;
-- загрузка плана измерений из Python-файла и переход между целями;
-- показ текущего положения столика на миникарте и в окне дизайна;
-- калибровка положения игл с помощью внешнего LCR-прибора;
-- повторяющиеся траектории движения по X, по Y и по спирали.
+In practice this means:
+- before any `click-to-move`, minimap move, full design map move, target move, `autofocus`, or any automated motion, make sure the needles are raised;
+- if the UI shows `unknown` needle state, raise the needles again with `Raise` or run `homing A`;
+- manual commands from `Serial Terminal`, especially anything touching axis `A` or a controller reset, can invalidate the needle state;
+- if the needles are down or their state is unknown, the application must block automatic motion. Do not work around that manually.
 
-## Что Нужно Для Работы
+## Requirements
 
-### Оборудование
-- камера, совместимая с `rotpy` / Spinnaker;
-- контроллер FluidNC, подключённый по serial;
-- для режима калибровки игл: поддерживаемый прибор GW Instek LCR.
+Hardware:
+- a camera compatible with `rotpy` / Spinnaker;
+- a `FluidNC` controller connected over serial;
+- for needle calibration mode: a supported `GW Instek LCR`.
 
-### Обязательные библиотеки
+Core Python packages:
 - `PySide6`
 - `numpy`
 - `opencv-python`
@@ -40,480 +40,416 @@
 - `gdstk`
 - `pyqtgraph`
 
-### Дополнительные библиотеки
-Для LCR-прибора нужны:
+Optional packages for LCR support:
 - `pyvisa`
 - `qcodes`
 
-Без них основная работа программы сохранится, но панель калибровки игл через LCR не будет работать.
+## Launch
 
-## Установка
-
-### Обычная установка
-```bash
-python -m venv .venv
-. .venv/bin/activate
-pip install -e .
-```
-
-Для Windows:
 ```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -e .
+.\.venv\Scripts\python.exe main.py
 ```
 
-### Установка со скриптами Windows
-```cmd
-scripts\bootstrap_venv.cmd
-scripts\run_gui.cmd
-```
+If the virtual environment is already activated:
 
-Важно:
-- создавайте `.venv` только после переноса репозитория в итоговую папку;
-- на Windows виртуальное окружение привязано к пути;
-- настройки и журналы у каждого пользователя свои.
-
-### Установка с поддержкой LCR
-```bash
-pip install -e ".[lcr]"
-```
-
-## Запуск
-
-```bash
+```powershell
 python main.py
 ```
 
-После запуска откроется главное окно с изображением микроскопа и боковыми панелями управления.
+## First Startup
 
-## Подготовка К Работе
+Recommended order:
+1. Start the application and confirm that the camera image is live.
+2. In the `Connection` panel, select the controller serial port and press `Connect`.
+3. Wait for the startup synchronization to finish.
+4. In the `Joystick` panel, home the required axes.
+5. Raise the needles and confirm that the needle status shows `up`.
+6. Test manual jogging.
+7. Only then use `click-to-move`, `Design Window`, `Alignment`, `autofocus`, and `Oscillation`.
 
-Перед любыми автоматическими перемещениями убедитесь, что:
-- камера подключена и изображение обновляется;
-- контроллер подключён к правильному serial-порту;
-- оси можно безопасно отправлять в хоуминг;
-- иглы подняты;
-- вокруг текущей точки есть запас хода;
-- образец допускает движение по Z и по XY.
+## UI Layout
 
-Ограничения безопасности, которые нужно учитывать:
-- движение по XY запрещено, если программе неизвестно положение игл;
-- движение по XY запрещено, если иглы опущены;
-- ручные команды из терминала могут сделать состояние игл неизвестным;
-- если вы вручную меняли A или делали сброс контроллера, сначала снова поднимите или отхомьте A;
-- перемещение по клику отменяется, если вычисленный ход слишком велик, и тогда калибровка сбрасывается.
+Main window:
+- the live microscope image is in the center;
+- when a design is loaded, a minimap appears in the image corner;
+- the bottom area contains the status bar and status history.
 
-## Рекомендуемый Порядок Первого Запуска
+Menus:
+- `Application`: settings and status log;
+- `Tools`: `Connection`, `Joystick`, `Serial Terminal`, `Oscillation`;
+- `Calibration`: `Design Window`, `Alignment`, `Needle Calibration`.
 
-1. Запустите программу и проверьте изображение с камеры.
-2. В панели `Connection` выберите порт и нажмите `Connect`.
-3. Дождитесь стартовой синхронизации контроллера.
-4. В панели `Joystick` выполните хоуминг нужных осей.
-5. Убедитесь, что строка состояния игл показывает `Needles: up`.
-6. Проверьте ручной джог.
-7. Только после этого используйте перемещение по клику, автофокус и режим дизайна.
-
-## Главное Окно
-
-### Центральное изображение
-- показывает живой кадр с камеры;
-- голубое перекрестие отмечает центр кадра;
-- клик по кадру запускает перемещение по клику;
-- красный маркер показывает выбранную точку;
-- при загруженном дизайне в углу появляется миникарта;
-- двойной клик по миникарте открывает отдельное окно дизайна.
-
-### Строка состояния
-- показывает краткие сообщения программы;
-- хранит видимую историю прямо в окне;
-- полный журнал можно открыть через `Application -> Open Status Log`.
-
-### Меню `Panels`
-Через это меню можно показать или скрыть панели:
+Main panels:
+- `Connection`
 - `Joystick`
 - `Serial Terminal`
-- `Connection`
+- `Alignment`
 - `Needle Calibration`
-- `Chip Alignment`
-
-### Остальные меню
-- `Application`: открыть журнал состояния;
-- `Settings`: изменить настройки;
-- `Tools`: включить режим выравнивания чипа;
-- `Design`: открыть окно дизайна;
-- `Oscillation`: открыть управление повторяющимся движением.
-
-## Панель `Connection`
-
-Панель `Connection` отвечает за подключение к FluidNC.
-
-Что она делает:
-- ищет serial-порты;
-- даёт выбрать скорость соединения;
-- подключает и отключает контроллер;
-- пытается автоматически подключиться при старте;
-- может автоматически переподключаться после обрыва связи.
-
-Как пользоваться:
-1. Нажмите `Refresh`, если список портов устарел.
-2. Выберите порт контроллера.
-3. Проверьте скорость. Обычно это `115200`.
-4. Нажмите `Connect`.
-
-После успешного подключения:
-- активируются панели `Joystick` и `Serial Terminal`;
-- восстанавливается сохранённое состояние контроллера, если сам контроллер не перезагружался;
-- запускается стартовая синхронизация;
-- при необходимости автоматически выполняется хоуминг оси A.
-
-## Панель `Joystick`
-
-Это главный инструмент ручного управления.
-
-### Что находится на панели
-- кнопки движения по X и Y;
-- кнопки фокусировки по Z;
-- слайдер линейной скорости;
-- кнопки хоуминга `X`, `Y`, `Z`, `A`, `ALL`;
-- кнопки `Raise` и `Lower` для игл;
-- кнопка `Unlock` для команды `$X`;
-- кнопка `Reset` для мягкого сброса контроллера;
-- кнопка `Reset Cal` для сброса калибровки перемещения по клику;
-- кнопка `Autofocus`.
-
-### Управление с клавиатуры
-По умолчанию заданы:
-- `W`, `A`, `S`, `D`;
-- стрелки;
-- русские клавиши из стандартных настроек.
-
-Переназначение выполняется в `Settings -> Controls`.
-
-Поведение:
-- движение продолжается, пока кнопка или клавиша удерживается;
-- при отпускании отправляется команда остановки;
-- колесо мыши меняет линейную скорость;
-- если фокус стоит в текстовом поле или в терминале, глобальный джог с клавиатуры отключается.
-
-### Хоуминг
-- кнопки осей запускают хоуминг одной оси;
-- `ALL` запускает полный хоуминг;
-- на время хоуминга на кнопках появляется индикатор;
-- хоуминг A соответствует безопасному поднятию игл.
-
-### Иглы
-- `Raise` поднимает иглы через хоуминг A;
-- `Lower` опускает иглы в сохранённое нижнее положение.
-
-Состояние игл:
-- зелёный индикатор: иглы подняты;
-- жёлтый индикатор: иглы опущены или состояние неизвестно.
-
-Если отображается `Needles: unknown`, движение по XY сначала нужно сделать снова безопасным: поднять иглы или выполнить хоуминг A.
-
-### Кнопки `Unlock`, `Reset`, `Reset Cal`
-- `Unlock` снимает блокировку после alarm-состояния;
-- `Reset` отправляет мягкий сброс контроллеру;
-- `Reset Cal` удаляет калибровку перемещения по клику.
-
-### `Autofocus`
-- ищет лучший фокус локально по оси Z;
-- требует установленный `SciPy`;
-- если иглы не подняты, сначала автоматически поднимает их через ось A;
-- использует реальную картинку с камеры, поэтому при плохом или неподвижном кадре может завершиться ошибкой.
-
-## Перемещение По Клику
-
-Перемещение по клику это режим, в котором вы указываете точку на изображении, а программа сдвигает столик так, чтобы эта точка оказалась в центре перекрестия.
-
-Как это устроено:
-1. Программа оценивает, как смещение в пикселях связано с перемещением в миллиметрах.
-2. При первом использовании, либо после `Reset Cal`, калибровка строится заново.
-3. После движения результат уточняется по фактическому сдвигу изображения.
-
-Как пользоваться:
-1. Подключите контроллер.
-2. Отхомьте X и Y.
-3. Убедитесь, что иглы подняты.
-4. Кликните по нужной точке на изображении.
-5. Дождитесь завершения движения.
-
-Что важно помнить:
-- если расчётный ход слишком большой, программа отменит перемещение;
-- в этом случае калибровка будет сброшена;
-- если кадр с камеры не обновляется, перемещение по клику не сработает корректно.
-
-## Панель `Serial Terminal`
-
-Панель `Serial Terminal` нужна для прямой отправки команд в FluidNC.
-
-Она содержит:
-- окно вывода;
-- строку ввода;
-- историю команд;
-- поддержку `Ctrl+X` из поля ввода.
-
-Когда она полезна:
-- для диагностики;
-- для чтения ответов контроллера;
-- для ручного выхода из alarm-состояний;
-- для разовых ручных команд.
-
-Важно:
-- ручные команды могут нарушить внутреннее представление программы о положении игл;
-- после ручных действий по оси A или после сброса контроллера поднимите иглы заново;
-- пока выполняется автоматическое движение, отправка команд из терминала блокируется.
-
-## Панель `Needle Calibration`
-
-Панель `Needle Calibration` нужна для настройки нижнего положения игл по внешнему LCR-прибору.
-
-Для её работы нужны:
-- правильно заполненные настройки на вкладке `Needles`;
-- установленные пакеты `pyvisa` и `qcodes`;
-- поддерживаемый GW Instek прибор.
-
-### Что показывает панель
-- состояние подключения прибора;
-- адрес прибора;
-- идентификацию прибора;
-- текущее сопротивление;
-- состояние `Short` или `Open`;
-- текущую позицию A;
-- сохранённую нижнюю позицию A.
-
-### Типичный порядок калибровки
-1. Откройте `Settings -> Needles`.
-2. Укажите адрес прибора, порог сопротивления, интервал опроса и направление опускания.
-3. Вернитесь в панель `Needle Calibration` и нажмите `Connect LCR`.
-4. Нажмите `Start Calibration`.
-5. Двигайте иглы малыми шагами.
-6. Следите за сопротивлением и за состоянием `Short/Open`.
-7. Когда достигнута нужная точка контакта, нажмите `Save Current`.
-8. Поднимите иглы через `Raise Needles`.
-9. Для повторного возвращения в ту же точку используйте `Lower To Saved`.
-
-Мелкие шаги особенно важны рядом с контактом.
-
-## Режим `Chip Alignment`
-
-Этот режим нужен для выравнивания чипа по двум маркерам с поворотом по оси B.
-
-Включение:
-- `Tools -> Chip Alignment Mode`
-- сочетание клавиш `Ctrl+Alt+A`
-
-Полезные клавиши:
-- `Space`: захватить текущий маркер;
-- `Esc`: выйти из режима.
-
-Как работать:
-1. Включите режим.
-2. Совместите первый маркер с центром изображения.
-3. Зафиксируйте его кликом или клавишей `Space`.
-4. Перейдите ко второму маркеру.
-5. Зафиксируйте второй маркер.
-6. Программа вычислит нужный угол и повернёт чип по оси B.
-
-Важно:
-- любое изменение по оси B сбрасывает привязку дизайна;
-- после обнуления B, поворота B или ручного движения по B калибровку дизайна придётся делать заново.
-
-## Окно Дизайна
-
-Окно дизайна нужно для работы не только по камере, но и по файлу топологии.
-
-### Для чего оно нужно
-- загрузить `GDS` или `OAS`;
-- выбрать верхнюю ячейку;
-- включить и выключить слои;
-- задать опорные точки на дизайне;
-- связать их с реальными точками на образце;
-- видеть положение столика в координатах дизайна;
-- переходить к заранее подготовленным целям.
-
-### Что требуется
-- `gdstk` для чтения файлов дизайна;
-- `pyqtgraph` для отдельного графического окна дизайна.
-
-Если `pyqtgraph` не установлен, основная программа запустится, но полноценное окно дизайна будет недоступно.
-
-### Загрузка дизайна
-1. Откройте `Design -> Design Window`.
-2. Нажмите `Load GDS...`.
-3. Выберите файл.
-4. При необходимости выберите нужную `Top cell`.
-5. Настройте видимость слоёв в списке `Layers`.
-
-### Калибровка соответствия дизайна и столика
-Для калибровки нужны две точки на дизайне и две реальные точки на чипе.
-
-В окне дизайна:
-- левый клик задаёт `Mark 1`;
-- правый клик задаёт `Mark 2`;
-- `Capture Chip Point 1` записывает текущую позицию столика для первой точки;
-- `Capture Chip Point 2` записывает текущую позицию столика для второй точки.
-
-Рекомендуемый порядок:
-1. Загрузите дизайн.
-2. Левым кликом укажите первую точку на дизайне.
-3. Правым кликом укажите вторую точку на дизайне.
-4. Перейдите к первой реальной точке на образце и нажмите `Capture Chip Point 1`.
-5. Перейдите ко второй реальной точке и нажмите `Capture Chip Point 2`.
-6. Дождитесь завершения калибровки.
-
-После этого:
-- на миникарте будет видно текущее положение;
-- движение к целям станет осмысленным;
-- программа сможет переводить координаты столика в координаты дизайна.
-
-Когда привязка автоматически сбрасывается:
-- после отключения контроллера;
-- после хоуминга X, Y, B или `ALL`;
-- после сброса контроллера;
-- после любого значимого действия по оси B.
-
-## План Измерений
-
-В окне дизайна можно загрузить Python-файл с набором целей.
-
-Требование к файлу:
-- он должен содержать функцию `build_plan(context)`.
-
-Эта функция должна вернуть список целей, которые появятся в таблице.
-
-После загрузки можно:
-- перейти к предыдущей цели через `Previous`;
-- перейти к следующей цели через `Next`;
-- поехать к выбранной цели через `Move To`.
-
-Важно:
-- переход к целям работает только после успешной привязки дизайна;
-- без калибровки программа не сможет корректно вычислить координаты для `Move To`.
-
-## Панель `Oscillation`
-
-Панель `Oscillation` запускает повторяющееся движение.
-
-Открытие:
-- `Oscillation -> Open Controls`
-
-Доступные режимы:
-- `Along X`
-- `Along Y`
-- `Spiral`
-
-Настраиваемые параметры:
-- амплитуда;
-- скорость;
-- число витков за проход для спирали.
-
-Особенности:
-- движение продолжается до остановки;
-- `Stop` завершает режим без возврата в центр;
-- программа проверяет допустимость амплитуды и скорости;
-- траектория должна помещаться в известные программные пределы.
-
-Используйте этот режим особенно осторожно при работе с опущенными иглами.
-
-## Настройки
-
-Окно открывается через `Settings -> Settings`.
-
-Вкладки:
-- `Controls`: клавиши управления;
-- `Jog`: параметры шага джога;
-- `Needles`: параметры LCR и положения игл;
-- `Feedrates`: скорости;
-- `Logging`: журналирование.
-
-Что обычно настраивают:
-- клавиши управления;
-- шаг ручного перемещения;
-- скорости;
-- адрес LCR-прибора;
-- путь к файлу журнала.
-
-## Где Хранятся Настройки И Журналы
-
-### Настройки
-- Windows: `%APPDATA%\ProbeStationGUI`
-- macOS: `~/Library/Application Support/ProbeStationGUI`
-- Linux: `$XDG_CONFIG_HOME/probe-station-gui` или `~/.config/probe-station-gui`
-
-### Журналы
-- Windows: `%LOCALAPPDATA%\ProbeStationGUI\Logs`
-- macOS: `~/Library/Logs/ProbeStationGUI`
-- Linux: `$XDG_STATE_HOME/probe-station-gui` или `~/.local/state/probe-station-gui`
-
-## Типовые Сценарии Работы
-
-### Ручное позиционирование
-1. Подключите контроллер.
-2. Выполните хоуминг.
-3. Поднимите иглы.
-4. Перемещайте столик кнопками или клавишами.
-5. Подстройте скорость.
-6. При необходимости запустите автофокус.
-
-### Центрирование объекта по клику
-1. Поднимите иглы.
-2. Убедитесь, что изображение стабильно.
-3. Кликните по нужной точке.
-4. Дождитесь окончания движения.
-
-### Возврат к сохранённой точке контакта
-1. Поднимите иглы, если их состояние неизвестно.
-2. Откройте `Needle Calibration`.
-3. При необходимости подключите LCR.
-4. Используйте `Lower To Saved`.
-
-### Переход по целям на дизайне
-1. Загрузите дизайн.
-2. Выполните калибровку по двум точкам.
-3. Загрузите план измерений.
-4. Используйте `Previous`, `Next` и `Move To`.
-
-## Если Что-То Не Работает
-
-### Не найден serial-порт
-- проверьте кабель и питание контроллера;
-- нажмите `Refresh`;
-- переподключите устройство.
-
-### Контроллер подключён, но движение не идёт
-- проверьте хоуминг осей;
-- проверьте состояние игл;
-- если отображается `Needles: unknown` или `Needles: down`, сначала поднимите иглы.
-
-### Неточное перемещение по клику
-- убедитесь, что кадр резкий и стабильный;
-- нажмите `Reset Cal`;
-- не начинайте с очень больших перемещений по клику.
-
-### Не работает автофокус
-- проверьте наличие `scipy`;
-- убедитесь, что Z отхомлена;
-- проверьте, что камера обновляет кадр.
-
-### Не подключается LCR
-- установите дополнительные зависимости;
-- проверьте адрес прибора в настройках;
-- убедитесь, что прибор поддерживается.
-
-### Не работает окно дизайна
-- проверьте наличие `pyqtgraph`;
-- убедитесь, что файл дизайна читается без ошибок;
-- повторите калибровку после любых действий по оси B.
-
-## Ограничения
-
-- программа рассчитана на реальное оборудование;
-- режим LCR сделан под приборы GW Instek;
-- работа по дизайну зависит от корректной двухточечной привязки;
-- точность перемещения по клику зависит от качества изображения и поведения механики.
-
-## License
-
-TBD
+- `Oscillation`
+
+Separate window:
+- `Design Window`
+
+## `Connection` Panel
+
+Purpose:
+- scan serial ports;
+- connect to and disconnect from `FluidNC`;
+- run startup synchronization after connect;
+- attempt auto-connect.
+
+How to use it:
+1. Press `Refresh` if the port list is outdated.
+2. Select the controller port.
+3. Check the baud rate, usually `115200`.
+4. Press `Connect`.
+
+After connection:
+- the control panels become active;
+- the application synchronizes controller state;
+- if needed, it automatically raises the needles through `homing A`.
+
+## `Joystick` Panel
+
+This is the main manual control tool.
+
+What it contains:
+- manual jog for `X`, `Y`, `Z`;
+- `B` axis control when available in the current UI;
+- per-axis and `ALL` homing;
+- `Raise` and `Lower` for the needles;
+- `Unlock`;
+- `Reset`;
+- `Reset Cal`;
+- `Autofocus`;
+- jog speed control.
+
+Behavior:
+- holding a button or key keeps the stage moving;
+- releasing it stops motion;
+- manual `B` motion invalidates design registration;
+- `Reset Cal` resets image click-to-move calibration.
+
+Needles:
+- `Raise` brings the system into a safe state for motion;
+- `Lower` moves the needles to the saved lower position;
+- if the status is `Needles: unknown`, raise them again first.
+
+## Motion By Camera Image
+
+Clicking the microscope image moves the stage so that the selected point reaches the crosshair center.
+
+How to use it:
+1. Connect the controller.
+2. Home `X` and `Y`.
+3. Raise the needles.
+4. Click the desired point in the image.
+5. Wait for motion to complete.
+
+Important:
+- on first use, or after `Reset Cal`, the application rebuilds click calibration;
+- if the predicted move is too large, the motion is cancelled and calibration is reset;
+- this requires a live and stable camera image.
+
+## `Serial Terminal` Panel
+
+This panel is used for direct controller commands.
+
+Use it for:
+- diagnostics;
+- reading direct controller responses;
+- one-off service commands;
+- `Ctrl+X`.
+
+Important:
+- the terminal should show only replies to your manual commands;
+- manual commands can invalidate the application's internal state;
+- after manual `A` or `B` actions, controller reset, or manual coordinate-system changes, re-check needle state and re-sync if necessary.
+
+## Design Workflow
+
+### What `Design Window` Provides
+
+`Design Window` is used for `GDS/OAS` workflows:
+- loading a design file;
+- selecting `Top cell`;
+- enabling and disabling layers;
+- viewing the full design map;
+- selecting design points for registration;
+- navigating measurement targets from a plan;
+- `click-to-move` on the full design map after registration is complete.
+
+### Loading A Design
+
+1. Open `Calibration -> Design Window`.
+2. Press `Load GDS...`.
+3. Select the file.
+4. Change `Top cell` if needed.
+5. Configure visible layers.
+
+The last opened design folder is saved automatically and reused next time.
+
+### Minimap In The Main Window
+
+When a design is loaded:
+- a minimap appears in the image corner;
+- it shows targets, registration points, and the current position;
+- a single click on the minimap starts motion to the selected design point;
+- a double click on the minimap opens `Design Window`;
+- while motion is in progress, the minimap position is animated.
+
+Moving by minimap requires completed design registration and raised needles.
+
+### Full Design Map In `Design Window`
+
+The full design map shows:
+- the design itself;
+- selected design points;
+- current stage position;
+- current field of view;
+- a short green cross at the current position.
+
+After registration is complete:
+- left click on the full design map starts motion to the selected point;
+- that motion is animated as well;
+- the same needle safety checks apply as for any other automatic motion.
+
+Before registration is complete:
+- the full design map is used to select the two design calibration points.
+
+### `Snap To Geometry`
+
+`Design Window` has a `Snap To Geometry` checkbox.
+
+When `Snap To Geometry` is enabled:
+- clicks and hover snap to nearby design geometry;
+- snap works only inside a reasonable radius around the cursor;
+- that radius follows the current zoom level, similar to CAD behavior;
+- if there is no nearby line or vertex, the click uses the exact cursor position.
+
+When `Snap To Geometry` is disabled:
+- clicks always use the exact cursor position with no snapping.
+
+Automatic behavior:
+- it turns on automatically when a design is loaded;
+- it should stay on while building registration;
+- after successful design alignment, the application turns it off automatically;
+- the operator can still toggle it manually.
+
+## `Alignment` Panel
+
+The `Alignment` panel is used to align the chip using two points.
+
+There are two workflows:
+- alignment backed by a loaded design;
+- quick alignment without a design.
+
+What is on the panel:
+- capture mode selector;
+- `Set Point 1`;
+- `Set Point 2`;
+- `Reset Points`;
+- `Cancel Pick`;
+- `Open Design Window`.
+
+Capture modes:
+- `Crosshair center`: save the current image center;
+- `Pick in image`: click a point in the camera image.
+
+### Design-Backed Alignment
+
+1. Load the design in `Design Window`.
+2. Pick two design points on the full map:
+   - left mouse button for `Point 1`;
+   - right mouse button for `Point 2`.
+3. Go to the `Alignment` panel.
+4. Move the first real chip mark under the crosshair and capture `Set Point 1`.
+5. Move the second real mark under the crosshair and capture `Set Point 2`.
+6. The application calculates the required `B` rotation.
+7. After motion completes, registration becomes valid.
+
+After that you can:
+- click on the minimap;
+- click on the full design map in `Design Window`;
+- move to measurement-plan targets.
+
+### Quick Alignment Without A Design
+
+If the design is not loaded, or you do not want to locate design points:
+1. Open `Alignment`.
+2. choose two real points on the chip;
+3. capture `Point 1` and `Point 2`;
+4. the application computes the required `B` rotation.
+
+This aligns the chip, but it does not create full design registration.
+
+### When Registration Is Invalidated
+
+Design registration must be considered invalid after:
+- controller disconnect;
+- `homing` of `X`, `Y`, `B`, or `ALL`;
+- manual `B` motion;
+- zeroing or manual changes of `B`;
+- controller reset;
+- any action after which the real stage position no longer matches the stored registration.
+
+In those cases, repeat alignment.
+
+## Measurement Plan And Targets
+
+When a measurement plan is loaded:
+- `Design Window` shows a target list;
+- you can select targets manually;
+- you can move with `Previous` / `Next`;
+- `Move To` moves the stage to the selected target.
+
+For `Move To` to work correctly you need:
+- a loaded design;
+- valid registration;
+- raised needles.
+
+## `Needle Calibration` Panel
+
+This panel is used to calibrate the lower needle position using an external `LCR`.
+
+Requirements:
+- properly configured instrument address;
+- installed `pyvisa` and `qcodes`;
+- a supported `GW Instek LCR`.
+
+Typical workflow:
+1. Open needle settings.
+2. Configure the `LCR` parameters.
+3. In `Needle Calibration`, press `Connect LCR`.
+4. Start calibration.
+5. Lower the needles in small steps.
+6. Watch the resistance and `Short/Open` state.
+7. When you find the correct contact point, save the current position.
+8. Raise the needles again.
+
+Near contact, always use very small steps.
+
+## `Oscillation` Panel
+
+The `Oscillation` panel starts repeated motion:
+- along `X`;
+- along `Y`;
+- in a spiral.
+
+Use it only when you understand the trajectory and the available travel range.
+
+Before starting:
+- raise the needles;
+- make sure there is enough free travel around the current point;
+- verify amplitude and speed.
+
+## Coordinates
+
+In settings, you can choose whether the GUI works in:
+- active `WCS` work coordinates;
+- absolute machine coordinates.
+
+At startup the application synchronizes with the controller and uses what `FluidNC` actually reports.
+
+Operator notes:
+- if you manually change `G54/G55/...` or coordinate-reporting settings, re-check the displayed coordinates and re-sync if needed;
+- make sure the coordinates shown in the UI are the ones you intend to work in.
+
+## Settings
+
+Open settings through `Application -> Settings...`.
+
+Typical items:
+- `Controls`: key bindings;
+- `Jog`: manual jog parameters;
+- `Needles`: `LCR` parameters, lowering direction, saved lower position;
+- `Coordinates`: coordinate mode;
+- `Logging`: log path and log level.
+
+## Typical Operator Scenarios
+
+### Move Around The Chip Manually
+
+1. Connect the controller.
+2. Run `homing`.
+3. Raise the needles.
+4. Move through `Joystick`.
+5. Use `Autofocus` if needed.
+
+### Move To A Point In The Camera Image
+
+1. Raise the needles.
+2. Click the required point in the central image.
+3. Wait for the move to complete.
+
+### Register The Chip To The Design
+
+1. Load the design.
+2. Open `Design Window`.
+3. Select two design points.
+4. In `Alignment`, capture the two corresponding real chip points.
+5. Wait for rotation and registration to complete.
+6. After that, use the minimap, the full design map, and plan targets.
+
+### Align The Chip Quickly Without A Design
+
+1. Open `Alignment`.
+2. Capture two real chip points.
+3. Wait for the `B` rotation to complete.
+
+### Move By Minimap
+
+1. Make sure the design is loaded and registration is valid.
+2. Raise the needles.
+3. Click the minimap.
+
+### Move By Full Design Map
+
+1. Make sure the design is loaded and registration is valid.
+2. Raise the needles.
+3. Open `Design Window`.
+4. Click the required point on the full design map.
+
+## Troubleshooting
+
+### Automatic Motion Does Not Start
+
+Check:
+- whether the needles are raised;
+- whether the needle state is `unknown`;
+- whether `homing` has been completed;
+- whether the controller is busy with another operation;
+- whether registration is valid for minimap, full-map, or target-driven motion.
+
+### Design-Based Motion Does Not Work
+
+Check:
+- whether a design is loaded;
+- whether alignment has been completed;
+- whether registration was invalidated by `B` motion, `homing`, disconnect, or reset.
+
+### The Click Snaps To The Wrong Place
+
+Check:
+- whether `Snap To Geometry` is enabled;
+- whether you are zoomed in enough around the intended geometry;
+- whether another nearby line or vertex is closer;
+- if you need an exact raw click, turn off `Snap To Geometry` temporarily.
+
+### Terminal Commands Disturb Machine State
+
+After manual terminal commands:
+- re-check displayed coordinates;
+- re-check the needle state;
+- if needed, run `Raise` again or `homing A`;
+- if needed, repeat alignment.
+
+## Log
+
+Open the status log through `Application -> Open Status Log`.
+
+Useful things to check there:
+- connection errors;
+- safety-block messages;
+- design-registration invalidation messages;
+- failed move or failed autofocus messages.
