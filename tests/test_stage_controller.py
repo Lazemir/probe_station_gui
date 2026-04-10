@@ -1,5 +1,6 @@
 import importlib.util
 import sys
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -110,8 +111,18 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
 
         sent_moves = []
         statuses = [
-            types.SimpleNamespace(state="Idle", position=(10.0, 20.0, 0.0), homed_axes={"X", "Y"}),
-            types.SimpleNamespace(state="Idle", position=(15.0, 26.0, 0.0), homed_axes={"X", "Y"}),
+            types.SimpleNamespace(
+                state="Idle",
+                position=(10.0, 20.0, 0.0),
+                display_position=(10.0, 20.0, 0.0),
+                homed_axes={"X", "Y"},
+            ),
+            types.SimpleNamespace(
+                state="Idle",
+                position=(15.0, 26.0, 0.0),
+                display_position=(15.0, 26.0, 0.0),
+                homed_axes={"X", "Y"},
+            ),
         ]
 
         controller._move_safety_check = lambda: None
@@ -150,6 +161,69 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
 
         self.assertEqual(movement_results[-1][0], False)
         self.assertIn("Serial connection is not available", movement_results[-1][1])
+
+    def test_click_to_move_holds_serial_lock(self) -> None:
+        controller = StageController()
+        controller._serial = _FakeSerial()
+        controller._pixels_to_mm = _stage_controller_module.np.eye(2) * 0.1
+        controller._move_safety_check = lambda: None
+        controller._ensure_calibration = lambda _serial: None
+        controller._get_frame_snapshot = lambda timeout=3.0: (object(), 1)
+        controller._wait_for_new_frame = (
+            lambda frame_counter, timeout=4.0: (object(), frame_counter + 1)
+        )
+        controller.movement_started = types.SimpleNamespace(emit=lambda *args, **kwargs: None)
+        controller.status_message = types.SimpleNamespace(emit=lambda *args, **kwargs: None)
+        controller.stage_position_changed = types.SimpleNamespace(
+            emit=lambda *args, **kwargs: None
+        )
+        movement_results = []
+        controller.movement_finished = types.SimpleNamespace(
+            emit=lambda success, message: movement_results.append((success, message))
+        )
+        observed = []
+
+        def _send_relative_move(_serial, _move) -> None:
+            def _probe() -> None:
+                acquired = controller._serial_session_lock.acquire(blocking=False)
+                observed.append(acquired)
+                if acquired:
+                    controller._serial_session_lock.release()
+
+            thread = threading.Thread(target=_probe)
+            thread.start()
+            thread.join()
+
+        controller._send_relative_move = _send_relative_move
+
+        controller._run_move(10.0, -5.0)
+
+        self.assertEqual(observed, [False])
+        self.assertEqual(movement_results[-1], (True, "Move complete."))
+
+
+class StageControllerStatusParsingTest(unittest.TestCase):
+    def test_parse_status_line_uses_cached_work_offset(self) -> None:
+        controller = StageController()
+        controller._active_work_coordinate_system = "G54"
+        controller._controller_coordinate_offsets["G54"] = (
+            32.0,
+            32.0,
+            0.0,
+            0.0,
+            0.0,
+        )
+
+        status = controller._parse_status_line(
+            "<Idle|MPos:25.106,25.401,9.207,0.000,2.170|Bf:15,127|FS:0,0>"
+        )
+
+        self.assertIsNotNone(status)
+        assert status is not None
+        self.assertEqual(status.position[:2], (25.106, 25.401))
+        self.assertEqual(status.work_offset[:2], (32.0, 32.0))
+        self.assertAlmostEqual(status.work_position[0], -6.894)
+        self.assertAlmostEqual(status.work_position[1], -6.599)
 
 
 class StageControllerJogQueueTest(unittest.TestCase):
@@ -242,6 +316,9 @@ class StageControllerStartupSyncTest(unittest.TestCase):
     def test_startup_sync_homes_a_when_not_reported_homed(self) -> None:
         controller = StageController()
         controller._serial = _FakeSerial()
+        controller._refresh_coordinate_system_state = (
+            lambda _serial, apply_preference=True: None
+        )
         controller._ensure_axis_limits = lambda _serial: None
         controller._query_status = lambda _serial: types.SimpleNamespace(
             state="Idle",
@@ -275,6 +352,9 @@ class StageControllerStartupSyncTest(unittest.TestCase):
     def test_startup_sync_skips_a_homing_when_axis_is_homed(self) -> None:
         controller = StageController()
         controller._serial = _FakeSerial()
+        controller._refresh_coordinate_system_state = (
+            lambda _serial, apply_preference=True: None
+        )
         controller._ensure_axis_limits = lambda _serial: None
         controller._query_status = lambda _serial: types.SimpleNamespace(
             state="Idle",

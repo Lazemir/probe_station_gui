@@ -921,36 +921,14 @@ class StageController(QObject):
             if serial_connection is None or not serial_connection.is_open:
                 raise StageControllerError("Serial connection is not available.")
             self._move_safety_check()
-
-            self.status_message.emit("Ensuring calibration before movement…")
-            self._ensure_calibration(serial_connection)
-            self._check_cancelled()
-            if self._pixels_to_mm is None:
-                raise StageControllerError("Calibration failed. Cannot move stage.")
-
-            if abs(dx_pixels) < 1e-3 and abs(dy_pixels) < 1e-3:
+            before_counter = self._prepare_click_move_without_status_locked(
+                serial_connection,
+                dx_pixels,
+                dy_pixels,
+            )
+            if before_counter is None:
                 self.movement_finished.emit(True, "Target already centered.")
                 return
-
-            before_frame, before_counter = self._get_frame_snapshot()
-            if before_frame is None:
-                raise StageControllerError("Camera frame unavailable before movement.")
-            pixel_vector = np.array([dx_pixels, dy_pixels], dtype=float)
-            # Moving the stage shifts the image in the opposite direction, so we
-            # negate the calibrated conversion when turning pixel error into mm.
-            mm_vector = -(self._pixels_to_mm @ pixel_vector)
-            move = MoveVector(x=float(mm_vector[0]), y=float(mm_vector[1]))
-            move_magnitude = float(np.linalg.norm(mm_vector))
-            if move_magnitude > self.MAX_CLICK_MOVE_MM:
-                self._pixels_to_mm = None
-                raise StageControllerError(
-                    "Predicted click move is too large; calibration was reset. Recalibrate and try again."
-                )
-
-            self.status_message.emit(
-                f"Jogging stage ΔX={move.x:.3f} mm ΔY={move.y:.3f} mm"
-            )
-            self._send_relative_move(serial_connection, move)
             after_frame, _ = self._wait_for_new_frame(before_counter, timeout=4.0)
             if after_frame is None:
                 self.movement_finished.emit(
@@ -959,14 +937,7 @@ class StageController(QObject):
                 )
                 return
 
-            shift_x, shift_y = self._estimate_shift(before_frame, after_frame)
-            message = self._update_calibration_from_measurement(
-                pixel_vector,
-                np.array([shift_x, shift_y], dtype=float),
-                mm_vector,
-            )
-
-            self.movement_finished.emit(True, message)
+            self.movement_finished.emit(True, "Move complete.")
         except StageControllerError as exc:
             self.movement_finished.emit(False, str(exc))
         finally:
@@ -981,6 +952,25 @@ class StageController(QObject):
             if serial_connection is None or not serial_connection.is_open:
                 raise StageControllerError("Serial connection is not available.")
             self._move_safety_check()
+            message = self._move_to_xy_locked(
+                serial_connection,
+                target_x_mm,
+                target_y_mm,
+            )
+            self.movement_finished.emit(True, message)
+        except StageControllerError as exc:
+            self.movement_finished.emit(False, str(exc))
+        finally:
+            with self._task_lock:
+                self._active_thread = None
+
+    def _move_to_xy_locked(
+        self,
+        serial_connection: serial.Serial,
+        target_x_mm: float,
+        target_y_mm: float,
+    ) -> str:
+        with self._serial_session_lock:
             status = self._query_status(serial_connection)
             if status is None or status.display_position is None:
                 raise StageControllerError("Unable to read current stage position.")
@@ -991,23 +981,46 @@ class StageController(QObject):
             delta_y = float(target_y_mm) - current_y
             move = MoveVector(x=delta_x, y=delta_y)
             if move.is_zero(tol=1e-5):
-                self.movement_finished.emit(True, "Target already at requested X/Y.")
-                return
+                return "Target already at requested X/Y."
             self.status_message.emit(
                 f"Moving to X={target_x_mm:.3f} mm, Y={target_y_mm:.3f} mm"
             )
             self._send_relative_move(serial_connection, move)
             self._wait_for_idle(serial_connection)
             self._query_status(serial_connection)
-            self.movement_finished.emit(
-                True,
-                f"Arrived at X={target_x_mm:.3f} mm, Y={target_y_mm:.3f} mm.",
+            return f"Arrived at X={target_x_mm:.3f} mm, Y={target_y_mm:.3f} mm."
+
+    def _prepare_click_move_without_status_locked(
+        self,
+        serial_connection: serial.Serial,
+        dx_pixels: float,
+        dy_pixels: float,
+    ) -> int | None:
+        with self._serial_session_lock:
+            self._ensure_calibration(serial_connection)
+            self._check_cancelled()
+            if self._pixels_to_mm is None:
+                raise StageControllerError("Calibration failed. Cannot move stage.")
+
+            if abs(dx_pixels) < 1e-3 and abs(dy_pixels) < 1e-3:
+                return None
+
+            _, before_counter = self._get_frame_snapshot()
+            pixel_vector = np.array([dx_pixels, dy_pixels], dtype=float)
+            mm_vector = -(self._pixels_to_mm @ pixel_vector)
+            move = MoveVector(x=float(mm_vector[0]), y=float(mm_vector[1]))
+            move_magnitude = float(np.linalg.norm(mm_vector))
+            if move_magnitude > self.MAX_CLICK_MOVE_MM:
+                self._pixels_to_mm = None
+                raise StageControllerError(
+                    "Predicted click move is too large; calibration was reset. Recalibrate and try again."
+                )
+
+            self.status_message.emit(
+                f"Jogging stage ΔX={move.x:.3f} mm ΔY={move.y:.3f} mm"
             )
-        except StageControllerError as exc:
-            self.movement_finished.emit(False, str(exc))
-        finally:
-            with self._task_lock:
-                self._active_thread = None
+            self._send_relative_move(serial_connection, move)
+            return before_counter
 
     def _run_rotate_b(self, delta_deg: float) -> None:
         self.movement_started.emit()
@@ -1658,7 +1671,9 @@ class StageController(QObject):
 
     @staticmethod
     def _desired_status_report_mask_for_mode(position_mode: str) -> int:
-        return 3 if position_mode == "machine" else 2
+        # Keep status reports in a single controller-defined format instead of
+        # flipping $10 in the motion hot path.
+        return 3
 
     @staticmethod
     def _parse_controller_coordinate_offsets(
@@ -1806,11 +1821,11 @@ class StageController(QObject):
 
     def _emit_coordinate_system_status(self, status: _Status | None) -> None:
         if self._position_reporting_mode == "machine":
-            self.status_message.emit("Coordinate system: machine coordinates ($10=3).")
+            self.status_message.emit("Coordinate system: machine coordinates.")
             return
         coordinate_system = self._active_work_coordinate_system
         if not coordinate_system:
-            self.status_message.emit("Coordinate system: work coordinates ($10=2).")
+            self.status_message.emit("Coordinate system: work coordinates.")
             return
         offset = None if status is None else status.work_offset
         if offset is not None and len(offset) >= 2:
@@ -2023,13 +2038,19 @@ class StageController(QObject):
         if status is None:
             return None
         if self._position_reporting_mode == "work":
-            status.display_position = status.work_position
+            status.display_position = (
+                status.work_position
+                if status.work_position is not None
+                else status.position
+            )
             if status.position is None:
                 machine_status = self._query_machine_status_snapshot(
                     serial_connection, timeout=timeout
                 )
                 if machine_status is not None and machine_status.position is not None:
                     status.position = machine_status.position
+                    if status.display_position is None:
+                        status.display_position = machine_status.position
         else:
             status.display_position = status.position
         self._last_stage_state = status.state
@@ -2126,6 +2147,12 @@ class StageController(QObject):
                 work_offset = self._parse_float_tuple(value)
 
         coordinate_system = self._active_work_coordinate_system
+        if (
+            work_offset is None
+            and coordinate_system
+            and coordinate_system in self._controller_coordinate_offsets
+        ):
+            work_offset = self._controller_coordinate_offsets.get(coordinate_system)
         if machine_position is None and work_position is not None and work_offset is not None:
             machine_position = self._combine_coordinate_vectors(
                 work_position, work_offset, operator="+"
