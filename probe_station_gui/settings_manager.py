@@ -252,18 +252,18 @@ class SavedStagePositionSettings:
 class NeedleCalibrationSettings:
     """Configuration for needle calibration and the external LCR meter."""
 
-    visa_resource: str = ""
-    measurement_function: str = "DCR"
-    range_mode: str = "HOLD"
-    auto_range_enabled: bool = False
+    visa_resource: str = "COM4"
+    measurement_function: str = "R-X"
+    range_mode: str = "AUTO"
+    auto_range_enabled: bool = True
     impedance_range: int = 3
-    dcr_range: int = 3
-    frequency_hz: float = 1000.0
+    dcr_range: int = 4
+    frequency_hz: float = 50.0
     level_mode: str = "VOLTAGE"
     voltage_level_v: float = 0.01
     current_level_a: float = 0.0001
-    source_resistance_ohm: int = 30
-    aperture_rate: str = "FAST"
+    source_resistance_ohm: int = 100
+    aperture_rate: str = "SLOW"
     aperture_averages: int = 1
     trigger_source: str = "INT"
     trigger_delay_s: float = 0.0
@@ -462,17 +462,18 @@ class SettingsManager:
     DEFAULT_OSCILLATION_TURNS_PER_SWEEP: float = 3.0
     DEFAULT_LINEAR_JOG_DISTANCE_MM: float = 25.0
     DEFAULT_ROTARY_JOG_DISTANCE_DEG: float = 5.0
-    DEFAULT_LCR_AUTO_RANGE_ENABLED: bool = False
-    DEFAULT_LCR_MEASUREMENT_FUNCTION: str = "DCR"
-    DEFAULT_LCR_RANGE_MODE: str = "HOLD"
+    DEFAULT_LCR_VISA_RESOURCE: str = "COM4"
+    DEFAULT_LCR_AUTO_RANGE_ENABLED: bool = True
+    DEFAULT_LCR_MEASUREMENT_FUNCTION: str = "R-X"
+    DEFAULT_LCR_RANGE_MODE: str = "AUTO"
     DEFAULT_LCR_IMPEDANCE_RANGE: int = 3
-    DEFAULT_LCR_DCR_RANGE: int = 3
-    DEFAULT_LCR_FREQUENCY_HZ: float = 1000.0
+    DEFAULT_LCR_DCR_RANGE: int = 4
+    DEFAULT_LCR_FREQUENCY_HZ: float = 50.0
     DEFAULT_LCR_LEVEL_MODE: str = "VOLTAGE"
     DEFAULT_LCR_VOLTAGE_LEVEL_V: float = 0.01
     DEFAULT_LCR_CURRENT_LEVEL_A: float = 0.0001
-    DEFAULT_LCR_SOURCE_RESISTANCE_OHM: int = 30
-    DEFAULT_LCR_APERTURE_RATE: str = "FAST"
+    DEFAULT_LCR_SOURCE_RESISTANCE_OHM: int = 100
+    DEFAULT_LCR_APERTURE_RATE: str = "SLOW"
     DEFAULT_LCR_APERTURE_AVERAGES: int = 1
     DEFAULT_LCR_TRIGGER_SOURCE: str = "INT"
     DEFAULT_LCR_TRIGGER_DELAY_S: float = 0.0
@@ -745,7 +746,7 @@ class SettingsManager:
         needle_section = data.get("needle_calibration")
         if not isinstance(needle_section, dict):
             needle_section = {
-                "visa_resource": "",
+                "visa_resource": self.DEFAULT_LCR_VISA_RESOURCE,
                 "measurement_function": self.DEFAULT_LCR_MEASUREMENT_FUNCTION,
                 "range_mode": self.DEFAULT_LCR_RANGE_MODE,
                 "auto_range_enabled": self.DEFAULT_LCR_AUTO_RANGE_ENABLED,
@@ -784,7 +785,7 @@ class SettingsManager:
             }
             data["needle_calibration"] = needle_section
         else:
-            needle_section.setdefault("visa_resource", "")
+            needle_section.setdefault("visa_resource", self.DEFAULT_LCR_VISA_RESOURCE)
             needle_section.setdefault(
                 "measurement_function", self.DEFAULT_LCR_MEASUREMENT_FUNCTION
             )
@@ -1020,7 +1021,7 @@ class SettingsManager:
     ) -> NeedleCalibrationSettings:
         """Normalise persisted needle calibration settings."""
 
-        visa_resource = ""
+        visa_resource = self.DEFAULT_LCR_VISA_RESOURCE
         measurement_function = self.DEFAULT_LCR_MEASUREMENT_FUNCTION
         range_mode = self.DEFAULT_LCR_RANGE_MODE
         auto_range_enabled = self.DEFAULT_LCR_AUTO_RANGE_ENABLED
