@@ -34,11 +34,14 @@ from probe_station_gui.design_script import ScriptContext, load_measurement_plan
 from probe_station_gui.design_session import AlignmentPreparation, DesignSession
 from probe_station_gui.dialogs.settings_dialog import SettingsDialog
 from probe_station_gui.lcr_meter import LCRMeterController
-from probe_station_gui.settings_manager import SettingsManager
+from probe_station_gui.settings_manager import Settings, SettingsManager
 from probe_station_gui.views.alignment_panel import AlignmentPanel
 from probe_station_gui.views.design_navigator_panel import (
     DesignLayoutWindow,
     DesignNavigatorPanel,
+)
+from probe_station_gui.views.contact_oscillation_window import (
+    ContactOscillationWindow,
 )
 from probe_station_gui.views.dock_widgets import CollapsibleDockWidget
 from probe_station_gui.views.needle_calibration_panel import NeedleCalibrationPanel
@@ -93,6 +96,7 @@ class Main(QMainWindow):
         self.serial_connection_panel: SerialConnectionPanel | None = None
         self.needle_calibration_panel: NeedleCalibrationPanel | None = None
         self.oscillation_panel: OscillationPanel | None = None
+        self.contact_calibration_window: ContactOscillationWindow | None = None
         self.alignment_panel: AlignmentPanel | None = None
         self.design_navigator_panel: DesignNavigatorPanel | None = None
         self.design_layout_window: DesignLayoutWindow | None = None
@@ -105,7 +109,10 @@ class Main(QMainWindow):
         self._needle_calibration_active = False
         self._alignment_capture_action: QAction | None = None
         self._alignment_exit_action: QAction | None = None
+        self._contact_calibration_window_action: QAction | None = None
         self._design_layout_window_action: QAction | None = None
+        self._ruler_action: QAction | None = None
+        self._rect_action: QAction | None = None
         self._last_selected_design_point: tuple[float, float] | None = None
         self._current_design_stage_xy: tuple[float, float] | None = None
         self._pending_design_stage_xy: tuple[float, float] | None = None
@@ -311,6 +318,8 @@ class Main(QMainWindow):
             self.serial_terminal_panel.set_serial(None)
         if self.needle_calibration_panel:
             self.needle_calibration_panel.set_current_a(None)
+        if self.contact_calibration_window is not None:
+            self.contact_calibration_window.set_current_stage_position(None)
         if self.oscillation_panel:
             self.oscillation_panel.set_running(False, "")
         self._reset_manual_alignment(cancel_pick=True)
@@ -323,6 +332,16 @@ class Main(QMainWindow):
         if self.serial_connection_panel and not self.serial_connection:
             logger.debug("Attempting auto-connect through connection panel")
             self.serial_connection_panel.auto_connect()
+        needle_settings = self.settings_manager.needle_calibration_configuration()
+        if (
+            needle_settings.visa_resource.strip()
+            and not self.lcr_controller.is_connected()
+        ):
+            logger.debug(
+                "Attempting LCR auto-connect to %s",
+                needle_settings.visa_resource,
+            )
+            self.lcr_controller.request_connect()
 
     def _run_serial_startup_sync(self) -> None:
         if self.serial_connection is None or not self.serial_connection.is_open:
@@ -383,6 +402,15 @@ class Main(QMainWindow):
         )
         calibration_menu.addAction(self._design_layout_window_action)
 
+        self._contact_calibration_window_action = QAction(
+            "Contact / Stone Calibration", self
+        )
+        self._contact_calibration_window_action.setCheckable(True)
+        self._contact_calibration_window_action.toggled.connect(
+            self._toggle_contact_calibration_window
+        )
+        calibration_menu.addAction(self._contact_calibration_window_action)
+
         for dock, title in (
             (self.oscillation_dock, "Oscillation"),
             (self.serial_connection_dock, "Connection"),
@@ -405,6 +433,23 @@ class Main(QMainWindow):
             action.setText(title)
             calibration_menu.addAction(action)
 
+        panels_menu.addSeparator()
+        self._ruler_action = QAction("Ruler", self)
+        self._ruler_action.setCheckable(True)
+        self._ruler_action.setShortcut(QKeySequence("R"))
+        self._ruler_action.setShortcutContext(Qt.ApplicationShortcut)
+        self._ruler_action.toggled.connect(self._on_measure_action_toggled)
+        panels_menu.addAction(self._ruler_action)
+        self.addAction(self._ruler_action)
+
+        self._rect_action = QAction("Rectangle", self)
+        self._rect_action.setCheckable(True)
+        self._rect_action.setShortcut(QKeySequence("T"))
+        self._rect_action.setShortcutContext(Qt.ApplicationShortcut)
+        self._rect_action.toggled.connect(self._on_measure_action_toggled)
+        panels_menu.addAction(self._rect_action)
+        self.addAction(self._rect_action)
+
         self._alignment_capture_action = QAction("Capture Alignment Point", self)
         self._alignment_capture_action.setShortcut(
             QKeySequence(self.ALIGNMENT_CAPTURE_SHORTCUT)
@@ -418,9 +463,8 @@ class Main(QMainWindow):
         self._alignment_exit_action = QAction("Cancel Alignment Pick", self)
         self._alignment_exit_action.setShortcut(QKeySequence(Qt.Key_Escape))
         self._alignment_exit_action.setShortcutContext(Qt.ApplicationShortcut)
-        self._alignment_exit_action.triggered.connect(
-            self._cancel_manual_alignment_pick
-        )
+        self._alignment_exit_action.triggered.connect(self._cancel_manual_alignment_pick)
+        self._alignment_exit_action.triggered.connect(self._on_measure_mode_exited)
         self.addAction(self._alignment_exit_action)
 
     def _toggle_design_layout_window(self, visible: bool) -> None:
@@ -444,6 +488,25 @@ class Main(QMainWindow):
         self._design_layout_window_action.blockSignals(False)
         if visible:
             self._collapse_alignment_panel_if_ready()
+
+    def _toggle_contact_calibration_window(self, visible: bool) -> None:
+        if self.contact_calibration_window is None:
+            if self._contact_calibration_window_action is not None:
+                self._contact_calibration_window_action.blockSignals(True)
+                self._contact_calibration_window_action.setChecked(False)
+                self._contact_calibration_window_action.blockSignals(False)
+            return
+        if visible:
+            self.contact_calibration_window.show_and_raise()
+            return
+        self.contact_calibration_window.hide()
+
+    def _on_contact_calibration_window_visibility_changed(self, visible: bool) -> None:
+        if self._contact_calibration_window_action is None:
+            return
+        self._contact_calibration_window_action.blockSignals(True)
+        self._contact_calibration_window_action.setChecked(visible)
+        self._contact_calibration_window_action.blockSignals(False)
 
     def _on_design_layout_point_selected(
         self, slot: int, x_value: float, y_value: float
@@ -484,13 +547,13 @@ class Main(QMainWindow):
                 jog.rotary_distance_deg,
             )
         needle_settings = self.settings_manager.needle_calibration_configuration()
+        oscillation_settings = self.settings_manager.oscillation_configuration()
         self.stage_controller.apply_needle_calibration(
             down_position_mm=(
                 needle_settings.down_position_mm
                 if needle_settings.down_position_configured
                 else None
             ),
-            lower_direction=needle_settings.lower_direction,
         )
         coordinate_settings = self.settings_manager.coordinate_system_configuration()
         self.stage_controller.apply_coordinate_system_configuration(
@@ -506,10 +569,29 @@ class Main(QMainWindow):
             self.design_layout_window.set_snap_enabled(self._design_snap_enabled)
         self.lcr_controller.apply_configuration(
             resource_name=needle_settings.visa_resource,
+            measurement_function=needle_settings.measurement_function,
+            range_mode=needle_settings.range_mode,
+            auto_range_enabled=needle_settings.auto_range_enabled,
+            impedance_range=needle_settings.impedance_range,
             dcr_range=needle_settings.dcr_range,
+            frequency_hz=needle_settings.frequency_hz,
+            level_mode=needle_settings.level_mode,
+            voltage_level_v=needle_settings.voltage_level_v,
+            current_level_a=needle_settings.current_level_a,
+            source_resistance_ohm=needle_settings.source_resistance_ohm,
+            aperture_rate=needle_settings.aperture_rate,
+            aperture_averages=needle_settings.aperture_averages,
+            trigger_source=needle_settings.trigger_source,
+            trigger_delay_s=needle_settings.trigger_delay_s,
+            bias_enabled=needle_settings.bias_enabled,
+            bias_level_v=needle_settings.bias_level_v,
+            monitor1=needle_settings.monitor1,
+            monitor2=needle_settings.monitor2,
+            alc_enabled=needle_settings.alc_enabled,
             short_threshold_ohm=needle_settings.short_threshold_ohm,
             poll_interval_ms=needle_settings.poll_interval_ms,
         )
+        self.lcr_controller.request_reconfigure()
         if self.needle_calibration_panel:
             self.needle_calibration_panel.apply_configuration(
                 resource_name=needle_settings.visa_resource,
@@ -518,8 +600,24 @@ class Main(QMainWindow):
                     if needle_settings.down_position_configured
                     else None
                 ),
-                lower_direction=needle_settings.lower_direction,
                 short_threshold_ohm=needle_settings.short_threshold_ohm,
+                measurement_function=needle_settings.measurement_function,
+            )
+        if self.contact_calibration_window is not None:
+            self.contact_calibration_window.set_saved_surface_position(
+                "chip",
+                needle_settings.chip_position,
+            )
+            self.contact_calibration_window.set_saved_surface_position(
+                "stone",
+                needle_settings.stone_position,
+            )
+        if self.oscillation_panel:
+            self.oscillation_panel.apply_configuration(
+                mode=oscillation_settings.mode,
+                amplitude_mm=oscillation_settings.amplitude_mm,
+                feedrate_mm_min=oscillation_settings.feedrate_mm_min,
+                turns_per_sweep=oscillation_settings.turns_per_sweep,
             )
         if self.serial_connection and self.serial_connection.is_open:
             self.stage_controller.request_startup_sync(auto_home_a=False)
@@ -527,10 +625,14 @@ class Main(QMainWindow):
 
     def _open_settings_dialog(self) -> None:
         dialog = SettingsDialog(self.settings_manager.settings, self)
+        dialog.settings_applied.connect(self._apply_settings_from_dialog)
         if dialog.exec() != QDialog.Accepted:
-            logger.debug("Settings dialog cancelled")
+            if not dialog.was_applied():
+                logger.debug("Settings dialog cancelled")
+
+    def _apply_settings_from_dialog(self, new_settings: object) -> None:
+        if not isinstance(new_settings, Settings):
             return
-        new_settings = dialog.result_settings()
         self.settings_manager.replace(new_settings)
         self.settings_manager.save()
         self._apply_settings()
@@ -1291,6 +1393,39 @@ class Main(QMainWindow):
             f"Calibration: ΔX {mm_per_pixel_x:.6f} mm/px, ΔY {mm_per_pixel_y:.6f} mm/px",
             5000,
         )
+        self.view.set_scale(mm_per_pixel_x, mm_per_pixel_y)
+
+    def _on_measure_action_toggled(self, checked: bool) -> None:
+        """Handle ruler/rect toggle — keep the two actions mutually exclusive."""
+        sender = self.sender()
+        if not checked:
+            # Only exit if no other measure action is checked
+            if (
+                (self._ruler_action is None or not self._ruler_action.isChecked())
+                and (self._rect_action is None or not self._rect_action.isChecked())
+            ):
+                self.view.set_measure_mode(None)
+            return
+        # Uncheck the other action without triggering this handler recursively
+        if sender is self._ruler_action and self._rect_action is not None:
+            self._rect_action.blockSignals(True)
+            self._rect_action.setChecked(False)
+            self._rect_action.blockSignals(False)
+        elif sender is self._rect_action and self._ruler_action is not None:
+            self._ruler_action.blockSignals(True)
+            self._ruler_action.setChecked(False)
+            self._ruler_action.blockSignals(False)
+        mode = "ruler" if sender is self._ruler_action else "rect"
+        self.view.set_measure_mode(mode)
+
+    def _on_measure_mode_exited(self) -> None:
+        """Exit measure mode (called on Esc or from the view's own signal)."""
+        self.view.set_measure_mode(None)
+        for action in (self._ruler_action, self._rect_action):
+            if action is not None:
+                action.blockSignals(True)
+                action.setChecked(False)
+                action.blockSignals(False)
 
     def _load_design_document(self, design_path: str) -> None:
         try:
@@ -1577,6 +1712,13 @@ class Main(QMainWindow):
         if not isinstance(position, tuple) or len(position) < 2:
             return
         logger.debug("TIMING stage_position_changed position=%s", position)
+        if self.contact_calibration_window is not None:
+            if len(position) >= 3:
+                self.contact_calibration_window.set_current_stage_position(
+                    (float(position[0]), float(position[1]), float(position[2]))
+                )
+            else:
+                self.contact_calibration_window.set_current_stage_position(None)
         if len(position) > 4:
             current_b = float(position[4])
             if (
@@ -1791,6 +1933,8 @@ class Main(QMainWindow):
         self.lcr_controller.shutdown()
         if self.design_layout_window is not None:
             self.design_layout_window.close()
+        if self.contact_calibration_window is not None:
+            self.contact_calibration_window.close()
         if self.serial_connection_panel:
             self.serial_connection_panel.shutdown()
         event.accept()
@@ -1882,7 +2026,21 @@ class Main(QMainWindow):
             self.serial_connection_dock, self.joystick_dock, Qt.Vertical
         )
 
-        self.needle_calibration_panel = NeedleCalibrationPanel(self)
+        self.contact_calibration_window = ContactOscillationWindow()
+        self.contact_calibration_window.visibility_changed.connect(
+            self._on_contact_calibration_window_visibility_changed
+        )
+        self.contact_calibration_window.autofocus_requested.connect(
+            self.stage_controller.request_autofocus
+        )
+        self.contact_calibration_window.save_surface_position_requested.connect(
+            self._save_surface_position
+        )
+        self.contact_calibration_window.move_to_surface_position_requested.connect(
+            self._move_to_surface_position
+        )
+
+        self.needle_calibration_panel = self.contact_calibration_window.needle_panel
         self.needle_calibration_panel.connect_requested.connect(
             self.lcr_controller.request_connect
         )
@@ -1913,15 +2071,6 @@ class Main(QMainWindow):
         self.lcr_controller.reading_updated.connect(
             self._on_lcr_reading_updated
         )
-        self.needle_calibration_dock = CollapsibleDockWidget(
-            "Needle Calibration", self
-        )
-        self.needle_calibration_dock.setObjectName("NeedleCalibrationDock")
-        self.needle_calibration_dock.setWidget(self.needle_calibration_panel)
-        self.needle_calibration_dock.setAllowedAreas(
-            Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea
-        )
-        self.addDockWidget(Qt.RightDockWidgetArea, self.needle_calibration_dock)
 
         self.serial_terminal_panel = SerialTerminalWindow(self)
         self.serial_terminal_panel.set_stage_controller(self.stage_controller)
@@ -1938,21 +2087,17 @@ class Main(QMainWindow):
         self.addDockWidget(Qt.LeftDockWidgetArea, self.serial_terminal_dock)
         self.splitDockWidget(self.joystick_dock, self.serial_terminal_dock, Qt.Vertical)
 
-        self.oscillation_panel = OscillationPanel(self)
+        self.oscillation_panel = self.contact_calibration_window.oscillation_panel
         self.oscillation_panel.start_requested.connect(
             self.stage_controller.request_oscillation
         )
+        self.oscillation_panel.start_requested.connect(self._save_oscillation_configuration)
         self.oscillation_panel.stop_requested.connect(
             self.stage_controller.request_stop_oscillation
         )
-        self.oscillation_dock = CollapsibleDockWidget("Oscillation", self)
-        self.oscillation_dock.setObjectName("OscillationDock")
-        self.oscillation_dock.setWidget(self.oscillation_panel)
-        self.oscillation_dock.setAllowedAreas(
-            Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea
+        self.oscillation_panel.configuration_changed.connect(
+            self._save_oscillation_configuration
         )
-        self.addDockWidget(Qt.LeftDockWidgetArea, self.oscillation_dock)
-        self.tabifyDockWidget(self.joystick_dock, self.oscillation_dock)
         self.joystick_dock.raise_()
 
         self.design_layout_window = DesignLayoutWindow()
@@ -2021,7 +2166,6 @@ class Main(QMainWindow):
             Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea
         )
         self.addDockWidget(Qt.RightDockWidgetArea, self.alignment_dock)
-        self.splitDockWidget(self.needle_calibration_dock, self.alignment_dock, Qt.Vertical)
         self._refresh_manual_alignment_ui()
         self._update_coordinate_display()
         self._refresh_design_panel()
@@ -2034,11 +2178,6 @@ class Main(QMainWindow):
             [self.joystick_dock, self.alignment_dock],
             [360, 520],
             Qt.Horizontal,
-        )
-        self.resizeDocks(
-            [self.needle_calibration_dock, self.alignment_dock],
-            [320, 260],
-            Qt.Vertical,
         )
 
     def _move_to_design_window_point(self, x_value: float, y_value: float) -> None:
@@ -2058,17 +2197,22 @@ class Main(QMainWindow):
             self._show_status("Connect the LCR meter before starting calibration.")
             return
         self._needle_calibration_active = True
-        self._needle_height_timer.start()
         if self.needle_calibration_panel:
             self.needle_calibration_panel.set_calibration_active(True)
-        self.stage_controller.request_needles_raise()
+        latest_a = self.stage_controller.latest_a_position()
+        if latest_a is not None:
+            self._on_needle_height_changed(latest_a)
+        else:
+            logger.debug(
+                "Needle calibration started without cached A position; requesting status refresh."
+            )
+            self.stage_controller.request_status_refresh()
         self._show_status(
             "Needle calibration started. Move above metal and lower the needles in steps until the LCR reports a short."
         )
 
     def _stop_needle_calibration(self) -> None:
         self._needle_calibration_active = False
-        self._needle_height_timer.stop()
         if self.needle_calibration_panel:
             self.needle_calibration_panel.set_calibration_active(False)
         self._show_status("Needle calibration stopped.")
@@ -2076,8 +2220,12 @@ class Main(QMainWindow):
     def _refresh_needle_height(self) -> None:
         if not self._needle_calibration_active:
             return
-        a_position = self.stage_controller.current_a_position()
+        a_position = self.stage_controller.latest_a_position()
         if a_position is None:
+            logger.debug(
+                "Needle height refresh has no cached A position; requesting status refresh."
+            )
+            self.stage_controller.request_status_refresh()
             return
         self._on_needle_height_changed(a_position)
 
@@ -2109,9 +2257,27 @@ class Main(QMainWindow):
         self._set_design_snap_enabled(enabled)
 
     def _save_current_needle_height(self) -> None:
-        a_position = self.stage_controller.current_a_position()
+        a_position = self.stage_controller.latest_a_position()
         if a_position is None:
-            self._show_status("Unable to read A position. Wait for the stage to become idle.")
+            logger.debug("Saving needle height without cached A position; querying controller.")
+            a_position = self.stage_controller.current_a_position()
+        if a_position is None:
+            reason = (
+                self.stage_controller.last_a_position_read_failure()
+                or "unknown reason"
+            )
+            if "stage task is active" in reason:
+                status_reason = "stage is busy"
+            elif "serial connection" in reason:
+                status_reason = "serial connection is unavailable"
+            elif "status query" in reason:
+                status_reason = "controller status was unavailable"
+            elif "does not include A axis" in reason:
+                status_reason = "controller status did not include A"
+            else:
+                status_reason = "see log for details"
+            logger.warning("Unable to save needle down height: %s", reason)
+            self._show_status(f"Unable to read A position: {status_reason}.")
             return
         settings = self.settings_manager.settings.clone()
         settings.needle_calibration.down_position_mm = a_position
@@ -2121,9 +2287,83 @@ class Main(QMainWindow):
         self._apply_settings()
         self._show_status(f"Saved needle down height at A={a_position:.4f} mm.")
 
+    def _save_surface_position(self, target: str) -> None:
+        target_key = target.strip().lower()
+        if target_key not in {"chip", "stone"}:
+            self._show_status(f"Unknown calibration position '{target}'.")
+            return
+        try:
+            current_position = self.stage_controller.current_stage_position()
+        except Exception as exc:
+            self._show_status(str(exc))
+            return
+        if len(current_position) < 3:
+            self._show_status("Controller did not report X/Y/Z coordinates.")
+            return
+        settings = self.settings_manager.settings.clone()
+        saved_position = (
+            settings.needle_calibration.chip_position
+            if target_key == "chip"
+            else settings.needle_calibration.stone_position
+        )
+        saved_position.x_mm = float(current_position[0])
+        saved_position.y_mm = float(current_position[1])
+        saved_position.z_mm = float(current_position[2])
+        saved_position.configured = True
+        self.settings_manager.replace(settings)
+        self.settings_manager.save()
+        self._apply_settings()
+        self._show_status(
+            f"Saved {target_key} focus at "
+            f"X={saved_position.x_mm:.4f}, "
+            f"Y={saved_position.y_mm:.4f}, "
+            f"Z={saved_position.z_mm:.4f} mm."
+        )
+
+    def _move_to_surface_position(self, target: str) -> None:
+        target_key = target.strip().lower()
+        if target_key not in {"chip", "stone"}:
+            self._show_status(f"Unknown calibration position '{target}'.")
+            return
+        settings = self.settings_manager.needle_calibration_configuration()
+        destination = (
+            settings.chip_position if target_key == "chip" else settings.stone_position
+        )
+        other = (
+            settings.stone_position if target_key == "chip" else settings.chip_position
+        )
+        if not destination.configured:
+            self._show_status(f"Save the {target_key} focus position first.")
+            return
+        transit_z = destination.z_mm
+        if other.configured:
+            transit_z = min(destination.z_mm, other.z_mm)
+        self.stage_controller.request_move_to_xyz(
+            destination.x_mm,
+            destination.y_mm,
+            destination.z_mm,
+            transit_z,
+            f"{target_key} position",
+        )
+
     def _on_oscillation_state_changed(self, running: bool, axis: str) -> None:
         if self.oscillation_panel:
             self.oscillation_panel.set_running(running, axis)
+
+    def _save_oscillation_configuration(
+        self,
+        mode: str,
+        amplitude_mm: float,
+        feedrate_mm_min: float,
+        turns_per_sweep: float,
+    ) -> None:
+        settings = self.settings_manager.settings.clone()
+        settings.oscillation.mode = str(mode).strip().upper() or "X"
+        settings.oscillation.amplitude_mm = float(amplitude_mm)
+        settings.oscillation.feedrate_mm_min = float(feedrate_mm_min)
+        settings.oscillation.turns_per_sweep = float(turns_per_sweep)
+        self.settings_manager.replace(settings)
+        self.settings_manager.save()
 
 def main() -> int:
     app = QApplication(sys.argv)

@@ -108,6 +108,7 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
     def test_absolute_xy_move_uses_relative_delta(self) -> None:
         controller = StageController()
         controller._serial = _FakeSerial()
+        controller._position_reporting_mode = "machine"
 
         sent_moves = []
         statuses = [
@@ -147,6 +148,62 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
         self.assertEqual(movement_results[-1][0], True)
         self.assertIn("Arrived", movement_results[-1][1])
 
+    def test_absolute_xy_move_uses_work_basis_and_ignores_machine_position(self) -> None:
+        controller = StageController()
+        controller._serial = _FakeSerial()
+        controller._position_reporting_mode = "work"
+        controller._active_work_coordinate_system = "G54"
+        controller._controller_coordinate_offsets["G54"] = (
+            32.0,
+            32.0,
+            0.0,
+            0.0,
+            0.0,
+        )
+
+        sent_moves = []
+        statuses = [
+            types.SimpleNamespace(
+                state="Idle",
+                position=(999.0, 999.0, 9.244, 0.0, 2.17),
+                display_position=(4.984, 3.705, 9.244, 0.0, 2.17),
+                work_position=(4.984, 3.705, 9.244, 0.0, 2.17),
+                work_offset=(32.0, 32.0, 0.0, 0.0, 0.0),
+                coordinate_system="G54",
+                homed_axes={"X", "Y"},
+            ),
+            types.SimpleNamespace(
+                state="Idle",
+                position=(888.0, 888.0, 9.244, 0.0, 2.17),
+                display_position=(29.887, 26.689, 9.244, 0.0, 2.17),
+                work_position=(29.887, 26.689, 9.244, 0.0, 2.17),
+                work_offset=(32.0, 32.0, 0.0, 0.0, 0.0),
+                coordinate_system="G54",
+                homed_axes={"X", "Y"},
+            ),
+        ]
+
+        controller._move_safety_check = lambda: None
+        controller._refresh_coordinate_system_state = (
+            lambda _serial, apply_preference=True: None
+        )
+        controller._wait_for_idle = lambda _serial: None
+        controller._query_status = lambda _serial: statuses.pop(0)
+        controller._send_relative_move = lambda _serial, move: sent_moves.append(move)
+        controller.movement_started = types.SimpleNamespace(emit=lambda *args, **kwargs: None)
+        controller.status_message = types.SimpleNamespace(emit=lambda *args, **kwargs: None)
+        movement_results = []
+        controller.movement_finished = types.SimpleNamespace(
+            emit=lambda success, message: movement_results.append((success, message))
+        )
+
+        controller._run_move_to_xy(29.887, 26.689)
+
+        self.assertEqual(len(sent_moves), 1)
+        self.assertAlmostEqual(sent_moves[0].x, 24.903)
+        self.assertAlmostEqual(sent_moves[0].y, 22.984)
+        self.assertEqual(movement_results[-1][0], True)
+
     def test_absolute_xy_move_requires_serial(self) -> None:
         controller = StageController()
         controller._serial = None
@@ -161,6 +218,48 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
 
         self.assertEqual(movement_results[-1][0], False)
         self.assertIn("Serial connection is not available", movement_results[-1][1])
+
+    def test_absolute_xyz_move_uses_safe_transfer_z_before_xy(self) -> None:
+        controller = StageController()
+        controller._serial = _FakeSerial()
+        controller._position_reporting_mode = "machine"
+
+        sent_moves = []
+        statuses = [
+            types.SimpleNamespace(
+                state="Idle",
+                position=(10.0, 20.0, 8.0, 0.0),
+                display_position=(10.0, 20.0, 8.0, 0.0),
+                homed_axes={"X", "Y", "Z"},
+            ),
+            types.SimpleNamespace(
+                state="Idle",
+                position=(30.0, 40.0, 6.0, 0.0),
+                display_position=(30.0, 40.0, 6.0, 0.0),
+                homed_axes={"X", "Y", "Z"},
+            ),
+        ]
+
+        controller._move_safety_check = lambda: None
+        controller._wait_for_idle = lambda _serial: None
+        controller._query_status = lambda _serial: statuses.pop(0)
+        controller._send_relative_move = lambda _serial, move: sent_moves.append(move)
+        controller.movement_started = types.SimpleNamespace(emit=lambda *args, **kwargs: None)
+        controller.status_message = types.SimpleNamespace(emit=lambda *args, **kwargs: None)
+        movement_results = []
+        controller.movement_finished = types.SimpleNamespace(
+            emit=lambda success, message: movement_results.append((success, message))
+        )
+
+        controller._run_move_to_xyz(30.0, 40.0, 6.0, 3.0, "stone position")
+
+        self.assertEqual(len(sent_moves), 3)
+        self.assertAlmostEqual(sent_moves[0].z, -5.0)
+        self.assertAlmostEqual(sent_moves[1].x, 20.0)
+        self.assertAlmostEqual(sent_moves[1].y, 20.0)
+        self.assertAlmostEqual(sent_moves[2].z, 3.0)
+        self.assertEqual(movement_results[-1][0], True)
+        self.assertIn("Arrived at stone position", movement_results[-1][1])
 
     def test_click_to_move_holds_serial_lock(self) -> None:
         controller = StageController()
@@ -203,8 +302,37 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
 
 
 class StageControllerStatusParsingTest(unittest.TestCase):
-    def test_parse_status_line_uses_cached_work_offset(self) -> None:
+    def test_work_mode_requests_wpos_status_reports(self) -> None:
         controller = StageController()
+
+        self.assertEqual(controller._desired_status_report_mask_for_mode("work"), 2)
+        self.assertEqual(controller._desired_status_report_mask_for_mode("machine"), 3)
+
+    def test_parse_status_line_uses_native_work_position(self) -> None:
+        controller = StageController()
+        controller._active_work_coordinate_system = "G54"
+        controller._controller_coordinate_offsets["G54"] = (
+            32.0,
+            32.0,
+            0.0,
+            0.0,
+            0.0,
+        )
+
+        status = controller._parse_status_line(
+            "<Idle|WPos:-6.894,-6.599,9.207,0.000,2.170|Bf:15,127|FS:0,0>"
+        )
+
+        self.assertIsNotNone(status)
+        assert status is not None
+        self.assertIsNone(status.position)
+        self.assertEqual(status.work_offset[:2], (32.0, 32.0))
+        self.assertAlmostEqual(status.work_position[0], -6.894)
+        self.assertAlmostEqual(status.work_position[1], -6.599)
+
+    def test_work_mode_ignores_machine_position_status_reports(self) -> None:
+        controller = StageController()
+        controller._position_reporting_mode = "work"
         controller._active_work_coordinate_system = "G54"
         controller._controller_coordinate_offsets["G54"] = (
             32.0,
@@ -218,12 +346,14 @@ class StageControllerStatusParsingTest(unittest.TestCase):
             "<Idle|MPos:25.106,25.401,9.207,0.000,2.170|Bf:15,127|FS:0,0>"
         )
 
-        self.assertIsNotNone(status)
-        assert status is not None
-        self.assertEqual(status.position[:2], (25.106, 25.401))
-        self.assertEqual(status.work_offset[:2], (32.0, 32.0))
-        self.assertAlmostEqual(status.work_position[0], -6.894)
-        self.assertAlmostEqual(status.work_position[1], -6.599)
+        self.assertIsNone(status)
+
+    def test_parse_status_line_rejects_truncated_machine_position(self) -> None:
+        controller = StageController()
+
+        status = controller._parse_status_line("<Idle|MPos:29.459,31.4|FS:0,0>")
+
+        self.assertIsNone(status)
 
 
 class StageControllerJogQueueTest(unittest.TestCase):
@@ -279,7 +409,9 @@ class StageControllerNeedlesStateTest(unittest.TestCase):
         controller._update_needles_from_status(
             types.SimpleNamespace(
                 state="Idle",
-                position=(0.0, 0.0, 0.0, 0.0),
+                position=None,
+                display_position=(0.0, 0.0, 0.0, 0.0),
+                work_position=(0.0, 0.0, 0.0, 0.0),
                 homed_axes=None,
             )
         )
@@ -304,12 +436,42 @@ class StageControllerNeedlesStateTest(unittest.TestCase):
         controller._update_needles_from_status(
             types.SimpleNamespace(
                 state="Idle",
-                position=(0.0, 0.0, 0.0, 0.0),
+                position=None,
+                display_position=(0.0, 0.0, 0.0, 0.0),
+                work_position=(0.0, 0.0, 0.0, 0.0),
                 homed_axes={"A"},
             )
         )
 
         self.assertEqual(emitted[-1], (True, True))
+
+    def test_latest_a_position_reads_cached_stage_position(self) -> None:
+        controller = StageController()
+        controller._last_stage_position = (1.0, 2.0, 3.0, -0.25)
+
+        self.assertEqual(controller.latest_a_position(), -0.25)
+
+
+class StageControllerPriorityNeedlesActionTest(unittest.TestCase):
+    def test_needles_lower_queues_during_oscillation(self) -> None:
+        controller = StageController()
+        controller._oscillation_active = True
+        controller._active_thread = types.SimpleNamespace(is_alive=lambda: True)
+        messages = []
+        controller.needles_action_started = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        controller.status_message = types.SimpleNamespace(
+            emit=lambda message: messages.append(message)
+        )
+
+        controller.request_needles_lower()
+
+        self.assertFalse(controller._cancel_event.is_set())
+        self.assertEqual(
+            list(controller._oscillation_needles_actions), [("lower", None)]
+        )
+        self.assertIn("queued during oscillation", messages[-1])
 
 
 class StageControllerStartupSyncTest(unittest.TestCase):

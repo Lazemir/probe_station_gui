@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections import deque
 from queue import Empty, PriorityQueue
 import re
 import threading
@@ -179,8 +180,9 @@ class StageController(QObject):
         self._needles_up = False
         self._needles_known = False
         self._needle_down_offset: Optional[float] = None
-        self._needle_lower_direction_sign = -1.0
         self._oscillation_active = False
+        self._queued_needles_actions: deque[tuple[str, float | None]] = deque()
+        self._oscillation_needles_actions: deque[tuple[str, float | None]] = deque()
         self._b_axis_zero_position: Optional[float] = None
         self._serial_session_lock = threading.RLock()
         self._queued_write_sequence = 0
@@ -188,6 +190,7 @@ class StageController(QObject):
         self._last_stage_state: Optional[str] = None
         self._last_status_timestamp: Optional[float] = None
         self._last_jog_write_timestamp: Optional[float] = None
+        self._last_a_position_read_failure: Optional[str] = None
         self._controller_state_stale = False
         self._position_reporting_mode = "work"
         self._current_status_report_mask: Optional[int] = None
@@ -435,7 +438,7 @@ class StageController(QObject):
             thread.start()
 
     def request_move_to_xy(self, target_x_mm: float, target_y_mm: float) -> None:
-        """Move to an absolute X/Y machine-space coordinate in the background."""
+        """Move to an absolute X/Y coordinate in the configured report mode."""
 
         with self._task_lock:
             if self._active_thread and self._active_thread.is_alive():
@@ -445,6 +448,35 @@ class StageController(QObject):
             thread = threading.Thread(
                 target=self._run_move_to_xy,
                 args=(float(target_x_mm), float(target_y_mm)),
+                daemon=True,
+            )
+            self._active_thread = thread
+            thread.start()
+
+    def request_move_to_xyz(
+        self,
+        target_x_mm: float,
+        target_y_mm: float,
+        target_z_mm: float,
+        transit_z_mm: float | None = None,
+        label: str = "saved position",
+    ) -> None:
+        """Move to an absolute X/Y/Z point using a safe intermediate Z level."""
+
+        with self._task_lock:
+            if self._active_thread and self._active_thread.is_alive():
+                self.status_message.emit("Stage is busy. Ignoring XYZ move request.")
+                return
+            self._cancel_event.clear()
+            thread = threading.Thread(
+                target=self._run_move_to_xyz,
+                args=(
+                    float(target_x_mm),
+                    float(target_y_mm),
+                    float(target_z_mm),
+                    None if transit_z_mm is None else float(transit_z_mm),
+                    str(label),
+                ),
                 daemon=True,
             )
             self._active_thread = thread
@@ -516,41 +548,33 @@ class StageController(QObject):
 
         with self._task_lock:
             if self._active_thread and self._active_thread.is_alive():
+                if self._oscillation_active:
+                    self._queue_oscillation_needles_action_locked("raise")
+                    return
                 self.status_message.emit("Stage is busy. Ignoring needle raise request.")
                 return
-            self._cancel_event.clear()
-            thread = threading.Thread(
-                target=self._run_needles_action, args=("raise",), daemon=True
-            )
-            self._active_thread = thread
-            thread.start()
+            self._start_needles_action_locked("raise")
 
     def request_needles_lower(self) -> None:
         """Lower the needles to the calibrated down position."""
 
         with self._task_lock:
             if self._active_thread and self._active_thread.is_alive():
+                if self._oscillation_active:
+                    self._queue_oscillation_needles_action_locked("lower")
+                    return
                 self.status_message.emit("Stage is busy. Ignoring needle lower request.")
                 return
-            self._cancel_event.clear()
-            thread = threading.Thread(
-                target=self._run_needles_action, args=("lower",), daemon=True
-            )
-            self._active_thread = thread
-            thread.start()
+            self._start_needles_action_locked("lower")
 
     def apply_needle_calibration(
         self,
         *,
         down_position_mm: Optional[float],
-        lower_direction: str,
     ) -> None:
         """Apply the persisted needle calibration settings."""
 
         self._needle_down_offset = down_position_mm
-        self._needle_lower_direction_sign = (
-            1.0 if lower_direction.strip().lower() == "positive" else -1.0
-        )
 
     def apply_coordinate_system_configuration(
         self,
@@ -587,22 +611,21 @@ class StageController(QObject):
         active = self._active_work_coordinate_system
         if active:
             return active
-        return "Machine"
+        return "Work"
 
     def request_needles_adjust(self, step_mm: float) -> None:
         """Adjust the A axis for needle calibration without the XY safety gate."""
 
         with self._task_lock:
             if self._active_thread and self._active_thread.is_alive():
+                if self._oscillation_active:
+                    self._queue_oscillation_needles_action_locked(
+                        "adjust", float(step_mm)
+                    )
+                    return
                 self.status_message.emit("Stage is busy. Ignoring needle adjustment.")
                 return
-            self._cancel_event.clear()
-            thread = threading.Thread(
-                target=self._run_needles_adjust, args=(float(step_mm),), daemon=True
-            )
-            self._active_thread = thread
-            self.needles_action_started.emit("adjust")
-            thread.start()
+            self._start_needles_action_locked("adjust", float(step_mm))
 
     def request_oscillation(
         self, mode: str, amplitude_mm: float, feedrate: float, turns_per_sweep: float = 3.0
@@ -637,13 +660,26 @@ class StageController(QObject):
         self.status_message.emit("Oscillation stop requested.")
 
     def current_a_position(self) -> Optional[float]:
-        """Return the current machine A coordinate when it can be queried safely."""
+        """Return the current A coordinate when it can be queried safely."""
 
+        self._last_a_position_read_failure = None
         serial_connection = self._serial
         if serial_connection is None or not serial_connection.is_open:
+            self._record_a_position_read_failure("serial connection is not available")
             return None
         with self._task_lock:
             if self._active_thread and self._active_thread.is_alive():
+                thread_name = self._active_thread.name or "<unnamed>"
+                latest = self._last_stage_position
+                timestamp = self._last_status_timestamp
+                age_s = None if timestamp is None else max(0.0, time.monotonic() - timestamp)
+                reason = (
+                    f"stage task is active ({thread_name}); "
+                    f"latest_state={self._last_stage_state!r}, "
+                    f"latest_position={latest!r}, "
+                    f"last_status_age_s={age_s!r}"
+                )
+                self._record_a_position_read_failure(reason)
                 return None
         with self._serial_session_lock:
             a_position = self._read_current_a_position(serial_connection)
@@ -651,6 +687,11 @@ class StageController(QObject):
             return None
         self.needle_height_changed.emit(a_position)
         return a_position
+
+    def last_a_position_read_failure(self) -> Optional[str]:
+        """Return the last reason why reading A position failed, if any."""
+
+        return self._last_a_position_read_failure
 
     def read_pending_serial_output(self, max_bytes: int | None = None) -> bytes:
         """Read currently buffered controller output without contending with active tasks."""
@@ -714,9 +755,13 @@ class StageController(QObject):
             if serial_connection is None or not serial_connection.is_open:
                 raise StageControllerError("Serial connection is not available.")
             with self._serial_session_lock:
-                status = self._query_status(serial_connection)
+                status = self._query_synced_status_for_absolute_motion(
+                    serial_connection
+                )
         if status is None or status.display_position is None:
             raise StageControllerError("Unable to read stage position.")
+        if len(status.display_position) < 3:
+            raise StageControllerError("Controller did not report complete X/Y/Z coordinates.")
         if status.state.lower() in {"jog", "run"}:
             raise StageControllerError("Wait for the stage to stop before capturing a marker.")
         self._ensure_b_axis_zero_reference(status)
@@ -728,6 +773,14 @@ class StageController(QObject):
         if self._last_stage_position is None:
             return None
         return tuple(self._last_stage_position)
+
+    def latest_a_position(self) -> float | None:
+        """Return the latest cached A position, if known."""
+
+        latest = self.latest_stage_position()
+        if latest is None or len(latest) <= 3:
+            return None
+        return float(latest[3])
 
     def latest_stage_state(self) -> str | None:
         """Return the most recently observed controller motion state."""
@@ -820,7 +873,7 @@ class StageController(QObject):
         )
 
     def zero_b_axis(self) -> None:
-        """Set the current B machine position as the application zero reference."""
+        """Set the current B coordinate as the application zero reference."""
 
         with self._task_lock:
             if self._active_thread and self._active_thread.is_alive():
@@ -832,7 +885,7 @@ class StageController(QObject):
                 raise StageControllerError("Serial connection is not available.")
             with self._serial_session_lock:
                 status = self._query_status(serial_connection)
-        if status is None or status.position is None:
+        if status is None or self._axis_value_for_configured_mode(status, "B") is None:
             raise StageControllerError("Unable to read B axis position.")
         self._set_b_axis_zero_reference(status)
 
@@ -964,6 +1017,36 @@ class StageController(QObject):
             with self._task_lock:
                 self._active_thread = None
 
+    def _run_move_to_xyz(
+        self,
+        target_x_mm: float,
+        target_y_mm: float,
+        target_z_mm: float,
+        transit_z_mm: float | None,
+        label: str,
+    ) -> None:
+        self.movement_started.emit()
+        try:
+            self._check_cancelled()
+            serial_connection = self._serial
+            if serial_connection is None or not serial_connection.is_open:
+                raise StageControllerError("Serial connection is not available.")
+            self._move_safety_check()
+            message = self._move_to_xyz_locked(
+                serial_connection,
+                target_x_mm,
+                target_y_mm,
+                target_z_mm,
+                transit_z_mm=transit_z_mm,
+                label=label,
+            )
+            self.movement_finished.emit(True, message)
+        except StageControllerError as exc:
+            self.movement_finished.emit(False, str(exc))
+        finally:
+            with self._task_lock:
+                self._active_thread = None
+
     def _move_to_xy_locked(
         self,
         serial_connection: serial.Serial,
@@ -971,14 +1054,17 @@ class StageController(QObject):
         target_y_mm: float,
     ) -> str:
         with self._serial_session_lock:
-            status = self._query_status(serial_connection)
-            if status is None or status.display_position is None:
+            status = self._query_synced_status_for_absolute_motion(serial_connection)
+            if status is None:
                 raise StageControllerError("Unable to read current stage position.")
             self._require_homed_axes(status, {"X", "Y"})
-            current_x = float(status.display_position[0])
-            current_y = float(status.display_position[1])
-            delta_x = float(target_x_mm) - current_x
-            delta_y = float(target_y_mm) - current_y
+            current_position = self._require_position_for_absolute_motion(
+                status,
+                required_axes=2,
+            )
+            target_position = (float(target_x_mm), float(target_y_mm))
+            delta_x = float(target_position[0]) - float(current_position[0])
+            delta_y = float(target_position[1]) - float(current_position[1])
             move = MoveVector(x=delta_x, y=delta_y)
             if move.is_zero(tol=1e-5):
                 return "Target already at requested X/Y."
@@ -989,6 +1075,92 @@ class StageController(QObject):
             self._wait_for_idle(serial_connection)
             self._query_status(serial_connection)
             return f"Arrived at X={target_x_mm:.3f} mm, Y={target_y_mm:.3f} mm."
+
+    def _move_to_xyz_locked(
+        self,
+        serial_connection: serial.Serial,
+        target_x_mm: float,
+        target_y_mm: float,
+        target_z_mm: float,
+        *,
+        transit_z_mm: float | None,
+        label: str,
+    ) -> str:
+        with self._serial_session_lock:
+            status = self._query_synced_status_for_absolute_motion(serial_connection)
+            if status is None:
+                raise StageControllerError("Unable to read current stage position.")
+            self._require_homed_axes(status, {"X", "Y", "Z"})
+            current_position = self._require_position_for_absolute_motion(
+                status,
+                required_axes=3,
+            )
+            current_x = float(current_position[0])
+            current_y = float(current_position[1])
+            current_z = float(current_position[2])
+            target_position = (float(target_x_mm), float(target_y_mm), float(target_z_mm))
+            transit_z = (
+                float(target_position[2])
+                if transit_z_mm is None
+                else float(transit_z_mm)
+            )
+            moved = False
+
+            if abs(transit_z - current_z) >= 1e-5:
+                self.status_message.emit(
+                    f"Moving Z to safe transfer level {transit_z:.3f} mm before {label}."
+                )
+                self._send_relative_move(
+                    serial_connection,
+                    MoveVector(z=transit_z - current_z),
+                )
+                current_z = transit_z
+                moved = True
+
+            delta_x = float(target_position[0]) - current_x
+            delta_y = float(target_position[1]) - current_y
+            xy_move = MoveVector(x=delta_x, y=delta_y)
+            if not xy_move.is_zero(tol=1e-5):
+                self.status_message.emit(
+                    f"Moving to {label} X={target_x_mm:.3f} mm, Y={target_y_mm:.3f} mm"
+                )
+                self._send_relative_move(serial_connection, xy_move)
+                current_x = float(target_position[0])
+                current_y = float(target_position[1])
+                moved = True
+
+            delta_z = float(target_position[2]) - current_z
+            if abs(delta_z) >= 1e-5:
+                self.status_message.emit(
+                    f"Moving Z to {label} focus height {target_z_mm:.3f} mm"
+                )
+                self._send_relative_move(
+                    serial_connection,
+                    MoveVector(z=delta_z),
+                )
+                moved = True
+
+            self._wait_for_idle(serial_connection)
+            self._query_status(serial_connection)
+
+            if not moved:
+                return f"{label.capitalize()} already reached."
+            return (
+                f"Arrived at {label}: X={target_x_mm:.3f} mm, "
+                f"Y={target_y_mm:.3f} mm, Z={target_z_mm:.3f} mm."
+            )
+
+    def _query_synced_status_for_absolute_motion(
+        self, serial_connection: serial.Serial
+    ) -> Optional[_Status]:
+        """Refresh coordinate-system state before absolute position reads and moves."""
+
+        if self._position_reporting_mode != "machine" or self._controller_state_stale:
+            self._refresh_coordinate_system_state(
+                serial_connection,
+                apply_preference=True,
+            )
+        return self._query_status(serial_connection)
 
     def _prepare_click_move_without_status_locked(
         self,
@@ -1017,7 +1189,7 @@ class StageController(QObject):
                 )
 
             self.status_message.emit(
-                f"Jogging stage ΔX={move.x:.3f} mm ΔY={move.y:.3f} mm"
+                f"Jogging stage dX={move.x:.3f} mm dY={move.y:.3f} mm"
             )
             self._send_relative_move(serial_connection, move)
             return before_counter
@@ -1076,11 +1248,12 @@ class StageController(QObject):
                 frame_counter = self._frame_counter
 
             status = self._query_status(serial_connection)
-            if status is None or status.position is None:
+            position = self._position_for_configured_mode(status)
+            if status is None or position is None or len(position) < 3:
                 raise StageControllerError("Unable to read Z position for autofocus.")
             self._require_homed_axes(status, {"Z"}, allow_relative=True)
-            start_z = float(status.position[2])
-            z_limits = self._axis_limits.get("Z")
+            start_z = float(position[2])
+            z_limits = self._axis_limits_for_configured_mode("Z", status)
             if not z_limits:
                 raise StageControllerError("Z axis limits unavailable.")
             min_z, max_z = z_limits
@@ -1242,11 +1415,11 @@ class StageController(QObject):
             raise StageControllerError("Camera frames are unavailable for calibration.")
 
         start_status = self._query_status(serial_connection)
-        if start_status is None or start_status.position is None:
-            raise StageControllerError("Unable to read machine position for calibration.")
+        origin = self._position_for_configured_mode(start_status)
+        if start_status is None or origin is None:
+            raise StageControllerError("Unable to read position for calibration.")
         self._require_homed_axes(start_status, {"X", "Y"})
 
-        origin = start_status.position
         try:
             mm_x, shift_x_vec = self._calibrate_axis(
                 serial_connection, before_frame, origin, axis="X"
@@ -1297,10 +1470,10 @@ class StageController(QObject):
             if new_frame is None:
                 raise StageControllerError("Camera did not update during calibration.")
             status = self._query_status(serial_connection)
-            if status is None or status.position is None:
+            current = self._position_for_configured_mode(status)
+            if status is None or current is None:
                 raise StageControllerError("Unable to query position during calibration.")
             self._require_homed_axes(status, {axis})
-            current = status.position
             total_mm = current[index] - origin[index]
             shift_x, shift_y = self._estimate_shift(reference_frame, new_frame)
             axis_shift = shift_x if axis == "X" else shift_y
@@ -1318,10 +1491,10 @@ class StageController(QObject):
         self, serial_connection: serial.Serial, origin: tuple[float, float, float]
     ) -> None:
         status = self._query_status(serial_connection)
-        if status is None or status.position is None:
+        current = self._position_for_configured_mode(status)
+        if status is None or current is None:
             return
         self._require_homed_axes(status, {"X", "Y"})
-        current = status.position
         delta_x = origin[0] - current[0]
         delta_y = origin[1] - current[1]
         move = MoveVector(x=delta_x, y=delta_y)
@@ -1343,14 +1516,13 @@ class StageController(QObject):
                     effective_homed = set(self._homed_axes)
                 if (
                     status is not None
-                    and status.position is not None
+                    and self._position_for_configured_mode(status) is not None
                     and effective_homed is not None
                     and "A" in effective_homed
                 ):
-                    idx = self.AXIS_INDEX.get("A")
-                    if idx is None or idx >= len(status.position):
+                    current_a = self._axis_value_for_configured_mode(status, "A")
+                    if current_a is None:
                         raise StageControllerError("A axis position unavailable.")
-                    current_a = float(status.position[idx])
                     if abs(current_a) >= 1e-6:
                         self.status_message.emit("Needles: raising to A zero.")
                         self._send_relative_move(
@@ -1374,13 +1546,10 @@ class StageController(QObject):
                         "Needle down calibration missing; cannot lower."
                     )
                 status = self._query_status(serial_connection)
-                if status is None or status.position is None:
+                current_a = self._axis_value_for_configured_mode(status, "A")
+                if status is None or current_a is None:
                     raise StageControllerError("Unable to read A position for needles.")
                 self._require_homed_axes(status, {"A"})
-                idx = self.AXIS_INDEX.get("A")
-                if idx is None or idx >= len(status.position):
-                    raise StageControllerError("A axis position unavailable.")
-                current_a = float(status.position[idx])
                 delta = float(self._needle_down_offset) - current_a
                 if abs(delta) < 1e-6:
                     self._update_needles_from_a_position(float(self._needle_down_offset))
@@ -1400,6 +1569,7 @@ class StageController(QObject):
         finally:
             with self._task_lock:
                 self._active_thread = None
+            self._start_next_queued_needles_action()
 
     def _run_needles_adjust(self, step_mm: float) -> None:
         action = "adjust"
@@ -1411,7 +1581,7 @@ class StageController(QObject):
                 self.needles_action_finished.emit(True, "Needle position unchanged.", action)
                 return
             status = self._query_status(serial_connection)
-            if status is None or status.position is None:
+            if status is None or self._axis_value_for_configured_mode(status, "A") is None:
                 raise StageControllerError("Unable to read A position for needles.")
             self._require_homed_axes(status, {"A"})
             self._send_relative_move(
@@ -1423,7 +1593,7 @@ class StageController(QObject):
             if current_a is None:
                 raise StageControllerError("Unable to confirm A position after move.")
             self._update_needles_from_a_position(current_a)
-            direction = "lowered" if step_mm * self._needle_lower_direction_sign > 0 else "raised"
+            direction = "lowered" if step_mm < 0 else "raised"
             self.needles_action_finished.emit(
                 True,
                 f"Needles {direction} by {abs(step_mm):.3f} mm.",
@@ -1434,6 +1604,7 @@ class StageController(QObject):
         finally:
             with self._task_lock:
                 self._active_thread = None
+            self._start_next_queued_needles_action()
 
     def _run_oscillation(
         self, mode: str, amplitude_mm: float, feedrate: float, turns_per_sweep: float
@@ -1507,12 +1678,18 @@ class StageController(QObject):
                     self._wait_for_ok(serial_connection)
             except StageControllerError:
                 pass
-            self.status_message.emit(str(exc))
+            with self._task_lock:
+                has_queued_needles_action = bool(self._queued_needles_actions)
+            if not (
+                str(exc) == "Operation cancelled." and has_queued_needles_action
+            ):
+                self.status_message.emit(str(exc))
         finally:
             self._oscillation_active = False
             self.oscillation_state_changed.emit(False, mode)
             with self._task_lock:
                 self._active_thread = None
+            self._start_next_queued_needles_action()
 
     def _update_calibration_from_measurement(
         self,
@@ -1625,9 +1802,9 @@ class StageController(QObject):
         if not self._axis_limits and abs(move.b) < 1e-6:
             return
         status = self._query_status(serial_connection)
-        if status is None or not status.position:
+        positions = self._position_for_configured_mode(status)
+        if status is None or not positions:
             return
-        positions = status.position
         self._ensure_b_axis_zero_reference(status)
         requested_axes = {
             axis for axis, delta in move.items() if abs(delta) >= 1e-6
@@ -1651,7 +1828,7 @@ class StageController(QObject):
                         f"B move {delta:+.3f} exceeds software limit ({-limit:.3f}, {limit:.3f}) relative to B zero."
                     )
                 continue
-            limits = self._axis_limits.get(axis)
+            limits = self._axis_limits_for_configured_mode(axis, status)
             if not limits:
                 continue
             min_value, max_value = limits
@@ -1671,9 +1848,9 @@ class StageController(QObject):
 
     @staticmethod
     def _desired_status_report_mask_for_mode(position_mode: str) -> int:
-        # Keep status reports in a single controller-defined format instead of
-        # flipping $10 in the motion hot path.
-        return 3
+        # FluidNC RtStatus::Position bit selects MPos; without it reports WPos.
+        # Keep buffer reporting enabled in both modes.
+        return 3 if position_mode.strip().lower() == "machine" else 2
 
     @staticmethod
     def _parse_controller_coordinate_offsets(
@@ -2020,7 +2197,7 @@ class StageController(QObject):
             logger.debug(
                 "SERIAL TRACE wait_for_idle status=%s position=%s",
                 None if status is None else status.state,
-                None if status is None else status.position,
+                None if status is None else status.display_position,
             )
             if status and status.state.lower() == "idle":
                 return
@@ -2038,19 +2215,7 @@ class StageController(QObject):
         if status is None:
             return None
         if self._position_reporting_mode == "work":
-            status.display_position = (
-                status.work_position
-                if status.work_position is not None
-                else status.position
-            )
-            if status.position is None:
-                machine_status = self._query_machine_status_snapshot(
-                    serial_connection, timeout=timeout
-                )
-                if machine_status is not None and machine_status.position is not None:
-                    status.position = machine_status.position
-                    if status.display_position is None:
-                        status.display_position = machine_status.position
+            status.display_position = status.work_position
         else:
             status.display_position = status.position
         self._last_stage_state = status.state
@@ -2101,23 +2266,6 @@ class StageController(QObject):
             return status
         return None
 
-    def _query_machine_status_snapshot(
-        self, serial_connection: serial.Serial, timeout: float = 1.5
-    ) -> Optional[_Status]:
-        machine_mask = self._desired_status_report_mask_for_mode("machine")
-        desired_mask = self._desired_status_report_mask_for_mode(
-            self._position_reporting_mode
-        )
-        self._ensure_status_report_mask(serial_connection, machine_mask)
-        try:
-            status = self._read_status_frame(serial_connection, timeout=timeout)
-            if status is not None:
-                status.display_position = status.position
-            return status
-        finally:
-            if desired_mask != machine_mask:
-                self._ensure_status_report_mask(serial_connection, desired_mask)
-
     def _parse_status_line(self, line: str) -> Optional[_Status]:
         match = self.STATUS_PATTERN.search(line)
         if not match:
@@ -2139,43 +2287,43 @@ class StageController(QObject):
                 continue
             key = field_match.group("key")
             value = field_match.group("value")
-            if key == "MPos":
+            if key == "MPos" and self._position_reporting_mode == "machine":
                 machine_position = self._parse_float_tuple(value)
-            elif key == "WPos":
+            elif key == "WPos" and self._position_reporting_mode != "machine":
                 work_position = self._parse_float_tuple(value)
             elif key == "WCO":
                 work_offset = self._parse_float_tuple(value)
 
+        if machine_position is not None and len(machine_position) < 3:
+            return None
+        if work_position is not None and len(work_position) < 3:
+            return None
+        if work_offset is not None and len(work_offset) < 3:
+            return None
+        if self._position_reporting_mode == "machine" and machine_position is None:
+            return None
+        if self._position_reporting_mode != "machine" and work_position is None:
+            return None
+
         coordinate_system = self._active_work_coordinate_system
-        if (
-            work_offset is None
-            and coordinate_system
-            and coordinate_system in self._controller_coordinate_offsets
-        ):
-            work_offset = self._controller_coordinate_offsets.get(coordinate_system)
-        if machine_position is None and work_position is not None and work_offset is not None:
-            machine_position = self._combine_coordinate_vectors(
-                work_position, work_offset, operator="+"
-            )
-        if work_position is None and machine_position is not None and work_offset is not None:
-            work_position = self._combine_coordinate_vectors(
-                machine_position, work_offset, operator="-"
-            )
-        if (
-            work_offset is None
-            and machine_position is not None
-            and work_position is not None
-        ):
-            work_offset = self._combine_coordinate_vectors(
-                machine_position, work_position, operator="-"
-            )
-            if coordinate_system and work_offset is not None:
-                self._controller_coordinate_offsets[coordinate_system] = work_offset
+        if self._position_reporting_mode != "machine":
+            if (
+                work_offset is None
+                and coordinate_system
+                and coordinate_system in self._controller_coordinate_offsets
+            ):
+                work_offset = self._controller_coordinate_offsets.get(coordinate_system)
+        else:
+            coordinate_system = None
 
         return _Status(
             state=state,
             position=machine_position,
-            display_position=work_position if work_position is not None else machine_position,
+            display_position=(
+                machine_position
+                if self._position_reporting_mode == "machine"
+                else work_position
+            ),
             work_position=work_position,
             work_offset=work_offset,
             coordinate_system=coordinate_system,
@@ -2189,21 +2337,57 @@ class StageController(QObject):
             return None
         return values if values else None
 
-    @staticmethod
-    def _combine_coordinate_vectors(
-        left: tuple[float, ...],
-        right: tuple[float, ...],
-        *,
-        operator: str,
-    ) -> tuple[float, ...] | None:
-        size = min(len(left), len(right))
-        if size <= 0:
+    def _require_position_for_absolute_motion(
+        self, status: _Status, *, required_axes: int
+    ) -> tuple[float, ...]:
+        position = self._position_for_configured_mode(status)
+        if position is None or len(position) < required_axes:
+            raise StageControllerError(
+                "Controller did not report a complete position for absolute motion."
+            )
+        return tuple(float(value) for value in position[:required_axes])
+
+    def _position_for_configured_mode(self, status: _Status | None) -> tuple[float, ...] | None:
+        if status is None:
             return None
-        if operator == "+":
-            return tuple(float(left[idx]) + float(right[idx]) for idx in range(size))
-        if operator == "-":
-            return tuple(float(left[idx]) - float(right[idx]) for idx in range(size))
-        raise ValueError(f"Unsupported coordinate operator: {operator}")
+        return (
+            status.position
+            if self._position_reporting_mode == "machine"
+            else status.work_position
+        )
+
+    def _axis_value_for_configured_mode(
+        self, status: _Status | None, axis: str
+    ) -> float | None:
+        position = self._position_for_configured_mode(status)
+        if position is None:
+            return None
+        idx = self.AXIS_INDEX.get(axis.upper())
+        if idx is None or idx >= len(position):
+            return None
+        return float(position[idx])
+
+    def _axis_limits_for_configured_mode(
+        self, axis: str, status: _Status | None
+    ) -> tuple[float, float] | None:
+        limits = self._axis_limits.get(axis)
+        if not limits:
+            return None
+        if self._position_reporting_mode == "machine":
+            return limits
+        idx = self.AXIS_INDEX.get(axis.upper())
+        if idx is None:
+            return limits
+        work_offset = None if status is None else status.work_offset
+        if work_offset is None and self._active_work_coordinate_system:
+            work_offset = self._controller_coordinate_offsets.get(
+                self._active_work_coordinate_system
+            )
+        if work_offset is None or idx >= len(work_offset):
+            return None
+        min_value, max_value = limits
+        offset = float(work_offset[idx])
+        return (float(min_value) - offset, float(max_value) - offset)
 
     def _update_cached_positions(self, status: _Status) -> None:
         if status.coordinate_system:
@@ -2226,35 +2410,31 @@ class StageController(QObject):
     def _ensure_b_axis_zero_reference(self, status: _Status) -> None:
         if self._b_axis_zero_position is not None:
             return
-        if status.position is None:
+        if self._axis_value_for_configured_mode(status, "B") is None:
             return
         self._set_b_axis_zero_reference(status, emit_status=False)
 
     def _set_b_axis_zero_reference(
         self, status: _Status, *, emit_status: bool = True
     ) -> None:
-        if status.position is None:
-            raise StageControllerError("Unable to read B axis position.")
-        idx = self.AXIS_INDEX.get("B")
-        if idx is None or idx >= len(status.position):
+        b_position = self._axis_value_for_configured_mode(status, "B")
+        if b_position is None:
             raise StageControllerError("B axis position unavailable.")
-        self._b_axis_zero_position = float(status.position[idx])
+        self._b_axis_zero_position = b_position
         if emit_status:
             self.status_message.emit(
                 f"B zero reference set to current position ({self._b_axis_zero_position:.3f})."
             )
 
     def _relative_b_position(self, status: _Status) -> float:
-        if status.position is None:
-            raise StageControllerError("B axis position unavailable.")
-        idx = self.AXIS_INDEX.get("B")
-        if idx is None or idx >= len(status.position):
+        b_position = self._axis_value_for_configured_mode(status, "B")
+        if b_position is None:
             raise StageControllerError("B axis position unavailable.")
         self._ensure_b_axis_zero_reference(status)
         zero = self._b_axis_zero_position
         if zero is None:
             raise StageControllerError("B zero reference is not initialized.")
-        return float(status.position[idx]) - zero
+        return b_position - zero
 
     def _resolve_xy_from_center(
         self,
@@ -2309,13 +2489,10 @@ class StageController(QObject):
     def _update_needles_from_status(self, status: _Status) -> None:
         """Update needle state only when A homing is actually known."""
 
-        if status.position is None:
-            return
-        idx = self.AXIS_INDEX.get("A")
-        if idx is None or idx >= len(status.position):
+        a_position = self._axis_value_for_configured_mode(status, "A")
+        if a_position is None:
             return
 
-        a_position = float(status.position[idx])
         self.needle_height_changed.emit(a_position)
 
         effective_homed = status.homed_axes
@@ -2330,15 +2507,48 @@ class StageController(QObject):
     def _read_current_a_position(
         self, serial_connection: serial.Serial
     ) -> Optional[float]:
-        """Read the current machine A coordinate from the controller."""
+        """Read the current A coordinate from the configured controller report mode."""
 
         status = self._query_status(serial_connection)
-        if status is None or status.position is None:
+        if status is None:
+            self._record_a_position_read_failure(
+                "status query returned no complete status frame"
+            )
+            return None
+        position = self._position_for_configured_mode(status)
+        mode_name = "machine" if self._position_reporting_mode == "machine" else "work"
+        if position is None:
+            self._record_a_position_read_failure(
+                f"status has no {mode_name} position: "
+                f"state={status.state!r}, display_position={status.display_position!r}, "
+                f"work_position={status.work_position!r}, work_offset={status.work_offset!r}, "
+                f"coordinate_system={status.coordinate_system!r}"
+            )
             return None
         idx = self.AXIS_INDEX.get("A")
-        if idx is None or idx >= len(status.position):
+        if idx is None or idx >= len(position):
+            self._record_a_position_read_failure(
+                f"{mode_name} position does not include A axis: "
+                f"axis_index={idx!r}, position={position!r}, state={status.state!r}"
+            )
             return None
-        return float(status.position[idx])
+        a_position = float(position[idx])
+        self._last_a_position_read_failure = None
+        logger.debug(
+            "A position read succeeded: A=%.6f, mode=%s, state=%s, position=%r, "
+            "homed_axes=%r, coordinate_system=%r",
+            a_position,
+            mode_name,
+            status.state,
+            position,
+            status.homed_axes,
+            status.coordinate_system,
+        )
+        return a_position
+
+    def _record_a_position_read_failure(self, reason: str) -> None:
+        self._last_a_position_read_failure = reason
+        logger.debug("A position read failed: %s", reason)
 
     def _perform_home_command(
         self, serial_connection: serial.Serial, command: str
@@ -2394,6 +2604,7 @@ class StageController(QObject):
         )
         while not self._cancel_event.is_set():
             self._check_cancelled()
+            self._apply_pending_oscillation_needles_actions(serial_connection)
             remaining = target_offset - current_offset
             if abs(remaining) < 1e-6:
                 direction *= -1.0
@@ -2424,6 +2635,7 @@ class StageController(QObject):
         last_y = 0.0
         while not self._cancel_event.is_set():
             self._check_cancelled()
+            self._apply_pending_oscillation_needles_actions(serial_connection)
             phase += phase_step
             radius = amplitude_mm * 0.5 * (1.0 - float(np.cos(phase)))
             angle = start_angle + (2.0 * turns_per_sweep * phase)
@@ -2436,6 +2648,91 @@ class StageController(QObject):
             )
             last_x = next_x
             last_y = next_y
+
+    def _apply_pending_oscillation_needles_actions(
+        self, serial_connection: serial.Serial
+    ) -> None:
+        """Apply queued A-axis actions inline while oscillation continues."""
+
+        pending: list[tuple[str, float | None]] = []
+        with self._task_lock:
+            while self._oscillation_needles_actions:
+                pending.append(self._oscillation_needles_actions.popleft())
+        for action, step_mm in pending:
+            self._execute_oscillation_needles_action(
+                serial_connection,
+                action,
+                step_mm,
+            )
+
+    def _execute_oscillation_needles_action(
+        self,
+        serial_connection: serial.Serial,
+        action: str,
+        step_mm: float | None,
+    ) -> None:
+        """Execute an A-axis move inline in G91 during oscillation."""
+
+        try:
+            current_a = self._latest_known_a_position()
+            if current_a is None:
+                raise StageControllerError(
+                    "A axis position is unknown; cannot adjust needles during oscillation."
+                )
+            if action == "raise":
+                delta = -current_a
+                if abs(delta) < 1e-6:
+                    self._update_needles_from_a_position(0.0)
+                    self.needles_action_finished.emit(
+                        True,
+                        "Needles already raised.",
+                        action,
+                    )
+                    return
+            elif action == "lower":
+                if self._needle_down_offset is None:
+                    raise StageControllerError(
+                        "Needle down calibration missing; cannot lower."
+                    )
+                delta = float(self._needle_down_offset) - current_a
+                if abs(delta) < 1e-6:
+                    self._update_needles_from_a_position(float(self._needle_down_offset))
+                    self.needles_action_finished.emit(
+                        True,
+                        "Needles already lowered.",
+                        action,
+                    )
+                    return
+            elif action == "adjust":
+                delta = 0.0 if step_mm is None else float(step_mm)
+                if abs(delta) < 1e-6:
+                    self.needles_action_finished.emit(
+                        True,
+                        "Needle position unchanged.",
+                        action,
+                    )
+                    return
+            else:
+                raise StageControllerError(f"Unknown needle action: {action}.")
+
+            self._write_relative_g1_unchecked(
+                serial_connection,
+                MoveVector(a=delta),
+                feedrate=self.DEFAULT_FEEDRATE,
+            )
+            new_a = current_a + delta
+            self._update_cached_axis_position("A", new_a)
+            self._update_needles_from_a_position(new_a)
+            if action == "adjust":
+                direction = "lowered" if delta < 0 else "raised"
+                message = f"Needles {direction} by {abs(delta):.3f} mm."
+            elif action == "raise":
+                message = "Needles raised."
+            else:
+                message = "Needles lowered."
+            self.needles_action_finished.emit(True, message, action)
+        except StageControllerError as exc:
+            self.needles_action_finished.emit(False, str(exc), action)
 
     def _ensure_oscillation_limits(
         self, axis: str, center_position: float, amplitude_mm: float
@@ -2490,14 +2787,11 @@ class StageController(QObject):
         allow_relative: bool = False,
     ) -> None:
         status = self._query_status(serial_connection)
-        if status is None or status.position is None:
+        a_position = self._axis_value_for_configured_mode(status, "A")
+        if status is None or a_position is None:
             raise AxisStateError("Unable to read A axis position.")
         if not allow_missing_homing:
             self._require_homed_axes(status, {"A"}, allow_relative=allow_relative)
-        idx = self.AXIS_INDEX.get("A")
-        if idx is None or idx >= len(status.position):
-            raise AxisStateError("A axis position unavailable.")
-        a_position = float(status.position[idx])
         if abs(a_position) > self.A_ZERO_TOLERANCE:
             raise AxisStateError(f"A axis not at zero (A={a_position:.3f}).")
 
@@ -2543,6 +2837,107 @@ class StageController(QObject):
     def _check_cancelled(self) -> None:
         if self._cancel_event.is_set():
             raise StageControllerError("Operation cancelled.")
+
+    def _queue_needles_action_locked(
+        self, action: str, step_mm: float | None = None
+    ) -> None:
+        """Queue a needle command so it runs immediately after oscillation stops."""
+
+        self._queued_needles_actions.append((action, step_mm))
+        self._cancel_event.set()
+        if action == "raise":
+            label = "Needle raise"
+        elif action == "lower":
+            label = "Needle lower"
+        else:
+            direction = "lower" if (step_mm or 0.0) < 0 else "raise"
+            label = f"Needle {direction} step"
+        self.status_message.emit(f"{label} queued with priority. Stopping oscillation.")
+
+    def _queue_oscillation_needles_action_locked(
+        self, action: str, step_mm: float | None = None
+    ) -> None:
+        """Queue an A-axis move to be injected into the running oscillation."""
+
+        self._oscillation_needles_actions.append((action, step_mm))
+        self.needles_action_started.emit(action)
+        if action == "raise":
+            label = "Needle raise"
+        elif action == "lower":
+            label = "Needle lower"
+        else:
+            direction = "lower" if (step_mm or 0.0) < 0 else "raise"
+            label = f"Needle {direction} step"
+        self.status_message.emit(f"{label} queued during oscillation.")
+
+    def _start_needles_action_locked(
+        self, action: str, step_mm: float | None = None
+    ) -> None:
+        """Start a needle action while the caller owns the task lock."""
+
+        self._cancel_event.clear()
+        if action == "adjust":
+            if step_mm is None:
+                step_mm = 0.0
+            thread = threading.Thread(
+                target=self._run_needles_adjust,
+                args=(float(step_mm),),
+                daemon=True,
+            )
+            self._active_thread = thread
+            self.needles_action_started.emit("adjust")
+            thread.start()
+            return
+        thread = threading.Thread(
+            target=self._run_needles_action,
+            args=(action,),
+            daemon=True,
+        )
+        self._active_thread = thread
+        thread.start()
+
+    def _start_next_queued_needles_action(self) -> None:
+        """Run the next queued needle action after oscillation yields the controller."""
+
+        with self._task_lock:
+            if self._active_thread and self._active_thread.is_alive():
+                return
+            if not self._queued_needles_actions:
+                return
+            action, step_mm = self._queued_needles_actions.popleft()
+            self._start_needles_action_locked(action, step_mm)
+
+    def _latest_known_a_position(self) -> float | None:
+        """Return the best available cached A-axis coordinate."""
+
+        if self._position_reporting_mode != "machine":
+            if self._last_stage_position is not None and len(self._last_stage_position) > 3:
+                return float(self._last_stage_position[3])
+            return None
+        if self._last_machine_position is not None and len(self._last_machine_position) > 3:
+            return float(self._last_machine_position[3])
+        return None
+
+    def _update_cached_axis_position(self, axis: str, value: float) -> None:
+        """Update cached stage coordinates after an inline single-axis move."""
+
+        index = self.AXIS_INDEX.get(axis.upper())
+        if index is None:
+            return
+        if (
+            self._position_reporting_mode == "machine"
+            and self._last_machine_position is not None
+            and len(self._last_machine_position) > index
+        ):
+            machine = list(self._last_machine_position)
+            machine[index] = float(value)
+            self._last_machine_position = tuple(machine)
+        if self._last_stage_position is not None and len(self._last_stage_position) > index:
+            stage = list(self._last_stage_position)
+            stage[index] = float(value)
+            coords = tuple(stage)
+            self._last_stage_position = coords
+            self.stage_position_changed.emit(coords)
 
     def _update_homing_status(self, homed_axes: set[str]) -> None:
         if homed_axes == self._homed_axes:

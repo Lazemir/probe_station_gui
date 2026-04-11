@@ -35,6 +35,13 @@ from probe_station_gui.settings_manager import (
     FeedrateSettings,
     JogSettings,
     KeyBinding,
+    LCR_APERTURE_RATES,
+    LCR_LEVEL_MODES,
+    LCR_MEASUREMENT_FUNCTIONS,
+    LCR_MONITOR_PARAMETERS,
+    LCR_RANGE_MODES,
+    LCR_SOURCE_RESISTANCES_OHM,
+    LCR_TRIGGER_SOURCES,
     LoggingSettings,
     NeedleCalibrationSettings,
     Settings,
@@ -462,6 +469,8 @@ class NeedleCalibrationSettingsWidget(QWidget):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self._chip_position = calibration_settings.chip_position.clone()
+        self._stone_position = calibration_settings.stone_position.clone()
         layout = QFormLayout(self)
         layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
@@ -470,11 +479,125 @@ class NeedleCalibrationSettingsWidget(QWidget):
         self._visa_resource_edit.setText(calibration_settings.visa_resource)
         layout.addRow(QLabel("LCR resource", self), self._visa_resource_edit)
 
+        self._function_combo = QComboBox(self)
+        self._function_combo.addItems(LCR_MEASUREMENT_FUNCTIONS)
+        self._function_combo.setCurrentText(calibration_settings.measurement_function)
+        layout.addRow(QLabel("Measurement function", self), self._function_combo)
+
+        self._range_mode_combo = QComboBox(self)
+        for mode in LCR_RANGE_MODES:
+            label = "Fixed range (HOLD)" if mode == "HOLD" else "Auto range"
+            self._range_mode_combo.addItem(label, mode)
+        range_index = self._range_mode_combo.findData(calibration_settings.range_mode)
+        if range_index >= 0:
+            self._range_mode_combo.setCurrentIndex(range_index)
+        layout.addRow(QLabel("Range mode", self), self._range_mode_combo)
+
+        self._impedance_range_spin = QSpinBox(self)
+        self._impedance_range_spin.setRange(0, 8)
+        self._impedance_range_spin.setSingleStep(1)
+        self._impedance_range_spin.setValue(calibration_settings.impedance_range)
+        layout.addRow(QLabel("Impedance range", self), self._impedance_range_spin)
+
         self._dcr_range_spin = QSpinBox(self)
         self._dcr_range_spin.setRange(0, 8)
         self._dcr_range_spin.setSingleStep(1)
         self._dcr_range_spin.setValue(calibration_settings.dcr_range)
         layout.addRow(QLabel("DCR range", self), self._dcr_range_spin)
+
+        self._frequency_spin = QDoubleSpinBox(self)
+        self._frequency_spin.setDecimals(3)
+        self._frequency_spin.setRange(10.0, 300_000.0)
+        self._frequency_spin.setSingleStep(100.0)
+        self._frequency_spin.setSuffix(" Hz")
+        self._frequency_spin.setValue(calibration_settings.frequency_hz)
+        layout.addRow(QLabel("AC frequency", self), self._frequency_spin)
+
+        self._level_mode_combo = QComboBox(self)
+        self._level_mode_combo.addItem("Voltage", "VOLTAGE")
+        self._level_mode_combo.addItem("Current", "CURRENT")
+        level_mode_index = self._level_mode_combo.findData(
+            calibration_settings.level_mode
+        )
+        if level_mode_index >= 0:
+            self._level_mode_combo.setCurrentIndex(level_mode_index)
+        layout.addRow(QLabel("AC level mode", self), self._level_mode_combo)
+
+        self._voltage_level_spin = QDoubleSpinBox(self)
+        self._voltage_level_spin.setDecimals(4)
+        self._voltage_level_spin.setRange(0.01, 2.0)
+        self._voltage_level_spin.setSingleStep(0.01)
+        self._voltage_level_spin.setSuffix(" V")
+        self._voltage_level_spin.setValue(calibration_settings.voltage_level_v)
+        layout.addRow(QLabel("AC voltage level", self), self._voltage_level_spin)
+
+        self._current_level_spin = QDoubleSpinBox(self)
+        self._current_level_spin.setDecimals(6)
+        self._current_level_spin.setRange(0.0001, 0.02)
+        self._current_level_spin.setSingleStep(0.0001)
+        self._current_level_spin.setSuffix(" A")
+        self._current_level_spin.setValue(calibration_settings.current_level_a)
+        layout.addRow(QLabel("AC current level", self), self._current_level_spin)
+
+        self._source_resistance_combo = QComboBox(self)
+        for resistance_ohm in LCR_SOURCE_RESISTANCES_OHM:
+            self._source_resistance_combo.addItem(f"{resistance_ohm} ohm", resistance_ohm)
+        source_index = self._source_resistance_combo.findData(
+            calibration_settings.source_resistance_ohm
+        )
+        if source_index >= 0:
+            self._source_resistance_combo.setCurrentIndex(source_index)
+        layout.addRow(QLabel("Source resistance", self), self._source_resistance_combo)
+
+        self._aperture_combo = QComboBox(self)
+        self._aperture_combo.addItems(LCR_APERTURE_RATES)
+        self._aperture_combo.setCurrentText(calibration_settings.aperture_rate)
+        layout.addRow(QLabel("Measurement speed", self), self._aperture_combo)
+
+        self._averages_spin = QSpinBox(self)
+        self._averages_spin.setRange(1, 256)
+        self._averages_spin.setSingleStep(1)
+        self._averages_spin.setValue(calibration_settings.aperture_averages)
+        layout.addRow(QLabel("Averaging factor", self), self._averages_spin)
+
+        self._trigger_source_combo = QComboBox(self)
+        self._trigger_source_combo.addItems(LCR_TRIGGER_SOURCES)
+        self._trigger_source_combo.setCurrentText(calibration_settings.trigger_source)
+        layout.addRow(QLabel("Trigger source", self), self._trigger_source_combo)
+
+        self._trigger_delay_spin = QDoubleSpinBox(self)
+        self._trigger_delay_spin.setDecimals(3)
+        self._trigger_delay_spin.setRange(0.0, 60.0)
+        self._trigger_delay_spin.setSingleStep(0.01)
+        self._trigger_delay_spin.setSuffix(" s")
+        self._trigger_delay_spin.setValue(calibration_settings.trigger_delay_s)
+        layout.addRow(QLabel("Trigger delay", self), self._trigger_delay_spin)
+
+        self._bias_checkbox = QCheckBox("Enable DC bias", self)
+        self._bias_checkbox.setChecked(calibration_settings.bias_enabled)
+        layout.addRow(self._bias_checkbox)
+
+        self._bias_level_spin = QDoubleSpinBox(self)
+        self._bias_level_spin.setDecimals(3)
+        self._bias_level_spin.setRange(-2.5, 2.5)
+        self._bias_level_spin.setSingleStep(0.01)
+        self._bias_level_spin.setSuffix(" V")
+        self._bias_level_spin.setValue(calibration_settings.bias_level_v)
+        layout.addRow(QLabel("DC bias level", self), self._bias_level_spin)
+
+        self._monitor1_combo = QComboBox(self)
+        self._monitor1_combo.addItems(LCR_MONITOR_PARAMETERS)
+        self._monitor1_combo.setCurrentText(calibration_settings.monitor1)
+        layout.addRow(QLabel("Monitor 1", self), self._monitor1_combo)
+
+        self._monitor2_combo = QComboBox(self)
+        self._monitor2_combo.addItems(LCR_MONITOR_PARAMETERS)
+        self._monitor2_combo.setCurrentText(calibration_settings.monitor2)
+        layout.addRow(QLabel("Monitor 2", self), self._monitor2_combo)
+
+        self._alc_checkbox = QCheckBox("Enable ALC", self)
+        self._alc_checkbox.setChecked(calibration_settings.alc_enabled)
+        layout.addRow(self._alc_checkbox)
 
         self._short_threshold_spin = QDoubleSpinBox(self)
         self._short_threshold_spin.setDecimals(3)
@@ -492,16 +615,6 @@ class NeedleCalibrationSettingsWidget(QWidget):
         self._poll_interval_spin.setValue(calibration_settings.poll_interval_ms)
         layout.addRow(QLabel("Polling interval", self), self._poll_interval_spin)
 
-        self._lower_direction_combo = QComboBox(self)
-        self._lower_direction_combo.addItem("Negative A", "negative")
-        self._lower_direction_combo.addItem("Positive A", "positive")
-        current_index = self._lower_direction_combo.findData(
-            calibration_settings.lower_direction
-        )
-        if current_index >= 0:
-            self._lower_direction_combo.setCurrentIndex(current_index)
-        layout.addRow(QLabel("Lowering direction", self), self._lower_direction_combo)
-
         self._configured_checkbox = QCheckBox("Calibrated down height is configured", self)
         self._configured_checkbox.setChecked(
             calibration_settings.down_position_configured
@@ -516,19 +629,71 @@ class NeedleCalibrationSettingsWidget(QWidget):
         self._down_position_spin.setValue(calibration_settings.down_position_mm)
         layout.addRow(QLabel("Calibrated down A position", self), self._down_position_spin)
 
+        self._function_combo.currentTextChanged.connect(
+            lambda _text: self._update_lcr_control_state()
+        )
+        self._range_mode_combo.currentIndexChanged.connect(
+            lambda _index: self._update_lcr_control_state()
+        )
+        self._level_mode_combo.currentIndexChanged.connect(
+            lambda _index: self._update_lcr_control_state()
+        )
+        self._bias_checkbox.toggled.connect(
+            lambda _checked: self._update_lcr_control_state()
+        )
+        self._update_lcr_control_state()
+
+    def _update_lcr_control_state(self) -> None:
+        function = self._function_combo.currentText()
+        range_mode = str(self._range_mode_combo.currentData() or "HOLD")
+        level_mode = str(self._level_mode_combo.currentData() or "VOLTAGE")
+        fixed_range = range_mode == "HOLD"
+        dcr_mode = function == "DCR"
+        self._dcr_range_spin.setEnabled(fixed_range and dcr_mode)
+        self._impedance_range_spin.setEnabled(fixed_range and not dcr_mode)
+        self._frequency_spin.setEnabled(not dcr_mode)
+        self._level_mode_combo.setEnabled(not dcr_mode)
+        self._voltage_level_spin.setEnabled(not dcr_mode and level_mode == "VOLTAGE")
+        self._current_level_spin.setEnabled(not dcr_mode and level_mode == "CURRENT")
+        self._source_resistance_combo.setEnabled(not dcr_mode)
+        self._bias_checkbox.setEnabled(not dcr_mode)
+        self._bias_level_spin.setEnabled(not dcr_mode and self._bias_checkbox.isChecked())
+        self._monitor1_combo.setEnabled(not dcr_mode)
+        self._monitor2_combo.setEnabled(not dcr_mode)
+        self._alc_checkbox.setEnabled(not dcr_mode)
+
     def to_settings(self, settings: Settings) -> None:
         """Persist the widget state into the provided settings object."""
 
         settings.needle_calibration = NeedleCalibrationSettings(
             visa_resource=self._visa_resource_edit.text().strip(),
+            measurement_function=self._function_combo.currentText(),
+            range_mode=str(self._range_mode_combo.currentData() or "HOLD"),
+            auto_range_enabled=str(self._range_mode_combo.currentData() or "") == "AUTO",
+            impedance_range=int(self._impedance_range_spin.value()),
             dcr_range=int(self._dcr_range_spin.value()),
+            frequency_hz=self._frequency_spin.value(),
+            level_mode=str(self._level_mode_combo.currentData() or "VOLTAGE"),
+            voltage_level_v=self._voltage_level_spin.value(),
+            current_level_a=self._current_level_spin.value(),
+            source_resistance_ohm=int(
+                self._source_resistance_combo.currentData() or 30
+            ),
+            aperture_rate=self._aperture_combo.currentText(),
+            aperture_averages=int(self._averages_spin.value()),
+            trigger_source=self._trigger_source_combo.currentText(),
+            trigger_delay_s=self._trigger_delay_spin.value(),
+            bias_enabled=self._bias_checkbox.isChecked(),
+            bias_level_v=self._bias_level_spin.value(),
+            monitor1=self._monitor1_combo.currentText(),
+            monitor2=self._monitor2_combo.currentText(),
+            alc_enabled=self._alc_checkbox.isChecked(),
             short_threshold_ohm=self._short_threshold_spin.value(),
             poll_interval_ms=int(self._poll_interval_spin.value()),
-            lower_direction=str(
-                self._lower_direction_combo.currentData() or "negative"
-            ),
             down_position_mm=self._down_position_spin.value(),
             down_position_configured=self._configured_checkbox.isChecked(),
+            chip_position=self._chip_position.clone(),
+            stone_position=self._stone_position.clone(),
         )
 
 
@@ -630,12 +795,15 @@ class CoordinateSystemSettingsWidget(QWidget):
 class SettingsDialog(QDialog):
     """Main settings dialog with tabbed sections."""
 
+    settings_applied = Signal(object)
+
     def __init__(self, settings: Settings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.setModal(True)
         self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
         self._settings = settings.clone()
+        self._applied_once = False
 
         root_layout = QVBoxLayout(self)
         self._tabs = QTabWidget(self)
@@ -656,21 +824,42 @@ class SettingsDialog(QDialog):
         self._tabs.addTab(self._needle_calibration_tab, "Needles")
         self._tabs.addTab(self._logging_tab, "Logging")
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel, self)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Save | QDialogButtonBox.Apply | QDialogButtonBox.Cancel,
+            self,
+        )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+        apply_button = buttons.button(QDialogButtonBox.Apply)
+        if apply_button is not None:
+            apply_button.clicked.connect(self._apply_without_closing)
         root_layout.addWidget(buttons)
 
     def accept(self) -> None:  # type: ignore[override]
+        self._collect_settings()
+        self._applied_once = True
+        self.settings_applied.emit(self._settings.clone())
+        super().accept()
+
+    def _apply_without_closing(self) -> None:
+        self._collect_settings()
+        self._applied_once = True
+        self.settings_applied.emit(self._settings.clone())
+
+    def _collect_settings(self) -> None:
         self._controls_tab.to_settings(self._settings)
         self._jog_tab.to_settings(self._settings)
         self._coordinate_system_tab.to_settings(self._settings)
         self._needle_calibration_tab.to_settings(self._settings)
         self._logging_tab.to_settings(self._settings.logging)
-        super().accept()
 
     def result_settings(self) -> Settings:
         """Return a clone of the adjusted settings."""
 
         return self._settings.clone()
+
+    def was_applied(self) -> bool:
+        """Return True when settings were applied at least once."""
+
+        return self._applied_once
 

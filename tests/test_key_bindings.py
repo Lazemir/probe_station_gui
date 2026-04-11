@@ -59,6 +59,9 @@ settings_manager = _load_module(
     "settings_manager_test", "probe_station_gui/settings_manager.py"
 )
 KeyBinding = settings_manager.KeyBinding
+NeedleCalibrationSettings = settings_manager.NeedleCalibrationSettings
+OscillationSettings = settings_manager.OscillationSettings
+SavedStagePositionSettings = settings_manager.SavedStagePositionSettings
 derive_native_scan_code_from_qt_key = qt_compat.derive_native_scan_code_from_qt_key
 
 
@@ -82,6 +85,69 @@ class KeyBindingRoundTripTest(unittest.TestCase):
             self.assertGreater(scan_code, 0)
         else:
             self.assertEqual(scan_code, 0)
+
+
+class NeedleCalibrationBookmarkTest(unittest.TestCase):
+    def test_clone_preserves_chip_and_stone_positions(self) -> None:
+        settings = NeedleCalibrationSettings(
+            chip_position=SavedStagePositionSettings(
+                x_mm=1.0, y_mm=2.0, z_mm=3.0, configured=True
+            ),
+            stone_position=SavedStagePositionSettings(
+                x_mm=4.0, y_mm=5.0, z_mm=6.0, configured=True
+            ),
+        )
+
+        restored = settings.clone()
+
+        self.assertEqual(restored.chip_position, settings.chip_position)
+        self.assertEqual(restored.stone_position, settings.stone_position)
+
+    def test_lcr_settings_round_trip(self) -> None:
+        settings = NeedleCalibrationSettings(
+            measurement_function="Cp-Rp",
+            range_mode="AUTO",
+            auto_range_enabled=True,
+            impedance_range=2,
+            dcr_range=5,
+            frequency_hz=1234.0,
+            level_mode="CURRENT",
+            voltage_level_v=0.05,
+            current_level_a=0.001,
+            source_resistance_ohm=100,
+            aperture_rate="SLOW",
+            aperture_averages=16,
+            trigger_source="BUS",
+            trigger_delay_s=0.25,
+            bias_enabled=True,
+            bias_level_v=1.5,
+            monitor1="R",
+            monitor2="X",
+            alc_enabled=True,
+        )
+
+        restored = settings.to_dict()
+
+        self.assertEqual(restored["measurement_function"], settings.measurement_function)
+        self.assertEqual(restored["range_mode"], settings.range_mode)
+        self.assertEqual(restored["impedance_range"], settings.impedance_range)
+        self.assertEqual(restored["dcr_range"], settings.dcr_range)
+        self.assertEqual(restored["level_mode"], settings.level_mode)
+        self.assertEqual(restored["source_resistance_ohm"], settings.source_resistance_ohm)
+        self.assertEqual(restored["monitor1"], settings.monitor1)
+        self.assertEqual(restored["monitor2"], settings.monitor2)
+
+    def test_oscillation_settings_round_trip(self) -> None:
+        settings = OscillationSettings(
+            mode="SPIRAL",
+            amplitude_mm=0.75,
+            feedrate_mm_min=240.0,
+            turns_per_sweep=4.5,
+        )
+
+        restored = OscillationSettings(**settings.to_dict())
+
+        self.assertEqual(restored, settings)
 
 
 if __name__ == "__main__":

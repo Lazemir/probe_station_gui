@@ -44,6 +44,47 @@ WORK_COORDINATE_SYSTEMS: tuple[str, ...] = (
     "G59.3",
 )
 
+LCR_MEASUREMENT_FUNCTIONS: tuple[str, ...] = (
+    "Cs-Rs",
+    "Cs-D",
+    "Cp-Rp",
+    "Cp-D",
+    "Lp-Rp",
+    "Lp-Q",
+    "Ls-Rs",
+    "Ls-Q",
+    "Rs-Q",
+    "Rp-Q",
+    "R-X",
+    "DCR",
+    "Z-thr",
+    "Z-thd",
+    "Z-D",
+    "Z-Q",
+)
+LCR_RANGE_MODES: tuple[str, ...] = ("HOLD", "AUTO")
+LCR_LEVEL_MODES: tuple[str, ...] = ("VOLTAGE", "CURRENT")
+LCR_APERTURE_RATES: tuple[str, ...] = ("FAST", "MED", "SLOW")
+LCR_TRIGGER_SOURCES: tuple[str, ...] = ("INT", "MAN", "EXT", "BUS")
+LCR_SOURCE_RESISTANCES_OHM: tuple[int, ...] = (30, 50, 100)
+LCR_MONITOR_PARAMETERS: tuple[str, ...] = (
+    "OFF",
+    "Z",
+    "D",
+    "Q",
+    "THR",
+    "THD",
+    "R",
+    "X",
+    "G",
+    "B",
+    "Y",
+    "ABS",
+    "PER",
+    "VAC",
+    "IAC",
+)
+
 
 @dataclass(eq=True, frozen=True)
 class KeyBinding:
@@ -124,6 +165,36 @@ class FeedrateSettings:
 
 
 @dataclass
+class OscillationSettings:
+    """Persisted defaults for the oscillation panel."""
+
+    mode: str = "X"
+    amplitude_mm: float = 0.5
+    feedrate_mm_min: float = 120.0
+    turns_per_sweep: float = 3.0
+
+    def clone(self) -> "OscillationSettings":
+        """Return a copy of the oscillation configuration."""
+
+        return OscillationSettings(
+            mode=self.mode,
+            amplitude_mm=self.amplitude_mm,
+            feedrate_mm_min=self.feedrate_mm_min,
+            turns_per_sweep=self.turns_per_sweep,
+        )
+
+    def to_dict(self) -> dict[str, float | str]:
+        """Serialize the oscillation preferences."""
+
+        return {
+            "mode": self.mode,
+            "amplitude_mm": self.amplitude_mm,
+            "feedrate_mm_min": self.feedrate_mm_min,
+            "turns_per_sweep": self.turns_per_sweep,
+        }
+
+
+@dataclass
 class JogSettings:
     """Configuration for joystick jog distances."""
 
@@ -148,41 +219,132 @@ class JogSettings:
 
 
 @dataclass
+class SavedStagePositionSettings:
+    """A persisted XYZ bookmark used by calibration workflows."""
+
+    x_mm: float = 0.0
+    y_mm: float = 0.0
+    z_mm: float = 0.0
+    configured: bool = False
+
+    def clone(self) -> "SavedStagePositionSettings":
+        """Return a copy of the saved XYZ bookmark."""
+
+        return SavedStagePositionSettings(
+            x_mm=self.x_mm,
+            y_mm=self.y_mm,
+            z_mm=self.z_mm,
+            configured=self.configured,
+        )
+
+    def to_dict(self) -> dict[str, float | bool]:
+        """Serialize the saved XYZ bookmark."""
+
+        return {
+            "x_mm": self.x_mm,
+            "y_mm": self.y_mm,
+            "z_mm": self.z_mm,
+            "configured": self.configured,
+        }
+
+
+@dataclass
 class NeedleCalibrationSettings:
     """Configuration for needle calibration and the external LCR meter."""
 
     visa_resource: str = ""
+    measurement_function: str = "DCR"
+    range_mode: str = "HOLD"
+    auto_range_enabled: bool = False
+    impedance_range: int = 3
     dcr_range: int = 3
+    frequency_hz: float = 1000.0
+    level_mode: str = "VOLTAGE"
+    voltage_level_v: float = 0.01
+    current_level_a: float = 0.0001
+    source_resistance_ohm: int = 30
+    aperture_rate: str = "FAST"
+    aperture_averages: int = 1
+    trigger_source: str = "INT"
+    trigger_delay_s: float = 0.0
+    bias_enabled: bool = False
+    bias_level_v: float = 0.0
+    monitor1: str = "OFF"
+    monitor2: str = "OFF"
+    alc_enabled: bool = False
     short_threshold_ohm: float = 10.0
     poll_interval_ms: int = 250
-    lower_direction: str = "negative"
     down_position_mm: float = 0.0
     down_position_configured: bool = False
+    chip_position: SavedStagePositionSettings = field(
+        default_factory=SavedStagePositionSettings
+    )
+    stone_position: SavedStagePositionSettings = field(
+        default_factory=SavedStagePositionSettings
+    )
 
     def clone(self) -> "NeedleCalibrationSettings":
         """Return a copy of the needle calibration settings."""
 
         return NeedleCalibrationSettings(
             visa_resource=self.visa_resource,
+            measurement_function=self.measurement_function,
+            range_mode=self.range_mode,
+            auto_range_enabled=self.auto_range_enabled,
+            impedance_range=self.impedance_range,
             dcr_range=self.dcr_range,
+            frequency_hz=self.frequency_hz,
+            level_mode=self.level_mode,
+            voltage_level_v=self.voltage_level_v,
+            current_level_a=self.current_level_a,
+            source_resistance_ohm=self.source_resistance_ohm,
+            aperture_rate=self.aperture_rate,
+            aperture_averages=self.aperture_averages,
+            trigger_source=self.trigger_source,
+            trigger_delay_s=self.trigger_delay_s,
+            bias_enabled=self.bias_enabled,
+            bias_level_v=self.bias_level_v,
+            monitor1=self.monitor1,
+            monitor2=self.monitor2,
+            alc_enabled=self.alc_enabled,
             short_threshold_ohm=self.short_threshold_ohm,
             poll_interval_ms=self.poll_interval_ms,
-            lower_direction=self.lower_direction,
             down_position_mm=self.down_position_mm,
             down_position_configured=self.down_position_configured,
+            chip_position=self.chip_position.clone(),
+            stone_position=self.stone_position.clone(),
         )
 
-    def to_dict(self) -> dict[str, float | int | str | bool]:
+    def to_dict(self) -> dict[str, float | int | str | bool | dict[str, float | bool]]:
         """Serialize the needle calibration preferences."""
 
         return {
             "visa_resource": self.visa_resource,
+            "measurement_function": self.measurement_function,
+            "range_mode": self.range_mode,
+            "auto_range_enabled": self.auto_range_enabled,
+            "impedance_range": self.impedance_range,
             "dcr_range": self.dcr_range,
+            "frequency_hz": self.frequency_hz,
+            "level_mode": self.level_mode,
+            "voltage_level_v": self.voltage_level_v,
+            "current_level_a": self.current_level_a,
+            "source_resistance_ohm": self.source_resistance_ohm,
+            "aperture_rate": self.aperture_rate,
+            "aperture_averages": self.aperture_averages,
+            "trigger_source": self.trigger_source,
+            "trigger_delay_s": self.trigger_delay_s,
+            "bias_enabled": self.bias_enabled,
+            "bias_level_v": self.bias_level_v,
+            "monitor1": self.monitor1,
+            "monitor2": self.monitor2,
+            "alc_enabled": self.alc_enabled,
             "short_threshold_ohm": self.short_threshold_ohm,
             "poll_interval_ms": self.poll_interval_ms,
-            "lower_direction": self.lower_direction,
             "down_position_mm": self.down_position_mm,
             "down_position_configured": self.down_position_configured,
+            "chip_position": self.chip_position.to_dict(),
+            "stone_position": self.stone_position.to_dict(),
         }
 
 
@@ -220,6 +382,7 @@ class Settings:
     controls: Dict[str, List[KeyBinding]] = field(default_factory=dict)
     logging: LoggingSettings = field(default_factory=LoggingSettings)
     feedrates: FeedrateSettings = field(default_factory=FeedrateSettings)
+    oscillation: OscillationSettings = field(default_factory=OscillationSettings)
     jog: JogSettings = field(default_factory=JogSettings)
     needle_calibration: NeedleCalibrationSettings = field(
         default_factory=NeedleCalibrationSettings
@@ -236,6 +399,7 @@ class Settings:
             controls={key: list(value) for key, value in self.controls.items()},
             logging=self.logging.clone(),
             feedrates=self.feedrates.clone(),
+            oscillation=self.oscillation.clone(),
             jog=self.jog.clone(),
             needle_calibration=self.needle_calibration.clone(),
             coordinate_system=self.coordinate_system.clone(),
@@ -261,6 +425,7 @@ class Settings:
                     "default": self.feedrates.rotary.default,
                 },
             },
+            "oscillation": self.oscillation.to_dict(),
             "jog": self.jog.to_dict(),
             "needle_calibration": self.needle_calibration.to_dict(),
             "coordinate_system": self.coordinate_system.to_dict(),
@@ -291,12 +456,32 @@ class SettingsManager:
         360.0,
     )
     DEFAULT_FEEDRATE_DEFAULT: float = 1.0
+    DEFAULT_OSCILLATION_MODE: str = "X"
+    DEFAULT_OSCILLATION_AMPLITUDE_MM: float = 0.5
+    DEFAULT_OSCILLATION_FEEDRATE_MM_MIN: float = 120.0
+    DEFAULT_OSCILLATION_TURNS_PER_SWEEP: float = 3.0
     DEFAULT_LINEAR_JOG_DISTANCE_MM: float = 25.0
     DEFAULT_ROTARY_JOG_DISTANCE_DEG: float = 5.0
+    DEFAULT_LCR_AUTO_RANGE_ENABLED: bool = False
+    DEFAULT_LCR_MEASUREMENT_FUNCTION: str = "DCR"
+    DEFAULT_LCR_RANGE_MODE: str = "HOLD"
+    DEFAULT_LCR_IMPEDANCE_RANGE: int = 3
     DEFAULT_LCR_DCR_RANGE: int = 3
+    DEFAULT_LCR_FREQUENCY_HZ: float = 1000.0
+    DEFAULT_LCR_LEVEL_MODE: str = "VOLTAGE"
+    DEFAULT_LCR_VOLTAGE_LEVEL_V: float = 0.01
+    DEFAULT_LCR_CURRENT_LEVEL_A: float = 0.0001
+    DEFAULT_LCR_SOURCE_RESISTANCE_OHM: int = 30
+    DEFAULT_LCR_APERTURE_RATE: str = "FAST"
+    DEFAULT_LCR_APERTURE_AVERAGES: int = 1
+    DEFAULT_LCR_TRIGGER_SOURCE: str = "INT"
+    DEFAULT_LCR_TRIGGER_DELAY_S: float = 0.0
+    DEFAULT_LCR_BIAS_ENABLED: bool = False
+    DEFAULT_LCR_BIAS_LEVEL_V: float = 0.0
+    DEFAULT_LCR_MONITOR: str = "OFF"
+    DEFAULT_LCR_ALC_ENABLED: bool = False
     DEFAULT_SHORT_THRESHOLD_OHM: float = 10.0
     DEFAULT_LCR_POLL_INTERVAL_MS: int = 250
-    DEFAULT_LOWER_DIRECTION: str = "negative"
     DEFAULT_POSITION_MODE: str = "work"
     DEFAULT_COORDINATE_STARTUP_MODE: str = "controller"
     DEFAULT_COORDINATE_SYSTEM: str = "G54"
@@ -536,32 +721,122 @@ class SettingsManager:
                 "rotary_distance_deg", self.DEFAULT_ROTARY_JOG_DISTANCE_DEG
             )
 
+        oscillation_section = data.get("oscillation")
+        if not isinstance(oscillation_section, dict):
+            oscillation_section = {
+                "mode": self.DEFAULT_OSCILLATION_MODE,
+                "amplitude_mm": self.DEFAULT_OSCILLATION_AMPLITUDE_MM,
+                "feedrate_mm_min": self.DEFAULT_OSCILLATION_FEEDRATE_MM_MIN,
+                "turns_per_sweep": self.DEFAULT_OSCILLATION_TURNS_PER_SWEEP,
+            }
+            data["oscillation"] = oscillation_section
+        else:
+            oscillation_section.setdefault("mode", self.DEFAULT_OSCILLATION_MODE)
+            oscillation_section.setdefault(
+                "amplitude_mm", self.DEFAULT_OSCILLATION_AMPLITUDE_MM
+            )
+            oscillation_section.setdefault(
+                "feedrate_mm_min", self.DEFAULT_OSCILLATION_FEEDRATE_MM_MIN
+            )
+            oscillation_section.setdefault(
+                "turns_per_sweep", self.DEFAULT_OSCILLATION_TURNS_PER_SWEEP
+            )
+
         needle_section = data.get("needle_calibration")
         if not isinstance(needle_section, dict):
             needle_section = {
                 "visa_resource": "",
+                "measurement_function": self.DEFAULT_LCR_MEASUREMENT_FUNCTION,
+                "range_mode": self.DEFAULT_LCR_RANGE_MODE,
+                "auto_range_enabled": self.DEFAULT_LCR_AUTO_RANGE_ENABLED,
+                "impedance_range": self.DEFAULT_LCR_IMPEDANCE_RANGE,
                 "dcr_range": self.DEFAULT_LCR_DCR_RANGE,
+                "frequency_hz": self.DEFAULT_LCR_FREQUENCY_HZ,
+                "level_mode": self.DEFAULT_LCR_LEVEL_MODE,
+                "voltage_level_v": self.DEFAULT_LCR_VOLTAGE_LEVEL_V,
+                "current_level_a": self.DEFAULT_LCR_CURRENT_LEVEL_A,
+                "source_resistance_ohm": self.DEFAULT_LCR_SOURCE_RESISTANCE_OHM,
+                "aperture_rate": self.DEFAULT_LCR_APERTURE_RATE,
+                "aperture_averages": self.DEFAULT_LCR_APERTURE_AVERAGES,
+                "trigger_source": self.DEFAULT_LCR_TRIGGER_SOURCE,
+                "trigger_delay_s": self.DEFAULT_LCR_TRIGGER_DELAY_S,
+                "bias_enabled": self.DEFAULT_LCR_BIAS_ENABLED,
+                "bias_level_v": self.DEFAULT_LCR_BIAS_LEVEL_V,
+                "monitor1": self.DEFAULT_LCR_MONITOR,
+                "monitor2": self.DEFAULT_LCR_MONITOR,
+                "alc_enabled": self.DEFAULT_LCR_ALC_ENABLED,
                 "short_threshold_ohm": self.DEFAULT_SHORT_THRESHOLD_OHM,
                 "poll_interval_ms": self.DEFAULT_LCR_POLL_INTERVAL_MS,
-                "lower_direction": self.DEFAULT_LOWER_DIRECTION,
                 "down_position_mm": 0.0,
                 "down_position_configured": False,
+                "chip_position": {
+                    "x_mm": 0.0,
+                    "y_mm": 0.0,
+                    "z_mm": 0.0,
+                    "configured": False,
+                },
+                "stone_position": {
+                    "x_mm": 0.0,
+                    "y_mm": 0.0,
+                    "z_mm": 0.0,
+                    "configured": False,
+                },
             }
             data["needle_calibration"] = needle_section
         else:
             needle_section.setdefault("visa_resource", "")
+            needle_section.setdefault(
+                "measurement_function", self.DEFAULT_LCR_MEASUREMENT_FUNCTION
+            )
+            needle_section.setdefault("range_mode", self.DEFAULT_LCR_RANGE_MODE)
+            needle_section.setdefault(
+                "auto_range_enabled", self.DEFAULT_LCR_AUTO_RANGE_ENABLED
+            )
+            needle_section.setdefault(
+                "impedance_range", self.DEFAULT_LCR_IMPEDANCE_RANGE
+            )
             needle_section.setdefault("dcr_range", self.DEFAULT_LCR_DCR_RANGE)
+            needle_section.setdefault("frequency_hz", self.DEFAULT_LCR_FREQUENCY_HZ)
+            needle_section.setdefault("level_mode", self.DEFAULT_LCR_LEVEL_MODE)
+            needle_section.setdefault(
+                "voltage_level_v", self.DEFAULT_LCR_VOLTAGE_LEVEL_V
+            )
+            needle_section.setdefault(
+                "current_level_a", self.DEFAULT_LCR_CURRENT_LEVEL_A
+            )
+            needle_section.setdefault(
+                "source_resistance_ohm", self.DEFAULT_LCR_SOURCE_RESISTANCE_OHM
+            )
+            needle_section.setdefault("aperture_rate", self.DEFAULT_LCR_APERTURE_RATE)
+            needle_section.setdefault(
+                "aperture_averages", self.DEFAULT_LCR_APERTURE_AVERAGES
+            )
+            needle_section.setdefault("trigger_source", self.DEFAULT_LCR_TRIGGER_SOURCE)
+            needle_section.setdefault(
+                "trigger_delay_s", self.DEFAULT_LCR_TRIGGER_DELAY_S
+            )
+            needle_section.setdefault("bias_enabled", self.DEFAULT_LCR_BIAS_ENABLED)
+            needle_section.setdefault("bias_level_v", self.DEFAULT_LCR_BIAS_LEVEL_V)
+            needle_section.setdefault("monitor1", self.DEFAULT_LCR_MONITOR)
+            needle_section.setdefault("monitor2", self.DEFAULT_LCR_MONITOR)
+            needle_section.setdefault("alc_enabled", self.DEFAULT_LCR_ALC_ENABLED)
             needle_section.setdefault(
                 "short_threshold_ohm", self.DEFAULT_SHORT_THRESHOLD_OHM
             )
             needle_section.setdefault(
                 "poll_interval_ms", self.DEFAULT_LCR_POLL_INTERVAL_MS
             )
-            needle_section.setdefault(
-                "lower_direction", self.DEFAULT_LOWER_DIRECTION
-            )
             needle_section.setdefault("down_position_mm", 0.0)
             needle_section.setdefault("down_position_configured", False)
+            for key in ("chip_position", "stone_position"):
+                bookmark = needle_section.get(key)
+                if not isinstance(bookmark, dict):
+                    bookmark = {}
+                    needle_section[key] = bookmark
+                bookmark.setdefault("x_mm", 0.0)
+                bookmark.setdefault("y_mm", 0.0)
+                bookmark.setdefault("z_mm", 0.0)
+                bookmark.setdefault("configured", False)
 
         coordinate_section = data.get("coordinate_system")
         if not isinstance(coordinate_section, dict):
@@ -621,6 +896,7 @@ class SettingsManager:
         feedrates_raw = raw.get("feedrates") if isinstance(raw, dict) else None
         legacy_presets = raw.get("feedrate_presets") if isinstance(raw, dict) else None
         feedrates = self._parse_feedrates(feedrates_raw, legacy_presets)
+        oscillation_raw = raw.get("oscillation") if isinstance(raw, dict) else None
         jog_raw = raw.get("jog") if isinstance(raw, dict) else None
         needle_calibration_raw = (
             raw.get("needle_calibration") if isinstance(raw, dict) else None
@@ -637,6 +913,7 @@ class SettingsManager:
             controls=controls,
             logging=logging_settings,
             feedrates=feedrates,
+            oscillation=self._parse_oscillation(oscillation_raw),
             jog=self._parse_jog(jog_raw),
             needle_calibration=self._parse_needle_calibration(needle_calibration_raw),
             coordinate_system=self._parse_coordinate_system(coordinate_system_raw),
@@ -693,27 +970,184 @@ class SettingsManager:
             rotary_distance_deg=rotary_distance,
         )
 
+    def _parse_oscillation(self, raw_oscillation) -> OscillationSettings:
+        """Normalise persisted oscillation-panel settings."""
+
+        mode = self.DEFAULT_OSCILLATION_MODE
+        amplitude_mm = self.DEFAULT_OSCILLATION_AMPLITUDE_MM
+        feedrate_mm_min = self.DEFAULT_OSCILLATION_FEEDRATE_MM_MIN
+        turns_per_sweep = self.DEFAULT_OSCILLATION_TURNS_PER_SWEEP
+        if isinstance(raw_oscillation, dict):
+            mode_candidate = raw_oscillation.get("mode", mode)
+            if isinstance(mode_candidate, str):
+                mode = mode_candidate.strip().upper() or mode
+            for key, default in (
+                ("amplitude_mm", amplitude_mm),
+                ("feedrate_mm_min", feedrate_mm_min),
+                ("turns_per_sweep", turns_per_sweep),
+            ):
+                candidate = raw_oscillation.get(key, default)
+                try:
+                    if isinstance(candidate, (int, float, str)):
+                        value = float(candidate)
+                    else:
+                        value = default
+                except (TypeError, ValueError):
+                    value = default
+                if key == "amplitude_mm":
+                    amplitude_mm = value
+                elif key == "feedrate_mm_min":
+                    feedrate_mm_min = value
+                else:
+                    turns_per_sweep = value
+        if mode not in {"X", "Y", "SPIRAL"}:
+            mode = self.DEFAULT_OSCILLATION_MODE
+        if amplitude_mm <= 0:
+            amplitude_mm = self.DEFAULT_OSCILLATION_AMPLITUDE_MM
+        if feedrate_mm_min <= 0:
+            feedrate_mm_min = self.DEFAULT_OSCILLATION_FEEDRATE_MM_MIN
+        if turns_per_sweep <= 0:
+            turns_per_sweep = self.DEFAULT_OSCILLATION_TURNS_PER_SWEEP
+        return OscillationSettings(
+            mode=mode,
+            amplitude_mm=amplitude_mm,
+            feedrate_mm_min=feedrate_mm_min,
+            turns_per_sweep=turns_per_sweep,
+        )
+
     def _parse_needle_calibration(
         self, raw_needle_calibration
     ) -> NeedleCalibrationSettings:
         """Normalise persisted needle calibration settings."""
 
         visa_resource = ""
+        measurement_function = self.DEFAULT_LCR_MEASUREMENT_FUNCTION
+        range_mode = self.DEFAULT_LCR_RANGE_MODE
+        auto_range_enabled = self.DEFAULT_LCR_AUTO_RANGE_ENABLED
+        impedance_range = self.DEFAULT_LCR_IMPEDANCE_RANGE
         dcr_range = self.DEFAULT_LCR_DCR_RANGE
+        frequency_hz = self.DEFAULT_LCR_FREQUENCY_HZ
+        level_mode = self.DEFAULT_LCR_LEVEL_MODE
+        voltage_level_v = self.DEFAULT_LCR_VOLTAGE_LEVEL_V
+        current_level_a = self.DEFAULT_LCR_CURRENT_LEVEL_A
+        source_resistance_ohm = self.DEFAULT_LCR_SOURCE_RESISTANCE_OHM
+        aperture_rate = self.DEFAULT_LCR_APERTURE_RATE
+        aperture_averages = self.DEFAULT_LCR_APERTURE_AVERAGES
+        trigger_source = self.DEFAULT_LCR_TRIGGER_SOURCE
+        trigger_delay_s = self.DEFAULT_LCR_TRIGGER_DELAY_S
+        bias_enabled = self.DEFAULT_LCR_BIAS_ENABLED
+        bias_level_v = self.DEFAULT_LCR_BIAS_LEVEL_V
+        monitor1 = self.DEFAULT_LCR_MONITOR
+        monitor2 = self.DEFAULT_LCR_MONITOR
+        alc_enabled = self.DEFAULT_LCR_ALC_ENABLED
         short_threshold_ohm = self.DEFAULT_SHORT_THRESHOLD_OHM
         poll_interval_ms = self.DEFAULT_LCR_POLL_INTERVAL_MS
-        lower_direction = self.DEFAULT_LOWER_DIRECTION
         down_position_mm = 0.0
         down_position_configured = False
+        chip_position = SavedStagePositionSettings()
+        stone_position = SavedStagePositionSettings()
         if isinstance(raw_needle_calibration, dict):
             resource_raw = raw_needle_calibration.get("visa_resource", visa_resource)
             if isinstance(resource_raw, str):
                 visa_resource = resource_raw.strip()
+            measurement_function = self._normalise_choice(
+                raw_needle_calibration.get(
+                    "measurement_function", measurement_function
+                ),
+                choices=LCR_MEASUREMENT_FUNCTIONS,
+                default=measurement_function,
+            )
+            range_mode = self._normalise_choice(
+                raw_needle_calibration.get("range_mode", range_mode),
+                choices=LCR_RANGE_MODES,
+                default=range_mode,
+            )
+            auto_range_raw = raw_needle_calibration.get(
+                "auto_range_enabled", auto_range_enabled
+            )
+            if isinstance(auto_range_raw, str):
+                auto_range_enabled = auto_range_raw.strip().lower() not in {
+                    "",
+                    "0",
+                    "false",
+                    "off",
+                    "no",
+                }
+            else:
+                auto_range_enabled = bool(auto_range_raw)
+            auto_range_enabled = range_mode == "AUTO"
+            impedance_range = self._coerce_int(
+                raw_needle_calibration.get("impedance_range", impedance_range),
+                default=self.DEFAULT_LCR_IMPEDANCE_RANGE,
+            )
             candidate = raw_needle_calibration.get("dcr_range", dcr_range)
             try:
                 dcr_range = int(float(candidate))
             except (TypeError, ValueError):
                 dcr_range = self.DEFAULT_LCR_DCR_RANGE
+            frequency_hz = self._coerce_float(
+                raw_needle_calibration.get("frequency_hz", frequency_hz),
+                default=self.DEFAULT_LCR_FREQUENCY_HZ,
+            )
+            level_mode = self._normalise_choice(
+                raw_needle_calibration.get("level_mode", level_mode),
+                choices=LCR_LEVEL_MODES,
+                default=level_mode,
+            )
+            voltage_level_v = self._coerce_float(
+                raw_needle_calibration.get("voltage_level_v", voltage_level_v),
+                default=self.DEFAULT_LCR_VOLTAGE_LEVEL_V,
+            )
+            current_level_a = self._coerce_float(
+                raw_needle_calibration.get("current_level_a", current_level_a),
+                default=self.DEFAULT_LCR_CURRENT_LEVEL_A,
+            )
+            source_resistance_ohm = self._coerce_int(
+                raw_needle_calibration.get(
+                    "source_resistance_ohm", source_resistance_ohm
+                ),
+                default=self.DEFAULT_LCR_SOURCE_RESISTANCE_OHM,
+            )
+            aperture_rate = self._normalise_choice(
+                raw_needle_calibration.get("aperture_rate", aperture_rate),
+                choices=LCR_APERTURE_RATES,
+                default=aperture_rate,
+            )
+            aperture_averages = self._coerce_int(
+                raw_needle_calibration.get("aperture_averages", aperture_averages),
+                default=self.DEFAULT_LCR_APERTURE_AVERAGES,
+            )
+            trigger_source = self._normalise_choice(
+                raw_needle_calibration.get("trigger_source", trigger_source),
+                choices=LCR_TRIGGER_SOURCES,
+                default=trigger_source,
+            )
+            trigger_delay_s = self._coerce_float(
+                raw_needle_calibration.get("trigger_delay_s", trigger_delay_s),
+                default=self.DEFAULT_LCR_TRIGGER_DELAY_S,
+            )
+            bias_enabled = self._coerce_bool(
+                raw_needle_calibration.get("bias_enabled", bias_enabled),
+                default=self.DEFAULT_LCR_BIAS_ENABLED,
+            )
+            bias_level_v = self._coerce_float(
+                raw_needle_calibration.get("bias_level_v", bias_level_v),
+                default=self.DEFAULT_LCR_BIAS_LEVEL_V,
+            )
+            monitor1 = self._normalise_choice(
+                raw_needle_calibration.get("monitor1", monitor1),
+                choices=LCR_MONITOR_PARAMETERS,
+                default=monitor1,
+            )
+            monitor2 = self._normalise_choice(
+                raw_needle_calibration.get("monitor2", monitor2),
+                choices=LCR_MONITOR_PARAMETERS,
+                default=monitor2,
+            )
+            alc_enabled = self._coerce_bool(
+                raw_needle_calibration.get("alc_enabled", alc_enabled),
+                default=self.DEFAULT_LCR_ALC_ENABLED,
+            )
             candidate = raw_needle_calibration.get(
                 "short_threshold_ohm", short_threshold_ohm
             )
@@ -730,11 +1164,6 @@ class SettingsManager:
                     poll_interval_ms = int(float(candidate))
             except (TypeError, ValueError):
                 poll_interval_ms = self.DEFAULT_LCR_POLL_INTERVAL_MS
-            direction_raw = raw_needle_calibration.get(
-                "lower_direction", lower_direction
-            )
-            if isinstance(direction_raw, str):
-                lower_direction = direction_raw.strip().lower()
             candidate = raw_needle_calibration.get(
                 "down_position_mm", down_position_mm
             )
@@ -748,22 +1177,128 @@ class SettingsManager:
                     "down_position_configured", down_position_configured
                 )
             )
+            chip_position = self._parse_saved_stage_position(
+                raw_needle_calibration.get("chip_position")
+            )
+            stone_position = self._parse_saved_stage_position(
+                raw_needle_calibration.get("stone_position")
+            )
+        if impedance_range < 0 or impedance_range > 8:
+            impedance_range = self.DEFAULT_LCR_IMPEDANCE_RANGE
         if dcr_range < 0 or dcr_range > 8:
             dcr_range = self.DEFAULT_LCR_DCR_RANGE
+        if frequency_hz < 10:
+            frequency_hz = self.DEFAULT_LCR_FREQUENCY_HZ
+        if voltage_level_v < 0.01 or voltage_level_v > 2.0:
+            voltage_level_v = self.DEFAULT_LCR_VOLTAGE_LEVEL_V
+        if current_level_a < 0.0001 or current_level_a > 0.02:
+            current_level_a = self.DEFAULT_LCR_CURRENT_LEVEL_A
+        if source_resistance_ohm not in LCR_SOURCE_RESISTANCES_OHM:
+            source_resistance_ohm = self.DEFAULT_LCR_SOURCE_RESISTANCE_OHM
+        if aperture_averages < 1 or aperture_averages > 256:
+            aperture_averages = self.DEFAULT_LCR_APERTURE_AVERAGES
+        if trigger_delay_s < 0 or trigger_delay_s > 60:
+            trigger_delay_s = self.DEFAULT_LCR_TRIGGER_DELAY_S
+        if bias_level_v < -2.5 or bias_level_v > 2.5:
+            bias_level_v = self.DEFAULT_LCR_BIAS_LEVEL_V
         if short_threshold_ohm < 0:
             short_threshold_ohm = self.DEFAULT_SHORT_THRESHOLD_OHM
         if poll_interval_ms < 50:
             poll_interval_ms = self.DEFAULT_LCR_POLL_INTERVAL_MS
-        if lower_direction not in {"negative", "positive"}:
-            lower_direction = self.DEFAULT_LOWER_DIRECTION
+        auto_range_enabled = range_mode == "AUTO"
         return NeedleCalibrationSettings(
             visa_resource=visa_resource,
+            measurement_function=measurement_function,
+            range_mode=range_mode,
+            auto_range_enabled=auto_range_enabled,
+            impedance_range=impedance_range,
             dcr_range=dcr_range,
+            frequency_hz=frequency_hz,
+            level_mode=level_mode,
+            voltage_level_v=voltage_level_v,
+            current_level_a=current_level_a,
+            source_resistance_ohm=source_resistance_ohm,
+            aperture_rate=aperture_rate,
+            aperture_averages=aperture_averages,
+            trigger_source=trigger_source,
+            trigger_delay_s=trigger_delay_s,
+            bias_enabled=bias_enabled,
+            bias_level_v=bias_level_v,
+            monitor1=monitor1,
+            monitor2=monitor2,
+            alc_enabled=alc_enabled,
             short_threshold_ohm=short_threshold_ohm,
             poll_interval_ms=poll_interval_ms,
-            lower_direction=lower_direction,
             down_position_mm=down_position_mm,
             down_position_configured=down_position_configured,
+            chip_position=chip_position,
+            stone_position=stone_position,
+        )
+
+    @staticmethod
+    def _coerce_bool(value, *, default: bool) -> bool:
+        if isinstance(value, str):
+            return value.strip().lower() not in {"", "0", "false", "off", "no"}
+        if value is None:
+            return default
+        return bool(value)
+
+    @staticmethod
+    def _coerce_float(value, *, default: float) -> float:
+        try:
+            if isinstance(value, (int, float, str)):
+                return float(value)
+        except (TypeError, ValueError):
+            pass
+        return default
+
+    @staticmethod
+    def _coerce_int(value, *, default: int) -> int:
+        try:
+            if isinstance(value, (int, float, str)):
+                return int(float(value))
+        except (TypeError, ValueError):
+            pass
+        return default
+
+    @staticmethod
+    def _normalise_choice(value, *, choices: tuple, default: str) -> str:
+        if isinstance(value, str):
+            candidate = value.strip()
+            for choice in choices:
+                if candidate.upper() == str(choice).upper():
+                    return str(choice)
+        return default
+
+    def _parse_saved_stage_position(self, raw_position) -> SavedStagePositionSettings:
+        """Normalise a persisted XYZ bookmark used by calibration workflows."""
+
+        x_mm = 0.0
+        y_mm = 0.0
+        z_mm = 0.0
+        configured = False
+        if isinstance(raw_position, dict):
+            for key, default in (("x_mm", 0.0), ("y_mm", 0.0), ("z_mm", 0.0)):
+                candidate = raw_position.get(key, default)
+                try:
+                    if isinstance(candidate, (int, float, str)):
+                        value = float(candidate)
+                    else:
+                        value = default
+                except (TypeError, ValueError):
+                    value = default
+                if key == "x_mm":
+                    x_mm = value
+                elif key == "y_mm":
+                    y_mm = value
+                else:
+                    z_mm = value
+            configured = bool(raw_position.get("configured", configured))
+        return SavedStagePositionSettings(
+            x_mm=x_mm,
+            y_mm=y_mm,
+            z_mm=z_mm,
+            configured=configured,
         )
 
     def _parse_coordinate_system(self, raw_coordinate_system) -> CoordinateSystemSettings:
@@ -941,6 +1476,7 @@ class SettingsManager:
                 clone.feedrates.rotary, fallback=self.DEFAULT_ROTARY_FEEDRATE_PRESETS
             ),
         )
+        clone.oscillation = self._parse_oscillation(clone.oscillation.to_dict())
         clone.jog = self._parse_jog(clone.jog.to_dict())
         clone.needle_calibration = self._parse_needle_calibration(
             clone.needle_calibration.to_dict()
@@ -966,6 +1502,11 @@ class SettingsManager:
         """Return the current jog configuration clone."""
 
         return self._settings.jog.clone()
+
+    def oscillation_configuration(self) -> OscillationSettings:
+        """Return the current oscillation configuration clone."""
+
+        return self._settings.oscillation.clone()
 
     def needle_calibration_configuration(self) -> NeedleCalibrationSettings:
         """Return the current needle calibration configuration clone."""

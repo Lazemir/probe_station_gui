@@ -33,7 +33,6 @@ class NeedleCalibrationPanel(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._lower_direction_sign = -1.0
         self._saved_height: Optional[float] = None
         self._current_height: Optional[float] = None
 
@@ -41,10 +40,8 @@ class NeedleCalibrationPanel(QWidget):
 
         self._connection_status = QLabel("LCR: disconnected", self)
         self._resource_label = QLabel("Resource: not set", self)
-        self._instrument_label = QLabel("Instrument: n/a", self)
         root_layout.addWidget(self._connection_status)
         root_layout.addWidget(self._resource_label)
-        root_layout.addWidget(self._instrument_label)
 
         connection_layout = QHBoxLayout()
         self._connect_button = QPushButton("Connect LCR", self)
@@ -124,16 +121,17 @@ class NeedleCalibrationPanel(QWidget):
         *,
         resource_name: str,
         saved_height: Optional[float],
-        lower_direction: str,
         short_threshold_ohm: float,
+        measurement_function: str = "DCR",
     ) -> None:
         """Update the static labels from the application settings."""
 
         self._resource_label.setText(
-            f"Resource: {resource_name}" if resource_name else "Resource: not set"
+            f"Resource: {resource_name} ({measurement_function})"
+            if resource_name
+            else f"Resource: not set ({measurement_function})"
         )
         self._short_label.setToolTip(f"Short threshold: {short_threshold_ohm:.3f} ohm")
-        self._lower_direction_sign = 1.0 if lower_direction == "positive" else -1.0
         self.set_saved_height(saved_height)
 
     def set_connection_state(
@@ -142,11 +140,10 @@ class NeedleCalibrationPanel(QWidget):
         """Update the connection status labels."""
 
         if connected:
-            self._connection_status.setText(f"LCR: connected via {backend_name}")
-            self._instrument_label.setText(f"Instrument: {description}")
+            backend_suffix = f" via {backend_name}" if backend_name else ""
+            self._connection_status.setText(f"LCR: connected{backend_suffix}")
         else:
             self._connection_status.setText("LCR: disconnected")
-            self._instrument_label.setText(f"Instrument: {description}")
         self._connect_button.setEnabled(not connected)
         self._disconnect_button.setEnabled(connected)
 
@@ -199,5 +196,4 @@ class NeedleCalibrationPanel(QWidget):
             button.setEnabled(active)
 
     def _emit_adjust(self, is_lower: bool, step_mm: float) -> None:
-        sign = self._lower_direction_sign if is_lower else -self._lower_direction_sign
-        self.adjust_requested.emit(sign * step_mm)
+        self.adjust_requested.emit(-step_mm if is_lower else step_mm)

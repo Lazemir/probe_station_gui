@@ -19,6 +19,7 @@ class OscillationPanel(QWidget):
 
     start_requested = Signal(str, float, float, float)
     stop_requested = Signal()
+    configuration_changed = Signal(str, float, float, float)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -78,6 +79,10 @@ class OscillationPanel(QWidget):
         root_layout.addStretch(1)
 
         self._mode_combo.currentIndexChanged.connect(self._update_mode_dependent_ui)
+        self._mode_combo.currentIndexChanged.connect(self._emit_configuration_changed)
+        self._amplitude_spin.valueChanged.connect(self._emit_configuration_changed)
+        self._feedrate_spin.valueChanged.connect(self._emit_configuration_changed)
+        self._turns_spin.valueChanged.connect(self._emit_configuration_changed)
         self.set_running(False, "")
         self._update_mode_dependent_ui()
 
@@ -103,9 +108,44 @@ class OscillationPanel(QWidget):
             self._turns_spin.value(),
         )
 
+    def apply_configuration(
+        self,
+        *,
+        mode: str,
+        amplitude_mm: float,
+        feedrate_mm_min: float,
+        turns_per_sweep: float,
+    ) -> None:
+        """Load persisted oscillation values into the panel."""
+
+        mode_key = mode.strip().upper()
+        index = self._mode_combo.findData(mode_key)
+        self._mode_combo.blockSignals(True)
+        self._amplitude_spin.blockSignals(True)
+        self._feedrate_spin.blockSignals(True)
+        self._turns_spin.blockSignals(True)
+        if index >= 0:
+            self._mode_combo.setCurrentIndex(index)
+        self._amplitude_spin.setValue(float(amplitude_mm))
+        self._feedrate_spin.setValue(float(feedrate_mm_min))
+        self._turns_spin.setValue(float(turns_per_sweep))
+        self._mode_combo.blockSignals(False)
+        self._amplitude_spin.blockSignals(False)
+        self._feedrate_spin.blockSignals(False)
+        self._turns_spin.blockSignals(False)
+        self._update_mode_dependent_ui()
+
     def _is_spiral_mode(self) -> bool:
         return str(self._mode_combo.currentData() or "") == "SPIRAL"
 
     def _update_mode_dependent_ui(self) -> None:
         is_spiral = self._is_spiral_mode()
         self._turns_spin.setEnabled(is_spiral and not self._stop_button.isEnabled())
+
+    def _emit_configuration_changed(self, *_args) -> None:
+        self.configuration_changed.emit(
+            str(self._mode_combo.currentData() or "X"),
+            self._amplitude_spin.value(),
+            self._feedrate_spin.value(),
+            self._turns_spin.value(),
+        )

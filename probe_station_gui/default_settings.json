@@ -67,18 +67,53 @@
     "level": "INFO",
     "file": "probe-station-gui.log"
   },
+  "oscillation": {
+    "mode": "X",
+    "amplitude_mm": 0.5,
+    "feedrate_mm_min": 120.0,
+    "turns_per_sweep": 3.0
+  },
   "jog": {
     "linear_distance_mm": 25.0,
     "rotary_distance_deg": 5.0
   },
   "needle_calibration": {
     "visa_resource": "",
+    "measurement_function": "DCR",
+    "range_mode": "HOLD",
+    "auto_range_enabled": false,
+    "impedance_range": 3,
     "dcr_range": 3,
+    "frequency_hz": 1000.0,
+    "level_mode": "VOLTAGE",
+    "voltage_level_v": 0.01,
+    "current_level_a": 0.0001,
+    "source_resistance_ohm": 30,
+    "aperture_rate": "FAST",
+    "aperture_averages": 1,
+    "trigger_source": "INT",
+    "trigger_delay_s": 0.0,
+    "bias_enabled": false,
+    "bias_level_v": 0.0,
+    "monitor1": "OFF",
+    "monitor2": "OFF",
+    "alc_enabled": false,
     "short_threshold_ohm": 10.0,
     "poll_interval_ms": 250,
-    "lower_direction": "negative",
     "down_position_mm": 0.0,
-    "down_position_configured": false
+    "down_position_configured": false,
+    "chip_position": {
+      "x_mm": 0.0,
+      "y_mm": 0.0,
+      "z_mm": 0.0,
+      "configured": false
+    },
+    "stone_position": {
+      "x_mm": 0.0,
+      "y_mm": 0.0,
+      "z_mm": 0.0,
+      "configured": false
+    }
   },
   "coordinate_system": {
     "position_mode": "work",
