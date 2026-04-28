@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Sequence, cast
 
-from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtCore import QEvent, QLocale, Qt, Signal
 from PySide6.QtGui import QDoubleValidator, QKeyEvent, QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -444,6 +444,7 @@ class JogSettingsWidget(QWidget):
         layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
         self._linear_distance_spin = QDoubleSpinBox(self)
+        self._linear_distance_spin.setLocale(QLocale.c())
         self._linear_distance_spin.setDecimals(3)
         self._linear_distance_spin.setRange(0.001, 1000.0)
         self._linear_distance_spin.setSingleStep(1.0)
@@ -451,13 +452,42 @@ class JogSettingsWidget(QWidget):
         self._linear_distance_spin.setValue(jog_settings.linear_distance_mm)
         layout.addRow(QLabel("Linear jog distance", self), self._linear_distance_spin)
 
+        self._motion_safety_checkbox = QCheckBox("Disable motion safety", self)
+        self._motion_safety_checkbox.setChecked(jog_settings.motion_safety_disabled)
+        self._motion_safety_checkbox.setToolTip(
+            "Allows joystick movement when needle state is unknown/down and skips axis limit checks."
+        )
+        layout.addRow(self._motion_safety_checkbox)
+
+        self._show_axis_a_checkbox = QCheckBox("Show A-axis controls", self)
+        self._show_axis_a_checkbox.setChecked(jog_settings.show_axis_a_controls)
+        layout.addRow(self._show_axis_a_checkbox)
+
+        self._show_axis_b_checkbox = QCheckBox("Show B-axis controls", self)
+        self._show_axis_b_checkbox.setChecked(jog_settings.show_axis_b_controls)
+        layout.addRow(self._show_axis_b_checkbox)
+
+        self._manual_axis_controls_checkbox = QCheckBox(
+            "Show manual axis move controls",
+            self,
+        )
+        self._manual_axis_controls_checkbox.setChecked(
+            jog_settings.manual_axis_controls_enabled
+        )
+        layout.addRow(self._manual_axis_controls_checkbox)
+
     def to_settings(self, settings: Settings) -> None:
         """Persist the widget state into the provided settings object."""
 
-        settings.jog = JogSettings(
-            linear_distance_mm=self._linear_distance_spin.value(),
-            rotary_distance_deg=settings.jog.rotary_distance_deg,
+        jog = settings.jog.clone()
+        jog.linear_distance_mm = self._linear_distance_spin.value()
+        jog.motion_safety_disabled = self._motion_safety_checkbox.isChecked()
+        jog.show_axis_a_controls = self._show_axis_a_checkbox.isChecked()
+        jog.show_axis_b_controls = self._show_axis_b_checkbox.isChecked()
+        jog.manual_axis_controls_enabled = (
+            self._manual_axis_controls_checkbox.isChecked()
         )
+        settings.jog = jog
 
 
 class NeedleCalibrationSettingsWidget(QWidget):

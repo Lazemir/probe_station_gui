@@ -73,6 +73,7 @@ def _load_stage_controller():
 _stage_controller_module = _load_stage_controller()
 StageController = _stage_controller_module.StageController
 QueuedSerialWrite = _stage_controller_module._QueuedSerialWrite
+MoveVector = _stage_controller_module.MoveVector
 
 
 class StageControllerStartupLimitsTest(unittest.TestCase):
@@ -390,6 +391,90 @@ class StageControllerJogQueueTest(unittest.TestCase):
         ready = controller._await_current_jog_command(job)
 
         self.assertTrue(ready)
+
+
+class StageControllerMotionSafetyBypassTest(unittest.TestCase):
+    def test_disabled_motion_safety_bypasses_needle_safety_and_axis_limits(self) -> None:
+        controller = StageController()
+        controller.set_motion_safety_disabled(True)
+        controller._serial = _FakeSerial()
+        commands = []
+        controller._ensure_axis_limits = (
+            lambda _serial: (_ for _ in ()).throw(AssertionError("limits checked"))
+        )
+        controller._check_relative_move_limits = (
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("relative limits checked")
+            )
+        )
+        controller._write_command = lambda _serial, command: commands.append(command)
+        controller._wait_for_ok = lambda *_args, **_kwargs: None
+        controller._wait_for_idle = lambda *_args, **_kwargs: None
+
+        controller._move_safety_check()
+        controller._send_relative_move(controller._serial, MoveVector(a=0.25))
+
+        self.assertIn("G1 A0.2500 F600", commands)
+
+    def test_disabled_motion_safety_allows_absolute_manual_axis_move(self) -> None:
+        controller = StageController()
+        controller.set_motion_safety_disabled(True)
+        controller._serial = _FakeSerial()
+        commands = []
+        controller._ensure_axis_limits = (
+            lambda _serial: (_ for _ in ()).throw(AssertionError("limits checked"))
+        )
+        controller._query_status = (
+            lambda _serial: (_ for _ in ()).throw(AssertionError("status queried"))
+        )
+        controller._write_command = lambda _serial, command: commands.append(command)
+        controller._wait_for_ok = lambda *_args, **_kwargs: None
+        controller._wait_for_idle = lambda *_args, **_kwargs: None
+
+        controller._send_absolute_axis_move(
+            controller._serial,
+            "B",
+            0.25,
+            ignore_needle_safety=True,
+            feedrate=123.4,
+        )
+
+        self.assertIn("G90", commands)
+        self.assertIn("G1 B0.2500 F123", commands)
+
+    def test_manual_axis_move_does_not_wait_for_idle_after_gcode_is_accepted(
+        self,
+    ) -> None:
+        controller = StageController()
+        controller.set_motion_safety_disabled(True)
+        controller._serial = _FakeSerial()
+        controller.movement_started = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        movement_results = []
+        controller.movement_finished = types.SimpleNamespace(
+            emit=lambda success, message: movement_results.append((success, message))
+        )
+        controller.status_message = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        commands = []
+        controller._write_command = lambda _serial, command: commands.append(command)
+        controller._wait_for_ok = lambda *_args, **_kwargs: None
+        controller._wait_for_idle = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("waited for idle")
+        )
+
+        controller._run_manual_axis_move("A", 0.25, "G91", 1.0)
+
+        self.assertIn("G1 A0.2500 F1", commands)
+        self.assertEqual(movement_results[-1][0], True)
+        self.assertIn("accepted", movement_results[-1][1])
+
+    def test_idle_timeout_scales_with_slow_feedrate(self) -> None:
+        controller = StageController()
+
+        self.assertEqual(controller._idle_timeout_for_distance(0.25, 1.0), 20.0)
 
 
 class StageControllerNeedlesStateTest(unittest.TestCase):

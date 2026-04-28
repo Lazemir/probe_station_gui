@@ -200,6 +200,14 @@ class JogSettings:
 
     linear_distance_mm: float = 25.0
     rotary_distance_deg: float = 5.0
+    motion_safety_disabled: bool = False
+    show_axis_a_controls: bool = False
+    show_axis_b_controls: bool = False
+    manual_axis_controls_enabled: bool = False
+    manual_axis: str = "A"
+    manual_axis_distance_mm: float = 1.0
+    manual_axis_mode: str = "G91"
+    manual_axis_feedrate_mm_min: float = 600.0
 
     def clone(self) -> "JogSettings":
         """Return a copy of the jog preferences."""
@@ -207,14 +215,30 @@ class JogSettings:
         return JogSettings(
             linear_distance_mm=self.linear_distance_mm,
             rotary_distance_deg=self.rotary_distance_deg,
+            motion_safety_disabled=self.motion_safety_disabled,
+            show_axis_a_controls=self.show_axis_a_controls,
+            show_axis_b_controls=self.show_axis_b_controls,
+            manual_axis_controls_enabled=self.manual_axis_controls_enabled,
+            manual_axis=self.manual_axis,
+            manual_axis_distance_mm=self.manual_axis_distance_mm,
+            manual_axis_mode=self.manual_axis_mode,
+            manual_axis_feedrate_mm_min=self.manual_axis_feedrate_mm_min,
         )
 
-    def to_dict(self) -> dict[str, float]:
+    def to_dict(self) -> dict[str, float | bool | str]:
         """Serialize the jog preferences."""
 
         return {
             "linear_distance_mm": self.linear_distance_mm,
             "rotary_distance_deg": self.rotary_distance_deg,
+            "motion_safety_disabled": self.motion_safety_disabled,
+            "show_axis_a_controls": self.show_axis_a_controls,
+            "show_axis_b_controls": self.show_axis_b_controls,
+            "manual_axis_controls_enabled": self.manual_axis_controls_enabled,
+            "manual_axis": self.manual_axis,
+            "manual_axis_distance_mm": self.manual_axis_distance_mm,
+            "manual_axis_mode": self.manual_axis_mode,
+            "manual_axis_feedrate_mm_min": self.manual_axis_feedrate_mm_min,
         }
 
 
@@ -462,6 +486,16 @@ class SettingsManager:
     DEFAULT_OSCILLATION_TURNS_PER_SWEEP: float = 3.0
     DEFAULT_LINEAR_JOG_DISTANCE_MM: float = 25.0
     DEFAULT_ROTARY_JOG_DISTANCE_DEG: float = 5.0
+    DEFAULT_MOTION_SAFETY_DISABLED: bool = False
+    DEFAULT_SHOW_AXIS_A_CONTROLS: bool = False
+    DEFAULT_SHOW_AXIS_B_CONTROLS: bool = False
+    DEFAULT_MANUAL_AXIS_CONTROLS_ENABLED: bool = False
+    DEFAULT_MANUAL_AXIS: str = "A"
+    DEFAULT_MANUAL_AXIS_DISTANCE_MM: float = 1.0
+    DEFAULT_MANUAL_AXIS_MODE: str = "G91"
+    DEFAULT_MANUAL_AXIS_FEEDRATE_MM_MIN: float = 600.0
+    MANUAL_AXIS_MODES: tuple[str, ...] = ("G91", "G90")
+    MANUAL_JOG_AXES: tuple[str, ...] = ("X", "Y", "Z", "A", "B", "C")
     DEFAULT_LCR_VISA_RESOURCE: str = "COM4"
     DEFAULT_LCR_AUTO_RANGE_ENABLED: bool = True
     DEFAULT_LCR_MEASUREMENT_FUNCTION: str = "R-X"
@@ -712,6 +746,14 @@ class SettingsManager:
             jog_section = {
                 "linear_distance_mm": self.DEFAULT_LINEAR_JOG_DISTANCE_MM,
                 "rotary_distance_deg": self.DEFAULT_ROTARY_JOG_DISTANCE_DEG,
+                "motion_safety_disabled": self.DEFAULT_MOTION_SAFETY_DISABLED,
+                "show_axis_a_controls": self.DEFAULT_SHOW_AXIS_A_CONTROLS,
+                "show_axis_b_controls": self.DEFAULT_SHOW_AXIS_B_CONTROLS,
+                "manual_axis_controls_enabled": self.DEFAULT_MANUAL_AXIS_CONTROLS_ENABLED,
+                "manual_axis": self.DEFAULT_MANUAL_AXIS,
+                "manual_axis_distance_mm": self.DEFAULT_MANUAL_AXIS_DISTANCE_MM,
+                "manual_axis_mode": self.DEFAULT_MANUAL_AXIS_MODE,
+                "manual_axis_feedrate_mm_min": self.DEFAULT_MANUAL_AXIS_FEEDRATE_MM_MIN,
             }
             data["jog"] = jog_section
         else:
@@ -720,6 +762,28 @@ class SettingsManager:
             )
             jog_section.setdefault(
                 "rotary_distance_deg", self.DEFAULT_ROTARY_JOG_DISTANCE_DEG
+            )
+            jog_section.setdefault(
+                "motion_safety_disabled", self.DEFAULT_MOTION_SAFETY_DISABLED
+            )
+            jog_section.setdefault(
+                "show_axis_a_controls", self.DEFAULT_SHOW_AXIS_A_CONTROLS
+            )
+            jog_section.setdefault(
+                "show_axis_b_controls", self.DEFAULT_SHOW_AXIS_B_CONTROLS
+            )
+            jog_section.setdefault(
+                "manual_axis_controls_enabled",
+                self.DEFAULT_MANUAL_AXIS_CONTROLS_ENABLED,
+            )
+            jog_section.setdefault("manual_axis", self.DEFAULT_MANUAL_AXIS)
+            jog_section.setdefault(
+                "manual_axis_distance_mm", self.DEFAULT_MANUAL_AXIS_DISTANCE_MM
+            )
+            jog_section.setdefault("manual_axis_mode", self.DEFAULT_MANUAL_AXIS_MODE)
+            jog_section.setdefault(
+                "manual_axis_feedrate_mm_min",
+                self.DEFAULT_MANUAL_AXIS_FEEDRATE_MM_MIN,
             )
 
         oscillation_section = data.get("oscillation")
@@ -949,7 +1013,19 @@ class SettingsManager:
 
         linear_distance = self.DEFAULT_LINEAR_JOG_DISTANCE_MM
         rotary_distance = self.DEFAULT_ROTARY_JOG_DISTANCE_DEG
+        motion_safety_disabled = self.DEFAULT_MOTION_SAFETY_DISABLED
+        show_axis_a_controls = self.DEFAULT_SHOW_AXIS_A_CONTROLS
+        show_axis_b_controls = self.DEFAULT_SHOW_AXIS_B_CONTROLS
+        manual_axis_controls_enabled = self.DEFAULT_MANUAL_AXIS_CONTROLS_ENABLED
+        manual_axis = self.DEFAULT_MANUAL_AXIS
+        manual_axis_distance = self.DEFAULT_MANUAL_AXIS_DISTANCE_MM
+        manual_axis_mode = self.DEFAULT_MANUAL_AXIS_MODE
+        manual_axis_feedrate = self.DEFAULT_MANUAL_AXIS_FEEDRATE_MM_MIN
         if isinstance(raw_jog, dict):
+            legacy_unsafe = self._coerce_bool(
+                raw_jog.get("unsafe_motion_enabled", False),
+                default=False,
+            )
             candidate = raw_jog.get("linear_distance_mm", linear_distance)
             try:
                 if isinstance(candidate, (int, float, str)):
@@ -962,13 +1038,65 @@ class SettingsManager:
                     rotary_distance = float(candidate)
             except (TypeError, ValueError):
                 rotary_distance = self.DEFAULT_ROTARY_JOG_DISTANCE_DEG
+            motion_safety_disabled = self._coerce_bool(
+                raw_jog.get("motion_safety_disabled", legacy_unsafe),
+                default=self.DEFAULT_MOTION_SAFETY_DISABLED,
+            )
+            show_axis_a_controls = self._coerce_bool(
+                raw_jog.get("show_axis_a_controls", legacy_unsafe),
+                default=self.DEFAULT_SHOW_AXIS_A_CONTROLS,
+            )
+            show_axis_b_controls = self._coerce_bool(
+                raw_jog.get("show_axis_b_controls", legacy_unsafe),
+                default=self.DEFAULT_SHOW_AXIS_B_CONTROLS,
+            )
+            manual_axis_controls_enabled = self._coerce_bool(
+                raw_jog.get("manual_axis_controls_enabled", legacy_unsafe),
+                default=self.DEFAULT_MANUAL_AXIS_CONTROLS_ENABLED,
+            )
+            candidate = raw_jog.get("manual_axis", manual_axis)
+            if isinstance(candidate, str):
+                manual_axis = candidate.strip().upper() or manual_axis
+            candidate = raw_jog.get("manual_axis_mode", manual_axis_mode)
+            if isinstance(candidate, str):
+                manual_axis_mode = candidate.strip().upper() or manual_axis_mode
+            candidate = raw_jog.get("manual_axis_distance_mm", manual_axis_distance)
+            try:
+                if isinstance(candidate, (int, float, str)):
+                    manual_axis_distance = float(candidate)
+            except (TypeError, ValueError):
+                manual_axis_distance = self.DEFAULT_MANUAL_AXIS_DISTANCE_MM
+            candidate = raw_jog.get(
+                "manual_axis_feedrate_mm_min", manual_axis_feedrate
+            )
+            try:
+                if isinstance(candidate, (int, float, str)):
+                    manual_axis_feedrate = float(candidate)
+            except (TypeError, ValueError):
+                manual_axis_feedrate = self.DEFAULT_MANUAL_AXIS_FEEDRATE_MM_MIN
         if linear_distance <= 0:
             linear_distance = self.DEFAULT_LINEAR_JOG_DISTANCE_MM
         if rotary_distance <= 0:
             rotary_distance = self.DEFAULT_ROTARY_JOG_DISTANCE_DEG
+        if manual_axis not in self.MANUAL_JOG_AXES:
+            manual_axis = self.DEFAULT_MANUAL_AXIS
+        if manual_axis_distance <= 0:
+            manual_axis_distance = self.DEFAULT_MANUAL_AXIS_DISTANCE_MM
+        if manual_axis_mode not in self.MANUAL_AXIS_MODES:
+            manual_axis_mode = self.DEFAULT_MANUAL_AXIS_MODE
+        if manual_axis_feedrate <= 0:
+            manual_axis_feedrate = self.DEFAULT_MANUAL_AXIS_FEEDRATE_MM_MIN
         return JogSettings(
             linear_distance_mm=linear_distance,
             rotary_distance_deg=rotary_distance,
+            motion_safety_disabled=motion_safety_disabled,
+            show_axis_a_controls=show_axis_a_controls,
+            show_axis_b_controls=show_axis_b_controls,
+            manual_axis_controls_enabled=manual_axis_controls_enabled,
+            manual_axis=manual_axis,
+            manual_axis_distance_mm=manual_axis_distance,
+            manual_axis_mode=manual_axis_mode,
+            manual_axis_feedrate_mm_min=manual_axis_feedrate,
         )
 
     def _parse_oscillation(self, raw_oscillation) -> OscillationSettings:

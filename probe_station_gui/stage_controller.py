@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from collections import deque
 from queue import Empty, PriorityQueue
 import re
@@ -110,6 +111,9 @@ class StageController(QObject):
     CALIBRATION_STEP_MM = 0.2
     CALIBRATION_MAX_STEPS = 25
     DEFAULT_FEEDRATE = 600.0
+    MOVE_IDLE_TIMEOUT_MARGIN_S = 5.0
+    MOVE_IDLE_TIMEOUT_MIN_S = 10.0
+    MOVE_IDLE_TIMEOUT_MAX_S = 3600.0
     AUTOFOCUS_RANGE_MM = 0.0
     AUTOFOCUS_INITIAL_STEP_MM = 0.5
     AUTOFOCUS_FINE_STEP_MM = 0.02
@@ -181,6 +185,7 @@ class StageController(QObject):
         self._needles_known = False
         self._needle_down_offset: Optional[float] = None
         self._oscillation_active = False
+        self._motion_safety_disabled = False
         self._queued_needles_actions: deque[tuple[str, float | None]] = deque()
         self._oscillation_needles_actions: deque[tuple[str, float | None]] = deque()
         self._b_axis_zero_position: Optional[float] = None
@@ -371,6 +376,20 @@ class StageController(QObject):
 
     # Jog stop confirmation is handled in the joystick layer to avoid serial contention.
 
+    def set_motion_safety_disabled(self, disabled: bool) -> None:
+        """Enable or disable the explicit motion safety bypass."""
+
+        self._motion_safety_disabled = bool(disabled)
+        if self._motion_safety_disabled:
+            logger.warning("Motion safety disabled")
+        else:
+            logger.info("Motion safety enabled")
+
+    def set_unsafe_motion_enabled(self, enabled: bool) -> None:
+        """Backward-compatible alias for persisted pre-split settings."""
+
+        self.set_motion_safety_disabled(enabled)
+
     def shutdown(self) -> None:
         """Stop any outstanding background task before application exit."""
 
@@ -493,6 +512,39 @@ class StageController(QObject):
             thread = threading.Thread(
                 target=self._run_rotate_b,
                 args=(float(delta_deg),),
+                daemon=True,
+            )
+            self._active_thread = thread
+            thread.start()
+
+    def request_manual_axis_move(
+        self, axis: str, distance_mm: float, mode: str, feedrate: float | None = None
+    ) -> None:
+        """Move an arbitrary axis from the manual jog controls."""
+
+        axis = axis.upper().strip()
+        if axis not in self.AXIS_INDEX:
+            self.status_message.emit(f"Unsupported axis: {axis}")
+            return
+        mode = mode.upper().strip()
+        if mode not in {"G90", "G91"}:
+            self.status_message.emit(f"Unsupported manual move mode: {mode}")
+            return
+        try:
+            effective_feedrate = (
+                None if feedrate is None else max(1.0, float(feedrate))
+            )
+        except (TypeError, ValueError):
+            self.status_message.emit(f"Unsupported manual feedrate: {feedrate}")
+            return
+        with self._task_lock:
+            if self._active_thread and self._active_thread.is_alive():
+                self.status_message.emit("Stage is busy. Ignoring manual axis move.")
+                return
+            self._cancel_event.clear()
+            thread = threading.Thread(
+                target=self._run_manual_axis_move,
+                args=(axis, float(distance_mm), mode, effective_feedrate),
                 daemon=True,
             )
             self._active_thread = thread
@@ -1571,6 +1623,55 @@ class StageController(QObject):
                 self._active_thread = None
             self._start_next_queued_needles_action()
 
+    def _run_manual_axis_move(
+        self, axis: str, distance_mm: float, mode: str, feedrate: float | None
+    ) -> None:
+        self.movement_started.emit()
+        try:
+            self._check_cancelled()
+            serial_connection = self._serial
+            if serial_connection is None or not serial_connection.is_open:
+                raise StageControllerError("Serial connection is not available.")
+            if abs(distance_mm) < 1e-6:
+                self.movement_finished.emit(True, "Manual axis move skipped.")
+                return
+            move = self._move_vector_for_axis(axis, distance_mm)
+            feedrate_text = (
+                self.DEFAULT_FEEDRATE if feedrate is None else max(1.0, float(feedrate))
+            )
+            self.status_message.emit(
+                f"Manual axis move ({mode}): {axis}{distance_mm:+.3f} F{feedrate_text:.0f}."
+            )
+            if mode == "G91":
+                with self._serial_session_lock:
+                    self._send_relative_move(
+                        serial_connection,
+                        move,
+                        allow_relative=True,
+                        ignore_needle_safety=self._motion_safety_disabled,
+                        feedrate=feedrate,
+                        wait_for_completion=False,
+                    )
+            else:
+                with self._serial_session_lock:
+                    self._send_absolute_axis_move(
+                        serial_connection,
+                        axis,
+                        distance_mm,
+                        ignore_needle_safety=self._motion_safety_disabled,
+                        feedrate=feedrate,
+                        wait_for_completion=False,
+                    )
+            self.movement_finished.emit(
+                True,
+                f"Manual axis move accepted ({mode} {axis}{distance_mm:+.3f}).",
+            )
+        except StageControllerError as exc:
+            self.movement_finished.emit(False, str(exc))
+        finally:
+            with self._task_lock:
+                self._active_thread = None
+
     def _run_needles_adjust(self, step_mm: float) -> None:
         action = "adjust"
         try:
@@ -1735,15 +1836,17 @@ class StageController(QObject):
         allow_relative: bool = False,
         ignore_needle_safety: bool = False,
         feedrate: Optional[float] = None,
+        wait_for_completion: bool = True,
     ) -> None:
         if move.is_zero():
             return
         if not ignore_needle_safety:
             self._move_safety_check()
-        self._ensure_axis_limits(serial_connection)
-        self._check_relative_move_limits(
-            serial_connection, move, allow_relative=allow_relative
-        )
+        if not self._motion_safety_disabled:
+            self._ensure_axis_limits(serial_connection)
+            self._check_relative_move_limits(
+                serial_connection, move, allow_relative=allow_relative
+            )
         self._write_command(serial_connection, "G21")
         self._wait_for_ok(serial_connection)
         self._write_command(serial_connection, "G91")
@@ -1758,12 +1861,93 @@ class StageController(QObject):
         effective_feedrate = (
             self.DEFAULT_FEEDRATE if feedrate is None else max(1.0, float(feedrate))
         )
-        move = "G1 " + " ".join(move_parts) + f" F{effective_feedrate:.0f}"
-        self._write_command(serial_connection, move)
+        move_distance = self._move_distance_for_timeout(move)
+        command = "G1 " + " ".join(move_parts) + f" F{effective_feedrate:.0f}"
+        self._write_command(serial_connection, command)
         self._wait_for_ok(serial_connection)
         self._write_command(serial_connection, "G90")
         self._wait_for_ok(serial_connection)
-        self._wait_for_idle(serial_connection)
+        if wait_for_completion:
+            self._wait_for_idle(
+                serial_connection,
+                timeout=self._idle_timeout_for_distance(
+                    move_distance, effective_feedrate
+                ),
+            )
+
+    def _send_absolute_axis_move(
+        self,
+        serial_connection: serial.Serial,
+        axis: str,
+        value: float,
+        *,
+        ignore_needle_safety: bool = False,
+        feedrate: Optional[float] = None,
+        wait_for_completion: bool = True,
+    ) -> None:
+        axis = axis.upper().strip()
+        if axis not in self.AXIS_INDEX:
+            raise StageControllerError(f"Unsupported axis: {axis}")
+        if not ignore_needle_safety:
+            self._move_safety_check()
+        current_value: float | None = None
+        if not self._motion_safety_disabled:
+            self._ensure_axis_limits(serial_connection)
+            status = self._query_status(serial_connection)
+            if status is None:
+                raise StageControllerError("Unable to read position for absolute move.")
+            self._require_homed_axes(status, {axis})
+            current_value = self._axis_value_for_configured_mode(status, axis)
+            limits = self._axis_limits_for_configured_mode(axis, status)
+            if limits:
+                min_value, max_value = limits
+                if value < min_value or value > max_value:
+                    raise StageControllerError(
+                        f"{axis} target {value:+.3f} exceeds limits ({min_value:.3f}, {max_value:.3f})."
+                    )
+        effective_feedrate = (
+            self.DEFAULT_FEEDRATE if feedrate is None else max(1.0, float(feedrate))
+        )
+        self._write_command(serial_connection, "G21")
+        self._wait_for_ok(serial_connection)
+        self._write_command(serial_connection, "G90")
+        self._wait_for_ok(serial_connection)
+        self._write_command(
+            serial_connection,
+            f"G1 {axis}{value:.4f} F{effective_feedrate:.0f}",
+        )
+        self._wait_for_ok(serial_connection)
+        if wait_for_completion:
+            move_distance = (
+                abs(value)
+                if current_value is None
+                else abs(float(value) - float(current_value))
+            )
+            self._wait_for_idle(
+                serial_connection,
+                timeout=self._idle_timeout_for_distance(
+                    move_distance, effective_feedrate
+                ),
+            )
+
+    @staticmethod
+    def _move_distance_for_timeout(move: MoveVector) -> float:
+        return math.sqrt(sum(value * value for _axis, value in move.items()))
+
+    def _idle_timeout_for_distance(self, distance: float, feedrate: float) -> float:
+        """Return an idle wait timeout long enough for slow manual G1 moves."""
+
+        try:
+            distance_value = abs(float(distance))
+            feedrate_value = max(1.0, float(feedrate))
+        except (TypeError, ValueError):
+            return self.MOVE_IDLE_TIMEOUT_MIN_S
+        travel_time_s = (distance_value / feedrate_value) * 60.0
+        timeout = travel_time_s + self.MOVE_IDLE_TIMEOUT_MARGIN_S
+        return min(
+            self.MOVE_IDLE_TIMEOUT_MAX_S,
+            max(self.MOVE_IDLE_TIMEOUT_MIN_S, timeout),
+        )
 
     def _write_relative_g1_unchecked(
         self,
@@ -1841,6 +2025,8 @@ class StageController(QObject):
     def _move_safety_check(self) -> None:
         """Validate motion safety prerequisites before any move."""
 
+        if self._motion_safety_disabled:
+            return
         if not self._needles_known:
             raise AxisStateError("Needle position unknown. Home/raise A before moving.")
         if not self._needles_up:

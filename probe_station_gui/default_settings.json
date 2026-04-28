@@ -75,7 +75,15 @@
   },
   "jog": {
     "linear_distance_mm": 25.0,
-    "rotary_distance_deg": 5.0
+    "rotary_distance_deg": 5.0,
+    "motion_safety_disabled": false,
+    "show_axis_a_controls": false,
+    "show_axis_b_controls": false,
+    "manual_axis_controls_enabled": false,
+    "manual_axis": "A",
+    "manual_axis_distance_mm": 1.0,
+    "manual_axis_mode": "G91",
+    "manual_axis_feedrate_mm_min": 600.0
   },
   "needle_calibration": {
     "visa_resource": "COM4",

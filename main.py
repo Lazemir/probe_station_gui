@@ -540,12 +540,30 @@ class Main(QMainWindow):
             self.joystick_panel.apply_jog_settings(
                 jog.linear_distance_mm,
                 jog.rotary_distance_deg,
+                jog.motion_safety_disabled,
+                jog.show_axis_a_controls,
+                jog.show_axis_b_controls,
+                jog.manual_axis_controls_enabled,
+                jog.manual_axis,
+                jog.manual_axis_distance_mm,
+                jog.manual_axis_mode,
+                jog.manual_axis_feedrate_mm_min,
             )
             logger.debug(
-                "Joystick jog settings reapplied: linear_distance_mm=%s rotary_distance_deg=%s",
+                "Joystick jog settings reapplied: linear_distance_mm=%s rotary_distance_deg=%s safety_disabled=%s axis_a=%s axis_b=%s manual=%s manual_axis=%s manual_axis_distance_mm=%s manual_mode=%s manual_feedrate_mm_min=%s",
                 jog.linear_distance_mm,
                 jog.rotary_distance_deg,
+                jog.motion_safety_disabled,
+                jog.show_axis_a_controls,
+                jog.show_axis_b_controls,
+                jog.manual_axis_controls_enabled,
+                jog.manual_axis,
+                jog.manual_axis_distance_mm,
+                jog.manual_axis_mode,
+                jog.manual_axis_feedrate_mm_min,
             )
+        jog = self.settings_manager.jog_configuration()
+        self.stage_controller.set_motion_safety_disabled(jog.motion_safety_disabled)
         needle_settings = self.settings_manager.needle_calibration_configuration()
         oscillation_settings = self.settings_manager.oscillation_configuration()
         self.stage_controller.apply_needle_calibration(
@@ -1161,6 +1179,32 @@ class Main(QMainWindow):
                 and self.serial_terminal_panel.set_live_poll_paused(False),
             )
         self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
+
+    def _save_manual_axis_jog_settings(
+        self, axis: str, distance_mm: float, mode: str, feedrate_mm_min: float
+    ) -> None:
+        axis = axis.strip().upper()
+        if axis not in {"X", "Y", "Z", "A", "B", "C"}:
+            return
+        mode = mode.strip().upper()
+        if mode not in {"G90", "G91"}:
+            return
+        distance = max(0.001, float(distance_mm))
+        feedrate = max(0.1, float(feedrate_mm_min))
+        settings = self.settings_manager.settings.clone()
+        if (
+            settings.jog.manual_axis == axis
+            and abs(settings.jog.manual_axis_distance_mm - distance) <= 1e-9
+            and settings.jog.manual_axis_mode == mode
+            and abs(settings.jog.manual_axis_feedrate_mm_min - feedrate) <= 1e-9
+        ):
+            return
+        settings.jog.manual_axis = axis
+        settings.jog.manual_axis_distance_mm = distance
+        settings.jog.manual_axis_mode = mode
+        settings.jog.manual_axis_feedrate_mm_min = feedrate
+        self.settings_manager.replace(settings)
+        self.settings_manager.save()
 
     def _advance_motion_prediction(self) -> None:
         if self._manual_jog_velocity_xy is not None:
@@ -1957,7 +2001,16 @@ class Main(QMainWindow):
         self.joystick_panel.apply_jog_settings(
             jog.linear_distance_mm,
             jog.rotary_distance_deg,
+            jog.motion_safety_disabled,
+            jog.show_axis_a_controls,
+            jog.show_axis_b_controls,
+            jog.manual_axis_controls_enabled,
+            jog.manual_axis,
+            jog.manual_axis_distance_mm,
+            jog.manual_axis_mode,
+            jog.manual_axis_feedrate_mm_min,
         )
+        self.stage_controller.set_motion_safety_disabled(jog.motion_safety_disabled)
         self.joystick_panel.set_serial(self.serial_connection)
         self.joystick_panel.autofocus_requested.connect(
             self.stage_controller.request_autofocus
@@ -1976,6 +2029,13 @@ class Main(QMainWindow):
         )
         self.joystick_panel.reset_calibration_requested.connect(
             self._reset_click_calibration
+        )
+        self.joystick_panel.zero_b_requested.connect(self._zero_b_axis)
+        self.joystick_panel.manual_axis_move_requested.connect(
+            self.stage_controller.request_manual_axis_move
+        )
+        self.joystick_panel.manual_axis_settings_changed.connect(
+            self._save_manual_axis_jog_settings
         )
         self.joystick_panel.motion_axis_requested.connect(self._on_manual_motion_axis)
         self.joystick_panel.jog_command_changed.connect(

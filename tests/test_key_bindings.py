@@ -59,9 +59,11 @@ settings_manager = _load_module(
     "settings_manager_test", "probe_station_gui/settings_manager.py"
 )
 KeyBinding = settings_manager.KeyBinding
+JogSettings = settings_manager.JogSettings
 NeedleCalibrationSettings = settings_manager.NeedleCalibrationSettings
 OscillationSettings = settings_manager.OscillationSettings
 SavedStagePositionSettings = settings_manager.SavedStagePositionSettings
+SettingsManager = settings_manager.SettingsManager
 derive_native_scan_code_from_qt_key = qt_compat.derive_native_scan_code_from_qt_key
 
 
@@ -148,6 +150,51 @@ class NeedleCalibrationBookmarkTest(unittest.TestCase):
         restored = OscillationSettings(**settings.to_dict())
 
         self.assertEqual(restored, settings)
+
+
+class JogSettingsTest(unittest.TestCase):
+    def test_jog_settings_round_trip_preserves_manual_axis_controls(self) -> None:
+        settings = JogSettings(
+            linear_distance_mm=12.5,
+            rotary_distance_deg=7.5,
+            motion_safety_disabled=True,
+            show_axis_a_controls=True,
+            show_axis_b_controls=True,
+            manual_axis_controls_enabled=True,
+            manual_axis="B",
+            manual_axis_distance_mm=0.25,
+            manual_axis_mode="G90",
+            manual_axis_feedrate_mm_min=123.4,
+        )
+
+        restored = JogSettings(**settings.to_dict())
+
+        self.assertEqual(restored, settings)
+
+    def test_parse_jog_normalizes_manual_axis_controls(self) -> None:
+        manager = object.__new__(SettingsManager)
+
+        parsed = manager._parse_jog(
+            {
+                "linear_distance_mm": "2.5",
+                "rotary_distance_deg": "3.5",
+                "unsafe_motion_enabled": "true",
+                "manual_axis": "b",
+                "manual_axis_distance_mm": "0.125",
+                "manual_axis_feedrate_mm_min": "123.4",
+            }
+        )
+
+        self.assertEqual(parsed.linear_distance_mm, 2.5)
+        self.assertEqual(parsed.rotary_distance_deg, 3.5)
+        self.assertTrue(parsed.motion_safety_disabled)
+        self.assertTrue(parsed.show_axis_a_controls)
+        self.assertTrue(parsed.show_axis_b_controls)
+        self.assertTrue(parsed.manual_axis_controls_enabled)
+        self.assertEqual(parsed.manual_axis, "B")
+        self.assertEqual(parsed.manual_axis_distance_mm, 0.125)
+        self.assertEqual(parsed.manual_axis_mode, "G91")
+        self.assertEqual(parsed.manual_axis_feedrate_mm_min, 123.4)
 
 
 if __name__ == "__main__":

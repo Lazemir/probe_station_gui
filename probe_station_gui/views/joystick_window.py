@@ -7,11 +7,13 @@ import time
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import serial
-from PySide6.QtCore import QEvent, QRectF, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QLocale, QRectF, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QCloseEvent, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
+    QComboBox,
+    QDoubleSpinBox,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -82,9 +84,15 @@ class JoystickWindow(QWidget):
     needles_raise_requested = Signal()
     needles_lower_requested = Signal()
     reset_calibration_requested = Signal()
+    manual_axis_move_requested = Signal(str, float, str, float)
+    manual_axis_settings_changed = Signal(str, float, str, float)
+    zero_b_requested = Signal()
 
     DEFAULT_JOG_DISTANCE_MM = 25.0
     DEFAULT_ROTATE_DISTANCE_DEG = 5.0
+    DEFAULT_MANUAL_AXIS_DISTANCE_MM = 1.0
+    DEFAULT_MANUAL_AXIS_MODE = "G91"
+    DEFAULT_MANUAL_AXIS_FEEDRATE_MM_MIN = 600.0
     DEFAULT_LINEAR_FEEDRATE_PRESETS: tuple[float, ...] = (
         1.0,
         3.0,
@@ -96,6 +104,8 @@ class JoystickWindow(QWidget):
     KEYBOARD_JOG_SYNC_DEBOUNCE_MS = 10
     KEYBOARD_JOG_SECONDARY_AXIS_ACTIVATION_MS = 320
     KEYBOARD_JOG_DIAGONAL_CHORD_WINDOW_MS = 90
+    MANUAL_JOG_AXES = ("X", "Y", "Z", "A", "B", "C")
+    MANUAL_AXIS_MODES = ("G91", "G90")
     LINEAR_AXES = {"X", "Y", "Z"}
     HOMING_AXES = ("X", "Y", "Z", "A")
     LINEAR_FEEDRATE_SCALE = 10
@@ -149,6 +159,16 @@ class JoystickWindow(QWidget):
         self._linear_presets: List[float] = list(self.DEFAULT_LINEAR_FEEDRATE_PRESETS)
         self._linear_default: float = 1.0
         self._linear_jog_distance_mm: float = self.DEFAULT_JOG_DISTANCE_MM
+        self._manual_axis_distance_mm: float = self.DEFAULT_MANUAL_AXIS_DISTANCE_MM
+        self._manual_axis_mode = self.DEFAULT_MANUAL_AXIS_MODE
+        self._manual_axis_feedrate_mm_min: float = (
+            self.DEFAULT_MANUAL_AXIS_FEEDRATE_MM_MIN
+        )
+        self._motion_safety_disabled = False
+        self._show_axis_a_controls = False
+        self._show_axis_b_controls = False
+        self._manual_axis_controls_enabled = False
+        self._applying_jog_settings = False
         self._linear_feedrate_value: float = self._linear_default
         self._last_feedrate_wheel_at = 0.0
         self._homing_buttons: dict[str, QPushButton] = {}
@@ -234,26 +254,73 @@ class JoystickWindow(QWidget):
         focus_layout.addStretch(1)
         root_layout.addLayout(focus_layout)
 
+        self.extra_axis_widget = QWidget(self)
+        extra_axis_layout = QVBoxLayout(self.extra_axis_widget)
+        extra_axis_layout.setContentsMargins(0, 0, 0, 0)
+
         rotate_layout = QHBoxLayout()
         rotate_layout.addStretch(1)
-        self.rotate_label = QLabel("Rotate B:", self)
+        self.rotate_label = QLabel("Extra axes:", self)
         rotate_layout.addWidget(self.rotate_label)
-        self.rotate_negative_button = QPushButton("↻", self)
-        self.rotate_positive_button = QPushButton("↺", self)
+        self.axis_a_negative_button = QPushButton("A-", self)
+        self.axis_a_positive_button = QPushButton("A+", self)
+        self.rotate_negative_button = QPushButton("B-", self)
+        self.rotate_positive_button = QPushButton("B+", self)
         self.zero_b_button = QPushButton("Zero B", self)
-        self.rotate_negative_button.setToolTip("Rotate clockwise (B-)")
-        self.rotate_positive_button.setToolTip("Rotate counter-clockwise (B+)")
+        self.axis_a_negative_button.setToolTip("Move A negative")
+        self.axis_a_positive_button.setToolTip("Move A positive")
+        self.rotate_negative_button.setToolTip("Move B negative")
+        self.rotate_positive_button.setToolTip("Move B positive")
         self.zero_b_button.setToolTip("Use the current B position as zero")
+        rotate_layout.addWidget(self.axis_a_negative_button)
+        rotate_layout.addWidget(self.axis_a_positive_button)
         rotate_layout.addWidget(self.rotate_negative_button)
         rotate_layout.addWidget(self.rotate_positive_button)
         rotate_layout.addWidget(self.zero_b_button)
         rotate_layout.addStretch(1)
-        root_layout.addLayout(rotate_layout)
-        rotate_layout.setEnabled(False)
-        self.rotate_label.hide()
-        self.rotate_negative_button.hide()
-        self.rotate_positive_button.hide()
-        self.zero_b_button.hide()
+        extra_axis_layout.addLayout(rotate_layout)
+
+        manual_axis_layout = QHBoxLayout()
+        self.manual_axis_label = QLabel("Axis:", self)
+        manual_axis_layout.addWidget(self.manual_axis_label)
+        self.manual_axis_combo = QComboBox(self)
+        self.manual_axis_combo.addItems(self.MANUAL_JOG_AXES)
+        manual_axis_layout.addWidget(self.manual_axis_combo)
+        self.manual_axis_mode_label = QLabel("Mode:", self)
+        manual_axis_layout.addWidget(self.manual_axis_mode_label)
+        self.manual_axis_mode_combo = QComboBox(self)
+        self.manual_axis_mode_combo.addItems(self.MANUAL_AXIS_MODES)
+        manual_axis_layout.addWidget(self.manual_axis_mode_combo)
+        self.manual_axis_distance_label = QLabel("Step:", self)
+        manual_axis_layout.addWidget(self.manual_axis_distance_label)
+        self.manual_axis_distance_spin = QDoubleSpinBox(self)
+        self.manual_axis_distance_spin.setLocale(QLocale.c())
+        self.manual_axis_distance_spin.setDecimals(3)
+        self.manual_axis_distance_spin.setRange(0.001, 1000.0)
+        self.manual_axis_distance_spin.setSingleStep(0.1)
+        self.manual_axis_distance_spin.setSuffix(" mm")
+        self.manual_axis_distance_spin.setValue(self._manual_axis_distance_mm)
+        manual_axis_layout.addWidget(self.manual_axis_distance_spin)
+        self.manual_axis_feedrate_label = QLabel("Feed:", self)
+        manual_axis_layout.addWidget(self.manual_axis_feedrate_label)
+        self.manual_axis_feedrate_spin = QDoubleSpinBox(self)
+        self.manual_axis_feedrate_spin.setLocale(QLocale.c())
+        self.manual_axis_feedrate_spin.setDecimals(1)
+        self.manual_axis_feedrate_spin.setRange(
+            self.MIN_LINEAR_FEEDRATE,
+            self.MAX_LINEAR_FEEDRATE,
+        )
+        self.manual_axis_feedrate_spin.setSingleStep(10.0)
+        self.manual_axis_feedrate_spin.setSuffix(" mm/min")
+        self.manual_axis_feedrate_spin.setValue(self._manual_axis_feedrate_mm_min)
+        manual_axis_layout.addWidget(self.manual_axis_feedrate_spin)
+        self.manual_axis_negative_button = QPushButton("Move -", self)
+        self.manual_axis_positive_button = QPushButton("Move +", self)
+        manual_axis_layout.addWidget(self.manual_axis_negative_button)
+        manual_axis_layout.addWidget(self.manual_axis_positive_button)
+        extra_axis_layout.addLayout(manual_axis_layout)
+        root_layout.addWidget(self.extra_axis_widget)
+        self.extra_axis_widget.hide()
 
         self.up_button.pressed.connect(lambda: self.start_jog("Y", 1))
         self.up_button.released.connect(self.stop_jog)
@@ -267,6 +334,37 @@ class JoystickWindow(QWidget):
         self.focus_down_button.released.connect(self.stop_jog)
         self.focus_up_button.pressed.connect(lambda: self.start_jog("Z", 1))
         self.focus_up_button.released.connect(self.stop_jog)
+        self.axis_a_negative_button.clicked.connect(
+            lambda: self._manual_axis_step("A", -1, mode="G91")
+        )
+        self.axis_a_positive_button.clicked.connect(
+            lambda: self._manual_axis_step("A", 1, mode="G91")
+        )
+        self.rotate_negative_button.clicked.connect(
+            lambda: self._manual_axis_step("B", -1, mode="G91")
+        )
+        self.rotate_positive_button.clicked.connect(
+            lambda: self._manual_axis_step("B", 1, mode="G91")
+        )
+        self.zero_b_button.clicked.connect(self.zero_b_requested.emit)
+        self.manual_axis_negative_button.clicked.connect(
+            lambda: self._manual_axis_step(self._selected_manual_axis(), -1)
+        )
+        self.manual_axis_positive_button.clicked.connect(
+            lambda: self._manual_axis_step(self._selected_manual_axis(), 1)
+        )
+        self.manual_axis_combo.currentTextChanged.connect(
+            lambda _text: self._emit_manual_axis_settings_changed()
+        )
+        self.manual_axis_mode_combo.currentTextChanged.connect(
+            lambda _text: self._emit_manual_axis_settings_changed()
+        )
+        self.manual_axis_distance_spin.valueChanged.connect(
+            lambda _value: self._emit_manual_axis_settings_changed()
+        )
+        self.manual_axis_feedrate_spin.valueChanged.connect(
+            lambda _value: self._emit_manual_axis_settings_changed()
+        )
 
         homing_layout = QHBoxLayout()
         homing_layout.addWidget(QLabel("Homing:", self))
@@ -428,14 +526,75 @@ class JoystickWindow(QWidget):
         )
 
     def apply_jog_settings(
-        self, linear_distance_mm: float, rotary_distance_deg: float
+        self,
+        linear_distance_mm: float,
+        rotary_distance_deg: float,
+        motion_safety_disabled: bool = False,
+        show_axis_a_controls: bool = False,
+        show_axis_b_controls: bool = False,
+        manual_axis_controls_enabled: bool = False,
+        manual_axis: str = "A",
+        manual_axis_distance_mm: float = DEFAULT_MANUAL_AXIS_DISTANCE_MM,
+        manual_axis_mode: str = DEFAULT_MANUAL_AXIS_MODE,
+        manual_axis_feedrate_mm_min: float = DEFAULT_MANUAL_AXIS_FEEDRATE_MM_MIN,
     ) -> None:
         """Update the jog distance used for linear axes."""
 
+        self._applying_jog_settings = True
+        was_motion_safety_disabled = self._motion_safety_disabled
         self._linear_jog_distance_mm = max(0.001, float(linear_distance_mm))
+        self._manual_axis_distance_mm = max(0.001, float(manual_axis_distance_mm))
+        self._manual_axis_feedrate_mm_min = min(
+            self.MAX_LINEAR_FEEDRATE,
+            max(self.MIN_LINEAR_FEEDRATE, float(manual_axis_feedrate_mm_min)),
+        )
+        self._motion_safety_disabled = bool(motion_safety_disabled)
+        self._show_axis_a_controls = bool(show_axis_a_controls)
+        self._show_axis_b_controls = bool(show_axis_b_controls)
+        self._manual_axis_controls_enabled = bool(manual_axis_controls_enabled)
+        axis = manual_axis.strip().upper() if isinstance(manual_axis, str) else "A"
+        if axis not in self.MANUAL_JOG_AXES:
+            axis = "A"
+        mode = (
+            manual_axis_mode.strip().upper()
+            if isinstance(manual_axis_mode, str)
+            else self.DEFAULT_MANUAL_AXIS_MODE
+        )
+        if mode not in self.MANUAL_AXIS_MODES:
+            mode = self.DEFAULT_MANUAL_AXIS_MODE
+        axis_index = self.manual_axis_combo.findText(axis)
+        if axis_index >= 0:
+            self.manual_axis_combo.setCurrentIndex(axis_index)
+        mode_index = self.manual_axis_mode_combo.findText(mode)
+        if mode_index >= 0:
+            self.manual_axis_mode_combo.setCurrentIndex(mode_index)
+        self._manual_axis_mode = mode
+        self.manual_axis_distance_spin.setValue(self._manual_axis_distance_mm)
+        self.manual_axis_feedrate_spin.setValue(self._manual_axis_feedrate_mm_min)
+        self._update_extra_axis_visibility()
+        self._applying_jog_settings = False
+        if (
+            was_motion_safety_disabled
+            and not self._motion_safety_disabled
+            and not self._axis_a_ready
+        ):
+            self.stop_jog()
+            self._pending_jog_axes = None
+            self._key_stack.clear()
+            self._key_press_times.clear()
+            self._clear_pending_key_activations()
+        self._update_enabled_state()
         logger.debug(
-            "Joystick jog distance updated: linear_distance_mm=%s",
+            "Joystick jog settings updated: linear_distance_mm=%s safety_disabled=%s axis_a=%s axis_b=%s manual=%s manual_axis=%s manual_axis_distance_mm=%s manual_mode=%s manual_feedrate_mm_min=%s",
             self._linear_jog_distance_mm,
+            self._motion_safety_disabled,
+            self._show_axis_a_controls,
+            self._show_axis_b_controls,
+            self._manual_axis_controls_enabled,
+            axis,
+            self._manual_axis_distance_mm,
+            self._manual_axis_mode,
+            self._manual_axis_feedrate_mm_min,
         )
 
     def set_serial(self, serial_connection: Optional[serial.Serial]) -> None:
@@ -468,9 +627,37 @@ class JoystickWindow(QWidget):
                 self._stop_homing_animation(axis)
         self._update_enabled_state()
 
+    def _update_extra_axis_visibility(self) -> None:
+        axis_controls_visible = self._show_axis_a_controls or self._show_axis_b_controls
+        self.rotate_label.setVisible(axis_controls_visible)
+        self.axis_a_negative_button.setVisible(self._show_axis_a_controls)
+        self.axis_a_positive_button.setVisible(self._show_axis_a_controls)
+        self.rotate_negative_button.setVisible(self._show_axis_b_controls)
+        self.rotate_positive_button.setVisible(self._show_axis_b_controls)
+        self.zero_b_button.setVisible(self._show_axis_b_controls)
+        for widget in (
+            self.manual_axis_label,
+            self.manual_axis_combo,
+            self.manual_axis_mode_label,
+            self.manual_axis_mode_combo,
+            self.manual_axis_distance_label,
+            self.manual_axis_distance_spin,
+            self.manual_axis_feedrate_label,
+            self.manual_axis_feedrate_spin,
+            self.manual_axis_negative_button,
+            self.manual_axis_positive_button,
+        ):
+            widget.setVisible(self._manual_axis_controls_enabled)
+        self.extra_axis_widget.setVisible(
+            axis_controls_visible or self._manual_axis_controls_enabled
+        )
+
     def _update_enabled_state(self) -> None:
         enabled = bool(self.serial_connection and self.serial_connection.is_open)
-        motion_enabled = enabled and self._axis_a_ready
+        motion_enabled = enabled and (self._axis_a_ready or self._motion_safety_disabled)
+        extra_controls_enabled = enabled and (
+            self._axis_a_ready or self._motion_safety_disabled
+        )
         for widget in (
             self.linear_feedrate_slider,
             self.home_all_button,
@@ -491,12 +678,26 @@ class JoystickWindow(QWidget):
             self.autofocus_button,
         ):
             widget.setEnabled(motion_enabled)
+        for widget in (
+            self.axis_a_negative_button,
+            self.axis_a_positive_button,
+            self.rotate_negative_button,
+            self.rotate_positive_button,
+            self.zero_b_button,
+            self.manual_axis_combo,
+            self.manual_axis_mode_combo,
+            self.manual_axis_distance_spin,
+            self.manual_axis_feedrate_spin,
+            self.manual_axis_negative_button,
+            self.manual_axis_positive_button,
+        ):
+            widget.setEnabled(extra_controls_enabled)
         for button in self._homing_buttons.values():
             button.setEnabled(enabled)
 
     def set_axis_a_ready(self, ready: bool) -> None:
         self._axis_a_ready = ready
-        if not ready:
+        if not ready and not self._motion_safety_disabled:
             self.stop_jog()
             self._pending_jog_axes = None
             self._key_stack.clear()
@@ -540,6 +741,11 @@ class JoystickWindow(QWidget):
             self._show_warning(message)
 
     def _move_safety_check(self) -> bool:
+        if self._motion_safety_disabled:
+            if self.stage_controller is not None and self.stage_controller.is_busy():
+                logger.debug("Jog blocked because stage controller is busy")
+                return False
+            return True
         if not self._axis_a_ready:
             logger.debug("Jog blocked because A axis is not homed/zero")
             return False
@@ -625,6 +831,8 @@ class JoystickWindow(QWidget):
         logger.debug("TIMING jog_command_sent command=%s", command.strip())
 
     def _distance_for_axis(self, axis: str) -> float:
+        if axis.upper() not in self.LINEAR_AXES:
+            return self._manual_axis_distance_mm
         return self._linear_jog_distance_mm
 
     def _feedrate_for_axes(
@@ -634,8 +842,61 @@ class JoystickWindow(QWidget):
 
         if has_linear:
             return self._linear_feedrate_value
+        if self._motion_safety_disabled:
+            return self._linear_feedrate_value
 
         return None
+
+    def _selected_manual_axis(self) -> str:
+        axis = self.manual_axis_combo.currentText().strip().upper()
+        if axis not in self.MANUAL_JOG_AXES:
+            return "A"
+        return axis
+
+    def _selected_manual_axis_mode(self) -> str:
+        mode = self.manual_axis_mode_combo.currentText().strip().upper()
+        if mode not in self.MANUAL_AXIS_MODES:
+            return self.DEFAULT_MANUAL_AXIS_MODE
+        return mode
+
+    def _manual_axis_step(
+        self, axis: str, direction: int, *, mode: Optional[str] = None
+    ) -> None:
+        if not (self._axis_a_ready or self._motion_safety_disabled):
+            return
+        if self.stage_controller is not None and self.stage_controller.is_busy():
+            logger.debug("Manual axis step blocked because stage controller is busy")
+            return
+        axis = axis.strip().upper()
+        if axis not in self.MANUAL_JOG_AXES:
+            return
+        distance = float(direction) * self._manual_axis_distance_mm
+        self.motion_axis_requested.emit(axis)
+        self.manual_axis_move_requested.emit(
+            axis,
+            distance,
+            mode or self._selected_manual_axis_mode(),
+            self._manual_axis_feedrate_mm_min,
+        )
+
+    def _emit_manual_axis_settings_changed(self) -> None:
+        if self._applying_jog_settings:
+            return
+        self._manual_axis_distance_mm = max(
+            0.001,
+            float(self.manual_axis_distance_spin.value()),
+        )
+        self._manual_axis_mode = self._selected_manual_axis_mode()
+        self._manual_axis_feedrate_mm_min = min(
+            self.MAX_LINEAR_FEEDRATE,
+            max(self.MIN_LINEAR_FEEDRATE, float(self.manual_axis_feedrate_spin.value())),
+        )
+        self.manual_axis_settings_changed.emit(
+            self._selected_manual_axis(),
+            self._manual_axis_distance_mm,
+            self._manual_axis_mode,
+            self._manual_axis_feedrate_mm_min,
+        )
 
     def _compute_active_axes(self) -> tuple[tuple[str, int], ...]:
         unique_axes: dict[str, int] = {}
@@ -1032,7 +1293,7 @@ class JoystickWindow(QWidget):
         if not window.isActiveWindow() and active_window is not window:
             logger.debug("Ignoring global key event because joystick host window is not active")
             return False
-        if not self._axis_a_ready:
+        if not (self._axis_a_ready or self._motion_safety_disabled):
             logger.debug("Ignoring global key event because A axis is not homed/zero")
             return False
         focus_widget = app.focusWidget() if app else None
