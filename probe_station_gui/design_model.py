@@ -8,7 +8,19 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, ClassVar, Iterable, Optional
 
-import numpy as np
+
+class _LazyModule:
+    def __init__(self, module_name: str) -> None:
+        self._module_name = module_name
+        self._module: Any | None = None
+
+    def __getattr__(self, name: str) -> Any:
+        if self._module is None:
+            self._module = importlib.import_module(self._module_name)
+        return getattr(self._module, name)
+
+
+np = _LazyModule("numpy")
 
 
 LayerKey = tuple[int, int]

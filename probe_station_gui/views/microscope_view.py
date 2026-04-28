@@ -5,7 +5,17 @@ from __future__ import annotations
 import math
 
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QImage, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QImage,
+    QMouseEvent,
+    QPainter,
+    QPainterPath,
+    QPalette,
+    QPen,
+    QPixmap,
+)
 from PySide6.QtWidgets import QApplication, QWidget
 
 from ..design_model import DesignDocument, MeasurementTarget
@@ -28,7 +38,12 @@ class MicroscopeView(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Microscope Qt")
-        self.setMinimumSize(960, 720)
+        self.setMinimumSize(640, 480)
+        self.setAutoFillBackground(True)
+        palette = self.palette()
+        palette.setColor(QPalette.Window, QColor("black"))
+        self.setPalette(palette)
+        self.setAttribute(Qt.WA_OpaquePaintEvent, True)
         self.setMouseTracking(True)
         self._pix: QPixmap | None = None
         self._target_rel: tuple[float, float] | None = None

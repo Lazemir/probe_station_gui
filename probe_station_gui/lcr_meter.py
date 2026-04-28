@@ -10,8 +10,6 @@ from typing import Optional
 
 from PySide6.QtCore import QObject, Signal
 
-from probe_station_gui.gwinstek_lcr_76200 import GWInstekLCR76200, normalize_resource_name
-
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +29,11 @@ class _LCRSession:
     OVERLOAD_RESISTANCE_OHM = 9.9e19
 
     def __init__(self, address: str, timeout_ms: int) -> None:
+        from probe_station_gui.gwinstek_lcr_76200 import (
+            GWInstekLCR76200,
+            normalize_resource_name,
+        )
+
         normalized_address = normalize_resource_name(address)
         try:
             self._instrument = GWInstekLCR76200(

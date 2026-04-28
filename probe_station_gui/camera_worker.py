@@ -3,22 +3,36 @@
 from __future__ import annotations
 
 import logging
+import importlib
 import time
 
-import numpy as np
 from PySide6.QtCore import QObject, Signal, Slot
 from PySide6.QtGui import QImage
 
-try:  # pragma: no cover - optional runtime dependency
-    from rotpy.camera import CameraList
-    from rotpy.system import SpinSystem
-    _ROTPY_IMPORT_ERROR: Exception | None = None
-except Exception as exc:  # pragma: no cover - optional runtime dependency
-    CameraList = None
-    SpinSystem = None
-    _ROTPY_IMPORT_ERROR = exc
-
 logger = logging.getLogger(__name__)
+
+
+class _LazyModule:
+    def __init__(self, module_name: str) -> None:
+        self._module_name = module_name
+        self._module: object | None = None
+
+    def __getattr__(self, name: str) -> object:
+        if self._module is None:
+            self._module = importlib.import_module(self._module_name)
+        return getattr(self._module, name)
+
+
+np = _LazyModule("numpy")
+
+
+def _load_camera_backend():
+    try:  # pragma: no cover - optional runtime dependency
+        from rotpy.camera import CameraList
+        from rotpy.system import SpinSystem
+    except Exception as exc:  # pragma: no cover - optional runtime dependency
+        return None, None, exc
+    return CameraList, SpinSystem, None
 
 
 class Grabber(QObject):
@@ -42,10 +56,11 @@ class Grabber(QObject):
         self._running = True
         self._last_frame_timestamp = None
         self._last_frame_log_timestamp = 0.0
+        CameraList, SpinSystem, import_error = _load_camera_backend()
         if CameraList is None or SpinSystem is None:
             message = "Camera backend unavailable"
-            if _ROTPY_IMPORT_ERROR is not None:
-                message = f"{message}: {_ROTPY_IMPORT_ERROR}"
+            if import_error is not None:
+                message = f"{message}: {import_error}"
             self.error.emit(message)
             return
         try:

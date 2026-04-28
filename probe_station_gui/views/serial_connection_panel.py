@@ -41,6 +41,10 @@ class SerialConnectionPanel(QWidget):
         self._auto_retry_pending = False
         self._connect_thread: Optional[QThread] = None
         self._connect_worker: Optional[_SerialConnectWorker] = None
+        self._scan_thread: Optional[QThread] = None
+        self._scan_worker: Optional[_SerialPortScanWorker] = None
+        self._scan_in_progress = False
+        self._pending_auto_connect_after_scan = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -85,7 +89,9 @@ class SerialConnectionPanel(QWidget):
         self._auto_timer.setSingleShot(True)
         self._auto_timer.timeout.connect(self.auto_connect)
 
-        self.populate_ports()
+        self.port_combo.addItem("Scanning ports...")
+        self._update_ui_state()
+        QTimer.singleShot(0, self.populate_ports)
 
     def is_connected(self) -> bool:
         return self._serial is not None and self._serial.is_open
@@ -93,9 +99,33 @@ class SerialConnectionPanel(QWidget):
     def populate_ports(self) -> None:
         if self._serial is not None and self._serial.is_open:
             return
+        if self._scan_in_progress:
+            return
 
+        self._scan_in_progress = True
         self.port_combo.clear()
-        ports = list(list_ports.comports())
+        self.port_combo.addItem("Scanning ports...")
+        self._ports_available = False
+        self._set_scan_controls_enabled(False)
+
+        worker = _SerialPortScanWorker()
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_port_scan_finished)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._cleanup_scan_worker)
+
+        self._scan_worker = worker
+        self._scan_thread = thread
+        thread.start()
+
+    @Slot(object)
+    def _on_port_scan_finished(self, ports: object) -> None:
+        self.port_combo.clear()
+        ports = list(ports) if ports is not None else []
         self._ports_cache = ports
         if not ports:
             self.port_combo.addItem("No ports found")
@@ -108,7 +138,14 @@ class SerialConnectionPanel(QWidget):
         self.status_label.setText(
             "Disconnected" if not self.status_label.text() else self.status_label.text()
         )
+        self._scan_in_progress = False
         self._update_ui_state()
+        if self._pending_auto_connect_after_scan:
+            self._pending_auto_connect_after_scan = False
+            if not self._ports_available:
+                self._auto_timer.start(self._AUTO_RECONNECT_DELAY_MS)
+                return
+            self.auto_connect()
 
     def on_connect_clicked(self) -> None:
         if self._connecting:
@@ -145,10 +182,13 @@ class SerialConnectionPanel(QWidget):
             return
         if self._connecting:
             return
+        if self._scan_in_progress:
+            self._pending_auto_connect_after_scan = True
+            return
         if not self._ports_available:
+            self._pending_auto_connect_after_scan = True
             self.populate_ports()
             if not self._ports_available:
-                self._auto_timer.start(self._AUTO_RECONNECT_DELAY_MS)
                 return
 
         target_index = 0
@@ -175,9 +215,11 @@ class SerialConnectionPanel(QWidget):
     def _update_ui_state(self) -> None:
         connected = self._serial is not None and self._serial.is_open
         self.connect_button.setText("Disconnect" if connected else "Connect")
-        self.port_combo.setEnabled(not connected and self._ports_available)
+        self.port_combo.setEnabled(
+            not connected and self._ports_available and not self._scan_in_progress
+        )
         self.baud_combo.setEnabled(not connected)
-        self.refresh_button.setEnabled(not connected)
+        self.refresh_button.setEnabled(not connected and not self._scan_in_progress)
 
     def _set_connecting(self, connecting: bool) -> None:
         self._connecting = connecting
@@ -188,6 +230,11 @@ class SerialConnectionPanel(QWidget):
             self.refresh_button.setEnabled(False)
         else:
             self._update_ui_state()
+
+    def _set_scan_controls_enabled(self, enabled: bool) -> None:
+        connected = self._serial is not None and self._serial.is_open
+        self.port_combo.setEnabled(enabled and not connected and self._ports_available)
+        self.refresh_button.setEnabled(enabled and not connected)
 
     def _start_async_connect(self, port_name: Optional[str], baud_rate: int) -> None:
         if port_name is None:
@@ -247,6 +294,10 @@ class SerialConnectionPanel(QWidget):
         self._connect_worker = None
         self._connect_thread = None
 
+    def _cleanup_scan_worker(self) -> None:
+        self._scan_worker = None
+        self._scan_thread = None
+
     def shutdown(self) -> None:
         self._auto_timer.stop()
         self._connect_cancelled = True
@@ -254,6 +305,14 @@ class SerialConnectionPanel(QWidget):
         if self._serial is not None and self._serial.is_open:
             self._serial.close()
         self._serial = None
+
+
+class _SerialPortScanWorker(QObject):
+    finished: Signal = Signal(object)
+
+    @Slot()
+    def run(self) -> None:
+        self.finished.emit(list(list_ports.comports()))
 
 
 class _SerialConnectWorker(QObject):

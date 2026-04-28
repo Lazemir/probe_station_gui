@@ -5,13 +5,14 @@ from __future__ import annotations
 import logging
 import math
 import re
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
 import sys
+from typing import TYPE_CHECKING
 
-import numpy as np
-from PySide6.QtCore import QThread, QTimer, Qt, QUrl
+from PySide6.QtCore import QThread, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import QAction, QDesktopServices, QImage, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -37,10 +38,6 @@ from probe_station_gui.dialogs.settings_dialog import SettingsDialog
 from probe_station_gui.lcr_meter import LCRMeterController
 from probe_station_gui.settings_manager import Settings, SettingsManager
 from probe_station_gui.views.alignment_panel import AlignmentPanel
-from probe_station_gui.views.design_navigator_panel import (
-    DesignLayoutWindow,
-    DesignNavigatorPanel,
-)
 from probe_station_gui.views.contact_oscillation_window import (
     ContactOscillationWindow,
 )
@@ -52,9 +49,17 @@ from probe_station_gui.views.serial_connection_panel import SerialConnectionPane
 
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from probe_station_gui.views.design_navigator_panel import (
+        DesignLayoutWindow,
+        DesignNavigatorPanel,
+    )
+
 
 class Main(QMainWindow):
     """Main application window wiring the camera view and serial dialog."""
+
+    design_layout_module_ready: Signal = Signal(object, object)
 
     ALIGNMENT_CAPTURE_SHORTCUT = "Space"
     ALIGNMENT_TARGET_ANGLES = (-180.0, -90.0, 0.0, 90.0, 180.0)
@@ -72,9 +77,6 @@ class Main(QMainWindow):
     TERMINAL_RESET_REFRESH_DELAYS_MS = (500, 1100, 1800)
     TERMINAL_RESUME_AFTER_JOG_MS = 180
     B_POSITION_CHANGE_TOLERANCE_DEG = 1e-3
-    STARTUP_AUTO_CONNECT_DELAY_MS = 400
-    SERIAL_STARTUP_SYNC_DELAY_MS = 150
-    STARTUP_FOCUS_DELAY_MS = 120
     CAMERA_UI_FRAME_GAP_WARNING_S = 0.25
 
     def __init__(self) -> None:
@@ -102,6 +104,8 @@ class Main(QMainWindow):
         self.alignment_panel: AlignmentPanel | None = None
         self.design_navigator_panel: DesignNavigatorPanel | None = None
         self.design_layout_window: DesignLayoutWindow | None = None
+        self._design_layout_preload_started = False
+        self._design_layout_window_requested = False
         self.joystick_dock: CollapsibleDockWidget | None = None
         self.serial_terminal_dock: CollapsibleDockWidget | None = None
         self.serial_connection_dock: CollapsibleDockWidget | None = None
@@ -169,7 +173,7 @@ class Main(QMainWindow):
         )
         self.grabber.frame_ready.connect(self._on_camera_frame)
         self.grabber.error.connect(self.on_error)
-        self.thread.start()
+        self.design_layout_module_ready.connect(self._on_design_layout_module_ready)
 
         self.stage_controller = StageController()
         self.stage_controller.status_message.connect(self._show_status)
@@ -207,16 +211,53 @@ class Main(QMainWindow):
         self._setup_menus()
         self._apply_settings()
 
-        QTimer.singleShot(
-            self.STARTUP_AUTO_CONNECT_DELAY_MS, self._auto_connect_if_possible
-        )
-        QTimer.singleShot(self.STARTUP_FOCUS_DELAY_MS, self._prime_keyboard_focus)
+        QTimer.singleShot(0, self._auto_connect_if_possible)
+        QTimer.singleShot(0, self._prime_keyboard_focus)
+        QTimer.singleShot(0, self._start_camera_thread)
+        QTimer.singleShot(0, self._preload_design_layout_window)
 
         self.setStyleSheet(
             """
             QMainWindow::separator { width: 8px; height: 8px; background: palette(window); }
             """
         )
+
+    def _start_camera_thread(self) -> None:
+        if not self.thread.isRunning():
+            self.thread.start()
+
+    def _preload_design_layout_window(self) -> None:
+        if self.design_layout_window is not None or self._design_layout_preload_started:
+            return
+        self._design_layout_preload_started = True
+
+        def load_design_window_module() -> None:
+            try:
+                from probe_station_gui.views.design_navigator_panel import (
+                    DesignLayoutWindow as design_layout_window_class,
+                )
+            except Exception as exc:
+                self.design_layout_module_ready.emit(None, exc)
+                return
+            self.design_layout_module_ready.emit(design_layout_window_class, None)
+
+        threading.Thread(
+            target=load_design_window_module,
+            name="DesignLayoutImport",
+            daemon=True,
+        ).start()
+
+    def _on_design_layout_module_ready(
+        self,
+        design_layout_window_class: object,
+        error: object,
+    ) -> None:
+        if error is not None:
+            self._design_layout_preload_started = False
+            logger.error("Design window preload failed: %s", error)
+            self._show_status(f"Unable to prepare design window: {error}")
+            return
+        self._create_design_layout_window(design_layout_window_class)
 
     def on_click(self, dx: float, dy: float, _rel_x: float, _rel_y: float) -> None:
         if self._manual_alignment_pick_slot is not None:
@@ -308,9 +349,7 @@ class Main(QMainWindow):
             self.serial_terminal_dock.raise_()
             if self.serial_terminal_dock.isFloating():
                 self.serial_terminal_dock.activateWindow()
-        QTimer.singleShot(
-            self.SERIAL_STARTUP_SYNC_DELAY_MS, self._run_serial_startup_sync
-        )
+        QTimer.singleShot(0, self._run_serial_startup_sync)
         self._refresh_design_position()
 
     def on_serial_disconnected(self) -> None:
@@ -491,15 +530,17 @@ class Main(QMainWindow):
 
     def _toggle_design_layout_window(self, visible: bool) -> None:
         if self.design_layout_window is None:
-            if self._design_layout_window_action is not None:
-                self._design_layout_window_action.blockSignals(True)
-                self._design_layout_window_action.setChecked(False)
-                self._design_layout_window_action.blockSignals(False)
+            self._design_layout_window_requested = bool(visible)
+            if visible:
+                self._show_status("Preparing design window...")
+                self._preload_design_layout_window()
             return
         if visible:
+            self._design_layout_window_requested = True
             self.design_layout_window.show_and_raise()
             self._collapse_alignment_panel_if_ready()
         else:
+            self._design_layout_window_requested = False
             self.design_layout_window.hide()
 
     def _on_design_layout_window_visibility_changed(self, visible: bool) -> None:
@@ -1975,6 +2016,8 @@ class Main(QMainWindow):
         return f"({float(point[0]):.4f}, {float(point[1]):.4f})"
 
     def _resolve_design_fov_size(self) -> tuple[float, float] | None:
+        import numpy as np
+
         registration = self._design_session.registration
         if registration is None or not registration.valid:
             return None
@@ -2199,7 +2242,54 @@ class Main(QMainWindow):
         )
         self.joystick_dock.raise_()
 
-        self.design_layout_window = DesignLayoutWindow()
+        self.alignment_panel = AlignmentPanel(self)
+        self.alignment_panel.open_design_window_requested.connect(
+            lambda: self._toggle_design_layout_window(True)
+        )
+        self.alignment_panel.capture_point_requested.connect(
+            self._request_alignment_capture
+        )
+        self.alignment_panel.reset_points_requested.connect(
+            self._reset_alignment_capture_points
+        )
+        self.alignment_panel.cancel_pick_requested.connect(
+            self._cancel_manual_alignment_pick
+        )
+        self.alignment_panel.clear_registration_requested.connect(
+            self._clear_design_registration
+        )
+        self.alignment_dock = CollapsibleDockWidget("Alignment", self)
+        self.alignment_dock.setObjectName("AlignmentDock")
+        self.alignment_dock.setWidget(self.alignment_panel)
+        self.alignment_dock.setAllowedAreas(
+            Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea
+        )
+        self.addDockWidget(Qt.RightDockWidgetArea, self.alignment_dock)
+        self._refresh_manual_alignment_ui()
+        self._update_coordinate_display()
+        self._refresh_design_panel()
+        self.resizeDocks(
+            [self.serial_connection_dock, self.joystick_dock, self.serial_terminal_dock],
+            [150, 340, 220],
+            Qt.Vertical,
+        )
+        self.resizeDocks(
+            [self.joystick_dock, self.alignment_dock],
+            [360, 520],
+            Qt.Horizontal,
+        )
+
+    def _create_design_layout_window(
+        self,
+        design_layout_window_class: object | None = None,
+    ) -> None:
+        if self.design_layout_window is not None:
+            return
+        if design_layout_window_class is None:
+            from probe_station_gui.views.design_navigator_panel import (
+                DesignLayoutWindow as design_layout_window_class,
+            )
+        self.design_layout_window = design_layout_window_class()
         self.design_navigator_panel = self.design_layout_window.navigator_panel
         self.design_navigator_panel.load_design_requested.connect(self._load_design_document)
         self.design_navigator_panel.unload_design_requested.connect(
@@ -2242,42 +2332,13 @@ class Main(QMainWindow):
         self.design_layout_window.visibility_changed.connect(
             self._on_design_layout_window_visibility_changed
         )
-        self.alignment_panel = AlignmentPanel(self)
-        self.alignment_panel.open_design_window_requested.connect(
-            lambda: self._toggle_design_layout_window(True)
+        self.design_navigator_panel.set_design_dialog_directory(
+            self.settings_manager.design_last_directory()
         )
-        self.alignment_panel.capture_point_requested.connect(
-            self._request_alignment_capture
-        )
-        self.alignment_panel.reset_points_requested.connect(
-            self._reset_alignment_capture_points
-        )
-        self.alignment_panel.cancel_pick_requested.connect(
-            self._cancel_manual_alignment_pick
-        )
-        self.alignment_panel.clear_registration_requested.connect(
-            self._clear_design_registration
-        )
-        self.alignment_dock = CollapsibleDockWidget("Alignment", self)
-        self.alignment_dock.setObjectName("AlignmentDock")
-        self.alignment_dock.setWidget(self.alignment_panel)
-        self.alignment_dock.setAllowedAreas(
-            Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea
-        )
-        self.addDockWidget(Qt.RightDockWidgetArea, self.alignment_dock)
-        self._refresh_manual_alignment_ui()
-        self._update_coordinate_display()
         self._refresh_design_panel()
-        self.resizeDocks(
-            [self.serial_connection_dock, self.joystick_dock, self.serial_terminal_dock],
-            [150, 340, 220],
-            Qt.Vertical,
-        )
-        self.resizeDocks(
-            [self.joystick_dock, self.alignment_dock],
-            [360, 520],
-            Qt.Horizontal,
-        )
+        if self._design_layout_window_requested:
+            self.design_layout_window.show_and_raise()
+            self._collapse_alignment_panel_if_ready()
 
     def _move_to_design_window_point(self, x_value: float, y_value: float) -> None:
         design_xy = (float(x_value), float(y_value))
@@ -2464,10 +2525,60 @@ class Main(QMainWindow):
         self.settings_manager.replace(settings)
         self.settings_manager.save()
 
+
+def _screen_available_geometry(window: QMainWindow):
+    screen = window.screen() or QApplication.primaryScreen()
+    if screen is None:
+        return None
+    return screen.availableGeometry()
+
+
+def _set_initial_window_geometry(window: QMainWindow) -> None:
+    available = _screen_available_geometry(window)
+    if available is None:
+        return
+    bounds = available.adjusted(12, 12, -12, -12)
+    if bounds.width() <= 0 or bounds.height() <= 0:
+        bounds = available
+    width = min(1600, bounds.width())
+    height = min(1000, bounds.height())
+    window.resize(width, height)
+    window.move(bounds.left(), bounds.top())
+
+
+def _fit_window_to_screen(window: QMainWindow) -> None:
+    available = _screen_available_geometry(window)
+    if available is None:
+        return
+    bounds = available.adjusted(4, 4, -4, -4)
+    if bounds.width() <= 0 or bounds.height() <= 0:
+        bounds = available
+    if window.width() > bounds.width() or window.height() > bounds.height():
+        window.resize(
+            min(window.width(), bounds.width()),
+            min(window.height(), bounds.height()),
+        )
+    frame = window.frameGeometry()
+    target_x = frame.x()
+    target_y = frame.y()
+    if frame.right() > available.right():
+        target_x -= frame.right() - available.right()
+    if frame.bottom() > available.bottom():
+        target_y -= frame.bottom() - available.bottom()
+    if target_x < available.left():
+        target_x = available.left()
+    if target_y < available.top():
+        target_y = available.top()
+    delta = frame.topLeft() - window.pos()
+    window.move(target_x - delta.x(), target_y - delta.y())
+
+
 def main() -> int:
     app = QApplication(sys.argv)
     window = Main()
-    window.showMaximized()
+    _set_initial_window_geometry(window)
+    window.show()
+    QTimer.singleShot(0, lambda: _fit_window_to_screen(window))
     return app.exec()
 
 

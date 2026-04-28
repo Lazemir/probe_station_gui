@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import importlib
 from collections import deque
 from queue import Empty, PriorityQueue
 import re
@@ -12,15 +13,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
-import cv2
-import numpy as np
 import serial
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QImage
-try:
-    from scipy import optimize as scipy_optimize
-except ImportError:  # pragma: no cover - optional dependency for autofocus
-    scipy_optimize = None
 
 
 logger = logging.getLogger(__name__)
@@ -32,6 +27,29 @@ class StageControllerError(RuntimeError):
 
 class AxisStateError(StageControllerError):
     """Raised when axis state prevents the requested operation."""
+
+
+class _LazyModule:
+    def __init__(self, module_name: str) -> None:
+        self._module_name = module_name
+        self._module: object | None = None
+
+    def __getattr__(self, name: str) -> object:
+        if self._module is None:
+            self._module = importlib.import_module(self._module_name)
+        return getattr(self._module, name)
+
+
+np = _LazyModule("numpy")
+cv2 = _LazyModule("cv2")
+
+
+def _load_scipy_optimize():
+    try:
+        from scipy import optimize as scipy_optimize
+    except ImportError:  # pragma: no cover - optional dependency for autofocus
+        return None
+    return scipy_optimize
 
 
 @dataclass
@@ -1294,6 +1312,7 @@ class StageController(QObject):
             serial_connection = self._serial
             if serial_connection is None or not serial_connection.is_open:
                 raise StageControllerError("Serial connection is not available.")
+            scipy_optimize = _load_scipy_optimize()
             if scipy_optimize is None:
                 raise StageControllerError(
                     "SciPy is required for autofocus optimization. Please install it."
