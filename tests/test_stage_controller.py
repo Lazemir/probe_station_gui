@@ -1,6 +1,7 @@
 import importlib.util
 import sys
 import threading
+import time
 import types
 import unittest
 from pathlib import Path
@@ -103,6 +104,18 @@ class _FakeSerial:
     def __init__(self) -> None:
         self.is_open = True
         self.probe_station_reboot_detected = False
+
+
+class _WritableFakeSerial(_FakeSerial):
+    def __init__(self) -> None:
+        super().__init__()
+        self.writes: list[bytes] = []
+
+    def write(self, payload: bytes) -> None:
+        self.writes.append(payload)
+
+    def flush(self) -> None:
+        return None
 
 
 class StageControllerAbsoluteMoveTest(unittest.TestCase):
@@ -358,6 +371,46 @@ class StageControllerStatusParsingTest(unittest.TestCase):
 
 
 class StageControllerJogQueueTest(unittest.TestCase):
+    def test_jog_stop_writes_immediately_when_serial_lock_is_free(self) -> None:
+        controller = StageController()
+        serial_connection = _WritableFakeSerial()
+        try:
+            controller._serial = serial_connection
+
+            controller.queue_jog_stop()
+
+            self.assertEqual(serial_connection.writes, [b"\x85"])
+            self.assertTrue(controller._async_write_queue.empty())
+        finally:
+            controller.shutdown()
+
+    def test_jog_command_superseded_while_waiting_for_serial_lock_is_not_written(
+        self,
+    ) -> None:
+        controller = StageController()
+        controller.SERIAL_JOG_COMMAND_SETTLE_S = 0.0
+        serial_connection = _WritableFakeSerial()
+        try:
+            controller._serial = serial_connection
+            controller._serial_session_lock.acquire()
+            try:
+                controller.queue_jog_command("$J=G91 G21 X250.000 F10")
+                deadline = time.monotonic() + 1.0
+                while (
+                    not controller._async_write_queue.empty()
+                    and time.monotonic() < deadline
+                ):
+                    time.sleep(0.005)
+                controller.queue_jog_stop()
+            finally:
+                controller._serial_session_lock.release()
+
+            controller._async_write_queue.join()
+
+            self.assertEqual(serial_connection.writes, [b"\x85"])
+        finally:
+            controller.shutdown()
+
     def test_superseded_jog_command_is_dropped_before_write(self) -> None:
         controller = StageController()
         controller.SERIAL_JOG_COMMAND_SETTLE_S = 0.0

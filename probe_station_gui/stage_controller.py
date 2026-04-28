@@ -967,16 +967,32 @@ class StageController(QObject):
         # Invalidate any queued-but-not-yet-written jog command so a late $J
         # cannot arrive after the stop and keep motion alive.
         self._queued_jog_generation += 1
-        self._async_write_queue.put(
-            _QueuedSerialWrite(
-                priority=self.SERIAL_PRIORITY_JOG_STOP,
-                sequence=self._next_queued_write_sequence(),
-                kind="jog_stop",
-                payload=b"\x85",
-                description="0x85",
-                generation=self._queued_jog_generation,
-            )
+        job = _QueuedSerialWrite(
+            priority=self.SERIAL_PRIORITY_JOG_STOP,
+            sequence=self._next_queued_write_sequence(),
+            kind="jog_stop",
+            payload=b"\x85",
+            description="0x85",
+            generation=self._queued_jog_generation,
         )
+        if self._try_write_jog_stop_immediately(job):
+            return
+        self._async_write_queue.put(job)
+
+    def _try_write_jog_stop_immediately(self, job: _QueuedSerialWrite) -> bool:
+        serial_connection = self._serial
+        if serial_connection is None or not serial_connection.is_open:
+            return True
+        if not self._serial_session_lock.acquire(blocking=False):
+            return False
+        try:
+            self._write_async_job(serial_connection, job)
+            return True
+        except StageControllerError as exc:
+            self.status_message.emit(str(exc))
+            return True
+        finally:
+            self._serial_session_lock.release()
 
     def queue_soft_reset(self, *, source: str = "unknown") -> None:
         """Queue a FluidNC soft reset without blocking the UI thread."""
@@ -2278,6 +2294,8 @@ class StageController(QObject):
                 if serial_connection is None or not serial_connection.is_open:
                     continue
                 with self._serial_session_lock:
+                    if not self._queued_jog_command_is_current(job):
+                        continue
                     self._write_async_job(serial_connection, job)
             except StageControllerError as exc:
                 self.status_message.emit(str(exc))
@@ -2292,33 +2310,34 @@ class StageController(QObject):
         while time.monotonic() < deadline:
             if self._async_write_shutdown.is_set():
                 return False
-            if job.generation != self._queued_jog_generation:
-                logger.debug(
-                    "TIMING jog_command_dropped_superseded command=%s generation=%s current_generation=%s",
-                    job.description,
-                    job.generation,
-                    self._queued_jog_generation,
-                )
+            if not self._queued_jog_command_is_current(job):
                 return False
             remaining = deadline - time.monotonic()
             time.sleep(min(0.005, remaining))
 
-        if job.generation != self._queued_jog_generation:
-            logger.debug(
-                "TIMING jog_command_dropped_superseded command=%s generation=%s current_generation=%s",
-                job.description,
-                job.generation,
-                self._queued_jog_generation,
-            )
-            return False
-        return True
+        return self._queued_jog_command_is_current(job)
+
+    def _queued_jog_command_is_current(self, job: _QueuedSerialWrite) -> bool:
+        if job.kind != "jog_command":
+            return True
+        if job.generation == self._queued_jog_generation:
+            return True
+        logger.debug(
+            "TIMING jog_command_dropped_superseded command=%s generation=%s current_generation=%s",
+            job.description,
+            job.generation,
+            self._queued_jog_generation,
+        )
+        return False
 
     def _write_async_job(
         self, serial_connection: serial.Serial, job: _QueuedSerialWrite
     ) -> None:
         try:
             if job.kind == "jog_command":
-                logger.debug("TIMING jog_serial_write_begin command=%s", job.description)
+                logger.debug(
+                    "TIMING jog_serial_write_begin command=%s", job.description
+                )
             elif job.kind == "jog_stop":
                 logger.debug("TIMING jog_stop_write_begin command=0x85")
             elif job.kind == "soft_reset":

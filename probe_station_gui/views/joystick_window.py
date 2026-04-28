@@ -104,6 +104,9 @@ class JoystickWindow(QWidget):
     KEYBOARD_JOG_SYNC_DEBOUNCE_MS = 10
     KEYBOARD_JOG_SECONDARY_AXIS_ACTIVATION_MS = 320
     KEYBOARD_JOG_DIAGONAL_CHORD_WINDOW_MS = 90
+    KEYBOARD_JOG_AXIS_DROP_CHORD_WINDOW_MS = 160
+    KEYBOARD_JOG_DIRECTION_CHANGE_CHORD_WINDOW_MS = 250
+    JOG_STOP_RESEND_DELAYS_MS = (80, 180, 400, 900, 1500)
     MANUAL_JOG_AXES = ("X", "Y", "Z", "A", "B", "C")
     MANUAL_AXIS_MODES = ("G91", "G90")
     LINEAR_AXES = {"X", "Y", "Z"}
@@ -194,7 +197,7 @@ class JoystickWindow(QWidget):
         self._jog_state_sync_timer.setInterval(self.KEYBOARD_JOG_SYNC_DEBOUNCE_MS)
         self._jog_state_sync_timer.timeout.connect(self._sync_active_jog_state)
         self._pending_jog_axes: Optional[tuple[tuple[str, int], ...]] = None
-        self._jog_stop_resend_pending = False
+        self._jog_stop_resend_generation = 0
         self.apply_control_bindings({})
         self._event_filter_installed = False
         self._event_filter_retry_scheduled = False
@@ -899,17 +902,36 @@ class JoystickWindow(QWidget):
         )
 
     def _compute_active_axes(self) -> tuple[tuple[str, int], ...]:
-        unique_axes: dict[str, int] = {}
+        axis_directions: dict[str, list[int]] = {}
         for identifier in self._key_stack:
             mapping = self._mapping_from_identifier(identifier)
             if mapping is None:
                 continue
             axis, direction = mapping
-            unique_axes[axis] = direction
+            axis_directions.setdefault(axis, []).append(direction)
+        unique_axes: dict[str, int] = {}
+        for axis, directions in axis_directions.items():
+            active_direction = self._active_direction_for_axis(axis)
+            if active_direction in directions:
+                unique_axes[axis] = active_direction
+            else:
+                unique_axes[axis] = directions[-1]
         return tuple(unique_axes.items())
 
     def _schedule_active_jog_update(self) -> None:
         axes = self._compute_active_axes()
+        if not axes:
+            self._pending_jog_axes = None
+            self._clear_pending_key_activations()
+            if self._jog_state_sync_timer.isActive():
+                self._jog_state_sync_timer.stop()
+            logger.debug(
+                "Scheduled immediate jog stop: axes=%s active_axes=%s",
+                axes,
+                self._active_axes,
+            )
+            self.stop_jog()
+            return
         self._pending_jog_axes = axes
         interval = self._jog_sync_interval_for_axes(axes)
         if self._jog_state_sync_timer.isActive():
@@ -938,10 +960,30 @@ class JoystickWindow(QWidget):
         self, axes: tuple[tuple[str, int], ...]
     ) -> int:
         if not axes:
-            return self.KEYBOARD_JOG_SYNC_DEBOUNCE_MS
-        if not (self._active_axes or ()):
             return 0
+        linear_axes = [axis for axis, _direction in axes if axis in self.LINEAR_AXES]
+        if not (self._active_axes or ()):
+            if len(linear_axes) == 1:
+                return self.KEYBOARD_JOG_DIAGONAL_CHORD_WINDOW_MS
+            return 0
+        active_linear_axes = [
+            axis
+            for axis, _direction in self._active_axes
+            if axis in self.LINEAR_AXES
+        ]
+        for axis, direction in axes:
+            active_direction = self._active_direction_for_axis(axis)
+            if active_direction is not None and active_direction != direction:
+                return self.KEYBOARD_JOG_DIRECTION_CHANGE_CHORD_WINDOW_MS
+        if len(linear_axes) == 1 and len(active_linear_axes) >= 2:
+            return self.KEYBOARD_JOG_AXIS_DROP_CHORD_WINDOW_MS
         return self.KEYBOARD_JOG_SYNC_DEBOUNCE_MS
+
+    def _active_direction_for_axis(self, axis: str) -> Optional[int]:
+        for active_axis, active_direction in self._active_axes or ():
+            if active_axis == axis:
+                return active_direction
+        return None
 
     def set_homing_status(self, homed_axes: set[str]) -> None:
         active_axes = set(homed_axes).intersection(self.HOMING_AXES)
@@ -1379,10 +1421,7 @@ class JoystickWindow(QWidget):
                 )
                 return True
             if identifier in self._key_stack:
-                self._key_stack.remove(identifier)
-                self._key_press_times.pop(identifier, None)
-                self._promote_pending_keys_if_needed()
-                self._schedule_active_jog_update()
+                self._release_key_identifier(identifier)
             event.accept()
             logger.debug(
                 "TIMING keyrelease_received key=%s scan=%s text=%s modifiers=%s mapping=%s remaining=%s",
@@ -1423,6 +1462,15 @@ class JoystickWindow(QWidget):
             keyboard_modifiers_to_int(event.modifiers()),
         )
         return False
+
+    def _release_key_identifier(self, identifier: Tuple[str, object]) -> bool:
+        if identifier not in self._key_stack:
+            return False
+        self._key_stack.remove(identifier)
+        self._key_press_times.pop(identifier, None)
+        self._promote_pending_keys_if_needed()
+        self._schedule_active_jog_update()
+        return True
 
     def _handle_wheel_event(self, event, obj) -> bool:
         widget = obj if isinstance(obj, QWidget) else None
@@ -1469,7 +1517,7 @@ class JoystickWindow(QWidget):
         }
         current_axes = active_axes.union(pressed_axes)
 
-        if not current_axes or axis in current_axes:
+        if not current_axes or axis in current_axes or axis in self.LINEAR_AXES:
             self._key_stack.append(identifier)
             self._schedule_active_jog_update()
             return
@@ -1564,20 +1612,24 @@ class JoystickWindow(QWidget):
         return self.KEYBOARD_JOG_SECONDARY_AXIS_ACTIVATION_MS
 
     def _schedule_jog_stop_resend(self) -> None:
-        if self._jog_stop_resend_pending:
-            return
-        self._jog_stop_resend_pending = True
+        self._jog_stop_resend_generation += 1
+        generation = self._jog_stop_resend_generation
 
-        def resend() -> None:
-            self._jog_stop_resend_pending = False
-            if self._key_stack:
+        def resend(expected_generation: int) -> None:
+            if expected_generation != self._jog_stop_resend_generation:
+                return
+            if self._key_stack or self._active_axes is not None:
                 return
             if not self.serial_connection or not self.serial_connection.is_open:
                 return
             self.send_command(b"\x85")
             logger.debug("Resent stop jog command")
 
-        QTimer.singleShot(120, resend)
+        for delay_ms in self.JOG_STOP_RESEND_DELAYS_MS:
+            QTimer.singleShot(
+                delay_ms,
+                lambda expected_generation=generation: resend(expected_generation),
+            )
 
     @staticmethod
     def _is_text_entry_widget(widget: Optional[QWidget]) -> bool:

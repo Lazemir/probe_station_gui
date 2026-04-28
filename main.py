@@ -12,10 +12,11 @@ import sys
 
 import numpy as np
 from PySide6.QtCore import QThread, QTimer, Qt, QUrl
-from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
+from PySide6.QtGui import QAction, QDesktopServices, QImage, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
+    QLabel,
     QMainWindow,
     QPlainTextEdit,
     QVBoxLayout,
@@ -74,6 +75,7 @@ class Main(QMainWindow):
     STARTUP_AUTO_CONNECT_DELAY_MS = 400
     SERIAL_STARTUP_SYNC_DELAY_MS = 150
     STARTUP_FOCUS_DELAY_MS = 120
+    CAMERA_UI_FRAME_GAP_WARNING_S = 0.25
 
     def __init__(self) -> None:
         super().__init__()
@@ -136,8 +138,15 @@ class Main(QMainWindow):
         self._planned_move_stop_status_timestamp: float | None = None
         self._design_snap_enabled = True
         self._last_reported_b_position: float | None = None
+        self._last_camera_frame_ui_timestamp: float | None = None
         self._design_session = DesignSession()
         self.statusBar()
+        self._stage_position_label = QLabel("Position: unavailable", self)
+        self._stage_position_label.setMinimumWidth(390)
+        self._stage_position_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self._stage_position_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._stage_position_label.setToolTip("Current controller position")
+        self.statusBar().addPermanentWidget(self._stage_position_label, 0)
         self._status_log = QPlainTextEdit(self)
         self._status_log.setReadOnly(True)
         self._status_log.setMaximumHeight(80)
@@ -158,7 +167,7 @@ class Main(QMainWindow):
         self.view.design_minimap_double_clicked.connect(
             lambda: self._toggle_design_layout_window(True)
         )
-        self.grabber.frame_ready.connect(self.view.set_frame)
+        self.grabber.frame_ready.connect(self._on_camera_frame)
         self.grabber.error.connect(self.on_error)
         self.thread.start()
 
@@ -217,6 +226,18 @@ class Main(QMainWindow):
 
     def on_error(self, message: str) -> None:
         logger.error("Camera error: %s", message)
+
+    def _on_camera_frame(self, qimg: QImage) -> None:
+        now = time.monotonic()
+        if self._last_camera_frame_ui_timestamp is not None:
+            frame_gap = now - self._last_camera_frame_ui_timestamp
+            if frame_gap > self.CAMERA_UI_FRAME_GAP_WARNING_S:
+                logger.warning(
+                    "Camera UI frame gap %.3fs before display update",
+                    frame_gap,
+                )
+        self._last_camera_frame_ui_timestamp = now
+        self.view.set_frame(qimg)
 
     def _on_view_hover(
         self, dx: float, dy: float, _rel_x: float, _rel_y: float
@@ -309,6 +330,7 @@ class Main(QMainWindow):
         self.stage_controller.request_stop_oscillation()
         self._stop_needle_calibration()
         self.stage_controller.set_serial(None)
+        self._update_stage_position_display(None)
         auto_retry = self.sender() is not self.serial_connection_panel
         if self.serial_connection_panel:
             self.serial_connection_panel.handle_external_disconnect(auto_retry=auto_retry)
@@ -1753,6 +1775,7 @@ class Main(QMainWindow):
         self._update_design_position(self._current_design_stage_xy)
 
     def _on_stage_position_changed(self, position: object) -> None:
+        self._update_stage_position_display(position)
         if not isinstance(position, tuple) or len(position) < 2:
             return
         logger.debug("TIMING stage_position_changed position=%s", position)
@@ -1806,6 +1829,22 @@ class Main(QMainWindow):
         self._pending_design_stage_xy = center_xy
         if not self._design_overlay_timer.isActive():
             self._design_overlay_timer.start()
+
+    def _update_stage_position_display(self, position: object | None) -> None:
+        if not isinstance(position, tuple) or len(position) < 2:
+            self._stage_position_label.setText("Position: unavailable")
+            return
+        axis_names = ("X", "Y", "Z", "A", "B", "C")
+        parts: list[str] = []
+        for axis_name, axis_value in zip(axis_names, position):
+            try:
+                parts.append(f"{axis_name}={float(axis_value):.3f}")
+            except (TypeError, ValueError):
+                continue
+        if not parts:
+            self._stage_position_label.setText("Position: unavailable")
+            return
+        self._stage_position_label.setText("Position: " + "  ".join(parts))
 
     def _refresh_design_position(self) -> None:
         if self._design_session.document is None:
