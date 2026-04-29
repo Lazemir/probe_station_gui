@@ -74,10 +74,15 @@ class Main(QMainWindow):
     MANUAL_JOG_RECONCILE_SMOOTH_THRESHOLD_MM = 0.35
     MANUAL_JOG_RECONCILE_SMOOTH_ALPHA = 0.35
     MANUAL_JOG_STATUS_SETTLE_HOLD_S = 0.8
+    MANUAL_JOG_DEFAULT_STOP_TAIL_S = 0.11
+    MANUAL_JOG_STOP_TAIL_MIN_S = 0.02
+    MANUAL_JOG_STOP_TAIL_MAX_S = 0.25
+    MANUAL_JOG_STOP_TAIL_LEARN_ALPHA = 0.25
     PLANNED_MOVE_DURATION_PADDING_S = 0.12
     TERMINAL_REFRESH_DELAYS_MS = (180, 500)
     TERMINAL_RESET_REFRESH_DELAYS_MS = (500, 1100, 1800)
     TERMINAL_RESUME_AFTER_JOG_MS = 180
+    STAGE_AXIS_NAMES = ("X", "Y", "Z", "A", "B", "C")
     B_POSITION_CHANGE_TOLERANCE_DEG = 1e-3
     CAMERA_UI_FRAME_GAP_WARNING_S = 0.25
 
@@ -129,8 +134,15 @@ class Main(QMainWindow):
         self._pending_quick_alignment_rotation = False
         self._manual_alignment_pick_slot: int | None = None
         self._manual_alignment_points: list[tuple[float, float] | None] = [None, None]
+        self._manual_jog_stage_position: tuple[float, ...] | None = None
         self._manual_jog_stage_xy: tuple[float, float] | None = None
+        self._manual_jog_axis_velocities: dict[str, float] = {}
+        self._manual_jog_stop_axis_velocities: dict[str, float] = {}
         self._manual_jog_velocity_xy: tuple[float, float] | None = None
+        self._manual_jog_stop_prediction_until: float | None = None
+        self._manual_jog_stop_tail_position: tuple[float, ...] | None = None
+        self._manual_jog_stop_tail_s = self.MANUAL_JOG_DEFAULT_STOP_TAIL_S
+        self._manual_jog_command_started_at: float | None = None
         self._manual_jog_last_timestamp: float | None = None
         self._manual_jog_last_prediction_log_at = 0.0
         self._manual_jog_waiting_for_fresh_status = False
@@ -387,8 +399,14 @@ class Main(QMainWindow):
         self._stage_unhomed_display_origins.clear()
         self._last_reported_b_position = None
         self._manual_jog_timer.stop()
+        self._manual_jog_stage_position = None
         self._manual_jog_stage_xy = None
+        self._manual_jog_axis_velocities.clear()
+        self._manual_jog_stop_axis_velocities.clear()
         self._manual_jog_velocity_xy = None
+        self._manual_jog_stop_prediction_until = None
+        self._manual_jog_stop_tail_position = None
+        self._manual_jog_command_started_at = None
         self._manual_jog_last_timestamp = None
         self._manual_jog_waiting_for_fresh_status = False
         self._manual_jog_settle_until = 0.0
@@ -1058,9 +1076,167 @@ class Main(QMainWindow):
                 self._format_active_coordinate_label("Cursor", cursor_xy),
             )
 
+    def _manual_jog_prediction_active(self) -> bool:
+        if self._manual_jog_axis_velocities:
+            return True
+        if (
+            self._manual_jog_stop_axis_velocities
+            and self._manual_jog_stop_prediction_until is not None
+        ):
+            now = time.monotonic()
+            return (
+                now < self._manual_jog_stop_prediction_until
+                or (
+                    self._manual_jog_last_timestamp is not None
+                    and self._manual_jog_last_timestamp
+                    < self._manual_jog_stop_prediction_until
+                )
+            )
+        return False
+
+    def _manual_jog_prediction_available(self) -> bool:
+        return (
+            self._manual_jog_prediction_active()
+            or bool(self._manual_jog_stop_axis_velocities)
+            or (
+                self._manual_jog_waiting_for_fresh_status
+                and self._manual_jog_stage_position is not None
+            )
+        )
+
+    def _manual_jog_prediction_velocities(self) -> dict[str, float]:
+        if self._manual_jog_axis_velocities:
+            return self._manual_jog_axis_velocities
+        if self._manual_jog_prediction_active():
+            return self._manual_jog_stop_axis_velocities
+        return {}
+
+    def _clear_manual_jog_stop_prediction(self) -> None:
+        self._manual_jog_stop_axis_velocities.clear()
+        self._manual_jog_stop_prediction_until = None
+        self._manual_jog_stop_tail_position = None
+
+    @staticmethod
+    def _stage_xy_from_position(
+        position: object | None,
+    ) -> tuple[float, float] | None:
+        if not isinstance(position, (tuple, list)) or len(position) < 2:
+            return None
+        try:
+            return (float(position[0]), float(position[1]))
+        except (TypeError, ValueError):
+            return None
+
+    def _position_with_stage_xy(
+        self,
+        stage_xy: tuple[float, float],
+        *,
+        base_position: object | None = None,
+    ) -> tuple[float, ...]:
+        position = base_position
+        if not isinstance(position, (tuple, list)) or len(position) < 2:
+            position = self.stage_controller.latest_stage_position()
+        if isinstance(position, (tuple, list)) and len(position) >= 2:
+            try:
+                values = [float(value) for value in position]
+            except (TypeError, ValueError):
+                values = []
+        else:
+            values = []
+        if len(values) < 2:
+            values = [float(stage_xy[0]), float(stage_xy[1])]
+        else:
+            values[0] = float(stage_xy[0])
+            values[1] = float(stage_xy[1])
+        return tuple(values)
+
+    def _seed_motion_prediction_position(self) -> tuple[float, ...] | None:
+        if self._manual_jog_stage_position is not None:
+            return tuple(float(value) for value in self._manual_jog_stage_position)
+        if self._manual_jog_stage_xy is not None:
+            return self._position_with_stage_xy(self._manual_jog_stage_xy)
+        latest = self.stage_controller.latest_stage_position()
+        if isinstance(latest, tuple) and len(latest) >= 2:
+            try:
+                return tuple(float(value) for value in latest)
+            except (TypeError, ValueError):
+                pass
+        if self._current_design_stage_xy is not None:
+            return self._position_with_stage_xy(
+                self._current_design_stage_xy,
+                base_position=None,
+            )
+        return None
+
+    def _publish_stage_position_estimate(
+        self,
+        position: tuple[float, ...] | None,
+    ) -> None:
+        stage_xy = self._stage_xy_from_position(position)
+        design_stage_xy = (
+            stage_xy if self.stage_controller.axes_are_homed({"X", "Y"}) else None
+        )
+        self._update_stage_position_display(position)
+        self._update_coordinate_display(center_xy=design_stage_xy)
+        self._update_design_position(design_stage_xy)
+
+    def _learn_manual_jog_stop_tail(
+        self,
+        predicted_position: object | None,
+        actual_position: object | None,
+    ) -> None:
+        if not self._manual_jog_stop_axis_velocities:
+            return
+        if not isinstance(predicted_position, (tuple, list)) or not isinstance(
+            actual_position, (tuple, list)
+        ):
+            return
+        speed_sq = 0.0
+        projected_error = 0.0
+        for axis, velocity in self._manual_jog_stop_axis_velocities.items():
+            try:
+                axis_index = self.STAGE_AXIS_NAMES.index(axis)
+            except ValueError:
+                continue
+            if axis_index >= len(predicted_position) or axis_index >= len(actual_position):
+                continue
+            try:
+                predicted_value = float(predicted_position[axis_index])
+                actual_value = float(actual_position[axis_index])
+            except (TypeError, ValueError):
+                continue
+            speed_sq += velocity * velocity
+            projected_error += (actual_value - predicted_value) * velocity
+        if speed_sq <= 1e-9:
+            return
+        residual_s = projected_error / speed_sq
+        old_tail_s = self._manual_jog_stop_tail_s
+        learned_tail_s = min(
+            self.MANUAL_JOG_STOP_TAIL_MAX_S,
+            max(
+                self.MANUAL_JOG_STOP_TAIL_MIN_S,
+                old_tail_s + residual_s,
+            ),
+        )
+        self._manual_jog_stop_tail_s = (
+            old_tail_s
+            + (learned_tail_s - old_tail_s) * self.MANUAL_JOG_STOP_TAIL_LEARN_ALPHA
+        )
+        logger.debug(
+            "MOTION PREDICTION stop_tail_learn old=%.4f residual=%.4f learned=%.4f new=%.4f",
+            old_tail_s,
+            residual_s,
+            learned_tail_s,
+            self._manual_jog_stop_tail_s,
+        )
+
     def _preferred_design_stage_xy(self) -> tuple[float, float] | None:
-        if self._manual_jog_velocity_xy is not None and self._manual_jog_stage_xy is not None:
-            return self._manual_jog_stage_xy
+        if self._manual_jog_prediction_available():
+            stage_xy = self._stage_xy_from_position(self._manual_jog_stage_position)
+            if stage_xy is not None:
+                return stage_xy
+            if self._manual_jog_stage_xy is not None:
+                return self._manual_jog_stage_xy
         if (
             self._planned_move_started_at is not None
             and self._planned_move_stage_xy is not None
@@ -1072,10 +1248,13 @@ class Main(QMainWindow):
                 last_status_timestamp is not None
                 and self._manual_jog_stop_status_timestamp is not None
                 and last_status_timestamp > self._manual_jog_stop_status_timestamp
+                and (self.stage_controller.latest_stage_state() or "").lower()
+                == "idle"
             ):
                 self._manual_jog_waiting_for_fresh_status = False
                 self._manual_jog_settle_until = 0.0
                 self._manual_jog_stop_status_timestamp = None
+                self._clear_manual_jog_stop_prediction()
             elif (
                 self._manual_jog_stage_xy is not None
                 and time.monotonic() < self._manual_jog_settle_until
@@ -1085,6 +1264,7 @@ class Main(QMainWindow):
                 self._manual_jog_waiting_for_fresh_status = False
                 self._manual_jog_settle_until = 0.0
                 self._manual_jog_stop_status_timestamp = None
+                self._clear_manual_jog_stop_prediction()
         if self._planned_move_waiting_for_fresh_status:
             last_status_timestamp = self.stage_controller.last_status_timestamp()
             if (
@@ -1225,7 +1405,9 @@ class Main(QMainWindow):
         self._manual_jog_stop_status_timestamp = None
         if self.serial_terminal_panel is not None:
             self.serial_terminal_panel.set_live_poll_paused(True)
-        xy_components: dict[str, float] = {"X": 0.0, "Y": 0.0}
+        axis_components: dict[str, float] = {
+            axis: 0.0 for axis in self.STAGE_AXIS_NAMES
+        }
         for item in commanded_distances:
             if not isinstance(item, tuple) or len(item) != 2:
                 continue
@@ -1234,43 +1416,59 @@ class Main(QMainWindow):
                 distance = float(item[1])
             except (TypeError, ValueError):
                 continue
-            if axis in xy_components:
-                xy_components[axis] = distance
-        path_length = math.hypot(xy_components["X"], xy_components["Y"])
+            if axis in axis_components:
+                axis_components[axis] = distance
+        path_length = math.sqrt(
+            sum(component * component for component in axis_components.values())
+        )
         if path_length <= 1e-9:
-            logger.debug("DESIGN MINIMAP prediction_stop_requested command=%s", commanded_distances)
+            logger.debug("MOTION PREDICTION stop_requested command=%s", commanded_distances)
+            self._manual_jog_axis_velocities.clear()
+            self._clear_manual_jog_stop_prediction()
             self._manual_jog_velocity_xy = None
             self._manual_jog_timer.stop()
             self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
             return
         speed_mm_per_s = max(0.0, float(feedrate)) / 60.0
+        self._manual_jog_axis_velocities = {
+            axis: speed_mm_per_s * distance / path_length
+            for axis, distance in axis_components.items()
+            if abs(distance) > 1e-9
+        }
         self._manual_jog_velocity_xy = (
-            speed_mm_per_s * xy_components["X"] / path_length,
-            speed_mm_per_s * xy_components["Y"] / path_length,
+            self._manual_jog_axis_velocities.get("X", 0.0),
+            self._manual_jog_axis_velocities.get("Y", 0.0),
         )
+        self._clear_manual_jog_stop_prediction()
         stage_source = "tracked"
-        if self._manual_jog_stage_xy is not None:
-            self._manual_jog_stage_xy = (
-                float(self._manual_jog_stage_xy[0]),
-                float(self._manual_jog_stage_xy[1]),
-            )
-        else:
+        if self._manual_jog_stage_position is None and self._manual_jog_stage_xy is None:
             latest = self.stage_controller.latest_stage_position()
             if latest is not None and len(latest) >= 2:
-                self._manual_jog_stage_xy = (float(latest[0]), float(latest[1]))
                 stage_source = "latest_status"
             elif self._current_design_stage_xy is not None:
-                self._manual_jog_stage_xy = self._current_design_stage_xy
                 stage_source = "current_design"
             else:
                 stage_source = "unknown"
-        if self._manual_jog_stage_xy is None and self._current_design_stage_xy is not None:
+        self._manual_jog_stage_position = self._seed_motion_prediction_position()
+        self._manual_jog_stage_xy = self._stage_xy_from_position(
+            self._manual_jog_stage_position
+        )
+        if (
+            self._manual_jog_stage_position is None
+            and self._current_design_stage_xy is not None
+        ):
+            self._manual_jog_stage_position = self._position_with_stage_xy(
+                self._current_design_stage_xy,
+                base_position=None,
+            )
             self._manual_jog_stage_xy = self._current_design_stage_xy
             stage_source = "current_design"
-        self._manual_jog_last_timestamp = time.monotonic()
+        now = time.monotonic()
+        self._manual_jog_command_started_at = now
+        self._manual_jog_last_timestamp = now
         self._manual_jog_last_prediction_log_at = 0.0
         logger.debug(
-            "DESIGN MINIMAP prediction_start stage=%s design=%s velocity=(%.4f, %.4f) feedrate=%.3f command=%s source=%s",
+            "MOTION PREDICTION start stage=%s design=%s velocity=(%.4f, %.4f) feedrate=%.3f command=%s source=%s",
             self._format_optional_point(self._manual_jog_stage_xy),
             self._format_optional_point(
                 self._design_session.design_from_stage(self._manual_jog_stage_xy)
@@ -1283,26 +1481,41 @@ class Main(QMainWindow):
             commanded_distances,
             stage_source,
         )
+        if self._manual_jog_stage_position is not None:
+            self._publish_stage_position_estimate(self._manual_jog_stage_position)
         if not self._manual_jog_timer.isActive():
             self._manual_jog_timer.start()
 
     def _on_manual_jog_stopped(self) -> None:
+        now = time.monotonic()
+        stop_velocities = dict(self._manual_jog_axis_velocities)
         logger.debug(
-            "DESIGN MINIMAP prediction_stop stage=%s design=%s",
+            "MOTION PREDICTION stop_requested stage=%s design=%s stop_tail_s=%.4f",
             self._format_optional_point(self._manual_jog_stage_xy),
             self._format_optional_point(
                 self._design_session.design_from_stage(self._manual_jog_stage_xy)
                 if self._manual_jog_stage_xy is not None
                 else None
             ),
+            self._manual_jog_stop_tail_s if stop_velocities else 0.0,
         )
-        self._manual_jog_timer.stop()
+        if stop_velocities and self._manual_jog_stage_position is not None:
+            self._manual_jog_stop_axis_velocities = stop_velocities
+            self._manual_jog_stop_prediction_until = now + self._manual_jog_stop_tail_s
+            self._manual_jog_stop_tail_position = None
+            if self._manual_jog_last_timestamp is None:
+                self._manual_jog_last_timestamp = now
+            if not self._manual_jog_timer.isActive():
+                self._manual_jog_timer.start()
+        else:
+            self._clear_manual_jog_stop_prediction()
+            self._manual_jog_timer.stop()
+        self._manual_jog_axis_velocities.clear()
         self._manual_jog_velocity_xy = None
-        self._manual_jog_last_timestamp = None
         self._manual_jog_last_prediction_log_at = 0.0
         self._manual_jog_waiting_for_fresh_status = self._manual_jog_stage_xy is not None
         self._manual_jog_settle_until = (
-            time.monotonic() + self.MANUAL_JOG_STATUS_SETTLE_HOLD_S
+            now + self.MANUAL_JOG_STATUS_SETTLE_HOLD_S
         )
         self._manual_jog_stop_status_timestamp = self.stage_controller.last_status_timestamp()
         if self.serial_terminal_panel is not None:
@@ -1340,7 +1553,7 @@ class Main(QMainWindow):
         self.settings_manager.save()
 
     def _advance_motion_prediction(self) -> None:
-        if self._manual_jog_velocity_xy is not None:
+        if self._manual_jog_prediction_active():
             self._advance_manual_jog_prediction()
             return
         if self._planned_move_started_at is not None:
@@ -1349,39 +1562,68 @@ class Main(QMainWindow):
         self._manual_jog_timer.stop()
 
     def _advance_manual_jog_prediction(self) -> None:
-        if self._manual_jog_velocity_xy is None:
+        velocities = self._manual_jog_prediction_velocities()
+        if not velocities:
             return
         now = time.monotonic()
         if self._manual_jog_last_timestamp is None:
             self._manual_jog_last_timestamp = now
             return
-        dt = max(0.0, now - self._manual_jog_last_timestamp)
-        self._manual_jog_last_timestamp = now
+        prediction_now = now
+        if (
+            not self._manual_jog_axis_velocities
+            and self._manual_jog_stop_prediction_until is not None
+        ):
+            prediction_now = min(now, self._manual_jog_stop_prediction_until)
+        dt = max(0.0, prediction_now - self._manual_jog_last_timestamp)
+        self._manual_jog_last_timestamp = prediction_now
         if dt <= 0.0:
+            if (
+                self._manual_jog_stop_prediction_until is not None
+                and now >= self._manual_jog_stop_prediction_until
+            ):
+                self._manual_jog_stop_tail_position = self._manual_jog_stage_position
+                self._manual_jog_timer.stop()
             return
-        if self._manual_jog_stage_xy is None:
-            latest = self.stage_controller.latest_stage_position()
-            if latest is None or len(latest) < 2:
+        if self._manual_jog_stage_position is None:
+            self._manual_jog_stage_position = self._seed_motion_prediction_position()
+            if self._manual_jog_stage_position is None:
                 return
-            self._manual_jog_stage_xy = (float(latest[0]), float(latest[1]))
-        self._manual_jog_stage_xy = (
-            float(self._manual_jog_stage_xy[0] + self._manual_jog_velocity_xy[0] * dt),
-            float(self._manual_jog_stage_xy[1] + self._manual_jog_velocity_xy[1] * dt),
+        values = [float(value) for value in self._manual_jog_stage_position]
+        for axis, velocity in velocities.items():
+            try:
+                axis_index = self.STAGE_AXIS_NAMES.index(axis)
+            except ValueError:
+                continue
+            if axis_index >= len(values):
+                continue
+            values[axis_index] = float(values[axis_index] + velocity * dt)
+        self._manual_jog_stage_position = tuple(values)
+        self._manual_jog_stage_xy = self._stage_xy_from_position(
+            self._manual_jog_stage_position
         )
         if now - self._manual_jog_last_prediction_log_at >= 0.15:
+            velocity_x = velocities.get("X", 0.0)
+            velocity_y = velocities.get("Y", 0.0)
             logger.debug(
-                "DESIGN MINIMAP prediction_tick stage=%s design=%s dt=%.4f velocity=(%.4f, %.4f)",
+                "MOTION PREDICTION tick stage=%s design=%s dt=%.4f velocity=(%.4f, %.4f)",
                 self._format_optional_point(self._manual_jog_stage_xy),
                 self._format_optional_point(
                     self._design_session.design_from_stage(self._manual_jog_stage_xy)
                 ),
                 dt,
-                self._manual_jog_velocity_xy[0],
-                self._manual_jog_velocity_xy[1],
+                velocity_x,
+                velocity_y,
             )
             self._manual_jog_last_prediction_log_at = now
-        self._update_coordinate_display(center_xy=self._manual_jog_stage_xy)
-        self._update_design_position(self._manual_jog_stage_xy)
+        self._publish_stage_position_estimate(self._manual_jog_stage_position)
+        if (
+            self._manual_jog_stop_prediction_until is not None
+            and now >= self._manual_jog_stop_prediction_until
+            and not self._manual_jog_axis_velocities
+        ):
+            self._manual_jog_stop_tail_position = self._manual_jog_stage_position
+            self._manual_jog_timer.stop()
 
     def _advance_planned_move_prediction(self) -> None:
         if (
@@ -1407,8 +1649,9 @@ class Main(QMainWindow):
             float(origin_x + (target_x - origin_x) * progress),
             float(origin_y + (target_y - origin_y) * progress),
         )
-        self._update_coordinate_display(center_xy=self._planned_move_stage_xy)
-        self._update_design_position(self._planned_move_stage_xy)
+        self._publish_stage_position_estimate(
+            self._position_with_stage_xy(self._planned_move_stage_xy)
+        )
         if progress >= 1.0:
             self._planned_move_waiting_for_fresh_status = (
                 self._planned_move_stage_xy is not None
@@ -1471,13 +1714,16 @@ class Main(QMainWindow):
         self._planned_move_waiting_for_fresh_status = False
         self._planned_move_stop_status_timestamp = None
         logger.debug(
-            "DESIGN MINIMAP planned_move_start source=%s origin=%s target=%s distance=%.4f duration=%.4f feedrate=%.3f",
+            "MOTION PREDICTION planned_move_start source=%s origin=%s target=%s distance=%.4f duration=%.4f feedrate=%.3f",
             source_label,
             self._format_optional_point(origin_stage_xy),
             self._format_optional_point(target_stage_xy),
             distance_mm,
             duration_s,
             float(self.stage_controller.DEFAULT_FEEDRATE),
+        )
+        self._publish_stage_position_estimate(
+            self._position_with_stage_xy(origin_stage_xy)
         )
         if not self._manual_jog_timer.isActive():
             self._manual_jog_timer.start()
@@ -1507,7 +1753,7 @@ class Main(QMainWindow):
             or self._planned_move_waiting_for_fresh_status
         ):
             logger.debug(
-                "DESIGN MINIMAP planned_move_finish success=%s stage=%s",
+                "MOTION PREDICTION planned_move_finish success=%s stage=%s",
                 success,
                 self._format_optional_point(self._planned_move_stage_xy),
             )
@@ -1934,8 +2180,8 @@ class Main(QMainWindow):
         self._update_design_position(self._current_design_stage_xy)
 
     def _on_stage_position_changed(self, position: object) -> None:
-        self._update_stage_position_display(position)
         if not isinstance(position, tuple) or len(position) < 2:
+            self._update_stage_position_display(position)
             return
         logger.debug("TIMING stage_position_changed position=%s", position)
         xy_homed = self.stage_controller.axes_are_homed({"X", "Y"})
@@ -1948,11 +2194,14 @@ class Main(QMainWindow):
             else:
                 self.contact_calibration_window.set_current_stage_position(None)
         if not xy_homed:
-            self._manual_jog_stage_xy = None
-            self._planned_move_stage_xy = None
-            self._update_coordinate_display(center_xy=None)
-            self._update_design_position(None)
-            return
+            if not self._manual_jog_prediction_available():
+                self._update_stage_position_display(position)
+                self._manual_jog_stage_position = None
+                self._manual_jog_stage_xy = None
+                self._planned_move_stage_xy = None
+                self._update_coordinate_display(center_xy=None)
+                self._update_design_position(None)
+                return
         if len(position) > 4:
             current_b = float(position[4])
             if (
@@ -1967,45 +2216,64 @@ class Main(QMainWindow):
                     "Design registration cleared after B-axis motion."
                 )
             self._last_reported_b_position = current_b
-        predicted_stage_xy = None
-        if self._manual_jog_velocity_xy is not None:
-            predicted_stage_xy = self._manual_jog_stage_xy
+        predicted_position = None
+        if self._manual_jog_prediction_available():
+            predicted_position = self._manual_jog_stage_position
         elif (
             self._planned_move_started_at is not None
             or self._planned_move_waiting_for_fresh_status
         ):
-            predicted_stage_xy = self._planned_move_stage_xy
+            if self._planned_move_stage_xy is not None:
+                predicted_position = self._position_with_stage_xy(
+                    self._planned_move_stage_xy,
+                    base_position=position,
+                )
+        predicted_stage_xy = self._stage_xy_from_position(predicted_position)
         center_xy = (float(position[0]), float(position[1]))
+        latest_state = (self.stage_controller.latest_stage_state() or "").lower()
+        if self._manual_jog_waiting_for_fresh_status and latest_state != "idle":
+            logger.debug(
+                "MOTION PREDICTION deferred_stop_sample stage=%s state=%s",
+                self._format_optional_point(center_xy),
+                latest_state,
+            )
+            return
         if self._should_ignore_manual_jog_status_sample(center_xy):
             return
         if predicted_stage_xy is not None:
             self._log_design_position_reconcile(predicted_stage_xy, center_xy)
             center_xy = self._smooth_manual_jog_actual_position(predicted_stage_xy, center_xy)
+        display_position = self._position_with_stage_xy(
+            center_xy,
+            base_position=position,
+        )
+        self._manual_jog_stage_position = display_position
         self._manual_jog_stage_xy = center_xy
         self._planned_move_stage_xy = center_xy
-        if self._manual_jog_waiting_for_fresh_status:
+        if self._manual_jog_waiting_for_fresh_status and latest_state == "idle":
+            self._learn_manual_jog_stop_tail(
+                self._manual_jog_stop_tail_position or predicted_position,
+                display_position,
+            )
             self._manual_jog_waiting_for_fresh_status = False
             self._manual_jog_settle_until = 0.0
             self._manual_jog_stop_status_timestamp = None
+            self._clear_manual_jog_stop_prediction()
         if self._planned_move_waiting_for_fresh_status:
             self._planned_move_waiting_for_fresh_status = False
             self._planned_move_stop_status_timestamp = None
-        if self._manual_jog_velocity_xy is not None:
+        if self._manual_jog_prediction_active():
             self._manual_jog_last_timestamp = time.monotonic()
-        self._update_coordinate_display(center_xy=center_xy)
-        self._pending_design_stage_xy = center_xy
-        if not self._design_overlay_timer.isActive():
-            self._design_overlay_timer.start()
+        self._publish_stage_position_estimate(display_position)
 
     def _update_stage_position_display(self, position: object | None) -> None:
         if not isinstance(position, tuple) or len(position) < 2:
             self._stage_unhomed_display_origins.clear()
             self._stage_position_label.setText("Position: unavailable")
             return
-        axis_names = ("X", "Y", "Z", "A", "B", "C")
         homed_axes = self.stage_controller.homed_axes()
         parts: list[str] = []
-        for axis_name, axis_value in zip(axis_names, position):
+        for axis_name, axis_value in zip(self.STAGE_AXIS_NAMES, position):
             try:
                 raw_value = float(axis_value)
             except (TypeError, ValueError):
@@ -2033,6 +2301,23 @@ class Main(QMainWindow):
         self._stage_position_label.setText("Position: " + "&nbsp;".join(parts))
 
     def _on_homing_status_changed(self, _homed_axes: object) -> None:
+        if (
+            self._manual_jog_prediction_available()
+            and self._manual_jog_stage_position is not None
+        ):
+            self._update_stage_position_display(self._manual_jog_stage_position)
+            return
+        if (
+            self._planned_move_stage_xy is not None
+            and (
+                self._planned_move_started_at is not None
+                or self._planned_move_waiting_for_fresh_status
+            )
+        ):
+            self._update_stage_position_display(
+                self._position_with_stage_xy(self._planned_move_stage_xy)
+            )
+            return
         self._update_stage_position_display(self.stage_controller.latest_stage_position())
 
     def _refresh_controller_status(self) -> None:
@@ -2099,7 +2384,7 @@ class Main(QMainWindow):
         delta_x = float(actual_stage_xy[0] - predicted_stage_xy[0])
         delta_y = float(actual_stage_xy[1] - predicted_stage_xy[1])
         logger.debug(
-            "DESIGN MINIMAP reconcile predicted_stage=%s actual_stage=%s delta=(%.4f, %.4f) delta_norm=%.4f state=%s predicted_design=%s actual_design=%s",
+            "MOTION PREDICTION reconcile predicted_stage=%s actual_stage=%s delta=(%.4f, %.4f) delta_norm=%.4f state=%s predicted_design=%s actual_design=%s",
             self._format_optional_point(predicted_stage_xy),
             self._format_optional_point(actual_stage_xy),
             delta_x,
@@ -2114,19 +2399,27 @@ class Main(QMainWindow):
         self,
         actual_stage_xy: tuple[float, float],
     ) -> bool:
-        if self._manual_jog_velocity_xy is None:
+        if not self._manual_jog_prediction_active():
+            return False
+        if self._manual_jog_waiting_for_fresh_status:
             return False
         state = (self.stage_controller.latest_stage_state() or "").lower()
         if state != "idle":
             return False
         last_jog_write = self.stage_controller.last_jog_write_timestamp()
-        if last_jog_write is None:
+        command_started_at = self._manual_jog_command_started_at
+        timestamps = [
+            timestamp
+            for timestamp in (last_jog_write, command_started_at)
+            if timestamp is not None
+        ]
+        if not timestamps:
             return False
-        age = time.monotonic() - last_jog_write
+        age = time.monotonic() - max(timestamps)
         if age > self.MANUAL_JOG_IGNORE_IDLE_AFTER_COMMAND_S:
             return False
         logger.debug(
-            "DESIGN MINIMAP ignored_idle_sample stage=%s age=%.3f state=%s",
+            "MOTION PREDICTION ignored_idle_sample stage=%s age=%.3f state=%s",
             self._format_optional_point(actual_stage_xy),
             age,
             state,
@@ -2153,7 +2446,7 @@ class Main(QMainWindow):
             float(predicted_stage_xy[1] + delta_y * alpha),
         )
         logger.debug(
-            "DESIGN MINIMAP reconcile_smoothed predicted_stage=%s actual_stage=%s smoothed_stage=%s delta_norm=%.4f alpha=%.2f",
+            "MOTION PREDICTION reconcile_smoothed predicted_stage=%s actual_stage=%s smoothed_stage=%s delta_norm=%.4f alpha=%.2f",
             self._format_optional_point(predicted_stage_xy),
             self._format_optional_point(actual_stage_xy),
             self._format_optional_point(smoothed),
