@@ -60,10 +60,12 @@ class Main(QMainWindow):
     """Main application window wiring the camera view and serial dialog."""
 
     design_layout_module_ready: Signal = Signal(object, object)
+    design_document_loaded: Signal = Signal(int, object, object)
 
     ALIGNMENT_CAPTURE_SHORTCUT = "Space"
     ALIGNMENT_TARGET_ANGLES = (-180.0, -90.0, 0.0, 90.0, 180.0)
     DESIGN_POSITION_REFRESH_MS = 800
+    CONTROLLER_STATUS_REFRESH_MS = 800
     DESIGN_OVERLAY_UPDATE_MS = 120
     DESIGN_SPACING_RATIO_TOLERANCE = 0.35
     MANUAL_JOG_UPDATE_MS = 50
@@ -106,6 +108,7 @@ class Main(QMainWindow):
         self.design_layout_window: DesignLayoutWindow | None = None
         self._design_layout_preload_started = False
         self._design_layout_window_requested = False
+        self._design_load_generation = 0
         self.joystick_dock: CollapsibleDockWidget | None = None
         self.serial_terminal_dock: CollapsibleDockWidget | None = None
         self.serial_connection_dock: CollapsibleDockWidget | None = None
@@ -143,11 +146,15 @@ class Main(QMainWindow):
         self._design_snap_enabled = True
         self._last_reported_b_position: float | None = None
         self._last_camera_frame_ui_timestamp: float | None = None
+        self._stage_unhomed_display_origins: dict[str, float] = {}
+        self._controller_state_persistence_suspended = False
+        self._controller_reboot_recovery_scheduled = False
         self._design_session = DesignSession()
         self.statusBar()
         self._stage_position_label = QLabel("Position: unavailable", self)
         self._stage_position_label.setMinimumWidth(390)
         self._stage_position_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self._stage_position_label.setTextFormat(Qt.RichText)
         self._stage_position_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._stage_position_label.setToolTip("Current controller position")
         self.statusBar().addPermanentWidget(self._stage_position_label, 0)
@@ -174,6 +181,7 @@ class Main(QMainWindow):
         self.grabber.frame_ready.connect(self._on_camera_frame)
         self.grabber.error.connect(self.on_error)
         self.design_layout_module_ready.connect(self._on_design_layout_module_ready)
+        self.design_document_loaded.connect(self._on_design_document_loaded)
 
         self.stage_controller = StageController()
         self.stage_controller.status_message.connect(self._show_status)
@@ -182,6 +190,12 @@ class Main(QMainWindow):
         self.stage_controller.autofocus_finished.connect(self.on_autofocus_finished)
         self.stage_controller.stage_position_changed.connect(self._on_stage_position_changed)
         self.stage_controller.needle_height_changed.connect(self._on_needle_height_changed)
+        self.stage_controller.controller_reboot_detected.connect(
+            self._on_controller_reboot_detected
+        )
+        self.stage_controller.controller_reboot_ready.connect(
+            self._on_controller_reboot_ready
+        )
         self.stage_controller.oscillation_state_changed.connect(
             self._on_oscillation_state_changed
         )
@@ -195,6 +209,10 @@ class Main(QMainWindow):
         self._design_position_timer.setInterval(self.DESIGN_POSITION_REFRESH_MS)
         self._design_position_timer.timeout.connect(self._refresh_design_position)
         self._design_position_timer.start()
+        self._controller_status_timer = QTimer(self)
+        self._controller_status_timer.setInterval(self.CONTROLLER_STATUS_REFRESH_MS)
+        self._controller_status_timer.timeout.connect(self._refresh_controller_status)
+        self._controller_status_timer.start()
         self._design_overlay_timer = QTimer(self)
         self._design_overlay_timer.setSingleShot(True)
         self._design_overlay_timer.setInterval(self.DESIGN_OVERLAY_UPDATE_MS)
@@ -334,9 +352,18 @@ class Main(QMainWindow):
             self.serial_connection.port,
             self.serial_connection.baudrate,
         )
+        self._stage_unhomed_display_origins.clear()
         self._last_reported_b_position = None
-        self.stage_controller.set_serial(self.serial_connection)
-        self._restore_persisted_controller_state()
+        cached_state = self.settings_manager.load_controller_state()
+        self._controller_state_persistence_suspended = True
+        try:
+            self.stage_controller.set_serial(self.serial_connection)
+        finally:
+            self._controller_state_persistence_suspended = False
+        self._restore_persisted_controller_state(
+            cached_state,
+            cache_already_loaded=True,
+        )
         if self.joystick_panel and self.joystick_dock:
             self.joystick_panel.set_serial(self.serial_connection)
             self.joystick_dock.setVisible(True)
@@ -353,9 +380,11 @@ class Main(QMainWindow):
         self._refresh_design_position()
 
     def on_serial_disconnected(self) -> None:
+        self._stop_jog_before_serial_close("serial disconnect")
         if self.serial_connection and self.serial_connection.is_open:
             self.serial_connection.close()
         self.serial_connection = None
+        self._stage_unhomed_display_origins.clear()
         self._last_reported_b_position = None
         self._manual_jog_timer.stop()
         self._manual_jog_stage_xy = None
@@ -364,11 +393,16 @@ class Main(QMainWindow):
         self._manual_jog_waiting_for_fresh_status = False
         self._manual_jog_settle_until = 0.0
         self._manual_jog_stop_status_timestamp = None
+        self._controller_reboot_recovery_scheduled = False
         self._clear_planned_move_prediction(clear_wait_state=True)
         logger.info("Serial disconnected")
         self.stage_controller.request_stop_oscillation()
         self._stop_needle_calibration()
-        self.stage_controller.set_serial(None)
+        self._controller_state_persistence_suspended = True
+        try:
+            self.stage_controller.set_serial(None)
+        finally:
+            self._controller_state_persistence_suspended = False
         self._update_stage_position_display(None)
         auto_retry = self.sender() is not self.serial_connection_panel
         if self.serial_connection_panel:
@@ -407,7 +441,23 @@ class Main(QMainWindow):
     def _run_serial_startup_sync(self) -> None:
         if self.serial_connection is None or not self.serial_connection.is_open:
             return
-        self.stage_controller.request_startup_sync(auto_home_a=True)
+        self.stage_controller.request_startup_sync(
+            auto_home_a=True,
+            clear_unverified_state=False,
+        )
+
+    def _on_controller_reboot_detected(self) -> None:
+        self._stage_unhomed_display_origins.clear()
+
+    def _on_controller_reboot_ready(self) -> None:
+        if self._controller_reboot_recovery_scheduled:
+            return
+        self._controller_reboot_recovery_scheduled = True
+        QTimer.singleShot(0, self._run_controller_reboot_recovery)
+
+    def _run_controller_reboot_recovery(self) -> None:
+        self._controller_reboot_recovery_scheduled = False
+        self._run_serial_startup_sync()
 
     def _prime_keyboard_focus(self) -> None:
         if not self.isVisible():
@@ -420,23 +470,36 @@ class Main(QMainWindow):
         super().showEvent(event)
         QTimer.singleShot(0, self._prime_keyboard_focus)
 
-    def _restore_persisted_controller_state(self) -> None:
+    def _restore_persisted_controller_state(
+        self,
+        cached_state: dict | None = None,
+        *,
+        cache_already_loaded: bool = False,
+    ) -> None:
         if self.serial_connection is None or not self.serial_connection.is_open:
             return
-        if bool(
-            getattr(self.serial_connection, "probe_station_reboot_detected", False)
-        ):
+        if not cache_already_loaded:
+            cached_state = self.settings_manager.load_controller_state()
+        if not cached_state:
+            logger.info("No cached controller homing state found for this connection.")
+            return
+        if not self.stage_controller.cached_controller_session_is_current(cached_state):
             self.settings_manager.clear_controller_state()
             self.stage_controller.clear_cached_controller_state()
-            self._show_status("Controller reboot detected. Cleared cached controller state.")
+            self._show_status(
+                "Controller session changed. Cleared cached homing state."
+            )
             return
-        cached_state = self.settings_manager.load_controller_state()
-        if not cached_state:
-            return
+        logger.info(
+            "Controller session marker matches; restoring cached homing state pending live status."
+        )
         self.stage_controller.import_cached_controller_state(cached_state)
-        self._show_status("Restored cached controller state from previous session.")
+        self._show_status("Restored cached homing state; reading live coordinates.")
 
     def _persist_controller_state(self, *_args) -> None:
+        if self._controller_state_persistence_suspended:
+            logger.debug("Skipping controller state persistence while serial state resets.")
+            return
         self.settings_manager.save_controller_state(
             self.stage_controller.export_cached_controller_state()
         )
@@ -982,7 +1045,12 @@ class Main(QMainWindow):
         cursor_xy: tuple[float, float] | None = None,
     ) -> None:
         latest = self.stage_controller.latest_stage_position()
-        if center_xy is None and latest is not None and len(latest) >= 2:
+        if (
+            center_xy is None
+            and latest is not None
+            and len(latest) >= 2
+            and self.stage_controller.axes_are_homed({"X", "Y"})
+        ):
             center_xy = (float(latest[0]), float(latest[1]))
         if self.alignment_panel is not None:
             self.alignment_panel.set_coordinate_labels(
@@ -1033,6 +1101,8 @@ class Main(QMainWindow):
                 self._planned_move_stop_status_timestamp = None
         latest = self.stage_controller.latest_stage_position()
         if latest is None or len(latest) < 2:
+            return None
+        if not self.stage_controller.axes_are_homed({"X", "Y"}):
             return None
         return (float(latest[0]), float(latest[1]))
 
@@ -1535,32 +1605,80 @@ class Main(QMainWindow):
                 action.blockSignals(False)
 
     def _load_design_document(self, design_path: str) -> None:
+        self._design_load_generation += 1
+        generation = self._design_load_generation
+        path_text = str(design_path)
+        self._toggle_design_layout_window(True)
+        if self.design_layout_window is not None:
+            self.design_layout_window.set_status_message("Loading design...")
+        elif self.design_navigator_panel:
+            self.design_navigator_panel.set_status_message("Loading design...")
+        self._show_status(f"Loading design '{Path(path_text).name}'...")
+
+        def load_design() -> None:
+            try:
+                document = DesignDocument.load(path_text)
+            except Exception as exc:
+                self.design_document_loaded.emit(generation, None, exc)
+                return
+            self.design_document_loaded.emit(generation, document, None)
+
+        threading.Thread(
+            target=load_design,
+            name="DesignDocumentLoad",
+            daemon=True,
+        ).start()
+
+    def _on_design_document_loaded(
+        self,
+        generation: int,
+        document: object,
+        error: object,
+    ) -> None:
+        if generation != self._design_load_generation:
+            return
+        if error is not None:
+            message = str(error)
+            self._show_status(message, 6000)
+            if self.design_layout_window is not None:
+                self.design_layout_window.set_status_message(message)
+            elif self.design_navigator_panel:
+                self.design_navigator_panel.set_status_message(message)
+            return
+        if not isinstance(document, DesignDocument):
+            message = "Loaded design has an unexpected type."
+            self._show_status(message, 6000)
+            if self.design_layout_window is not None:
+                self.design_layout_window.set_status_message(message)
+            elif self.design_navigator_panel:
+                self.design_navigator_panel.set_status_message(message)
+            return
         try:
-            document = DesignDocument.load(design_path)
+            self._reset_manual_alignment(cancel_pick=True)
+            self._design_session.load_document(document)
+            self._pending_alignment_preparation = None
+            self._last_selected_design_point = None
+            self._set_design_snap_enabled(True)
+            self.settings_manager.set_design_last_directory(document.path.parent)
+            if self.design_navigator_panel is not None:
+                self.design_navigator_panel.set_design_dialog_directory(
+                    document.path.parent
+                )
+            if self.design_layout_window is not None:
+                self.design_layout_window.set_status_message("Rendering design...")
+                QApplication.processEvents()
+            self._refresh_design_panel()
+            self._refresh_design_position()
+            self._toggle_design_layout_window(True)
+            self._show_status(
+                f"Loaded design '{document.path.name}' ({document.top_cell_name}).",
+                5000,
+            )
         except DesignModelError as exc:
             self._show_status(str(exc), 6000)
-            if self.design_navigator_panel:
-                self.design_navigator_panel.set_status_message(str(exc))
-            return
-        self._reset_manual_alignment(cancel_pick=True)
-        self._design_session.load_document(document)
-        self._pending_alignment_preparation = None
-        self._last_selected_design_point = None
-        self._set_design_snap_enabled(True)
-        self.settings_manager.set_design_last_directory(document.path.parent)
-        if self.design_navigator_panel is not None:
-            self.design_navigator_panel.set_design_dialog_directory(
-                document.path.parent
-            )
-        self._refresh_design_panel()
-        self._refresh_design_position()
-        self._toggle_design_layout_window(True)
-        self._show_status(
-            f"Loaded design '{document.path.name}' ({document.top_cell_name}).",
-            5000,
-        )
 
     def _unload_design_document(self) -> None:
+        self._design_load_generation += 1
         if self._design_session.document is None:
             return
         document_name = self._design_session.document.path.name
@@ -1820,13 +1938,21 @@ class Main(QMainWindow):
         if not isinstance(position, tuple) or len(position) < 2:
             return
         logger.debug("TIMING stage_position_changed position=%s", position)
+        xy_homed = self.stage_controller.axes_are_homed({"X", "Y"})
+        xyz_homed = self.stage_controller.axes_are_homed({"X", "Y", "Z"})
         if self.contact_calibration_window is not None:
-            if len(position) >= 3:
+            if len(position) >= 3 and xyz_homed:
                 self.contact_calibration_window.set_current_stage_position(
                     (float(position[0]), float(position[1]), float(position[2]))
                 )
             else:
                 self.contact_calibration_window.set_current_stage_position(None)
+        if not xy_homed:
+            self._manual_jog_stage_xy = None
+            self._planned_move_stage_xy = None
+            self._update_coordinate_display(center_xy=None)
+            self._update_design_position(None)
+            return
         if len(position) > 4:
             current_b = float(position[4])
             if (
@@ -1873,19 +1999,46 @@ class Main(QMainWindow):
 
     def _update_stage_position_display(self, position: object | None) -> None:
         if not isinstance(position, tuple) or len(position) < 2:
+            self._stage_unhomed_display_origins.clear()
             self._stage_position_label.setText("Position: unavailable")
             return
         axis_names = ("X", "Y", "Z", "A", "B", "C")
+        homed_axes = self.stage_controller.homed_axes()
         parts: list[str] = []
         for axis_name, axis_value in zip(axis_names, position):
             try:
-                parts.append(f"{axis_name}={float(axis_value):.3f}")
+                raw_value = float(axis_value)
             except (TypeError, ValueError):
                 continue
+            if axis_name in homed_axes:
+                display_value = raw_value
+                background = "#1565c0"
+                foreground = "#f5f5f5"
+            else:
+                origin = self._stage_unhomed_display_origins.setdefault(
+                    axis_name, raw_value
+                )
+                display_value = raw_value - origin
+                background = "#f0b429"
+                foreground = "#1f1f1f"
+            parts.append(
+                "<span style="
+                f"'background-color:{background}; color:{foreground}; "
+                "padding:2px 6px;'"
+                f">&nbsp;{axis_name}={display_value:.3f}&nbsp;</span>"
+            )
         if not parts:
             self._stage_position_label.setText("Position: unavailable")
             return
-        self._stage_position_label.setText("Position: " + "  ".join(parts))
+        self._stage_position_label.setText("Position: " + "&nbsp;".join(parts))
+
+    def _on_homing_status_changed(self, _homed_axes: object) -> None:
+        self._update_stage_position_display(self.stage_controller.latest_stage_position())
+
+    def _refresh_controller_status(self) -> None:
+        if self.serial_connection is None or not self.serial_connection.is_open:
+            return
+        self.stage_controller.request_status_refresh()
 
     def _refresh_design_position(self) -> None:
         if self._design_session.document is None:
@@ -2045,6 +2198,7 @@ class Main(QMainWindow):
     def closeEvent(self, event) -> None:  # type: ignore[override]
         self._design_position_timer.stop()
         self._manual_jog_timer.stop()
+        self._stop_jog_before_serial_close("application shutdown")
         self.grabber.stop()
         self.thread.quit()
         self.thread.wait()
@@ -2064,6 +2218,17 @@ class Main(QMainWindow):
         if self.serial_connection_panel:
             self.serial_connection_panel.shutdown()
         event.accept()
+
+    def _stop_jog_before_serial_close(self, reason: str) -> None:
+        if self.serial_connection is None or not self.serial_connection.is_open:
+            return
+        logger.warning("Stopping active jog before %s.", reason)
+        if self.joystick_panel is not None:
+            self.joystick_panel.stop_jog()
+        try:
+            self.stage_controller.force_jog_stop(timeout=0.8)
+        except Exception:
+            logger.exception("Failed to force jog stop before %s.", reason)
 
     def _create_dock_widgets(self) -> None:
         self.serial_connection_panel = SerialConnectionPanel(self)
@@ -2132,6 +2297,7 @@ class Main(QMainWindow):
         self.stage_controller.homing_status_changed.connect(
             self.joystick_panel.set_homing_status
         )
+        self.stage_controller.homing_status_changed.connect(self._on_homing_status_changed)
         self.stage_controller.homing_status_changed.connect(self._persist_controller_state)
         self.stage_controller.homing_action_started.connect(
             self.joystick_panel.set_homing_action_started
@@ -2265,6 +2431,7 @@ class Main(QMainWindow):
             Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea
         )
         self.addDockWidget(Qt.RightDockWidgetArea, self.alignment_dock)
+        self.alignment_dock.hide()
         self._refresh_manual_alignment_ui()
         self._update_coordinate_display()
         self._refresh_design_panel()

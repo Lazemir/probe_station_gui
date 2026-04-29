@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ctypes
 import logging
+import sys
 import time
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
@@ -106,6 +108,7 @@ class JoystickWindow(QWidget):
     KEYBOARD_JOG_DIAGONAL_CHORD_WINDOW_MS = 90
     KEYBOARD_JOG_AXIS_DROP_CHORD_WINDOW_MS = 160
     KEYBOARD_JOG_DIRECTION_CHANGE_CHORD_WINDOW_MS = 250
+    KEYBOARD_JOG_PHYSICAL_KEY_WATCHDOG_MS = 80
     JOG_STOP_RESEND_DELAYS_MS = (80, 180, 400, 900, 1500)
     MANUAL_JOG_AXES = ("X", "Y", "Z", "A", "B", "C")
     MANUAL_AXIS_MODES = ("G91", "G90")
@@ -196,6 +199,13 @@ class JoystickWindow(QWidget):
         self._jog_state_sync_timer.setSingleShot(True)
         self._jog_state_sync_timer.setInterval(self.KEYBOARD_JOG_SYNC_DEBOUNCE_MS)
         self._jog_state_sync_timer.timeout.connect(self._sync_active_jog_state)
+        self._physical_key_watchdog_timer = QTimer(self)
+        self._physical_key_watchdog_timer.setInterval(
+            self.KEYBOARD_JOG_PHYSICAL_KEY_WATCHDOG_MS
+        )
+        self._physical_key_watchdog_timer.timeout.connect(
+            self._drop_released_physical_keys
+        )
         self._pending_jog_axes: Optional[tuple[tuple[str, int], ...]] = None
         self._jog_stop_resend_generation = 0
         self.apply_control_bindings({})
@@ -586,6 +596,7 @@ class JoystickWindow(QWidget):
             self._key_stack.clear()
             self._key_press_times.clear()
             self._clear_pending_key_activations()
+            self._sync_physical_key_watchdog()
         self._update_enabled_state()
         logger.debug(
             "Joystick jog settings updated: linear_distance_mm=%s safety_disabled=%s axis_a=%s axis_b=%s manual=%s manual_axis=%s manual_axis_distance_mm=%s manual_mode=%s manual_feedrate_mm_min=%s",
@@ -612,6 +623,7 @@ class JoystickWindow(QWidget):
             self._key_stack.clear()
             self._key_press_times.clear()
             self._clear_pending_key_activations()
+            self._sync_physical_key_watchdog()
             logger.debug("Joystick serial detached")
         if serial_connection and serial_connection.is_open:
             self.status_label.setText(
@@ -706,6 +718,7 @@ class JoystickWindow(QWidget):
             self._key_stack.clear()
             self._key_press_times.clear()
             self._clear_pending_key_activations()
+            self._sync_physical_key_watchdog()
         self._update_enabled_state()
 
     def set_needles_state(self, raised: bool, known: bool) -> None:
@@ -1240,6 +1253,7 @@ class JoystickWindow(QWidget):
         self._clear_pending_key_activations()
         self._key_stack.clear()
         self._key_press_times.clear()
+        self._sync_physical_key_watchdog()
         self.stop_jog()
         super().focusOutEvent(event)
 
@@ -1252,6 +1266,7 @@ class JoystickWindow(QWidget):
         self._clear_pending_key_activations()
         self._key_stack.clear()
         self._key_press_times.clear()
+        self._sync_physical_key_watchdog()
         self.stop_jog()
         self._remove_event_filter()
         super().closeEvent(event)
@@ -1469,6 +1484,7 @@ class JoystickWindow(QWidget):
         self._key_stack.remove(identifier)
         self._key_press_times.pop(identifier, None)
         self._promote_pending_keys_if_needed()
+        self._sync_physical_key_watchdog()
         self._schedule_active_jog_update()
         return True
 
@@ -1496,6 +1512,8 @@ class JoystickWindow(QWidget):
                     self._key_stack.remove(identifier)
                     self._key_press_times.pop(identifier, None)
                     removed = True
+        if removed:
+            self._sync_physical_key_watchdog()
         return removed
 
     def _register_pressed_mapping(
@@ -1519,6 +1537,7 @@ class JoystickWindow(QWidget):
 
         if not current_axes or axis in current_axes or axis in self.LINEAR_AXES:
             self._key_stack.append(identifier)
+            self._sync_physical_key_watchdog()
             self._schedule_active_jog_update()
             return
 
@@ -1545,6 +1564,7 @@ class JoystickWindow(QWidget):
         )
         self._pending_key_activations[identifier] = timer
         timer.start()
+        self._sync_physical_key_watchdog()
         logger.debug(
             "Deferred secondary axis activation for %s by %s ms mapping=%s",
             identifier,
@@ -1562,6 +1582,7 @@ class JoystickWindow(QWidget):
         if identifier in self._key_stack:
             return
         self._key_stack.append(identifier)
+        self._sync_physical_key_watchdog()
         self._schedule_active_jog_update()
         logger.debug("Activated deferred secondary axis for %s mapping=%s", identifier, mapping)
 
@@ -1715,7 +1736,75 @@ class JoystickWindow(QWidget):
             for identifier, timestamp in self._key_press_times.items()
             if self._mapping_from_identifier(identifier) is not None
         }
+        self._sync_physical_key_watchdog()
         logger.info("Joystick key bindings updated: %d entries", len(self._key_bindings))
+
+    def _sync_physical_key_watchdog(self) -> None:
+        if self._key_stack or self._pending_key_activations:
+            if not self._physical_key_watchdog_timer.isActive():
+                self._physical_key_watchdog_timer.start()
+            return
+        if self._physical_key_watchdog_timer.isActive():
+            self._physical_key_watchdog_timer.stop()
+
+    def _drop_released_physical_keys(self) -> None:
+        if not self._key_stack and not self._pending_key_activations:
+            self._sync_physical_key_watchdog()
+            return
+
+        removed: list[Tuple[str, object]] = []
+        for identifier in list(self._key_stack):
+            is_down = self._physical_key_is_down(identifier)
+            if is_down is False:
+                self._key_stack.remove(identifier)
+                self._key_press_times.pop(identifier, None)
+                removed.append(identifier)
+        for identifier in list(self._pending_key_activations.keys()):
+            is_down = self._physical_key_is_down(identifier)
+            if is_down is False:
+                self._cancel_pending_key_activation(identifier)
+                self._key_press_times.pop(identifier, None)
+                removed.append(identifier)
+
+        if not removed:
+            self._sync_physical_key_watchdog()
+            return
+
+        logger.warning(
+            "Recovered lost keyboard release for jog: removed=%s remaining=%s",
+            removed,
+            self._key_stack,
+        )
+        self._promote_pending_keys_if_needed()
+        self._sync_physical_key_watchdog()
+        self._schedule_active_jog_update()
+
+    @staticmethod
+    def _physical_key_is_down(identifier: Tuple[str, object]) -> Optional[bool]:
+        if not sys.platform.startswith("win"):
+            return None
+        try:
+            kind, value = identifier
+            if not isinstance(value, tuple) or not value:
+                return None
+            vk_code = 0
+            if kind == "scan":
+                scan_code = int(value[0] or 0)
+                if not scan_code:
+                    return None
+                vk_code = int(ctypes.windll.user32.MapVirtualKeyW(scan_code, 3))
+            elif kind == "key":
+                vk_code = int(value[0] or 0)
+            if not (0 < vk_code <= 0xFF):
+                return None
+            return bool(ctypes.windll.user32.GetAsyncKeyState(vk_code) & 0x8000)
+        except Exception:
+            logger.debug(
+                "Unable to read physical key state for %s",
+                identifier,
+                exc_info=True,
+            )
+            return None
 
     @staticmethod
     def _event_scan_code(event) -> int:

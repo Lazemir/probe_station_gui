@@ -33,6 +33,8 @@ KEYS = {
     "A": {"key": 65, "scan": 30, "text": "a"},
     "D": {"key": 68, "scan": 32, "text": "d"},
 }
+SCAN_TO_KEY = {int(value["scan"]): name for name, value in KEYS.items()}
+QT_KEY_TO_KEY = {int(value["key"]): name for name, value in KEYS.items()}
 
 CONTROLS = {
     "move_y_positive": [
@@ -100,6 +102,7 @@ class Harness:
     app: QApplication
     joystick: JoystickWindow
     serial: FakeSerial
+    physical_keys: set[str]
 
     @classmethod
     def create(cls) -> "Harness":
@@ -113,28 +116,49 @@ class Harness:
             rotary_distance_deg=5.0,
             motion_safety_disabled=True,
         )
-        return cls(app=app, joystick=joystick, serial=serial)
+        harness = cls(app=app, joystick=joystick, serial=serial, physical_keys=set())
+
+        def physical_key_is_down(identifier) -> bool | None:
+            kind, value = identifier
+            if not isinstance(value, tuple) or not value:
+                return None
+            if kind == "scan":
+                return SCAN_TO_KEY.get(int(value[0] or 0)) in harness.physical_keys
+            if kind == "key":
+                return QT_KEY_TO_KEY.get(int(value[0] or 0)) in harness.physical_keys
+            return None
+
+        joystick._physical_key_is_down = physical_key_is_down  # type: ignore[method-assign]
+        return harness
 
     def reset(self) -> None:
         self.joystick._jog_state_sync_timer.stop()
+        self.joystick._physical_key_watchdog_timer.stop()
         self.joystick._pending_jog_axes = None
         self.joystick._key_stack.clear()
         self.joystick._key_press_times.clear()
         self.joystick._clear_pending_key_activations()
         self.joystick._active_axes = None
         self.joystick._jog_stop_resend_generation += 1
+        self.physical_keys.clear()
         self.serial.writes.clear()
         self.pump(20)
 
     def press(self, key: str, *, auto_repeat: bool = False) -> None:
+        self.physical_keys.add(key)
         self.joystick._handle_key_press_event(
             FakeKeyEvent(key, auto_repeat=auto_repeat)
         )
 
     def release(self, key: str, *, auto_repeat: bool = False) -> None:
+        if not auto_repeat:
+            self.physical_keys.discard(key)
         self.joystick._handle_key_release_event(
             FakeKeyEvent(key, auto_repeat=auto_repeat)
         )
+
+    def physical_release_without_event(self, key: str) -> None:
+        self.physical_keys.discard(key)
 
     def pump(self, ms: int) -> None:
         deadline = time.monotonic() + (ms / 1000.0)
@@ -158,6 +182,9 @@ class Harness:
 
     def jog_commands_since(self, start_index: int) -> list[str]:
         return self.jog_commands()[start_index:]
+
+    def stop_commands(self) -> list[bytes]:
+        return [payload for payload in self.serial.writes if payload == b"\x85"]
 
 
 def command_axes(command: str) -> dict[str, float]:
@@ -361,6 +388,41 @@ def run_log_replay_1648(harness: Harness) -> None:
     assert_contains(commands, {"X": 25.0, "Y": 25.0}, label="16:48 log replay")
 
 
+def run_log_replay_1447_lost_d_release(harness: Harness) -> None:
+    harness.reset()
+    harness.press("W")
+    harness.press("D")
+    harness.pump(220)
+    assert_contains(
+        harness.jog_commands(),
+        {"X": 25.0, "Y": 25.0},
+        label="14:47 diagonal setup",
+    )
+
+    command_index = len(harness.jog_commands())
+    stop_index = len(harness.stop_commands())
+    harness.physical_release_without_event("D")
+    harness.release("W")
+    harness.pump(420)
+
+    commands_after_release = harness.jog_commands_since(command_index)
+    if commands_after_release:
+        raise AssertionError(
+            "14:47 lost D release: emitted jog command after all physical keys "
+            f"were released: {commands_after_release}"
+        )
+    if len(harness.stop_commands()) <= stop_index:
+        raise AssertionError("14:47 lost D release: no jog stop was emitted")
+    if harness.joystick._key_stack:
+        raise AssertionError(
+            f"14:47 lost D release: stale key stack {harness.joystick._key_stack}"
+        )
+    if harness.joystick._active_axes is not None:
+        raise AssertionError(
+            f"14:47 lost D release: active axes remained {harness.joystick._active_axes}"
+        )
+
+
 def main() -> int:
     harness = Harness.create()
     scenarios = (
@@ -368,6 +430,7 @@ def main() -> int:
         ("WD auto-repeat", run_dirty_wd_auto_repeat),
         ("WD -> WA -> WD", run_dirty_wd_to_wa_to_wd),
         ("16:48 log replay", run_log_replay_1648),
+        ("14:47 lost D release replay", run_log_replay_1447_lost_d_release),
     )
     for label, scenario in scenarios:
         scenario(harness)

@@ -123,6 +123,8 @@ class StageController(QObject):
     needle_height_changed: Signal = Signal(float)
     oscillation_state_changed: Signal = Signal(bool, str)
     status_message: Signal = Signal(str)
+    controller_reboot_detected: Signal = Signal()
+    controller_reboot_ready: Signal = Signal()
 
     CALIBRATION_PIXEL_TARGET = 120.0
     CALIBRATION_MIN_VERIFY_PIXELS = 15.0
@@ -156,6 +158,12 @@ class StageController(QObject):
     SERIAL_PRIORITY_SOFT_RESET = 20
     SERIAL_PRIORITY_TERMINAL = 30
     SERIAL_JOG_COMMAND_SETTLE_S = 0.03
+    CONTROLLER_REBOOT_TOKENS = (
+        "[MSG:RST",
+        "FAST_FLASH_BOOT",
+        "ESP-ROM",
+    )
+    CONTROLLER_REBOOT_LINE_PREFIXES = ("RST:", "LOAD:", "ENTRY ")
 
     STATUS_PATTERN = re.compile(r"^<(?P<body>[^>]*)>")
     STATUS_FIELD_PATTERN = re.compile(r"(?P<key>[A-Za-z]+):(?P<value>.+)")
@@ -215,8 +223,12 @@ class StageController(QObject):
         self._last_jog_write_timestamp: Optional[float] = None
         self._last_a_position_read_failure: Optional[str] = None
         self._controller_state_stale = False
+        self._jog_motion_active = False
         self._position_reporting_mode = "work"
         self._current_status_report_mask: Optional[int] = None
+        self._controller_session_marker: Optional[int] = None
+        self._controller_reboot_recovery_pending = False
+        self._controller_reboot_ready_notified = False
         self._coordinate_startup_mode = "controller"
         self._preferred_work_coordinate_system = self.DEFAULT_WORK_COORDINATE_SYSTEM
         self._active_work_coordinate_system: Optional[str] = None
@@ -235,23 +247,14 @@ class StageController(QObject):
         with self._task_lock:
             self._serial = serial_connection
             self._queued_jog_generation += 1
+            self._controller_reboot_recovery_pending = False
+            self._controller_reboot_ready_notified = False
             self._clear_pending_async_writes()
+            self._clear_unverified_controller_state_locked()
             if serial_connection is None or not serial_connection.is_open:
                 self._pixels_to_mm = None
-                self._last_stage_state = None
-                self._last_status_timestamp = None
-                self._last_jog_write_timestamp = None
-                self._current_status_report_mask = None
-                self._last_machine_position = None
-                self._active_work_coordinate_system = None
-                self._controller_coordinate_offsets.clear()
                 self._axis_limits.clear()
                 self._b_axis_zero_position = None
-                self._controller_state_stale = bool(
-                    self._last_stage_position is not None
-                    or self._homed_axes
-                    or self._needles_known
-                )
                 self._refresh_axis_a_ready_from_state()
             else:
                 self._axis_limits.clear()
@@ -261,18 +264,9 @@ class StageController(QObject):
                     getattr(serial_connection, "probe_station_reboot_detected", False)
                 ):
                     logger.warning(
-                        "Controller reboot detected on serial connect; clearing cached homing and position state."
+                        "Controller reboot banner detected on serial connect."
                     )
-                    self._last_stage_position = None
-                    self._last_machine_position = None
-                    self._last_stage_state = None
-                    self._current_status_report_mask = None
-                    self._active_work_coordinate_system = None
-                    self._controller_coordinate_offsets.clear()
-                    self._update_homing_status(set())
-                    self._set_needles_state(False, known=False)
-                else:
-                    self._refresh_axis_a_ready_from_state()
+                self._refresh_axis_a_ready_from_state()
 
     def export_cached_controller_state(self) -> dict[str, object] | None:
         """Return controller state suitable for persistence across app restarts."""
@@ -303,78 +297,148 @@ class StageController(QObject):
             "homed_axes": sorted(self._homed_axes),
             "needles_up": bool(self._needles_up),
             "needles_known": bool(self._needles_known),
+            "controller_session_marker": self._controller_session_marker,
         }
 
     def import_cached_controller_state(self, data: dict[str, object]) -> None:
-        """Restore controller state persisted from a previous application run."""
+        """Restore homing state when the volatile controller marker matches.
 
-        position_raw = data.get("last_stage_position")
-        position = None
-        if isinstance(position_raw, (list, tuple)):
-            try:
-                coords = tuple(float(value) for value in position_raw)
-                if coords:
-                    position = coords
-            except (TypeError, ValueError):
-                position = None
-        state_raw = data.get("last_stage_state")
-        if isinstance(state_raw, str) and state_raw.strip():
-            self._last_stage_state = state_raw.strip()
-        self._last_stage_position = position
-        machine_position_raw = data.get("last_machine_position")
-        machine_position = None
-        if isinstance(machine_position_raw, (list, tuple)):
-            try:
-                coords = tuple(float(value) for value in machine_position_raw)
-                if coords:
-                    machine_position = coords
-            except (TypeError, ValueError):
-                machine_position = None
-        self._last_machine_position = machine_position
-        coordinate_system_raw = data.get("active_work_coordinate_system")
-        if (
-            isinstance(coordinate_system_raw, str)
-            and coordinate_system_raw.strip().upper() in self.WORK_COORDINATE_SYSTEMS
-        ):
-            self._active_work_coordinate_system = coordinate_system_raw.strip().upper()
-        offsets_raw = data.get("controller_coordinate_offsets")
-        self._controller_coordinate_offsets = self._parse_controller_coordinate_offsets(
-            offsets_raw
-        )
-        self._controller_state_stale = True
+        FluidNC does not report the full homed-axis set in regular status
+        frames.  When the marker proves this is the same controller session,
+        we can reuse cached homing flags, but positions still come only from
+        the next live status query.
+        """
+
         homed_raw = data.get("homed_axes")
         homed_axes: set[str] = set()
         if isinstance(homed_raw, (list, tuple)):
             for value in homed_raw:
                 if isinstance(value, str) and value.strip():
                     homed_axes.add(value.strip().upper())
+        needles_up = bool(data.get("needles_up", False))
+        needles_known = bool(data.get("needles_known", False))
+        marker = self._parse_cached_controller_session_marker(data)
+
+        self._controller_state_stale = True
+        self._controller_session_marker = marker
         self._update_homing_status(homed_axes)
-        self._set_needles_state(
-            bool(data.get("needles_up", False)),
-            known=bool(data.get("needles_known", False)),
-        )
+        self._set_needles_state(needles_up, known=needles_known)
         self._refresh_axis_a_ready_from_state()
-        if position is not None:
-            self.stage_position_changed.emit(tuple(position))
+        logger.info(
+            "Restored cached controller homing state pending live status: homed_axes=%s needles_up=%s needles_known=%s marker=%s",
+            sorted(homed_axes),
+            needles_up,
+            needles_known,
+            marker,
+        )
+
+    def cached_controller_session_is_current(self, data: dict[str, object]) -> bool:
+        """Return True when the controller still has the cached volatile marker."""
+
+        expected_marker = self._parse_cached_controller_session_marker(data)
+        if expected_marker is None:
+            logger.info("Cached controller state has no session marker; ignoring it.")
+            return False
+        serial_connection = self._serial
+        if serial_connection is None or not serial_connection.is_open:
+            return False
+        try:
+            with self._serial_session_lock:
+                current_marker = self._read_controller_session_marker(
+                    serial_connection
+                )
+        except StageControllerError as exc:
+            logger.info("Unable to verify cached controller session marker: %s", exc)
+            return False
+        matches = current_marker == expected_marker
+        logger.info(
+            "Controller session marker check: expected=%s current=%s matches=%s",
+            expected_marker,
+            current_marker,
+            matches,
+        )
+        return matches
 
     def clear_cached_controller_state(self) -> None:
         """Forget locally cached controller state."""
 
+        self._clear_unverified_controller_state_locked()
+
+    def _clear_unverified_controller_state_locked(self) -> None:
+        """Clear volatile state that must be verified from the live controller."""
+
         self._last_stage_position = None
         self._last_machine_position = None
         self._last_stage_state = None
+        self._last_status_timestamp = None
+        self._last_jog_write_timestamp = None
+        self._jog_motion_active = False
+        self._current_status_report_mask = None
+        self._controller_session_marker = None
         self._active_work_coordinate_system = None
         self._controller_coordinate_offsets.clear()
+        self._controller_state_stale = True
         self._update_homing_status(set())
         self._set_needles_state(False, known=False)
+        self.stage_position_changed.emit(None)
 
-    def request_startup_sync(self, *, auto_home_a: bool = True) -> None:
+    @classmethod
+    def _line_indicates_controller_reboot(cls, line: str) -> bool:
+        upper = line.strip().upper()
+        return upper.startswith(cls.CONTROLLER_REBOOT_LINE_PREFIXES) or any(
+            token in upper for token in cls.CONTROLLER_REBOOT_TOKENS
+        )
+
+    def _handle_controller_reboot_detected(self, line: str, source: str) -> None:
+        already_pending = self._controller_reboot_recovery_pending
+        self._controller_reboot_recovery_pending = True
+        self._controller_reboot_ready_notified = False
+        self._queued_jog_generation += 1
+        self._clear_pending_async_writes()
+        self._clear_unverified_controller_state_locked()
+        if already_pending:
+            logger.debug(
+                "Additional controller reboot/reset line from %s: %r",
+                source,
+                line,
+            )
+            return
+        logger.warning(
+            "Controller reboot/reset detected from %s serial output: %r",
+            source,
+            line,
+        )
+        self.controller_reboot_detected.emit()
+
+    def _raise_if_controller_reboot_line(self, line: str, source: str) -> None:
+        if not self._line_indicates_controller_reboot(line):
+            return
+        self._handle_controller_reboot_detected(line, source)
+        raise StageControllerError(
+            "Controller reboot detected. Cleared homing state."
+        )
+
+    def _handle_pending_serial_data_side_effects(
+        self, data: bytes, source: str
+    ) -> None:
+        text = data.decode("ascii", errors="ignore")
+        for line in text.splitlines():
+            line = line.strip()
+            if self._line_indicates_controller_reboot(line):
+                self._handle_controller_reboot_detected(line, source)
+                return
+
+    def request_startup_sync(
+        self, *, auto_home_a: bool = True, clear_unverified_state: bool = False
+    ) -> None:
         """Load controller state after connect and optionally home A."""
 
         with self._task_lock:
             if self._active_thread and self._active_thread.is_alive():
                 self.status_message.emit("Stage is busy. Skipping startup sync.")
                 return
+            if clear_unverified_state:
+                self._clear_unverified_controller_state_locked()
             self._cancel_event.clear()
             thread = threading.Thread(
                 target=self._run_startup_sync,
@@ -790,6 +854,9 @@ class StageController(QObject):
                 raise StageControllerError(f"Serial read failed: {exc}") from exc
             if data:
                 logger.debug("SERIAL TRACE terminal_read bytes=%r", data[:200])
+                self._handle_pending_serial_data_side_effects(
+                    data, "terminal pending read"
+                )
             return data
         finally:
             self._serial_session_lock.release()
@@ -844,6 +911,16 @@ class StageController(QObject):
             return None
         return tuple(self._last_stage_position)
 
+    def homed_axes(self) -> set[str]:
+        """Return a snapshot of axes that the live controller reported as homed."""
+
+        return set(self._homed_axes)
+
+    def axes_are_homed(self, axes: set[str]) -> bool:
+        """Return True when every requested axis is known to be homed."""
+
+        return set(axes).issubset(self._homed_axes)
+
     def latest_a_position(self) -> float | None:
         """Return the latest cached A position, if known."""
 
@@ -874,6 +951,8 @@ class StageController(QObject):
             if self._active_thread and self._active_thread.is_alive():
                 return
             if not self._async_write_queue.empty():
+                return
+            if self._jog_motion_active:
                 return
             serial_connection = self._serial
             if serial_connection is None or not serial_connection.is_open:
@@ -968,6 +1047,7 @@ class StageController(QObject):
         if not stripped:
             return
         self._queued_jog_generation += 1
+        self._jog_motion_active = True
         self._async_write_queue.put(
             _QueuedSerialWrite(
                 priority=self.SERIAL_PRIORITY_JOG_COMMAND,
@@ -985,6 +1065,7 @@ class StageController(QObject):
         # Invalidate any queued-but-not-yet-written jog command so a late $J
         # cannot arrive after the stop and keep motion alive.
         self._queued_jog_generation += 1
+        self._jog_motion_active = False
         job = _QueuedSerialWrite(
             priority=self.SERIAL_PRIORITY_JOG_STOP,
             sequence=self._next_queued_write_sequence(),
@@ -996,6 +1077,38 @@ class StageController(QObject):
         if self._try_write_jog_stop_immediately(job):
             return
         self._async_write_queue.put(job)
+
+    def force_jog_stop(self, timeout: float = 0.5) -> bool:
+        """Best-effort synchronous jog stop before closing the serial port."""
+
+        self._queued_jog_generation += 1
+        self._jog_motion_active = False
+        self._clear_pending_async_writes()
+        serial_connection = self._serial
+        if serial_connection is None or not serial_connection.is_open:
+            return False
+        acquired = self._serial_session_lock.acquire(timeout=max(0.0, float(timeout)))
+        if not acquired:
+            logger.warning("Unable to acquire serial lock for emergency jog stop.")
+            return False
+        try:
+            job = _QueuedSerialWrite(
+                priority=self.SERIAL_PRIORITY_JOG_STOP,
+                sequence=self._next_queued_write_sequence(),
+                kind="jog_stop",
+                payload=b"\x85",
+                description="0x85 emergency",
+                generation=self._queued_jog_generation,
+            )
+            self._write_async_job(serial_connection, job)
+            logger.warning("Emergency jog stop written before serial shutdown.")
+            return True
+        except StageControllerError as exc:
+            logger.warning("Emergency jog stop failed before serial shutdown: %s", exc)
+            self.status_message.emit(str(exc))
+            return False
+        finally:
+            self._serial_session_lock.release()
 
     def _try_write_jog_stop_immediately(self, job: _QueuedSerialWrite) -> bool:
         serial_connection = self._serial
@@ -1015,6 +1128,8 @@ class StageController(QObject):
     def queue_soft_reset(self, *, source: str = "unknown") -> None:
         """Queue a FluidNC soft reset without blocking the UI thread."""
 
+        with self._task_lock:
+            self._clear_unverified_controller_state_locked()
         self._async_write_queue.put(
             _QueuedSerialWrite(
                 priority=self.SERIAL_PRIORITY_SOFT_RESET,
@@ -1437,6 +1552,7 @@ class StageController(QObject):
                 self._active_thread = None
 
     def _run_startup_sync(self, auto_home_a: bool) -> None:
+        success = False
         try:
             serial_connection = self._serial
             if serial_connection is None or not serial_connection.is_open:
@@ -1469,10 +1585,7 @@ class StageController(QObject):
             self._controller_state_stale = False
             self._refresh_axis_a_ready_from_state()
 
-            if not auto_home_a:
-                return
-
-            if effective_homed is None or "A" not in effective_homed:
+            if auto_home_a and (effective_homed is None or "A" not in effective_homed):
                 self.movement_started.emit()
                 self.homing_action_started.emit("A")
                 try:
@@ -1487,10 +1600,18 @@ class StageController(QObject):
                     self.movement_finished.emit(False, str(exc))
                     self.homing_action_finished.emit(False, str(exc), "A")
                     raise
+            with self._serial_session_lock:
+                self._ensure_controller_session_marker(serial_connection)
+            if self._last_stage_position is not None:
+                self.stage_position_changed.emit(tuple(self._last_stage_position))
+            success = True
         except StageControllerError as exc:
             self.status_message.emit(str(exc))
         finally:
             with self._task_lock:
+                if success:
+                    self._controller_reboot_recovery_pending = False
+                    self._controller_reboot_ready_notified = False
                 self._active_thread = None
 
     def _ensure_calibration(self, serial_connection: serial.Serial) -> None:
@@ -1934,7 +2055,7 @@ class StageController(QObject):
             self._require_homed_axes(status, {axis})
             current_value = self._axis_value_for_configured_mode(status, axis)
             limits = self._axis_limits_for_configured_mode(axis, status)
-            if limits:
+            if limits and self._software_axis_limits_ready(status):
                 min_value, max_value = limits
                 if value < min_value or value > max_value:
                     raise StageControllerError(
@@ -2028,7 +2149,7 @@ class StageController(QObject):
         requested_axes = {
             axis for axis, delta in move.items() if abs(delta) >= 1e-6
         }
-        if requested_axes:
+        if requested_axes and self._software_axis_limits_ready(status):
             self._require_homed_axes(
                 status, requested_axes, allow_relative=allow_relative
             )
@@ -2048,6 +2169,8 @@ class StageController(QObject):
                     )
                 continue
             limits = self._axis_limits_for_configured_mode(axis, status)
+            if limits and not self._software_axis_limits_ready(status):
+                continue
             if not limits:
                 continue
             min_value, max_value = limits
@@ -2056,6 +2179,17 @@ class StageController(QObject):
                 raise StageControllerError(
                     f"{axis} move {delta:+.3f} exceeds limits ({min_value:.3f}, {max_value:.3f})."
                 )
+
+    def _software_axis_limits_ready(self, status: _Status | None) -> bool:
+        """Software soft limits are meaningful only after every limited axis is homed."""
+
+        limited_axes = set(self._axis_limits).difference({"B"})
+        if not limited_axes:
+            return False
+        effective_homed = self._effective_homed_axes(status)
+        if effective_homed is None:
+            return False
+        return limited_axes.issubset(effective_homed)
 
     def _move_safety_check(self) -> None:
         """Validate motion safety prerequisites before any move."""
@@ -2120,6 +2254,7 @@ class StageController(QObject):
             if not line:
                 continue
             logger.debug("SERIAL TRACE stage_readline %s line=%r", description, line)
+            self._raise_if_controller_reboot_line(line, description)
             homed_msg = self.HOMED_MSG_PATTERN.match(line)
             if homed_msg:
                 axes = set(homed_msg.group("axes").upper())
@@ -2142,20 +2277,65 @@ class StageController(QObject):
     def _query_active_coordinate_system(
         self, serial_connection: serial.Serial, timeout: float = 2.0
     ) -> str | None:
+        tokens = self._query_modal_state_tokens(serial_connection, timeout=timeout)
+        for token in tokens:
+            candidate = token.strip().upper()
+            if candidate in self.WORK_COORDINATE_SYSTEMS:
+                return candidate
+        return None
+
+    def _query_modal_state_tokens(
+        self, serial_connection: serial.Serial, timeout: float = 2.0
+    ) -> list[str]:
         self._write_command(serial_connection, "$G")
         lines = self._read_response_lines(
             serial_connection, timeout=timeout, description="$G"
         )
         for line in lines:
             modal_match = self.MODAL_STATE_PATTERN.match(line)
-            if not modal_match:
+            if modal_match:
+                return modal_match.group("modal").split()
+        return []
+
+    def _read_controller_session_marker(
+        self, serial_connection: serial.Serial
+    ) -> int | None:
+        for token in self._query_modal_state_tokens(serial_connection):
+            token = token.strip().upper()
+            if not token.startswith("T"):
                 continue
-            tokens = modal_match.group("modal").split()
-            for token in tokens:
-                candidate = token.strip().upper()
-                if candidate in self.WORK_COORDINATE_SYSTEMS:
-                    return candidate
+            try:
+                marker = int(float(token[1:]))
+            except ValueError:
+                continue
+            return marker if marker > 0 else None
         return None
+
+    def _ensure_controller_session_marker(
+        self, serial_connection: serial.Serial
+    ) -> None:
+        marker = self._controller_session_marker
+        if marker is None:
+            marker = self._new_controller_session_marker()
+        self._write_command(serial_connection, f"T{marker}")
+        self._wait_for_ok(serial_connection)
+        self._controller_session_marker = marker
+        logger.info("Controller volatile session marker set to T%s.", marker)
+
+    @staticmethod
+    def _parse_cached_controller_session_marker(
+        data: dict[str, object]
+    ) -> int | None:
+        raw_marker = data.get("controller_session_marker")
+        try:
+            marker = int(raw_marker)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+        return marker if marker > 0 else None
+
+    @staticmethod
+    def _new_controller_session_marker() -> int:
+        return 100 + (time.monotonic_ns() % 900)
 
     def _query_work_coordinate_offsets(
         self, serial_connection: serial.Serial, timeout: float = 2.5
@@ -2255,6 +2435,7 @@ class StageController(QObject):
                 continue
             lower = line.lower()
             lines.append(line)
+            self._raise_if_controller_reboot_line(line, "$Startup/Show")
             if lower == "ok":
                 break
             if lower.startswith("alarm"):
@@ -2396,6 +2577,7 @@ class StageController(QObject):
             if not line:
                 continue
             logger.debug("SERIAL TRACE stage_readline wait_for_ok line=%r", line)
+            self._raise_if_controller_reboot_line(line, "wait_for_ok")
             homed_msg = self.HOMED_MSG_PATTERN.match(line)
             if homed_msg:
                 axes = set(homed_msg.group("axes").upper())
@@ -2448,6 +2630,12 @@ class StageController(QObject):
         self._update_cached_positions(status)
         self._update_needles_from_status(status)
         self._ensure_b_axis_zero_reference(status)
+        if (
+            self._controller_reboot_recovery_pending
+            and not self._controller_reboot_ready_notified
+        ):
+            self._controller_reboot_ready_notified = True
+            self.controller_reboot_ready.emit()
         return status
 
     def _read_status_frame(
@@ -2471,6 +2659,7 @@ class StageController(QObject):
             if not line:
                 continue
             logger.debug("SERIAL TRACE stage_readline query_status line=%r", line)
+            self._raise_if_controller_reboot_line(line, "status query")
             if line.lower().startswith("alarm"):
                 raise StageControllerError(f"Controller alarm: {line}")
             homed_msg = self.HOMED_MSG_PATTERN.match(line)
@@ -2792,6 +2981,8 @@ class StageController(QObject):
             self._update_homing_status(axes)
             self._controller_state_stale = False
             self._set_needles_state(True, known=True)
+            if self._controller_session_marker is None:
+                self._ensure_controller_session_marker(serial_connection)
 
     def _move_vector_for_axis(self, axis: str, delta: float) -> MoveVector:
         """Create a single-axis move vector."""
@@ -2978,9 +3169,7 @@ class StageController(QObject):
     def _require_homed_axes(
         self, status: _Status, axes: set[str], *, allow_relative: bool = False
     ) -> None:
-        effective_homed = status.homed_axes
-        if effective_homed is None and self._homed_axes:
-            effective_homed = set(self._homed_axes)
+        effective_homed = self._effective_homed_axes(status)
         if effective_homed is None:
             if allow_relative:
                 if not self._relative_warning_emitted:
@@ -3002,6 +3191,14 @@ class StageController(QObject):
                 return
             ordered = ", ".join(sorted(missing))
             raise AxisStateError(f"Axes not homed: {ordered}.")
+
+    def _effective_homed_axes(self, status: _Status | None) -> set[str] | None:
+        if status is None:
+            return set(self._homed_axes) if self._homed_axes else None
+        effective_homed = status.homed_axes
+        if effective_homed is None and self._homed_axes:
+            effective_homed = set(self._homed_axes)
+        return effective_homed
 
     def _ensure_axis_a_zero(
         self,

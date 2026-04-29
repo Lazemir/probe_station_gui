@@ -232,6 +232,8 @@ class DesignDocument:
     """Loaded GDS design and display-ready polygon geometry."""
 
     SNAP_VERTEX_PRIORITY_RATIO: ClassVar[float] = 1.8
+    SNAP_GRID_DIVISIONS: ClassVar[int] = 256
+    SNAP_GRID_MAX_SEGMENT_CELLS: ClassVar[int] = 64
 
     path: Path
     library: Any
@@ -243,6 +245,10 @@ class DesignDocument:
     bounds: tuple[float, float, float, float]
     polygons_by_layer: dict[LayerKey, tuple[np.ndarray, ...]]
     visible_layers: frozenset[LayerKey]
+    plot_paths_by_layer: dict[LayerKey, tuple[np.ndarray, np.ndarray]] = field(
+        default_factory=dict,
+        repr=False,
+    )
     snap_vertices: np.ndarray = field(
         default_factory=lambda: np.empty((0, 2), dtype=float),
         repr=False,
@@ -255,6 +261,30 @@ class DesignDocument:
         default_factory=lambda: np.empty((0, 2), dtype=float),
         repr=False,
     )
+    snap_grid_cell_size: float = field(default=0.0, repr=False)
+    snap_vertex_bins: dict[tuple[int, int], tuple[int, ...]] = field(
+        default_factory=dict,
+        repr=False,
+    )
+    snap_segment_bins: dict[tuple[int, int], tuple[int, ...]] = field(
+        default_factory=dict,
+        repr=False,
+    )
+    snap_long_segment_indices: tuple[int, ...] = field(default_factory=tuple, repr=False)
+    snap_geometry_built: bool = field(default=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if not self.plot_paths_by_layer and self.polygons_by_layer:
+            object.__setattr__(
+                self,
+                "plot_paths_by_layer",
+                self._build_plot_paths(self.polygons_by_layer, self.visible_layers),
+            )
+        if (
+            not self.snap_geometry_built
+            and (len(self.snap_vertices) > 0 or len(self.snap_segment_starts) > 0)
+        ):
+            object.__setattr__(self, "snap_geometry_built", True)
 
     @classmethod
     def load(cls, path: str | Path) -> "DesignDocument":
@@ -316,10 +346,6 @@ class DesignDocument:
             effective_layers = frozenset(layer for layer in visible_layers if layer in layers)
             if not effective_layers:
                 effective_layers = layers
-        snap_vertices, snap_segment_starts, snap_segment_ends = cls._build_snap_geometry(
-            polygons_by_layer,
-            effective_layers,
-        )
         dbu = float(getattr(library, "unit", 1e-6))
         precision = float(getattr(library, "precision", dbu))
         user_unit = precision if precision > 0 else dbu
@@ -334,9 +360,7 @@ class DesignDocument:
             bounds=bounds,
             polygons_by_layer=polygons_by_layer,
             visible_layers=effective_layers,
-            snap_vertices=snap_vertices,
-            snap_segment_starts=snap_segment_starts,
-            snap_segment_ends=snap_segment_ends,
+            plot_paths_by_layer=cls._build_plot_paths(polygons_by_layer, effective_layers),
         )
 
     def with_top_cell(self, top_cell_name: str) -> "DesignDocument":
@@ -375,14 +399,29 @@ class DesignDocument:
             if layer in self.visible_layers
         }
 
+    def visible_plot_paths(self) -> dict[LayerKey, tuple[np.ndarray, np.ndarray]]:
+        """Return display-ready path arrays for currently visible layers."""
+
+        return {
+            layer: paths
+            for layer, paths in self.plot_paths_by_layer.items()
+            if layer in self.visible_layers
+        }
+
     def snap_point(self, point: Point2D) -> Point2D:
         """Snap a design-space point to the nearest visible vertex or segment."""
 
         return self.snap_point_info(point).point
 
-    def snap_point_info(self, point: Point2D) -> SnapResult:
+    def snap_point_info(
+        self,
+        point: Point2D,
+        *,
+        max_distance: float | None = None,
+    ) -> SnapResult:
         """Return the nearest visible snap target and its geometry metadata."""
 
+        self._ensure_snap_geometry()
         target = np.asarray(point, dtype=float)
         vertex_point = target
         vertex_distance_sq = float("inf")
@@ -391,32 +430,39 @@ class DesignDocument:
         segment_start: Point2D | None = None
         segment_end: Point2D | None = None
 
-        if len(self.snap_vertices):
-            vertex_delta = self.snap_vertices - target
+        vertex_indices, segment_indices = self._snap_candidate_indices(
+            target,
+            max_distance=max_distance,
+        )
+
+        if len(vertex_indices):
+            candidate_vertices = self.snap_vertices[vertex_indices]
+            vertex_delta = candidate_vertices - target
             vertex_distance_sq_array = np.einsum("ij,ij->i", vertex_delta, vertex_delta)
             vertex_index = int(np.argmin(vertex_distance_sq_array))
             vertex_distance_sq = float(vertex_distance_sq_array[vertex_index])
-            vertex_point = np.asarray(self.snap_vertices[vertex_index], dtype=float)
+            vertex_point = np.asarray(candidate_vertices[vertex_index], dtype=float)
 
-        if len(self.snap_segment_starts):
-            segments = self.snap_segment_ends - self.snap_segment_starts
+        if len(segment_indices):
+            candidate_starts = self.snap_segment_starts[segment_indices]
+            candidate_ends = self.snap_segment_ends[segment_indices]
+            segments = candidate_ends - candidate_starts
             lengths_sq = np.einsum("ij,ij->i", segments, segments)
             valid_lengths = np.maximum(lengths_sq, 1e-18)
             projections = np.einsum(
                 "ij,ij->i",
-                np.broadcast_to(target, self.snap_segment_starts.shape)
-                - self.snap_segment_starts,
+                np.broadcast_to(target, candidate_starts.shape) - candidate_starts,
                 segments,
             ) / valid_lengths
             projections = np.clip(projections, 0.0, 1.0)
-            snapped_points = self.snap_segment_starts + segments * projections[:, np.newaxis]
+            snapped_points = candidate_starts + segments * projections[:, np.newaxis]
             segment_delta = snapped_points - target
             segment_distance_sq_array = np.einsum("ij,ij->i", segment_delta, segment_delta)
             segment_index = int(np.argmin(segment_distance_sq_array))
             segment_distance_sq = float(segment_distance_sq_array[segment_index])
             segment_point = np.asarray(snapped_points[segment_index], dtype=float)
-            start = self.snap_segment_starts[segment_index]
-            end = self.snap_segment_ends[segment_index]
+            start = candidate_starts[segment_index]
+            end = candidate_ends[segment_index]
             segment_start = (float(start[0]), float(start[1]))
             segment_end = (float(end[0]), float(end[1]))
 
@@ -448,6 +494,127 @@ class DesignDocument:
             mode="free",
             distance=0.0,
         )
+
+    def _ensure_snap_geometry(self) -> None:
+        if self.snap_geometry_built:
+            return
+        (
+            snap_vertices,
+            snap_segment_starts,
+            snap_segment_ends,
+            snap_grid_cell_size,
+            snap_vertex_bins,
+            snap_segment_bins,
+            snap_long_segment_indices,
+        ) = self._build_snap_geometry(
+            self.polygons_by_layer,
+            self.visible_layers,
+            self.bounds,
+        )
+        self.set_snap_geometry(
+            snap_vertices,
+            snap_segment_starts,
+            snap_segment_ends,
+            snap_grid_cell_size,
+            snap_vertex_bins,
+            snap_segment_bins,
+            snap_long_segment_indices,
+        )
+
+    def has_snap_geometry(self) -> bool:
+        """Return whether snap geometry is available without doing work."""
+
+        return bool(self.snap_geometry_built)
+
+    def build_snap_geometry(
+        self,
+    ) -> tuple[
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        float,
+        dict[tuple[int, int], tuple[int, ...]],
+        dict[tuple[int, int], tuple[int, ...]],
+        tuple[int, ...],
+    ]:
+        """Build snap arrays for the visible layers."""
+
+        return self._build_snap_geometry(
+            self.polygons_by_layer,
+            self.visible_layers,
+            self.bounds,
+        )
+
+    def set_snap_geometry(
+        self,
+        snap_vertices: np.ndarray,
+        snap_segment_starts: np.ndarray,
+        snap_segment_ends: np.ndarray,
+        snap_grid_cell_size: float | None = None,
+        snap_vertex_bins: dict[tuple[int, int], tuple[int, ...]] | None = None,
+        snap_segment_bins: dict[tuple[int, int], tuple[int, ...]] | None = None,
+        snap_long_segment_indices: tuple[int, ...] | None = None,
+    ) -> None:
+        """Install precomputed snap arrays on this immutable document object."""
+
+        object.__setattr__(self, "snap_vertices", snap_vertices)
+        object.__setattr__(self, "snap_segment_starts", snap_segment_starts)
+        object.__setattr__(self, "snap_segment_ends", snap_segment_ends)
+        if snap_grid_cell_size is None or snap_vertex_bins is None or snap_segment_bins is None:
+            (
+                snap_grid_cell_size,
+                snap_vertex_bins,
+                snap_segment_bins,
+                snap_long_segment_indices,
+            ) = self._build_snap_spatial_index(
+                snap_vertices,
+                snap_segment_starts,
+                snap_segment_ends,
+                self.bounds,
+            )
+        object.__setattr__(self, "snap_grid_cell_size", float(snap_grid_cell_size))
+        object.__setattr__(self, "snap_vertex_bins", snap_vertex_bins)
+        object.__setattr__(self, "snap_segment_bins", snap_segment_bins)
+        object.__setattr__(
+            self,
+            "snap_long_segment_indices",
+            tuple(snap_long_segment_indices or ()),
+        )
+        object.__setattr__(self, "snap_geometry_built", True)
+
+    def _snap_candidate_indices(
+        self,
+        target: np.ndarray,
+        *,
+        max_distance: float | None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if (
+            max_distance is None
+            or not math.isfinite(float(max_distance))
+            or max_distance <= 0.0
+            or self.snap_grid_cell_size <= 0.0
+        ):
+            return (
+                np.arange(len(self.snap_vertices), dtype=np.intp),
+                np.arange(len(self.snap_segment_starts), dtype=np.intp),
+            )
+
+        radius = float(max_distance)
+        vertex_radius = radius * self.SNAP_VERTEX_PRIORITY_RATIO
+        vertex_indices = self._indices_from_bins(
+            self.snap_vertex_bins,
+            target,
+            vertex_radius,
+            self.snap_grid_cell_size,
+        )
+        segment_indices = self._indices_from_bins(
+            self.snap_segment_bins,
+            target,
+            radius,
+            self.snap_grid_cell_size,
+            extra_indices=self.snap_long_segment_indices,
+        )
+        return vertex_indices, segment_indices
 
     def dbu_to_um(self, value: float) -> float:
         """Convert design database units to micrometers."""
@@ -550,10 +717,49 @@ class DesignDocument:
         return (min(mins_x), min(mins_y), max(maxs_x), max(maxs_y))
 
     @staticmethod
+    def _build_plot_paths(
+        polygons_by_layer: dict[LayerKey, tuple[np.ndarray, ...]],
+        visible_layers: Iterable[LayerKey],
+    ) -> dict[LayerKey, tuple[np.ndarray, np.ndarray]]:
+        visible_layer_set = frozenset(visible_layers)
+        paths_by_layer: dict[LayerKey, tuple[np.ndarray, np.ndarray]] = {}
+        for layer_key, polygons in polygons_by_layer.items():
+            if layer_key not in visible_layer_set:
+                continue
+            valid_polygons = [polygon for polygon in polygons if len(polygon) >= 2]
+            point_count = sum(len(polygon) + 2 for polygon in valid_polygons)
+            if point_count <= 0:
+                continue
+            x_data = np.empty(point_count, dtype=float)
+            y_data = np.empty(point_count, dtype=float)
+            offset = 0
+            for polygon in valid_polygons:
+                count = len(polygon)
+                next_offset = offset + count
+                x_data[offset:next_offset] = polygon[:, 0]
+                y_data[offset:next_offset] = polygon[:, 1]
+                x_data[next_offset] = polygon[0, 0]
+                y_data[next_offset] = polygon[0, 1]
+                x_data[next_offset + 1] = float("nan")
+                y_data[next_offset + 1] = float("nan")
+                offset = next_offset + 2
+            paths_by_layer[layer_key] = (x_data, y_data)
+        return paths_by_layer
+
+    @staticmethod
     def _build_snap_geometry(
         polygons_by_layer: dict[LayerKey, tuple[np.ndarray, ...]],
         visible_layers: Iterable[LayerKey],
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        bounds: tuple[float, float, float, float],
+    ) -> tuple[
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        float,
+        dict[tuple[int, int], tuple[int, ...]],
+        dict[tuple[int, int], tuple[int, ...]],
+        tuple[int, ...],
+    ]:
         vertices: list[np.ndarray] = []
         segment_starts: list[np.ndarray] = []
         segment_ends: list[np.ndarray] = []
@@ -562,7 +768,7 @@ class DesignDocument:
                 if len(polygon) == 0:
                     continue
                 closed = polygon
-                if len(polygon) > 1 and not np.allclose(polygon[0], polygon[-1]):
+                if len(polygon) > 1 and not np.array_equal(polygon[0], polygon[-1]):
                     closed = np.vstack((polygon, polygon[0]))
                 vertices.append(np.asarray(closed, dtype=float))
                 if len(closed) > 1:
@@ -577,7 +783,104 @@ class DesignDocument:
         segment_end_array = (
             np.vstack(segment_ends) if segment_ends else np.empty((0, 2), dtype=float)
         )
-        return vertex_array, segment_start_array, segment_end_array
+        (
+            cell_size,
+            vertex_bins,
+            segment_bins,
+            long_segment_indices,
+        ) = DesignDocument._build_snap_spatial_index(
+            vertex_array,
+            segment_start_array,
+            segment_end_array,
+            bounds,
+        )
+        return (
+            vertex_array,
+            segment_start_array,
+            segment_end_array,
+            cell_size,
+            vertex_bins,
+            segment_bins,
+            long_segment_indices,
+        )
+
+    @staticmethod
+    def _build_snap_spatial_index(
+        vertices: np.ndarray,
+        segment_starts: np.ndarray,
+        segment_ends: np.ndarray,
+        bounds: tuple[float, float, float, float],
+    ) -> tuple[
+        float,
+        dict[tuple[int, int], tuple[int, ...]],
+        dict[tuple[int, int], tuple[int, ...]],
+        tuple[int, ...],
+    ]:
+        left, bottom, right, top = bounds
+        span = max(abs(float(right) - float(left)), abs(float(top) - float(bottom)))
+        if not math.isfinite(span) or span <= 0.0:
+            span = 1.0
+        cell_size = span / float(DesignDocument.SNAP_GRID_DIVISIONS)
+        if cell_size <= 0.0 or not math.isfinite(cell_size):
+            cell_size = 1.0
+
+        vertex_bins_list: dict[tuple[int, int], list[int]] = {}
+        for index, vertex in enumerate(vertices):
+            key = DesignDocument._snap_grid_key(vertex, cell_size)
+            vertex_bins_list.setdefault(key, []).append(index)
+
+        segment_bins_list: dict[tuple[int, int], list[int]] = {}
+        long_segment_indices: list[int] = []
+        for index, (start, end) in enumerate(zip(segment_starts, segment_ends)):
+            min_x = min(float(start[0]), float(end[0]))
+            max_x = max(float(start[0]), float(end[0]))
+            min_y = min(float(start[1]), float(end[1]))
+            max_y = max(float(start[1]), float(end[1]))
+            x0 = math.floor(min_x / cell_size)
+            x1 = math.floor(max_x / cell_size)
+            y0 = math.floor(min_y / cell_size)
+            y1 = math.floor(max_y / cell_size)
+            cell_count = (x1 - x0 + 1) * (y1 - y0 + 1)
+            if cell_count > DesignDocument.SNAP_GRID_MAX_SEGMENT_CELLS:
+                long_segment_indices.append(index)
+                continue
+            for gx in range(x0, x1 + 1):
+                for gy in range(y0, y1 + 1):
+                    segment_bins_list.setdefault((gx, gy), []).append(index)
+
+        vertex_bins = {key: tuple(values) for key, values in vertex_bins_list.items()}
+        segment_bins = {key: tuple(values) for key, values in segment_bins_list.items()}
+        return cell_size, vertex_bins, segment_bins, tuple(long_segment_indices)
+
+    @staticmethod
+    def _snap_grid_key(point: np.ndarray, cell_size: float) -> tuple[int, int]:
+        return (
+            math.floor(float(point[0]) / cell_size),
+            math.floor(float(point[1]) / cell_size),
+        )
+
+    @staticmethod
+    def _indices_from_bins(
+        bins: dict[tuple[int, int], tuple[int, ...]],
+        target: np.ndarray,
+        radius: float,
+        cell_size: float,
+        *,
+        extra_indices: tuple[int, ...] = (),
+    ) -> np.ndarray:
+        x0 = math.floor((float(target[0]) - radius) / cell_size)
+        x1 = math.floor((float(target[0]) + radius) / cell_size)
+        y0 = math.floor((float(target[1]) - radius) / cell_size)
+        y1 = math.floor((float(target[1]) + radius) / cell_size)
+        indices: set[int] = set(extra_indices)
+        for gx in range(x0, x1 + 1):
+            for gy in range(y0, y1 + 1):
+                values = bins.get((gx, gy))
+                if values:
+                    indices.update(values)
+        if not indices:
+            return np.empty((0,), dtype=np.intp)
+        return np.fromiter(indices, dtype=np.intp, count=len(indices))
 
     @staticmethod
     def _project_point_to_segment(

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import math
 import logging
+import threading
 from pathlib import Path
 from time import perf_counter, monotonic
 
-import numpy as np
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
@@ -51,6 +51,7 @@ class _DesignPlotPane(QWidget):
     calibration_point_selected = Signal(int, float, float)
     move_requested = Signal(float, float)
     hover_snap_changed = Signal(object)
+    snap_geometry_ready = Signal(int, object, object, object)
     HOVER_SNAP_LOG_INTERVAL_S = 0.2
     HOVER_SNAP_SLOW_MS = 8.0
     SNAP_RADIUS_PX = 14.0
@@ -72,7 +73,9 @@ class _DesignPlotPane(QWidget):
         self._pending_hover_scene_pos = None
         self._last_hover_log_at = 0.0
         self._last_hover_log_signature: tuple[float, float, str] | None = None
+        self._snap_generation = 0
         self._plot = None
+        self._status_label: QLabel | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -87,6 +90,12 @@ class _DesignPlotPane(QWidget):
             layout.addWidget(status_label, 1)
             return
 
+        self._status_label = QLabel("No design loaded.", self)
+        self._status_label.setAlignment(Qt.AlignCenter)
+        self._status_label.setMinimumHeight(320)
+        self._status_label.setStyleSheet(
+            "QLabel { border: 1px dashed palette(mid); color: palette(mid); }"
+        )
         self._plot = pg.PlotWidget(parent=self)
         self._plot.setBackground("k")
         self._plot.setMenuEnabled(False)
@@ -154,6 +163,7 @@ class _DesignPlotPane(QWidget):
         self._hover_timer.setSingleShot(True)
         self._hover_timer.setInterval(16)
         self._hover_timer.timeout.connect(self._flush_hover_snap)
+        self.snap_geometry_ready.connect(self._on_snap_geometry_ready)
         self._plot.addItem(self._hover_item)
         self._plot.addItem(self._target_item)
         self._plot.addItem(self._selected_target_item)
@@ -163,14 +173,37 @@ class _DesignPlotPane(QWidget):
         self._plot.addItem(self._check_mark_item)
         self._plot.scene().sigMouseClicked.connect(self._on_mouse_clicked)
         self._plot.scene().sigMouseMoved.connect(self._on_mouse_moved)
+        layout.addWidget(self._status_label, 1)
         layout.addWidget(self._plot, 1)
+        self._plot.hide()
 
     def set_document(self, document: DesignDocument | None) -> None:
+        same_document = document is self._document
         self._document = document
         if document is None:
+            self._snap_generation += 1
             self._set_hover_snap(None)
-        self._redraw_document()
+            self.set_status_message("No design loaded.")
+            self._redraw_document()
+        elif not same_document:
+            self._snap_generation += 1
+            self._set_hover_snap(None)
+            self.set_status_message("")
+            self._redraw_document()
+            self._start_snap_geometry_build(document)
         self._redraw_overlays()
+
+    def set_status_message(self, message: str) -> None:
+        if self._status_label is None or self._plot is None:
+            return
+        message = str(message or "")
+        if message:
+            self._status_label.setText(message)
+            self._status_label.show()
+            self._plot.hide()
+        else:
+            self._status_label.hide()
+            self._plot.show()
 
     def set_targets(
         self,
@@ -231,23 +264,15 @@ class _DesignPlotPane(QWidget):
     def _redraw_document(self) -> None:
         if self._plot is None:
             return
+        started = perf_counter()
         for item in self._layer_items:
             self._plot.removeItem(item)
         self._layer_items.clear()
         if self._document is None:
             return
-        for layer_key, polygons in self._document.visible_polygons().items():
-            x_data: list[float] = []
-            y_data: list[float] = []
-            for polygon in polygons:
-                if len(polygon) < 2:
-                    continue
-                closed = np.vstack((polygon, polygon[0]))
-                x_data.extend(float(value) for value in closed[:, 0])
-                x_data.append(float("nan"))
-                y_data.extend(float(value) for value in closed[:, 1])
-                y_data.append(float("nan"))
-            if not x_data:
+        point_count = 0
+        for layer_key, (x_data, y_data) in self._document.visible_plot_paths().items():
+            if len(x_data) == 0:
                 continue
             line = self._plot.plot(
                 x_data,
@@ -255,7 +280,67 @@ class _DesignPlotPane(QWidget):
                 pen=pg.mkPen(self._layer_color(layer_key), width=1),
             )
             self._layer_items.append(line)
+            point_count += len(x_data)
         self.focus_bounds()
+        logger.debug(
+            "DESIGN RENDER full items=%d points=%d elapsed_ms=%.2f",
+            len(self._layer_items),
+            point_count,
+            (perf_counter() - started) * 1000.0,
+        )
+
+    def _start_snap_geometry_build(self, document: DesignDocument) -> None:
+        if document.has_snap_geometry():
+            return
+        generation = self._snap_generation
+
+        def build_snap_geometry() -> None:
+            started = perf_counter()
+            try:
+                geometry = document.build_snap_geometry()
+            except Exception as exc:
+                try:
+                    self.snap_geometry_ready.emit(generation, document, None, exc)
+                except RuntimeError:
+                    pass
+                return
+            elapsed_ms = (perf_counter() - started) * 1000.0
+            try:
+                self.snap_geometry_ready.emit(generation, document, geometry, elapsed_ms)
+            except RuntimeError:
+                pass
+
+        threading.Thread(
+            target=build_snap_geometry,
+            name="DesignSnapGeometryBuild",
+            daemon=True,
+        ).start()
+
+    def _on_snap_geometry_ready(
+        self,
+        generation: int,
+        document: object,
+        geometry: object,
+        result: object,
+    ) -> None:
+        if generation != self._snap_generation or document is not self._document:
+            return
+        if result is not None and not isinstance(result, (int, float)):
+            logger.warning("Design snap geometry build failed: %s", result)
+            return
+        if not isinstance(document, DesignDocument) or not isinstance(geometry, tuple):
+            return
+        if len(geometry) < 3:
+            return
+        document.set_snap_geometry(*geometry)
+        logger.debug(
+            "DESIGN SNAP geometry ready vertices=%d segments=%d elapsed_ms=%.2f",
+            len(document.snap_vertices),
+            len(document.snap_segment_starts),
+            float(result or 0.0),
+        )
+        if self._pending_hover_scene_pos is not None and not self._hover_timer.isActive():
+            self._hover_timer.start()
 
     def _redraw_overlays(self) -> None:
         if self._plot is None:
@@ -386,9 +471,16 @@ class _DesignPlotPane(QWidget):
             return SnapResult(point=raw_point, mode="free", distance=0.0)
         if not self._snap_enabled:
             return SnapResult(point=raw_point, mode="free", distance=0.0)
-        snap_result = self._document.snap_point_info(raw_point)
+        if not self._document.has_snap_geometry():
+            return SnapResult(point=raw_point, mode="free", distance=0.0)
         snap_threshold = self._snap_distance_threshold()
-        if snap_threshold is not None and snap_result.distance > snap_threshold:
+        if snap_threshold is None:
+            return SnapResult(point=raw_point, mode="free", distance=0.0)
+        snap_result = self._document.snap_point_info(
+            raw_point,
+            max_distance=snap_threshold,
+        )
+        if snap_result.distance > snap_threshold:
             return SnapResult(point=raw_point, mode="free", distance=0.0)
         return snap_result
 
@@ -576,19 +668,19 @@ class DesignNavigatorPanel(QWidget):
         registration_layout.addWidget(self._calibration_prompt_label)
         self._mark_1_label = QLabel(registration_group)
         self._mark_1_label.setWordWrap(True)
-        self._mark_1_label.setStyleSheet("QLabel { color: #ffd54f; }")
+        self._mark_1_label.setStyleSheet("QLabel { font-weight: 600; }")
         registration_layout.addWidget(self._mark_1_label)
         self._mark_2_label = QLabel(registration_group)
         self._mark_2_label.setWordWrap(True)
-        self._mark_2_label.setStyleSheet("QLabel { color: #ff7043; }")
+        self._mark_2_label.setStyleSheet("QLabel { font-weight: 600; }")
         registration_layout.addWidget(self._mark_2_label)
         self._chip_1_label = QLabel(registration_group)
         self._chip_1_label.setWordWrap(True)
-        self._chip_1_label.setStyleSheet("QLabel { color: #ffd54f; }")
+        self._chip_1_label.setStyleSheet("QLabel { font-weight: 600; }")
         registration_layout.addWidget(self._chip_1_label)
         self._chip_2_label = QLabel(registration_group)
         self._chip_2_label.setWordWrap(True)
-        self._chip_2_label.setStyleSheet("QLabel { color: #ff7043; }")
+        self._chip_2_label.setStyleSheet("QLabel { font-weight: 600; }")
         registration_layout.addWidget(self._chip_2_label)
         self._registration_status_label = QLabel("No design registration.", registration_group)
         self._registration_status_label.setWordWrap(True)
@@ -973,6 +1065,7 @@ class DesignLayoutWindow(QWidget):
         self.navigator_panel.set_registration_status(text)
 
     def set_status_message(self, text: str) -> None:
+        self._main_view.set_status_message(text)
         self.navigator_panel.set_status_message(text)
 
     def set_hover_snap(self, snap_result: SnapResult | None) -> None:

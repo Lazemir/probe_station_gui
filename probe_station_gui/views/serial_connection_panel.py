@@ -355,8 +355,11 @@ class _SerialConnectWorker(QObject):
         try:
             original_timeout = connection.timeout
             connection.timeout = 0.05
-            deadline = time.monotonic() + 0.35
+            deadline = time.monotonic() + 1.5
+            quiet_deadline = time.monotonic() + 0.25
             while time.monotonic() < deadline:
+                if time.monotonic() >= quiet_deadline:
+                    break
                 try:
                     raw = connection.readline()
                 except serial.SerialException:
@@ -365,8 +368,9 @@ class _SerialConnectWorker(QObject):
                 if not line:
                     continue
                 startup_lines.append(line)
+                quiet_deadline = time.monotonic() + 0.25
                 upper = line.upper()
-                if "[VER:" in upper or "FLUIDNC" in upper or "GRBL" in upper:
+                if self._line_indicates_controller_reboot(upper):
                     reboot_detected = True
             connection.timeout = original_timeout
         except Exception:
@@ -386,6 +390,23 @@ class _SerialConnectWorker(QObject):
 
         self.connected.emit(connection, self._port_name, self._baud_rate)
         self.finished.emit()
+
+    @staticmethod
+    def _line_indicates_controller_reboot(upper_line: str) -> bool:
+        return any(
+            token in upper_line
+            for token in (
+                "[VER:",
+                "FLUIDNC",
+                "GRBL",
+                "[MSG:RST",
+                "FAST_FLASH_BOOT",
+                "ESP-ROM",
+                "LOAD:",
+                "ENTRY ",
+                "RST:",
+            )
+        )
 
 
 __all__ = ["SerialConnectionPanel"]
