@@ -60,10 +60,10 @@ class NeedleCalibrationPanel(QWidget):
         status_layout.addWidget(QLabel("Short:", self), 1, 0)
         self._short_label = QLabel("Unknown", self)
         status_layout.addWidget(self._short_label, 1, 1)
-        status_layout.addWidget(QLabel("Current A:", self), 2, 0)
+        status_layout.addWidget(QLabel("Current lowering:", self), 2, 0)
         self._current_a_label = QLabel("n/a", self)
         status_layout.addWidget(self._current_a_label, 2, 1)
-        status_layout.addWidget(QLabel("Saved down A:", self), 3, 0)
+        status_layout.addWidget(QLabel("Saved lowering:", self), 3, 0)
         self._saved_a_label = QLabel("n/a", self)
         status_layout.addWidget(self._saved_a_label, 3, 1)
         root_layout.addWidget(status_group)
@@ -166,7 +166,7 @@ class NeedleCalibrationPanel(QWidget):
             self._short_label.setStyleSheet("QLabel { color: #8d6e63; font-weight: 600; }")
 
     def set_current_a(self, position_mm: Optional[float]) -> None:
-        """Update the displayed current A coordinate."""
+        """Update the displayed current physical A-axis lowering."""
 
         self._current_height = position_mm
         if position_mm is None:
@@ -177,7 +177,7 @@ class NeedleCalibrationPanel(QWidget):
         self._save_button.setEnabled(True)
 
     def set_saved_height(self, position_mm: Optional[float]) -> None:
-        """Update the displayed saved down height."""
+        """Update the displayed saved physical down height."""
 
         self._saved_height = position_mm
         if position_mm is None:

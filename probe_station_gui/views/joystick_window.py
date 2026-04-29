@@ -24,6 +24,8 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSlider,
+    QStyle,
+    QStyleOptionSlider,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -73,6 +75,94 @@ class _SpinnerOverlay(QWidget):
         painter.drawArc(rect, int(self._angle * 16), int(120 * 16))
 
 
+class _FeedrateSlider(QSlider):
+    """Slider with visual overlay for temporarily unavailable feedrate ranges."""
+
+    def __init__(self, orientation: Qt.Orientation, parent: QWidget | None = None) -> None:
+        super().__init__(orientation, parent)
+        self._temporary_bounds: tuple[int, int] | None = None
+
+    def set_temporary_bounds(self, minimum: int | None, maximum: int | None) -> None:
+        if minimum is None or maximum is None:
+            bounds = None
+        else:
+            bounds = (int(minimum), int(maximum))
+        if bounds == self._temporary_bounds:
+            return
+        self._temporary_bounds = bounds
+        self.update()
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        super().paintEvent(event)
+        if self._temporary_bounds is None or self.orientation() != Qt.Horizontal:
+            return
+        lower, upper = self._temporary_bounds
+        slider_min = self.minimum()
+        slider_max = self.maximum()
+        if slider_max <= slider_min:
+            return
+        lower = max(slider_min, min(slider_max, lower))
+        upper = max(slider_min, min(slider_max, upper))
+        if lower <= slider_min and upper >= slider_max:
+            return
+
+        option = QStyleOptionSlider()
+        self.initStyleOption(option)
+        groove = self.style().subControlRect(
+            QStyle.CC_Slider,
+            option,
+            QStyle.SC_SliderGroove,
+            self,
+        )
+        handle = self.style().subControlRect(
+            QStyle.CC_Slider,
+            option,
+            QStyle.SC_SliderHandle,
+            self,
+        )
+        usable_left = groove.left() + handle.width() // 2
+        usable_right = groove.right() - handle.width() // 2
+        usable_width = max(1, usable_right - usable_left)
+        lower_x = usable_left + QStyle.sliderPositionFromValue(
+            slider_min,
+            slider_max,
+            lower,
+            usable_width,
+            option.upsideDown,
+        )
+        upper_x = usable_left + QStyle.sliderPositionFromValue(
+            slider_min,
+            slider_max,
+            upper,
+            usable_width,
+            option.upsideDown,
+        )
+        if lower_x > upper_x:
+            lower_x, upper_x = upper_x, lower_x
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        color = QColor("#9e9e9e")
+        color.setAlpha(150)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(color)
+        overlay_rect = groove.adjusted(0, -2, 0, 2)
+        if lower > slider_min:
+            painter.drawRect(
+                overlay_rect.left(),
+                overlay_rect.top(),
+                max(0, lower_x - overlay_rect.left()),
+                overlay_rect.height(),
+            )
+        if upper < slider_max:
+            painter.drawRect(
+                upper_x,
+                overlay_rect.top(),
+                max(0, overlay_rect.right() - upper_x + 1),
+                overlay_rect.height(),
+            )
+
+
 class JoystickWindow(QWidget):
     """Widget that provides directional jogging controls."""
 
@@ -88,6 +178,7 @@ class JoystickWindow(QWidget):
     reset_calibration_requested = Signal()
     manual_axis_move_requested = Signal(str, float, str, float)
     manual_axis_settings_changed = Signal(str, float, str, float)
+    linear_feedrate_changed = Signal(float)
     zero_b_requested = Signal()
 
     DEFAULT_JOG_DISTANCE_MM = 25.0
@@ -133,6 +224,32 @@ class JoystickWindow(QWidget):
         "QPushButton[homing=\"true\"]:pressed { background: #e0e0e0; }"
         "QPushButton:disabled { color: #9e9e9e; }"
     )
+    LIMIT_STYLE = (
+        "QPushButton { padding: 2px 6px; border-radius: 4px; background: #c62828; color: #ffffff; }"
+        "QPushButton:pressed { background: #8e0000; }"
+        "QPushButton:checked { background: #c62828; }"
+        "QPushButton[homing=\"true\"] { background: #e6e6e6; color: #9e9e9e; border: 1px solid #cfcfcf; }"
+        "QPushButton[homing=\"true\"]:pressed { background: #e0e0e0; }"
+        "QPushButton:disabled { color: #9e9e9e; }"
+    )
+    HOMING_ACTIVE_STYLE = (
+        "QPushButton { padding: 2px 6px; border-radius: 4px; background: #1565c0; color: #f5f5f5; }"
+        "QPushButton:pressed { background: #0d47a1; }"
+        "QPushButton:checked { background: #1565c0; }"
+        "QPushButton:disabled { color: #d0d0d0; }"
+    )
+    HOMING_ACTIVE_DIM_STYLE = (
+        "QPushButton { padding: 2px 6px; border-radius: 4px; background: #6f8fb8; color: #f5f5f5; }"
+        "QPushButton:pressed { background: #5e7ea7; }"
+        "QPushButton:checked { background: #6f8fb8; }"
+        "QPushButton:disabled { color: #d0d0d0; }"
+    )
+    HOMING_PENDING_STYLE = (
+        "QPushButton { padding: 2px 6px; border-radius: 4px; background: #d8bd78; color: #1f1f1f; }"
+        "QPushButton:pressed { background: #c8ad68; }"
+        "QPushButton:checked { background: #d8bd78; }"
+        "QPushButton:disabled { color: #6f6f6f; }"
+    )
     ALL_HOMED_STYLE = HOMED_STYLE
     NEEDLES_UP_STYLE = (
         "QPushButton { padding: 2px 6px; border-radius: 4px; background: #1565c0; color: #f5f5f5; }"
@@ -176,12 +293,17 @@ class JoystickWindow(QWidget):
         self._manual_axis_controls_enabled = False
         self._applying_jog_settings = False
         self._linear_feedrate_value: float = self._linear_default
+        self._linear_feedrate_bounds: tuple[float, float] | None = None
         self._last_feedrate_wheel_at = 0.0
         self._homing_buttons: dict[str, QPushButton] = {}
         self._homing_targets: dict[str, QPushButton] = {}
         self._homing_text: dict[str, str] = {}
         self._homing_overlays: dict[str, _SpinnerOverlay] = {}
+        self._homed_axes: set[str] = set()
+        self._limit_axes: set[str] = set()
+        self._pending_homing_axes: set[str] = set()
         self._homing_spinner_angle = 0
+        self._homing_blink_dimmed = False
         self._axis_a_ready = False
         self._needles_known = False
         self._needles_up = False
@@ -190,7 +312,7 @@ class JoystickWindow(QWidget):
         self._needle_overlays: dict[str, _SpinnerOverlay] = {}
         self._needle_spinner_angle = 0
         self._homing_animation_timer = QTimer(self)
-        self._homing_animation_timer.setInterval(90)
+        self._homing_animation_timer.setInterval(250)
         self._homing_animation_timer.timeout.connect(self._advance_homing_spinner)
         self._needle_animation_timer = QTimer(self)
         self._needle_animation_timer.setInterval(90)
@@ -222,13 +344,13 @@ class JoystickWindow(QWidget):
         linear_feed_layout = QHBoxLayout()
         linear_feed_layout.addWidget(QLabel("Linear feed (mm/min):", self))
         self.linear_feedrate_value_label = QLabel(self)
-        self.linear_feedrate_value_label.setMinimumWidth(90)
+        self.linear_feedrate_value_label.setMinimumWidth(160)
         self.linear_feedrate_value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         linear_feed_layout.addWidget(self.linear_feedrate_value_label)
 
         feed_container.addLayout(linear_feed_layout)
 
-        self.linear_feedrate_slider = QSlider(Qt.Horizontal, self)
+        self.linear_feedrate_slider = _FeedrateSlider(Qt.Horizontal, self)
         self.linear_feedrate_slider.setRange(
             int(self.MIN_LINEAR_FEEDRATE * self.LINEAR_FEEDRATE_SCALE),
             int(self.MAX_LINEAR_FEEDRATE * self.LINEAR_FEEDRATE_SCALE),
@@ -315,7 +437,6 @@ class JoystickWindow(QWidget):
         self.manual_axis_distance_spin.setValue(self._manual_axis_distance_mm)
         manual_axis_layout.addWidget(self.manual_axis_distance_spin)
         self.manual_axis_feedrate_label = QLabel("Feed:", self)
-        manual_axis_layout.addWidget(self.manual_axis_feedrate_label)
         self.manual_axis_feedrate_spin = QDoubleSpinBox(self)
         self.manual_axis_feedrate_spin.setLocale(QLocale.c())
         self.manual_axis_feedrate_spin.setDecimals(1)
@@ -326,7 +447,8 @@ class JoystickWindow(QWidget):
         self.manual_axis_feedrate_spin.setSingleStep(10.0)
         self.manual_axis_feedrate_spin.setSuffix(" mm/min")
         self.manual_axis_feedrate_spin.setValue(self._manual_axis_feedrate_mm_min)
-        manual_axis_layout.addWidget(self.manual_axis_feedrate_spin)
+        self.manual_axis_feedrate_label.hide()
+        self.manual_axis_feedrate_spin.hide()
         self.manual_axis_negative_button = QPushButton("Move -", self)
         self.manual_axis_positive_button = QPushButton("Move +", self)
         manual_axis_layout.addWidget(self.manual_axis_negative_button)
@@ -373,9 +495,6 @@ class JoystickWindow(QWidget):
             lambda _text: self._emit_manual_axis_settings_changed()
         )
         self.manual_axis_distance_spin.valueChanged.connect(
-            lambda _value: self._emit_manual_axis_settings_changed()
-        )
-        self.manual_axis_feedrate_spin.valueChanged.connect(
             lambda _value: self._emit_manual_axis_settings_changed()
         )
 
@@ -471,10 +590,41 @@ class JoystickWindow(QWidget):
         logger.debug("Joystick event filter removed")
 
     def _format_feedrate(self, value: float) -> str:
-        return f"{float(value):.1f} mm/min"
+        text = f"{float(value):.1f} mm/min"
+        if self._linear_feedrate_bounds is not None:
+            min_value, max_value = self._linear_feedrate_bounds
+            text += f" [{min_value:.1f}-{max_value:.1f}]"
+        return text
+
+    def _linear_feedrate_min_max(self) -> tuple[float, float]:
+        if self._linear_feedrate_bounds is None:
+            return (self.MIN_LINEAR_FEEDRATE, self.MAX_LINEAR_FEEDRATE)
+        min_value, max_value = self._linear_feedrate_bounds
+        return (
+            max(self.MIN_LINEAR_FEEDRATE, float(min_value)),
+            max(self.MIN_LINEAR_FEEDRATE, float(max_value)),
+        )
+
+    def _update_linear_feedrate_slider_range(self) -> None:
+        minimum = int(round(self.MIN_LINEAR_FEEDRATE * self.LINEAR_FEEDRATE_SCALE))
+        maximum = int(round(self.MAX_LINEAR_FEEDRATE * self.LINEAR_FEEDRATE_SCALE))
+        self.linear_feedrate_slider.blockSignals(True)
+        if self.linear_feedrate_slider.minimum() != minimum or self.linear_feedrate_slider.maximum() != maximum:
+            self.linear_feedrate_slider.setRange(minimum, maximum)
+        self.linear_feedrate_slider.blockSignals(False)
+        if isinstance(self.linear_feedrate_slider, _FeedrateSlider):
+            if self._linear_feedrate_bounds is None:
+                self.linear_feedrate_slider.set_temporary_bounds(None, None)
+            else:
+                min_value, max_value = self._linear_feedrate_min_max()
+                self.linear_feedrate_slider.set_temporary_bounds(
+                    int(round(min_value * self.LINEAR_FEEDRATE_SCALE)),
+                    int(round(max_value * self.LINEAR_FEEDRATE_SCALE)),
+                )
 
     def _slider_value_from_feedrate(self, value: float) -> int:
-        bounded = min(self.MAX_LINEAR_FEEDRATE, max(self.MIN_LINEAR_FEEDRATE, float(value)))
+        min_value, max_value = self._linear_feedrate_min_max()
+        bounded = min(max_value, max(min_value, float(value)))
         return int(round(bounded * self.LINEAR_FEEDRATE_SCALE))
 
     def _feedrate_from_slider_value(self, slider_value: int) -> float:
@@ -486,9 +636,12 @@ class JoystickWindow(QWidget):
         *,
         reissue_if_active: bool,
     ) -> None:
-        bounded = min(self.MAX_LINEAR_FEEDRATE, max(self.MIN_LINEAR_FEEDRATE, float(value)))
-        if abs(bounded - self._linear_feedrate_value) <= 1e-9 and not reissue_if_active:
-            return
+        min_value, max_value = self._linear_feedrate_min_max()
+        bounded = min(max_value, max(min_value, float(value)))
+        bounded = self._feedrate_from_slider_value(
+            self._slider_value_from_feedrate(bounded)
+        )
+        changed = abs(bounded - self._linear_feedrate_value) > 1e-9
         self._linear_feedrate_value = bounded
         slider_value = self._slider_value_from_feedrate(bounded)
         if self.linear_feedrate_slider.value() != slider_value:
@@ -496,8 +649,33 @@ class JoystickWindow(QWidget):
             self.linear_feedrate_slider.setValue(slider_value)
             self.linear_feedrate_slider.blockSignals(False)
         self.linear_feedrate_value_label.setText(self._format_feedrate(bounded))
+        if changed:
+            self._manual_axis_feedrate_mm_min = bounded
+            self.linear_feedrate_changed.emit(bounded)
         if reissue_if_active:
             self._restart_active_jog_with_current_feedrate()
+
+    def set_temporary_linear_feedrate_bounds(
+        self, min_feedrate: float, max_feedrate: float
+    ) -> None:
+        min_value = max(self.MIN_LINEAR_FEEDRATE, float(min_feedrate))
+        max_value = max(min_value, float(max_feedrate))
+        self._linear_feedrate_bounds = (min_value, max_value)
+        self._update_linear_feedrate_slider_range()
+        self._set_linear_feedrate(
+            self._linear_feedrate_value,
+            reissue_if_active=False,
+        )
+
+    def clear_temporary_linear_feedrate_bounds(self) -> None:
+        if self._linear_feedrate_bounds is None:
+            return
+        self._linear_feedrate_bounds = None
+        self._update_linear_feedrate_slider_range()
+        self._set_linear_feedrate(
+            self._linear_feedrate_value,
+            reissue_if_active=False,
+        )
 
     def _on_linear_feedrate_slider_changed(self, slider_value: int) -> None:
         self._set_linear_feedrate(
@@ -537,6 +715,9 @@ class JoystickWindow(QWidget):
             self._linear_presets,
             self._linear_default,
         )
+
+    def current_linear_feedrate(self) -> float:
+        return float(self._linear_feedrate_value)
 
     def apply_jog_settings(
         self,
@@ -583,7 +764,7 @@ class JoystickWindow(QWidget):
             self.manual_axis_mode_combo.setCurrentIndex(mode_index)
         self._manual_axis_mode = mode
         self.manual_axis_distance_spin.setValue(self._manual_axis_distance_mm)
-        self.manual_axis_feedrate_spin.setValue(self._manual_axis_feedrate_mm_min)
+        self.manual_axis_feedrate_spin.setValue(self._linear_feedrate_value)
         self._update_extra_axis_visibility()
         self._applying_jog_settings = False
         if (
@@ -637,6 +818,7 @@ class JoystickWindow(QWidget):
         else:
             self.status_label.setText("Disconnected")
             logger.info("Joystick disconnected from serial link")
+            self._pending_homing_axes.clear()
             self._stop_homing_animation("ALL")
             for axis in self.HOMING_AXES:
                 self._stop_homing_animation(axis)
@@ -657,12 +839,12 @@ class JoystickWindow(QWidget):
             self.manual_axis_mode_combo,
             self.manual_axis_distance_label,
             self.manual_axis_distance_spin,
-            self.manual_axis_feedrate_label,
-            self.manual_axis_feedrate_spin,
             self.manual_axis_negative_button,
             self.manual_axis_positive_button,
         ):
             widget.setVisible(self._manual_axis_controls_enabled)
+        self.manual_axis_feedrate_label.setVisible(False)
+        self.manual_axis_feedrate_spin.setVisible(False)
         self.extra_axis_widget.setVisible(
             axis_controls_visible or self._manual_axis_controls_enabled
         )
@@ -702,7 +884,6 @@ class JoystickWindow(QWidget):
             self.manual_axis_combo,
             self.manual_axis_mode_combo,
             self.manual_axis_distance_spin,
-            self.manual_axis_feedrate_spin,
             self.manual_axis_negative_button,
             self.manual_axis_positive_button,
         ):
@@ -828,12 +1009,26 @@ class JoystickWindow(QWidget):
             return
         if self._active_axes is not None:
             self.stop_jog()
-        parts: list[str] = []
         commanded_distances: list[tuple[str, float]] = []
         for axis, direction in axes_sorted:
             distance = direction * self._distance_for_axis(axis)
             commanded_distances.append((axis, distance))
-            parts.append(f"{axis}{distance:.3f}")
+        if self.stage_controller is not None:
+            try:
+                commanded_distances = list(
+                    self.stage_controller.constrain_jog_distances(
+                        tuple(commanded_distances)
+                    )
+                )
+            except Exception as error:  # pragma: no cover - UI safety guard
+                self._show_warning(str(error))
+                logger.exception("Failed to constrain jog command: %s", error)
+                self.jog_command_changed.emit(tuple(), float(feedrate))
+                return
+        if not commanded_distances:
+            self.jog_command_changed.emit(tuple(), float(feedrate))
+            return
+        parts = [f"{axis}{distance:.3f}" for axis, distance in commanded_distances]
         command = f"$J=G91 G21 {' '.join(parts)} F{feedrate}\n"
         logger.debug(
             "TIMING jog_command_prepared axes=%s feedrate=%s command=%s",
@@ -841,8 +1036,14 @@ class JoystickWindow(QWidget):
             feedrate,
             command.strip(),
         )
-        self.send_command(command)
-        self._active_axes = axes_sorted
+        if not self.send_command(command):
+            self.jog_command_changed.emit(tuple(), float(feedrate))
+            return
+        self._active_axes = tuple(
+            (axis, direction)
+            for axis, direction in axes_sorted
+            if any(command_axis == axis for command_axis, _ in commanded_distances)
+        )
         self.jog_command_changed.emit(tuple(commanded_distances), float(feedrate))
         logger.debug("TIMING jog_command_sent command=%s", command.strip())
 
@@ -892,7 +1093,7 @@ class JoystickWindow(QWidget):
             axis,
             distance,
             mode or self._selected_manual_axis_mode(),
-            self._manual_axis_feedrate_mm_min,
+            self._linear_feedrate_value,
         )
 
     def _emit_manual_axis_settings_changed(self) -> None:
@@ -903,10 +1104,7 @@ class JoystickWindow(QWidget):
             float(self.manual_axis_distance_spin.value()),
         )
         self._manual_axis_mode = self._selected_manual_axis_mode()
-        self._manual_axis_feedrate_mm_min = min(
-            self.MAX_LINEAR_FEEDRATE,
-            max(self.MIN_LINEAR_FEEDRATE, float(self.manual_axis_feedrate_spin.value())),
-        )
+        self._manual_axis_feedrate_mm_min = self._linear_feedrate_value
         self.manual_axis_settings_changed.emit(
             self._selected_manual_axis(),
             self._manual_axis_distance_mm,
@@ -1000,29 +1198,101 @@ class JoystickWindow(QWidget):
 
     def set_homing_status(self, homed_axes: set[str]) -> None:
         active_axes = set(homed_axes).intersection(self.HOMING_AXES)
+        self._homed_axes = set(active_axes)
         all_homed = active_axes == set(self.HOMING_AXES)
         for axis, button in self._homing_buttons.items():
-            if axis in active_axes:
-                self._stop_homing_animation(axis)
-                self._set_homing_button_state(button, True, all_homed=all_homed)
-            elif axis not in self._homing_targets:
-                self._set_homing_button_state(button, False, all_homed=all_homed)
-        if all_homed:
-            self._stop_homing_animation("ALL")
+            if axis in self._homing_targets:
+                self._set_homing_button_state(
+                    button,
+                    axis in active_axes,
+                    all_homed=all_homed,
+                    limit=axis in self._limit_axes,
+                    active=True,
+                )
+            elif axis in active_axes:
+                self._set_homing_button_state(
+                    button,
+                    True,
+                    all_homed=all_homed,
+                    limit=axis in self._limit_axes,
+                )
+            else:
+                self._set_homing_button_state(
+                    button,
+                    False,
+                    all_homed=all_homed,
+                    limit=axis in self._limit_axes,
+                    pending=axis in self._pending_homing_axes,
+                )
+        all_pending = bool(self._pending_homing_axes)
+        if "ALL" in self._homing_targets:
+            self._set_homing_button_state(
+                self.home_all_button,
+                all_homed,
+                all_homed=all_homed,
+                active=True,
+            )
+        elif all_homed:
             self._set_homing_button_state(self.home_all_button, True, all_homed=True)
-        elif "ALL" not in self._homing_targets:
-            self._set_homing_button_state(self.home_all_button, False, all_homed=False)
+        else:
+            self._set_homing_button_state(
+                self.home_all_button,
+                False,
+                all_homed=False,
+                pending=all_pending,
+            )
 
     def _set_homing_button_state(
-        self, button: QPushButton, homed: bool, *, all_homed: bool = False
+        self,
+        button: QPushButton,
+        homed: bool,
+        *,
+        all_homed: bool = False,
+        limit: bool = False,
+        pending: bool = False,
+        active: bool = False,
     ) -> None:
-        button.setProperty("homing", False)
+        button.setProperty("homing", active)
         button.setProperty("all_homed", all_homed)
-        button.setChecked(False)
-        if all_homed:
+        button.setProperty("limit", limit)
+        button.setProperty("pending", pending)
+        button.setChecked(active)
+        if active:
+            button.setStyleSheet(
+                self.HOMING_ACTIVE_DIM_STYLE
+                if self._homing_blink_dimmed
+                else self.HOMING_ACTIVE_STYLE
+            )
+        elif pending:
+            button.setStyleSheet(self.HOMING_PENDING_STYLE)
+        elif limit:
+            button.setStyleSheet(self.LIMIT_STYLE)
+        elif all_homed:
             button.setStyleSheet(self.ALL_HOMED_STYLE)
         else:
             button.setStyleSheet(self.HOMED_STYLE if homed else self.NOT_HOMED_STYLE)
+
+    def set_pending_homing_actions(self, axes: object) -> None:
+        if isinstance(axes, (set, list, tuple)):
+            self._pending_homing_axes = {
+                str(axis).strip().upper()
+                for axis in axes
+                if str(axis).strip().upper() in self.HOMING_AXES
+            }
+        else:
+            self._pending_homing_axes = set()
+        self.set_homing_status(set(self._homed_axes))
+
+    def set_limit_axes(self, axes: object) -> None:
+        if isinstance(axes, (set, list, tuple)):
+            self._limit_axes = {
+                str(axis).strip().upper()
+                for axis in axes
+                if str(axis).strip().upper() in self.HOMING_AXES
+            }
+        else:
+            self._limit_axes = set()
+        self.set_homing_status(set(self._homed_axes))
 
     def _home_all(self) -> None:
         self.home_all_requested.emit()
@@ -1031,6 +1301,7 @@ class JoystickWindow(QWidget):
         self.home_axis_requested.emit(axis)
 
     def set_homing_action_started(self, axis_key: str) -> None:
+        axis_key = axis_key.strip().upper()
         if axis_key == "ALL":
             self._start_homing_animation("ALL", self.home_all_button)
             return
@@ -1039,6 +1310,7 @@ class JoystickWindow(QWidget):
             self._start_homing_animation(axis_key, button)
 
     def set_homing_action_finished(self, success: bool, message: str, axis_key: str) -> None:
+        axis_key = axis_key.strip().upper()
         if axis_key == "ALL":
             self._stop_homing_animation("ALL")
         else:
@@ -1060,15 +1332,9 @@ class JoystickWindow(QWidget):
         base_text = button.text()
         self._homing_targets[key] = button
         self._homing_text[key] = base_text
-        overlay = _SpinnerOverlay(button)
-        overlay.setGeometry(button.rect())
-        overlay.show()
-        overlay.raise_()
-        self._homing_overlays[key] = overlay
         button.setProperty("homing", True)
         button.setChecked(True)
-        button.setEnabled(False)
-        button.setStyleSheet(button.styleSheet())
+        self.set_homing_status(set(self._homed_axes))
         self._advance_homing_spinner()
         if not self._homing_animation_timer.isActive():
             self._homing_animation_timer.start()
@@ -1088,20 +1354,19 @@ class JoystickWindow(QWidget):
         if overlay is not None:
             overlay.hide()
             overlay.deleteLater()
-        button.setStyleSheet(button.styleSheet())
         button.setEnabled(True)
         if not self._homing_targets:
             self._homing_animation_timer.stop()
             self._homing_spinner_angle = 0
+            self._homing_blink_dimmed = False
+        self.set_homing_status(set(self._homed_axes))
 
     def _advance_homing_spinner(self) -> None:
         if not self._homing_targets:
             return
         self._homing_spinner_angle = (self._homing_spinner_angle + 30) % 360
-        for key in self._homing_targets:
-            overlay = self._homing_overlays.get(key)
-            if overlay is not None:
-                overlay.set_angle(self._homing_spinner_angle)
+        self._homing_blink_dimmed = not self._homing_blink_dimmed
+        self.set_homing_status(set(self._homed_axes))
 
     def _start_needle_animation(self, key: str, button: QPushButton) -> None:
         if key in self._needle_targets:
@@ -1159,28 +1424,28 @@ class JoystickWindow(QWidget):
         self.reset_requested.emit()
         self.send_command(b"\x18")
 
-    def send_command(self, command: str | bytes) -> None:
+    def send_command(self, command: str | bytes) -> bool:
         if not self.serial_connection or not self.serial_connection.is_open:
             logger.debug("Discarded command because serial is closed: %s", command)
-            return
+            return False
         if self.stage_controller is not None:
             try:
                 if isinstance(command, bytes) and command == b"\x85":
                     self.stage_controller.queue_jog_stop()
-                    return
+                    return True
                 if isinstance(command, bytes) and command == b"\x18":
                     self.stage_controller.queue_soft_reset(source="joystick_reset_button")
-                    return
+                    return True
                 if isinstance(command, str) and command.startswith("$J="):
                     self.stage_controller.queue_jog_command(command)
-                    return
+                    return True
                 if isinstance(command, str):
                     self.stage_controller.queue_manual_command(command)
-                    return
+                    return True
             except Exception as error:  # pragma: no cover - UI safety guard
                 self._show_warning(str(error))
                 logger.exception("Failed to queue controller command: %s", error)
-                return
+                return False
         try:
             data = command if isinstance(command, bytes) else command.encode("ascii")
             if isinstance(command, str) and command.startswith("$J="):
@@ -1197,10 +1462,12 @@ class JoystickWindow(QWidget):
                 logger.debug("Command written to serial (bytes): %s", command.hex())
             else:
                 logger.debug("Command written to serial: %s", command.strip())
+            return True
         except serial.SerialException as error:  # pragma: no cover - best effort guard
             self._show_warning(f"Serial communication error: {error}")
             self.set_serial(None)
             logger.exception("Serial communication error: %s", error)
+            return False
 
     def _show_warning(self, message: str) -> None:
         QMessageBox.warning(self, "Joystick", message)

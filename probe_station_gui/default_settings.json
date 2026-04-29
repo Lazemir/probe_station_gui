@@ -123,6 +123,21 @@
       "configured": false
     }
   },
+  "axis_a_calibration": {
+    "configured": true,
+    "model": "cosine_displacement",
+    "steps_per_mm": 2500.0,
+    "commanded_lowering_min_mm": 0.0,
+    "commanded_lowering_max_mm": 5.0,
+    "offset_mm": 0.006879563812405575,
+    "amplitude_mm": 4.175160198502771,
+    "angular_frequency_rad_per_mm": 0.25075568892433536,
+    "phase_rad": 0.8855481310064558,
+    "fit_rmse_mm": 0.003298102306833686,
+    "fit_max_abs_error_mm": 0.013190533545433425,
+    "source": "calibrations/axis_a_calibration.json",
+    "created_at": "2026-04-29T15:04:45.242243+00:00"
+  },
   "coordinate_system": {
     "position_mode": "work",
     "startup_mode": "controller",

@@ -103,7 +103,7 @@ class StageControllerStartupLimitsTest(unittest.TestCase):
         self.assertEqual(limits.get("A"), (-0.1, 0.0))
         self.assertEqual(limits.get("B"), (-1000.0, 0.0))
 
-    def test_relative_software_limits_wait_until_all_limited_axes_are_homed(self) -> None:
+    def test_relative_software_limits_apply_per_homed_axis(self) -> None:
         controller = StageController()
         controller._axis_limits = {"X": (0.0, 10.0), "Y": (0.0, 10.0)}
         controller._query_status = lambda _serial: types.SimpleNamespace(
@@ -117,21 +117,98 @@ class StageControllerStartupLimitsTest(unittest.TestCase):
         controller._ensure_b_axis_zero_reference = lambda _status: None
 
         controller._check_relative_move_limits(
-            _FakeSerial(), MoveVector(x=5.0), allow_relative=True
+            _FakeSerial(), MoveVector(y=15.0), allow_relative=True
         )
 
-        controller._query_status = lambda _serial: types.SimpleNamespace(
-            state="Idle",
-            position=None,
-            display_position=(9.0, 0.0, 0.0),
-            work_position=(9.0, 0.0, 0.0),
-            work_offset=(0.0, 0.0, 0.0),
-            homed_axes={"X", "Y"},
-        )
         with self.assertRaises(StageControllerError):
             controller._check_relative_move_limits(
                 _FakeSerial(), MoveVector(x=5.0), allow_relative=True
             )
+
+    def test_constrain_jog_distances_clips_homed_axis_to_soft_limit(self) -> None:
+        controller = StageController()
+        controller._position_reporting_mode = "machine"
+        controller._axis_limits = {"Z": (0.0, 20.0)}
+        controller._last_stage_position = (0.0, 0.0, 1.0)
+        controller._homed_axes = {"Z"}
+        messages = []
+        controller.status_message = types.SimpleNamespace(
+            emit=lambda message: messages.append(message)
+        )
+
+        constrained = controller.constrain_jog_distances((("Z", -25.0),))
+
+        self.assertEqual(constrained, (("Z", -1.0),))
+        self.assertTrue(any("soft limit" in message for message in messages))
+
+    def test_queue_jog_command_rejects_unclipped_soft_limit_move(self) -> None:
+        controller = StageController()
+        controller._position_reporting_mode = "machine"
+        controller._axis_limits = {"Z": (0.0, 20.0)}
+        controller._last_stage_position = (0.0, 0.0, 0.0)
+        controller._homed_axes = {"Z"}
+
+        with self.assertRaises(StageControllerError):
+            controller.queue_jog_command("$J=G91 G21 Z-25.000 F10")
+
+        self.assertFalse(controller._jog_motion_active)
+
+    def test_absolute_axis_move_respects_homed_axis_soft_limit(self) -> None:
+        controller = StageController()
+        controller._serial = _FakeSerial()
+        controller._position_reporting_mode = "machine"
+        controller._axis_limits = {"Z": (0.0, 20.0), "X": (0.0, 64.0)}
+        controller._ensure_axis_limits = lambda _serial: None
+        controller._query_status = lambda _serial: types.SimpleNamespace(
+            state="Idle",
+            position=(0.0, 0.0, 1.0),
+            work_position=(0.0, 0.0, 1.0),
+            display_position=(0.0, 0.0, 1.0),
+            work_offset=(0.0, 0.0, 0.0),
+            homed_axes={"Z"},
+        )
+        commands = []
+        controller._write_command = lambda _serial, command: commands.append(command)
+        controller._wait_for_ok = lambda *_args, **_kwargs: None
+        controller._wait_for_idle = lambda *_args, **_kwargs: None
+
+        with self.assertRaises(StageControllerError):
+            controller._send_absolute_axis_move(
+                controller._serial,
+                "Z",
+                -0.1,
+                ignore_needle_safety=True,
+                allow_unhomed=True,
+            )
+
+        self.assertFalse(any(command.startswith("G1 Z") for command in commands))
+
+    def test_feed_override_payload_uses_realtime_grbl_steps(self) -> None:
+        payload, applied = StageController._feed_override_payload_for_percent_change(
+            100,
+            137,
+        )
+
+        self.assertEqual(applied, 137)
+        self.assertEqual(payload, b"\x91\x91\x91" + b"\x93" * 7)
+
+        payload, applied = StageController._feed_override_payload_for_percent_change(
+            137,
+            82,
+        )
+
+        self.assertEqual(applied, 82)
+        self.assertEqual(payload, b"\x92" * 5 + b"\x94" * 5)
+
+    def test_feed_override_percent_is_clamped_to_controller_range(self) -> None:
+        self.assertEqual(
+            StageController.feed_override_percent_for_feedrates(100.0, 250.0),
+            200,
+        )
+        self.assertEqual(
+            StageController.feed_override_percent_for_feedrates(100.0, 1.0),
+            10,
+        )
 
 
 class _FakeSerial:
@@ -405,6 +482,45 @@ class StageControllerStatusParsingTest(unittest.TestCase):
         self.assertAlmostEqual(status.work_position[0], -6.894)
         self.assertAlmostEqual(status.work_position[1], -6.599)
 
+    def test_parse_status_line_captures_limit_pins(self) -> None:
+        controller = StageController()
+
+        status = controller._parse_status_line(
+            "<Alarm|WPos:0.000,10.000,1.000,0.000|Pn:XY|FS:0,0>"
+        )
+
+        self.assertIsNotNone(status)
+        assert status is not None
+        self.assertEqual(status.pins, {"X", "Y"})
+
+    def test_limit_axes_update_from_status_pins(self) -> None:
+        controller = StageController()
+        emitted = []
+        controller.limit_axes_changed = types.SimpleNamespace(
+            emit=lambda axes: emitted.append(set(axes))
+        )
+        status = controller._parse_status_line(
+            "<Alarm|WPos:0.000,10.000,1.000,0.000|Pn:Y|FS:0,0>"
+        )
+
+        assert status is not None
+        controller._update_limit_axes_from_status(status)
+
+        self.assertEqual(controller._limit_axes, {"Y"})
+        self.assertEqual(emitted, [{"Y"}])
+
+    def test_soft_limit_message_marks_axis_limited(self) -> None:
+        controller = StageController()
+        emitted = []
+        controller.limit_axes_changed = types.SimpleNamespace(
+            emit=lambda axes: emitted.append(set(axes))
+        )
+
+        controller._handle_limit_line("[MSG:INFO: Soft limit on X target:-8.000]")
+
+        self.assertEqual(controller._limit_axes, {"X"})
+        self.assertEqual(emitted, [{"X"}])
+
     def test_work_mode_ignores_machine_position_status_reports(self) -> None:
         controller = StageController()
         controller._position_reporting_mode = "work"
@@ -570,9 +686,9 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
         )
 
         self.assertIn("G90", commands)
-        self.assertIn("G1 B0.2500 F123", commands)
+        self.assertIn("G1 B0.2500 F123.4", commands)
 
-    def test_manual_axis_move_does_not_wait_for_idle_after_gcode_is_accepted(
+    def test_relative_manual_axis_move_is_resolved_to_absolute_g90(
         self,
     ) -> None:
         controller = StageController()
@@ -589,15 +705,92 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
             emit=lambda *_args, **_kwargs: None
         )
         commands = []
+        controller._query_status = lambda _serial: types.SimpleNamespace(
+            state="Idle",
+            position=(0.0, 0.0, 0.0, -0.1),
+            work_position=(0.0, 0.0, 0.0, -0.1),
+            display_position=(0.0, 0.0, 0.0, -0.1),
+            homed_axes={"A"},
+        )
         controller._write_command = lambda _serial, command: commands.append(command)
         controller._wait_for_ok = lambda *_args, **_kwargs: None
         controller._wait_for_idle = lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("waited for idle")
         )
 
-        controller._run_manual_axis_move("A", 0.25, "G91", 1.0)
+        controller._run_manual_axis_move("A", -0.02, "G91", 1.0)
 
-        self.assertIn("G1 A0.2500 F1", commands)
+        self.assertIn("G90", commands)
+        self.assertNotIn("G91", commands)
+        self.assertIn("G1 A-0.1200 F1", commands)
+        self.assertEqual(movement_results[-1][0], True)
+        self.assertIn("accepted", movement_results[-1][1])
+
+    def test_relative_manual_axis_move_can_use_unhomed_current_position(self) -> None:
+        controller = StageController()
+        controller._serial = _FakeSerial()
+        controller._needles_known = True
+        controller._needles_up = True
+        controller.movement_started = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        movement_results = []
+        controller.movement_finished = types.SimpleNamespace(
+            emit=lambda success, message: movement_results.append((success, message))
+        )
+        controller.status_message = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        commands = []
+        controller._ensure_axis_limits = lambda _serial: None
+        controller._query_status = lambda _serial: types.SimpleNamespace(
+            state="Idle",
+            position=(1.0, 0.0, 0.0),
+            work_position=(1.0, 0.0, 0.0),
+            display_position=(1.0, 0.0, 0.0),
+            homed_axes=set(),
+        )
+        controller._write_command = lambda _serial, command: commands.append(command)
+        controller._wait_for_ok = lambda *_args, **_kwargs: None
+        controller._wait_for_idle = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("waited for idle")
+        )
+
+        controller._run_manual_axis_move("X", 0.25, "G91", 10.0)
+
+        self.assertIn("G90", commands)
+        self.assertNotIn("G91", commands)
+        self.assertIn("G1 X1.2500 F10", commands)
+        self.assertEqual(movement_results[-1][0], True)
+
+    def test_absolute_manual_axis_zero_target_is_sent(self) -> None:
+        controller = StageController()
+        controller.set_motion_safety_disabled(True)
+        controller._serial = _FakeSerial()
+        controller.movement_started = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        movement_results = []
+        controller.movement_finished = types.SimpleNamespace(
+            emit=lambda success, message: movement_results.append((success, message))
+        )
+        controller.status_message = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        commands = []
+        controller._query_status = lambda _serial: (_ for _ in ()).throw(
+            AssertionError("status queried")
+        )
+        controller._write_command = lambda _serial, command: commands.append(command)
+        controller._wait_for_ok = lambda *_args, **_kwargs: None
+        controller._wait_for_idle = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("waited for idle")
+        )
+
+        controller._run_manual_axis_move("A", 0.0, "G90", 5.0)
+
+        self.assertIn("G90", commands)
+        self.assertIn("G1 A0.0000 F5", commands)
         self.assertEqual(movement_results[-1][0], True)
         self.assertIn("accepted", movement_results[-1][1])
 
@@ -605,6 +798,166 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
         controller = StageController()
 
         self.assertEqual(controller._idle_timeout_for_distance(0.25, 1.0), 20.0)
+
+
+class StageControllerAxisACalibrationTest(unittest.TestCase):
+    def test_axis_a_calibration_maps_physical_lowering_to_absolute_gcode(self) -> None:
+        controller = StageController()
+        try:
+            controller.apply_axis_a_calibration(
+                types.SimpleNamespace(
+                    configured=True,
+                    model="cosine_displacement",
+                    steps_per_mm=2500.0,
+                    commanded_lowering_min_mm=0.0,
+                    commanded_lowering_max_mm=5.0,
+                    offset_mm=0.006879563812405575,
+                    amplitude_mm=4.175160198502771,
+                    angular_frequency_rad_per_mm=0.25075568892433536,
+                    phase_rad=0.8855481310064558,
+                )
+            )
+
+            target_a = controller.axis_a_gcode_coordinate_for_lowering(0.02)
+
+            self.assertLess(target_a, 0.0)
+            self.assertAlmostEqual(target_a, -0.0246108657, places=6)
+            self.assertAlmostEqual(
+                controller.axis_a_lowering_for_gcode_coordinate(0.0),
+                0.0,
+                places=6,
+            )
+        finally:
+            controller.shutdown()
+
+    def test_axis_a_calibration_falls_back_when_disabled(self) -> None:
+        controller = StageController()
+        try:
+            controller.apply_axis_a_calibration(
+                types.SimpleNamespace(configured=False)
+            )
+
+            target_a = controller.axis_a_gcode_coordinate_for_lowering(0.02)
+            lowering = controller.axis_a_lowering_for_gcode_coordinate(-1.0)
+
+            self.assertEqual(target_a, -0.02)
+            self.assertEqual(lowering, 1.0)
+        finally:
+            controller.shutdown()
+
+    def test_needle_adjust_sends_absolute_calibrated_a_target(self) -> None:
+        controller = StageController()
+        try:
+            controller._serial = _FakeSerial()
+            controller.apply_axis_a_calibration(
+                types.SimpleNamespace(
+                    configured=True,
+                    model="cosine_displacement",
+                    steps_per_mm=2500.0,
+                    commanded_lowering_min_mm=0.0,
+                    commanded_lowering_max_mm=5.0,
+                    offset_mm=0.006879563812405575,
+                    amplitude_mm=4.175160198502771,
+                    angular_frequency_rad_per_mm=0.25075568892433536,
+                    phase_rad=0.8855481310064558,
+                )
+            )
+            controller._query_status = lambda _serial: types.SimpleNamespace(
+                state="Idle",
+                position=(0.0, 0.0, 0.0, 0.0),
+                work_position=(0.0, 0.0, 0.0, 0.0),
+                display_position=(0.0, 0.0, 0.0, 0.0),
+                homed_axes={"A"},
+            )
+            targets = []
+            controller._send_absolute_axis_move = (
+                lambda _serial, axis, value, **_kwargs: targets.append((axis, value))
+            )
+            controller._read_current_a_position = lambda _serial: targets[-1][1]
+            controller.needles_action_finished = types.SimpleNamespace(
+                emit=lambda *_args, **_kwargs: None
+            )
+            controller.needle_height_changed = types.SimpleNamespace(
+                emit=lambda *_args, **_kwargs: None
+            )
+            controller.needles_state_changed = types.SimpleNamespace(
+                emit=lambda *_args, **_kwargs: None
+            )
+            controller.axis_a_ready_changed = types.SimpleNamespace(
+                emit=lambda *_args, **_kwargs: None
+            )
+
+            controller._run_needles_adjust(-0.02)
+
+            self.assertEqual(targets[0][0], "A")
+            self.assertAlmostEqual(targets[0][1], -0.0246108657, places=6)
+        finally:
+            controller.shutdown()
+
+    def test_manual_axis_a_relative_move_keeps_raw_gcode_sign(self) -> None:
+        controller = StageController()
+        try:
+            controller.apply_axis_a_calibration(
+                types.SimpleNamespace(
+                    configured=True,
+                    model="cosine_displacement",
+                    steps_per_mm=2500.0,
+                    commanded_lowering_min_mm=0.0,
+                    commanded_lowering_max_mm=5.0,
+                    offset_mm=0.006879563812405575,
+                    amplitude_mm=4.175160198502771,
+                    angular_frequency_rad_per_mm=0.25075568892433536,
+                    phase_rad=0.8855481310064558,
+                )
+            )
+            controller._query_status = lambda _serial: types.SimpleNamespace(
+                state="Idle",
+                position=(0.0, 0.0, 0.0, 0.0),
+                work_position=(0.0, 0.0, 0.0, 0.0),
+                display_position=(0.0, 0.0, 0.0, 0.0),
+                homed_axes={"A"},
+            )
+
+            target = controller._manual_axis_absolute_target(
+                _FakeSerial(),
+                "A",
+                -0.02,
+                "G91",
+            )
+
+            self.assertEqual(target, -0.02)
+        finally:
+            controller.shutdown()
+
+    def test_legacy_negative_saved_a_position_is_treated_as_raw_coordinate(self) -> None:
+        controller = StageController()
+        try:
+            controller.apply_axis_a_calibration(
+                types.SimpleNamespace(
+                    configured=True,
+                    model="cosine_displacement",
+                    steps_per_mm=2500.0,
+                    commanded_lowering_min_mm=0.0,
+                    commanded_lowering_max_mm=5.0,
+                    offset_mm=0.006879563812405575,
+                    amplitude_mm=4.175160198502771,
+                    angular_frequency_rad_per_mm=0.25075568892433536,
+                    phase_rad=0.8855481310064558,
+                )
+            )
+
+            controller.apply_needle_calibration(down_position_mm=-1.0)
+
+            self.assertGreater(controller._needle_down_lowering_mm, 0.0)
+            self.assertAlmostEqual(
+                controller.axis_a_gcode_coordinate_for_lowering(
+                    controller._needle_down_lowering_mm
+                ),
+                -1.0,
+                places=6,
+            )
+        finally:
+            controller.shutdown()
 
 
 class StageControllerNeedlesStateTest(unittest.TestCase):

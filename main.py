@@ -12,12 +12,21 @@ from pathlib import Path
 import sys
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QThread, QTimer, Qt, QUrl, Signal
-from PySide6.QtGui import QAction, QDesktopServices, QImage, QKeySequence
+from PySide6.QtCore import QLocale, QThread, QTimer, Qt, QUrl, Signal
+from PySide6.QtGui import (
+    QAction,
+    QDesktopServices,
+    QDoubleValidator,
+    QImage,
+    QKeySequence,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
+    QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QPlainTextEdit,
     QVBoxLayout,
@@ -78,11 +87,23 @@ class Main(QMainWindow):
     MANUAL_JOG_STOP_TAIL_MIN_S = 0.02
     MANUAL_JOG_STOP_TAIL_MAX_S = 0.25
     MANUAL_JOG_STOP_TAIL_LEARN_ALPHA = 0.25
+    STAGE_COORDINATE_BLINK_MS = 250
     PLANNED_MOVE_DURATION_PADDING_S = 0.12
+    COORDINATE_MOVE_MIN_IDLE_ACCEPT_S = 0.15
     TERMINAL_REFRESH_DELAYS_MS = (180, 500)
     TERMINAL_RESET_REFRESH_DELAYS_MS = (500, 1100, 1800)
     TERMINAL_RESUME_AFTER_JOG_MS = 180
     STAGE_AXIS_NAMES = ("X", "Y", "Z", "A", "B", "C")
+    STAGE_AXIS_DIMMED_BACKGROUNDS = {
+        "#1565c0": "#6f8fb8",
+        "#f0b429": "#cda75a",
+        "#c62828": "#ad6b6b",
+    }
+    STAGE_AXIS_PENDING_BACKGROUNDS = {
+        "#1565c0": "#8aa5c9",
+        "#f0b429": "#d8bd78",
+        "#c62828": "#b98585",
+    }
     B_POSITION_CHANGE_TOLERANCE_DEG = 1e-3
     CAMERA_UI_FRAME_GAP_WARNING_S = 0.25
 
@@ -155,21 +176,39 @@ class Main(QMainWindow):
         self._planned_move_ends_at: float | None = None
         self._planned_move_waiting_for_fresh_status = False
         self._planned_move_stop_status_timestamp: float | None = None
+        self._coordinate_move_axis: str | None = None
+        self._coordinate_move_origin_position: tuple[float, ...] | None = None
+        self._coordinate_move_stage_position: tuple[float, ...] | None = None
+        self._coordinate_move_target_position: tuple[float, ...] | None = None
+        self._coordinate_move_started_at: float | None = None
+        self._coordinate_move_ends_at: float | None = None
+        self._coordinate_move_programmed_feedrate: float | None = None
+        self._coordinate_move_effective_feedrate: float | None = None
+        self._pending_stage_axis_targets: dict[str, tuple[float, float]] = {}
         self._design_snap_enabled = True
         self._last_reported_b_position: float | None = None
         self._last_camera_frame_ui_timestamp: float | None = None
         self._stage_unhomed_display_origins: dict[str, float] = {}
+        self._stage_axis_fields: dict[str, QLineEdit] = {}
+        self._stage_axis_raw_values: dict[str, float] = {}
+        self._stage_axis_display_values: dict[str, float] = {}
+        self._stage_axis_homed: set[str] = set()
+        self._stage_limit_axes: set[str] = set()
+        self._stage_axis_base_styles: dict[str, tuple[str, str]] = {}
+        self._stage_motion_axes: set[str] = set()
+        self._stage_motion_blink_dimmed = False
+        self._stage_axis_return_commits: set[str] = set()
+        self._stage_axis_escape_shortcuts: list[QShortcut] = []
+        self._updating_stage_position_fields = False
+        self._pending_linear_feedrate_default: float | None = None
+        self._homing_active_key: str | None = None
+        self._pending_homing_axes: list[str] = []
         self._controller_state_persistence_suspended = False
         self._controller_reboot_recovery_scheduled = False
         self._design_session = DesignSession()
         self.statusBar()
-        self._stage_position_label = QLabel("Position: unavailable", self)
-        self._stage_position_label.setMinimumWidth(390)
-        self._stage_position_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self._stage_position_label.setTextFormat(Qt.RichText)
-        self._stage_position_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self._stage_position_label.setToolTip("Current controller position")
-        self.statusBar().addPermanentWidget(self._stage_position_label, 0)
+        self._stage_position_widget = self._create_stage_position_widget()
+        self.statusBar().addPermanentWidget(self._stage_position_widget, 0)
         self._status_log = QPlainTextEdit(self)
         self._status_log.setReadOnly(True)
         self._status_log.setMaximumHeight(80)
@@ -232,6 +271,15 @@ class Main(QMainWindow):
         self._manual_jog_timer = QTimer(self)
         self._manual_jog_timer.setInterval(self.MANUAL_JOG_UPDATE_MS)
         self._manual_jog_timer.timeout.connect(self._advance_motion_prediction)
+        self._stage_motion_blink_timer = QTimer(self)
+        self._stage_motion_blink_timer.setInterval(self.STAGE_COORDINATE_BLINK_MS)
+        self._stage_motion_blink_timer.timeout.connect(self._advance_stage_motion_blink)
+        self._linear_feedrate_save_timer = QTimer(self)
+        self._linear_feedrate_save_timer.setSingleShot(True)
+        self._linear_feedrate_save_timer.setInterval(400)
+        self._linear_feedrate_save_timer.timeout.connect(
+            self._save_pending_linear_feedrate_default
+        )
         self._needle_height_timer = QTimer(self)
         self._needle_height_timer.setInterval(400)
         self._needle_height_timer.timeout.connect(self._refresh_needle_height)
@@ -293,6 +341,8 @@ class Main(QMainWindow):
         if self._manual_alignment_pick_slot is not None:
             self._capture_manual_alignment_clicked(dx, dy)
             return
+        if not self.stage_controller.is_busy():
+            self._set_stage_motion_axes({"X", "Y"})
         self.stage_controller.request_move(dx, dy)
 
     def on_error(self, message: str) -> None:
@@ -328,6 +378,169 @@ class Main(QMainWindow):
             self.statusBar().showMessage(message, timeout_ms)
             self._status_log.appendPlainText(message)
             self._append_status_log(message)
+
+    def _create_stage_position_widget(self) -> QWidget:
+        widget = QWidget(self)
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        label = QLabel("Position:", widget)
+        label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        layout.addWidget(label)
+        for axis_name in self.STAGE_AXIS_NAMES:
+            axis_label = QLabel(axis_name, widget)
+            axis_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            layout.addWidget(axis_label)
+            field = QLineEdit(widget)
+            field.setAlignment(Qt.AlignCenter)
+            field.setFixedWidth(72)
+            field.setPlaceholderText("---")
+            field.setToolTip(
+                f"Current {axis_name} coordinate. Enter target and press Enter."
+            )
+            validator = QDoubleValidator(-1000000.0, 1000000.0, 6, field)
+            validator.setNotation(QDoubleValidator.StandardNotation)
+            validator.setLocale(QLocale.c())
+            field.setValidator(validator)
+            field.returnPressed.connect(
+                lambda axis=axis_name: self._on_stage_axis_return_pressed(axis)
+            )
+            escape_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), field)
+            escape_shortcut.setContext(Qt.WidgetShortcut)
+            escape_shortcut.setAutoRepeat(False)
+            escape_shortcut.activated.connect(
+                lambda axis=axis_name: self._on_stage_axis_escape_pressed(axis)
+            )
+            self._stage_axis_escape_shortcuts.append(escape_shortcut)
+            field.editingFinished.connect(
+                lambda axis=axis_name: self._on_stage_axis_editing_finished(axis)
+            )
+            self._stage_axis_fields[axis_name] = field
+            layout.addWidget(field)
+        self._set_stage_position_fields_available(False)
+        return widget
+
+    def _set_stage_position_fields_available(self, available: bool) -> None:
+        self._updating_stage_position_fields = True
+        try:
+            for axis_name, field in self._stage_axis_fields.items():
+                field.blockSignals(True)
+                if not available:
+                    field.clear()
+                    field.setPlaceholderText("---")
+                    field.setEnabled(False)
+                    field.setModified(False)
+                    self._style_stage_axis_field(field, "#e6e6e6", "#666666")
+                else:
+                    field.setEnabled(True)
+                field.blockSignals(False)
+        finally:
+            self._updating_stage_position_fields = False
+
+    @staticmethod
+    def _style_stage_axis_field(field: QLineEdit, background: str, foreground: str) -> None:
+        field.setStyleSheet(
+            "QLineEdit {"
+            f"background-color: {background}; color: {foreground}; "
+            f"border: 1px solid {background}; border-radius: 4px; "
+            "padding: 2px 5px;"
+            "}"
+            "QLineEdit:disabled {"
+            f"background-color: {background}; color: {foreground};"
+            "}"
+        )
+
+    @staticmethod
+    def _format_stage_axis_value(value: float) -> str:
+        text = f"{float(value):.3f}"
+        return text.rstrip("0").rstrip(".") if "." in text else text
+
+    def _display_axis_value_from_raw(self, axis_name: str, raw_value: float) -> float:
+        return float(raw_value)
+
+    def _raw_axis_value_from_display(
+        self,
+        axis_name: str,
+        display_value: float,
+    ) -> float:
+        return float(display_value)
+
+    def _apply_stage_axis_field_style(
+        self, axis_name: str, field: QLineEdit | None = None
+    ) -> None:
+        axis = axis_name.strip().upper()
+        target = field or self._stage_axis_fields.get(axis)
+        if target is None:
+            return
+        background, foreground = self._stage_axis_base_styles.get(
+            axis, ("#e6e6e6", "#666666")
+        )
+        if axis in self._stage_motion_axes and self._stage_motion_blink_dimmed:
+            background = self.STAGE_AXIS_DIMMED_BACKGROUNDS.get(background, background)
+        elif axis in self._pending_stage_axis_targets:
+            background = self.STAGE_AXIS_PENDING_BACKGROUNDS.get(background, background)
+        self._style_stage_axis_field(target, background, foreground)
+
+    def _refresh_stage_axis_styles(self) -> None:
+        for axis_name, field in self._stage_axis_fields.items():
+            if axis_name not in self._stage_axis_base_styles:
+                continue
+            self._apply_stage_axis_field_style(axis_name, field)
+
+    def _set_stage_motion_axes(self, axes: object) -> None:
+        if isinstance(axes, str):
+            raw_axes = [axes]
+        elif isinstance(axes, (set, list, tuple)):
+            raw_axes = list(axes)
+        else:
+            raw_axes = []
+        motion_axes = {
+            str(axis).strip().upper()
+            for axis in raw_axes
+            if str(axis).strip().upper() in self.STAGE_AXIS_NAMES
+        }
+        if not motion_axes:
+            self._clear_stage_motion_axes()
+            return
+        self._stage_motion_axes = motion_axes
+        self._stage_motion_blink_dimmed = False
+        if not self._stage_motion_blink_timer.isActive():
+            self._stage_motion_blink_timer.start()
+        self._refresh_stage_axis_styles()
+
+    def _clear_stage_motion_axes(self) -> None:
+        if self._stage_motion_blink_timer.isActive():
+            self._stage_motion_blink_timer.stop()
+        if not self._stage_motion_axes and not self._stage_motion_blink_dimmed:
+            return
+        self._stage_motion_axes.clear()
+        self._stage_motion_blink_dimmed = False
+        self._refresh_stage_axis_styles()
+
+    def _advance_stage_motion_blink(self) -> None:
+        if not self._stage_motion_axes:
+            self._stage_motion_blink_timer.stop()
+            self._stage_motion_blink_dimmed = False
+            return
+        self._stage_motion_blink_dimmed = not self._stage_motion_blink_dimmed
+        self._refresh_stage_axis_styles()
+
+    def _on_stage_axis_return_pressed(self, axis_name: str) -> None:
+        axis = axis_name.strip().upper()
+        if axis in self.STAGE_AXIS_NAMES:
+            self._stage_axis_return_commits.add(axis)
+
+    def _on_stage_axis_escape_pressed(self, axis_name: str) -> None:
+        axis = axis_name.strip().upper()
+        self._stage_axis_return_commits.discard(axis)
+        self._pending_stage_axis_targets.pop(axis, None)
+        self._reset_stage_axis_field(axis)
+        field = self._stage_axis_fields.get(axis)
+        if field is not None:
+            field.deselect()
+            field.clearFocus()
+        self._refresh_stage_axis_styles()
+        self.view.setFocus(Qt.OtherFocusReason)
 
     def _append_status_log(self, message: str) -> None:
         if not message:
@@ -412,6 +625,9 @@ class Main(QMainWindow):
         self._manual_jog_settle_until = 0.0
         self._manual_jog_stop_status_timestamp = None
         self._controller_reboot_recovery_scheduled = False
+        self._clear_coordinate_move_tracking(clear_pending=True, reset_override=False)
+        self._clear_pending_homing_queue()
+        self._clear_stage_motion_axes()
         self._clear_planned_move_prediction(clear_wait_state=True)
         logger.info("Serial disconnected")
         self.stage_controller.request_stop_oscillation()
@@ -680,6 +896,13 @@ class Main(QMainWindow):
             bindings = self.settings_manager.control_bindings()
             self.joystick_panel.apply_control_bindings(bindings)
             logger.debug("Joystick bindings reapplied from settings")
+            feedrates = self.settings_manager.feedrate_configuration()
+            self.joystick_panel.apply_feedrate_settings(
+                feedrates.linear.presets,
+                feedrates.linear.default,
+                feedrates.rotary.presets,
+                feedrates.rotary.default,
+            )
             jog = self.settings_manager.jog_configuration()
             self.joystick_panel.apply_jog_settings(
                 jog.linear_distance_mm,
@@ -710,6 +933,9 @@ class Main(QMainWindow):
         self.stage_controller.set_motion_safety_disabled(jog.motion_safety_disabled)
         needle_settings = self.settings_manager.needle_calibration_configuration()
         oscillation_settings = self.settings_manager.oscillation_configuration()
+        self.stage_controller.apply_axis_a_calibration(
+            self.settings_manager.axis_a_calibration_configuration()
+        )
         self.stage_controller.apply_needle_calibration(
             down_position_mm=(
                 needle_settings.down_position_mm
@@ -1150,7 +1376,35 @@ class Main(QMainWindow):
             values[1] = float(stage_xy[1])
         return tuple(values)
 
+    def _position_with_axis_value(
+        self,
+        axis_name: str,
+        raw_value: float,
+        *,
+        base_position: object | None = None,
+    ) -> tuple[float, ...] | None:
+        axis = axis_name.strip().upper()
+        try:
+            axis_index = self.STAGE_AXIS_NAMES.index(axis)
+        except ValueError:
+            return None
+        position = base_position
+        if not isinstance(position, (tuple, list)) or len(position) <= axis_index:
+            position = self._seed_motion_prediction_position()
+        values: list[float] = []
+        if isinstance(position, (tuple, list)):
+            try:
+                values = [float(value) for value in position]
+            except (TypeError, ValueError):
+                values = []
+        if len(values) <= axis_index:
+            return None
+        values[axis_index] = float(raw_value)
+        return tuple(values)
+
     def _seed_motion_prediction_position(self) -> tuple[float, ...] | None:
+        if self._coordinate_move_stage_position is not None:
+            return tuple(float(value) for value in self._coordinate_move_stage_position)
         if self._manual_jog_stage_position is not None:
             return tuple(float(value) for value in self._manual_jog_stage_position)
         if self._manual_jog_stage_xy is not None:
@@ -1231,6 +1485,10 @@ class Main(QMainWindow):
         )
 
     def _preferred_design_stage_xy(self) -> tuple[float, float] | None:
+        if self._coordinate_move_stage_position is not None:
+            stage_xy = self._stage_xy_from_position(self._coordinate_move_stage_position)
+            if stage_xy is not None:
+                return stage_xy
         if self._manual_jog_prediction_available():
             stage_xy = self._stage_xy_from_position(self._manual_jog_stage_position)
             if stage_xy is not None:
@@ -1389,7 +1647,9 @@ class Main(QMainWindow):
             self.serial_terminal_panel.setFocus(Qt.ActiveWindowFocusReason)
 
     def _on_manual_motion_axis(self, axis: str) -> None:
-        if axis.upper() == "B":
+        axis_name = axis.upper()
+        self._set_stage_motion_axes({axis_name})
+        if axis_name == "B":
             self._invalidate_design_registration(
                 "Design registration cleared after manual B-axis motion."
             )
@@ -1427,8 +1687,16 @@ class Main(QMainWindow):
             self._clear_manual_jog_stop_prediction()
             self._manual_jog_velocity_xy = None
             self._manual_jog_timer.stop()
+            self._clear_stage_motion_axes()
             self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
             return
+        self._set_stage_motion_axes(
+            {
+                axis
+                for axis, distance in axis_components.items()
+                if abs(distance) > 1e-9
+            }
+        )
         speed_mm_per_s = max(0.0, float(feedrate)) / 60.0
         self._manual_jog_axis_velocities = {
             axis: speed_mm_per_s * distance / path_length
@@ -1552,9 +1820,40 @@ class Main(QMainWindow):
         self.settings_manager.replace(settings)
         self.settings_manager.save()
 
+    def _schedule_linear_feedrate_save(self, feedrate_mm_min: float) -> None:
+        try:
+            self._pending_linear_feedrate_default = max(0.1, float(feedrate_mm_min))
+        except (TypeError, ValueError):
+            return
+        self._linear_feedrate_save_timer.start()
+
+    def _on_linear_feedrate_changed(self, feedrate_mm_min: float) -> None:
+        self._schedule_linear_feedrate_save(feedrate_mm_min)
+        self._apply_coordinate_move_feedrate(feedrate_mm_min)
+
+    def _save_pending_linear_feedrate_default(self) -> None:
+        feedrate = self._pending_linear_feedrate_default
+        self._pending_linear_feedrate_default = None
+        if feedrate is None:
+            return
+        settings = self.settings_manager.settings.clone()
+        if abs(settings.feedrates.linear.default - feedrate) <= 1e-9:
+            return
+        settings.feedrates.linear.default = feedrate
+        self.settings_manager.replace(settings)
+        self.settings_manager.save()
+
+    def _current_linear_feedrate(self) -> float:
+        if self.joystick_panel is not None:
+            return self.joystick_panel.current_linear_feedrate()
+        return float(self.settings_manager.feedrate_configuration().linear.default)
+
     def _advance_motion_prediction(self) -> None:
         if self._manual_jog_prediction_active():
             self._advance_manual_jog_prediction()
+            return
+        if self._coordinate_move_started_at is not None:
+            self._advance_coordinate_move_prediction()
             return
         if self._planned_move_started_at is not None:
             self._advance_planned_move_prediction()
@@ -1624,6 +1923,36 @@ class Main(QMainWindow):
         ):
             self._manual_jog_stop_tail_position = self._manual_jog_stage_position
             self._manual_jog_timer.stop()
+
+    def _advance_coordinate_move_prediction(self) -> None:
+        if (
+            self._coordinate_move_origin_position is None
+            or self._coordinate_move_target_position is None
+            or self._coordinate_move_started_at is None
+            or self._coordinate_move_ends_at is None
+        ):
+            self._clear_coordinate_move_tracking(clear_pending=False, reset_override=True)
+            return
+        now = time.monotonic()
+        duration = max(
+            self._coordinate_move_ends_at - self._coordinate_move_started_at,
+            1e-6,
+        )
+        progress = min(
+            1.0,
+            max(0.0, (now - self._coordinate_move_started_at) / duration),
+        )
+        origin = self._coordinate_move_origin_position
+        target = self._coordinate_move_target_position
+        count = min(len(origin), len(target))
+        values = [
+            float(origin[index] + (target[index] - origin[index]) * progress)
+            for index in range(count)
+        ]
+        if len(target) > count:
+            values.extend(float(value) for value in target[count:])
+        self._coordinate_move_stage_position = tuple(values)
+        self._publish_stage_position_estimate(self._coordinate_move_stage_position)
 
     def _advance_planned_move_prediction(self) -> None:
         if (
@@ -1713,6 +2042,7 @@ class Main(QMainWindow):
         self._planned_move_ends_at = started_at + max(duration_s, 0.05)
         self._planned_move_waiting_for_fresh_status = False
         self._planned_move_stop_status_timestamp = None
+        self._set_stage_motion_axes({"X", "Y"})
         logger.debug(
             "MOTION PREDICTION planned_move_start source=%s origin=%s target=%s distance=%.4f duration=%.4f feedrate=%.3f",
             source_label,
@@ -1748,6 +2078,7 @@ class Main(QMainWindow):
             self.stage_controller.request_startup_sync(auto_home_a=False)
 
     def on_move_finished(self, success: bool, message: str) -> None:
+        message_lower = message.lower() if message else ""
         if (
             self._planned_move_started_at is not None
             or self._planned_move_waiting_for_fresh_status
@@ -1802,6 +2133,17 @@ class Main(QMainWindow):
         if success:
             self.view.clear_target_cross()
             self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
+        if (
+            not success
+            or "skipped" in message_lower
+            or "already" in message_lower
+            or "unchanged" in message_lower
+        ):
+            self._clear_coordinate_move_tracking(
+                clear_pending=not success,
+                reset_override=True,
+            )
+            self._clear_stage_motion_axes()
         if message:
             self._show_status(message, 5000)
 
@@ -2184,6 +2526,7 @@ class Main(QMainWindow):
             self._update_stage_position_display(position)
             return
         logger.debug("TIMING stage_position_changed position=%s", position)
+        latest_state = (self.stage_controller.latest_stage_state() or "").lower()
         xy_homed = self.stage_controller.axes_are_homed({"X", "Y"})
         xyz_homed = self.stage_controller.axes_are_homed({"X", "Y", "Z"})
         if self.contact_calibration_window is not None:
@@ -2201,6 +2544,9 @@ class Main(QMainWindow):
                 self._planned_move_stage_xy = None
                 self._update_coordinate_display(center_xy=None)
                 self._update_design_position(None)
+                if latest_state == "idle":
+                    self._finish_coordinate_move_if_idle(position)
+                    self._clear_stage_motion_axes()
                 return
         if len(position) > 4:
             current_b = float(position[4])
@@ -2217,8 +2563,12 @@ class Main(QMainWindow):
                 )
             self._last_reported_b_position = current_b
         predicted_position = None
+        smooth_predicted_status = False
         if self._manual_jog_prediction_available():
             predicted_position = self._manual_jog_stage_position
+            smooth_predicted_status = True
+        elif self._coordinate_move_stage_position is not None:
+            predicted_position = self._coordinate_move_stage_position
         elif (
             self._planned_move_started_at is not None
             or self._planned_move_waiting_for_fresh_status
@@ -2228,9 +2578,9 @@ class Main(QMainWindow):
                     self._planned_move_stage_xy,
                     base_position=position,
                 )
+                smooth_predicted_status = True
         predicted_stage_xy = self._stage_xy_from_position(predicted_position)
         center_xy = (float(position[0]), float(position[1]))
-        latest_state = (self.stage_controller.latest_stage_state() or "").lower()
         if self._manual_jog_waiting_for_fresh_status and latest_state != "idle":
             logger.debug(
                 "MOTION PREDICTION deferred_stop_sample stage=%s state=%s",
@@ -2242,7 +2592,10 @@ class Main(QMainWindow):
             return
         if predicted_stage_xy is not None:
             self._log_design_position_reconcile(predicted_stage_xy, center_xy)
-            center_xy = self._smooth_manual_jog_actual_position(predicted_stage_xy, center_xy)
+            if smooth_predicted_status:
+                center_xy = self._smooth_manual_jog_actual_position(
+                    predicted_stage_xy, center_xy
+                )
         display_position = self._position_with_stage_xy(
             center_xy,
             base_position=position,
@@ -2265,40 +2618,398 @@ class Main(QMainWindow):
         if self._manual_jog_prediction_active():
             self._manual_jog_last_timestamp = time.monotonic()
         self._publish_stage_position_estimate(display_position)
+        if latest_state == "idle":
+            self._finish_coordinate_move_if_idle(display_position)
+            self._clear_stage_motion_axes()
 
     def _update_stage_position_display(self, position: object | None) -> None:
         if not isinstance(position, tuple) or len(position) < 2:
             self._stage_unhomed_display_origins.clear()
-            self._stage_position_label.setText("Position: unavailable")
+            self._stage_axis_raw_values.clear()
+            self._stage_axis_display_values.clear()
+            self._stage_axis_homed.clear()
+            self._stage_axis_base_styles.clear()
+            self._pending_stage_axis_targets.clear()
+            self._clear_stage_motion_axes()
+            self._set_stage_position_fields_available(False)
             return
         homed_axes = self.stage_controller.homed_axes()
-        parts: list[str] = []
+        self._stage_axis_homed = set(homed_axes)
+        updated_axes: set[str] = set()
+        self._updating_stage_position_fields = True
         for axis_name, axis_value in zip(self.STAGE_AXIS_NAMES, position):
+            field = self._stage_axis_fields.get(axis_name)
+            if field is None:
+                continue
             try:
                 raw_value = float(axis_value)
             except (TypeError, ValueError):
                 continue
+            updated_axes.add(axis_name)
+            self._stage_axis_raw_values[axis_name] = raw_value
+            axis_display_value = self._display_axis_value_from_raw(
+                axis_name,
+                raw_value,
+            )
             if axis_name in homed_axes:
-                display_value = raw_value
+                display_value = axis_display_value
                 background = "#1565c0"
                 foreground = "#f5f5f5"
             else:
                 origin = self._stage_unhomed_display_origins.setdefault(
                     axis_name, raw_value
                 )
-                display_value = raw_value - origin
+                origin_display = self._display_axis_value_from_raw(axis_name, origin)
+                display_value = axis_display_value - origin_display
                 background = "#f0b429"
                 foreground = "#1f1f1f"
-            parts.append(
-                "<span style="
-                f"'background-color:{background}; color:{foreground}; "
-                "padding:2px 6px;'"
-                f">&nbsp;{axis_name}={display_value:.3f}&nbsp;</span>"
+            if axis_name in self._stage_limit_axes:
+                background = "#c62828"
+                foreground = "#ffffff"
+            self._stage_axis_base_styles[axis_name] = (background, foreground)
+            self._stage_axis_display_values[axis_name] = display_value
+            pending_target = self._pending_stage_axis_targets.get(axis_name)
+            visible_value = (
+                pending_target[1] if pending_target is not None else display_value
             )
-        if not parts:
-            self._stage_position_label.setText("Position: unavailable")
+            field.blockSignals(True)
+            field.setEnabled(True)
+            if not field.hasFocus():
+                field.setText(self._format_stage_axis_value(visible_value))
+                field.setModified(False)
+            field.setToolTip(
+                f"{axis_name} coordinate. Enter target and press Enter. "
+                f"Move feedrate: {self._current_linear_feedrate():.1f} mm/min."
+            )
+            self._apply_stage_axis_field_style(axis_name, field)
+            field.blockSignals(False)
+        for axis_name, field in self._stage_axis_fields.items():
+            if axis_name in updated_axes:
+                continue
+            self._stage_axis_base_styles.pop(axis_name, None)
+            self._pending_stage_axis_targets.pop(axis_name, None)
+            field.blockSignals(True)
+            field.clear()
+            field.setEnabled(False)
+            field.setModified(False)
+            self._style_stage_axis_field(field, "#e6e6e6", "#666666")
+            field.blockSignals(False)
+        self._updating_stage_position_fields = False
+        if not updated_axes:
+            self._set_stage_position_fields_available(False)
             return
-        self._stage_position_label.setText("Position: " + "&nbsp;".join(parts))
+
+    def _on_stage_axis_editing_finished(self, axis_name: str) -> None:
+        if self._updating_stage_position_fields:
+            return
+        axis = axis_name.strip().upper()
+        commit_from_return = axis in self._stage_axis_return_commits
+        self._stage_axis_return_commits.discard(axis)
+        field = self._stage_axis_fields.get(axis)
+        if field is None or not field.isEnabled() or not field.isModified():
+            return
+        text = field.text().strip().replace(",", ".")
+        try:
+            display_target = float(text)
+        except (TypeError, ValueError):
+            self._reset_stage_axis_field(axis)
+            self._show_status(f"Invalid {axis} target coordinate.", 3000)
+            return
+        raw_target = self._raw_target_from_display_value(axis, display_target)
+        if raw_target is None:
+            self._reset_stage_axis_field(axis)
+            self._show_status(f"{axis} coordinate is unavailable.", 3000)
+            return
+        field.blockSignals(True)
+        field.setText(self._format_stage_axis_value(display_target))
+        field.setModified(False)
+        if commit_from_return:
+            field.clearFocus()
+        field.blockSignals(False)
+        if commit_from_return:
+            self.view.setFocus(Qt.OtherFocusReason)
+        if self._coordinate_move_axis is not None:
+            self._set_pending_stage_axis_target(axis, raw_target, display_target)
+            self._show_status(
+                f"Queued {axis} target {display_target:.3f}.", 3000
+            )
+            return
+        if self.stage_controller.is_busy():
+            self._reset_stage_axis_field(axis)
+            self._show_status("Stage is busy. Ignoring coordinate target.", 3000)
+            return
+        self._start_coordinate_axis_move(axis, raw_target, display_target)
+
+    def _set_pending_stage_axis_target(
+        self, axis_name: str, raw_target: float, display_target: float
+    ) -> None:
+        axis = axis_name.strip().upper()
+        if axis not in self.STAGE_AXIS_NAMES:
+            return
+        self._pending_stage_axis_targets[axis] = (
+            float(raw_target),
+            float(display_target),
+        )
+        field = self._stage_axis_fields.get(axis)
+        if field is not None and not field.hasFocus():
+            field.blockSignals(True)
+            field.setText(self._format_stage_axis_value(display_target))
+            field.setModified(False)
+            field.blockSignals(False)
+        self._refresh_stage_axis_styles()
+
+    def _start_coordinate_axis_move(
+        self, axis: str, raw_target: float, display_target: float
+    ) -> bool:
+        feedrate = self._current_linear_feedrate()
+        origin_position = self._seed_motion_prediction_position()
+        if origin_position is None:
+            origin_position = self.stage_controller.latest_stage_position()
+        if not isinstance(origin_position, (tuple, list)):
+            self._show_status(f"{axis} coordinate is unavailable.", 3000)
+            return False
+        target_position = self._position_with_axis_value(
+            axis,
+            raw_target,
+            base_position=origin_position,
+        )
+        if target_position is None:
+            self._show_status(f"{axis} coordinate is unavailable.", 3000)
+            return False
+        self._pending_stage_axis_targets.pop(axis, None)
+        self._coordinate_move_axis = axis
+        self._coordinate_move_origin_position = tuple(float(v) for v in origin_position)
+        self._coordinate_move_stage_position = self._coordinate_move_origin_position
+        self._coordinate_move_target_position = target_position
+        self._coordinate_move_started_at = time.monotonic()
+        self._coordinate_move_programmed_feedrate = max(0.1, float(feedrate))
+        self._coordinate_move_effective_feedrate = self._coordinate_move_programmed_feedrate
+        self._set_coordinate_move_feedrate_bounds(self._coordinate_move_programmed_feedrate)
+        self._coordinate_move_ends_at = self._coordinate_move_started_at + max(
+            self._coordinate_move_duration_s(
+                self._coordinate_move_origin_position,
+                target_position,
+                feedrate,
+            ),
+            0.05,
+        )
+        self._on_manual_motion_axis(axis)
+        accepted = self.stage_controller.request_absolute_axis_move(
+            axis, raw_target, feedrate
+        )
+        if not accepted:
+            self._clear_coordinate_move_tracking(
+                clear_pending=False,
+                reset_override=True,
+            )
+            return False
+        self._show_status(
+            f"Moving {axis} to {display_target:.3f} at F{feedrate:.1f}.",
+            3000,
+        )
+        self._publish_stage_position_estimate(self._coordinate_move_stage_position)
+        if not self._manual_jog_timer.isActive():
+            self._manual_jog_timer.start()
+        return True
+
+    def _coordinate_move_duration_s(
+        self,
+        origin_position: tuple[float, ...],
+        target_position: tuple[float, ...],
+        feedrate_mm_min: float,
+    ) -> float:
+        axis = self._coordinate_move_axis
+        if axis is None:
+            return 0.0
+        try:
+            axis_index = self.STAGE_AXIS_NAMES.index(axis)
+        except ValueError:
+            return 0.0
+        if axis_index >= len(origin_position) or axis_index >= len(target_position):
+            return 0.0
+        distance = abs(float(target_position[axis_index]) - float(origin_position[axis_index]))
+        speed_mm_per_s = max(0.1, float(feedrate_mm_min)) / 60.0
+        return (distance / speed_mm_per_s) + self.PLANNED_MOVE_DURATION_PADDING_S
+
+    def _apply_coordinate_move_feedrate(self, feedrate_mm_min: float) -> None:
+        if (
+            self._coordinate_move_axis is None
+            or self._coordinate_move_programmed_feedrate is None
+            or self._coordinate_move_target_position is None
+        ):
+            return
+        try:
+            requested_feedrate = max(0.1, float(feedrate_mm_min))
+        except (TypeError, ValueError):
+            return
+        min_feedrate = (
+            self._coordinate_move_programmed_feedrate
+            * float(self.stage_controller.FEED_OVERRIDE_MIN_PERCENT)
+            / 100.0
+        )
+        max_feedrate = (
+            self._coordinate_move_programmed_feedrate
+            * float(self.stage_controller.FEED_OVERRIDE_MAX_PERCENT)
+            / 100.0
+        )
+        if requested_feedrate < min_feedrate - 1e-9 or requested_feedrate > max_feedrate + 1e-9:
+            return
+        percent = self.stage_controller.queue_feed_override_for_feedrate(
+            self._coordinate_move_programmed_feedrate,
+            requested_feedrate,
+        )
+        if percent is None:
+            return
+        applied_feedrate = (
+            self._coordinate_move_programmed_feedrate * float(percent) / 100.0
+        )
+        self._coordinate_move_effective_feedrate = applied_feedrate
+        self._advance_coordinate_move_prediction()
+        current_position = (
+            self._coordinate_move_stage_position
+            or self._coordinate_move_origin_position
+        )
+        if current_position is None:
+            return
+        now = time.monotonic()
+        self._coordinate_move_origin_position = tuple(float(v) for v in current_position)
+        self._coordinate_move_started_at = now
+        self._coordinate_move_ends_at = now + max(
+            self._coordinate_move_duration_s(
+                self._coordinate_move_origin_position,
+                self._coordinate_move_target_position,
+                applied_feedrate,
+            ),
+            0.05,
+        )
+        self._show_status(
+            f"Active coordinate move feed override: {percent}% "
+            f"(effective F{applied_feedrate:.1f}).",
+            1500,
+        )
+
+    def _clear_coordinate_move_tracking(
+        self, *, clear_pending: bool, reset_override: bool
+    ) -> None:
+        self._coordinate_move_axis = None
+        self._coordinate_move_origin_position = None
+        self._coordinate_move_stage_position = None
+        self._coordinate_move_target_position = None
+        self._coordinate_move_started_at = None
+        self._coordinate_move_ends_at = None
+        self._coordinate_move_programmed_feedrate = None
+        self._coordinate_move_effective_feedrate = None
+        if clear_pending:
+            self._pending_stage_axis_targets.clear()
+        if reset_override:
+            self.stage_controller.queue_feed_override_reset()
+        if self.joystick_panel is not None:
+            self.joystick_panel.clear_temporary_linear_feedrate_bounds()
+        self._refresh_stage_axis_styles()
+
+    def _set_coordinate_move_feedrate_bounds(self, programmed_feedrate: float) -> None:
+        if self.joystick_panel is None:
+            return
+        min_feedrate = (
+            programmed_feedrate
+            * float(self.stage_controller.FEED_OVERRIDE_MIN_PERCENT)
+            / 100.0
+        )
+        max_feedrate = (
+            programmed_feedrate
+            * float(self.stage_controller.FEED_OVERRIDE_MAX_PERCENT)
+            / 100.0
+        )
+        self.joystick_panel.set_temporary_linear_feedrate_bounds(
+            min_feedrate,
+            max_feedrate,
+        )
+
+    def _start_next_pending_stage_axis_move(self) -> None:
+        if self._coordinate_move_axis is not None or not self._pending_stage_axis_targets:
+            return
+        if self.stage_controller.is_busy():
+            QTimer.singleShot(200, self._start_next_pending_stage_axis_move)
+            return
+        latest_state = (self.stage_controller.latest_stage_state() or "").lower()
+        if latest_state not in {"", "idle"}:
+            QTimer.singleShot(200, self._start_next_pending_stage_axis_move)
+            return
+        axis = next(iter(self._pending_stage_axis_targets.keys()))
+        raw_target, display_target = self._pending_stage_axis_targets.pop(axis)
+        self._start_coordinate_axis_move(axis, raw_target, display_target)
+
+    def _finish_coordinate_move_if_idle(self, position: object | None) -> None:
+        if self._coordinate_move_axis is None:
+            return
+        latest_state = (self.stage_controller.latest_stage_state() or "").lower()
+        if latest_state != "idle":
+            return
+        if (
+            self._coordinate_move_started_at is not None
+            and time.monotonic() - self._coordinate_move_started_at
+            < self.COORDINATE_MOVE_MIN_IDLE_ACCEPT_S
+        ):
+            return
+        if isinstance(position, tuple):
+            self._coordinate_move_stage_position = tuple(float(v) for v in position)
+        self._clear_coordinate_move_tracking(clear_pending=False, reset_override=True)
+        if self._pending_stage_axis_targets:
+            QTimer.singleShot(0, self._start_next_pending_stage_axis_move)
+        elif self._pending_homing_axes:
+            QTimer.singleShot(0, self._start_next_pending_homing_action)
+
+    def _raw_target_from_display_value(
+        self, axis_name: str, display_target: float
+    ) -> float | None:
+        axis = axis_name.strip().upper()
+        if axis in self._stage_axis_homed:
+            return self._raw_axis_value_from_display(axis, display_target)
+        if axis not in self._stage_axis_raw_values:
+            return None
+        origin = self._stage_unhomed_display_origins.get(axis)
+        if origin is None:
+            origin = self._stage_axis_raw_values.get(axis)
+        if origin is None:
+            return None
+        if axis == "A":
+            origin_display = self._display_axis_value_from_raw(axis, origin)
+            return self._raw_axis_value_from_display(
+                axis,
+                origin_display + float(display_target),
+            )
+        return float(origin) + float(display_target)
+
+    def _reset_stage_axis_field(self, axis_name: str) -> None:
+        axis = axis_name.strip().upper()
+        field = self._stage_axis_fields.get(axis)
+        if field is None:
+            return
+        value = self._stage_axis_display_values.get(axis)
+        field.blockSignals(True)
+        if value is None:
+            field.clear()
+        else:
+            field.setText(self._format_stage_axis_value(value))
+        field.setModified(False)
+        field.blockSignals(False)
+
+    def _on_limit_axes_changed(self, axes: object) -> None:
+        if isinstance(axes, (set, list, tuple)):
+            self._stage_limit_axes = {
+                str(axis).strip().upper()
+                for axis in axes
+                if str(axis).strip().upper() in self.STAGE_AXIS_NAMES
+            }
+        else:
+            self._stage_limit_axes = set()
+        if (
+            self._manual_jog_prediction_available()
+            and self._manual_jog_stage_position is not None
+        ):
+            self._update_stage_position_display(self._manual_jog_stage_position)
+            return
+        self._update_stage_position_display(self.stage_controller.latest_stage_position())
 
     def _on_homing_status_changed(self, _homed_axes: object) -> None:
         if (
@@ -2478,19 +3189,117 @@ class Main(QMainWindow):
         height_vec = inverse @ np.asarray([0.0, float(stage_fov[1])], dtype=float)
         return (float(np.linalg.norm(width_vec)), float(np.linalg.norm(height_vec)))
 
+    def _request_home_axis_from_ui(self, axis: str) -> None:
+        axis_name = axis.strip().upper()
+        if axis_name not in {"X", "Y", "Z", "A"}:
+            return
+        self._queue_or_start_homing_axes([axis_name])
+
+    def _request_home_all_from_ui(self) -> None:
+        self._queue_or_start_homing_axes(["X", "Y", "Z", "A"])
+
+    def _queue_or_start_homing_axes(self, axes: list[str]) -> None:
+        normalized: list[str] = []
+        for axis in axes:
+            axis_name = axis.strip().upper()
+            if axis_name not in {"X", "Y", "Z", "A"}:
+                continue
+            if axis_name == self._homing_active_key:
+                continue
+            if axis_name in self._pending_homing_axes:
+                continue
+            normalized.append(axis_name)
+        if not normalized:
+            return
+        latest_state = (self.stage_controller.latest_stage_state() or "").lower()
+        if (
+            self._homing_active_key is None
+            and not self.stage_controller.is_busy()
+            and latest_state in {"", "idle"}
+            and self._coordinate_move_axis is None
+        ):
+            first_axis = normalized.pop(0)
+            if not self.stage_controller.request_home_axis(first_axis):
+                normalized.insert(0, first_axis)
+        self._pending_homing_axes.extend(normalized)
+        self._refresh_pending_homing_ui()
+        if self._pending_homing_axes and self._homing_active_key is None:
+            QTimer.singleShot(200, self._start_next_pending_homing_action)
+
+    def _start_next_pending_homing_action(self) -> None:
+        if self._homing_active_key is not None or not self._pending_homing_axes:
+            return
+        if self.stage_controller.is_busy() or self._coordinate_move_axis is not None:
+            QTimer.singleShot(200, self._start_next_pending_homing_action)
+            return
+        latest_state = (self.stage_controller.latest_stage_state() or "").lower()
+        if latest_state not in {"", "idle"}:
+            QTimer.singleShot(200, self._start_next_pending_homing_action)
+            return
+        axis = self._pending_homing_axes.pop(0)
+        self._refresh_pending_homing_ui()
+        if not self.stage_controller.request_home_axis(axis):
+            self._pending_homing_axes.insert(0, axis)
+            self._refresh_pending_homing_ui()
+            QTimer.singleShot(200, self._start_next_pending_homing_action)
+
+    def _clear_pending_homing_queue(self) -> None:
+        self._homing_active_key = None
+        self._pending_homing_axes.clear()
+        self._refresh_pending_homing_ui()
+
+    def _refresh_pending_homing_ui(self) -> None:
+        if self.joystick_panel is not None:
+            self.joystick_panel.set_pending_homing_actions(
+                set(self._pending_homing_axes)
+            )
+
     def _on_homing_action_finished(
         self, success: bool, _message: str, axis_key: str
     ) -> None:
+        key = axis_key.strip().upper()
+        if key == self._homing_active_key or key == "ALL":
+            self._homing_active_key = None
         if not success:
+            self._pending_homing_axes.clear()
+            self._refresh_pending_homing_ui()
+            self._clear_stage_motion_axes()
             return
-        if axis_key.upper() in {"X", "Y", "B", "ALL"}:
+        if key in {"X", "Y", "B", "ALL"}:
             self._invalidate_design_registration(
-                f"Design registration cleared after homing {axis_key.upper()}."
+                f"Design registration cleared after homing {key}."
             )
+        self._clear_stage_motion_axes()
+        self._refresh_pending_homing_ui()
+        if self._pending_homing_axes:
+            QTimer.singleShot(0, self._start_next_pending_homing_action)
+
+    def _on_homing_action_started(self, axis_key: str) -> None:
+        key = axis_key.strip().upper()
+        self._homing_active_key = key
+        if key in self._pending_homing_axes:
+            self._pending_homing_axes.remove(key)
+            self._refresh_pending_homing_ui()
+        if key == "ALL":
+            self._set_stage_motion_axes({"X", "Y", "Z", "A"})
+        elif key in self.STAGE_AXIS_NAMES:
+            self._set_stage_motion_axes({key})
+
+    def _on_needles_action_started(self, _action: str) -> None:
+        self._set_stage_motion_axes({"A"})
+
+    def _on_needles_action_finished(
+        self, _success: bool, _message: str, _action: str
+    ) -> None:
+        self._clear_stage_motion_axes()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         self._design_position_timer.stop()
         self._manual_jog_timer.stop()
+        self._stage_motion_blink_timer.stop()
+        if self._linear_feedrate_save_timer.isActive():
+            self._linear_feedrate_save_timer.stop()
+        self._save_pending_linear_feedrate_default()
         self._stop_jog_before_serial_close("application shutdown")
         self.grabber.stop()
         self.thread.quit()
@@ -2537,6 +3346,13 @@ class Main(QMainWindow):
 
         self.joystick_panel = JoystickWindow(self)
         self.joystick_panel.set_stage_controller(self.stage_controller)
+        feedrates = self.settings_manager.feedrate_configuration()
+        self.joystick_panel.apply_feedrate_settings(
+            feedrates.linear.presets,
+            feedrates.linear.default,
+            feedrates.rotary.presets,
+            feedrates.rotary.default,
+        )
         jog = self.settings_manager.jog_configuration()
         self.joystick_panel.apply_jog_settings(
             jog.linear_distance_mm,
@@ -2556,10 +3372,10 @@ class Main(QMainWindow):
             self.stage_controller.request_autofocus
         )
         self.joystick_panel.home_axis_requested.connect(
-            self.stage_controller.request_home_axis
+            self._request_home_axis_from_ui
         )
         self.joystick_panel.home_all_requested.connect(
-            self.stage_controller.request_home_all
+            self._request_home_all_from_ui
         )
         self.joystick_panel.needles_raise_requested.connect(
             self.stage_controller.request_needles_raise
@@ -2577,6 +3393,9 @@ class Main(QMainWindow):
         self.joystick_panel.manual_axis_settings_changed.connect(
             self._save_manual_axis_jog_settings
         )
+        self.joystick_panel.linear_feedrate_changed.connect(
+            self._on_linear_feedrate_changed
+        )
         self.joystick_panel.motion_axis_requested.connect(self._on_manual_motion_axis)
         self.joystick_panel.jog_command_changed.connect(
             self._on_manual_jog_command_changed
@@ -2592,8 +3411,13 @@ class Main(QMainWindow):
         )
         self.stage_controller.homing_status_changed.connect(self._on_homing_status_changed)
         self.stage_controller.homing_status_changed.connect(self._persist_controller_state)
+        self.stage_controller.limit_axes_changed.connect(self._on_limit_axes_changed)
+        self.stage_controller.limit_axes_changed.connect(self.joystick_panel.set_limit_axes)
         self.stage_controller.homing_action_started.connect(
             self.joystick_panel.set_homing_action_started
+        )
+        self.stage_controller.homing_action_started.connect(
+            self._on_homing_action_started
         )
         self.stage_controller.homing_action_finished.connect(
             self.joystick_panel.set_homing_action_finished
@@ -2609,8 +3433,14 @@ class Main(QMainWindow):
         self.stage_controller.needles_action_started.connect(
             self.joystick_panel.set_needles_action_started
         )
+        self.stage_controller.needles_action_started.connect(
+            self._on_needles_action_started
+        )
         self.stage_controller.needles_action_finished.connect(
             self.joystick_panel.set_needles_action_finished
+        )
+        self.stage_controller.needles_action_finished.connect(
+            self._on_needles_action_finished
         )
         self.joystick_panel.reset_requested.connect(
             self.stage_controller.cancel_active_task
@@ -2819,9 +3649,9 @@ class Main(QMainWindow):
         self._needle_calibration_active = True
         if self.needle_calibration_panel:
             self.needle_calibration_panel.set_calibration_active(True)
-        latest_a = self.stage_controller.latest_a_position()
-        if latest_a is not None:
-            self._on_needle_height_changed(latest_a)
+        latest_lowering = self.stage_controller.latest_axis_a_lowering()
+        if latest_lowering is not None:
+            self._on_needle_height_changed(latest_lowering)
         else:
             logger.debug(
                 "Needle calibration started without cached A position; requesting status refresh."
@@ -2840,18 +3670,18 @@ class Main(QMainWindow):
     def _refresh_needle_height(self) -> None:
         if not self._needle_calibration_active:
             return
-        a_position = self.stage_controller.latest_a_position()
-        if a_position is None:
+        lowering_mm = self.stage_controller.latest_axis_a_lowering()
+        if lowering_mm is None:
             logger.debug(
                 "Needle height refresh has no cached A position; requesting status refresh."
             )
             self.stage_controller.request_status_refresh()
             return
-        self._on_needle_height_changed(a_position)
+        self._on_needle_height_changed(lowering_mm)
 
-    def _on_needle_height_changed(self, a_position: float) -> None:
+    def _on_needle_height_changed(self, lowering_mm: float) -> None:
         if self.needle_calibration_panel:
-            self.needle_calibration_panel.set_current_a(a_position)
+            self.needle_calibration_panel.set_current_a(lowering_mm)
 
     def _on_lcr_connection_changed(
         self, connected: bool, backend_name: str, description: str
@@ -2899,13 +3729,21 @@ class Main(QMainWindow):
             logger.warning("Unable to save needle down height: %s", reason)
             self._show_status(f"Unable to read A position: {status_reason}.")
             return
+        lowering_mm = self.stage_controller.axis_a_lowering_for_gcode_coordinate(
+            a_position
+        )
         settings = self.settings_manager.settings.clone()
-        settings.needle_calibration.down_position_mm = a_position
+        settings.needle_calibration.down_position_mm = lowering_mm
         settings.needle_calibration.down_position_configured = True
         self.settings_manager.replace(settings)
         self.settings_manager.save()
         self._apply_settings()
-        self._show_status(f"Saved needle down height at A={a_position:.4f} mm.")
+        target_a = self.stage_controller.axis_a_gcode_coordinate_for_lowering(
+            lowering_mm
+        )
+        self._show_status(
+            f"Saved needle down height at {lowering_mm:.4f} mm (A={target_a:.4f})."
+        )
 
     def _save_surface_position(self, target: str) -> None:
         target_key = target.strip().lower()

@@ -93,6 +93,7 @@ class _Status:
     work_offset: Optional[tuple[float, ...]] = None
     coordinate_system: Optional[str] = None
     homed_axes: Optional[set[str]] = None
+    pins: Optional[set[str]] = None
 
 
 @dataclass(order=True)
@@ -114,6 +115,7 @@ class StageController(QObject):
     stage_position_changed: Signal = Signal(object)
     autofocus_finished: Signal = Signal(bool, str)
     homing_status_changed: Signal = Signal(object)
+    limit_axes_changed: Signal = Signal(object)
     axis_a_ready_changed: Signal = Signal(bool)
     homing_action_started: Signal = Signal(str)
     homing_action_finished: Signal = Signal(bool, str, str)
@@ -154,10 +156,19 @@ class StageController(QObject):
     B_AXIS_SOFT_LIMIT_DEG = 45.0
     MAX_CLICK_MOVE_MM = 10.0
     SERIAL_PRIORITY_JOG_STOP = 0
+    SERIAL_PRIORITY_FEED_OVERRIDE = 5
     SERIAL_PRIORITY_JOG_COMMAND = 10
     SERIAL_PRIORITY_SOFT_RESET = 20
     SERIAL_PRIORITY_TERMINAL = 30
     SERIAL_JOG_COMMAND_SETTLE_S = 0.03
+    FEED_OVERRIDE_RESET = b"\x90"
+    FEED_OVERRIDE_PLUS_10 = b"\x91"
+    FEED_OVERRIDE_MINUS_10 = b"\x92"
+    FEED_OVERRIDE_PLUS_1 = b"\x93"
+    FEED_OVERRIDE_MINUS_1 = b"\x94"
+    FEED_OVERRIDE_MIN_PERCENT = 10
+    FEED_OVERRIDE_MAX_PERCENT = 200
+    LIMIT_HIT_TOLERANCE = 0.05
     CONTROLLER_REBOOT_TOKENS = (
         "[MSG:RST",
         "FAST_FLASH_BOOT",
@@ -167,6 +178,11 @@ class StageController(QObject):
 
     STATUS_PATTERN = re.compile(r"^<(?P<body>[^>]*)>")
     STATUS_FIELD_PATTERN = re.compile(r"(?P<key>[A-Za-z]+):(?P<value>.+)")
+    SOFT_LIMIT_AXIS_PATTERN = re.compile(r"Soft limit on\s+(?P<axis>[A-Za-z])\b")
+    JOG_AXIS_WORD_PATTERN = re.compile(
+        r"(?<![A-Za-z])(?P<axis>[XYZABC])(?P<value>[+-]?(?:\d+(?:\.\d*)?|\.\d+))",
+        re.IGNORECASE,
+    )
     AXIS_RANGE_PATTERN = re.compile(
         r"^\[MSG:INFO: Axis (?P<axis>[A-Za-z]) \((?P<min>-?\d+\.?\d*),(?P<max>-?\d+\.?\d*)\)\]"
     )
@@ -205,19 +221,24 @@ class StageController(QObject):
         self._cancel_event = threading.Event()
         self._axis_limits: dict[str, tuple[float, float]] = {}
         self._homed_axes: set[str] = set()
+        self._limit_axes: set[str] = set()
         self._relative_warning_emitted = False
         self._axis_a_ready = False
         self._needles_up = False
         self._needles_known = False
-        self._needle_down_offset: Optional[float] = None
+        self._needle_down_lowering_mm: Optional[float] = None
+        self._axis_a_calibration: dict[str, float | str] | None = None
         self._oscillation_active = False
         self._motion_safety_disabled = False
         self._queued_needles_actions: deque[tuple[str, float | None]] = deque()
         self._oscillation_needles_actions: deque[tuple[str, float | None]] = deque()
         self._b_axis_zero_position: Optional[float] = None
         self._serial_session_lock = threading.RLock()
+        self._feed_override_lock = threading.Lock()
         self._queued_write_sequence = 0
         self._queued_jog_generation = 0
+        self._queued_feed_override_generation = 0
+        self._active_feed_override_percent: Optional[int] = None
         self._last_stage_state: Optional[str] = None
         self._last_status_timestamp: Optional[float] = None
         self._last_jog_write_timestamp: Optional[float] = None
@@ -247,6 +268,8 @@ class StageController(QObject):
         with self._task_lock:
             self._serial = serial_connection
             self._queued_jog_generation += 1
+            with self._feed_override_lock:
+                self._active_feed_override_percent = None
             self._controller_reboot_recovery_pending = False
             self._controller_reboot_ready_notified = False
             self._clear_pending_async_writes()
@@ -373,12 +396,15 @@ class StageController(QObject):
         self._last_status_timestamp = None
         self._last_jog_write_timestamp = None
         self._jog_motion_active = False
+        with self._feed_override_lock:
+            self._active_feed_override_percent = None
         self._current_status_report_mask = None
         self._controller_session_marker = None
         self._active_work_coordinate_system = None
         self._controller_coordinate_offsets.clear()
         self._controller_state_stale = True
         self._update_homing_status(set())
+        self._update_limit_axes(set())
         self._set_needles_state(False, known=False)
         self.stage_position_changed.emit(None)
 
@@ -424,6 +450,7 @@ class StageController(QObject):
         text = data.decode("ascii", errors="ignore")
         for line in text.splitlines():
             line = line.strip()
+            self._handle_limit_line(line)
             if self._line_indicates_controller_reboot(line):
                 self._handle_controller_reboot_detected(line, source)
                 return
@@ -600,37 +627,70 @@ class StageController(QObject):
             thread.start()
 
     def request_manual_axis_move(
-        self, axis: str, distance_mm: float, mode: str, feedrate: float | None = None
-    ) -> None:
-        """Move an arbitrary axis from the manual jog controls."""
+        self,
+        axis: str,
+        distance_mm: float,
+        mode: str,
+        feedrate: float | None = None,
+        allow_unhomed: bool = False,
+    ) -> bool:
+        """Move an arbitrary axis from the manual jog controls.
+
+        G91 is accepted as a UI-relative input mode, but it is resolved to an
+        absolute G90 target before anything is sent to the controller.
+        """
 
         axis = axis.upper().strip()
         if axis not in self.AXIS_INDEX:
             self.status_message.emit(f"Unsupported axis: {axis}")
-            return
+            return False
         mode = mode.upper().strip()
         if mode not in {"G90", "G91"}:
             self.status_message.emit(f"Unsupported manual move mode: {mode}")
-            return
+            return False
         try:
             effective_feedrate = (
-                None if feedrate is None else max(1.0, float(feedrate))
+                None if feedrate is None else max(0.1, float(feedrate))
             )
         except (TypeError, ValueError):
             self.status_message.emit(f"Unsupported manual feedrate: {feedrate}")
-            return
+            return False
         with self._task_lock:
             if self._active_thread and self._active_thread.is_alive():
                 self.status_message.emit("Stage is busy. Ignoring manual axis move.")
-                return
+                return False
             self._cancel_event.clear()
             thread = threading.Thread(
                 target=self._run_manual_axis_move,
-                args=(axis, float(distance_mm), mode, effective_feedrate),
+                args=(
+                    axis,
+                    float(distance_mm),
+                    mode,
+                    effective_feedrate,
+                    bool(allow_unhomed),
+                ),
                 daemon=True,
             )
             self._active_thread = thread
             thread.start()
+            return True
+
+    def request_absolute_axis_move(
+        self,
+        axis: str,
+        target_mm: float,
+        feedrate: float | None = None,
+        allow_unhomed: bool = True,
+    ) -> bool:
+        """Move one axis to an absolute coordinate in the configured report mode."""
+
+        return self.request_manual_axis_move(
+            axis,
+            target_mm,
+            "G90",
+            feedrate,
+            allow_unhomed=allow_unhomed,
+        )
 
     def request_autofocus(self) -> None:
         """Begin an asynchronous autofocus sweep along the Z axis."""
@@ -644,16 +704,16 @@ class StageController(QObject):
             self._active_thread = thread
             thread.start()
 
-    def request_home_axis(self, axis: str) -> None:
+    def request_home_axis(self, axis: str) -> bool:
         """Home a specific axis via a background task."""
 
         axis = axis.upper().strip()
         if not axis:
-            return
+            return False
         with self._task_lock:
             if self._active_thread and self._active_thread.is_alive():
                 self.status_message.emit("Stage is busy. Ignoring home request.")
-                return
+                return False
             self._cancel_event.clear()
             thread = threading.Thread(
                 target=self._run_home, args=(f"$H{axis}", axis), daemon=True
@@ -661,14 +721,15 @@ class StageController(QObject):
             self._active_thread = thread
             self.homing_action_started.emit(axis)
             thread.start()
+            return True
 
-    def request_home_all(self) -> None:
+    def request_home_all(self) -> bool:
         """Home all axes via a background task."""
 
         with self._task_lock:
             if self._active_thread and self._active_thread.is_alive():
                 self.status_message.emit("Stage is busy. Ignoring home request.")
-                return
+                return False
             self._cancel_event.clear()
             thread = threading.Thread(
                 target=self._run_home, args=("$H", "ALL"), daemon=True
@@ -676,6 +737,7 @@ class StageController(QObject):
             self._active_thread = thread
             self.homing_action_started.emit("ALL")
             thread.start()
+            return True
 
     def request_needles_raise(self) -> None:
         """Raise the needles by homing the A axis."""
@@ -706,9 +768,51 @@ class StageController(QObject):
         *,
         down_position_mm: Optional[float],
     ) -> None:
-        """Apply the persisted needle calibration settings."""
+        """Apply the persisted physical needle lowering target."""
 
-        self._needle_down_offset = down_position_mm
+        if down_position_mm is None:
+            self._needle_down_lowering_mm = None
+            return
+        lowering_mm = float(down_position_mm)
+        if lowering_mm < 0.0:
+            lowering_mm = self._axis_a_lowering_for_gcode_coordinate(lowering_mm)
+        self._needle_down_lowering_mm = max(0.0, lowering_mm)
+
+    def apply_axis_a_calibration(self, calibration: object | None) -> None:
+        """Apply the compact nonlinear A-axis calibration model."""
+
+        if calibration is None or not bool(getattr(calibration, "configured", False)):
+            self._axis_a_calibration = None
+            return
+        model = str(getattr(calibration, "model", "")).strip()
+        if model != "cosine_displacement":
+            self._axis_a_calibration = None
+            return
+        try:
+            values: dict[str, float | str] = {
+                "model": model,
+                "steps_per_mm": float(getattr(calibration, "steps_per_mm")),
+                "min": float(getattr(calibration, "commanded_lowering_min_mm")),
+                "max": float(getattr(calibration, "commanded_lowering_max_mm")),
+                "offset": float(getattr(calibration, "offset_mm")),
+                "amplitude": float(getattr(calibration, "amplitude_mm")),
+                "angular_frequency": float(
+                    getattr(calibration, "angular_frequency_rad_per_mm")
+                ),
+                "phase": float(getattr(calibration, "phase_rad")),
+            }
+        except (TypeError, ValueError):
+            self._axis_a_calibration = None
+            return
+        if (
+            float(values["steps_per_mm"]) <= 0
+            or float(values["max"]) <= float(values["min"])
+            or abs(float(values["amplitude"])) <= 1e-12
+            or float(values["angular_frequency"]) <= 0
+        ):
+            self._axis_a_calibration = None
+            return
+        self._axis_a_calibration = values
 
     def apply_coordinate_system_configuration(
         self,
@@ -819,7 +923,9 @@ class StageController(QObject):
             a_position = self._read_current_a_position(serial_connection)
         if a_position is None:
             return None
-        self.needle_height_changed.emit(a_position)
+        self.needle_height_changed.emit(
+            self._axis_a_lowering_for_gcode_coordinate(a_position)
+        )
         return a_position
 
     def last_a_position_read_failure(self) -> Optional[str]:
@@ -928,6 +1034,14 @@ class StageController(QObject):
         if latest is None or len(latest) <= 3:
             return None
         return float(latest[3])
+
+    def latest_axis_a_lowering(self) -> float | None:
+        """Return the latest cached physical A-axis lowering, if known."""
+
+        a_position = self.latest_a_position()
+        if a_position is None:
+            return None
+        return self._axis_a_lowering_for_gcode_coordinate(a_position)
 
     def latest_stage_state(self) -> str | None:
         """Return the most recently observed controller motion state."""
@@ -1046,8 +1160,12 @@ class StageController(QObject):
         stripped = command.strip()
         if not stripped:
             return
+        move = self._move_vector_from_jog_command(stripped)
+        if move is not None and not self._motion_safety_disabled:
+            self._check_cached_jog_move_limits(move)
         self._queued_jog_generation += 1
         self._jog_motion_active = True
+        self.queue_feed_override_reset()
         self._async_write_queue.put(
             _QueuedSerialWrite(
                 priority=self.SERIAL_PRIORITY_JOG_COMMAND,
@@ -1058,6 +1176,246 @@ class StageController(QObject):
                 generation=self._queued_jog_generation,
             )
         )
+
+    @classmethod
+    def feed_override_percent_for_feedrates(
+        cls, programmed_feedrate: float, target_feedrate: float
+    ) -> int:
+        programmed = max(0.1, float(programmed_feedrate))
+        target = max(0.1, float(target_feedrate))
+        percent = int(round((target / programmed) * 100.0))
+        return min(
+            max(percent, cls.FEED_OVERRIDE_MIN_PERCENT),
+            cls.FEED_OVERRIDE_MAX_PERCENT,
+        )
+
+    @classmethod
+    def _feed_override_payload_for_percent_change(
+        cls,
+        current_percent: int,
+        target_percent: int,
+        *,
+        reset_first: bool = False,
+    ) -> tuple[bytes, int]:
+        current = min(
+            max(int(round(current_percent)), cls.FEED_OVERRIDE_MIN_PERCENT),
+            cls.FEED_OVERRIDE_MAX_PERCENT,
+        )
+        target = min(
+            max(int(round(target_percent)), cls.FEED_OVERRIDE_MIN_PERCENT),
+            cls.FEED_OVERRIDE_MAX_PERCENT,
+        )
+        payload = bytearray()
+        if reset_first:
+            payload.extend(cls.FEED_OVERRIDE_RESET)
+            current = 100
+        delta = target - current
+        if delta > 0:
+            tens, ones = divmod(delta, 10)
+            payload.extend(cls.FEED_OVERRIDE_PLUS_10 * tens)
+            payload.extend(cls.FEED_OVERRIDE_PLUS_1 * ones)
+        elif delta < 0:
+            tens, ones = divmod(abs(delta), 10)
+            payload.extend(cls.FEED_OVERRIDE_MINUS_10 * tens)
+            payload.extend(cls.FEED_OVERRIDE_MINUS_1 * ones)
+        return (bytes(payload), target)
+
+    def queue_feed_override_for_feedrate(
+        self, programmed_feedrate: float, target_feedrate: float
+    ) -> int | None:
+        """Queue realtime feed override bytes for an already-running G1 move."""
+
+        try:
+            target_percent = self.feed_override_percent_for_feedrates(
+                programmed_feedrate, target_feedrate
+            )
+        except (TypeError, ValueError, ZeroDivisionError):
+            return None
+        return self._queue_feed_override_percent(target_percent)
+
+    def queue_feed_override_reset(self) -> int | None:
+        """Return feed override to 100% without blocking the UI."""
+
+        with self._feed_override_lock:
+            current = self._active_feed_override_percent
+        if current in (None, 100):
+            return current
+        return self._queue_feed_override_percent(100)
+
+    def _queue_feed_override_percent(self, target_percent: int) -> int | None:
+        target = min(
+            max(int(round(target_percent)), self.FEED_OVERRIDE_MIN_PERCENT),
+            self.FEED_OVERRIDE_MAX_PERCENT,
+        )
+        with self._feed_override_lock:
+            current = self._active_feed_override_percent
+            reset_first = current is None
+            payload, applied = self._feed_override_payload_for_percent_change(
+                100 if current is None else current,
+                target,
+                reset_first=reset_first,
+            )
+            if not payload:
+                self._active_feed_override_percent = applied
+                return applied
+            self._active_feed_override_percent = applied
+        self._queued_feed_override_generation += 1
+        self._async_write_queue.put(
+            _QueuedSerialWrite(
+                priority=self.SERIAL_PRIORITY_FEED_OVERRIDE,
+                sequence=self._next_queued_write_sequence(),
+                kind="feed_override",
+                payload=payload,
+                description=f"feed override {applied}%",
+                generation=self._queued_feed_override_generation,
+            )
+        )
+        return applied
+
+    def constrain_jog_distances(
+        self,
+        commanded_distances: object,
+    ) -> tuple[tuple[str, float], ...]:
+        """Clip UI jog distances so homed axes do not cross software limits."""
+
+        if not isinstance(commanded_distances, (tuple, list)):
+            return tuple()
+        normalized: list[tuple[str, float]] = []
+        for item in commanded_distances:
+            if not isinstance(item, (tuple, list)) or len(item) != 2:
+                continue
+            axis = str(item[0]).strip().upper()
+            if axis not in self.AXIS_INDEX:
+                continue
+            try:
+                distance = float(item[1])
+            except (TypeError, ValueError):
+                continue
+            if abs(distance) < 1e-6:
+                continue
+            normalized.append((axis, distance))
+        if not normalized or self._motion_safety_disabled:
+            return tuple(normalized)
+
+        move = self._move_vector_from_axis_distances(normalized)
+        clipped = self._clip_relative_move_to_software_limits(move, emit_status=True)
+        clipped_values = {axis: value for axis, value in clipped.items()}
+        return tuple(
+            (axis, clipped_values[axis])
+            for axis, _distance in normalized
+            if abs(clipped_values.get(axis, 0.0)) >= 1e-6
+        )
+
+    def _move_vector_from_jog_command(self, command: str) -> MoveVector | None:
+        stripped = command.strip()
+        if not stripped.upper().startswith("$J="):
+            return None
+        distances: list[tuple[str, float]] = []
+        for match in self.JOG_AXIS_WORD_PATTERN.finditer(stripped):
+            axis = match.group("axis").upper()
+            try:
+                distance = float(match.group("value"))
+            except (TypeError, ValueError):
+                continue
+            distances.append((axis, distance))
+        if not distances:
+            return None
+        return self._move_vector_from_axis_distances(distances)
+
+    def _move_vector_from_axis_distances(
+        self, distances: list[tuple[str, float]] | tuple[tuple[str, float], ...]
+    ) -> MoveVector:
+        values = {axis: 0.0 for axis in self.AXIS_INDEX}
+        for axis, distance in distances:
+            normalized_axis = str(axis).strip().upper()
+            if normalized_axis not in values:
+                continue
+            values[normalized_axis] += float(distance)
+        return MoveVector(
+            x=values["X"],
+            y=values["Y"],
+            z=values["Z"],
+            a=values["A"],
+            b=values["B"],
+            c=values["C"],
+        )
+
+    def _clip_relative_move_to_software_limits(
+        self,
+        move: MoveVector,
+        *,
+        emit_status: bool = False,
+    ) -> MoveVector:
+        if move.is_zero() or self._motion_safety_disabled:
+            return move
+        position = self._last_stage_position
+        if position is None:
+            return move
+        values = {axis: delta for axis, delta in move.items()}
+        for axis, delta in move.items():
+            if abs(delta) < 1e-6:
+                continue
+            idx = self.AXIS_INDEX.get(axis)
+            if idx is None or idx >= len(position):
+                continue
+            if axis == "B":
+                clipped_delta = self._clip_b_relative_delta(delta)
+                if emit_status and abs(clipped_delta - delta) >= 1e-6:
+                    self.status_message.emit(
+                        "Jog limited by software soft limit: "
+                        f"B delta {delta:+.3f} clipped to {clipped_delta:+.3f}."
+                    )
+                values[axis] = clipped_delta
+                continue
+            limits = self._axis_limits_for_configured_mode(axis, None)
+            if not limits or not self._axis_software_limit_ready(None, axis):
+                continue
+            current = float(position[idx])
+            min_value, max_value = limits
+            target = current + float(delta)
+            clipped_target = min(max(target, min_value), max_value)
+            clipped_delta = clipped_target - current
+            if abs(clipped_delta - delta) >= 1e-6 and emit_status:
+                self.status_message.emit(
+                    "Jog limited by software soft limit: "
+                    f"{axis} target {target:+.3f} clipped to "
+                    f"{clipped_target:+.3f} "
+                    f"(limit {min_value:.3f}..{max_value:.3f})."
+                )
+            values[axis] = clipped_delta
+        return MoveVector(
+            x=values["X"],
+            y=values["Y"],
+            z=values["Z"],
+            a=values["A"],
+            b=values["B"],
+            c=values["C"],
+        )
+
+    def _clip_b_relative_delta(self, delta: float) -> float:
+        if self._last_stage_position is None:
+            return float(delta)
+        idx = self.AXIS_INDEX.get("B")
+        if idx is None or idx >= len(self._last_stage_position):
+            return float(delta)
+        if self._b_axis_zero_position is None:
+            return float(delta)
+        current_b = float(self._last_stage_position[idx]) - float(
+            self._b_axis_zero_position
+        )
+        limit = self.B_AXIS_SOFT_LIMIT_DEG
+        target_b = current_b + float(delta)
+        clipped_target = min(max(target_b, -limit), limit)
+        return clipped_target - current_b
+
+    def _check_cached_jog_move_limits(self, move: MoveVector) -> None:
+        clipped = self._clip_relative_move_to_software_limits(move)
+        for axis, original_delta in move.items():
+            clipped_delta = dict(clipped.items()).get(axis, 0.0)
+            if abs(original_delta - clipped_delta) >= 1e-6:
+                raise StageControllerError(
+                    f"Jog exceeds software soft limit on {axis}."
+                )
 
     def queue_jog_stop(self) -> None:
         """Queue a jog stop command without blocking the UI thread."""
@@ -1749,7 +2107,7 @@ class StageController(QObject):
                 self.needles_action_finished.emit(True, "Needles raised.", action)
                 return
             if action == "lower":
-                if self._needle_down_offset is None:
+                if self._needle_down_lowering_mm is None:
                     raise StageControllerError(
                         "Needle down calibration missing; cannot lower."
                     )
@@ -1758,17 +2116,20 @@ class StageController(QObject):
                 if status is None or current_a is None:
                     raise StageControllerError("Unable to read A position for needles.")
                 self._require_homed_axes(status, {"A"})
-                delta = float(self._needle_down_offset) - current_a
-                if abs(delta) < 1e-6:
-                    self._update_needles_from_a_position(float(self._needle_down_offset))
+                target_a = self._axis_a_gcode_coordinate_for_lowering(
+                    float(self._needle_down_lowering_mm)
+                )
+                if abs(target_a - current_a) < 1e-6:
+                    self._update_needles_from_a_position(target_a)
                     self.needles_action_finished.emit(True, "Needles already lowered.", action)
                     return
-                self._send_relative_move(
+                self._send_absolute_axis_move(
                     serial_connection,
-                    MoveVector(a=delta),
+                    "A",
+                    target_a,
                     ignore_needle_safety=True,
                 )
-                self._update_needles_from_a_position(float(self._needle_down_offset))
+                self._update_needles_from_a_position(target_a)
                 self.needles_action_finished.emit(True, "Needles lowered.", action)
                 return
             raise StageControllerError(f"Unknown needle action: {action}.")
@@ -1780,7 +2141,12 @@ class StageController(QObject):
             self._start_next_queued_needles_action()
 
     def _run_manual_axis_move(
-        self, axis: str, distance_mm: float, mode: str, feedrate: float | None
+        self,
+        axis: str,
+        distance_mm: float,
+        mode: str,
+        feedrate: float | None,
+        allow_unhomed: bool = False,
     ) -> None:
         self.movement_started.emit()
         try:
@@ -1788,45 +2154,86 @@ class StageController(QObject):
             serial_connection = self._serial
             if serial_connection is None or not serial_connection.is_open:
                 raise StageControllerError("Serial connection is not available.")
-            if abs(distance_mm) < 1e-6:
+            if mode == "G91" and abs(distance_mm) < 1e-6:
                 self.movement_finished.emit(True, "Manual axis move skipped.")
                 return
-            move = self._move_vector_for_axis(axis, distance_mm)
             feedrate_text = (
-                self.DEFAULT_FEEDRATE if feedrate is None else max(1.0, float(feedrate))
+                self.DEFAULT_FEEDRATE if feedrate is None else max(0.1, float(feedrate))
             )
-            self.status_message.emit(
-                f"Manual axis move ({mode}): {axis}{distance_mm:+.3f} F{feedrate_text:.0f}."
-            )
-            if mode == "G91":
-                with self._serial_session_lock:
-                    self._send_relative_move(
-                        serial_connection,
-                        move,
-                        allow_relative=True,
-                        ignore_needle_safety=self._motion_safety_disabled,
-                        feedrate=feedrate,
-                        wait_for_completion=False,
-                    )
-            else:
-                with self._serial_session_lock:
-                    self._send_absolute_axis_move(
-                        serial_connection,
-                        axis,
-                        distance_mm,
-                        ignore_needle_safety=self._motion_safety_disabled,
-                        feedrate=feedrate,
-                        wait_for_completion=False,
-                    )
+            with self._serial_session_lock:
+                target_value = self._manual_axis_absolute_target(
+                    serial_connection,
+                    axis,
+                    distance_mm,
+                    mode,
+                )
+                mode_label = "relative" if mode == "G91" else "absolute"
+                self.status_message.emit(
+                    f"Manual axis move ({mode_label}->G90): "
+                    f"{axis}{target_value:+.3f} "
+                    f"F{self._format_gcode_value(feedrate_text)}."
+                )
+                self._send_absolute_axis_move(
+                    serial_connection,
+                    axis,
+                    target_value,
+                    ignore_needle_safety=self._motion_safety_disabled,
+                    feedrate=feedrate,
+                    wait_for_completion=False,
+                    allow_unhomed=allow_unhomed or mode == "G91",
+                )
             self.movement_finished.emit(
                 True,
-                f"Manual axis move accepted ({mode} {axis}{distance_mm:+.3f}).",
+                "Manual axis move accepted "
+                f"({mode_label}->G90 {axis}{target_value:+.3f}).",
             )
         except StageControllerError as exc:
             self.movement_finished.emit(False, str(exc))
         finally:
             with self._task_lock:
                 self._active_thread = None
+
+    def _manual_axis_absolute_target(
+        self,
+        serial_connection: serial.Serial,
+        axis: str,
+        value_mm: float,
+        mode: str,
+    ) -> float:
+        axis = axis.upper().strip()
+        mode = mode.upper().strip()
+        if mode == "G90":
+            return float(value_mm)
+        if mode != "G91":
+            raise StageControllerError(f"Unsupported manual move mode: {mode}")
+
+        current_value = self._current_axis_value_for_manual_move(
+            serial_connection,
+            axis,
+        )
+        if current_value is None:
+            raise StageControllerError(
+                f"Unable to read {axis} position for relative manual move."
+            )
+        return float(current_value) + float(value_mm)
+
+    def _current_axis_value_for_manual_move(
+        self,
+        serial_connection: serial.Serial,
+        axis: str,
+    ) -> float | None:
+        status = self._query_status(serial_connection)
+        current_value = self._axis_value_for_configured_mode(status, axis)
+        if current_value is not None:
+            return current_value
+        index = self.AXIS_INDEX.get(axis.upper().strip())
+        if (
+            index is not None
+            and self._last_stage_position is not None
+            and index < len(self._last_stage_position)
+        ):
+            return float(self._last_stage_position[index])
+        return None
 
     def _run_needles_adjust(self, step_mm: float) -> None:
         action = "adjust"
@@ -1841,9 +2248,20 @@ class StageController(QObject):
             if status is None or self._axis_value_for_configured_mode(status, "A") is None:
                 raise StageControllerError("Unable to read A position for needles.")
             self._require_homed_axes(status, {"A"})
-            self._send_relative_move(
+            current_a = self._axis_value_for_configured_mode(status, "A")
+            if current_a is None:
+                raise StageControllerError("Unable to read A position for needles.")
+            target_a = self._axis_a_gcode_coordinate_for_lowering_step(
+                current_a,
+                step_mm,
+            )
+            if abs(target_a - current_a) < 1e-6:
+                self.needles_action_finished.emit(True, "Needle position unchanged.", action)
+                return
+            self._send_absolute_axis_move(
                 serial_connection,
-                MoveVector(a=step_mm),
+                "A",
+                target_a,
                 ignore_needle_safety=True,
             )
             current_a = self._read_current_a_position(serial_connection)
@@ -2015,10 +2433,15 @@ class StageController(QObject):
         if not move_parts:
             return
         effective_feedrate = (
-            self.DEFAULT_FEEDRATE if feedrate is None else max(1.0, float(feedrate))
+            self.DEFAULT_FEEDRATE if feedrate is None else max(0.1, float(feedrate))
         )
         move_distance = self._move_distance_for_timeout(move)
-        command = "G1 " + " ".join(move_parts) + f" F{effective_feedrate:.0f}"
+        command = (
+            "G1 "
+            + " ".join(move_parts)
+            + f" F{self._format_gcode_value(effective_feedrate)}"
+        )
+        self._reset_feed_override_for_serial(serial_connection)
         self._write_command(serial_connection, command)
         self._wait_for_ok(serial_connection)
         self._write_command(serial_connection, "G90")
@@ -2040,6 +2463,7 @@ class StageController(QObject):
         ignore_needle_safety: bool = False,
         feedrate: Optional[float] = None,
         wait_for_completion: bool = True,
+        allow_unhomed: bool = False,
     ) -> None:
         axis = axis.upper().strip()
         if axis not in self.AXIS_INDEX:
@@ -2052,25 +2476,26 @@ class StageController(QObject):
             status = self._query_status(serial_connection)
             if status is None:
                 raise StageControllerError("Unable to read position for absolute move.")
-            self._require_homed_axes(status, {axis})
+            self._require_homed_axes(status, {axis}, allow_relative=allow_unhomed)
             current_value = self._axis_value_for_configured_mode(status, axis)
             limits = self._axis_limits_for_configured_mode(axis, status)
-            if limits and self._software_axis_limits_ready(status):
+            if limits and self._axis_software_limit_ready(status, axis):
                 min_value, max_value = limits
                 if value < min_value or value > max_value:
                     raise StageControllerError(
                         f"{axis} target {value:+.3f} exceeds limits ({min_value:.3f}, {max_value:.3f})."
                     )
         effective_feedrate = (
-            self.DEFAULT_FEEDRATE if feedrate is None else max(1.0, float(feedrate))
+            self.DEFAULT_FEEDRATE if feedrate is None else max(0.1, float(feedrate))
         )
         self._write_command(serial_connection, "G21")
         self._wait_for_ok(serial_connection)
         self._write_command(serial_connection, "G90")
         self._wait_for_ok(serial_connection)
+        self._reset_feed_override_for_serial(serial_connection)
         self._write_command(
             serial_connection,
-            f"G1 {axis}{value:.4f} F{effective_feedrate:.0f}",
+            f"G1 {axis}{value:.4f} F{self._format_gcode_value(effective_feedrate)}",
         )
         self._wait_for_ok(serial_connection)
         if wait_for_completion:
@@ -2090,12 +2515,93 @@ class StageController(QObject):
     def _move_distance_for_timeout(move: MoveVector) -> float:
         return math.sqrt(sum(value * value for _axis, value in move.items()))
 
+    @staticmethod
+    def _format_gcode_value(value: float, decimals: int = 3) -> str:
+        text = f"{float(value):.{int(decimals)}f}"
+        text = text.rstrip("0").rstrip(".")
+        return text or "0"
+
+    def axis_a_gcode_coordinate_for_lowering(self, lowering_mm: float) -> float:
+        """Map a physical A-axis lowering in millimeters to an absolute G-code A coordinate."""
+
+        return self._axis_a_gcode_coordinate_for_lowering(lowering_mm)
+
+    def axis_a_lowering_for_gcode_coordinate(self, a_coordinate_mm: float) -> float:
+        """Map an absolute G-code A coordinate to physical calibrated lowering."""
+
+        return self._axis_a_lowering_for_gcode_coordinate(a_coordinate_mm)
+
+    def _axis_a_model_lowering_for_commanded(self, commanded_lowering_mm: float) -> float:
+        calibration = self._axis_a_calibration
+        if calibration is None:
+            return float(commanded_lowering_mm)
+        x_value = float(commanded_lowering_mm)
+        offset = float(calibration["offset"])
+        amplitude = float(calibration["amplitude"])
+        angular_frequency = float(calibration["angular_frequency"])
+        phase = float(calibration["phase"])
+        return offset + amplitude * (
+            math.cos(phase) - math.cos(phase + angular_frequency * x_value)
+        )
+
+    def _axis_a_lowering_for_gcode_coordinate(self, a_coordinate_mm: float) -> float:
+        calibration = self._axis_a_calibration
+        commanded_lowering = -float(a_coordinate_mm)
+        if calibration is None:
+            return commanded_lowering
+        origin = self._axis_a_model_lowering_for_commanded(float(calibration["min"]))
+        return self._axis_a_model_lowering_for_commanded(commanded_lowering) - origin
+
+    def _axis_a_gcode_coordinate_for_lowering(self, lowering_mm: float) -> float:
+        commanded_lowering = self._axis_a_commanded_lowering_for_physical(
+            lowering_mm
+        )
+        return -commanded_lowering
+
+    def _axis_a_commanded_lowering_for_physical(
+        self,
+        physical_lowering_mm: float,
+    ) -> float:
+        calibration = self._axis_a_calibration
+        if calibration is None:
+            return float(physical_lowering_mm)
+        low = float(calibration["min"])
+        high = float(calibration["max"])
+        origin_value = self._axis_a_model_lowering_for_commanded(low)
+        target = origin_value + float(physical_lowering_mm)
+        low_value = self._axis_a_model_lowering_for_commanded(low)
+        high_value = self._axis_a_model_lowering_for_commanded(high)
+        if high_value < low_value:
+            low, high = high, low
+            low_value, high_value = high_value, low_value
+        if target <= low_value:
+            return low
+        if target >= high_value:
+            return high
+        for _ in range(64):
+            mid = (low + high) * 0.5
+            value = self._axis_a_model_lowering_for_commanded(mid)
+            if value < target:
+                low = mid
+            else:
+                high = mid
+        return (low + high) * 0.5
+
+    def _axis_a_gcode_coordinate_for_lowering_step(
+        self,
+        current_a: float,
+        requested_step_mm: float,
+    ) -> float:
+        current_physical = self._axis_a_lowering_for_gcode_coordinate(current_a)
+        target_physical = current_physical - float(requested_step_mm)
+        return self._axis_a_gcode_coordinate_for_lowering(target_physical)
+
     def _idle_timeout_for_distance(self, distance: float, feedrate: float) -> float:
         """Return an idle wait timeout long enough for slow manual G1 moves."""
 
         try:
             distance_value = abs(float(distance))
-            feedrate_value = max(1.0, float(feedrate))
+            feedrate_value = max(0.1, float(feedrate))
         except (TypeError, ValueError):
             return self.MOVE_IDLE_TIMEOUT_MIN_S
         travel_time_s = (distance_value / feedrate_value) * 60.0
@@ -2124,11 +2630,13 @@ class StageController(QObject):
         if not move_parts:
             return
         effective_feedrate = (
-            self.DEFAULT_FEEDRATE if feedrate is None else max(1.0, float(feedrate))
+            self.DEFAULT_FEEDRATE if feedrate is None else max(0.1, float(feedrate))
         )
         self._write_command(
             serial_connection,
-            "G1 " + " ".join(move_parts) + f" F{effective_feedrate:.0f}",
+            "G1 "
+            + " ".join(move_parts)
+            + f" F{self._format_gcode_value(effective_feedrate)}",
         )
         self._wait_for_ok(serial_connection)
 
@@ -2146,13 +2654,6 @@ class StageController(QObject):
         if status is None or not positions:
             return
         self._ensure_b_axis_zero_reference(status)
-        requested_axes = {
-            axis for axis, delta in move.items() if abs(delta) >= 1e-6
-        }
-        if requested_axes and self._software_axis_limits_ready(status):
-            self._require_homed_axes(
-                status, requested_axes, allow_relative=allow_relative
-            )
         for axis, delta in move.items():
             if abs(delta) < 1e-6:
                 continue
@@ -2169,10 +2670,13 @@ class StageController(QObject):
                     )
                 continue
             limits = self._axis_limits_for_configured_mode(axis, status)
-            if limits and not self._software_axis_limits_ready(status):
-                continue
             if not limits:
                 continue
+            if not self._axis_software_limit_ready(status, axis):
+                continue
+            self._require_homed_axes(
+                status, {axis}, allow_relative=allow_relative
+            )
             min_value, max_value = limits
             target = positions[idx] + delta
             if target < min_value or target > max_value:
@@ -2181,7 +2685,7 @@ class StageController(QObject):
                 )
 
     def _software_axis_limits_ready(self, status: _Status | None) -> bool:
-        """Software soft limits are meaningful only after every limited axis is homed."""
+        """Return True only when every limited linear axis is homed."""
 
         limited_axes = set(self._axis_limits).difference({"B"})
         if not limited_axes:
@@ -2190,6 +2694,19 @@ class StageController(QObject):
         if effective_homed is None:
             return False
         return limited_axes.issubset(effective_homed)
+
+    def _axis_software_limit_ready(
+        self, status: _Status | None, axis: str
+    ) -> bool:
+        axis = axis.upper().strip()
+        if axis == "B":
+            return self._b_axis_zero_position is not None
+        if axis not in self._axis_limits:
+            return False
+        effective_homed = self._effective_homed_axes(status)
+        if effective_homed is None:
+            return False
+        return axis in effective_homed
 
     def _move_safety_check(self) -> None:
         """Validate motion safety prerequisites before any move."""
@@ -2255,6 +2772,7 @@ class StageController(QObject):
                 continue
             logger.debug("SERIAL TRACE stage_readline %s line=%r", description, line)
             self._raise_if_controller_reboot_line(line, description)
+            self._handle_limit_line(line)
             homed_msg = self.HOMED_MSG_PATTERN.match(line)
             if homed_msg:
                 axes = set(homed_msg.group("axes").upper())
@@ -2542,6 +3060,8 @@ class StageController(QObject):
                 logger.debug("TIMING jog_stop_write_begin command=0x85")
             elif job.kind == "soft_reset":
                 logger.debug("SERIAL TRACE terminal_write %s", job.description)
+            elif job.kind == "feed_override":
+                logger.debug("SERIAL TRACE realtime_write %s", job.description)
             elif job.kind == "terminal":
                 logger.debug("SERIAL TRACE terminal_write payload=%r", job.description)
             serial_connection.write(job.payload)
@@ -2553,6 +3073,31 @@ class StageController(QObject):
                 logger.debug("TIMING jog_stop_write_flushed command=0x85")
         except serial.SerialException as exc:  # pragma: no cover - hardware interaction
             raise StageControllerError(f"Serial write failed: {exc}") from exc
+
+    def _reset_feed_override_for_serial(self, serial_connection: serial.Serial) -> None:
+        self._write_realtime_payload(
+            serial_connection,
+            self.FEED_OVERRIDE_RESET,
+            "feed override reset 100%",
+        )
+        with self._feed_override_lock:
+            self._active_feed_override_percent = 100
+
+    def _write_realtime_payload(
+        self, serial_connection: serial.Serial, payload: bytes, description: str
+    ) -> None:
+        if not hasattr(serial_connection, "write"):
+            logger.debug(
+                "SERIAL TRACE realtime_write skipped for test serial: %s",
+                description,
+            )
+            return
+        try:
+            logger.debug("SERIAL TRACE realtime_write %s", description)
+            serial_connection.write(payload)
+            serial_connection.flush()
+        except serial.SerialException as exc:  # pragma: no cover - hardware interaction
+            raise StageControllerError(f"Serial realtime write failed: {exc}") from exc
 
     def _write_command(self, serial_connection: serial.Serial, command: str) -> None:
         self._check_cancelled()
@@ -2578,6 +3123,7 @@ class StageController(QObject):
                 continue
             logger.debug("SERIAL TRACE stage_readline wait_for_ok line=%r", line)
             self._raise_if_controller_reboot_line(line, "wait_for_ok")
+            self._handle_limit_line(line)
             homed_msg = self.HOMED_MSG_PATTERN.match(line)
             if homed_msg:
                 axes = set(homed_msg.group("axes").upper())
@@ -2628,6 +3174,7 @@ class StageController(QObject):
         self._last_status_timestamp = time.monotonic()
         self._controller_state_stale = False
         self._update_cached_positions(status)
+        self._update_limit_axes_from_status(status)
         self._update_needles_from_status(status)
         self._ensure_b_axis_zero_reference(status)
         if (
@@ -2660,6 +3207,7 @@ class StageController(QObject):
                 continue
             logger.debug("SERIAL TRACE stage_readline query_status line=%r", line)
             self._raise_if_controller_reboot_line(line, "status query")
+            self._handle_limit_line(line)
             if line.lower().startswith("alarm"):
                 raise StageControllerError(f"Controller alarm: {line}")
             homed_msg = self.HOMED_MSG_PATTERN.match(line)
@@ -2694,6 +3242,7 @@ class StageController(QObject):
         machine_position: tuple[float, ...] | None = None
         work_position: tuple[float, ...] | None = None
         work_offset: tuple[float, ...] | None = None
+        pins: set[str] = set()
         for part in parts[1:]:
             field_match = self.STATUS_FIELD_PATTERN.match(part)
             if not field_match:
@@ -2706,6 +3255,12 @@ class StageController(QObject):
                 work_position = self._parse_float_tuple(value)
             elif key == "WCO":
                 work_offset = self._parse_float_tuple(value)
+            elif key == "Pn":
+                pins = {
+                    pin.upper()
+                    for pin in value.strip()
+                    if pin.strip() and pin.upper() in self.AXIS_INDEX
+                }
 
         if machine_position is not None and len(machine_position) < 3:
             return None
@@ -2740,6 +3295,7 @@ class StageController(QObject):
             work_position=work_position,
             work_offset=work_offset,
             coordinate_system=coordinate_system,
+            pins=pins or None,
         )
 
     @staticmethod
@@ -2801,6 +3357,49 @@ class StageController(QObject):
         min_value, max_value = limits
         offset = float(work_offset[idx])
         return (float(min_value) - offset, float(max_value) - offset)
+
+    def _handle_limit_line(self, line: str) -> None:
+        soft_limit_match = self.SOFT_LIMIT_AXIS_PATTERN.search(line)
+        if soft_limit_match:
+            axis = soft_limit_match.group("axis").upper()
+            if axis in self.AXIS_INDEX:
+                self._update_limit_axes(set(self._limit_axes).union({axis}))
+            return
+        if line.strip().lower().startswith("alarm"):
+            axes = self._infer_limit_axes_from_position(None)
+            if axes:
+                self._update_limit_axes(axes)
+
+    def _update_limit_axes_from_status(self, status: _Status) -> None:
+        axes: set[str] = set()
+        if status.pins:
+            axes.update(axis for axis in status.pins if axis in self.AXIS_INDEX)
+        if status.state.strip().lower() == "alarm" and not axes:
+            axes.update(self._infer_limit_axes_from_position(status))
+            if not axes:
+                axes.update(self._limit_axes)
+        self._update_limit_axes(axes)
+
+    def _infer_limit_axes_from_position(self, status: _Status | None) -> set[str]:
+        if status is None:
+            position = self._last_stage_position
+        else:
+            position = self._position_for_configured_mode(status)
+        if position is None:
+            return set()
+        axes: set[str] = set()
+        for axis, index in self.AXIS_INDEX.items():
+            if index >= len(position):
+                continue
+            limits = self._axis_limits_for_configured_mode(axis, status)
+            if not limits:
+                continue
+            value = float(position[index])
+            min_value, max_value = limits
+            tolerance = self.LIMIT_HIT_TOLERANCE
+            if value <= min_value + tolerance or value >= max_value - tolerance:
+                axes.add(axis)
+        return axes
 
     def _update_cached_positions(self, status: _Status) -> None:
         if status.coordinate_system:
@@ -2896,7 +3495,9 @@ class StageController(QObject):
     def _update_needles_from_a_position(self, a_position: float) -> None:
         """Update the coarse needles state using the current A coordinate."""
 
-        self.needle_height_changed.emit(a_position)
+        self.needle_height_changed.emit(
+            self._axis_a_lowering_for_gcode_coordinate(a_position)
+        )
         self._set_needles_state(abs(a_position) <= self.A_ZERO_TOLERANCE, known=True)
 
     def _update_needles_from_status(self, status: _Status) -> None:
@@ -2906,7 +3507,9 @@ class StageController(QObject):
         if a_position is None:
             return
 
-        self.needle_height_changed.emit(a_position)
+        self.needle_height_changed.emit(
+            self._axis_a_lowering_for_gcode_coordinate(a_position)
+        )
 
         effective_homed = status.homed_axes
         if effective_homed is None and self._homed_axes:
@@ -2979,6 +3582,7 @@ class StageController(QObject):
             else:
                 axes.add("A")
             self._update_homing_status(axes)
+            self._update_limit_axes(self._limit_axes.difference(axes))
             self._controller_state_stale = False
             self._set_needles_state(True, known=True)
             if self._controller_session_marker is None:
@@ -3095,8 +3699,9 @@ class StageController(QObject):
                     "A axis position is unknown; cannot adjust needles during oscillation."
                 )
             if action == "raise":
-                delta = -current_a
-                if abs(delta) < 1e-6:
+                target_a = 0.0
+                relative_a_move = target_a - current_a
+                if abs(relative_a_move) < 1e-6:
                     self._update_needles_from_a_position(0.0)
                     self.needles_action_finished.emit(
                         True,
@@ -3105,13 +3710,16 @@ class StageController(QObject):
                     )
                     return
             elif action == "lower":
-                if self._needle_down_offset is None:
+                if self._needle_down_lowering_mm is None:
                     raise StageControllerError(
                         "Needle down calibration missing; cannot lower."
                     )
-                delta = float(self._needle_down_offset) - current_a
-                if abs(delta) < 1e-6:
-                    self._update_needles_from_a_position(float(self._needle_down_offset))
+                target_a = self._axis_a_gcode_coordinate_for_lowering(
+                    float(self._needle_down_lowering_mm)
+                )
+                relative_a_move = target_a - current_a
+                if abs(relative_a_move) < 1e-6:
+                    self._update_needles_from_a_position(target_a)
                     self.needles_action_finished.emit(
                         True,
                         "Needles already lowered.",
@@ -3119,8 +3727,13 @@ class StageController(QObject):
                     )
                     return
             elif action == "adjust":
-                delta = 0.0 if step_mm is None else float(step_mm)
-                if abs(delta) < 1e-6:
+                requested_step = 0.0 if step_mm is None else float(step_mm)
+                target_a = self._axis_a_gcode_coordinate_for_lowering_step(
+                    current_a,
+                    requested_step,
+                )
+                relative_a_move = target_a - current_a
+                if abs(relative_a_move) < 1e-6:
                     self.needles_action_finished.emit(
                         True,
                         "Needle position unchanged.",
@@ -3132,15 +3745,16 @@ class StageController(QObject):
 
             self._write_relative_g1_unchecked(
                 serial_connection,
-                MoveVector(a=delta),
+                MoveVector(a=relative_a_move),
                 feedrate=self.DEFAULT_FEEDRATE,
             )
-            new_a = current_a + delta
+            new_a = target_a
             self._update_cached_axis_position("A", new_a)
             self._update_needles_from_a_position(new_a)
             if action == "adjust":
-                direction = "lowered" if delta < 0 else "raised"
-                message = f"Needles {direction} by {abs(delta):.3f} mm."
+                requested_step = 0.0 if step_mm is None else float(step_mm)
+                direction = "lowered" if requested_step < 0 else "raised"
+                message = f"Needles {direction} by {abs(requested_step):.3f} mm."
             elif action == "raise":
                 message = "Needles raised."
             else:
@@ -3365,6 +3979,18 @@ class StageController(QObject):
             return
         self._homed_axes = set(homed_axes)
         self.homing_status_changed.emit(set(self._homed_axes))
+
+    def _update_limit_axes(self, limit_axes: set[str]) -> None:
+        axes = {
+            str(axis).strip().upper()
+            for axis in limit_axes
+            if str(axis).strip().upper()
+        }
+        axes = axes.intersection(self.AXIS_INDEX)
+        if axes == self._limit_axes:
+            return
+        self._limit_axes = set(axes)
+        self.limit_axes_changed.emit(set(self._limit_axes))
 
     @staticmethod
     def _qimage_to_gray(image: QImage) -> np.ndarray:

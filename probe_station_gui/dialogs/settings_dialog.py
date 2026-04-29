@@ -324,7 +324,7 @@ class FeedrateGroupEditor(QWidget):
         if not presets:
             presets = list(self._fallback_presets)
         default_value = self._default_value
-        if default_value <= 0 or all(not math.isclose(default_value, value, rel_tol=1e-9, abs_tol=1e-9) for value in presets):
+        if default_value <= 0:
             default_value = presets[0] if presets else self._fallback_default
         return FeedrateGroup(presets=presets, default=default_value)
 
@@ -333,17 +333,22 @@ class FeedrateGroupEditor(QWidget):
         self._list.clear()
         for value in self._presets:
             self._list.addItem(self._format_value(value))
-        if not any(math.isclose(self._default_value, value, rel_tol=1e-9, abs_tol=1e-9) for value in self._presets):
-            if self._presets:
-                self._default_value = self._presets[0]
-            else:
-                self._default_value = self._fallback_default
+        if self._default_value <= 0:
+            self._default_value = (
+                self._presets[0] if self._presets else self._fallback_default
+            )
         self._refresh_default_options()
 
     def _refresh_default_options(self) -> None:
         values = list(self._presets) if self._presets else list(self._fallback_presets)
         if not values:
             values = [self._fallback_default]
+        if self._default_value > 0 and not any(
+            math.isclose(self._default_value, value, rel_tol=1e-9, abs_tol=1e-9)
+            for value in values
+        ):
+            values.append(self._default_value)
+            values.sort()
         texts = [self._format_value(value) for value in values]
         desired_text = self._format_value(self._default_value)
 
@@ -657,7 +662,7 @@ class NeedleCalibrationSettingsWidget(QWidget):
         self._down_position_spin.setSingleStep(0.01)
         self._down_position_spin.setSuffix(" mm")
         self._down_position_spin.setValue(calibration_settings.down_position_mm)
-        layout.addRow(QLabel("Calibrated down A position", self), self._down_position_spin)
+        layout.addRow(QLabel("Calibrated down lowering", self), self._down_position_spin)
 
         self._function_combo.currentTextChanged.connect(
             lambda _text: self._update_lcr_control_state()

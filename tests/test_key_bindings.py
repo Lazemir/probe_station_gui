@@ -61,6 +61,7 @@ settings_manager = _load_module(
 KeyBinding = settings_manager.KeyBinding
 JogSettings = settings_manager.JogSettings
 NeedleCalibrationSettings = settings_manager.NeedleCalibrationSettings
+AxisACalibrationSettings = settings_manager.AxisACalibrationSettings
 OscillationSettings = settings_manager.OscillationSettings
 SavedStagePositionSettings = settings_manager.SavedStagePositionSettings
 SettingsManager = settings_manager.SettingsManager
@@ -195,6 +196,36 @@ class JogSettingsTest(unittest.TestCase):
         self.assertEqual(parsed.manual_axis_distance_mm, 0.125)
         self.assertEqual(parsed.manual_axis_mode, "G91")
         self.assertEqual(parsed.manual_axis_feedrate_mm_min, 123.4)
+
+
+class AxisACalibrationSettingsTest(unittest.TestCase):
+    def test_axis_a_calibration_round_trip_preserves_sine_model(self) -> None:
+        settings = AxisACalibrationSettings(
+            configured=True,
+            steps_per_mm=2500.0,
+            commanded_lowering_min_mm=0.0,
+            commanded_lowering_max_mm=5.0,
+            offset_mm=0.006879563812405575,
+            amplitude_mm=4.175160198502771,
+            angular_frequency_rad_per_mm=0.25075568892433536,
+            phase_rad=0.8855481310064558,
+        )
+
+        restored = AxisACalibrationSettings(**settings.to_dict())
+
+        self.assertEqual(restored, settings)
+
+    def test_parse_axis_a_calibration_disables_invalid_model(self) -> None:
+        manager = object.__new__(SettingsManager)
+
+        parsed = manager._parse_axis_a_calibration(
+            {
+                "configured": True,
+                "steps_per_mm": 0,
+            }
+        )
+
+        self.assertFalse(parsed.configured)
 
 
 if __name__ == "__main__":
