@@ -3196,7 +3196,20 @@ class Main(QMainWindow):
         self._queue_or_start_homing_axes([axis_name])
 
     def _request_home_all_from_ui(self) -> None:
-        self._queue_or_start_homing_axes(["X", "Y", "Z", "A"])
+        if self._coordinate_move_axis is not None:
+            self.stage_controller.status_message.emit(
+                "Stage is busy. Ignoring home request."
+            )
+            return
+        latest_state = (self.stage_controller.latest_stage_state() or "").lower()
+        if latest_state not in {"", "idle"}:
+            self.stage_controller.status_message.emit(
+                "Stage is busy. Ignoring home request."
+            )
+            return
+        if self.stage_controller.request_home_all():
+            self._pending_homing_axes.clear()
+            self._refresh_pending_homing_ui()
 
     def _queue_or_start_homing_axes(self, axes: list[str]) -> None:
         normalized: list[str] = []
