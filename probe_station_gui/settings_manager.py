@@ -380,15 +380,15 @@ class AxisACalibrationSettings:
     model: str = "cosine_displacement"
     steps_per_mm: float = 2500.0
     commanded_lowering_min_mm: float = 0.0
-    commanded_lowering_max_mm: float = 5.0
-    offset_mm: float = 0.006879563812405575
-    amplitude_mm: float = 4.175160198502771
-    angular_frequency_rad_per_mm: float = 0.25075568892433536
-    phase_rad: float = 0.8855481310064558
-    fit_rmse_mm: float = 0.003298102306833686
-    fit_max_abs_error_mm: float = 0.013190533545433425
+    commanded_lowering_max_mm: float = 6.0
+    offset_mm: float = -0.00013272701600556085
+    amplitude_mm: float = 4.29496757977153
+    angular_frequency_rad_per_mm: float = 0.24349261926759336
+    phase_rad: float = 0.8994441869661569
+    fit_rmse_mm: float = 0.003615354561001594
+    fit_max_abs_error_mm: float = 0.010851950741578964
     source: str = "calibrations/axis_a_calibration.json"
-    created_at: str = "2026-04-29T15:04:45.242243+00:00"
+    created_at: str = "2026-04-30T15:10:49.564867+00:00"
 
     def clone(self) -> "AxisACalibrationSettings":
         """Return a copy of the A-axis calibration model."""
@@ -582,15 +582,15 @@ class SettingsManager:
     DEFAULT_AXIS_A_CALIBRATION_MODEL: str = "cosine_displacement"
     DEFAULT_AXIS_A_CALIBRATION_STEPS_PER_MM: float = 2500.0
     DEFAULT_AXIS_A_CALIBRATION_MIN_MM: float = 0.0
-    DEFAULT_AXIS_A_CALIBRATION_MAX_MM: float = 5.0
-    DEFAULT_AXIS_A_CALIBRATION_OFFSET_MM: float = 0.006879563812405575
-    DEFAULT_AXIS_A_CALIBRATION_AMPLITUDE_MM: float = 4.175160198502771
-    DEFAULT_AXIS_A_CALIBRATION_ANGULAR_FREQUENCY: float = 0.25075568892433536
-    DEFAULT_AXIS_A_CALIBRATION_PHASE_RAD: float = 0.8855481310064558
-    DEFAULT_AXIS_A_CALIBRATION_RMSE_MM: float = 0.003298102306833686
-    DEFAULT_AXIS_A_CALIBRATION_MAX_ABS_ERROR_MM: float = 0.013190533545433425
+    DEFAULT_AXIS_A_CALIBRATION_MAX_MM: float = 6.0
+    DEFAULT_AXIS_A_CALIBRATION_OFFSET_MM: float = -0.00013272701600556085
+    DEFAULT_AXIS_A_CALIBRATION_AMPLITUDE_MM: float = 4.29496757977153
+    DEFAULT_AXIS_A_CALIBRATION_ANGULAR_FREQUENCY: float = 0.24349261926759336
+    DEFAULT_AXIS_A_CALIBRATION_PHASE_RAD: float = 0.8994441869661569
+    DEFAULT_AXIS_A_CALIBRATION_RMSE_MM: float = 0.003615354561001594
+    DEFAULT_AXIS_A_CALIBRATION_MAX_ABS_ERROR_MM: float = 0.010851950741578964
     DEFAULT_AXIS_A_CALIBRATION_SOURCE: str = "calibrations/axis_a_calibration.json"
-    DEFAULT_AXIS_A_CALIBRATION_CREATED_AT: str = "2026-04-29T15:04:45.242243+00:00"
+    DEFAULT_AXIS_A_CALIBRATION_CREATED_AT: str = "2026-04-30T15:10:49.564867+00:00"
     DEFAULT_POSITION_MODE: str = "work"
     DEFAULT_COORDINATE_STARTUP_MODE: str = "controller"
     DEFAULT_COORDINATE_SYSTEM: str = "G54"

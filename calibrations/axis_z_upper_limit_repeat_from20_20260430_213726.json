@@ -1,0 +1,261 @@
+{
+  "final": {
+    "ok": false,
+    "reason": "failed_to_move_down_off_upper"
+  },
+  "events": [
+    {
+      "t": 1777574247.3903992,
+      "kind": "boot",
+      "text": "PI_FAST_FLASH_BOOT)\r\nconfigsip: 0, SPIWP:0xee\r\nclk_drv:0x00,q_drv:0x00,d_drv:0x00,cs0_drv:0x00,hd_drv:0x00,wp_drv:0x00\r\nmode:DIO, clock div:1\r\nload:0x3fff0030,len:1184\r\nload:0x40078000,len:13260\r\nload:0x40080400,len:3028\r\nentry 0x400805e4\r\n[MSG:INFO: uart_channel0 created]\r\n\r\n[MSG:RST]\r\n[MSG:INFO: FluidNC v4.0.3 https://github.com/bdring/FluidNC]\r\n[MSG:INFO: Local filesystem is /littlefs]\r\n[MSG:INFO: Configuration file:config_main.yaml]\r\n[MSG:INFO: Machine Default (Test Drive no I/O)]\r\n[MSG:INFO: Board None]\r\n[MSG:INFO: Stepping:RMT Pulse:8us Dsbl Delay:1000us Dir Delay:8us Idle Delay:255ms]\r\n[MSG:INFO: Axis count 5]\r\n[MSG:INFO: Shared stepper disable gpio.18:low]\r\n[MSG:INFO: Axis X (0.000,64.000)]\r\n[MSG:INFO:   Motor0]\r\n[MSG:INFO:     standard_stepper Step:gpio.19 Dir:gpio.21:low Disable:NO_PIN]\r\n[MSG:INFO:  X All Limit gpio.4]\r\n[MSG:INFO: Axis Y (0.000,64.000)]\r\n[MSG:INFO:   Motor0]\r\n[MSG:INFO:     standard_stepper Step:gpio.22 Dir:gpio.23:low Disable:NO_PIN]\r\n[MSG:INFO:  Y All Limit gpio.5]\r\n[MSG:INFO: Axis Z (0.000,20.000)]\r\n[MSG:INFO:   Motor0]\r\n[MSG:INFO:     standard_stepper Step:gpio.25 Dir:gpio.26 Disable:NO_PIN]\r\n[MSG:INFO:  Z All Limit gpio.34]\r\n[MSG:INFO: Axis A (-6.000,0.000)]\r\n[MSG:INFO:   Motor0]\r\n[MSG:INFO:     standard_stepper Step:gpio.32 Dir:gpio.33 Disable:NO_PIN]\r\n[MSG:INFO:  A All Limit gpio.35]\r\n[MSG:INFO: Axis B (-1000.000,0.000)]\r\n[MSG:INFO:   Motor0]\r\n[MSG:INFO:     standard_stepper Step:gpio.13 Dir:gpio.14:low Disable:NO_PIN]\r\n[MSG:INFO: Kinematic system: Cartesian]\r\n[MSG:WARN: Input pin(s) active on startup:Z]\r\n[MSG:INFO: ALARM: Hard Limit]\r\nALARM:1\r\n[MSG:ERR: Reset to continue]\r\n\r\nGrbl 4.0 [FluidNC v4.0.3 (esp32-noradio) '$' for help]"
+    },
+    {
+      "t": 1777574247.7173998,
+      "kind": "status",
+      "raw": "<Alarm|WPos:-32.000,-32.000,0.000,0.000,0.000|Bf:15,128|FS:0,0|Pn:Z|WCO:32.000,32.000,0.000,0.000,0.000>",
+      "parsed": {
+        "raw": "<Alarm|WPos:-32.000,-32.000,0.000,0.000,0.000|Bf:15,128|FS:0,0|Pn:Z|WCO:32.000,32.000,0.000,0.000,0.000>",
+        "state": "Alarm",
+        "z": 0.0,
+        "pins": "Z"
+      }
+    },
+    {
+      "t": 1777574247.7173998,
+      "kind": "recover_normal_start",
+      "amount": 1.0
+    },
+    {
+      "t": 1777574248.0493994,
+      "kind": "status",
+      "raw": "<Alarm|WPos:-32.000,-32.000,0.000,0.000,0.000|Bf:15,128|FS:0,0|Pn:Z|Ov:100,100,100>",
+      "parsed": {
+        "raw": "<Alarm|WPos:-32.000,-32.000,0.000,0.000,0.000|Bf:15,128|FS:0,0|Pn:Z|Ov:100,100,100>",
+        "state": "Alarm",
+        "z": 0.0,
+        "pins": "Z"
+      }
+    },
+    {
+      "t": 1777574248.0493994,
+      "kind": "send_raw",
+      "label": "ctrl_x_reset"
+    },
+    {
+      "t": 1777574249.898157,
+      "kind": "reply",
+      "text": "Grbl 4.0 [FluidNC v4.0.3 (esp32-noradio) '$' for help]"
+    },
+    {
+      "t": 1777574250.6033158,
+      "kind": "restart_status",
+      "status": {
+        "raw": "<Idle|WPos:-32.000,-32.000,0.000,0.000,0.000|Bf:15,128|FS:0,0|Pn:Z|WCO:32.000,32.000,0.000,0.000,0.000>",
+        "state": "Idle",
+        "z": 0.0,
+        "pins": "Z"
+      },
+      "text": ""
+    },
+    {
+      "t": 1777574250.6033158,
+      "kind": "send",
+      "line": "G21"
+    },
+    {
+      "t": 1777574251.314668,
+      "kind": "reply",
+      "text": "ok"
+    },
+    {
+      "t": 1777574251.314668,
+      "kind": "send",
+      "line": "G91"
+    },
+    {
+      "t": 1777574251.9176695,
+      "kind": "reply",
+      "text": "ok"
+    },
+    {
+      "t": 1777574252.2482178,
+      "kind": "status",
+      "raw": "<Idle|WPos:-32.000,-32.000,0.000,0.000,0.000|Bf:15,128|FS:0,0|Pn:Z|Ov:100,100,100>",
+      "parsed": {
+        "raw": "<Idle|WPos:-32.000,-32.000,0.000,0.000,0.000|Bf:15,128|FS:0,0|Pn:Z|Ov:100,100,100>",
+        "state": "Idle",
+        "z": 0.0,
+        "pins": "Z"
+      }
+    },
+    {
+      "t": 1777574252.2482178,
+      "kind": "send",
+      "line": "G1 Z-1.000 F20.0"
+    },
+    {
+      "t": 1777574252.8649027,
+      "kind": "reply",
+      "text": "ok"
+    },
+    {
+      "t": 1777574253.1989577,
+      "kind": "motion_status",
+      "label": "normal_down_1.000",
+      "state": "Run",
+      "z": -0.202,
+      "pins": "Z",
+      "raw": "<Run|WPos:-32.000,-32.000,-0.202,0.000,0.000|Bf:14,128|FS:20,0|Pn:Z>"
+    },
+    {
+      "t": 1777574253.5271378,
+      "kind": "status",
+      "raw": "<Run|WPos:-32.000,-32.000,-0.313,0.000,0.000|Bf:14,128|FS:20,0|Pn:Z>",
+      "parsed": {
+        "raw": "<Run|WPos:-32.000,-32.000,-0.313,0.000,0.000|Bf:14,128|FS:20,0|Pn:Z>",
+        "state": "Run",
+        "z": -0.313,
+        "pins": "Z"
+      }
+    },
+    {
+      "t": 1777574253.5271378,
+      "kind": "recover_normal_result",
+      "ok": false,
+      "before": {
+        "raw": "<Idle|WPos:-32.000,-32.000,0.000,0.000,0.000|Bf:15,128|FS:0,0|Pn:Z|Ov:100,100,100>",
+        "state": "Idle",
+        "z": 0.0,
+        "pins": "Z"
+      },
+      "after": {
+        "raw": "<Run|WPos:-32.000,-32.000,-0.202,0.000,0.000|Bf:14,128|FS:20,0|Pn:Z>",
+        "state": "Run",
+        "z": -0.202,
+        "pins": "Z"
+      },
+      "moved": true
+    },
+    {
+      "t": 1777574253.5271378,
+      "kind": "recover_config_start"
+    },
+    {
+      "t": 1777574253.5271378,
+      "kind": "send",
+      "line": "$Config/Filename=config_recover_z.yaml"
+    },
+    {
+      "t": 1777574254.2431638,
+      "kind": "reply",
+      "text": "error:8\r\n[MSG:ERR: Command requires idle state]"
+    },
+    {
+      "t": 1777574254.2431638,
+      "kind": "send",
+      "line": "$Bye=RESTART"
+    },
+    {
+      "t": 1777574255.2536964,
+      "kind": "reply",
+      "text": "error:120\r\n[MSG:ERR: Another interface is busy]"
+    },
+    {
+      "t": 1777574257.448689,
+      "kind": "restart_status",
+      "status": {
+        "raw": "<Idle|WPos:-32.000,-32.000,-1.000,0.000,0.000|Bf:15,128|FS:0,0|Pn:Z>",
+        "state": "Idle",
+        "z": -1.0,
+        "pins": "Z"
+      },
+      "text": ""
+    },
+    {
+      "t": 1777574257.448689,
+      "kind": "send",
+      "line": "G21"
+    },
+    {
+      "t": 1777574258.061216,
+      "kind": "reply",
+      "text": "ok"
+    },
+    {
+      "t": 1777574258.061216,
+      "kind": "send",
+      "line": "G91"
+    },
+    {
+      "t": 1777574258.688637,
+      "kind": "reply",
+      "text": "ok"
+    },
+    {
+      "t": 1777574258.688637,
+      "kind": "send",
+      "line": "G1 Z-1.500 F20.0"
+    },
+    {
+      "t": 1777574259.223738,
+      "kind": "reply",
+      "text": "ok"
+    },
+    {
+      "t": 1777574259.555179,
+      "kind": "motion_status",
+      "label": "recovery_config_down",
+      "state": "Run",
+      "z": -1.175,
+      "pins": "Z",
+      "raw": "<Run|WPos:-32.000,-32.000,-1.175,0.000,0.000|Bf:14,128|FS:20,0|Pn:Z>"
+    },
+    {
+      "t": 1777574259.555179,
+      "kind": "send",
+      "line": "$Config/Filename=config_main.yaml"
+    },
+    {
+      "t": 1777574260.2659712,
+      "kind": "reply",
+      "text": "error:8\r\n[MSG:ERR: Command requires idle state]"
+    },
+    {
+      "t": 1777574260.2659712,
+      "kind": "send",
+      "line": "$Bye=RESTART"
+    },
+    {
+      "t": 1777574261.19887,
+      "kind": "reply",
+      "text": "error:120\r\n[MSG:ERR: Another interface is busy]"
+    },
+    {
+      "t": 1777574263.409255,
+      "kind": "restart_status",
+      "status": {
+        "raw": "<Run|WPos:-32.000,-32.000,-2.453,0.000,0.000|Bf:14,128|FS:20,0|Pn:Z>",
+        "state": "Run",
+        "z": -2.453,
+        "pins": "Z"
+      },
+      "text": ""
+    },
+    {
+      "t": 1777574263.409255,
+      "kind": "recover_config_result",
+      "down": {
+        "raw": "<Run|WPos:-32.000,-32.000,-1.175,0.000,0.000|Bf:14,128|FS:20,0|Pn:Z>",
+        "state": "Run",
+        "z": -1.175,
+        "pins": "Z"
+      },
+      "restored_status": {
+        "raw": "<Run|WPos:-32.000,-32.000,-2.453,0.000,0.000|Bf:14,128|FS:20,0|Pn:Z>",
+        "state": "Run",
+        "z": -2.453,
+        "pins": "Z"
+      }
+    }
+  ]
+}

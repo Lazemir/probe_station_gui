@@ -810,18 +810,18 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
                     model="cosine_displacement",
                     steps_per_mm=2500.0,
                     commanded_lowering_min_mm=0.0,
-                    commanded_lowering_max_mm=5.0,
-                    offset_mm=0.006879563812405575,
-                    amplitude_mm=4.175160198502771,
-                    angular_frequency_rad_per_mm=0.25075568892433536,
-                    phase_rad=0.8855481310064558,
+                    commanded_lowering_max_mm=6.0,
+                    offset_mm=-0.00013272701600556085,
+                    amplitude_mm=4.29496757977153,
+                    angular_frequency_rad_per_mm=0.24349261926759336,
+                    phase_rad=0.8994441869661569,
                 )
             )
 
             target_a = controller.axis_a_gcode_coordinate_for_lowering(0.02)
 
             self.assertLess(target_a, 0.0)
-            self.assertAlmostEqual(target_a, -0.0246108657, places=6)
+            self.assertAlmostEqual(target_a, -0.0243676184, places=6)
             self.assertAlmostEqual(
                 controller.axis_a_lowering_for_gcode_coordinate(0.0),
                 0.0,
@@ -855,11 +855,11 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
                     model="cosine_displacement",
                     steps_per_mm=2500.0,
                     commanded_lowering_min_mm=0.0,
-                    commanded_lowering_max_mm=5.0,
-                    offset_mm=0.006879563812405575,
-                    amplitude_mm=4.175160198502771,
-                    angular_frequency_rad_per_mm=0.25075568892433536,
-                    phase_rad=0.8855481310064558,
+                    commanded_lowering_max_mm=6.0,
+                    offset_mm=-0.00013272701600556085,
+                    amplitude_mm=4.29496757977153,
+                    angular_frequency_rad_per_mm=0.24349261926759336,
+                    phase_rad=0.8994441869661569,
                 )
             )
             controller._query_status = lambda _serial: types.SimpleNamespace(
@@ -890,7 +890,7 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
             controller._run_needles_adjust(-0.02)
 
             self.assertEqual(targets[0][0], "A")
-            self.assertAlmostEqual(targets[0][1], -0.0246108657, places=6)
+            self.assertAlmostEqual(targets[0][1], -0.0243676184, places=6)
         finally:
             controller.shutdown()
 
@@ -903,11 +903,11 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
                     model="cosine_displacement",
                     steps_per_mm=2500.0,
                     commanded_lowering_min_mm=0.0,
-                    commanded_lowering_max_mm=5.0,
-                    offset_mm=0.006879563812405575,
-                    amplitude_mm=4.175160198502771,
-                    angular_frequency_rad_per_mm=0.25075568892433536,
-                    phase_rad=0.8855481310064558,
+                    commanded_lowering_max_mm=6.0,
+                    offset_mm=-0.00013272701600556085,
+                    amplitude_mm=4.29496757977153,
+                    angular_frequency_rad_per_mm=0.24349261926759336,
+                    phase_rad=0.8994441869661569,
                 )
             )
             controller._query_status = lambda _serial: types.SimpleNamespace(
@@ -938,11 +938,11 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
                     model="cosine_displacement",
                     steps_per_mm=2500.0,
                     commanded_lowering_min_mm=0.0,
-                    commanded_lowering_max_mm=5.0,
-                    offset_mm=0.006879563812405575,
-                    amplitude_mm=4.175160198502771,
-                    angular_frequency_rad_per_mm=0.25075568892433536,
-                    phase_rad=0.8855481310064558,
+                    commanded_lowering_max_mm=6.0,
+                    offset_mm=-0.00013272701600556085,
+                    amplitude_mm=4.29496757977153,
+                    angular_frequency_rad_per_mm=0.24349261926759336,
+                    phase_rad=0.8994441869661569,
                 )
             )
 

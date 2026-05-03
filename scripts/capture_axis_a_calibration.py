@@ -215,7 +215,8 @@ def command_response(
 
 
 def query_status(serial_connection: serial.Serial, *, timeout_s: float = 2.0) -> dict[str, Any]:
-    write_command(serial_connection, "?")
+    serial_connection.write(b"?")
+    serial_connection.flush()
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         line = serial_connection.readline().decode("ascii", errors="ignore").strip()

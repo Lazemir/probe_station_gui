@@ -204,11 +204,11 @@ class AxisACalibrationSettingsTest(unittest.TestCase):
             configured=True,
             steps_per_mm=2500.0,
             commanded_lowering_min_mm=0.0,
-            commanded_lowering_max_mm=5.0,
-            offset_mm=0.006879563812405575,
-            amplitude_mm=4.175160198502771,
-            angular_frequency_rad_per_mm=0.25075568892433536,
-            phase_rad=0.8855481310064558,
+            commanded_lowering_max_mm=6.0,
+            offset_mm=-0.00013272701600556085,
+            amplitude_mm=4.29496757977153,
+            angular_frequency_rad_per_mm=0.24349261926759336,
+            phase_rad=0.8994441869661569,
         )
 
         restored = AxisACalibrationSettings(**settings.to_dict())
