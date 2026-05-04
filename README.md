@@ -39,6 +39,8 @@ Core Python packages:
 - `scipy`
 - `gdstk`
 - `pyqtgraph`
+- `fastapi`
+- `uvicorn`
 
 Optional packages for LCR support:
 - `pyvisa`
@@ -354,6 +356,44 @@ At startup the application synchronizes with the controller and uses what `Fluid
 Operator notes:
 - if you manually change `G54/G55/...` or coordinate-reporting settings, re-check the displayed coordinates and re-sync if needed;
 - make sure the coordinates shown in the UI are the ones you intend to work in.
+
+## HTTP Control API
+
+When the GUI starts, it also starts a local FastAPI server at:
+
+```text
+http://127.0.0.1:8765
+```
+
+The API uses the same coordinate basis and feedrate that the GUI currently shows. If settings are configured for machine coordinates, API targets are machine coordinates; if settings are configured for work coordinates, API targets are work coordinates. Coordinate move requests go through the same queue and status display as editing the coordinate fields in the status bar.
+
+Move to a coordinate:
+
+```powershell
+Invoke-RestMethod -Method Post `
+  -Uri http://127.0.0.1:8765/api/v1/stage/move `
+  -ContentType application/json `
+  -Body '{"x": 12.5, "y": 8.0}'
+```
+
+Equivalent payload:
+
+```json
+{
+  "coordinates": {
+    "X": 12.5,
+    "Y": 8.0
+  }
+}
+```
+
+Read the GUI-visible stage state:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8765/api/v1/stage/status
+```
+
+You can override the bind address with `PROBE_STATION_API_HOST` and `PROBE_STATION_API_PORT`.
 
 ## Settings
 

@@ -10,9 +10,9 @@ import time
 from datetime import datetime
 from pathlib import Path
 import sys
-from typing import TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING
 
-from PySide6.QtCore import QLocale, QThread, QTimer, Qt, QUrl, Signal
+from PySide6.QtCore import QObject, QLocale, QThread, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import (
     QAction,
     QDesktopServices,
@@ -44,6 +44,7 @@ from probe_station_gui.design_model import DesignDocument, DesignModelError
 from probe_station_gui.design_script import ScriptContext, load_measurement_plan
 from probe_station_gui.design_session import AlignmentPreparation, DesignSession
 from probe_station_gui.dialogs.settings_dialog import SettingsDialog
+from probe_station_gui.api_server import ProbeStationApiServer
 from probe_station_gui.lcr_meter import LCRMeterController
 from probe_station_gui.settings_manager import Settings, SettingsManager
 from probe_station_gui.views.alignment_panel import AlignmentPanel
@@ -63,6 +64,72 @@ if TYPE_CHECKING:
         DesignLayoutWindow,
         DesignNavigatorPanel,
     )
+
+
+class _ApiRequestBridge(QObject):
+    """Route API thread requests onto the Qt GUI thread."""
+
+    request_received: Signal = Signal(object)
+
+    def __init__(
+        self,
+        handler: Callable[[dict[str, Any]], dict[str, Any]],
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._handler = handler
+        self.request_received.connect(
+            self._handle_request,
+            Qt.ConnectionType.QueuedConnection,
+        )
+
+    def submit(
+        self,
+        request: dict[str, Any],
+        *,
+        timeout_s: float = 5.0,
+    ) -> dict[str, Any]:
+        event = threading.Event()
+        envelope: dict[str, Any] = {
+            "request": dict(request),
+            "result": None,
+            "event": event,
+        }
+        self.request_received.emit(envelope)
+        if not event.wait(timeout_s):
+            return {
+                "accepted": False,
+                "status_code": 503,
+                "message": "GUI did not process the API request in time.",
+            }
+        result = envelope.get("result")
+        if isinstance(result, dict):
+            return result
+        return {
+            "accepted": False,
+            "status_code": 500,
+            "message": "GUI returned an invalid API response.",
+        }
+
+    def _handle_request(self, envelope: object) -> None:
+        if not isinstance(envelope, dict):
+            return
+        event = envelope.get("event")
+        try:
+            request = envelope.get("request")
+            if not isinstance(request, dict):
+                raise ValueError("Invalid API request envelope.")
+            envelope["result"] = self._handler(request)
+        except Exception as exc:
+            logger.exception("Failed to handle API request.")
+            envelope["result"] = {
+                "accepted": False,
+                "status_code": 500,
+                "message": str(exc),
+            }
+        finally:
+            if isinstance(event, threading.Event):
+                event.set()
 
 
 class Main(QMainWindow):
@@ -123,6 +190,8 @@ class Main(QMainWindow):
         self.serial_port_name: str | None = None
         self.serial_baud_rate: int | None = None
         self.settings_manager: SettingsManager = SettingsManager()
+        self._api_bridge: _ApiRequestBridge | None = None
+        self._api_server: ProbeStationApiServer | None = None
         self.joystick_panel: JoystickWindow | None = None
         self.serial_terminal_panel: SerialTerminalWindow | None = None
         self.serial_connection_panel: SerialConnectionPanel | None = None
@@ -288,7 +357,13 @@ class Main(QMainWindow):
 
         self._setup_menus()
         self._apply_settings()
+        self._api_bridge = _ApiRequestBridge(self._handle_api_request, self)
+        self._api_server = ProbeStationApiServer(
+            move_callback=self._submit_api_move_request,
+            status_callback=self._submit_api_status_request,
+        )
 
+        QTimer.singleShot(0, self._start_api_server)
         QTimer.singleShot(0, self._auto_connect_if_possible)
         QTimer.singleShot(0, self._prime_keyboard_focus)
         QTimer.singleShot(0, self._start_camera_thread)
@@ -303,6 +378,200 @@ class Main(QMainWindow):
     def _start_camera_thread(self) -> None:
         if not self.thread.isRunning():
             self.thread.start()
+
+    def _start_api_server(self) -> None:
+        if self._api_server is None:
+            return
+        _started, message = self._api_server.start()
+        if message:
+            self._show_status(message, 5000)
+
+    def _submit_api_move_request(self, targets: dict[str, float]) -> dict[str, Any]:
+        if self._api_bridge is None:
+            return {
+                "accepted": False,
+                "status_code": 503,
+                "message": "GUI API bridge is not ready.",
+            }
+        return self._api_bridge.submit(
+            {"action": "move_to_coordinates", "targets": dict(targets)}
+        )
+
+    def _submit_api_status_request(self) -> dict[str, Any]:
+        if self._api_bridge is None:
+            return {
+                "accepted": False,
+                "status_code": 503,
+                "message": "GUI API bridge is not ready.",
+            }
+        return self._api_bridge.submit({"action": "status"})
+
+    def _handle_api_request(self, request: dict[str, Any]) -> dict[str, Any]:
+        action = str(request.get("action", "")).strip().lower()
+        if action == "move_to_coordinates":
+            return self._api_move_to_coordinates(request.get("targets"))
+        if action == "status":
+            return self._api_stage_status()
+        return {
+            "accepted": False,
+            "status_code": 400,
+            "message": f"Unsupported API action: {action}",
+        }
+
+    def _api_move_to_coordinates(self, targets: object) -> dict[str, Any]:
+        if not isinstance(targets, dict):
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": "Coordinate targets must be an object.",
+            }
+
+        parsed_targets: dict[str, tuple[float, float]] = {}
+        invalid_axes: list[str] = []
+        invalid_values: list[str] = []
+        unavailable_axes: list[str] = []
+        for raw_axis, raw_value in targets.items():
+            axis = str(raw_axis).strip().upper()
+            if axis not in self.STAGE_AXIS_NAMES:
+                invalid_axes.append(str(raw_axis))
+                continue
+            try:
+                display_target = float(raw_value)
+            except (TypeError, ValueError):
+                invalid_values.append(axis)
+                continue
+            if not math.isfinite(display_target):
+                invalid_values.append(axis)
+                continue
+            raw_target = self._raw_target_from_display_value(axis, display_target)
+            if raw_target is None:
+                unavailable_axes.append(axis)
+                continue
+            parsed_targets[axis] = (float(raw_target), float(display_target))
+
+        if invalid_axes:
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": f"Unsupported axes: {', '.join(invalid_axes)}.",
+            }
+        if invalid_values:
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": f"Invalid coordinate values for: {', '.join(invalid_values)}.",
+            }
+        if unavailable_axes:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": (
+                    "Coordinates are unavailable in the GUI for: "
+                    f"{', '.join(unavailable_axes)}."
+                ),
+            }
+        ordered_targets = [
+            (axis, *parsed_targets[axis])
+            for axis in self.STAGE_AXIS_NAMES
+            if axis in parsed_targets
+        ]
+        if not ordered_targets:
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": "Provide at least one target coordinate.",
+            }
+
+        current_feedrate = self._current_linear_feedrate()
+        if self._coordinate_move_axis is not None:
+            for axis, raw_target, display_target in ordered_targets:
+                self._set_pending_stage_axis_target(axis, raw_target, display_target)
+            queued_axes = [axis for axis, _raw, _display in ordered_targets]
+            message = f"API queued coordinate targets: {', '.join(queued_axes)}."
+            self._show_status(message, 3000)
+            return {
+                "accepted": True,
+                "message": message,
+                "started_axis": None,
+                "queued_axes": queued_axes,
+                "current_feedrate_mm_min": current_feedrate,
+                "coordinate_display": self.stage_controller.coordinate_display_name(),
+                "targets": {
+                    axis: display for axis, _raw, display in ordered_targets
+                },
+            }
+
+        if self.stage_controller.is_busy():
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Stage is busy. Ignoring API coordinate target.",
+            }
+
+        first_axis, first_raw, first_display = ordered_targets[0]
+        if not self._start_coordinate_axis_move(first_axis, first_raw, first_display):
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": f"Unable to start {first_axis} coordinate move.",
+            }
+        queued_axes: list[str] = []
+        for axis, raw_target, display_target in ordered_targets[1:]:
+            self._set_pending_stage_axis_target(axis, raw_target, display_target)
+            queued_axes.append(axis)
+        if queued_axes:
+            self._show_status(
+                f"API queued next coordinate targets: {', '.join(queued_axes)}.",
+                3000,
+            )
+        return {
+            "accepted": True,
+            "message": (
+                f"API coordinate move accepted: {first_axis} started"
+                + (f"; {', '.join(queued_axes)} queued." if queued_axes else ".")
+            ),
+            "started_axis": first_axis,
+            "queued_axes": queued_axes,
+            "current_feedrate_mm_min": current_feedrate,
+            "coordinate_display": self.stage_controller.coordinate_display_name(),
+            "targets": {axis: display for axis, _raw, display in ordered_targets},
+        }
+
+    def _api_stage_status(self) -> dict[str, Any]:
+        latest_position = self.stage_controller.latest_stage_position()
+        return {
+            "accepted": True,
+            "connected": bool(
+                self.serial_connection is not None
+                and getattr(self.serial_connection, "is_open", False)
+            ),
+            "busy": self.stage_controller.is_busy(),
+            "state": self.stage_controller.latest_stage_state(),
+            "coordinate_display": self.stage_controller.coordinate_display_name(),
+            "homed_axes": sorted(self.stage_controller.homed_axes()),
+            "position": self._api_axis_value_map(latest_position),
+            "display_position": {
+                axis: float(value)
+                for axis, value in self._stage_axis_display_values.items()
+            },
+            "pending_targets": {
+                axis: float(values[1])
+                for axis, values in self._pending_stage_axis_targets.items()
+            },
+            "active_coordinate_axis": self._coordinate_move_axis,
+            "current_feedrate_mm_min": self._current_linear_feedrate(),
+        }
+
+    def _api_axis_value_map(self, position: object) -> dict[str, float] | None:
+        if not isinstance(position, (tuple, list)):
+            return None
+        values: dict[str, float] = {}
+        for axis, value in zip(self.STAGE_AXIS_NAMES, position):
+            try:
+                values[axis] = float(value)
+            except (TypeError, ValueError):
+                continue
+        return values or None
 
     def _preload_design_layout_window(self) -> None:
         if self.design_layout_window is not None or self._design_layout_preload_started:
@@ -3307,6 +3576,8 @@ class Main(QMainWindow):
         self._clear_stage_motion_axes()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        if self._api_server is not None:
+            self._api_server.stop()
         self._design_position_timer.stop()
         self._manual_jog_timer.stop()
         self._stage_motion_blink_timer.stop()

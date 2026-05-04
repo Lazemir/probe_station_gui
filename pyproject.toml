@@ -12,10 +12,12 @@ dependencies = [
     "gdstk",
     "numpy",
     "opencv-python",
+    "fastapi",
     "PySide6",
     "pyqtgraph",
     "rotpy",
     "scipy",
+    "uvicorn",
 ]
 
 [project.optional-dependencies]
