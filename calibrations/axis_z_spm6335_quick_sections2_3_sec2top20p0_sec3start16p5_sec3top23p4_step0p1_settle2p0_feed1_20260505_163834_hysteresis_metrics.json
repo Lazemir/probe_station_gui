@@ -1,0 +1,55 @@
+{
+  "source_npz": "calibrations\\axis_z_spm6335_quick_sections2_3_sec2top20p0_sec3start16p5_sec3top23p4_step0p1_settle2p0_feed1_20260505_163834.npz",
+  "sections": {
+    "2": {
+      "up": {
+        "points": 91,
+        "z_min": 10.999999999999998,
+        "z_max": 20.0,
+        "indicator_min": -1.1751612124686825e-06,
+        "indicator_max": 10.413124135298832
+      },
+      "down": {
+        "points": 91,
+        "z_min": 10.999999999999998,
+        "z_max": 20.0,
+        "indicator_min": 0.0017682933581949526,
+        "indicator_max": 10.414146731930456
+      },
+      "hysteresis_down_minus_up": {
+        "overlap_z_min": 10.999999999999998,
+        "overlap_z_max": 20.0,
+        "median_mm": 0.02666380359193976,
+        "mean_mm": 0.02975443886595621,
+        "rms_mm": 0.031146959824735067,
+        "p95_abs_mm": 0.04347437972394541,
+        "max_abs_mm": 0.046635148480600463
+      }
+    },
+    "3": {
+      "up": {
+        "points": 70,
+        "z_min": 16.5,
+        "z_max": 23.4,
+        "indicator_min": -0.01146498291425635,
+        "indicator_max": 10.11094851194122
+      },
+      "down": {
+        "points": 70,
+        "z_min": 16.5,
+        "z_max": 23.4,
+        "indicator_min": 0.0016175521577283525,
+        "indicator_max": 10.1111756156124
+      },
+      "hysteresis_down_minus_up": {
+        "overlap_z_min": 16.5,
+        "overlap_z_max": 23.4,
+        "median_mm": 0.04728776322772288,
+        "mean_mm": 0.04831732325994153,
+        "rms_mm": 0.050386330804931774,
+        "p95_abs_mm": 0.07384439531696713,
+        "max_abs_mm": 0.07750247825662449
+      }
+    }
+  }
+}

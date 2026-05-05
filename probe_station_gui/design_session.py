@@ -14,6 +14,7 @@ from .design_model import (
     MeasurementTarget,
     Point2D,
 )
+from .route_model import MeasurementRoute, RoutePoint
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,8 @@ class DesignSession:
     selected_target_index: int = -1
     script_path: str | None = None
     script_module_name: str | None = None
+    route: MeasurementRoute | None = None
+    selected_route_point_index: int = -1
     registration_status: str = "No design registration."
 
     def load_document(self, document: DesignDocument) -> None:
@@ -55,6 +58,7 @@ class DesignSession:
 
         self.document = document
         self.clear_targets()
+        self.clear_route()
         self.clear_registration()
 
     def unload_document(self) -> None:
@@ -62,6 +66,7 @@ class DesignSession:
 
         self.document = None
         self.clear_targets()
+        self.clear_route()
         self.clear_registration()
         self.script_path = None
         self.script_module_name = None
@@ -285,6 +290,83 @@ class DesignSession:
 
         self.targets = list(targets)
         self.selected_target_index = 0 if self.targets else -1
+
+    def create_route(self, *, name: str | None = None) -> MeasurementRoute:
+        """Create an empty route for the active design."""
+
+        if self.document is None:
+            raise DesignModelError("Load a design before creating a route.")
+        route = MeasurementRoute.default_for_document(self.document, name=name)
+        self.set_route(route)
+        return route
+
+    def set_route(self, route: MeasurementRoute) -> None:
+        """Attach a route after checking that it belongs to the active design."""
+
+        if self.document is None:
+            raise DesignModelError("Load a design before loading a route.")
+        route.validate_for_document(self.document)
+        self.route = route
+        self.selected_route_point_index = 0 if route.points else -1
+
+    def clear_route(self) -> None:
+        """Remove the current design-bound probe route."""
+
+        self.route = None
+        self.selected_route_point_index = -1
+
+    def add_route_point(self, point: Point2D) -> RoutePoint:
+        """Append a route point, creating a route for the active design if needed."""
+
+        if self.document is None:
+            raise DesignModelError("Load a design before adding route points.")
+        if self.route is None:
+            self.create_route()
+        assert self.route is not None
+        route_point = self.route.add_point(point)
+        self.selected_route_point_index = len(self.route.points) - 1
+        return route_point
+
+    def remove_selected_route_point(self) -> RoutePoint | None:
+        """Remove the selected route point and update selection."""
+
+        if self.route is None:
+            return None
+        removed = self.route.remove_point_at(self.selected_route_point_index)
+        if not self.route.points:
+            self.selected_route_point_index = -1
+        else:
+            self.selected_route_point_index = min(
+                max(self.selected_route_point_index, 0),
+                len(self.route.points) - 1,
+            )
+        return removed
+
+    def clear_route_points(self) -> None:
+        """Remove all points from the current route without dropping its binding."""
+
+        if self.route is None:
+            return
+        self.route.clear_points()
+        self.selected_route_point_index = -1
+
+    def select_route_point(self, index: int) -> RoutePoint | None:
+        """Select one route point by row index."""
+
+        if self.route is None or not 0 <= index < len(self.route.points):
+            self.selected_route_point_index = -1
+            return None
+        self.selected_route_point_index = index
+        return self.route.points[index]
+
+    def current_route_point(self) -> RoutePoint | None:
+        """Return the currently selected route point."""
+
+        if self.route is None:
+            return None
+        if 0 <= self.selected_route_point_index < len(self.route.points):
+            return self.route.points[self.selected_route_point_index]
+        return None
 
     def select_target_by_id(self, target_id: str) -> MeasurementTarget | None:
         """Select a target by identifier and return it."""

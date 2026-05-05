@@ -1,0 +1,467 @@
+{
+  "artifact": "Random-walk report for A and Z calibration series",
+  "A": {
+    "walk_npz": "calibrations\\axis_a_spm2600_random_walk_hysteresis_step0p01_settle1p0_nozero_20260504_231921.npz",
+    "forward_npz": "calibrations\\axis_a_spm2600_pulloff0p25_start0p230_to-lowerlimit_step0p01_settle1p0_feed30_oneshot_20260504_223257.npz",
+    "reverse_npz": "calibrations\\axis_a_spm2600_pulloff0p25_reverse_startm5p730_to0p230_step0p01_settle1p0_feed30_oneshot_nozero_20260504_225516.npz",
+    "points": 113,
+    "gcode_min_mm": -0.85,
+    "gcode_max_mm": -0.62,
+    "indicator_min_mm": 0.7816974534009482,
+    "indicator_max_mm": 0.949351427289705,
+    "minus_forward": {
+      "count": 113,
+      "mean_mm": 0.03291725347916059,
+      "median_mm": 0.0325995993264252,
+      "std_mm": 0.022150995813229664,
+      "min_mm": 0.0029346288496254758,
+      "max_mm": 0.06289482700841109,
+      "abs_p50_mm": 0.0325995993264252,
+      "abs_p95_mm": 0.061855627700626845,
+      "abs_max_mm": 0.06289482700841109
+    },
+    "minus_reverse": {
+      "count": 113,
+      "mean_mm": -0.030574160984189545,
+      "median_mm": -0.030259500016552643,
+      "std_mm": 0.022403944533317028,
+      "min_mm": -0.06239516944131829,
+      "max_mm": 0.00036015452161297645,
+      "abs_p50_mm": 0.030259500016552643,
+      "abs_p95_mm": 0.059973940697815205,
+      "abs_max_mm": 0.06239516944131829
+    },
+    "A_minus_direction_points": 54,
+    "A_plus_direction_points": 59,
+    "A_minus_nearest_forward": 43,
+    "A_minus_total": 54,
+    "A_plus_nearest_reverse": 47,
+    "A_plus_total": 59,
+    "segment_transition_vs_forward": [
+      {
+        "segment": 1,
+        "direction": 1,
+        "branch": "forward/A-",
+        "points": 5,
+        "start_residual_mm": 0.013757411480589177,
+        "end_residual_mm": 0.05263744898661038,
+        "median_abs_residual_mm": 0.03321350493769515
+      },
+      {
+        "segment": 2,
+        "direction": -1,
+        "branch": "forward/A-",
+        "points": 7,
+        "start_residual_mm": 0.04343350507412591,
+        "end_residual_mm": 0.004453965713482333,
+        "median_abs_residual_mm": 0.013757411480589177
+      },
+      {
+        "segment": 3,
+        "direction": 1,
+        "branch": "forward/A-",
+        "points": 13,
+        "start_residual_mm": 0.015541527866404614,
+        "end_residual_mm": 0.060815244587136164,
+        "median_abs_residual_mm": 0.0592642294360175
+      },
+      {
+        "segment": 4,
+        "direction": -1,
+        "branch": "forward/A-",
+        "points": 3,
+        "start_residual_mm": 0.04979145180521627,
+        "end_residual_mm": 0.030343759948057603,
+        "median_abs_residual_mm": 0.03980393343146815
+      },
+      {
+        "segment": 5,
+        "direction": -1,
+        "branch": "forward/A-",
+        "points": 11,
+        "start_residual_mm": 0.021712553548508318,
+        "end_residual_mm": 0.00359053066028725,
+        "median_abs_residual_mm": 0.007510758900700409
+      },
+      {
+        "segment": 6,
+        "direction": 1,
+        "branch": "forward/A-",
+        "points": 4,
+        "start_residual_mm": 0.013951015297619662,
+        "end_residual_mm": 0.04511471042282089,
+        "median_abs_residual_mm": 0.029813491412157944
+      },
+      {
+        "segment": 7,
+        "direction": -1,
+        "branch": "forward/A-",
+        "points": 9,
+        "start_residual_mm": 0.03517298427700677,
+        "end_residual_mm": 0.003209643191107503,
+        "median_abs_residual_mm": 0.004938955477117979
+      },
+      {
+        "segment": 8,
+        "direction": 1,
+        "branch": "forward/A-",
+        "points": 17,
+        "start_residual_mm": 0.015342320660273856,
+        "end_residual_mm": 0.06151737056073614,
+        "median_abs_residual_mm": 0.06078426611764254
+      },
+      {
+        "segment": 9,
+        "direction": -1,
+        "branch": "forward/A-",
+        "points": 6,
+        "start_residual_mm": 0.05123886696396962,
+        "end_residual_mm": 0.010612511733036456,
+        "median_abs_residual_mm": 0.027052621283794043
+      },
+      {
+        "segment": 10,
+        "direction": 1,
+        "branch": "forward/A-",
+        "points": 12,
+        "start_residual_mm": 0.021764598611863306,
+        "end_residual_mm": 0.061464637478914064,
+        "median_abs_residual_mm": 0.06161347208794821
+      },
+      {
+        "segment": 11,
+        "direction": -1,
+        "branch": "forward/A-",
+        "points": 18,
+        "start_residual_mm": 0.05120419320845926,
+        "end_residual_mm": 0.004128484759373663,
+        "median_abs_residual_mm": 0.008856421271908665
+      },
+      {
+        "segment": 12,
+        "direction": 1,
+        "branch": "forward/A-",
+        "points": 8,
+        "start_residual_mm": 0.014964302610651181,
+        "end_residual_mm": 0.060040800487842105,
+        "median_abs_residual_mm": 0.05118091057964502
+      }
+    ],
+    "segment_transition_vs_reverse": [
+      {
+        "segment": 1,
+        "direction": 1,
+        "branch": "reverse/A+",
+        "points": 5,
+        "start_residual_mm": -0.050949852242192506,
+        "end_residual_mm": -0.010417172895357929,
+        "median_abs_residual_mm": 0.030259500016552643
+      },
+      {
+        "segment": 2,
+        "direction": -1,
+        "branch": "reverse/A+",
+        "points": 7,
+        "start_residual_mm": -0.020072643435250725,
+        "end_residual_mm": -0.058617755287053264,
+        "median_abs_residual_mm": 0.050949852242192506
+      },
+      {
+        "segment": 3,
+        "direction": 1,
+        "branch": "reverse/A+",
+        "points": 13,
+        "start_residual_mm": -0.04835346971122867,
+        "end_residual_mm": -0.0019213479585946658,
+        "median_abs_residual_mm": 0.004241919073359135
+      },
+      {
+        "segment": 4,
+        "direction": -1,
+        "branch": "reverse/A+",
+        "points": 3,
+        "start_residual_mm": -0.01208274834618539,
+        "end_residual_mm": -0.03257302395137884,
+        "median_abs_residual_mm": 0.02269860628823306
+      },
+      {
+        "segment": 5,
+        "direction": -1,
+        "branch": "reverse/A+",
+        "points": 11,
+        "start_residual_mm": -0.042628920553682725,
+        "end_residual_mm": -0.06040568116944289,
+        "median_abs_residual_mm": 0.05751268094543782
+      },
+      {
+        "segment": 6,
+        "direction": 1,
+        "branch": "reverse/A+",
+        "points": 4,
+        "start_residual_mm": -0.049120705702915934,
+        "end_residual_mm": -0.01959255329996079,
+        "median_abs_residual_mm": 0.03399319221878949
+      },
+      {
+        "segment": 7,
+        "direction": -1,
+        "branch": "reverse/A+",
+        "points": 9,
+        "start_residual_mm": -0.02854538540725482,
+        "end_residual_mm": -0.06239516944131829,
+        "median_abs_residual_mm": 0.05939082860168998
+      },
+      {
+        "segment": 8,
+        "direction": 1,
+        "branch": "reverse/A+",
+        "points": 17,
+        "start_residual_mm": -0.04997212970833509,
+        "end_residual_mm": -0.0009851691589650713,
+        "median_abs_residual_mm": 0.0034003112764144916
+      },
+      {
+        "segment": 9,
+        "direction": -1,
+        "branch": "reverse/A+",
+        "points": 6,
+        "start_residual_mm": -0.011677916935466826,
+        "end_residual_mm": -0.052860493221211335,
+        "median_abs_residual_mm": 0.03523220119842163
+      },
+      {
+        "segment": 10,
+        "direction": 1,
+        "branch": "reverse/A+",
+        "points": 12,
+        "start_residual_mm": -0.04174154989751333,
+        "end_residual_mm": 0.00036015452161297645,
+        "median_abs_residual_mm": 0.0010166273927252334
+      },
+      {
+        "segment": 11,
+        "direction": -1,
+        "branch": "reverse/A+",
+        "points": 18,
+        "start_residual_mm": -0.011375678661546651,
+        "end_residual_mm": -0.05986772707035648,
+        "median_abs_residual_mm": 0.054297168125392314
+      },
+      {
+        "segment": 12,
+        "direction": 1,
+        "branch": "reverse/A+",
+        "points": 8,
+        "start_residual_mm": -0.048107418389884415,
+        "end_residual_mm": -0.0030138213941262038,
+        "median_abs_residual_mm": 0.013684441204814934
+      }
+    ]
+  },
+  "Z": {
+    "walk_npz": "calibrations\\axis_z_spm6335_section3_random_walk_after_resume_start19p214_top23p300_step0p001_settle2p0_segments500_20260505_052443_live.npz",
+    "up_reference_npz": "calibrations\\axis_z_spm6335_section3_start19p214_top23p46_step0p0025_settle2p0_feed50_20260505_040152_up.npz",
+    "down_reference_npz": "calibrations\\axis_z_spm6335_section3_resume_down_start23p300_end19p214_step0p0025_settle2p0_feed50_20260505_052443.npz",
+    "reference_note": "Z random walk is compared to the same-session section3 up curve and resumed-down curve. The resumed-down file is invalid as canonical calibration, but is the matching local branch for this random walk scale.",
+    "points": 4000,
+    "segments": 9,
+    "gcode_min_mm": 19.214,
+    "gcode_max_mm": 21.341,
+    "indicator_min_mm": 0.9787137706325884,
+    "indicator_max_mm": 4.137796140966792,
+    "minus_up": {
+      "count": 4000,
+      "mean_mm": 0.9947974652050209,
+      "median_mm": 0.9827727688937409,
+      "std_mm": 0.024174209779893947,
+      "min_mm": 0.9670700972348967,
+      "max_mm": 1.0453069972140785,
+      "abs_p50_mm": 0.9827727688937409,
+      "abs_p95_mm": 1.0372243800270646,
+      "abs_max_mm": 1.0453069972140785
+    },
+    "minus_down": {
+      "count": 3999,
+      "mean_mm": -0.048865459057716366,
+      "median_mm": -0.0603329048813408,
+      "std_mm": 0.024548058716182024,
+      "min_mm": -0.08203181311067453,
+      "max_mm": -4.922446724009433e-06,
+      "abs_p50_mm": 0.0603329048813408,
+      "abs_p95_mm": 0.07438702780880013,
+      "abs_max_mm": 0.08203181311067453
+    },
+    "Z_minus_direction_points": 1049,
+    "Z_plus_direction_points": 2951,
+    "Z_minus_nearest_down": 1049,
+    "Z_minus_total": 1049,
+    "Z_plus_nearest_up": 0,
+    "Z_plus_total": 2951,
+    "segment_transition_vs_up": [
+      {
+        "segment": 0,
+        "direction": 1,
+        "branch": "up",
+        "points": 919,
+        "start_residual_mm": 0.9951953901254518,
+        "end_residual_mm": 0.9702800934660374,
+        "median_abs_residual_mm": 0.9873036493667993
+      },
+      {
+        "segment": 1,
+        "direction": 1,
+        "branch": "up",
+        "points": 861,
+        "start_residual_mm": 0.9711451908581212,
+        "end_residual_mm": 0.9808427565088893,
+        "median_abs_residual_mm": 0.9770962741760272
+      },
+      {
+        "segment": 2,
+        "direction": -1,
+        "branch": "up",
+        "points": 183,
+        "start_residual_mm": 0.9809215366851713,
+        "end_residual_mm": 1.0344645049012833,
+        "median_abs_residual_mm": 1.029859295222368
+      },
+      {
+        "segment": 3,
+        "direction": 1,
+        "branch": "up",
+        "points": 532,
+        "start_residual_mm": 1.0343823656745377,
+        "end_residual_mm": 0.9753650605956894,
+        "median_abs_residual_mm": 0.9769488874155285
+      },
+      {
+        "segment": 4,
+        "direction": -1,
+        "branch": "up",
+        "points": 426,
+        "start_residual_mm": 0.9762280456551844,
+        "end_residual_mm": 1.0367833693811033,
+        "median_abs_residual_mm": 1.0328052454521945
+      },
+      {
+        "segment": 5,
+        "direction": -1,
+        "branch": "up",
+        "points": 263,
+        "start_residual_mm": 1.0361554983693306,
+        "end_residual_mm": 1.0370557246288694,
+        "median_abs_residual_mm": 1.0356138293710666
+      },
+      {
+        "segment": 6,
+        "direction": -1,
+        "branch": "up",
+        "points": 177,
+        "start_residual_mm": 1.0364588437685223,
+        "end_residual_mm": 1.0447352566716381,
+        "median_abs_residual_mm": 1.040511068188196
+      },
+      {
+        "segment": 7,
+        "direction": 1,
+        "branch": "up",
+        "points": 330,
+        "start_residual_mm": 1.0438431186221175,
+        "end_residual_mm": 0.9824579981116863,
+        "median_abs_residual_mm": 0.9877382003236157
+      },
+      {
+        "segment": 8,
+        "direction": 1,
+        "branch": "up",
+        "points": 309,
+        "start_residual_mm": 0.9828288038023243,
+        "end_residual_mm": 0.9817621503260292,
+        "median_abs_residual_mm": 0.981732305916355
+      }
+    ],
+    "segment_transition_vs_down": [
+      {
+        "segment": 0,
+        "direction": 1,
+        "branch": "down",
+        "points": 918,
+        "start_residual_mm": -0.004498110362205043,
+        "end_residual_mm": -0.07152100045981324,
+        "median_abs_residual_mm": 0.05701041058883771
+      },
+      {
+        "segment": 1,
+        "direction": 1,
+        "branch": "down",
+        "points": 861,
+        "start_residual_mm": -0.0706559030677294,
+        "end_residual_mm": -0.06541801664467162,
+        "median_abs_residual_mm": 0.06649402004303973
+      },
+      {
+        "segment": 2,
+        "direction": -1,
+        "branch": "down",
+        "points": 183,
+        "start_residual_mm": -0.06533923646838957,
+        "end_residual_mm": -0.008969067860201463,
+        "median_abs_residual_mm": 0.014511154737388843
+      },
+      {
+        "segment": 3,
+        "direction": 1,
+        "branch": "down",
+        "points": 532,
+        "start_residual_mm": -0.009051207086947066,
+        "end_residual_mm": -0.0719730323094403,
+        "median_abs_residual_mm": 0.06831107343399556
+      },
+      {
+        "segment": 4,
+        "direction": -1,
+        "branch": "down",
+        "points": 426,
+        "start_residual_mm": -0.0711100472499453,
+        "end_residual_mm": -0.007424051673273535,
+        "median_abs_residual_mm": 0.01247944332779527
+      },
+      {
+        "segment": 5,
+        "direction": -1,
+        "branch": "down",
+        "points": 263,
+        "start_residual_mm": -0.008051922685046176,
+        "end_residual_mm": -0.0036435548773363635,
+        "median_abs_residual_mm": 0.0070108870160980885
+      },
+      {
+        "segment": 6,
+        "direction": -1,
+        "branch": "down",
+        "points": 177,
+        "start_residual_mm": -0.004240435737683512,
+        "end_residual_mm": -3.85039906554141e-05,
+        "median_abs_residual_mm": 0.0016356588087003132
+      },
+      {
+        "segment": 7,
+        "direction": 1,
+        "branch": "down",
+        "points": 330,
+        "start_residual_mm": -0.0009306420401760107,
+        "end_residual_mm": -0.06124700888048906,
+        "median_abs_residual_mm": 0.0530981222286786
+      },
+      {
+        "segment": 8,
+        "direction": 1,
+        "branch": "down",
+        "points": 309,
+        "start_residual_mm": -0.0608762031898511,
+        "end_residual_mm": -0.06124381810537649,
+        "median_abs_residual_mm": 0.06256729247459258
+      }
+    ]
+  }
+}

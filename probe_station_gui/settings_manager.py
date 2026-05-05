@@ -524,6 +524,7 @@ class SettingsManager:
 
     CONFIG_FILENAME = "settings.json"
     CONTROLLER_STATE_FILENAME = "controller-state.json"
+    SERIAL_CONNECTION_STATE_FILENAME = "serial-connection-state.json"
     DEFAULT_LOG_FILENAME = "probe-station-gui.log"
     DEFAULT_LINEAR_FEEDRATE_PRESETS: tuple[float, ...] = (
         1.0,
@@ -708,6 +709,61 @@ class SettingsManager:
             return
         except OSError as exc:
             self._logger.warning("Failed to clear controller state %s: %s", path, exc)
+
+    def load_serial_connection_state(self) -> dict:
+        """Load persisted serial connection state, if present."""
+
+        path = self._config_dir / self.SERIAL_CONNECTION_STATE_FILENAME
+        if not path.exists():
+            return {}
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            self._logger.warning(
+                "Failed to load serial connection state from %s: %s",
+                path,
+                exc,
+            )
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return data
+
+    def save_serial_connection_state(
+        self,
+        connected: bool,
+        *,
+        port: str | None = None,
+        baud_rate: int | None = None,
+    ) -> None:
+        """Persist the latest serial connection status."""
+
+        data: dict[str, object] = {
+            "status": "connected" if connected else "disconnected",
+        }
+        if port:
+            data["port"] = str(port)
+        if baud_rate is not None:
+            data["baud_rate"] = int(baud_rate)
+
+        path = self._config_dir / self.SERIAL_CONNECTION_STATE_FILENAME
+        self._config_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            with path.open("w", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=2, ensure_ascii=False)
+        except OSError as exc:
+            self._logger.warning(
+                "Failed to save serial connection state to %s: %s",
+                path,
+                exc,
+            )
+
+    def serial_auto_connect_enabled(self) -> bool:
+        """Return whether startup should restore an open serial connection."""
+
+        data = self.load_serial_connection_state()
+        return data.get("status") == "connected"
 
     def _determine_config_dir(self) -> Path:
         """Compute the directory where configuration files should live."""

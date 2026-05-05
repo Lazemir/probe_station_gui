@@ -1,0 +1,137 @@
+{
+  "artifact": "Blended Z calibration curve stitched from sections 1, 2, and valid section 3 data",
+  "inputs": {
+    "section12_stitched": "calibrations\\axis_z_spm6335_sections1_2_stitched_curves_hysteresis_20260505.npz",
+    "old3_up": "calibrations\\axis_z_spm6335_section3_start19p214_top23p46_step0p0025_settle2p0_feed50_20260505_040152_up.npz",
+    "new3_up": "calibrations\\axis_z_spm6335_section3_current16p400_limit23p455_turn23p435_step0p0025_settle2p0_feed10_20260505_105325_up.npz",
+    "new3_down_valid": "calibrations\\axis_z_spm6335_section3_down_valid_startcal23p435_endcal16p400_startctrl7p035_endctrl0p000_step0p0025_settle2p0_feed10_20260505_130405.npz",
+    "old3_down_invalid": "calibrations\\axis_z_spm6335_section3_resume_down_start23p300_end19p214_step0p0025_settle2p0_feed50_20260505_052443.npz"
+  },
+  "alignment": {
+    "old3_dx_mm": -0.02619999999999846,
+    "old3_indicator_offset_mm": 17.16421477811916,
+    "new3_dx_mm": -0.12049999999999988,
+    "new3_indicator_offset_mm": 13.281645746127953,
+    "new3_alignment_basis": "late section3 up against section12+old3 up, and late section3 down against section12 down; one common dx and one common indicator offset",
+    "shift_estimates": {
+      "old3_up_to_section12_up": {
+        "score_trimmed_rmse_mm": 0.004205467095015842,
+        "dx_mm": -0.02619999999999846,
+        "indicator_offset_mm": 17.16421477811916,
+        "points_total": 411,
+        "points_by_pair": [
+          411
+        ],
+        "resid_mean_mm": 3.0465610316313774e-05,
+        "resid_std_mm": 0.005834104124536568,
+        "resid_p05_mm": -0.007498673395311073,
+        "resid_p95_mm": 0.008300918017145165,
+        "resid_max_abs_mm": 0.04679313090695558
+      },
+      "new3_up_to_section12_up_only": {
+        "score_trimmed_rmse_mm": 0.005177305130028383,
+        "dx_mm": -0.0689999999999999,
+        "indicator_offset_mm": 13.333907004234337,
+        "points_total": 1553,
+        "points_by_pair": [
+          1553
+        ],
+        "resid_mean_mm": 0.0007185663501688325,
+        "resid_std_mm": 0.006153605464672409,
+        "resid_p05_mm": -0.007470601815021993,
+        "resid_p95_mm": 0.014512598621330138,
+        "resid_max_abs_mm": 0.018994490898474936
+      },
+      "new3_down_to_section12_down_only": {
+        "score_trimmed_rmse_mm": 0.0044909090711903665,
+        "dx_mm": -0.09549999999999992,
+        "indicator_offset_mm": 13.332275847266502,
+        "points_total": 1513,
+        "points_by_pair": [
+          1513
+        ],
+        "resid_mean_mm": -0.00014520008097325195,
+        "resid_std_mm": 0.0052977824513151155,
+        "resid_p05_mm": -0.009084143586243697,
+        "resid_p95_mm": 0.008408256925221014,
+        "resid_max_abs_mm": 0.03638472266562509
+      },
+      "new3_up_down_to_section12_only": {
+        "score_trimmed_rmse_mm": 0.01714041822490237,
+        "dx_mm": -0.09249999999999992,
+        "indicator_offset_mm": 13.31622321448981,
+        "points_total": 3075,
+        "points_by_pair": [
+          1563,
+          1512
+        ],
+        "resid_mean_mm": 0.0029990956712944417,
+        "resid_std_mm": 0.017654259346540885,
+        "resid_p05_mm": -0.02120117820865506,
+        "resid_p95_mm": 0.026462273950475356,
+        "resid_max_abs_mm": 0.033874414582397705
+      },
+      "new3_up_to_old_full_up": {
+        "score_trimmed_rmse_mm": 0.0070407489954301475,
+        "dx_mm": -0.16899999999999993,
+        "indicator_offset_mm": 13.20190232866242,
+        "points_total": 2815,
+        "points_by_pair": [
+          2815
+        ],
+        "resid_mean_mm": -0.00012756946903528534,
+        "resid_std_mm": 0.007859204678008566,
+        "resid_p05_mm": -0.013929631413128085,
+        "resid_p95_mm": 0.012782710528887615,
+        "resid_max_abs_mm": 0.021530990458277444
+      },
+      "new3_up_full_and_down_section12_combined": {
+        "score_trimmed_rmse_mm": 0.014220610498823331,
+        "dx_mm": -0.12049999999999988,
+        "indicator_offset_mm": 13.281645746127953,
+        "points_total": 4338,
+        "points_by_pair": [
+          2815,
+          1523
+        ],
+        "resid_mean_mm": -9.31231087001805e-05,
+        "resid_std_mm": 0.015170382400375498,
+        "resid_p05_mm": -0.02434214679999904,
+        "resid_p95_mm": 0.021711723336770912,
+        "resid_max_abs_mm": 0.03133035243856419
+      }
+    }
+  },
+  "blend": {
+    "method": "smoothstep blend from section1+2 to corrected section3 over the common valid overlap",
+    "blend_lo_z_mm": 16.2815,
+    "blend_hi_z_mm": 20.214,
+    "up_high_source": "mean(night section3 up aligned, late section3 up shifted) where both exist; otherwise available high source",
+    "down_high_source": "late valid section3 down shifted"
+  },
+  "excluded_from_calibration": {
+    "old3_down_invalid": "summary marks valid_for_calibration=false; plotted only as diagnostic if needed, not used in final branch",
+    "new3_down_one_point_105325": "only one point; replaced by later valid 130405 down pass",
+    "random_walk": "diagnostic random walk, not a monotonic branch calibration input"
+  },
+  "final_up_points": 6441,
+  "final_down_points": 5283,
+  "final_hysteresis_points": 5131,
+  "final_up_gcode_min_mm": 0.02,
+  "final_up_gcode_max_mm": 23.431,
+  "final_down_gcode_min_mm": 0.02,
+  "final_down_gcode_max_mm": 23.314,
+  "hysteresis_min_mm": 0.0077844605498356145,
+  "hysteresis_p05_mm": 0.01610716922303368,
+  "hysteresis_median_mm": 0.02672517341695979,
+  "hysteresis_mean_mm": 0.032385276414261865,
+  "hysteresis_p95_mm": 0.08083912882864475,
+  "hysteresis_max_mm": 0.09364534154506288,
+  "hysteresis_std_mm": 0.017937276957076594,
+  "hysteresis_trim": {
+    "top_reversal_trim_mm": 0.02,
+    "reason": "removed final turn-around tail from hysteresis statistics/plot; up/down calibration branches remain full length",
+    "raw_hysteresis_gcode_max_mm": 23.314,
+    "trimmed_hysteresis_gcode_max_mm": 23.294
+  }
+}

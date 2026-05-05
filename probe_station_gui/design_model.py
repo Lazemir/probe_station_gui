@@ -429,6 +429,10 @@ class DesignDocument:
         segment_distance_sq = float("inf")
         segment_start: Point2D | None = None
         segment_end: Point2D | None = None
+        midpoint_point = target
+        midpoint_distance_sq = float("inf")
+        midpoint_start: Point2D | None = None
+        midpoint_end: Point2D | None = None
 
         vertex_indices, segment_indices = self._snap_candidate_indices(
             target,
@@ -465,6 +469,51 @@ class DesignDocument:
             end = candidate_ends[segment_index]
             segment_start = (float(start[0]), float(start[1]))
             segment_end = (float(end[0]), float(end[1]))
+
+            midpoints = (candidate_starts + candidate_ends) * 0.5
+            midpoint_delta = midpoints - target
+            midpoint_distance_sq_array = np.einsum(
+                "ij,ij->i",
+                midpoint_delta,
+                midpoint_delta,
+            )
+            midpoint_index = int(np.argmin(midpoint_distance_sq_array))
+            midpoint_distance_sq = float(midpoint_distance_sq_array[midpoint_index])
+            midpoint_point = np.asarray(midpoints[midpoint_index], dtype=float)
+            midpoint_segment_start = candidate_starts[midpoint_index]
+            midpoint_segment_end = candidate_ends[midpoint_index]
+            midpoint_start = (
+                float(midpoint_segment_start[0]),
+                float(midpoint_segment_start[1]),
+            )
+            midpoint_end = (
+                float(midpoint_segment_end[0]),
+                float(midpoint_segment_end[1]),
+            )
+
+        point_mode = "vertex"
+        point = vertex_point
+        point_distance_sq = vertex_distance_sq
+        point_segment_start: Point2D | None = None
+        point_segment_end: Point2D | None = None
+        if midpoint_distance_sq < point_distance_sq:
+            point_mode = "segment_center"
+            point = midpoint_point
+            point_distance_sq = midpoint_distance_sq
+            point_segment_start = midpoint_start
+            point_segment_end = midpoint_end
+        midpoint_within_threshold = (
+            max_distance is not None
+            and midpoint_distance_sq <= float(max_distance) * float(max_distance)
+        )
+        if point_mode == "segment_center" and midpoint_within_threshold:
+            return SnapResult(
+                point=(float(point[0]), float(point[1])),
+                mode=point_mode,
+                distance=math.sqrt(max(0.0, point_distance_sq)),
+                segment_start=point_segment_start,
+                segment_end=point_segment_end,
+            )
 
         if (
             vertex_distance_sq < float("inf")

@@ -1,0 +1,17 @@
+{
+  "up_path": "calibrations\\axis_z_spm6335_nozero_up_from0p020_until-ind9p95_step0p01_settle1p0_feed50_20260504_233107.npz",
+  "down_path": "calibrations\\axis_z_spm6335_nozero_down_to0p020_from-up-end_step0p01_settle1p0_feed50_20260504_233107.npz",
+  "common_points": 1330,
+  "z_min_mm": 0.02,
+  "z_max_mm": 13.31,
+  "hysteresis_definition": "down_indicator - up_indicator at same rounded GCode coordinate",
+  "hysteresis_min_mm": 0.0,
+  "hysteresis_p05_mm": 0.02046898627171778,
+  "hysteresis_median_mm": 0.030399061220712287,
+  "hysteresis_mean_mm": 0.02943985288851363,
+  "hysteresis_p95_mm": 0.034129243448626535,
+  "hysteresis_max_mm": 0.037471851037726545,
+  "hysteresis_std_mm": 0.004006562919858126,
+  "hysteresis_start_mm": 0.021802702970503685,
+  "hysteresis_end_mm": 0.0
+}

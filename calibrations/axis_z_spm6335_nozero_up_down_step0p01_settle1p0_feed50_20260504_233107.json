@@ -1,0 +1,30 @@
+{
+  "created_at": "2026-05-05T00:15:42.663390",
+  "axis": "Z",
+  "steps_per_mm": 6335,
+  "direction": "up_then_down",
+  "api_zero_at_start": false,
+  "baseline_raw_reading_mm": -0.00011148294838955741,
+  "start_z_mm": 0.02,
+  "step_mm": 0.01,
+  "feedrate_mm_min": 50.0,
+  "settle_s": 1.0,
+  "target_indicator_delta_abs_mm": 9.95,
+  "up_npz": "C:\\Users\\Public\\code\\probe_station_gui\\calibrations\\axis_z_spm6335_nozero_up_from0p020_until-ind9p95_step0p01_settle1p0_feed50_20260504_233107.npz",
+  "down_npz": "C:\\Users\\Public\\code\\probe_station_gui\\calibrations\\axis_z_spm6335_nozero_down_to0p020_from-up-end_step0p01_settle1p0_feed50_20260504_233107.npz",
+  "up_points": 1330,
+  "down_points": 1330,
+  "up_end_z_mm": 13.31,
+  "up_end_indicator_delta_mm": 9.951515082350962,
+  "down_end_z_mm": 0.02,
+  "down_end_indicator_delta_mm": 0.021802702970503685,
+  "skipped": [
+    {
+      "phase": "down",
+      "error": "TimeoutError(\"no status; last=['dle|WPos:-32.000,-32.000,12.260,-0.720,0.000|Bf:15,128|FS:0,0>']\")"
+    }
+  ],
+  "stop_reason": "completed",
+  "final_status": "<Idle|WPos:-32.000,-32.000,0.020,-0.720,0.000|Bf:15,128|FS:0,0>",
+  "resumed_down": true
+}

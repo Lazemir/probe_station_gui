@@ -1,0 +1,65 @@
+{
+  "artifact": "Independent Z hysteresis curves for sections 1, 2, and latest valid section 3, with overlap zooms",
+  "definition": "hysteresis = down_indicator - up_indicator at matching rounded GCode Z; no indicator offset is applied because it cancels in each section",
+  "section3_dx_mm": 0.0,
+  "inputs": {
+    "section1": {
+      "up": "calibrations\\axis_z_spm6335_nozero_up_from0p020_until-ind9p95_step0p01_settle1p0_feed50_20260504_233107.npz",
+      "down": "calibrations\\axis_z_spm6335_nozero_down_to0p020_from-up-end_step0p01_settle1p0_feed50_20260504_233107.npz"
+    },
+    "section2": {
+      "up": "calibrations\\axis_z_spm6335_section2_nozero_up_step0p005_settle2p0_feed50_20260505_010155.npz",
+      "down": "calibrations\\axis_z_spm6335_section2_nozero_down_step0p005_settle2p0_feed50_20260505_010155.npz"
+    },
+    "section3": {
+      "up": "calibrations\\axis_z_spm6335_section3_current16p400_limit23p455_turn23p435_step0p0025_settle2p0_feed10_20260505_105325_up.npz",
+      "down": "calibrations\\axis_z_spm6335_section3_down_valid_startcal23p435_endcal16p400_startctrl7p035_endctrl0p000_step0p0025_settle2p0_feed10_20260505_130405.npz"
+    }
+  },
+  "overlap12_z_mm": [
+    12.0,
+    13.3
+  ],
+  "overlap23_z_mm": [
+    16.412,
+    20.209
+  ],
+  "sections": {
+    "section1": {
+      "points": 1329,
+      "z_min_mm": 0.02,
+      "z_max_mm": 13.3,
+      "dropped_top_turnaround": true,
+      "median_um": 30.401885531954775,
+      "mean_um": 29.4620047718007,
+      "p05_um": 20.4893817796723,
+      "p95_um": 34.12949793568405,
+      "min_um": 10.1366708593158,
+      "max_um": 37.471851037726545
+    },
+    "section2": {
+      "points": 1643,
+      "z_min_mm": 12.0,
+      "z_max_mm": 20.209,
+      "dropped_top_turnaround": true,
+      "median_um": 24.40669505049975,
+      "mean_um": 28.984781472047867,
+      "p05_um": 18.69118611633227,
+      "p95_um": 47.99963425631225,
+      "min_um": 15.9780676545207,
+      "max_um": 52.28387726353034
+    },
+    "section3": {
+      "points": 2332,
+      "z_min_mm": 16.412,
+      "z_max_mm": 23.433,
+      "dropped_top_turnaround": true,
+      "median_um": 28.052141928004204,
+      "mean_um": 33.65378328175189,
+      "p05_um": -4.385476811552836,
+      "p95_um": 90.52077202897547,
+      "min_um": -7.549925245355915,
+      "max_um": 97.56171494220922
+    }
+  }
+}

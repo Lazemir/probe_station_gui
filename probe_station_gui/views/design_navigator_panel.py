@@ -8,12 +8,24 @@ import threading
 from pathlib import Path
 from time import perf_counter, monotonic
 
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QPointF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QIcon,
+    QKeySequence,
+    QPainter,
+    QPen,
+    QPixmap,
+    QPolygonF,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QGridLayout,
     QGroupBox,
@@ -22,8 +34,13 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QScrollArea,
+    QSpinBox,
+    QStackedWidget,
+    QStyle,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -35,6 +52,7 @@ from ..design_model import (
     Point2D,
     SnapResult,
 )
+from ..route_model import MeasurementRoute
 
 try:  # pragma: no cover - optional runtime dependency
     import pyqtgraph as pg
@@ -50,6 +68,8 @@ class _DesignPlotPane(QWidget):
 
     calibration_point_selected = Signal(int, float, float)
     move_requested = Signal(float, float)
+    route_point_requested = Signal(float, float)
+    route_pick_requested = Signal(str, float, float)
     hover_snap_changed = Signal(object)
     snap_geometry_ready = Signal(int, object, object, object)
     HOVER_SNAP_LOG_INTERVAL_S = 0.2
@@ -62,11 +82,22 @@ class _DesignPlotPane(QWidget):
         self._document: DesignDocument | None = None
         self._targets: list[MeasurementTarget] = []
         self._selected_target_id: str | None = None
+        self._probe_route: MeasurementRoute | None = None
+        self._selected_route_point_index = -1
+        self._probe_route_preview_points: list[Point2D] = []
+        self._probe_route_preview_offsets: list[Point2D] = []
+        self._tool_measure_segments: list[tuple[Point2D, Point2D]] = []
+        self._tool_measure_points: list[Point2D] = []
+        self._tool_measure_label_items: list[object] = []
+        self._tool_sketch_segments: list[tuple[Point2D, Point2D]] = []
+        self._tool_sketch_points: list[Point2D] = []
         self._source_design_marks: list[Point2D | None] = [None, None]
         self._current_design_position: Point2D | None = None
         self._fov_design_size: Point2D | None = None
         self._check_design_marks: list[Point2D] = []
         self._navigation_enabled = False
+        self._route_edit_enabled = False
+        self._route_pick_mode: str | None = None
         self._snap_enabled = True
         self._layer_items: list[object] = []
         self._hover_snap: SnapResult | None = None
@@ -108,6 +139,25 @@ class _DesignPlotPane(QWidget):
         self._plot.plotItem.hideAxis("left")
 
         self._route_item = self._plot.plot([], [], pen=pg.mkPen("#4dd0e1", width=2))
+        self._probe_route_item = self._plot.plot(
+            [], [], pen=pg.mkPen("#29b6f6", width=2.5)
+        )
+        self._probe_route_arrow_item = self._plot.plot(
+            [], [], pen=pg.mkPen("#64b5f6", width=1.35)
+        )
+        self._probe_needle_connector_item = self._plot.plot(
+            [], [], pen=pg.mkPen("#cfd8dc", width=1, style=Qt.DotLine)
+        )
+        self._probe_route_preview_item = self._plot.plot(
+            [], [], pen=pg.mkPen("#ffca28", width=2, style=Qt.DashLine)
+        )
+        self._probe_route_preview_arrow_item = self._plot.plot(
+            [], [], pen=pg.mkPen("#64b5f6", width=1.35)
+        )
+        self._probe_preview_needle_connector_item = self._plot.plot(
+            [], [], pen=pg.mkPen("#ffe082", width=1, style=Qt.DotLine)
+        )
+        self._probe_route_number_items: list[object] = []
         self._hover_segment_item = self._plot.plot(
             [],
             [],
@@ -124,6 +174,84 @@ class _DesignPlotPane(QWidget):
             brush=pg.mkBrush(77, 208, 225, 150),
             size=8,
         )
+        self._probe_route_point_item = pg.ScatterPlotItem(
+            pen=pg.mkPen("#29b6f6", width=1.5),
+            brush=pg.mkBrush(41, 182, 246, 170),
+            size=9,
+            symbol="o",
+        )
+        self._probe_route_selected_item = pg.ScatterPlotItem(
+            pen=pg.mkPen("#ff7043", width=2),
+            brush=pg.mkBrush(255, 112, 67, 190),
+            size=14,
+            symbol="o",
+        )
+        self._probe_needle_1_item = pg.ScatterPlotItem(
+            pen=pg.mkPen("#ffd54f", width=1.5),
+            brush=pg.mkBrush(255, 213, 79, 180),
+            size=10,
+            symbol="+",
+        )
+        self._probe_needle_2_item = pg.ScatterPlotItem(
+            pen=pg.mkPen("#ec407a", width=1.5),
+            brush=pg.mkBrush(236, 64, 122, 170),
+            size=10,
+            symbol="x",
+        )
+        self._probe_route_preview_point_item = pg.ScatterPlotItem(
+            pen=pg.mkPen("#ffca28", width=1.5),
+            brush=pg.mkBrush(255, 202, 40, 100),
+            size=8,
+            symbol="o",
+        )
+        self._probe_preview_needle_1_item = pg.ScatterPlotItem(
+            pen=pg.mkPen("#fff59d", width=1.2),
+            brush=pg.mkBrush(255, 245, 157, 130),
+            size=8,
+            symbol="+",
+        )
+        self._probe_preview_needle_2_item = pg.ScatterPlotItem(
+            pen=pg.mkPen("#f48fb1", width=1.2),
+            brush=pg.mkBrush(244, 143, 177, 120),
+            size=8,
+            symbol="x",
+        )
+        self._tool_measure_item = self._plot.plot(
+            [], [], pen=pg.mkPen("#ffffff", width=1.5, style=Qt.DashLine)
+        )
+        self._tool_measure_point_item = pg.ScatterPlotItem(
+            pen=pg.mkPen("#ffffff", width=1.5),
+            brush=pg.mkBrush(255, 255, 255, 80),
+            size=8,
+            symbol="o",
+        )
+        self._tool_sketch_item = self._plot.plot(
+            [], [], pen=pg.mkPen("#90caf9", width=1.4, style=Qt.DashLine)
+        )
+        self._tool_sketch_point_item = pg.ScatterPlotItem(
+            pen=pg.mkPen("#90caf9", width=1.2),
+            brush=pg.mkBrush(144, 202, 249, 110),
+            size=7,
+            symbol="o",
+        )
+        self._tool_sketch_midpoint_item = pg.ScatterPlotItem(
+            pen=pg.mkPen("#ffffff", width=1.2),
+            brush=pg.mkBrush(100, 181, 246, 150),
+            size=8,
+            symbol="+",
+        )
+        self._axis_triad_x_item = self._plot.plot(
+            [], [], pen=pg.mkPen("#ef5350", width=2.2)
+        )
+        self._axis_triad_y_item = self._plot.plot(
+            [], [], pen=pg.mkPen("#66bb6a", width=2.2)
+        )
+        self._axis_triad_z_item = self._plot.plot(
+            [], [], pen=pg.mkPen("#42a5f5", width=2.2)
+        )
+        self._axis_triad_x_label = pg.TextItem(text="X", color="#ef5350", anchor=(0.0, 0.5))
+        self._axis_triad_y_label = pg.TextItem(text="Y", color="#66bb6a", anchor=(0.5, 1.0))
+        self._axis_triad_z_label = pg.TextItem(text="Z", color="#42a5f5", anchor=(1.0, 1.0))
         self._selected_target_item = pg.ScatterPlotItem(
             pen=pg.mkPen("#ff7043", width=2),
             brush=pg.mkBrush(255, 112, 67, 180),
@@ -166,6 +294,19 @@ class _DesignPlotPane(QWidget):
         self.snap_geometry_ready.connect(self._on_snap_geometry_ready)
         self._plot.addItem(self._hover_item)
         self._plot.addItem(self._target_item)
+        self._plot.addItem(self._probe_route_point_item)
+        self._plot.addItem(self._probe_route_selected_item)
+        self._plot.addItem(self._probe_needle_1_item)
+        self._plot.addItem(self._probe_needle_2_item)
+        self._plot.addItem(self._probe_route_preview_point_item)
+        self._plot.addItem(self._probe_preview_needle_1_item)
+        self._plot.addItem(self._probe_preview_needle_2_item)
+        self._plot.addItem(self._tool_measure_point_item)
+        self._plot.addItem(self._tool_sketch_point_item)
+        self._plot.addItem(self._tool_sketch_midpoint_item)
+        self._plot.addItem(self._axis_triad_x_label)
+        self._plot.addItem(self._axis_triad_y_label)
+        self._plot.addItem(self._axis_triad_z_label)
         self._plot.addItem(self._selected_target_item)
         self._plot.addItem(self._current_item)
         self._plot.addItem(self._source_mark_1_item)
@@ -173,6 +314,7 @@ class _DesignPlotPane(QWidget):
         self._plot.addItem(self._check_mark_item)
         self._plot.scene().sigMouseClicked.connect(self._on_mouse_clicked)
         self._plot.scene().sigMouseMoved.connect(self._on_mouse_moved)
+        view_box.sigRangeChanged.connect(lambda *_unused: self._redraw_axis_triad())
         layout.addWidget(self._status_label, 1)
         layout.addWidget(self._plot, 1)
         self._plot.hide()
@@ -215,6 +357,102 @@ class _DesignPlotPane(QWidget):
         self._selected_target_id = selected_target_id
         self._redraw_overlays()
 
+    def set_probe_route(
+        self,
+        route: MeasurementRoute | None,
+        *,
+        selected_route_point_index: int,
+    ) -> None:
+        self._probe_route = route
+        self._selected_route_point_index = selected_route_point_index
+        self._redraw_overlays()
+
+    def set_probe_route_preview(self, preview: object) -> None:
+        if (
+            isinstance(preview, tuple)
+            and len(preview) == 2
+            and isinstance(preview[0], list)
+            and isinstance(preview[1], list)
+        ):
+            self._probe_route_preview_points = [
+                (float(point[0]), float(point[1]))
+                for point in preview[0]
+                if isinstance(point, (list, tuple)) and len(point) == 2
+            ]
+            self._probe_route_preview_offsets = [
+                (float(offset[0]), float(offset[1]))
+                for offset in preview[1]
+                if isinstance(offset, (list, tuple)) and len(offset) == 2
+            ][:2]
+        else:
+            self._probe_route_preview_points = []
+            self._probe_route_preview_offsets = []
+        self._redraw_overlays()
+
+    def set_tool_measure_points(self, points: object) -> None:
+        if isinstance(points, list):
+            self._tool_measure_points = [
+                (float(point[0]), float(point[1]))
+                for point in points[:2]
+                if isinstance(point, (list, tuple)) and len(point) == 2
+            ]
+        else:
+            self._tool_measure_points = []
+        self._redraw_overlays()
+
+    def set_tool_measure_segments(self, segments: object) -> None:
+        parsed: list[tuple[Point2D, Point2D]] = []
+        if isinstance(segments, list):
+            for item in segments:
+                if (
+                    isinstance(item, (list, tuple))
+                    and len(item) == 2
+                    and isinstance(item[0], (list, tuple))
+                    and isinstance(item[1], (list, tuple))
+                    and len(item[0]) == 2
+                    and len(item[1]) == 2
+                ):
+                    parsed.append(
+                        (
+                            (float(item[0][0]), float(item[0][1])),
+                            (float(item[1][0]), float(item[1][1])),
+                        )
+                    )
+        self._tool_measure_segments = parsed
+        self._redraw_overlays()
+
+    def set_tool_sketch_points(self, points: object) -> None:
+        if isinstance(points, list):
+            self._tool_sketch_points = [
+                (float(point[0]), float(point[1]))
+                for point in points[:2]
+                if isinstance(point, (list, tuple)) and len(point) == 2
+            ]
+        else:
+            self._tool_sketch_points = []
+        self._redraw_overlays()
+
+    def set_tool_sketch_segments(self, segments: object) -> None:
+        parsed: list[tuple[Point2D, Point2D]] = []
+        if isinstance(segments, list):
+            for item in segments:
+                if (
+                    isinstance(item, (list, tuple))
+                    and len(item) == 2
+                    and isinstance(item[0], (list, tuple))
+                    and isinstance(item[1], (list, tuple))
+                    and len(item[0]) == 2
+                    and len(item[1]) == 2
+                ):
+                    parsed.append(
+                        (
+                            (float(item[0][0]), float(item[0][1])),
+                            (float(item[1][0]), float(item[1][1])),
+                        )
+                    )
+        self._tool_sketch_segments = parsed
+        self._redraw_overlays()
+
     def set_source_design_marks(self, points: list[Point2D | None]) -> None:
         self._source_design_marks = list(points[:2])
         while len(self._source_design_marks) < 2:
@@ -246,6 +484,20 @@ class _DesignPlotPane(QWidget):
         """Enable click-to-move on the layout plot once registration is valid."""
 
         self._navigation_enabled = bool(enabled)
+
+    def set_route_edit_enabled(self, enabled: bool) -> None:
+        """Enable route point placement by left-clicking the layout plot."""
+
+        self._route_edit_enabled = bool(enabled)
+
+    def set_route_pick_mode(self, mode: object) -> None:
+        """Use the next left click as a route array helper point."""
+
+        self._route_pick_mode = str(mode) if mode else None
+        if self._plot is not None:
+            self._plot.setCursor(
+                Qt.CrossCursor if self._route_pick_mode else Qt.ArrowCursor
+            )
 
     def set_snap_enabled(self, enabled: bool) -> None:
         """Enable or disable geometry snapping for design clicks and hover."""
@@ -354,6 +606,12 @@ class _DesignPlotPane(QWidget):
             self._target_item.setData([], [])
             self._route_item.setData([], [])
 
+        self._redraw_probe_route()
+        self._redraw_route_preview()
+        self._redraw_tool_sketch()
+        self._redraw_tool_measure()
+        self._redraw_axis_triad()
+
         selected_target = next(
             (target for target in self._targets if target.id == self._selected_target_id),
             None,
@@ -406,10 +664,417 @@ class _DesignPlotPane(QWidget):
             self._check_mark_item.setData([], [])
         self._redraw_hover()
 
+    def _redraw_probe_route(self) -> None:
+        if self._plot is None:
+            return
+        if self._probe_route is None or not self._probe_route.points:
+            self._probe_route_item.setData([], [])
+            self._probe_route_arrow_item.setData([], [])
+            self._probe_route_point_item.setData([], [])
+            self._probe_route_selected_item.setData([], [])
+            self._probe_needle_1_item.setData([], [])
+            self._probe_needle_2_item.setData([], [])
+            self._probe_needle_connector_item.setData([], [])
+            self._clear_probe_route_numbers()
+            return
+
+        points = [point for point in self._probe_route.points if point.enabled]
+        if not points:
+            self._probe_route_item.setData([], [])
+            self._probe_route_arrow_item.setData([], [])
+            self._probe_route_point_item.setData([], [])
+            self._probe_route_selected_item.setData([], [])
+            self._probe_needle_1_item.setData([], [])
+            self._probe_needle_2_item.setData([], [])
+            self._probe_needle_connector_item.setData([], [])
+            self._clear_probe_route_numbers()
+            return
+
+        centers_x = [point.camera_center[0] for point in points]
+        centers_y = [point.camera_center[1] for point in points]
+        self._probe_route_item.setData(centers_x, centers_y)
+        self._probe_route_point_item.setData(centers_x, centers_y)
+        self._probe_route_arrow_item.setData(
+            *self._route_arrow_segments([point.camera_center for point in points])
+        )
+        self._redraw_probe_route_numbers()
+
+        if 0 <= self._selected_route_point_index < len(self._probe_route.points):
+            selected = self._probe_route.points[self._selected_route_point_index]
+            self._probe_route_selected_item.setData(
+                [selected.camera_center[0]],
+                [selected.camera_center[1]],
+            )
+        else:
+            self._probe_route_selected_item.setData([], [])
+
+        needle_1_x: list[float] = []
+        needle_1_y: list[float] = []
+        needle_2_x: list[float] = []
+        needle_2_y: list[float] = []
+        connector_x: list[float] = []
+        connector_y: list[float] = []
+        for point in points:
+            center = point.camera_center
+            hits = self._probe_route.needle_hits_for_point(point)
+            for offset_index, (_offset, hit) in enumerate(hits[:2]):
+                if offset_index == 0:
+                    needle_1_x.append(hit[0])
+                    needle_1_y.append(hit[1])
+                else:
+                    needle_2_x.append(hit[0])
+                    needle_2_y.append(hit[1])
+                connector_x.extend([center[0], hit[0], float("nan")])
+                connector_y.extend([center[1], hit[1], float("nan")])
+        self._probe_needle_1_item.setData(needle_1_x, needle_1_y)
+        self._probe_needle_2_item.setData(needle_2_x, needle_2_y)
+        self._probe_needle_connector_item.setData(connector_x, connector_y)
+
+    def _redraw_route_preview(self) -> None:
+        if self._plot is None:
+            return
+        points = list(self._probe_route_preview_points)
+        if not points:
+            self._probe_route_preview_item.setData([], [])
+            self._probe_route_preview_arrow_item.setData([], [])
+            self._probe_route_preview_point_item.setData([], [])
+            self._probe_preview_needle_1_item.setData([], [])
+            self._probe_preview_needle_2_item.setData([], [])
+            self._probe_preview_needle_connector_item.setData([], [])
+            return
+        self._probe_route_preview_item.setData(
+            [point[0] for point in points],
+            [point[1] for point in points],
+        )
+        self._probe_route_preview_point_item.setData(
+            [point[0] for point in points],
+            [point[1] for point in points],
+        )
+        self._probe_route_preview_arrow_item.setData(
+            *self._route_arrow_segments(points)
+        )
+        needle_1_x: list[float] = []
+        needle_1_y: list[float] = []
+        needle_2_x: list[float] = []
+        needle_2_y: list[float] = []
+        connector_x: list[float] = []
+        connector_y: list[float] = []
+        for center in points:
+            for offset_index, offset in enumerate(self._probe_route_preview_offsets[:2]):
+                hit = (center[0] + offset[0], center[1] + offset[1])
+                if offset_index == 0:
+                    needle_1_x.append(hit[0])
+                    needle_1_y.append(hit[1])
+                else:
+                    needle_2_x.append(hit[0])
+                    needle_2_y.append(hit[1])
+                connector_x.extend([center[0], hit[0], float("nan")])
+                connector_y.extend([center[1], hit[1], float("nan")])
+        self._probe_preview_needle_1_item.setData(needle_1_x, needle_1_y)
+        self._probe_preview_needle_2_item.setData(needle_2_x, needle_2_y)
+        self._probe_preview_needle_connector_item.setData(connector_x, connector_y)
+
+    def _redraw_tool_sketch(self) -> None:
+        if self._plot is None:
+            return
+        segments = list(self._tool_sketch_segments)
+        if len(self._tool_sketch_points) == 2:
+            segments.append((self._tool_sketch_points[0], self._tool_sketch_points[1]))
+        if not segments and not self._tool_sketch_points:
+            self._tool_sketch_item.setData([], [])
+            self._tool_sketch_point_item.setData([], [])
+            self._tool_sketch_midpoint_item.setData([], [])
+            return
+
+        line_x: list[float] = []
+        line_y: list[float] = []
+        endpoint_points: list[Point2D] = []
+        midpoint_points: list[Point2D] = []
+        for start, end in segments:
+            line_x.extend([start[0], end[0], float("nan")])
+            line_y.extend([start[1], end[1], float("nan")])
+            endpoint_points.extend([start, end])
+            midpoint_points.append(
+                (
+                    (float(start[0]) + float(end[0])) * 0.5,
+                    (float(start[1]) + float(end[1])) * 0.5,
+                )
+            )
+        if len(self._tool_sketch_points) == 1:
+            endpoint_points.append(self._tool_sketch_points[0])
+
+        self._tool_sketch_item.setData(line_x, line_y)
+        self._tool_sketch_point_item.setData(
+            [point[0] for point in endpoint_points],
+            [point[1] for point in endpoint_points],
+        )
+        self._tool_sketch_midpoint_item.setData(
+            [point[0] for point in midpoint_points],
+            [point[1] for point in midpoint_points],
+        )
+
+    def _redraw_tool_measure(self) -> None:
+        if self._plot is None:
+            return
+        self._clear_tool_measure_labels()
+        segments = list(self._tool_measure_segments)
+        if len(self._tool_measure_points) == 2:
+            segments.append((self._tool_measure_points[0], self._tool_measure_points[1]))
+        if not segments and not self._tool_measure_points:
+            self._tool_measure_item.setData([], [])
+            self._tool_measure_point_item.setData([], [])
+            return
+
+        line_x: list[float] = []
+        line_y: list[float] = []
+        endpoint_points: list[Point2D] = []
+        for start, end in segments:
+            line_x.extend([start[0], end[0], float("nan")])
+            line_y.extend([start[1], end[1], float("nan")])
+            endpoint_points.extend([start, end])
+            self._add_tool_measure_labels(start, end)
+        if len(self._tool_measure_points) == 1:
+            endpoint_points.append(self._tool_measure_points[0])
+
+        self._tool_measure_item.setData(line_x, line_y)
+        self._tool_measure_point_item.setData(
+            [point[0] for point in endpoint_points],
+            [point[1] for point in endpoint_points],
+        )
+
+    def _clear_tool_measure_labels(self) -> None:
+        if self._plot is None:
+            self._tool_measure_label_items.clear()
+            return
+        for item in self._tool_measure_label_items:
+            self._plot.removeItem(item)
+        self._tool_measure_label_items.clear()
+
+    def _add_tool_measure_labels(self, start: Point2D, end: Point2D) -> None:
+        if self._plot is None or pg is None:
+            return
+        dx = float(end[0]) - float(start[0])
+        dy = float(end[1]) - float(start[1])
+        length = math.hypot(dx, dy)
+        if length <= 1e-12:
+            return
+        midpoint_x = (float(start[0]) + float(end[0])) * 0.5
+        midpoint_y = (float(start[1]) + float(end[1])) * 0.5
+        pixel_size = self._data_units_per_screen_pixel() or 1.0
+        normal_x = -dy / length
+        normal_y = dx / length
+        angle = -math.degrees(math.atan2(dy, dx))
+        label_specs = (
+            (f"D={length:.3f}", "#fff59d", 18.0),
+            (f"X={dx:.3f}", "#ef5350", 34.0),
+            (f"Y={dy:.3f}", "#66bb6a", 50.0),
+        )
+        for text, color, offset_px in label_specs:
+            item = pg.TextItem(
+                text=text,
+                color=color,
+                anchor=(0.5, 1.0),
+                fill=pg.mkBrush(0, 0, 0, 170),
+            )
+            try:
+                item.setAngle(angle)
+            except Exception:
+                pass
+            item.setPos(
+                midpoint_x + normal_x * pixel_size * offset_px,
+                midpoint_y + normal_y * pixel_size * offset_px,
+            )
+            self._plot.addItem(item)
+            self._tool_measure_label_items.append(item)
+
+    def _redraw_axis_triad(self) -> None:
+        if self._plot is None:
+            return
+        if self._document is None:
+            self._axis_triad_x_item.setData([], [])
+            self._axis_triad_y_item.setData([], [])
+            self._axis_triad_z_item.setData([], [])
+            for item in (
+                self._axis_triad_x_label,
+                self._axis_triad_y_label,
+                self._axis_triad_z_label,
+            ):
+                item.setVisible(False)
+            return
+        pixel_size = self._data_units_per_screen_pixel()
+        if pixel_size is None:
+            return
+        view_range = self._plot.getViewBox().viewRange()
+        if not isinstance(view_range, list) or len(view_range) < 2:
+            return
+        x_min, _x_max = view_range[0]
+        y_min, _y_max = view_range[1]
+        margin = pixel_size * 34.0
+        length = pixel_size * 42.0
+        base = (float(x_min) + margin, float(y_min) + margin)
+        x_end = (base[0] + length, base[1])
+        y_end = (base[0], base[1] + length)
+        z_end = (base[0] - length * 0.38, base[1] + length * 0.38)
+        arrow = pixel_size * 7.0
+        self._axis_triad_x_item.setData(
+            [base[0], x_end[0], float("nan"), x_end[0], x_end[0] - arrow, float("nan"), x_end[0], x_end[0] - arrow],
+            [base[1], x_end[1], float("nan"), x_end[1], x_end[1] + arrow * 0.55, float("nan"), x_end[1], x_end[1] - arrow * 0.55],
+        )
+        self._axis_triad_y_item.setData(
+            [base[0], y_end[0], float("nan"), y_end[0], y_end[0] - arrow * 0.55, float("nan"), y_end[0], y_end[0] + arrow * 0.55],
+            [base[1], y_end[1], float("nan"), y_end[1], y_end[1] - arrow, float("nan"), y_end[1], y_end[1] - arrow],
+        )
+        self._axis_triad_z_item.setData(
+            [base[0], z_end[0], float("nan"), z_end[0], z_end[0] + arrow * 0.95, float("nan"), z_end[0], z_end[0] + arrow * 0.2],
+            [base[1], z_end[1], float("nan"), z_end[1], z_end[1] - arrow * 0.2, float("nan"), z_end[1], z_end[1] - arrow * 0.95],
+        )
+        self._axis_triad_x_label.setPos(x_end[0] + pixel_size * 5.0, x_end[1])
+        self._axis_triad_y_label.setPos(y_end[0], y_end[1] + pixel_size * 5.0)
+        self._axis_triad_z_label.setPos(z_end[0] - pixel_size * 5.0, z_end[1])
+        for item in (
+            self._axis_triad_x_label,
+            self._axis_triad_y_label,
+            self._axis_triad_z_label,
+        ):
+            item.setVisible(True)
+
+    def _route_arrow_segments(
+        self,
+        centers: list[Point2D],
+    ) -> tuple[list[float], list[float]]:
+        if len(centers) < 2:
+            return [], []
+        pixel_size = self._data_units_per_screen_pixel() or 1.0
+        reference_length = self._first_segment_length(centers)
+        if reference_length <= 1e-12:
+            return [], []
+        common_arrow_len = min(
+            max(pixel_size * 5.0, reference_length * 0.18),
+            pixel_size * 12.0,
+        )
+        common_arrow_width = common_arrow_len * 0.58
+        x_values: list[float] = []
+        y_values: list[float] = []
+        for start, end in zip(centers, centers[1:]):
+            dx = float(end[0] - start[0])
+            dy = float(end[1] - start[1])
+            length = math.hypot(dx, dy)
+            if length <= 1e-12:
+                continue
+            ux = dx / length
+            uy = dy / length
+            px = -uy
+            py = ux
+            arrow_len = common_arrow_len
+            arrow_width = common_arrow_width
+            if length < arrow_len * 2.2:
+                arrow_len = max(pixel_size * 5.0, length * 0.34)
+                arrow_width = min(arrow_width, arrow_len * 0.7)
+            for fraction in self._route_arrow_tip_fractions(
+                length,
+                reference_length,
+                arrow_len,
+            ):
+                tip_x = float(start[0] + dx * fraction)
+                tip_y = float(start[1] + dy * fraction)
+                base_x = tip_x - ux * arrow_len
+                base_y = tip_y - uy * arrow_len
+                left_x = base_x + px * arrow_width * 0.5
+                left_y = base_y + py * arrow_width * 0.5
+                right_x = base_x - px * arrow_width * 0.5
+                right_y = base_y - py * arrow_width * 0.5
+                notch_x = base_x + ux * arrow_len * 0.22
+                notch_y = base_y + uy * arrow_len * 0.22
+                x_values.extend(
+                    [
+                        left_x,
+                        tip_x,
+                        right_x,
+                        float("nan"),
+                        left_x,
+                        notch_x,
+                        right_x,
+                        float("nan"),
+                    ]
+                )
+                y_values.extend(
+                    [
+                        left_y,
+                        tip_y,
+                        right_y,
+                        float("nan"),
+                        left_y,
+                        notch_y,
+                        right_y,
+                        float("nan"),
+                    ]
+                )
+        return x_values, y_values
+
+    @staticmethod
+    def _first_segment_length(centers: list[Point2D]) -> float:
+        for start, end in zip(centers, centers[1:]):
+            length = math.hypot(float(end[0] - start[0]), float(end[1] - start[1]))
+            if length > 1e-12:
+                return length
+        return 0.0
+
+    @staticmethod
+    def _route_arrow_tip_fractions(
+        segment_length: float,
+        reference_length: float,
+        arrow_len: float,
+    ) -> list[float]:
+        spacing = max(float(reference_length), float(arrow_len) * 4.0)
+        if spacing <= 1e-12:
+            return []
+        arrow_count = max(1, min(80, int(round(float(segment_length) / spacing))))
+        if arrow_count == 1:
+            return [0.58]
+        return [
+            float(index + 1) / float(arrow_count + 1)
+            for index in range(arrow_count)
+        ]
+
+    def _clear_probe_route_numbers(self) -> None:
+        if self._plot is None:
+            self._probe_route_number_items.clear()
+            return
+        for item in self._probe_route_number_items:
+            self._plot.removeItem(item)
+        self._probe_route_number_items.clear()
+
+    def _redraw_probe_route_numbers(self) -> None:
+        if self._plot is None or pg is None:
+            return
+        self._clear_probe_route_numbers()
+        if self._probe_route is None:
+            return
+        for route_index, route_point in enumerate(self._probe_route.points):
+            if not route_point.enabled:
+                continue
+            item = pg.TextItem(
+                text=str(route_index + 1),
+                color="#e1f5fe",
+                anchor=(0.0, 1.0),
+                fill=pg.mkBrush(0, 0, 0, 130),
+            )
+            item.setPos(route_point.camera_center[0], route_point.camera_center[1])
+            self._plot.addItem(item)
+            self._probe_route_number_items.append(item)
+
     def _on_mouse_clicked(self, event) -> None:  # pragma: no cover - UI interaction
         if self._plot is None or self._document is None:
             return
-        if self._navigation_enabled and event.button() == Qt.LeftButton:
+        route_pick = self._route_pick_mode is not None and event.button() == Qt.LeftButton
+        route_click = (
+            not route_pick
+            and self._route_edit_enabled
+            and event.button() == Qt.LeftButton
+        )
+        if route_pick or route_click:
+            slot = None
+        elif self._navigation_enabled and event.button() == Qt.LeftButton:
             slot = None
         elif event.button() == Qt.LeftButton:
             slot = 0
@@ -436,6 +1101,19 @@ class _DesignPlotPane(QWidget):
             snap_result.distance,
             elapsed_ms,
         )
+        if route_pick:
+            self.route_pick_requested.emit(
+                str(self._route_pick_mode),
+                snap_result.point[0],
+                snap_result.point[1],
+            )
+            return
+        if route_click:
+            self.route_point_requested.emit(
+                snap_result.point[0],
+                snap_result.point[1],
+            )
+            return
         if slot is None:
             self.move_requested.emit(
                 snap_result.point[0],
@@ -604,6 +1282,32 @@ class DesignNavigatorPanel(QWidget):
     previous_target_requested = Signal()
     target_selected = Signal(str)
     snap_enabled_changed = Signal(bool)
+    route_new_requested = Signal()
+    route_open_requested = Signal(str)
+    route_save_requested = Signal()
+    route_save_as_requested = Signal(str)
+    route_add_current_requested = Signal()
+    route_remove_selected_requested = Signal()
+    route_clear_requested = Signal()
+    route_selected = Signal(int)
+    route_offsets_changed = Signal(float, float, float, float)
+    route_edit_enabled_changed = Signal(bool)
+    route_pick_mode_changed = Signal(object)
+    route_preview_changed = Signal(object)
+    tool_measure_preview_changed = Signal(object)
+    tool_measurements_changed = Signal(object)
+    route_array_requested = Signal(
+        float,
+        float,
+        float,
+        float,
+        int,
+        float,
+        float,
+        int,
+        bool,
+        bool,
+    )
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -614,6 +1318,17 @@ class DesignNavigatorPanel(QWidget):
         self._source_stage_marks: list[Point2D | None] = [None, None]
         self._targets: list[MeasurementTarget] = []
         self._selected_target_id: str | None = None
+        self._route: MeasurementRoute | None = None
+        self._selected_route_point_index = -1
+        self._current_design_position: Point2D | None = None
+        self._active_design_tool = "select"
+        self._route_pick_mode: str | None = None
+        self._route_pick_anchor_mode: str | None = None
+        self._route_pick_anchor_point: Point2D | None = None
+        self._ruler_anchor: Point2D | None = None
+        self._ruler_end: Point2D | None = None
+        self._ruler_segments: list[tuple[Point2D, Point2D]] = []
+        self._updating_route_controls = False
 
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(8, 8, 8, 8)
@@ -720,6 +1435,258 @@ class DesignNavigatorPanel(QWidget):
         self._move_button.clicked.connect(self._emit_move_to_selected_target)
         root_layout.addWidget(script_group)
 
+        route_group = QGroupBox("Probe Route", self)
+        route_layout = QVBoxLayout(route_group)
+        self._route_layout = route_layout
+        route_buttons = QHBoxLayout()
+        self._route_new_button = QPushButton("New", route_group)
+        self._route_open_button = QPushButton("Open...", route_group)
+        self._route_save_button = QPushButton("Save", route_group)
+        self._route_save_as_button = QPushButton("Save As...", route_group)
+        route_buttons.addWidget(self._route_new_button)
+        route_buttons.addWidget(self._route_open_button)
+        route_buttons.addWidget(self._route_save_button)
+        route_buttons.addWidget(self._route_save_as_button)
+        route_layout.addLayout(route_buttons)
+        self._route_label = QLabel("No route loaded.", route_group)
+        self._route_label.setWordWrap(True)
+        route_layout.addWidget(self._route_label)
+
+        self._tool_toolbar_widget = QWidget(route_group)
+        tool_buttons = QHBoxLayout(self._tool_toolbar_widget)
+        tool_buttons.setContentsMargins(0, 0, 0, 0)
+        tool_buttons.setSpacing(4)
+        self._tool_button_group = QButtonGroup(self._tool_toolbar_widget)
+        self._tool_button_group.setExclusive(True)
+        self._select_tool_button = self._make_tool_button(
+            self._tool_toolbar_widget,
+            "Select",
+            self._make_tool_icon("select"),
+        )
+        self._ruler_tool_button = self._make_tool_button(
+            self._tool_toolbar_widget,
+            "Measure",
+            self._make_tool_icon("ruler"),
+        )
+        self._array_tool_button = self._make_tool_button(
+            self._tool_toolbar_widget,
+            "Array",
+            self._make_tool_icon("array"),
+        )
+        self._tool_button_group.addButton(self._select_tool_button)
+        self._tool_button_group.addButton(self._ruler_tool_button)
+        self._tool_button_group.addButton(self._array_tool_button)
+        self._select_tool_button.setChecked(True)
+        tool_buttons.addWidget(self._select_tool_button)
+        tool_buttons.addWidget(self._ruler_tool_button)
+        tool_buttons.addWidget(self._array_tool_button)
+        tool_buttons.addStretch(1)
+        route_layout.addWidget(self._tool_toolbar_widget)
+
+        self._tool_group = QGroupBox("Tool Options", route_group)
+        tool_layout = QVBoxLayout(self._tool_group)
+        self._tool_status_label = QLabel("", self._tool_group)
+        self._tool_status_label.setWordWrap(True)
+        self._tool_status_label.setStyleSheet("QLabel { color: #607d8b; }")
+        tool_layout.addWidget(self._tool_status_label)
+        self._tool_stack = QStackedWidget(self._tool_group)
+
+        select_page = QWidget(self._tool_group)
+        select_layout = QVBoxLayout(select_page)
+        select_layout.setContentsMargins(0, 0, 0, 0)
+        select_layout.addWidget(QLabel("No tool active.", select_page))
+        self._tool_stack.addWidget(select_page)
+
+        ruler_page = QWidget(self._tool_group)
+        ruler_layout = QGridLayout(ruler_page)
+        ruler_layout.setContentsMargins(0, 0, 0, 0)
+        self._ruler_start_label = QLabel("Start: not set", ruler_page)
+        self._ruler_end_label = QLabel("End: not set", ruler_page)
+        self._ruler_delta_label = QLabel("dX=0.000, dY=0.000", ruler_page)
+        self._ruler_length_label = QLabel("Length=0.000, Angle=0.000 deg", ruler_page)
+        self._ruler_clear_button = QPushButton("Clear", ruler_page)
+        self._ruler_cancel_button = QPushButton("Cancel", ruler_page)
+        ruler_layout.addWidget(self._ruler_start_label, 0, 0, 1, 2)
+        ruler_layout.addWidget(self._ruler_end_label, 1, 0, 1, 2)
+        ruler_layout.addWidget(self._ruler_delta_label, 2, 0, 1, 2)
+        ruler_layout.addWidget(self._ruler_length_label, 3, 0, 1, 2)
+        ruler_layout.addWidget(self._ruler_clear_button, 4, 0)
+        ruler_layout.addWidget(self._ruler_cancel_button, 4, 1)
+        self._tool_stack.addWidget(ruler_page)
+
+        array_page = QWidget(self._tool_group)
+        array_layout = QGridLayout(array_page)
+        array_layout.setContentsMargins(0, 0, 0, 0)
+        self._route_array_origin_x_spin = self._make_route_coordinate_spinbox(array_page)
+        self._route_array_origin_y_spin = self._make_route_coordinate_spinbox(array_page)
+        self._route_array_dir1_step_x_spin = self._make_route_distance_spinbox(array_page)
+        self._route_array_dir1_step_y_spin = self._make_route_angle_spinbox(array_page)
+        self._route_array_dir2_step_x_spin = self._make_route_distance_spinbox(array_page)
+        self._route_array_dir2_step_y_spin = self._make_route_angle_spinbox(array_page)
+        self._route_array_dir1_step_x_spin.setValue(100.0)
+        self._route_array_dir2_step_x_spin.setValue(100.0)
+        self._route_array_dir2_step_y_spin.setValue(90.0)
+        self._route_array_dir1_count_spin = QSpinBox(array_page)
+        self._route_array_dir1_count_spin.setRange(1, 10000)
+        self._route_array_dir1_count_spin.setValue(8)
+        self._route_array_dir2_count_spin = QSpinBox(array_page)
+        self._route_array_dir2_count_spin.setRange(1, 10000)
+        self._route_array_dir2_count_spin.setValue(1)
+        self._route_array_serpentine_checkbox = QCheckBox("Serpentine", array_page)
+        self._route_array_replace_checkbox = QCheckBox("Replace", array_page)
+        self._route_array_pick_origin_button = self._make_icon_button(
+            array_page, "Pick Origin", "origin"
+        )
+        self._route_array_pick_dir1_button = self._make_icon_button(
+            array_page, "Pick Dir 1", "direction"
+        )
+        self._route_array_pick_extent1_button = self._make_icon_button(
+            array_page, "Pick Extent 1", "extent"
+        )
+        self._route_array_pick_dir2_button = self._make_icon_button(
+            array_page, "Pick Dir 2", "direction"
+        )
+        self._route_array_pick_extent2_button = self._make_icon_button(
+            array_page, "Pick Extent 2", "extent"
+        )
+        self._route_array_create_button = self._make_icon_button(
+            array_page, "Create", "accept"
+        )
+        self._route_array_cancel_button = self._make_icon_button(
+            array_page, "Cancel", "cancel"
+        )
+        array_layout.addWidget(QLabel("Origin X", array_page), 0, 0)
+        array_layout.addWidget(self._route_array_origin_x_spin, 0, 1)
+        array_layout.addWidget(QLabel("Y", array_page), 0, 2)
+        array_layout.addWidget(self._route_array_origin_y_spin, 0, 3)
+        array_layout.addWidget(QLabel("Dir 1 length", array_page), 1, 0)
+        array_layout.addWidget(self._route_array_dir1_step_x_spin, 1, 1)
+        array_layout.addWidget(QLabel("angle", array_page), 1, 2)
+        array_layout.addWidget(self._route_array_dir1_step_y_spin, 1, 3)
+        array_layout.addWidget(QLabel("Count 1", array_page), 2, 0)
+        array_layout.addWidget(self._route_array_dir1_count_spin, 2, 1)
+        array_layout.addWidget(self._route_array_pick_dir1_button, 2, 2, 1, 2)
+        array_layout.addWidget(QLabel("Dir 2 length", array_page), 3, 0)
+        array_layout.addWidget(self._route_array_dir2_step_x_spin, 3, 1)
+        array_layout.addWidget(QLabel("angle", array_page), 3, 2)
+        array_layout.addWidget(self._route_array_dir2_step_y_spin, 3, 3)
+        array_layout.addWidget(QLabel("Count 2", array_page), 4, 0)
+        array_layout.addWidget(self._route_array_dir2_count_spin, 4, 1)
+        array_layout.addWidget(self._route_array_pick_dir2_button, 4, 2, 1, 2)
+        array_layout.addWidget(self._route_array_pick_origin_button, 5, 0, 1, 2)
+        array_layout.addWidget(self._route_array_pick_extent1_button, 5, 2, 1, 2)
+        array_layout.addWidget(self._route_array_pick_extent2_button, 6, 0, 1, 2)
+        array_layout.addWidget(self._route_array_serpentine_checkbox, 6, 2, 1, 2)
+        array_layout.addWidget(self._route_array_replace_checkbox, 7, 0, 1, 2)
+        array_layout.addWidget(self._route_array_create_button, 7, 2)
+        array_layout.addWidget(self._route_array_cancel_button, 7, 3)
+        self._tool_stack.addWidget(array_page)
+        tool_layout.addWidget(self._tool_stack)
+        route_layout.addWidget(self._tool_group)
+
+        offset_layout = QGridLayout()
+        offset_layout.addWidget(QLabel("Needle", route_group), 0, 0)
+        offset_layout.addWidget(QLabel("dx", route_group), 0, 1)
+        offset_layout.addWidget(QLabel("dy", route_group), 0, 2)
+        offset_layout.addWidget(QLabel("1", route_group), 1, 0)
+        offset_layout.addWidget(QLabel("2", route_group), 2, 0)
+        self._needle_1_dx_spin = self._make_route_offset_spinbox(route_group)
+        self._needle_1_dy_spin = self._make_route_offset_spinbox(route_group)
+        self._needle_2_dx_spin = self._make_route_offset_spinbox(route_group)
+        self._needle_2_dy_spin = self._make_route_offset_spinbox(route_group)
+        offset_layout.addWidget(self._needle_1_dx_spin, 1, 1)
+        offset_layout.addWidget(self._needle_1_dy_spin, 1, 2)
+        offset_layout.addWidget(self._needle_2_dx_spin, 2, 1)
+        offset_layout.addWidget(self._needle_2_dy_spin, 2, 2)
+        route_layout.addLayout(offset_layout)
+
+        self._route_table = QTableWidget(0, 5, route_group)
+        self._route_table.setHorizontalHeaderLabels(
+            ["#", "Label", "Center", "N1", "N2"]
+        )
+        self._route_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._route_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._route_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._route_table.itemSelectionChanged.connect(
+            self._on_route_selection_changed
+        )
+        route_layout.addWidget(self._route_table)
+
+        route_edit_buttons = QHBoxLayout()
+        self._route_add_current_button = QPushButton("Add Current", route_group)
+        self._route_remove_button = QPushButton("Remove", route_group)
+        self._route_clear_button = QPushButton("Clear", route_group)
+        route_edit_buttons.addWidget(self._route_add_current_button)
+        route_edit_buttons.addWidget(self._route_remove_button)
+        route_edit_buttons.addWidget(self._route_clear_button)
+        route_layout.addLayout(route_edit_buttons)
+
+        self._route_new_button.clicked.connect(self.route_new_requested.emit)
+        self._route_open_button.clicked.connect(self._choose_route_file)
+        self._route_save_button.clicked.connect(self.route_save_requested.emit)
+        self._route_save_as_button.clicked.connect(self._choose_route_save_file)
+        self._route_add_current_button.clicked.connect(
+            self.route_add_current_requested.emit
+        )
+        self._route_remove_button.clicked.connect(
+            self.route_remove_selected_requested.emit
+        )
+        self._route_clear_button.clicked.connect(self.route_clear_requested.emit)
+        self._select_tool_button.clicked.connect(
+            lambda _checked=False: self._set_design_tool("select")
+        )
+        self._ruler_tool_button.clicked.connect(
+            lambda _checked=False: self._set_design_tool("ruler")
+        )
+        self._array_tool_button.clicked.connect(
+            lambda _checked=False: self._set_design_tool("array")
+        )
+        self._ruler_clear_button.clicked.connect(self._clear_ruler)
+        self._ruler_cancel_button.clicked.connect(
+            lambda _checked=False: self._set_design_tool("select")
+        )
+        self._route_array_pick_origin_button.clicked.connect(
+            lambda _checked=False: self._start_route_pick_mode("array_origin")
+        )
+        self._route_array_pick_dir1_button.clicked.connect(
+            lambda _checked=False: self._start_route_pick_mode("array_dir1")
+        )
+        self._route_array_pick_extent1_button.clicked.connect(
+            lambda _checked=False: self._start_route_pick_mode("array_extent1")
+        )
+        self._route_array_pick_dir2_button.clicked.connect(
+            lambda _checked=False: self._start_route_pick_mode("array_dir2")
+        )
+        self._route_array_pick_extent2_button.clicked.connect(
+            lambda _checked=False: self._start_route_pick_mode("array_extent2")
+        )
+        self._route_array_create_button.clicked.connect(self._emit_route_array_requested)
+        self._route_array_cancel_button.clicked.connect(self._cancel_route_array)
+        for widget in (
+            self._route_array_origin_x_spin,
+            self._route_array_origin_y_spin,
+            self._route_array_dir1_step_x_spin,
+            self._route_array_dir1_step_y_spin,
+            self._route_array_dir1_count_spin,
+            self._route_array_dir2_step_x_spin,
+            self._route_array_dir2_step_y_spin,
+            self._route_array_dir2_count_spin,
+            self._route_array_serpentine_checkbox,
+            self._route_array_replace_checkbox,
+        ):
+            if hasattr(widget, "valueChanged"):
+                widget.valueChanged.connect(self._update_route_array_preview)
+            else:
+                widget.toggled.connect(self._update_route_array_preview)
+        for spinbox in (
+            self._needle_1_dx_spin,
+            self._needle_1_dy_spin,
+            self._needle_2_dx_spin,
+            self._needle_2_dy_spin,
+        ):
+            spinbox.valueChanged.connect(self._emit_route_offsets_changed)
+        root_layout.addWidget(route_group)
+
         self._current_position_label = QLabel("Stage: unavailable", self)
         self._current_position_label.setWordWrap(True)
         root_layout.addWidget(self._current_position_label)
@@ -727,6 +1694,7 @@ class DesignNavigatorPanel(QWidget):
 
         self._update_availability()
         self._update_enabled_state()
+        self._set_design_tool("select")
 
     def set_document(self, document: DesignDocument | None) -> None:
         if document is self._document:
@@ -798,6 +1766,65 @@ class DesignNavigatorPanel(QWidget):
         self._target_table.blockSignals(False)
         self._update_enabled_state()
 
+    def set_route(
+        self,
+        route: MeasurementRoute | None,
+        *,
+        selected_route_point_index: int,
+    ) -> None:
+        self._route = route
+        self._selected_route_point_index = selected_route_point_index
+        self._updating_route_controls = True
+        try:
+            self._route_table.blockSignals(True)
+            self._route_table.clearSelection()
+            if route is None:
+                self._route_label.setText("No route loaded.")
+                self._route_table.setRowCount(0)
+                self._set_route_offset_values(0.0, 0.0, 0.0, 0.0)
+            else:
+                path_text = str(route.path) if route.path is not None else "Unsaved route."
+                self._route_label.setText(f"{route.name} | {path_text}")
+                self._route_table.setRowCount(len(route.points))
+                for row, point in enumerate(route.points):
+                    hits = route.needle_hits_for_point(point)
+                    needle_1 = hits[0][1] if len(hits) > 0 else point.camera_center
+                    needle_2 = hits[1][1] if len(hits) > 1 else point.camera_center
+                    self._route_table.setItem(row, 0, QTableWidgetItem(str(row + 1)))
+                    self._route_table.setItem(row, 1, QTableWidgetItem(point.label))
+                    self._route_table.setItem(
+                        row,
+                        2,
+                        QTableWidgetItem(self._format_point(point.camera_center)),
+                    )
+                    self._route_table.setItem(
+                        row,
+                        3,
+                        QTableWidgetItem(self._format_point(needle_1)),
+                    )
+                    self._route_table.setItem(
+                        row,
+                        4,
+                        QTableWidgetItem(self._format_point(needle_2)),
+                    )
+                    if row == selected_route_point_index:
+                        self._route_table.selectRow(row)
+                offsets = route.needle_offsets[:2]
+                if len(offsets) >= 2:
+                    self._set_route_offset_values(
+                        offsets[0].dx,
+                        offsets[0].dy,
+                        offsets[1].dx,
+                        offsets[1].dy,
+                    )
+                else:
+                    self._set_route_offset_values(0.0, 0.0, 0.0, 0.0)
+            self._route_table.blockSignals(False)
+        finally:
+            self._updating_route_controls = False
+        self._update_enabled_state()
+        self._update_route_array_preview()
+
     def set_registration_status(self, text: str) -> None:
         self._registration_status_label.setText(text or "No design registration.")
 
@@ -833,18 +1860,32 @@ class DesignNavigatorPanel(QWidget):
         _ = fov_design_size
         if stage_xy is None:
             self._current_position_label.setText("Stage: unavailable")
+            self._current_design_position = None
         elif design_xy is None:
+            self._current_design_position = None
             self._current_position_label.setText(
                 f"Stage X={stage_xy[0]:.3f}, Y={stage_xy[1]:.3f}"
             )
         else:
+            self._current_design_position = design_xy
             self._current_position_label.setText(
                 f"Stage X={stage_xy[0]:.3f}, Y={stage_xy[1]:.3f} | "
                 f"Design X={design_xy[0]:.3f}, Y={design_xy[1]:.3f}"
             )
+        self._update_enabled_state()
 
     def set_status_message(self, text: str) -> None:
         self._availability_label.setText(text)
+
+    def detach_tool_toolbar(self) -> QWidget:
+        self._route_layout.removeWidget(self._tool_toolbar_widget)
+        self._tool_toolbar_widget.setParent(None)
+        return self._tool_toolbar_widget
+
+    def detach_tool_options_panel(self) -> QWidget:
+        self._route_layout.removeWidget(self._tool_group)
+        self._tool_group.setParent(None)
+        return self._tool_group
 
     def set_design_dialog_directory(self, directory: str | Path | None) -> None:
         """Update the preferred starting directory for opening GDS files."""
@@ -855,6 +1896,7 @@ class DesignNavigatorPanel(QWidget):
         self._design_dialog_directory = str(Path(directory))
 
     def set_hover_snap(self, snap_result: SnapResult | None) -> None:
+        self._update_tool_hover_preview(snap_result)
         if not self._snap_enabled:
             self._snap_hint_label.setText("Snap off: clicks use the exact cursor position.")
             return
@@ -901,6 +1943,618 @@ class DesignNavigatorPanel(QWidget):
         self._previous_button.setEnabled(has_targets)
         self._next_button.setEnabled(has_targets)
         self._move_button.setEnabled(has_targets and has_selection)
+        has_route = self._route is not None
+        has_route_selection = (
+            has_route
+            and 0 <= self._selected_route_point_index < len(self._route.points)
+        )
+        has_current_design_position = self._current_design_position is not None
+        self._route_new_button.setEnabled(has_document)
+        self._route_open_button.setEnabled(has_document)
+        self._route_save_button.setEnabled(has_route and self._route.path is not None)
+        self._route_save_as_button.setEnabled(has_route)
+        self._select_tool_button.setEnabled(has_document)
+        self._ruler_tool_button.setEnabled(has_document)
+        self._array_tool_button.setEnabled(has_document)
+        if not has_document and self._route_pick_mode is not None:
+            self._clear_route_pick_mode("Load a design to pick route geometry.")
+        if not has_document and self._active_design_tool != "select":
+            self._set_design_tool("select")
+        for spinbox in (
+            self._needle_1_dx_spin,
+            self._needle_1_dy_spin,
+            self._needle_2_dx_spin,
+            self._needle_2_dy_spin,
+        ):
+            spinbox.setEnabled(has_route)
+        self._route_table.setEnabled(has_route)
+        self._route_add_current_button.setEnabled(
+            has_route and has_current_design_position
+        )
+        self._route_remove_button.setEnabled(has_route_selection)
+        self._route_clear_button.setEnabled(has_route and bool(self._route.points))
+        for widget in (
+            self._ruler_clear_button,
+            self._ruler_cancel_button,
+            self._route_array_origin_x_spin,
+            self._route_array_origin_y_spin,
+            self._route_array_dir1_step_x_spin,
+            self._route_array_dir1_step_y_spin,
+            self._route_array_dir1_count_spin,
+            self._route_array_dir2_step_x_spin,
+            self._route_array_dir2_step_y_spin,
+            self._route_array_dir2_count_spin,
+            self._route_array_serpentine_checkbox,
+            self._route_array_replace_checkbox,
+            self._route_array_pick_origin_button,
+            self._route_array_pick_dir1_button,
+            self._route_array_pick_extent1_button,
+            self._route_array_pick_dir2_button,
+            self._route_array_pick_extent2_button,
+            self._route_array_create_button,
+            self._route_array_cancel_button,
+        ):
+            widget.setEnabled(has_document)
+
+    def _make_route_offset_spinbox(self, parent: QWidget) -> QDoubleSpinBox:
+        spinbox = QDoubleSpinBox(parent)
+        spinbox.setRange(-1_000_000_000.0, 1_000_000_000.0)
+        spinbox.setDecimals(4)
+        spinbox.setSingleStep(1.0)
+        spinbox.setAlignment(Qt.AlignRight)
+        spinbox.setMaximumWidth(96)
+        return spinbox
+
+    def _make_route_coordinate_spinbox(self, parent: QWidget) -> QDoubleSpinBox:
+        spinbox = QDoubleSpinBox(parent)
+        spinbox.setRange(-1_000_000_000.0, 1_000_000_000.0)
+        spinbox.setDecimals(4)
+        spinbox.setSingleStep(10.0)
+        spinbox.setAlignment(Qt.AlignRight)
+        spinbox.setMaximumWidth(112)
+        return spinbox
+
+    def _make_route_distance_spinbox(self, parent: QWidget) -> QDoubleSpinBox:
+        spinbox = QDoubleSpinBox(parent)
+        spinbox.setRange(0.0, 1_000_000_000.0)
+        spinbox.setDecimals(4)
+        spinbox.setSingleStep(10.0)
+        spinbox.setAlignment(Qt.AlignRight)
+        spinbox.setMaximumWidth(112)
+        return spinbox
+
+    def _make_route_angle_spinbox(self, parent: QWidget) -> QDoubleSpinBox:
+        spinbox = QDoubleSpinBox(parent)
+        spinbox.setRange(-3600.0, 3600.0)
+        spinbox.setDecimals(4)
+        spinbox.setSingleStep(5.0)
+        spinbox.setSuffix(" deg")
+        spinbox.setAlignment(Qt.AlignRight)
+        spinbox.setMaximumWidth(112)
+        return spinbox
+
+    def _make_tool_button(
+        self,
+        parent: QWidget,
+        text: str,
+        icon: QIcon,
+    ) -> QToolButton:
+        button = QToolButton(parent)
+        button.setText(text)
+        button.setIcon(icon)
+        button.setIconSize(QSize(28, 28))
+        button.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+        button.setCheckable(True)
+        button.setAutoRaise(True)
+        return button
+
+    def _make_icon_button(
+        self,
+        parent: QWidget,
+        text: str,
+        icon_name: str,
+    ) -> QToolButton:
+        button = QToolButton(parent)
+        button.setText(text)
+        button.setIcon(self._make_tool_icon(icon_name))
+        button.setIconSize(QSize(18, 18))
+        button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        button.setAutoRaise(False)
+        return button
+
+    def _make_tool_icon(self, name: str) -> QIcon:
+        pixmap = QPixmap(28, 28)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        dark = QColor("#263238")
+        accent = QColor("#0277bd")
+        soft = QColor("#ffca28")
+        painter.setPen(QPen(dark, 2.0))
+        painter.setBrush(Qt.NoBrush)
+        if name == "select":
+            polygon = QPolygonF(
+                [
+                    QPointF(7, 4),
+                    QPointF(20, 16),
+                    QPointF(14, 17),
+                    QPointF(17, 25),
+                    QPointF(13, 26),
+                    QPointF(10, 18),
+                    QPointF(6, 23),
+                ]
+            )
+            painter.setBrush(QBrush(QColor("#eceff1")))
+            painter.drawPolygon(polygon)
+        elif name == "ruler":
+            painter.setPen(QPen(accent, 3.0))
+            painter.drawLine(QPointF(5, 21), QPointF(23, 7))
+            painter.setPen(QPen(dark, 1.5))
+            for index in range(5):
+                x = 7 + index * 4
+                painter.drawLine(QPointF(x, 19 - index * 3), QPointF(x + 2, 21 - index * 3))
+        elif name == "array":
+            painter.setPen(QPen(accent, 2.0))
+            painter.setBrush(QBrush(QColor("#e1f5fe")))
+            for row in range(2):
+                for column in range(3):
+                    painter.drawEllipse(QPointF(8 + column * 7, 9 + row * 8), 2.2, 2.2)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawLine(QPointF(8, 9), QPointF(22, 17))
+        elif name == "origin":
+            painter.setPen(QPen(accent, 2.0))
+            painter.drawLine(QPointF(14, 5), QPointF(14, 23))
+            painter.drawLine(QPointF(5, 14), QPointF(23, 14))
+            painter.setBrush(QBrush(soft))
+            painter.drawEllipse(QPointF(14, 14), 3, 3)
+        elif name == "direction":
+            painter.setPen(QPen(accent, 2.5))
+            painter.drawLine(QPointF(5, 20), QPointF(22, 8))
+            painter.drawLine(QPointF(22, 8), QPointF(17, 8))
+            painter.drawLine(QPointF(22, 8), QPointF(21, 13))
+        elif name == "extent":
+            painter.setPen(QPen(accent, 2.0))
+            painter.drawLine(QPointF(6, 14), QPointF(22, 14))
+            painter.drawLine(QPointF(22, 14), QPointF(18, 10))
+            painter.drawLine(QPointF(22, 14), QPointF(18, 18))
+            painter.setPen(QPen(soft, 2.0))
+            painter.drawLine(QPointF(6, 8), QPointF(6, 20))
+        elif name == "accept":
+            painter.setPen(QPen(QColor("#2e7d32"), 3.0))
+            painter.drawLine(QPointF(6, 15), QPointF(12, 21))
+            painter.drawLine(QPointF(12, 21), QPointF(23, 7))
+        elif name == "cancel":
+            painter.setPen(QPen(QColor("#c62828"), 3.0))
+            painter.drawLine(QPointF(8, 8), QPointF(21, 21))
+            painter.drawLine(QPointF(21, 8), QPointF(8, 21))
+        else:
+            fallback = self.style().standardIcon(QStyle.SP_FileDialogDetailedView)
+            painter.end()
+            return fallback
+        painter.end()
+        return QIcon(pixmap)
+
+    def _set_route_offset_values(
+        self,
+        needle_1_dx: float,
+        needle_1_dy: float,
+        needle_2_dx: float,
+        needle_2_dy: float,
+    ) -> None:
+        values = (
+            (self._needle_1_dx_spin, needle_1_dx),
+            (self._needle_1_dy_spin, needle_1_dy),
+            (self._needle_2_dx_spin, needle_2_dx),
+            (self._needle_2_dy_spin, needle_2_dy),
+        )
+        for spinbox, value in values:
+            spinbox.blockSignals(True)
+            spinbox.setValue(float(value))
+            spinbox.blockSignals(False)
+
+    def _emit_route_offsets_changed(self, *_unused: object) -> None:
+        if self._updating_route_controls or self._route is None:
+            return
+        self.route_offsets_changed.emit(
+            self._needle_1_dx_spin.value(),
+            self._needle_1_dy_spin.value(),
+            self._needle_2_dx_spin.value(),
+            self._needle_2_dy_spin.value(),
+        )
+        self._update_route_array_preview()
+
+    def _set_design_tool(self, tool: str) -> None:
+        if tool not in {"select", "ruler", "array"}:
+            tool = "select"
+        self._active_design_tool = tool
+        button_by_tool = {
+            "select": self._select_tool_button,
+            "ruler": self._ruler_tool_button,
+            "array": self._array_tool_button,
+        }
+        for name, button in button_by_tool.items():
+            button.blockSignals(True)
+            button.setChecked(name == tool)
+            button.blockSignals(False)
+        stack_index_by_tool = {"select": 0, "ruler": 1, "array": 2}
+        self._tool_stack.setCurrentIndex(stack_index_by_tool[tool])
+        self._clear_route_pick_mode("")
+        self._tool_group.setVisible(tool == "array")
+        if tool == "select":
+            self.route_preview_changed.emit(None)
+            self.tool_measure_preview_changed.emit(None)
+            self._tool_status_label.setText("")
+        elif tool == "ruler":
+            self.route_preview_changed.emit(None)
+            self._ruler_anchor = None
+            self._ruler_end = None
+            self._update_ruler_labels()
+            self._tool_status_label.setText("")
+            self._route_pick_mode = "ruler"
+            self.route_pick_mode_changed.emit("ruler")
+        else:
+            self.tool_measure_preview_changed.emit(None)
+            self._tool_status_label.setText("Adjust array parameters or pick geometry.")
+            self._update_route_array_preview()
+
+    def cancel_active_tool(self) -> None:
+        if self._active_design_tool == "ruler":
+            self._clear_ruler()
+            self._set_design_tool("select")
+            return
+        if self._active_design_tool == "array":
+            self._cancel_route_array()
+            return
+        self._clear_route_pick_mode("")
+        self.tool_measure_preview_changed.emit(None)
+        self.route_preview_changed.emit(None)
+
+    def _set_route_array_origin(self, point: Point2D) -> None:
+        self._route_array_origin_x_spin.setValue(float(point[0]))
+        self._route_array_origin_y_spin.setValue(float(point[1]))
+
+    def _clear_ruler(self) -> None:
+        self._ruler_anchor = None
+        self._ruler_end = None
+        self._ruler_segments.clear()
+        self._update_ruler_labels()
+        self.tool_measure_preview_changed.emit(None)
+        self.tool_measurements_changed.emit([])
+        if self._active_design_tool == "ruler":
+            self._tool_status_label.setText("")
+
+    def _update_ruler_labels(self) -> None:
+        self._ruler_start_label.setText(
+            "Start: not set"
+            if self._ruler_anchor is None
+            else f"Start: {self._format_point(self._ruler_anchor)}"
+        )
+        self._ruler_end_label.setText(
+            "End: not set"
+            if self._ruler_end is None
+            else f"End: {self._format_point(self._ruler_end)}"
+        )
+        if self._ruler_anchor is None or self._ruler_end is None:
+            self._ruler_delta_label.setText("dX=0.000, dY=0.000")
+            self._ruler_length_label.setText("Length=0.000, Angle=0.000 deg")
+            if self._ruler_segments:
+                self._ruler_length_label.setText(
+                    f"{len(self._ruler_segments)} measurements"
+                )
+            return
+        dx = self._ruler_end[0] - self._ruler_anchor[0]
+        dy = self._ruler_end[1] - self._ruler_anchor[1]
+        length = math.hypot(dx, dy)
+        angle = math.degrees(math.atan2(dy, dx)) if length > 0.0 else 0.0
+        self._ruler_delta_label.setText(f"dX={dx:.3f}, dY={dy:.3f}")
+        self._ruler_length_label.setText(f"Length={length:.3f}, Angle={angle:.3f} deg")
+
+    def _start_route_pick_mode(self, mode: str) -> None:
+        if self._document is None:
+            self._tool_status_label.setText("Load a design to pick geometry.")
+            return
+        if self._active_design_tool != "array":
+            self._set_design_tool("array")
+        self._route_pick_mode = mode
+        self._route_pick_anchor_mode = None
+        self._route_pick_anchor_point = None
+        self.tool_measure_preview_changed.emit(None)
+        self._tool_status_label.setText(f"Click design for {self._route_pick_label_text(mode)}.")
+        self.route_pick_mode_changed.emit(mode)
+
+    def _clear_route_pick_mode(self, status: str = "") -> None:
+        self._route_pick_anchor_mode = None
+        self._route_pick_anchor_point = None
+        if self._route_pick_mode is not None:
+            self._route_pick_mode = None
+            self.route_pick_mode_changed.emit(None)
+        self.tool_measure_preview_changed.emit(None)
+        self._tool_status_label.setText(status)
+
+    def apply_route_pick(
+        self,
+        mode: str,
+        x_value: float,
+        y_value: float,
+    ) -> None:
+        point = (float(x_value), float(y_value))
+        status = ""
+        if mode == "ruler":
+            if self._ruler_anchor is None:
+                self._ruler_anchor = point
+                self._ruler_end = None
+                self.tool_measure_preview_changed.emit([point])
+            else:
+                self._ruler_end = point
+                self._ruler_segments.append((self._ruler_anchor, point))
+                self.tool_measurements_changed.emit(list(self._ruler_segments))
+                self.tool_measure_preview_changed.emit(None)
+                self._ruler_anchor = None
+                self._ruler_end = None
+            self._update_ruler_labels()
+            self._route_pick_mode = "ruler"
+            self.route_pick_mode_changed.emit("ruler")
+            return
+        if mode == "array_origin":
+            self._set_route_array_origin(point)
+            status = f"Array origin set to {self._format_point(point)}."
+        elif mode == "array_dir1":
+            anchor = self._route_vector_anchor_or_none(mode, point, "Direction 1")
+            if anchor is None:
+                return
+            step = (point[0] - anchor[0], point[1] - anchor[1])
+            length, angle = self._vector_length_angle(step)
+            self._route_array_dir1_step_x_spin.setValue(length)
+            self._route_array_dir1_step_y_spin.setValue(angle)
+            status = f"Direction 1 set to length={length:.3f}, angle={angle:.3f} deg."
+        elif mode == "array_extent1":
+            count = self._count_from_endpoint(
+                (
+                    self._route_array_origin_x_spin.value(),
+                    self._route_array_origin_y_spin.value(),
+                ),
+                (
+                    self._route_array_dir1_step_x_spin.value(),
+                    self._route_array_dir1_step_y_spin.value(),
+                ),
+                point,
+            )
+            self._route_array_dir1_count_spin.setValue(count)
+            status = f"Direction 1 count set to {count}."
+        elif mode == "array_dir2":
+            anchor = self._route_vector_anchor_or_none(mode, point, "Direction 2")
+            if anchor is None:
+                return
+            step = (point[0] - anchor[0], point[1] - anchor[1])
+            length, angle = self._vector_length_angle(step)
+            self._route_array_dir2_step_x_spin.setValue(length)
+            self._route_array_dir2_step_y_spin.setValue(angle)
+            status = f"Direction 2 set to length={length:.3f}, angle={angle:.3f} deg."
+        elif mode == "array_extent2":
+            count = self._count_from_endpoint(
+                (
+                    self._route_array_origin_x_spin.value(),
+                    self._route_array_origin_y_spin.value(),
+                ),
+                (
+                    self._route_array_dir2_step_x_spin.value(),
+                    self._route_array_dir2_step_y_spin.value(),
+                ),
+                point,
+            )
+            self._route_array_dir2_count_spin.setValue(count)
+            status = f"Direction 2 count set to {count}."
+        else:
+            status = "Unknown route pick mode."
+        self._clear_route_pick_mode(status)
+        self._update_route_array_preview()
+
+    def _route_vector_anchor_or_none(
+        self,
+        mode: str,
+        point: Point2D,
+        label: str,
+    ) -> Point2D | None:
+        if self._route_pick_anchor_mode != mode or self._route_pick_anchor_point is None:
+            self._route_pick_anchor_mode = mode
+            self._route_pick_anchor_point = point
+            self.tool_measure_preview_changed.emit([point])
+            self._tool_status_label.setText(
+                f"{label} vector starts at {self._format_point(point)}; click endpoint."
+            )
+            return None
+        self.tool_measure_preview_changed.emit([self._route_pick_anchor_point, point])
+        return self._route_pick_anchor_point
+
+    def _emit_route_array_requested(self) -> None:
+        dir1 = self._route_array_dir1_step()
+        dir2 = self._route_array_dir2_step()
+        self.route_array_requested.emit(
+            self._route_array_origin_x_spin.value(),
+            self._route_array_origin_y_spin.value(),
+            dir1[0],
+            dir1[1],
+            self._route_array_dir1_count_spin.value(),
+            dir2[0],
+            dir2[1],
+            self._route_array_dir2_count_spin.value(),
+            self._route_array_serpentine_checkbox.isChecked(),
+            self._route_array_replace_checkbox.isChecked(),
+        )
+        self._set_design_tool("select")
+
+    def _cancel_route_array(self) -> None:
+        self.route_preview_changed.emit(None)
+        self._set_design_tool("select")
+
+    def _update_tool_hover_preview(self, snap_result: SnapResult | None) -> None:
+        if snap_result is None:
+            return
+        point = snap_result.point
+        if self._active_design_tool == "ruler":
+            if self._ruler_anchor is not None and self._ruler_end is None:
+                self.tool_measure_preview_changed.emit([self._ruler_anchor, point])
+                self._ruler_end = point
+                self._update_ruler_labels()
+                self._ruler_end = None
+            return
+        if self._active_design_tool != "array":
+            return
+        if self._route_pick_mode == "array_origin":
+            self._update_route_array_preview(origin_override=point)
+        elif self._route_pick_mode == "array_dir1" and self._route_pick_anchor_point is not None:
+            step = (
+                point[0] - self._route_pick_anchor_point[0],
+                point[1] - self._route_pick_anchor_point[1],
+            )
+            self.tool_measure_preview_changed.emit([self._route_pick_anchor_point, point])
+            self._update_route_array_preview(dir1_override=step)
+        elif self._route_pick_mode == "array_dir2" and self._route_pick_anchor_point is not None:
+            step = (
+                point[0] - self._route_pick_anchor_point[0],
+                point[1] - self._route_pick_anchor_point[1],
+            )
+            self.tool_measure_preview_changed.emit([self._route_pick_anchor_point, point])
+            self._update_route_array_preview(dir2_override=step)
+        elif self._route_pick_mode == "array_extent1":
+            count = self._count_from_endpoint(
+                self._route_array_origin(),
+                self._route_array_dir1_step(),
+                point,
+            )
+            self._update_route_array_preview(count1_override=count)
+        elif self._route_pick_mode == "array_extent2":
+            count = self._count_from_endpoint(
+                self._route_array_origin(),
+                self._route_array_dir2_step(),
+                point,
+            )
+            self._update_route_array_preview(count2_override=count)
+
+    def _update_route_array_preview(
+        self,
+        *_unused: object,
+        origin_override: Point2D | None = None,
+        dir1_override: Point2D | None = None,
+        count1_override: int | None = None,
+        dir2_override: Point2D | None = None,
+        count2_override: int | None = None,
+    ) -> None:
+        if self._document is None or self._active_design_tool != "array":
+            self.route_preview_changed.emit(None)
+            return
+        origin = origin_override or self._route_array_origin()
+        dir1 = dir1_override or self._route_array_dir1_step()
+        dir2 = dir2_override or self._route_array_dir2_step()
+        count1 = int(count1_override or self._route_array_dir1_count_spin.value())
+        count2 = int(count2_override or self._route_array_dir2_count_spin.value())
+        points = self._build_array_preview_points(origin, dir1, count1, dir2, count2)
+        self.route_preview_changed.emit((points, self._current_route_offset_vectors()))
+
+    def _build_array_preview_points(
+        self,
+        origin: Point2D,
+        dir1: Point2D,
+        count1: int,
+        dir2: Point2D,
+        count2: int,
+    ) -> list[Point2D]:
+        count1 = max(1, int(count1))
+        count2 = max(1, int(count2))
+        dir1_x, dir1_y = float(dir1[0]), float(dir1[1])
+        dir2_x, dir2_y = float(dir2[0]), float(dir2[1])
+        if count1 > 1 and abs(dir1_x) <= 1e-12 and abs(dir1_y) <= 1e-12:
+            return []
+        if count2 > 1 and abs(dir2_x) <= 1e-12 and abs(dir2_y) <= 1e-12:
+            return []
+        points: list[Point2D] = []
+        for row_index in range(count2):
+            if self._route_array_serpentine_checkbox.isChecked() and row_index % 2 == 1:
+                column_indices = range(count1 - 1, -1, -1)
+            else:
+                column_indices = range(count1)
+            for column_index in column_indices:
+                points.append(
+                    (
+                        float(origin[0])
+                        + dir1_x * float(column_index)
+                        + dir2_x * float(row_index),
+                        float(origin[1])
+                        + dir1_y * float(column_index)
+                        + dir2_y * float(row_index),
+                    )
+                )
+        return points
+
+    def _route_array_origin(self) -> Point2D:
+        return (
+            self._route_array_origin_x_spin.value(),
+            self._route_array_origin_y_spin.value(),
+        )
+
+    def _route_array_dir1_step(self) -> Point2D:
+        return self._vector_from_length_angle(
+            self._route_array_dir1_step_x_spin.value(),
+            self._route_array_dir1_step_y_spin.value(),
+        )
+
+    def _route_array_dir2_step(self) -> Point2D:
+        return self._vector_from_length_angle(
+            self._route_array_dir2_step_x_spin.value(),
+            self._route_array_dir2_step_y_spin.value(),
+        )
+
+    def _current_route_offset_vectors(self) -> list[Point2D]:
+        if self._route is not None and len(self._route.needle_offsets) >= 2:
+            return [
+                (self._route.needle_offsets[0].dx, self._route.needle_offsets[0].dy),
+                (self._route.needle_offsets[1].dx, self._route.needle_offsets[1].dy),
+            ]
+        return [
+            (self._needle_1_dx_spin.value(), self._needle_1_dy_spin.value()),
+            (self._needle_2_dx_spin.value(), self._needle_2_dy_spin.value()),
+        ]
+
+    @staticmethod
+    def _vector_from_length_angle(length: float, angle_degrees: float) -> Point2D:
+        radians = math.radians(float(angle_degrees))
+        distance = float(length)
+        return (distance * math.cos(radians), distance * math.sin(radians))
+
+    @staticmethod
+    def _vector_length_angle(vector: Point2D) -> tuple[float, float]:
+        dx = float(vector[0])
+        dy = float(vector[1])
+        length = math.hypot(dx, dy)
+        angle = math.degrees(math.atan2(dy, dx)) if length > 0.0 else 0.0
+        return length, angle
+
+    @staticmethod
+    def _count_from_endpoint(
+        start: Point2D,
+        step: Point2D,
+        end: Point2D,
+    ) -> int:
+        step_x = float(step[0])
+        step_y = float(step[1])
+        denominator = step_x * step_x + step_y * step_y
+        if denominator <= 1e-18:
+            return 1
+        delta_x = float(end[0]) - float(start[0])
+        delta_y = float(end[1]) - float(start[1])
+        projected_steps = (delta_x * step_x + delta_y * step_y) / denominator
+        return max(1, int(math.floor(projected_steps + 0.5)) + 1)
+
+    @staticmethod
+    def _route_pick_label_text(mode: str) -> str:
+        labels = {
+            "array_origin": "array origin",
+            "array_dir1": "direction 1 vector start",
+            "array_extent1": "direction 1 approximate end",
+            "array_dir2": "direction 2 vector start",
+            "array_extent2": "direction 2 approximate end",
+        }
+        return labels.get(mode, "route point")
 
     def _choose_design_file(self) -> None:  # pragma: no cover - UI interaction
         start_directory = self._design_dialog_directory
@@ -924,6 +2578,38 @@ class DesignNavigatorPanel(QWidget):
         )
         if path:
             self.load_script_requested.emit(path)
+
+    def _choose_route_file(self) -> None:  # pragma: no cover - UI interaction
+        start_directory = ""
+        if self._route is not None and self._route.path is not None:
+            start_directory = str(self._route.path.parent)
+        elif self._document is not None:
+            start_directory = str(self._document.path.parent)
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Probe Route",
+            start_directory,
+            "Probe routes (*.probe-route.json *.json);;All files (*)",
+        )
+        if path:
+            self.route_open_requested.emit(path)
+
+    def _choose_route_save_file(self) -> None:  # pragma: no cover - UI interaction
+        if self._route is None:
+            return
+        start_directory = ""
+        if self._route.path is not None:
+            start_directory = str(self._route.path.parent)
+        elif self._document is not None:
+            start_directory = str(self._document.path.parent)
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Probe Route",
+            start_directory,
+            "Probe routes (*.probe-route.json);;JSON files (*.json);;All files (*)",
+        )
+        if path:
+            self.route_save_as_requested.emit(path)
 
     def _on_top_cell_changed(self, cell_name: str) -> None:
         if self._document is None or not cell_name:
@@ -970,6 +2656,18 @@ class DesignNavigatorPanel(QWidget):
         self.target_selected.emit(target.id)
         self._update_enabled_state()
 
+    def _on_route_selection_changed(self) -> None:
+        selected_rows = self._route_table.selectionModel().selectedRows()
+        if not selected_rows:
+            self._selected_route_point_index = -1
+            self.route_selected.emit(-1)
+            self._update_enabled_state()
+            return
+        row = selected_rows[0].row()
+        self._selected_route_point_index = row
+        self.route_selected.emit(row)
+        self._update_enabled_state()
+
     def _emit_move_to_selected_target(self) -> None:
         if self._selected_target_id is None:
             return
@@ -989,12 +2687,17 @@ class DesignNavigatorPanel(QWidget):
             return f"{label}: not set"
         return f"{label}: X={point[0]:.3f}, Y={point[1]:.3f}"
 
+    @staticmethod
+    def _format_point(point: Point2D) -> str:
+        return f"X={point[0]:.3f}, Y={point[1]:.3f}"
+
 
 class DesignLayoutWindow(QWidget):
     """Top-level design window combining the layout view and design controls."""
 
     calibration_point_selected = Signal(int, float, float)
     move_requested = Signal(float, float)
+    route_point_requested = Signal(float, float)
     hover_snap_changed = Signal(object)
     visibility_changed = Signal(bool)
 
@@ -1005,20 +2708,58 @@ class DesignLayoutWindow(QWidget):
         self.setWindowFlag(Qt.Window, True)
         self.resize(1480, 920)
 
-        root_layout = QHBoxLayout(self)
+        root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(8, 8, 8, 8)
         root_layout.setSpacing(8)
 
         self._main_view = _DesignPlotPane(parent=self)
         self.navigator_panel = DesignNavigatorPanel(self)
-        self.navigator_panel.setMinimumWidth(420)
+        tool_toolbar = self.navigator_panel.detach_tool_toolbar()
+        tool_toolbar.setObjectName("DesignToolToolbar")
+        tool_toolbar.setMinimumHeight(52)
+        tool_options = self.navigator_panel.detach_tool_options_panel()
+        tool_options.setMinimumWidth(300)
+        tool_options.setMaximumWidth(360)
+        self.navigator_panel.setMinimumWidth(400)
+        navigator_scroll = QScrollArea(self)
+        navigator_scroll.setWidgetResizable(True)
+        navigator_scroll.setFrameShape(QScrollArea.NoFrame)
+        navigator_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        navigator_scroll.setWidget(self.navigator_panel)
+        navigator_scroll.setMinimumWidth(430)
         self._main_view.calibration_point_selected.connect(
             self.calibration_point_selected.emit
         )
         self._main_view.move_requested.connect(self.move_requested.emit)
+        self._main_view.route_point_requested.connect(self.route_point_requested.emit)
+        self._main_view.route_pick_requested.connect(
+            self.navigator_panel.apply_route_pick
+        )
         self._main_view.hover_snap_changed.connect(self.hover_snap_changed.emit)
-        root_layout.addWidget(self._main_view, 1)
-        root_layout.addWidget(self.navigator_panel, 0)
+        self.navigator_panel.route_pick_mode_changed.connect(
+            self._main_view.set_route_pick_mode
+        )
+        self.navigator_panel.route_preview_changed.connect(
+            self._main_view.set_probe_route_preview
+        )
+        self.navigator_panel.tool_measure_preview_changed.connect(
+            self._main_view.set_tool_measure_points
+        )
+        self.navigator_panel.tool_measurements_changed.connect(
+            self._main_view.set_tool_measure_segments
+        )
+        self._escape_shortcut = QShortcut(QKeySequence("Esc"), self)
+        self._escape_shortcut.setContext(Qt.WindowShortcut)
+        self._escape_shortcut.activated.connect(self.navigator_panel.cancel_active_tool)
+
+        content_layout = QHBoxLayout()
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(8)
+        content_layout.addWidget(tool_options, 0)
+        content_layout.addWidget(self._main_view, 1)
+        content_layout.addWidget(navigator_scroll, 0)
+        root_layout.addWidget(tool_toolbar, 0)
+        root_layout.addLayout(content_layout, 1)
 
     def set_document(self, document: DesignDocument | None) -> None:
         self._main_view.set_document(document)
@@ -1033,6 +2774,21 @@ class DesignLayoutWindow(QWidget):
         self._main_view.set_targets(targets, selected_target_id=selected_target_id)
         self.navigator_panel.set_targets(targets, selected_target_id=selected_target_id)
 
+    def set_probe_route(
+        self,
+        route: MeasurementRoute | None,
+        *,
+        selected_route_point_index: int,
+    ) -> None:
+        self._main_view.set_probe_route(
+            route,
+            selected_route_point_index=selected_route_point_index,
+        )
+        self.navigator_panel.set_route(
+            route,
+            selected_route_point_index=selected_route_point_index,
+        )
+
     def set_registration_marks(
         self,
         source_design_marks: list[Point2D | None],
@@ -1045,6 +2801,11 @@ class DesignLayoutWindow(QWidget):
         """Toggle click-to-move behavior in the design plot."""
 
         self._main_view.set_navigation_enabled(enabled)
+
+    def set_route_edit_enabled(self, enabled: bool) -> None:
+        """Toggle route point placement in the design plot."""
+
+        self._main_view.set_route_edit_enabled(enabled)
 
     def set_snap_enabled(self, enabled: bool) -> None:
         """Toggle geometry snapping in the design plot and sidebar."""

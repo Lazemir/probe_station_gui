@@ -47,6 +47,7 @@ from probe_station_gui.diagnostics import configure_crash_diagnostics
 from probe_station_gui.dialogs.settings_dialog import SettingsDialog
 from probe_station_gui.api_server import ProbeStationApiServer
 from probe_station_gui.lcr_meter import LCRMeterController
+from probe_station_gui.route_model import MeasurementRoute
 from probe_station_gui.settings_manager import Settings, SettingsManager
 from probe_station_gui.views.alignment_panel import AlignmentPanel
 from probe_station_gui.views.contact_oscillation_window import (
@@ -879,6 +880,7 @@ class Main(QMainWindow):
         if self.serial_connection and self.serial_connection.is_open:
             self.serial_connection.close()
         self.serial_connection = None
+        self._persist_serial_connection_state(False)
         self._stage_unhomed_display_origins.clear()
         self._last_reported_b_position = None
         self._manual_jog_timer.stop()
@@ -929,8 +931,15 @@ class Main(QMainWindow):
 
     def _auto_connect_if_possible(self) -> None:
         if self.serial_connection_panel and not self.serial_connection:
-            logger.debug("Attempting auto-connect through connection panel")
-            self.serial_connection_panel.auto_connect()
+            if self.settings_manager.serial_auto_connect_enabled():
+                logger.debug(
+                    "Attempting serial auto-connect because previous session closed connected"
+                )
+                self.serial_connection_panel.auto_connect()
+            else:
+                logger.debug(
+                    "Skipping serial auto-connect because previous session was disconnected"
+                )
         needle_settings = self.settings_manager.needle_calibration_configuration()
         if (
             needle_settings.visa_resource.strip()
@@ -1006,6 +1015,13 @@ class Main(QMainWindow):
             return
         self.settings_manager.save_controller_state(
             self.stage_controller.export_cached_controller_state()
+        )
+
+    def _persist_serial_connection_state(self, connected: bool) -> None:
+        self.settings_manager.save_serial_connection_state(
+            connected,
+            port=self.serial_port_name,
+            baud_rate=self.serial_baud_rate,
         )
 
     def _setup_menus(self) -> None:
@@ -2605,6 +2621,190 @@ class Main(QMainWindow):
             return
         self._load_measurement_script(script_path)
 
+    def _create_measurement_route(self) -> None:
+        try:
+            route = self._design_session.create_route()
+        except DesignModelError as exc:
+            self._show_status(str(exc), 5000)
+            return
+        self._last_selected_design_point = None
+        self._refresh_design_panel()
+        self._show_status(f"Created route '{route.name}'.", 4000)
+
+    def _load_measurement_route(self, route_path: str) -> None:
+        document = self._design_session.document
+        if document is None:
+            self._show_status("Load a design before loading a route.", 5000)
+            return
+        try:
+            route = MeasurementRoute.load(route_path)
+            self._design_session.set_route(route)
+        except DesignModelError as exc:
+            self._show_status(str(exc), 7000)
+            return
+        current_point = self._design_session.current_route_point()
+        self._last_selected_design_point = (
+            current_point.camera_center if current_point is not None else None
+        )
+        self._refresh_design_panel()
+        self._show_status(
+            f"Loaded route '{route.name}' with {len(route.points)} points.",
+            5000,
+        )
+
+    def _save_measurement_route(self) -> None:
+        route = self._design_session.route
+        if route is None:
+            self._show_status("No route is loaded.", 4000)
+            return
+        try:
+            path = route.save()
+        except DesignModelError as exc:
+            self._show_status(str(exc), 5000)
+            return
+        self._refresh_design_panel()
+        self._show_status(f"Saved route '{path.name}'.", 4000)
+
+    def _save_measurement_route_as(self, route_path: str) -> None:
+        route = self._design_session.route
+        if route is None:
+            self._show_status("No route is loaded.", 4000)
+            return
+        try:
+            path = route.save(route_path)
+        except DesignModelError as exc:
+            self._show_status(str(exc), 5000)
+            return
+        self._refresh_design_panel()
+        self._show_status(f"Saved route '{path.name}'.", 4000)
+
+    def _add_design_route_point(self, x_value: float, y_value: float) -> None:
+        try:
+            point = self._design_session.add_route_point((float(x_value), float(y_value)))
+        except DesignModelError as exc:
+            self._show_status(str(exc), 5000)
+            return
+        self._last_selected_design_point = point.camera_center
+        self._refresh_design_panel()
+        self._show_status(
+            f"Added route point {point.label} at X={point.camera_center[0]:.3f}, "
+            f"Y={point.camera_center[1]:.3f}.",
+            3000,
+        )
+
+    def _add_current_design_route_point(self) -> None:
+        if self._current_design_stage_xy is None:
+            self._show_status("Current design position is unavailable.", 4000)
+            return
+        design_xy = self._design_session.design_from_stage(self._current_design_stage_xy)
+        if design_xy is None:
+            self._show_status(
+                "Design registration is required before adding the current position.",
+                5000,
+            )
+            return
+        self._add_design_route_point(design_xy[0], design_xy[1])
+
+    def _add_route_array_points(
+        self,
+        origin_x: float,
+        origin_y: float,
+        step_x_dx: float,
+        step_x_dy: float,
+        count_x: int,
+        step_y_dx: float,
+        step_y_dy: float,
+        count_y: int,
+        serpentine: bool,
+        replace_existing: bool,
+    ) -> None:
+        if self._design_session.document is None:
+            self._show_status("Load a design before adding route points.", 5000)
+            return
+        route = self._design_session.route
+        if route is None:
+            try:
+                route = self._design_session.create_route()
+            except DesignModelError as exc:
+                self._show_status(str(exc), 5000)
+                return
+        try:
+            added = route.add_grid_points(
+                (float(origin_x), float(origin_y)),
+                (float(step_x_dx), float(step_x_dy)),
+                int(count_x),
+                (float(step_y_dx), float(step_y_dy)),
+                int(count_y),
+                serpentine=bool(serpentine),
+                clear_existing=bool(replace_existing),
+            )
+        except DesignModelError as exc:
+            self._show_status(str(exc), 5000)
+            return
+        if added:
+            self._design_session.selected_route_point_index = len(route.points) - 1
+            self._last_selected_design_point = added[-1].camera_center
+        else:
+            self._design_session.selected_route_point_index = -1
+            self._last_selected_design_point = None
+        self._refresh_design_panel()
+        mode = "Replaced route with" if replace_existing else "Added"
+        self._show_status(
+            f"{mode} {len(added)} array route points "
+            f"from X={float(origin_x):.3f}, Y={float(origin_y):.3f}.",
+            4000,
+        )
+
+    def _remove_selected_route_point(self) -> None:
+        point = self._design_session.remove_selected_route_point()
+        if point is None:
+            self._show_status("No route point is selected.", 3000)
+            return
+        current_point = self._design_session.current_route_point()
+        self._last_selected_design_point = (
+            current_point.camera_center if current_point is not None else None
+        )
+        self._refresh_design_panel()
+        self._show_status(f"Removed route point {point.label}.", 3000)
+
+    def _clear_measurement_route_points(self) -> None:
+        route = self._design_session.route
+        if route is None:
+            self._show_status("No route is loaded.", 3000)
+            return
+        route.clear_points()
+        self._design_session.selected_route_point_index = -1
+        self._last_selected_design_point = None
+        self._refresh_design_panel()
+        self._show_status("Cleared route points.", 3000)
+
+    def _select_route_point(self, index: int) -> None:
+        point = self._design_session.select_route_point(index)
+        self._last_selected_design_point = point.camera_center if point is not None else None
+        self._refresh_design_panel()
+
+    def _set_route_needle_offsets(
+        self,
+        needle_1_dx: float,
+        needle_1_dy: float,
+        needle_2_dx: float,
+        needle_2_dy: float,
+    ) -> None:
+        route = self._design_session.route
+        if route is None:
+            return
+        route.set_needle_offsets(
+            needle_1_dx,
+            needle_1_dy,
+            needle_2_dx,
+            needle_2_dy,
+        )
+        self._refresh_design_panel()
+
+    def _set_route_edit_enabled(self, enabled: bool) -> None:
+        if self.design_layout_window is not None:
+            self.design_layout_window.set_route_edit_enabled(enabled)
+
     def _add_design_source_mark(self, x_value: float, y_value: float) -> None:
         self._design_session.add_source_design_mark((x_value, y_value))
         self._refresh_design_panel()
@@ -2758,6 +2958,10 @@ class Main(QMainWindow):
                 self._design_session.targets,
                 selected_target_id=selected_target_id,
             )
+            panel.set_route(
+                self._design_session.route,
+                selected_route_point_index=self._design_session.selected_route_point_index,
+            )
             if self._pending_alignment_preparation is not None:
                 panel.set_calibration_prompt(
                     "Calibration step 4/4: chip rotation is in progress."
@@ -2776,6 +2980,10 @@ class Main(QMainWindow):
             self.design_layout_window.set_targets(
                 self._design_session.targets,
                 selected_target_id=selected_target_id,
+            )
+            self.design_layout_window.set_probe_route(
+                self._design_session.route,
+                selected_route_point_index=self._design_session.selected_route_point_index,
             )
             self.design_layout_window.set_navigation_enabled(
                 self._design_session.registration is not None
@@ -3347,6 +3555,8 @@ class Main(QMainWindow):
             document=self._design_session.document,
             targets=self._design_session.targets,
             selected_target_id=current_target.id if current_target else None,
+            probe_route=self._design_session.route,
+            selected_route_point_index=self._design_session.selected_route_point_index,
             selected_design_point=self._last_selected_design_point,
             current_design_position=design_xy,
             fov_design_size=fov_design_size,
@@ -3577,6 +3787,10 @@ class Main(QMainWindow):
         self._clear_stage_motion_axes()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        serial_was_connected = bool(
+            self.serial_connection is not None and self.serial_connection.is_open
+        )
+        self._persist_serial_connection_state(serial_was_connected)
         if self._api_server is not None:
             self._api_server.stop()
         self._design_position_timer.stop()
@@ -3880,6 +4094,39 @@ class Main(QMainWindow):
         self.design_navigator_panel.reload_script_requested.connect(
             self._reload_measurement_script
         )
+        self.design_navigator_panel.route_new_requested.connect(
+            self._create_measurement_route
+        )
+        self.design_navigator_panel.route_open_requested.connect(
+            self._load_measurement_route
+        )
+        self.design_navigator_panel.route_save_requested.connect(
+            self._save_measurement_route
+        )
+        self.design_navigator_panel.route_save_as_requested.connect(
+            self._save_measurement_route_as
+        )
+        self.design_navigator_panel.route_add_current_requested.connect(
+            self._add_current_design_route_point
+        )
+        self.design_navigator_panel.route_remove_selected_requested.connect(
+            self._remove_selected_route_point
+        )
+        self.design_navigator_panel.route_clear_requested.connect(
+            self._clear_measurement_route_points
+        )
+        self.design_navigator_panel.route_selected.connect(
+            self._select_route_point
+        )
+        self.design_navigator_panel.route_offsets_changed.connect(
+            self._set_route_needle_offsets
+        )
+        self.design_navigator_panel.route_edit_enabled_changed.connect(
+            self._set_route_edit_enabled
+        )
+        self.design_navigator_panel.route_array_requested.connect(
+            self._add_route_array_points
+        )
         self.design_navigator_panel.move_to_target_requested.connect(
             self._move_to_design_target
         )
@@ -3900,6 +4147,9 @@ class Main(QMainWindow):
         )
         self.design_layout_window.move_requested.connect(
             lambda x_value, y_value: self._move_to_design_window_point(x_value, y_value)
+        )
+        self.design_layout_window.route_point_requested.connect(
+            self._add_design_route_point
         )
         self.design_layout_window.hover_snap_changed.connect(
             self.design_navigator_panel.set_hover_snap

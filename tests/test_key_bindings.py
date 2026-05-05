@@ -1,6 +1,9 @@
 import importlib.util
+import json
+import logging
 import platform
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -226,6 +229,44 @@ class AxisACalibrationSettingsTest(unittest.TestCase):
         )
 
         self.assertFalse(parsed.configured)
+
+
+class SerialConnectionStateTest(unittest.TestCase):
+    def _manager_for_temp_dir(self, directory: Path) -> SettingsManager:
+        manager = object.__new__(SettingsManager)
+        manager._config_dir = directory
+        manager._logger = logging.getLogger("settings_manager_test")
+        return manager
+
+    def test_serial_auto_connect_defaults_to_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self._manager_for_temp_dir(Path(temp_dir))
+
+            self.assertFalse(manager.serial_auto_connect_enabled())
+
+    def test_serial_auto_connect_follows_last_saved_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self._manager_for_temp_dir(Path(temp_dir))
+
+            manager.save_serial_connection_state(
+                True,
+                port="COM3",
+                baud_rate=115200,
+            )
+
+            self.assertTrue(manager.serial_auto_connect_enabled())
+            state_path = (
+                Path(temp_dir) / SettingsManager.SERIAL_CONNECTION_STATE_FILENAME
+            )
+            with state_path.open("r", encoding="utf-8") as handle:
+                saved = json.load(handle)
+            self.assertEqual(saved["status"], "connected")
+            self.assertEqual(saved["port"], "COM3")
+            self.assertEqual(saved["baud_rate"], 115200)
+
+            manager.save_serial_connection_state(False)
+
+            self.assertFalse(manager.serial_auto_connect_enabled())
 
 
 if __name__ == "__main__":

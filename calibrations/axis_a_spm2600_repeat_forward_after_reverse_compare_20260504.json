@@ -1,0 +1,33 @@
+{
+  "base_forward_npz": "C:\\Users\\Public\\code\\probe_station_gui\\calibrations\\axis_a_spm2600_pulloff0p25_start0p230_to-lowerlimit_step0p01_settle1p0_feed30_oneshot_20260504_223257.npz",
+  "repeat_forward_npz": "C:\\Users\\Public\\code\\probe_station_gui\\calibrations\\axis_a_spm2600_pulloff0p25_repeat_forward_start0p230_to-m0p770_step0p01_settle1p0_feed30_nozero_20260504_231333.npz",
+  "reverse_npz": "C:\\Users\\Public\\code\\probe_station_gui\\calibrations\\axis_a_spm2600_pulloff0p25_reverse_startm5p730_to0p230_step0p01_settle1p0_feed30_oneshot_nozero_20260504_225516.npz",
+  "plot_png": "C:\\Users\\Public\\code\\probe_station_gui\\calibrations\\axis_a_spm2600_repeat_forward_after_reverse_compare_20260504.png",
+  "repeat_points": 101,
+  "overlap_forward_points": 101,
+  "overlap_reverse_points": 101,
+  "gcode_range": [
+    0.23,
+    -0.77
+  ],
+  "repeat_minus_base_forward_mm": {
+    "mean": 0.0026961405368267073,
+    "median": 0.0025757505457901786,
+    "std": 0.0008960511082937595,
+    "min": 0.0005958143538729033,
+    "max": 0.005372353647125294,
+    "abs_p50": 0.0025757505457901786,
+    "abs_p95": 0.003955768559427142,
+    "abs_max": 0.005372353647125294
+  },
+  "repeat_minus_reverse_mm": {
+    "mean": -0.05506702590603804,
+    "median": -0.058423736825854,
+    "std": 0.009662300742641747,
+    "min": -0.062134702403489506,
+    "max": -0.0024852527970011806,
+    "abs_p50": 0.058423736825854,
+    "abs_p95": 0.06139095651765203,
+    "abs_max": 0.062134702403489506
+  }
+}

@@ -14,11 +14,13 @@ from PySide6.QtGui import (
     QPainterPath,
     QPalette,
     QPen,
+    QPolygonF,
     QPixmap,
 )
 from PySide6.QtWidgets import QApplication, QWidget
 
 from ..design_model import DesignDocument, MeasurementTarget
+from ..route_model import MeasurementRoute
 
 
 class MicroscopeView(QWidget):
@@ -54,6 +56,9 @@ class MicroscopeView(QWidget):
         self._design_document: DesignDocument | None = None
         self._design_targets: list[MeasurementTarget] = []
         self._selected_target_id: str | None = None
+        self._probe_route: MeasurementRoute | None = None
+        self._probe_route_snapshot: tuple[object, ...] | None = None
+        self._selected_route_point_index = -1
         self._selected_design_point: tuple[float, float] | None = None
         self._current_design_position: tuple[float, float] | None = None
         self._fov_design_size: tuple[float, float] | None = None
@@ -102,6 +107,8 @@ class MicroscopeView(QWidget):
         document: DesignDocument | None,
         targets: list[MeasurementTarget],
         selected_target_id: str | None,
+        probe_route: MeasurementRoute | None,
+        selected_route_point_index: int,
         selected_design_point: tuple[float, float] | None,
         current_design_position: tuple[float, float] | None,
         fov_design_size: tuple[float, float] | None,
@@ -117,6 +124,8 @@ class MicroscopeView(QWidget):
             self._design_document,
             tuple(target.id for target in self._design_targets),
             self._selected_target_id,
+            self._probe_route_snapshot,
+            self._selected_route_point_index,
             self._selected_design_point,
             self._current_design_position,
             self._fov_design_size,
@@ -126,6 +135,10 @@ class MicroscopeView(QWidget):
         self._design_document = document
         self._design_targets = list(targets)
         self._selected_target_id = selected_target_id
+        self._probe_route = probe_route
+        current_route_snapshot = self._route_snapshot(probe_route)
+        self._probe_route_snapshot = current_route_snapshot
+        self._selected_route_point_index = selected_route_point_index
         self._selected_design_point = selected_design_point
         self._current_design_position = current_design_position
         self._fov_design_size = fov_design_size
@@ -135,6 +148,8 @@ class MicroscopeView(QWidget):
             self._design_document,
             tuple(target.id for target in self._design_targets),
             self._selected_target_id,
+            current_route_snapshot,
+            self._selected_route_point_index,
             self._selected_design_point,
             self._current_design_position,
             self._fov_design_size,
@@ -242,6 +257,7 @@ class MicroscopeView(QWidget):
                 self._draw_scale_bar(painter, self._display_rect, scale_x)
                 self._draw_ruler(painter, self._display_rect, scale_x, scale_y)
                 self._draw_rect_measure(painter, self._display_rect, scale_x, scale_y)
+                self._draw_axis_triad(painter, self._display_rect)
         painter.end()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
@@ -438,6 +454,76 @@ class MicroscopeView(QWidget):
         painter.drawText(label_rect, Qt.AlignCenter, label)
         painter.setPen(QPen(QColor("white"), 1))
         painter.drawText(label_rect, Qt.AlignCenter, label)
+        painter.restore()
+
+    def _draw_axis_triad(self, painter: QPainter, display_rect: QRect) -> None:
+        """Draw a small SolidWorks-style axis triad in the camera view."""
+
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+        base = QPointF(display_rect.left() + 34.0, display_rect.bottom() - 82.0)
+        length = 34.0
+        arrow = 7.0
+        font = QFont()
+        font.setPointSize(8)
+        font.setBold(True)
+        painter.setFont(font)
+
+        def draw_axis(end: QPointF, color: QColor, label: str, label_offset: QPointF) -> None:
+            painter.setPen(QPen(QColor(0, 0, 0, 170), 4.0))
+            painter.drawLine(base, end)
+            painter.setPen(QPen(color, 2.2))
+            painter.drawLine(base, end)
+            dx = end.x() - base.x()
+            dy = end.y() - base.y()
+            axis_len = math.hypot(dx, dy)
+            if axis_len > 1e-6:
+                ux = dx / axis_len
+                uy = dy / axis_len
+                px = -uy
+                py = ux
+                p1 = QPointF(
+                    end.x() - ux * arrow + px * arrow * 0.55,
+                    end.y() - uy * arrow + py * arrow * 0.55,
+                )
+                p2 = QPointF(
+                    end.x() - ux * arrow - px * arrow * 0.55,
+                    end.y() - uy * arrow - py * arrow * 0.55,
+                )
+                painter.drawLine(end, p1)
+                painter.drawLine(end, p2)
+            label_rect = QRectF(
+                end.x() + label_offset.x() - 8.0,
+                end.y() + label_offset.y() - 8.0,
+                16.0,
+                16.0,
+            )
+            painter.setPen(QPen(QColor(0, 0, 0, 180), 3.0))
+            painter.drawText(label_rect, Qt.AlignCenter, label)
+            painter.setPen(QPen(color, 1.0))
+            painter.drawText(label_rect, Qt.AlignCenter, label)
+
+        draw_axis(
+            QPointF(base.x() + length, base.y()),
+            QColor("#ef5350"),
+            "X",
+            QPointF(10.0, 0.0),
+        )
+        draw_axis(
+            QPointF(base.x(), base.y() - length),
+            QColor("#66bb6a"),
+            "Y",
+            QPointF(0.0, -10.0),
+        )
+        draw_axis(
+            QPointF(base.x() - length * 0.42, base.y() - length * 0.42),
+            QColor("#42a5f5"),
+            "Z",
+            QPointF(-10.0, -8.0),
+        )
+        painter.setPen(QPen(QColor("#eceff1"), 1.0))
+        painter.setBrush(QColor(33, 33, 33, 170))
+        painter.drawEllipse(base, 3.0, 3.0)
         painter.restore()
 
     def _draw_ruler(
@@ -744,6 +830,7 @@ class MicroscopeView(QWidget):
             painter.drawPixmap(content_rect.topLeft(), background)
 
         self._draw_design_route(painter, content_rect)
+        self._draw_probe_route(painter, content_rect)
         self._draw_design_marks(painter, content_rect)
         self._draw_design_position(painter, content_rect)
 
@@ -809,6 +896,124 @@ class MicroscopeView(QWidget):
             painter.setBrush(QColor(255, 213, 79, 160))
             painter.drawEllipse(self._map_design_point_to_rect(self._selected_design_point, rect), 4.0, 4.0)
         painter.restore()
+
+    def _draw_probe_route(self, painter: QPainter, rect: QRect) -> None:
+        route = self._probe_route
+        if route is None or not route.points:
+            return
+        points = [point for point in route.points if point.enabled]
+        if not points:
+            return
+
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        center_path = QPainterPath()
+        first_point = self._map_design_point_to_rect(points[0].camera_center, rect)
+        center_path.moveTo(first_point)
+        for route_point in points[1:]:
+            center_path.lineTo(
+                self._map_design_point_to_rect(route_point.camera_center, rect)
+            )
+        painter.setPen(QPen(QColor("#29b6f6"), 2.0))
+        painter.drawPath(center_path)
+        painter.setPen(QPen(QColor("#e1f5fe"), 1.4))
+        painter.setBrush(QColor(225, 245, 254, 210))
+        for start, end in zip(points, points[1:]):
+            self._draw_route_arrowhead(
+                painter,
+                self._map_design_point_to_rect(start.camera_center, rect),
+                self._map_design_point_to_rect(end.camera_center, rect),
+            )
+
+        connector_pen = QPen(QColor(207, 216, 220, 120), 1.0)
+        connector_pen.setStyle(Qt.DotLine)
+        needle_colors = (QColor("#ffd54f"), QColor("#ec407a"))
+        font = QFont()
+        font.setPointSize(7)
+        painter.setFont(font)
+
+        for route_index, route_point in enumerate(route.points):
+            if not route_point.enabled:
+                continue
+            center = self._map_design_point_to_rect(route_point.camera_center, rect)
+            is_selected = route_index == self._selected_route_point_index
+            painter.setPen(QPen(QColor("#ff7043" if is_selected else "#29b6f6"), 2.0))
+            painter.setBrush(QColor(41, 182, 246, 170))
+            radius = 5.2 if is_selected else 4.0
+            painter.drawEllipse(center, radius, radius)
+
+            label_rect = QRectF(center.x() + 5.0, center.y() - 15.0, 30.0, 13.0)
+            painter.setPen(QPen(QColor(0, 0, 0, 180), 3))
+            painter.drawText(label_rect, Qt.AlignLeft | Qt.AlignVCenter, str(route_index + 1))
+            painter.setPen(QPen(QColor("#e3f2fd"), 1))
+            painter.drawText(label_rect, Qt.AlignLeft | Qt.AlignVCenter, str(route_index + 1))
+
+            hits = route.needle_hits_for_point(route_point)
+            for needle_index, (_offset, hit) in enumerate(hits[:2]):
+                needle_point = self._map_design_point_to_rect(hit, rect)
+                painter.setPen(connector_pen)
+                painter.drawLine(center, needle_point)
+                color = needle_colors[min(needle_index, len(needle_colors) - 1)]
+                painter.setPen(QPen(color, 1.6))
+                painter.setBrush(QColor(color.red(), color.green(), color.blue(), 120))
+                if needle_index == 0:
+                    painter.drawLine(
+                        QPointF(needle_point.x() - 4.0, needle_point.y()),
+                        QPointF(needle_point.x() + 4.0, needle_point.y()),
+                    )
+                    painter.drawLine(
+                        QPointF(needle_point.x(), needle_point.y() - 4.0),
+                        QPointF(needle_point.x(), needle_point.y() + 4.0),
+                    )
+                    painter.drawEllipse(needle_point, 3.0, 3.0)
+                else:
+                    painter.drawLine(
+                        QPointF(needle_point.x() - 4.0, needle_point.y() - 4.0),
+                        QPointF(needle_point.x() + 4.0, needle_point.y() + 4.0),
+                    )
+                    painter.drawLine(
+                        QPointF(needle_point.x() - 4.0, needle_point.y() + 4.0),
+                        QPointF(needle_point.x() + 4.0, needle_point.y() - 4.0),
+                    )
+                    painter.drawEllipse(needle_point, 3.0, 3.0)
+        painter.restore()
+
+    @staticmethod
+    def _draw_route_arrowhead(
+        painter: QPainter,
+        start: QPointF,
+        end: QPointF,
+    ) -> None:
+        dx = float(end.x() - start.x())
+        dy = float(end.y() - start.y())
+        length = math.hypot(dx, dy)
+        if length <= 1e-6:
+            return
+        ux = dx / length
+        uy = dy / length
+        px = -uy
+        py = ux
+        arrow_len = 11.0
+        arrow_width = 7.0
+        if length < arrow_len * 2.0:
+            arrow_len = max(5.0, length * 0.32)
+            arrow_width = min(arrow_width, arrow_len * 0.75)
+        tip_x = float(start.x() + dx * 0.58)
+        tip_y = float(start.y() + dy * 0.58)
+        base_x = tip_x - ux * arrow_len
+        base_y = tip_y - uy * arrow_len
+        notch_x = base_x + ux * arrow_len * 0.22
+        notch_y = base_y + uy * arrow_len * 0.22
+        polygon = QPolygonF(
+            [
+                QPointF(tip_x, tip_y),
+                QPointF(base_x + px * arrow_width * 0.5, base_y + py * arrow_width * 0.5),
+                QPointF(notch_x, notch_y),
+                QPointF(base_x - px * arrow_width * 0.5, base_y - py * arrow_width * 0.5),
+            ]
+        )
+        painter.drawPolygon(polygon)
 
     def _draw_design_marks(self, painter: QPainter, rect: QRect) -> None:
         painter.save()
@@ -964,6 +1169,28 @@ class MicroscopeView(QWidget):
     def _layer_color(layer_key: tuple[int, int]) -> QColor:
         hue = int((layer_key[0] * 57 + layer_key[1] * 19) % 360)
         return QColor.fromHsv(hue, 120, 145, 180)
+
+    @staticmethod
+    def _route_snapshot(route: MeasurementRoute | None) -> tuple[object, ...] | None:
+        if route is None:
+            return None
+        return (
+            route.name,
+            str(route.path) if route.path is not None else "",
+            tuple(
+                (offset.id, offset.dx, offset.dy, offset.source)
+                for offset in route.needle_offsets
+            ),
+            tuple(
+                (
+                    point.id,
+                    point.label,
+                    point.camera_center,
+                    point.enabled,
+                )
+                for point in route.points
+            ),
+        )
 
 
 __all__ = ["MicroscopeView"]

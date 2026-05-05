@@ -11,6 +11,7 @@ import sys
 from typing import Any
 
 import serial
+import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -70,6 +71,21 @@ def atomic_save(path: Path, payload: dict[str, Any]) -> None:
         encoding="utf-8",
     )
     temporary_path.replace(path)
+
+
+def save_points_npz(path: Path, points: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows: list[tuple[float, float]] = []
+    for point in points:
+        gcode = point.get("commanded_z_mm")
+        indicator = point.get("indicator_delta_mm")
+        if gcode is None or indicator is None:
+            continue
+        rows.append((float(gcode), float(indicator)))
+    data = np.asarray(rows, dtype=float)
+    if data.size == 0:
+        data = np.empty((0, 2), dtype=float)
+    np.savez(path, gcode=data[:, 0], indicator=data[:, 1])
 
 
 def current_axis_from_status(status: dict[str, Any], index: int) -> float:
@@ -288,6 +304,7 @@ def main() -> int:
     capture["complete"] = True
     capture["updated_at"] = datetime.now(timezone.utc).isoformat()
     atomic_save(args.output, capture)
+    save_points_npz(args.output.with_suffix(".npz"), points)
     try:
         partial_output.unlink()
     except FileNotFoundError:

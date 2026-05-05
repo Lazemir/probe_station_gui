@@ -15,6 +15,7 @@ from urllib.error import URLError
 from urllib.request import urlopen
 
 import serial
+import numpy as np
 
 
 AXIS_LIMIT_PATTERN = re.compile(
@@ -96,6 +97,21 @@ def save_calibration(path: Path, calibration: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         json.dump(calibration, handle, indent=2, ensure_ascii=False)
+
+
+def save_points_npz(path: Path, points: list[dict[str, Any]], axis_key: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows: list[tuple[float, float]] = []
+    for point in points:
+        gcode = point.get(axis_key)
+        indicator = point.get("indicator_delta_mm")
+        if gcode is None or indicator is None:
+            continue
+        rows.append((float(gcode), float(indicator)))
+    data = np.asarray(rows, dtype=float)
+    if data.size == 0:
+        data = np.empty((0, 2), dtype=float)
+    np.savez(path, gcode=data[:, 0], indicator=data[:, 1])
 
 
 def read_indicator(api_base: str, timeout_s: float = 2.0) -> dict[str, Any]:
@@ -520,6 +536,7 @@ def main() -> int:
     calibration["complete"] = True
     calibration["updated_at"] = datetime.now(timezone.utc).isoformat()
     save_calibration(args.output, calibration)
+    save_points_npz(args.output.with_suffix(".npz"), points, "commanded_a_mm")
     try:
         partial_output.unlink()
     except FileNotFoundError:
