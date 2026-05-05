@@ -21,6 +21,14 @@ from serial.tools import list_ports
 
 logger = logging.getLogger(__name__)
 
+_SERIAL_IO_EXCEPTIONS = (
+    serial.SerialException,
+    OSError,
+    ValueError,
+    AttributeError,
+    TypeError,
+)
+
 
 class SerialConnectionPanel(QWidget):
     """Widget that embeds serial scanning and connection controls."""
@@ -153,12 +161,14 @@ class SerialConnectionPanel(QWidget):
             self._auto_retry_pending = False
             self._set_connecting(False)
             self.status_label.setText("Connection cancelled.")
-            self._cleanup_connect_worker()
             return
 
         if self._serial is not None and self._serial.is_open:
             self._auto_timer.stop()
-            self._serial.close()
+            try:
+                self._serial.close()
+            except _SERIAL_IO_EXCEPTIONS:
+                logger.debug("Serial close failed during manual disconnect", exc_info=True)
             self._serial = None
             self.status_label.setText("Disconnected from board.")
             self.populate_ports()
@@ -201,11 +211,19 @@ class SerialConnectionPanel(QWidget):
             self.port_combo.setCurrentIndex(target_index)
 
         self._auto_retry_pending = True
+        logger.debug(
+            "Serial auto-connect attempting %s @ %s baud",
+            self.port_combo.currentData(),
+            self.baud_combo.currentText(),
+        )
         self._start_async_connect(self.port_combo.currentData(), int(self.baud_combo.currentText()))
 
     def handle_external_disconnect(self, auto_retry: bool = True) -> None:
         if self._serial is not None and self._serial.is_open:
-            self._serial.close()
+            try:
+                self._serial.close()
+            except _SERIAL_IO_EXCEPTIONS:
+                logger.debug("Serial close failed during external disconnect", exc_info=True)
         self._serial = None
         self.status_label.setText("Disconnected from board.")
         self.populate_ports()
@@ -241,6 +259,9 @@ class SerialConnectionPanel(QWidget):
             port_name = self.port_combo.currentText().split(" ")[0]
 
         if self._connect_thread is not None:
+            if self._connect_thread.isRunning():
+                self.status_label.setText("Previous connection attempt is still stopping.")
+                return
             self._cleanup_connect_worker()
 
         self._connect_cancelled = False
@@ -256,6 +277,7 @@ class SerialConnectionPanel(QWidget):
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._cleanup_connect_worker)
 
         self._connect_worker = worker
         self._connect_thread = thread
@@ -266,9 +288,8 @@ class SerialConnectionPanel(QWidget):
         if self._connect_cancelled:
             try:
                 serial_connection.close()
-            except serial.SerialException:
+            except _SERIAL_IO_EXCEPTIONS:
                 pass
-            self._cleanup_connect_worker()
             return
 
         self._serial = serial_connection
@@ -277,22 +298,44 @@ class SerialConnectionPanel(QWidget):
         self._auto_retry_pending = False
         self._set_connecting(False)
         self.connected.emit(self._serial)
-        self._cleanup_connect_worker()
 
     @Slot(str)
     def _on_connect_failed(self, message: str) -> None:
         if self._connect_cancelled:
-            self._cleanup_connect_worker()
             return
         self.status_label.setText(message)
         self._set_connecting(False)
-        if self._auto_retry_pending:
+        if self._auto_retry_pending and not self._is_port_busy_failure(message):
             self._auto_timer.start(self._AUTO_RECONNECT_DELAY_MS)
-        self._cleanup_connect_worker()
+        elif self._auto_retry_pending:
+            logger.debug("Serial auto-connect stopped after busy-port failure: %s", message)
+            self._auto_retry_pending = False
 
     def _cleanup_connect_worker(self) -> None:
         self._connect_worker = None
         self._connect_thread = None
+
+    @staticmethod
+    def _is_port_busy_failure(message: str) -> bool:
+        text = message.lower()
+        return any(
+            token in text
+            for token in (
+                "access is denied",
+                "permission denied",
+                "permissionerror",
+                "winerror 5",
+                "winerror 32",
+                "resource busy",
+                "port is busy",
+                "already open",
+                "in use",
+                "отказано в доступе",
+                "доступ запрещ",
+                "занят",
+                "используется",
+            )
+        )
 
     def _cleanup_scan_worker(self) -> None:
         self._scan_worker = None
@@ -303,7 +346,10 @@ class SerialConnectionPanel(QWidget):
         self._connect_cancelled = True
         self._set_connecting(False)
         if self._serial is not None and self._serial.is_open:
-            self._serial.close()
+            try:
+                self._serial.close()
+            except _SERIAL_IO_EXCEPTIONS:
+                logger.debug("Serial close failed during shutdown", exc_info=True)
         self._serial = None
 
 
@@ -327,6 +373,7 @@ class _SerialConnectWorker(QObject):
 
     @Slot()
     def run(self) -> None:
+        connection: serial.Serial | None = None
         try:
             connection = serial.Serial()
             connection.port = self._port_name
@@ -345,15 +392,23 @@ class _SerialConnectWorker(QObject):
                 connection.dtr = False
             except (AttributeError, ValueError):
                 pass
-        except serial.SerialException as exc:
-            self.failed.emit(f"Connection failed: {exc}")
+        except _SERIAL_IO_EXCEPTIONS as exc:
+            logger.debug("Serial connection failed on %s: %s", self._port_name, exc)
+            self._close_connection(connection)
+            self.failed.emit(f"Connection failed on {self._port_name}: {exc}")
+            self.finished.emit()
+            return
+        except Exception as exc:  # pragma: no cover - defensive hardware guard
+            logger.exception("Unexpected serial connection failure on %s", self._port_name)
+            self._close_connection(connection)
+            self.failed.emit(f"Connection failed on {self._port_name}: {exc!r}")
             self.finished.emit()
             return
 
         startup_lines: list[str] = []
         reboot_detected = False
+        original_timeout = connection.timeout
         try:
-            original_timeout = connection.timeout
             connection.timeout = 0.05
             deadline = time.monotonic() + 1.5
             quiet_deadline = time.monotonic() + 0.25
@@ -362,7 +417,7 @@ class _SerialConnectWorker(QObject):
                     break
                 try:
                     raw = connection.readline()
-                except serial.SerialException:
+                except _SERIAL_IO_EXCEPTIONS:
                     break
                 line = raw.decode("ascii", errors="ignore").strip()
                 if not line:
@@ -372,9 +427,13 @@ class _SerialConnectWorker(QObject):
                 upper = line.upper()
                 if self._line_indicates_controller_reboot(upper):
                     reboot_detected = True
-            connection.timeout = original_timeout
         except Exception:
             logger.debug("Initial serial banner probe failed", exc_info=True)
+        finally:
+            try:
+                connection.timeout = original_timeout
+            except _SERIAL_IO_EXCEPTIONS:
+                pass
 
         try:
             setattr(connection, "probe_station_reboot_detected", reboot_detected)
@@ -390,6 +449,16 @@ class _SerialConnectWorker(QObject):
 
         self.connected.emit(connection, self._port_name, self._baud_rate)
         self.finished.emit()
+
+    @staticmethod
+    def _close_connection(connection: serial.Serial | None) -> None:
+        if connection is None:
+            return
+        try:
+            if connection.is_open:
+                connection.close()
+        except _SERIAL_IO_EXCEPTIONS:
+            pass
 
     @staticmethod
     def _line_indicates_controller_reboot(upper_line: str) -> bool:

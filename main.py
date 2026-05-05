@@ -43,6 +43,7 @@ from probe_station_gui import (
 from probe_station_gui.design_model import DesignDocument, DesignModelError
 from probe_station_gui.design_script import ScriptContext, load_measurement_plan
 from probe_station_gui.design_session import AlignmentPreparation, DesignSession
+from probe_station_gui.diagnostics import configure_crash_diagnostics
 from probe_station_gui.dialogs.settings_dialog import SettingsDialog
 from probe_station_gui.api_server import ProbeStationApiServer
 from probe_station_gui.lcr_meter import LCRMeterController
@@ -4156,6 +4157,8 @@ def _fit_window_to_screen(window: QMainWindow) -> None:
 
 
 def main() -> int:
+    diagnostics_path = configure_crash_diagnostics()
+    logger.debug("Crash diagnostics enabled: %s", diagnostics_path)
     app = QApplication(sys.argv)
     window = Main()
     _set_initial_window_geometry(window)

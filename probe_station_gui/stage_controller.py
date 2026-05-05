@@ -20,6 +20,13 @@ from PySide6.QtGui import QImage
 
 logger = logging.getLogger(__name__)
 
+_SERIAL_IO_EXCEPTIONS = (
+    serial.SerialException,
+    OSError,
+    AttributeError,
+    TypeError,
+)
+
 
 class StageControllerError(RuntimeError):
     """Raised when the stage controller cannot complete an operation."""
@@ -947,7 +954,7 @@ class StageController(QObject):
         try:
             try:
                 waiting = serial_connection.in_waiting
-            except serial.SerialException as exc:  # pragma: no cover - hardware interaction
+            except _SERIAL_IO_EXCEPTIONS as exc:  # pragma: no cover - hardware interaction
                 raise StageControllerError(f"Serial read failed: {exc}") from exc
             if waiting <= 0:
                 return b""
@@ -956,7 +963,7 @@ class StageController(QObject):
             logger.debug("SERIAL TRACE terminal_in_waiting bytes=%s", waiting)
             try:
                 data = serial_connection.read(waiting)
-            except serial.SerialException as exc:  # pragma: no cover - hardware interaction
+            except _SERIAL_IO_EXCEPTIONS as exc:  # pragma: no cover - hardware interaction
                 raise StageControllerError(f"Serial read failed: {exc}") from exc
             if data:
                 logger.debug("SERIAL TRACE terminal_read bytes=%r", data[:200])
@@ -2765,7 +2772,7 @@ class StageController(QObject):
             self._check_cancelled()
             try:
                 raw = serial_connection.readline()
-            except serial.SerialException as exc:  # pragma: no cover - hardware interaction
+            except _SERIAL_IO_EXCEPTIONS as exc:  # pragma: no cover - hardware interaction
                 raise StageControllerError(f"Serial read failed: {exc}") from exc
             line = raw.decode("ascii", errors="ignore").strip()
             if not line:
@@ -2946,7 +2953,7 @@ class StageController(QObject):
             self._check_cancelled()
             try:
                 raw = serial_connection.readline()
-            except serial.SerialException as exc:  # pragma: no cover - hardware interaction
+            except _SERIAL_IO_EXCEPTIONS as exc:  # pragma: no cover - hardware interaction
                 raise StageControllerError(f"Serial read failed: {exc}") from exc
             line = raw.decode("ascii", errors="ignore").strip()
             if not line:
@@ -3071,7 +3078,7 @@ class StageController(QObject):
                 logger.debug("TIMING jog_serial_write_flushed command=%s", job.description)
             elif job.kind == "jog_stop":
                 logger.debug("TIMING jog_stop_write_flushed command=0x85")
-        except serial.SerialException as exc:  # pragma: no cover - hardware interaction
+        except _SERIAL_IO_EXCEPTIONS as exc:  # pragma: no cover - hardware interaction
             raise StageControllerError(f"Serial write failed: {exc}") from exc
 
     def _reset_feed_override_for_serial(self, serial_connection: serial.Serial) -> None:
@@ -3096,7 +3103,7 @@ class StageController(QObject):
             logger.debug("SERIAL TRACE realtime_write %s", description)
             serial_connection.write(payload)
             serial_connection.flush()
-        except serial.SerialException as exc:  # pragma: no cover - hardware interaction
+        except _SERIAL_IO_EXCEPTIONS as exc:  # pragma: no cover - hardware interaction
             raise StageControllerError(f"Serial realtime write failed: {exc}") from exc
 
     def _write_command(self, serial_connection: serial.Serial, command: str) -> None:
@@ -3107,7 +3114,7 @@ class StageController(QObject):
             serial_connection.write(data)
             serial_connection.flush()
             logger.debug("SERIAL TRACE stage_write_flushed command=%s", command.strip())
-        except serial.SerialException as exc:  # pragma: no cover - hardware interaction
+        except _SERIAL_IO_EXCEPTIONS as exc:  # pragma: no cover - hardware interaction
             raise StageControllerError(f"Serial write failed: {exc}") from exc
 
     def _wait_for_ok(self, serial_connection: serial.Serial, timeout: float = 5.0) -> None:
@@ -3116,7 +3123,7 @@ class StageController(QObject):
             self._check_cancelled()
             try:
                 raw = serial_connection.readline()
-            except serial.SerialException as exc:  # pragma: no cover - hardware interaction
+            except _SERIAL_IO_EXCEPTIONS as exc:  # pragma: no cover - hardware interaction
                 raise StageControllerError(f"Serial read failed: {exc}") from exc
             line = raw.decode("ascii", errors="ignore").strip()
             if not line:
@@ -3193,14 +3200,14 @@ class StageController(QObject):
             serial_connection.write(b"?\n")
             serial_connection.flush()
             logger.debug("SERIAL TRACE stage_query_status flushed=?")
-        except serial.SerialException as exc:  # pragma: no cover - hardware interaction
+        except _SERIAL_IO_EXCEPTIONS as exc:  # pragma: no cover - hardware interaction
             raise StageControllerError(f"Serial query failed: {exc}") from exc
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             self._check_cancelled()
             try:
                 raw = serial_connection.readline()
-            except serial.SerialException as exc:  # pragma: no cover - hardware interaction
+            except _SERIAL_IO_EXCEPTIONS as exc:  # pragma: no cover - hardware interaction
                 raise StageControllerError(f"Serial read failed: {exc}") from exc
             line = raw.decode("ascii", errors="ignore").strip()
             if not line:
