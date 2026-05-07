@@ -235,6 +235,7 @@ class StageController(QObject):
         self._needles_known = False
         self._needle_down_lowering_mm: Optional[float] = None
         self._axis_a_calibration: dict[str, float | str] | None = None
+        self._axis_z_calibration: dict[str, float | str | tuple[float, ...]] | None = None
         self._oscillation_active = False
         self._motion_safety_disabled = False
         self._queued_needles_actions: deque[tuple[str, float | None]] = deque()
@@ -796,13 +797,19 @@ class StageController(QObject):
             self._axis_a_calibration = None
             return
         try:
+            offset = float(getattr(calibration, "offset_mm"))
+            if offset > 0.0:
+                offset = -offset
+            amplitude = float(getattr(calibration, "amplitude_mm"))
+            if amplitude > 0.0:
+                amplitude = -amplitude
             values: dict[str, float | str] = {
                 "model": model,
                 "steps_per_mm": float(getattr(calibration, "steps_per_mm")),
                 "min": float(getattr(calibration, "commanded_lowering_min_mm")),
                 "max": float(getattr(calibration, "commanded_lowering_max_mm")),
-                "offset": float(getattr(calibration, "offset_mm")),
-                "amplitude": float(getattr(calibration, "amplitude_mm")),
+                "offset": offset,
+                "amplitude": amplitude,
                 "angular_frequency": float(
                     getattr(calibration, "angular_frequency_rad_per_mm")
                 ),
@@ -820,6 +827,40 @@ class StageController(QObject):
             self._axis_a_calibration = None
             return
         self._axis_a_calibration = values
+
+    def apply_axis_z_calibration(self, calibration: object | None) -> None:
+        """Apply the compact nonlinear Z-axis calibration model."""
+
+        if calibration is None or not bool(getattr(calibration, "configured", False)):
+            self._axis_z_calibration = None
+            return
+        model = str(getattr(calibration, "model", "")).strip()
+        if model != "quintic_polynomial":
+            self._axis_z_calibration = None
+            return
+        try:
+            coefficients = tuple(
+                float(value) for value in getattr(calibration, "coefficients_mm")
+            )
+            values: dict[str, float | str | tuple[float, ...]] = {
+                "model": model,
+                "steps_per_mm": float(getattr(calibration, "steps_per_mm")),
+                "min": float(getattr(calibration, "gcode_min_mm")),
+                "max": float(getattr(calibration, "gcode_max_mm")),
+                "coefficients": coefficients,
+            }
+        except (TypeError, ValueError):
+            self._axis_z_calibration = None
+            return
+        if (
+            float(values["steps_per_mm"]) <= 0
+            or float(values["max"]) <= float(values["min"])
+            or len(coefficients) != 6
+            or not all(math.isfinite(value) for value in coefficients)
+        ):
+            self._axis_z_calibration = None
+            return
+        self._axis_z_calibration = values
 
     def apply_coordinate_system_configuration(
         self,
@@ -2538,46 +2579,114 @@ class StageController(QObject):
 
         return self._axis_a_lowering_for_gcode_coordinate(a_coordinate_mm)
 
-    def _axis_a_model_lowering_for_commanded(self, commanded_lowering_mm: float) -> float:
+    def calibrated_axis_display_value(
+        self,
+        axis: str,
+        raw_value: float,
+    ) -> float:
+        """Map a controller coordinate to the calibrated user-facing coordinate."""
+
+        axis = axis.upper().strip()
+        if axis == "A":
+            return self._axis_a_calibrated_coordinate_for_gcode_coordinate(raw_value)
+        if axis == "Z":
+            return self._axis_z_display_for_gcode_coordinate(raw_value)
+        return float(raw_value)
+
+    def calibrated_axis_raw_value(
+        self,
+        axis: str,
+        display_value: float,
+    ) -> float:
+        """Map a calibrated user-facing coordinate to a controller coordinate."""
+
+        axis = axis.upper().strip()
+        if axis == "A":
+            return self._axis_a_gcode_coordinate_for_calibrated_coordinate(display_value)
+        if axis == "Z":
+            return self._axis_z_gcode_coordinate_for_display(display_value)
+        return float(display_value)
+
+    def _axis_a_model_parameters(self) -> tuple[float, float, float, float] | None:
         calibration = self._axis_a_calibration
         if calibration is None:
-            return float(commanded_lowering_mm)
+            return None
+        return (
+            float(calibration["offset"]),
+            float(calibration["amplitude"]),
+            float(calibration["angular_frequency"]),
+            float(calibration["phase"]),
+        )
+
+    def _axis_a_model_calibrated_coordinate_for_commanded(
+        self,
+        commanded_lowering_mm: float,
+    ) -> float:
+        parameters = self._axis_a_model_parameters()
+        if parameters is None:
+            return -float(commanded_lowering_mm)
         x_value = float(commanded_lowering_mm)
-        offset = float(calibration["offset"])
-        amplitude = float(calibration["amplitude"])
-        angular_frequency = float(calibration["angular_frequency"])
-        phase = float(calibration["phase"])
+        offset, amplitude, angular_frequency, phase = parameters
         return offset + amplitude * (
             math.cos(phase) - math.cos(phase + angular_frequency * x_value)
         )
 
-    def _axis_a_lowering_for_gcode_coordinate(self, a_coordinate_mm: float) -> float:
+    def _axis_a_model_lowering_for_commanded(
+        self,
+        commanded_lowering_mm: float,
+    ) -> float:
+        return -self._axis_a_model_calibrated_coordinate_for_commanded(
+            commanded_lowering_mm
+        )
+
+    def _axis_a_calibrated_coordinate_for_gcode_coordinate(
+        self, a_coordinate_mm: float
+    ) -> float:
         calibration = self._axis_a_calibration
         commanded_lowering = -float(a_coordinate_mm)
         if calibration is None:
-            return commanded_lowering
-        origin = self._axis_a_model_lowering_for_commanded(float(calibration["min"]))
-        return self._axis_a_model_lowering_for_commanded(commanded_lowering) - origin
+            return float(a_coordinate_mm)
+        origin = self._axis_a_model_calibrated_coordinate_for_commanded(
+            float(calibration["min"])
+        )
+        calibrated_value = (
+            self._axis_a_model_calibrated_coordinate_for_commanded(commanded_lowering)
+            - origin
+        )
+        return 0.0 if abs(calibrated_value) <= 1e-12 else calibrated_value
 
-    def _axis_a_gcode_coordinate_for_lowering(self, lowering_mm: float) -> float:
-        commanded_lowering = self._axis_a_commanded_lowering_for_physical(
-            lowering_mm
+    def _axis_a_lowering_for_gcode_coordinate(self, a_coordinate_mm: float) -> float:
+        return -self._axis_a_calibrated_coordinate_for_gcode_coordinate(
+            a_coordinate_mm
+        )
+
+    def _axis_a_gcode_coordinate_for_calibrated_coordinate(
+        self,
+        calibrated_coordinate_mm: float,
+    ) -> float:
+        commanded_lowering = self._axis_a_commanded_lowering_for_calibrated_coordinate(
+            calibrated_coordinate_mm
         )
         return -commanded_lowering
 
-    def _axis_a_commanded_lowering_for_physical(
+    def _axis_a_gcode_coordinate_for_lowering(self, lowering_mm: float) -> float:
+        return self._axis_a_gcode_coordinate_for_calibrated_coordinate(
+            -float(lowering_mm)
+        )
+
+    def _axis_a_commanded_lowering_for_calibrated_coordinate(
         self,
-        physical_lowering_mm: float,
+        calibrated_coordinate_mm: float,
     ) -> float:
         calibration = self._axis_a_calibration
         if calibration is None:
-            return float(physical_lowering_mm)
+            return -float(calibrated_coordinate_mm)
         low = float(calibration["min"])
         high = float(calibration["max"])
-        origin_value = self._axis_a_model_lowering_for_commanded(low)
-        target = origin_value + float(physical_lowering_mm)
-        low_value = self._axis_a_model_lowering_for_commanded(low)
-        high_value = self._axis_a_model_lowering_for_commanded(high)
+        origin_value = self._axis_a_model_calibrated_coordinate_for_commanded(low)
+        target = origin_value + float(calibrated_coordinate_mm)
+        low_value = self._axis_a_model_calibrated_coordinate_for_commanded(low)
+        high_value = self._axis_a_model_calibrated_coordinate_for_commanded(high)
         if high_value < low_value:
             low, high = high, low
             low_value, high_value = high_value, low_value
@@ -2587,12 +2696,20 @@ class StageController(QObject):
             return high
         for _ in range(64):
             mid = (low + high) * 0.5
-            value = self._axis_a_model_lowering_for_commanded(mid)
+            value = self._axis_a_model_calibrated_coordinate_for_commanded(mid)
             if value < target:
                 low = mid
             else:
                 high = mid
         return (low + high) * 0.5
+
+    def _axis_a_commanded_lowering_for_physical(
+        self,
+        physical_lowering_mm: float,
+    ) -> float:
+        return self._axis_a_commanded_lowering_for_calibrated_coordinate(
+            -float(physical_lowering_mm)
+        )
 
     def _axis_a_gcode_coordinate_for_lowering_step(
         self,
@@ -2602,6 +2719,54 @@ class StageController(QObject):
         current_physical = self._axis_a_lowering_for_gcode_coordinate(current_a)
         target_physical = current_physical - float(requested_step_mm)
         return self._axis_a_gcode_coordinate_for_lowering(target_physical)
+
+    @staticmethod
+    def _evaluate_polynomial(coefficients: tuple[float, ...], x_value: float) -> float:
+        result = 0.0
+        for coefficient in coefficients:
+            result = result * float(x_value) + float(coefficient)
+        return result
+
+    def _axis_z_coefficients(self) -> tuple[float, ...] | None:
+        calibration = self._axis_z_calibration
+        if calibration is None:
+            return None
+        coefficients = calibration["coefficients"]
+        if not isinstance(coefficients, tuple):
+            return None
+        return coefficients
+
+    def _axis_z_display_for_gcode_coordinate(self, z_coordinate_mm: float) -> float:
+        coefficients = self._axis_z_coefficients()
+        if coefficients is None:
+            return float(z_coordinate_mm)
+        return self._evaluate_polynomial(coefficients, float(z_coordinate_mm))
+
+    def _axis_z_gcode_coordinate_for_display(self, display_mm: float) -> float:
+        calibration = self._axis_z_calibration
+        coefficients = self._axis_z_coefficients()
+        if calibration is None or coefficients is None:
+            return float(display_mm)
+        low = float(calibration["min"])
+        high = float(calibration["max"])
+        low_value = self._evaluate_polynomial(coefficients, low)
+        high_value = self._evaluate_polynomial(coefficients, high)
+        target = float(display_mm)
+        if high_value < low_value:
+            low, high = high, low
+            low_value, high_value = high_value, low_value
+        if target <= low_value:
+            return low
+        if target >= high_value:
+            return high
+        for _ in range(64):
+            mid = (low + high) * 0.5
+            value = self._evaluate_polynomial(coefficients, mid)
+            if value < target:
+                low = mid
+            else:
+                high = mid
+        return (low + high) * 0.5
 
     def _idle_timeout_for_distance(self, distance: float, feedrate: float) -> float:
         """Return an idle wait timeout long enough for slow manual G1 moves."""

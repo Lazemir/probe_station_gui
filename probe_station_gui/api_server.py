@@ -13,14 +13,6 @@ logger = logging.getLogger(__name__)
 _AXIS_NAMES = ("X", "Y", "Z", "A", "B", "C")
 
 
-def _model_dump(model: object) -> dict[str, Any]:
-    if hasattr(model, "model_dump"):
-        return model.model_dump(exclude_none=True)  # type: ignore[no-any-return]
-    if hasattr(model, "dict"):
-        return model.dict(exclude_none=True)  # type: ignore[no-any-return]
-    return {}
-
-
 def _axis_targets_from_payload(payload: dict[str, Any]) -> dict[str, float]:
     targets: dict[str, float] = {}
     coordinates = payload.get("coordinates")
@@ -125,24 +117,8 @@ class ProbeStationApiServer:
             logger.exception("FastAPI control API stopped unexpectedly.")
 
     def _create_app(self):
-        from fastapi import FastAPI, HTTPException
-        from pydantic import BaseModel, Field
+        from fastapi import Body, FastAPI, HTTPException
         import uvicorn
-
-        class MoveRequest(BaseModel):
-            x: float | None = Field(default=None, description="Target X coordinate")
-            y: float | None = Field(default=None, description="Target Y coordinate")
-            z: float | None = Field(default=None, description="Target Z coordinate")
-            a: float | None = Field(default=None, description="Target A coordinate")
-            b: float | None = Field(default=None, description="Target B coordinate")
-            c: float | None = Field(default=None, description="Target C coordinate")
-            coordinates: dict[str, float] | None = Field(
-                default=None,
-                description="Alternative axis map, e.g. {'X': 1.0, 'Y': 2.0}",
-            )
-
-            class Config:
-                extra = "allow"
 
         app = FastAPI(
             title="Probe Station Control API",
@@ -160,8 +136,8 @@ class ProbeStationApiServer:
             return self._status_callback()
 
         @app.post("/api/v1/stage/move")
-        def move_stage(request: MoveRequest) -> dict[str, Any]:
-            targets = _axis_targets_from_payload(_model_dump(request))
+        def move_stage(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+            targets = _axis_targets_from_payload(payload)
             if not targets:
                 raise HTTPException(
                     status_code=400,

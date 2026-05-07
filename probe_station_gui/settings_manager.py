@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import platform
 import re
@@ -374,21 +375,21 @@ class NeedleCalibrationSettings:
 
 @dataclass
 class AxisACalibrationSettings:
-    """Compact calibrated model for the nonlinear A-axis linkage."""
+    """Compact signed calibrated model for the nonlinear A-axis linkage."""
 
-    configured: bool = True
+    configured: bool = False
     model: str = "cosine_displacement"
-    steps_per_mm: float = 2500.0
+    steps_per_mm: float = 2600.0
     commanded_lowering_min_mm: float = 0.0
-    commanded_lowering_max_mm: float = 6.0
-    offset_mm: float = -0.00013272701600556085
-    amplitude_mm: float = 4.29496757977153
-    angular_frequency_rad_per_mm: float = 0.24349261926759336
-    phase_rad: float = 0.8994441869661569
-    fit_rmse_mm: float = 0.003615354561001594
-    fit_max_abs_error_mm: float = 0.010851950741578964
-    source: str = "calibrations/axis_a_calibration.json"
-    created_at: str = "2026-04-30T15:10:49.564867+00:00"
+    commanded_lowering_max_mm: float = 5.5
+    offset_mm: float = -0.18025492860701603
+    amplitude_mm: float = -4.256281153779931
+    angular_frequency_rad_per_mm: float = 0.2560331555269034
+    phase_rad: float = 0.9304927419233507
+    fit_rmse_mm: float = 0.03390421874833405
+    fit_max_abs_error_mm: float = 0.044862806662900656
+    source: str = "calibrations/axis_a_spm2600_pulloff0p25_forward_reverse_settle1p0_20260504.png"
+    created_at: str = "2026-05-06T00:00:00+03:00"
 
     def clone(self) -> "AxisACalibrationSettings":
         """Return a copy of the A-axis calibration model."""
@@ -424,6 +425,69 @@ class AxisACalibrationSettings:
             "phase_rad": self.phase_rad,
             "fit_rmse_mm": self.fit_rmse_mm,
             "fit_max_abs_error_mm": self.fit_max_abs_error_mm,
+            "source": self.source,
+            "created_at": self.created_at,
+        }
+
+
+@dataclass
+class AxisZCalibrationSettings:
+    """Smooth calibrated model for the measured Z-axis branches."""
+
+    configured: bool = False
+    model: str = "quintic_polynomial"
+    steps_per_mm: float = 6335.0
+    gcode_min_mm: float = 0.02
+    gcode_max_mm: float = 23.4
+    coefficients_mm: List[float] = field(
+        default_factory=lambda: [
+            -1.1689194871855767e-06,
+            6.252947738309964e-05,
+            -0.0006221022578588869,
+            0.015449946058775076,
+            0.5416754463041403,
+            0.00910614542389841,
+        ]
+    )
+    fit_rmse_mm: float = 0.006126947872349345
+    fit_max_abs_error_mm: float = 0.020464954405667868
+    section2_indicator_offset_mm: float = 8.661368914604154
+    section3_indicator_offset_mm: float = 13.56547962940159
+    source: str = "calibrations/axis_z_spm6335_full_hysteresis_precise_s1_s2_s3_honest_stitches_20260505.png"
+    created_at: str = "2026-05-06T00:00:00+03:00"
+
+    def clone(self) -> "AxisZCalibrationSettings":
+        """Return a copy of the Z-axis calibration model."""
+
+        return AxisZCalibrationSettings(
+            configured=self.configured,
+            model=self.model,
+            steps_per_mm=self.steps_per_mm,
+            gcode_min_mm=self.gcode_min_mm,
+            gcode_max_mm=self.gcode_max_mm,
+            coefficients_mm=list(self.coefficients_mm),
+            fit_rmse_mm=self.fit_rmse_mm,
+            fit_max_abs_error_mm=self.fit_max_abs_error_mm,
+            section2_indicator_offset_mm=self.section2_indicator_offset_mm,
+            section3_indicator_offset_mm=self.section3_indicator_offset_mm,
+            source=self.source,
+            created_at=self.created_at,
+        )
+
+    def to_dict(self) -> dict[str, bool | float | str | list[float]]:
+        """Serialize the Z-axis calibration model."""
+
+        return {
+            "configured": self.configured,
+            "model": self.model,
+            "steps_per_mm": self.steps_per_mm,
+            "gcode_min_mm": self.gcode_min_mm,
+            "gcode_max_mm": self.gcode_max_mm,
+            "coefficients_mm": list(self.coefficients_mm),
+            "fit_rmse_mm": self.fit_rmse_mm,
+            "fit_max_abs_error_mm": self.fit_max_abs_error_mm,
+            "section2_indicator_offset_mm": self.section2_indicator_offset_mm,
+            "section3_indicator_offset_mm": self.section3_indicator_offset_mm,
             "source": self.source,
             "created_at": self.created_at,
         }
@@ -471,6 +535,9 @@ class Settings:
     axis_a_calibration: AxisACalibrationSettings = field(
         default_factory=AxisACalibrationSettings
     )
+    axis_z_calibration: AxisZCalibrationSettings = field(
+        default_factory=AxisZCalibrationSettings
+    )
     coordinate_system: CoordinateSystemSettings = field(
         default_factory=CoordinateSystemSettings
     )
@@ -487,6 +554,7 @@ class Settings:
             jog=self.jog.clone(),
             needle_calibration=self.needle_calibration.clone(),
             axis_a_calibration=self.axis_a_calibration.clone(),
+            axis_z_calibration=self.axis_z_calibration.clone(),
             coordinate_system=self.coordinate_system.clone(),
             design_last_directory=self.design_last_directory,
         )
@@ -514,6 +582,7 @@ class Settings:
             "jog": self.jog.to_dict(),
             "needle_calibration": self.needle_calibration.to_dict(),
             "axis_a_calibration": self.axis_a_calibration.to_dict(),
+            "axis_z_calibration": self.axis_z_calibration.to_dict(),
             "coordinate_system": self.coordinate_system.to_dict(),
             "design_last_directory": self.design_last_directory,
         }
@@ -581,17 +650,17 @@ class SettingsManager:
     DEFAULT_SHORT_THRESHOLD_OHM: float = 10.0
     DEFAULT_LCR_POLL_INTERVAL_MS: int = 250
     DEFAULT_AXIS_A_CALIBRATION_MODEL: str = "cosine_displacement"
-    DEFAULT_AXIS_A_CALIBRATION_STEPS_PER_MM: float = 2500.0
+    DEFAULT_AXIS_A_CALIBRATION_STEPS_PER_MM: float = 2600.0
     DEFAULT_AXIS_A_CALIBRATION_MIN_MM: float = 0.0
-    DEFAULT_AXIS_A_CALIBRATION_MAX_MM: float = 6.0
-    DEFAULT_AXIS_A_CALIBRATION_OFFSET_MM: float = -0.00013272701600556085
-    DEFAULT_AXIS_A_CALIBRATION_AMPLITUDE_MM: float = 4.29496757977153
-    DEFAULT_AXIS_A_CALIBRATION_ANGULAR_FREQUENCY: float = 0.24349261926759336
-    DEFAULT_AXIS_A_CALIBRATION_PHASE_RAD: float = 0.8994441869661569
-    DEFAULT_AXIS_A_CALIBRATION_RMSE_MM: float = 0.003615354561001594
-    DEFAULT_AXIS_A_CALIBRATION_MAX_ABS_ERROR_MM: float = 0.010851950741578964
-    DEFAULT_AXIS_A_CALIBRATION_SOURCE: str = "calibrations/axis_a_calibration.json"
-    DEFAULT_AXIS_A_CALIBRATION_CREATED_AT: str = "2026-04-30T15:10:49.564867+00:00"
+    DEFAULT_AXIS_A_CALIBRATION_MAX_MM: float = 5.5
+    DEFAULT_AXIS_A_CALIBRATION_OFFSET_MM: float = 0.15233792205087007
+    DEFAULT_AXIS_A_CALIBRATION_AMPLITUDE_MM: float = 4.257907588676109
+    DEFAULT_AXIS_A_CALIBRATION_ANGULAR_FREQUENCY: float = 0.2557266307909934
+    DEFAULT_AXIS_A_CALIBRATION_PHASE_RAD: float = 0.9228536838711686
+    DEFAULT_AXIS_A_CALIBRATION_RMSE_MM: float = 0.004633488125628648
+    DEFAULT_AXIS_A_CALIBRATION_MAX_ABS_ERROR_MM: float = 0.042784046777278234
+    DEFAULT_AXIS_A_CALIBRATION_SOURCE: str = "calibrations/axis_a_spm2600_pulloff0p25_forward_reverse_settle1p0_20260504.png"
+    DEFAULT_AXIS_A_CALIBRATION_CREATED_AT: str = "2026-05-06T00:00:00+03:00"
     DEFAULT_POSITION_MODE: str = "work"
     DEFAULT_COORDINATE_STARTUP_MODE: str = "controller"
     DEFAULT_COORDINATE_SYSTEM: str = "G54"
@@ -679,7 +748,7 @@ class SettingsManager:
         if not path.exists():
             return None
         try:
-            with path.open("r", encoding="utf-8") as handle:
+            with path.open("r", encoding="utf-8-sig") as handle:
                 data = json.load(handle)
         except (OSError, json.JSONDecodeError) as exc:
             self._logger.warning("Failed to load controller state from %s: %s", path, exc)
@@ -717,7 +786,7 @@ class SettingsManager:
         if not path.exists():
             return {}
         try:
-            with path.open("r", encoding="utf-8") as handle:
+            with path.open("r", encoding="utf-8-sig") as handle:
                 data = json.load(handle)
         except (OSError, json.JSONDecodeError) as exc:
             self._logger.warning(
@@ -1042,6 +1111,15 @@ class SettingsManager:
             for key, value in defaults.items():
                 axis_a_section.setdefault(key, value)
 
+        axis_z_section = data.get("axis_z_calibration")
+        if not isinstance(axis_z_section, dict):
+            axis_z_section = AxisZCalibrationSettings().to_dict()
+            data["axis_z_calibration"] = axis_z_section
+        else:
+            defaults = AxisZCalibrationSettings().to_dict()
+            for key, value in defaults.items():
+                axis_z_section.setdefault(key, value)
+
         coordinate_section = data.get("coordinate_system")
         if not isinstance(coordinate_section, dict):
             coordinate_section = {
@@ -1073,7 +1151,7 @@ class SettingsManager:
     def _load(self) -> Settings:
         """Load settings from disk and normalise the structure."""
 
-        with self._config_path.open("r", encoding="utf-8") as handle:
+        with self._config_path.open("r", encoding="utf-8-sig") as handle:
             raw = json.load(handle)
         self._logger.debug("Loaded settings from %s", self._config_path)
         controls_raw = raw.get("controls", {}) if isinstance(raw, dict) else {}
@@ -1108,6 +1186,9 @@ class SettingsManager:
         axis_a_calibration_raw = (
             raw.get("axis_a_calibration") if isinstance(raw, dict) else None
         )
+        axis_z_calibration_raw = (
+            raw.get("axis_z_calibration") if isinstance(raw, dict) else None
+        )
         coordinate_system_raw = (
             raw.get("coordinate_system") if isinstance(raw, dict) else None
         )
@@ -1124,6 +1205,7 @@ class SettingsManager:
             jog=self._parse_jog(jog_raw),
             needle_calibration=self._parse_needle_calibration(needle_calibration_raw),
             axis_a_calibration=self._parse_axis_a_calibration(axis_a_calibration_raw),
+            axis_z_calibration=self._parse_axis_z_calibration(axis_z_calibration_raw),
             coordinate_system=self._parse_coordinate_system(coordinate_system_raw),
             design_last_directory=design_last_directory,
         )
@@ -1552,13 +1634,17 @@ class SettingsManager:
                 ),
                 default=defaults.commanded_lowering_max_mm,
             ),
-            offset_mm=self._coerce_float(
-                raw_calibration.get("offset_mm", defaults.offset_mm),
-                default=defaults.offset_mm,
+            offset_mm=-abs(
+                self._coerce_float(
+                    raw_calibration.get("offset_mm", defaults.offset_mm),
+                    default=defaults.offset_mm,
+                )
             ),
-            amplitude_mm=self._coerce_float(
-                raw_calibration.get("amplitude_mm", defaults.amplitude_mm),
-                default=defaults.amplitude_mm,
+            amplitude_mm=-abs(
+                self._coerce_float(
+                    raw_calibration.get("amplitude_mm", defaults.amplitude_mm),
+                    default=defaults.amplitude_mm,
+                )
             ),
             angular_frequency_rad_per_mm=self._coerce_float(
                 raw_calibration.get(
@@ -1591,6 +1677,101 @@ class SettingsManager:
             <= calibration.commanded_lowering_min_mm
             or abs(calibration.amplitude_mm) <= 1e-12
             or calibration.angular_frequency_rad_per_mm <= 0
+        ):
+            calibration.configured = False
+        return calibration
+
+    def _parse_axis_z_calibration(self, raw_calibration) -> AxisZCalibrationSettings:
+        """Normalise the compact Z-axis nonlinear calibration model."""
+
+        defaults = AxisZCalibrationSettings()
+        if not isinstance(raw_calibration, dict):
+            return defaults
+
+        model_raw = raw_calibration.get("model", defaults.model)
+        model = model_raw.strip() if isinstance(model_raw, str) else defaults.model
+        if model != defaults.model:
+            model = defaults.model
+
+        source_raw = raw_calibration.get("source", defaults.source)
+        source = source_raw.strip() if isinstance(source_raw, str) else defaults.source
+        created_at_raw = raw_calibration.get("created_at", defaults.created_at)
+        created_at = (
+            created_at_raw.strip()
+            if isinstance(created_at_raw, str)
+            else defaults.created_at
+        )
+
+        def _coefficients(key: str, fallback: list[float]) -> list[float]:
+            raw_values = raw_calibration.get(key, fallback)
+            if not isinstance(raw_values, Iterable) or isinstance(raw_values, (str, bytes)):
+                return list(fallback)
+            values: list[float] = []
+            for raw_value in raw_values:
+                try:
+                    value = float(raw_value)
+                except (TypeError, ValueError):
+                    return list(fallback)
+                if not math.isfinite(value):
+                    return list(fallback)
+                values.append(value)
+            if len(values) != 6:
+                return list(fallback)
+            return values
+
+        calibration = AxisZCalibrationSettings(
+            configured=self._coerce_bool(
+                raw_calibration.get("configured", defaults.configured),
+                default=defaults.configured,
+            ),
+            model=model,
+            steps_per_mm=self._coerce_float(
+                raw_calibration.get("steps_per_mm", defaults.steps_per_mm),
+                default=defaults.steps_per_mm,
+            ),
+            gcode_min_mm=self._coerce_float(
+                raw_calibration.get("gcode_min_mm", defaults.gcode_min_mm),
+                default=defaults.gcode_min_mm,
+            ),
+            gcode_max_mm=self._coerce_float(
+                raw_calibration.get("gcode_max_mm", defaults.gcode_max_mm),
+                default=defaults.gcode_max_mm,
+            ),
+            coefficients_mm=_coefficients(
+                "coefficients_mm",
+                defaults.coefficients_mm,
+            ),
+            fit_rmse_mm=self._coerce_float(
+                raw_calibration.get("fit_rmse_mm", defaults.fit_rmse_mm),
+                default=defaults.fit_rmse_mm,
+            ),
+            fit_max_abs_error_mm=self._coerce_float(
+                raw_calibration.get(
+                    "fit_max_abs_error_mm",
+                    defaults.fit_max_abs_error_mm,
+                ),
+                default=defaults.fit_max_abs_error_mm,
+            ),
+            section2_indicator_offset_mm=self._coerce_float(
+                raw_calibration.get(
+                    "section2_indicator_offset_mm",
+                    defaults.section2_indicator_offset_mm,
+                ),
+                default=defaults.section2_indicator_offset_mm,
+            ),
+            section3_indicator_offset_mm=self._coerce_float(
+                raw_calibration.get(
+                    "section3_indicator_offset_mm",
+                    defaults.section3_indicator_offset_mm,
+                ),
+                default=defaults.section3_indicator_offset_mm,
+            ),
+            source=source,
+            created_at=created_at,
+        )
+        if (
+            calibration.steps_per_mm <= 0
+            or calibration.gcode_max_mm <= calibration.gcode_min_mm
         ):
             calibration.configured = False
         return calibration
@@ -1842,6 +2023,9 @@ class SettingsManager:
         clone.axis_a_calibration = self._parse_axis_a_calibration(
             clone.axis_a_calibration.to_dict()
         )
+        clone.axis_z_calibration = self._parse_axis_z_calibration(
+            clone.axis_z_calibration.to_dict()
+        )
         clone.design_last_directory = clone.design_last_directory.strip()
         return clone
 
@@ -1878,6 +2062,11 @@ class SettingsManager:
         """Return the current compact A-axis calibration model clone."""
 
         return self._settings.axis_a_calibration.clone()
+
+    def axis_z_calibration_configuration(self) -> AxisZCalibrationSettings:
+        """Return the current compact Z-axis calibration model clone."""
+
+        return self._settings.axis_z_calibration.clone()
 
     def coordinate_system_configuration(self) -> CoordinateSystemSettings:
         """Return the current coordinate-system configuration clone."""

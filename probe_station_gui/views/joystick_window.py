@@ -449,6 +449,8 @@ class JoystickWindow(QWidget):
         self.manual_axis_feedrate_spin.setValue(self._manual_axis_feedrate_mm_min)
         self.manual_axis_feedrate_label.hide()
         self.manual_axis_feedrate_spin.hide()
+        manual_axis_layout.addWidget(self.manual_axis_feedrate_label)
+        manual_axis_layout.addWidget(self.manual_axis_feedrate_spin)
         self.manual_axis_negative_button = QPushButton("Move -", self)
         self.manual_axis_positive_button = QPushButton("Move +", self)
         manual_axis_layout.addWidget(self.manual_axis_negative_button)
@@ -496,6 +498,9 @@ class JoystickWindow(QWidget):
         )
         self.manual_axis_distance_spin.valueChanged.connect(
             lambda _value: self._emit_manual_axis_settings_changed()
+        )
+        self.manual_axis_feedrate_spin.valueChanged.connect(
+            self._on_manual_axis_feedrate_changed
         )
 
         homing_layout = QHBoxLayout()
@@ -649,6 +654,10 @@ class JoystickWindow(QWidget):
             self.linear_feedrate_slider.setValue(slider_value)
             self.linear_feedrate_slider.blockSignals(False)
         self.linear_feedrate_value_label.setText(self._format_feedrate(bounded))
+        if hasattr(self, "manual_axis_feedrate_spin"):
+            self.manual_axis_feedrate_spin.blockSignals(True)
+            self.manual_axis_feedrate_spin.setValue(bounded)
+            self.manual_axis_feedrate_spin.blockSignals(False)
         if changed:
             self._manual_axis_feedrate_mm_min = bounded
             self.linear_feedrate_changed.emit(bounded)
@@ -764,7 +773,14 @@ class JoystickWindow(QWidget):
             self.manual_axis_mode_combo.setCurrentIndex(mode_index)
         self._manual_axis_mode = mode
         self.manual_axis_distance_spin.setValue(self._manual_axis_distance_mm)
+        if self._manual_axis_controls_enabled:
+            self._set_linear_feedrate(
+                self._manual_axis_feedrate_mm_min,
+                reissue_if_active=False,
+            )
+        self.manual_axis_feedrate_spin.blockSignals(True)
         self.manual_axis_feedrate_spin.setValue(self._linear_feedrate_value)
+        self.manual_axis_feedrate_spin.blockSignals(False)
         self._update_extra_axis_visibility()
         self._applying_jog_settings = False
         if (
@@ -839,12 +855,12 @@ class JoystickWindow(QWidget):
             self.manual_axis_mode_combo,
             self.manual_axis_distance_label,
             self.manual_axis_distance_spin,
+            self.manual_axis_feedrate_label,
+            self.manual_axis_feedrate_spin,
             self.manual_axis_negative_button,
             self.manual_axis_positive_button,
         ):
             widget.setVisible(self._manual_axis_controls_enabled)
-        self.manual_axis_feedrate_label.setVisible(False)
-        self.manual_axis_feedrate_spin.setVisible(False)
         self.extra_axis_widget.setVisible(
             axis_controls_visible or self._manual_axis_controls_enabled
         )
@@ -884,6 +900,7 @@ class JoystickWindow(QWidget):
             self.manual_axis_combo,
             self.manual_axis_mode_combo,
             self.manual_axis_distance_spin,
+            self.manual_axis_feedrate_spin,
             self.manual_axis_negative_button,
             self.manual_axis_positive_button,
         ):
@@ -1095,6 +1112,10 @@ class JoystickWindow(QWidget):
             mode or self._selected_manual_axis_mode(),
             self._linear_feedrate_value,
         )
+
+    def _on_manual_axis_feedrate_changed(self, value: float) -> None:
+        self._set_linear_feedrate(float(value), reissue_if_active=True)
+        self._emit_manual_axis_settings_changed()
 
     def _emit_manual_axis_settings_changed(self) -> None:
         if self._applying_jog_settings:

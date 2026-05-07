@@ -43,6 +43,8 @@ from probe_station_gui.settings_manager import (
     LCR_SOURCE_RESISTANCES_OHM,
     LCR_TRIGGER_SOURCES,
     LoggingSettings,
+    AxisACalibrationSettings,
+    AxisZCalibrationSettings,
     NeedleCalibrationSettings,
     Settings,
     WORK_COORDINATE_SYSTEMS,
@@ -827,6 +829,94 @@ class CoordinateSystemSettingsWidget(QWidget):
         )
 
 
+class AxisCalibrationSettingsWidget(QWidget):
+    """Tab that controls optional nonlinear axis coordinate calibration."""
+
+    def __init__(
+        self,
+        axis_a_calibration: AxisACalibrationSettings,
+        axis_z_calibration: AxisZCalibrationSettings,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._axis_a_calibration = axis_a_calibration.clone()
+        self._axis_z_calibration = axis_z_calibration.clone()
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self._axis_a_enabled_checkbox = QCheckBox(
+            "Use calibrated A-axis coordinate curve",
+            self,
+        )
+        self._axis_a_enabled_checkbox.setChecked(axis_a_calibration.configured)
+        self._axis_a_enabled_checkbox.setToolTip(
+            "When disabled, A coordinates are sent and displayed as raw GCode."
+        )
+        layout.addWidget(self._axis_a_enabled_checkbox)
+        layout.addLayout(
+            self._read_only_field_layout("A curve source", axis_a_calibration.source)
+        )
+        layout.addLayout(
+            self._read_only_field_layout(
+                "A fit error",
+                (
+                    f"RMSE {axis_a_calibration.fit_rmse_mm:.6f} mm, "
+                    f"max {axis_a_calibration.fit_max_abs_error_mm:.6f} mm"
+                ),
+            )
+        )
+
+        separator = QFrame(self)
+        separator.setFrameShape(QFrame.HLine)
+        separator.setFrameShadow(QFrame.Sunken)
+        layout.addWidget(separator)
+
+        self._axis_z_enabled_checkbox = QCheckBox(
+            "Use calibrated Z-axis coordinate curve",
+            self,
+        )
+        self._axis_z_enabled_checkbox.setChecked(axis_z_calibration.configured)
+        self._axis_z_enabled_checkbox.setToolTip(
+            "When disabled, Z coordinates are sent and displayed as raw GCode."
+        )
+        layout.addWidget(self._axis_z_enabled_checkbox)
+        layout.addLayout(
+            self._read_only_field_layout("Z curve source", axis_z_calibration.source)
+        )
+        layout.addLayout(
+            self._read_only_field_layout(
+                "Z fit error",
+                (
+                    f"RMSE {axis_z_calibration.fit_rmse_mm:.6f} mm, "
+                    f"max {axis_z_calibration.fit_max_abs_error_mm:.6f} mm"
+                ),
+            )
+        )
+
+        layout.addStretch(1)
+
+    def to_settings(self, settings: Settings) -> None:
+        """Persist enabled/disabled state while preserving curve parameters."""
+
+        axis_a = self._axis_a_calibration.clone()
+        axis_a.configured = self._axis_a_enabled_checkbox.isChecked()
+        axis_z = self._axis_z_calibration.clone()
+        axis_z.configured = self._axis_z_enabled_checkbox.isChecked()
+        settings.axis_a_calibration = axis_a
+        settings.axis_z_calibration = axis_z
+
+    def _read_only_field_layout(self, label: str, text: str) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.addWidget(QLabel(label, self))
+        field = QLineEdit(self)
+        field.setReadOnly(True)
+        field.setText(text)
+        field.setCursorPosition(0)
+        row.addWidget(field, 1)
+        return row
+
+
 class SettingsDialog(QDialog):
     """Main settings dialog with tabbed sections."""
 
@@ -853,9 +943,15 @@ class SettingsDialog(QDialog):
         self._coordinate_system_tab = CoordinateSystemSettingsWidget(
             self._settings.coordinate_system, self
         )
+        self._axis_calibration_tab = AxisCalibrationSettingsWidget(
+            self._settings.axis_a_calibration,
+            self._settings.axis_z_calibration,
+            self,
+        )
         self._tabs.addTab(self._controls_tab, "Controls")
         self._tabs.addTab(self._jog_tab, "Jog")
         self._tabs.addTab(self._coordinate_system_tab, "Coordinates")
+        self._tabs.addTab(self._axis_calibration_tab, "Axis Calibration")
         self._tabs.addTab(self._needle_calibration_tab, "Needles")
         self._tabs.addTab(self._logging_tab, "Logging")
 
@@ -885,6 +981,7 @@ class SettingsDialog(QDialog):
         self._controls_tab.to_settings(self._settings)
         self._jog_tab.to_settings(self._settings)
         self._coordinate_system_tab.to_settings(self._settings)
+        self._axis_calibration_tab.to_settings(self._settings)
         self._needle_calibration_tab.to_settings(self._settings)
         self._logging_tab.to_settings(self._settings.logging)
 
