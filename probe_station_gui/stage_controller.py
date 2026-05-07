@@ -692,13 +692,59 @@ class StageController(QObject):
     ) -> bool:
         """Move one axis to an absolute coordinate in the configured report mode."""
 
-        return self.request_manual_axis_move(
-            axis,
-            target_mm,
-            "G90",
-            feedrate,
+        return self.request_absolute_axis_targets_move(
+            {axis: target_mm},
+            feedrate=feedrate,
             allow_unhomed=allow_unhomed,
         )
+
+    def request_absolute_axis_targets_move(
+        self,
+        targets: dict[str, float],
+        *,
+        feedrate: float | None = None,
+        allow_unhomed: bool = True,
+    ) -> bool:
+        """Move multiple axes to absolute coordinates in one controller command."""
+
+        normalized: dict[str, float] = {}
+        for raw_axis, raw_value in targets.items():
+            axis = str(raw_axis).upper().strip()
+            if axis not in self.AXIS_INDEX:
+                self.status_message.emit(f"Unsupported axis: {axis}")
+                return False
+            try:
+                value = float(raw_value)
+            except (TypeError, ValueError):
+                self.status_message.emit(f"Unsupported target for {axis}: {raw_value}")
+                return False
+            if not math.isfinite(value):
+                self.status_message.emit(f"Unsupported target for {axis}: {raw_value}")
+                return False
+            normalized[axis] = value
+        if not normalized:
+            self.status_message.emit("No coordinate targets provided.")
+            return False
+        try:
+            effective_feedrate = (
+                None if feedrate is None else max(0.1, float(feedrate))
+            )
+        except (TypeError, ValueError):
+            self.status_message.emit(f"Unsupported manual feedrate: {feedrate}")
+            return False
+        with self._task_lock:
+            if self._active_thread and self._active_thread.is_alive():
+                self.status_message.emit("Stage is busy. Ignoring coordinate move.")
+                return False
+            self._cancel_event.clear()
+            thread = threading.Thread(
+                target=self._run_absolute_axis_targets_move,
+                args=(dict(normalized), effective_feedrate, bool(allow_unhomed)),
+                daemon=True,
+            )
+            self._active_thread = thread
+            thread.start()
+            return True
 
     def request_autofocus(self) -> None:
         """Begin an asynchronous autofocus sweep along the Z axis."""
@@ -898,6 +944,11 @@ class StageController(QObject):
         if active:
             return active
         return "Work"
+
+    def axis_display_limits(self, axis: str) -> tuple[float, float] | None:
+        """Return software limits in the same coordinate basis as the GUI."""
+
+        return self._axis_limits_for_configured_mode(axis.upper().strip(), None)
 
     def request_needles_adjust(self, step_mm: float) -> None:
         """Adjust the A axis for needle calibration without the XY safety gate."""
@@ -2241,6 +2292,52 @@ class StageController(QObject):
             with self._task_lock:
                 self._active_thread = None
 
+    def _run_absolute_axis_targets_move(
+        self,
+        targets: dict[str, float],
+        feedrate: float | None,
+        allow_unhomed: bool = True,
+    ) -> None:
+        self.movement_started.emit()
+        try:
+            self._check_cancelled()
+            serial_connection = self._serial
+            if serial_connection is None or not serial_connection.is_open:
+                raise StageControllerError("Serial connection is not available.")
+            feedrate_text = (
+                self.DEFAULT_FEEDRATE if feedrate is None else max(0.1, float(feedrate))
+            )
+            ordered_targets = {
+                axis: float(targets[axis])
+                for axis in self.AXIS_INDEX
+                if axis in targets
+            }
+            target_text = " ".join(
+                f"{axis}{value:+.3f}" for axis, value in ordered_targets.items()
+            )
+            with self._serial_session_lock:
+                self.status_message.emit(
+                    "Coordinate move (G90): "
+                    f"{target_text} F{self._format_gcode_value(feedrate_text)}."
+                )
+                self._send_absolute_axis_targets_move(
+                    serial_connection,
+                    ordered_targets,
+                    ignore_needle_safety=self._motion_safety_disabled,
+                    feedrate=feedrate,
+                    wait_for_completion=False,
+                    allow_unhomed=allow_unhomed,
+                )
+            self.movement_finished.emit(
+                True,
+                f"Coordinate move accepted (G90 {target_text}).",
+            )
+        except StageControllerError as exc:
+            self.movement_finished.emit(False, str(exc))
+        finally:
+            with self._task_lock:
+                self._active_thread = None
+
     def _manual_axis_absolute_target(
         self,
         serial_connection: serial.Serial,
@@ -2502,6 +2599,88 @@ class StageController(QObject):
                 ),
             )
 
+    def _send_absolute_axis_targets_move(
+        self,
+        serial_connection: serial.Serial,
+        targets: dict[str, float],
+        *,
+        ignore_needle_safety: bool = False,
+        feedrate: Optional[float] = None,
+        wait_for_completion: bool = True,
+        allow_unhomed: bool = False,
+    ) -> None:
+        ordered_targets: dict[str, float] = {}
+        for axis in self.AXIS_INDEX:
+            if axis not in targets:
+                continue
+            value = float(targets[axis])
+            if not math.isfinite(value):
+                raise StageControllerError(f"Unsupported target for {axis}: {value}")
+            ordered_targets[axis] = value
+        unsupported = [
+            str(axis)
+            for axis in targets
+            if str(axis).upper().strip() not in self.AXIS_INDEX
+        ]
+        if unsupported:
+            raise StageControllerError(f"Unsupported axis: {', '.join(unsupported)}")
+        if not ordered_targets:
+            return
+        if not ignore_needle_safety:
+            self._move_safety_check()
+        current_values: dict[str, float] = {}
+        if not self._motion_safety_disabled:
+            self._ensure_axis_limits(serial_connection)
+            status = self._query_status(serial_connection)
+            if status is None:
+                raise StageControllerError("Unable to read position for absolute move.")
+            self._require_homed_axes(
+                status,
+                set(ordered_targets),
+                allow_relative=allow_unhomed,
+            )
+            for axis, value in ordered_targets.items():
+                current_value = self._axis_value_for_configured_mode(status, axis)
+                if current_value is not None:
+                    current_values[axis] = float(current_value)
+                limits = self._axis_limits_for_configured_mode(axis, status)
+                if limits and self._axis_software_limit_ready(status, axis):
+                    min_value, max_value = limits
+                    if value < min_value or value > max_value:
+                        raise StageControllerError(
+                            f"{axis} target {value:+.3f} exceeds limits ({min_value:.3f}, {max_value:.3f})."
+                        )
+        effective_feedrate = (
+            self.DEFAULT_FEEDRATE if feedrate is None else max(0.1, float(feedrate))
+        )
+        self._write_command(serial_connection, "G21")
+        self._wait_for_ok(serial_connection)
+        self._write_command(serial_connection, "G90")
+        self._wait_for_ok(serial_connection)
+        self._reset_feed_override_for_serial(serial_connection)
+        move_parts = [
+            f"{axis}{value:.4f}"
+            for axis, value in ordered_targets.items()
+        ]
+        self._write_command(
+            serial_connection,
+            "G1 "
+            + " ".join(move_parts)
+            + f" F{self._format_gcode_value(effective_feedrate)}",
+        )
+        self._wait_for_ok(serial_connection)
+        if wait_for_completion:
+            move_distance = self._absolute_move_distance_for_timeout(
+                ordered_targets,
+                current_values,
+            )
+            self._wait_for_idle(
+                serial_connection,
+                timeout=self._idle_timeout_for_distance(
+                    move_distance, effective_feedrate
+                ),
+            )
+
     def _send_absolute_axis_move(
         self,
         serial_connection: serial.Serial,
@@ -2514,50 +2693,28 @@ class StageController(QObject):
         allow_unhomed: bool = False,
     ) -> None:
         axis = axis.upper().strip()
-        if axis not in self.AXIS_INDEX:
-            raise StageControllerError(f"Unsupported axis: {axis}")
-        if not ignore_needle_safety:
-            self._move_safety_check()
-        current_value: float | None = None
-        if not self._motion_safety_disabled:
-            self._ensure_axis_limits(serial_connection)
-            status = self._query_status(serial_connection)
-            if status is None:
-                raise StageControllerError("Unable to read position for absolute move.")
-            self._require_homed_axes(status, {axis}, allow_relative=allow_unhomed)
-            current_value = self._axis_value_for_configured_mode(status, axis)
-            limits = self._axis_limits_for_configured_mode(axis, status)
-            if limits and self._axis_software_limit_ready(status, axis):
-                min_value, max_value = limits
-                if value < min_value or value > max_value:
-                    raise StageControllerError(
-                        f"{axis} target {value:+.3f} exceeds limits ({min_value:.3f}, {max_value:.3f})."
-                    )
-        effective_feedrate = (
-            self.DEFAULT_FEEDRATE if feedrate is None else max(0.1, float(feedrate))
-        )
-        self._write_command(serial_connection, "G21")
-        self._wait_for_ok(serial_connection)
-        self._write_command(serial_connection, "G90")
-        self._wait_for_ok(serial_connection)
-        self._reset_feed_override_for_serial(serial_connection)
-        self._write_command(
+        self._send_absolute_axis_targets_move(
             serial_connection,
-            f"G1 {axis}{value:.4f} F{self._format_gcode_value(effective_feedrate)}",
+            {axis: float(value)},
+            ignore_needle_safety=ignore_needle_safety,
+            feedrate=feedrate,
+            wait_for_completion=wait_for_completion,
+            allow_unhomed=allow_unhomed,
         )
-        self._wait_for_ok(serial_connection)
-        if wait_for_completion:
-            move_distance = (
-                abs(value)
-                if current_value is None
-                else abs(float(value) - float(current_value))
-            )
-            self._wait_for_idle(
-                serial_connection,
-                timeout=self._idle_timeout_for_distance(
-                    move_distance, effective_feedrate
-                ),
-            )
+
+    @staticmethod
+    def _absolute_move_distance_for_timeout(
+        targets: dict[str, float],
+        current_values: dict[str, float],
+    ) -> float:
+        if not current_values:
+            return math.sqrt(sum(value * value for value in targets.values()))
+        squared = 0.0
+        for axis, value in targets.items():
+            current = current_values.get(axis)
+            delta = float(value) if current is None else float(value) - float(current)
+            squared += delta * delta
+        return math.sqrt(squared)
 
     @staticmethod
     def _move_distance_for_timeout(move: MoveVector) -> float:

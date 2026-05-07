@@ -23,12 +23,14 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
     QPlainTextEdit,
+    QPushButton,
     QVBoxLayout,
     QWidget,
 )
@@ -173,6 +175,8 @@ class Main(QMainWindow):
         "#f0b429": "#d8bd78",
         "#c62828": "#b98585",
     }
+    STAGE_AXIS_EDITED_BACKGROUND = "#d7b8ff"
+    STAGE_AXIS_EDITED_FOREGROUND = "#1f1233"
     B_POSITION_CHANGE_TOLERANCE_DEG = 1e-3
     CAMERA_UI_FRAME_GAP_WARNING_S = 0.25
 
@@ -194,6 +198,7 @@ class Main(QMainWindow):
         self.settings_manager: SettingsManager = SettingsManager()
         self._api_bridge: _ApiRequestBridge | None = None
         self._api_server: ProbeStationApiServer | None = None
+        self._api_settings_signature: tuple[bool, str, int] | None = None
         self.joystick_panel: JoystickWindow | None = None
         self.serial_terminal_panel: SerialTerminalWindow | None = None
         self.serial_connection_panel: SerialConnectionPanel | None = None
@@ -248,6 +253,7 @@ class Main(QMainWindow):
         self._planned_move_waiting_for_fresh_status = False
         self._planned_move_stop_status_timestamp: float | None = None
         self._coordinate_move_axis: str | None = None
+        self._coordinate_move_axes: set[str] = set()
         self._coordinate_move_origin_position: tuple[float, ...] | None = None
         self._coordinate_move_stage_position: tuple[float, ...] | None = None
         self._coordinate_move_target_position: tuple[float, ...] | None = None
@@ -270,6 +276,8 @@ class Main(QMainWindow):
         self._stage_motion_blink_dimmed = False
         self._stage_axis_return_commits: set[str] = set()
         self._stage_axis_escape_shortcuts: list[QShortcut] = []
+        self._stage_coordinate_mode_combo: QComboBox | None = None
+        self._stage_coordinate_apply_button: QPushButton | None = None
         self._updating_stage_position_fields = False
         self._pending_linear_feedrate_default: float | None = None
         self._homing_active_key: str | None = None
@@ -360,10 +368,7 @@ class Main(QMainWindow):
         self._setup_menus()
         self._apply_settings()
         self._api_bridge = _ApiRequestBridge(self._handle_api_request, self)
-        self._api_server = ProbeStationApiServer(
-            move_callback=self._submit_api_move_request,
-            status_callback=self._submit_api_status_request,
-        )
+        self._configure_api_server_from_settings(start_if_enabled=False)
 
         QTimer.singleShot(0, self._start_api_server)
         QTimer.singleShot(0, self._auto_connect_if_possible)
@@ -388,15 +393,49 @@ class Main(QMainWindow):
         if message:
             self._show_status(message, 5000)
 
-    def _submit_api_move_request(self, targets: dict[str, float]) -> dict[str, Any]:
+    def _configure_api_server_from_settings(self, *, start_if_enabled: bool) -> None:
+        api_settings = self.settings_manager.api_configuration()
+        signature = (
+            bool(api_settings.enabled),
+            str(api_settings.host),
+            int(api_settings.port),
+        )
+        if self._api_settings_signature == signature:
+            return
+        if self._api_server is not None:
+            self._api_server.stop()
+        self._api_settings_signature = signature
+        if not api_settings.enabled:
+            self._api_server = None
+            if start_if_enabled:
+                self._show_status("FastAPI control API is disabled.", 3000)
+            return
+        self._api_server = ProbeStationApiServer(
+            move_callback=self._submit_api_move_request,
+            status_callback=self._submit_api_status_request,
+            host=api_settings.host,
+            port=api_settings.port,
+        )
+        if start_if_enabled:
+            self._start_api_server()
+
+    def _submit_api_move_request(self, move_request: dict[str, Any]) -> dict[str, Any]:
         if self._api_bridge is None:
             return {
                 "accepted": False,
                 "status_code": 503,
                 "message": "GUI API bridge is not ready.",
             }
+        targets = move_request.get("targets")
+        if not isinstance(targets, dict):
+            targets = {}
         return self._api_bridge.submit(
-            {"action": "move_to_coordinates", "targets": dict(targets)}
+            {
+                "action": "move_to_coordinates",
+                "targets": dict(targets),
+                "mode": move_request.get("mode", "G90"),
+                "feedrate": move_request.get("feedrate"),
+            }
         )
 
     def _submit_api_status_request(self) -> dict[str, Any]:
@@ -411,7 +450,11 @@ class Main(QMainWindow):
     def _handle_api_request(self, request: dict[str, Any]) -> dict[str, Any]:
         action = str(request.get("action", "")).strip().lower()
         if action == "move_to_coordinates":
-            return self._api_move_to_coordinates(request.get("targets"))
+            return self._api_move_to_coordinates(
+                request.get("targets"),
+                mode=request.get("mode", "G90"),
+                feedrate=request.get("feedrate"),
+            )
         if action == "status":
             return self._api_stage_status()
         return {
@@ -420,18 +463,39 @@ class Main(QMainWindow):
             "message": f"Unsupported API action: {action}",
         }
 
-    def _api_move_to_coordinates(self, targets: object) -> dict[str, Any]:
+    def _api_move_to_coordinates(
+        self,
+        targets: object,
+        *,
+        mode: object = "G90",
+        feedrate: object = None,
+    ) -> dict[str, Any]:
         if not isinstance(targets, dict):
             return {
                 "accepted": False,
                 "status_code": 400,
                 "message": "Coordinate targets must be an object.",
             }
+        input_mode = self._normalize_coordinate_input_mode(mode)
+        if input_mode is None:
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": f"Unsupported coordinate mode: {mode}.",
+            }
+        move_feedrate = self._api_move_feedrate(feedrate)
+        if move_feedrate is None:
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": f"Invalid feedrate: {feedrate}.",
+            }
 
         parsed_targets: dict[str, tuple[float, float]] = {}
         invalid_axes: list[str] = []
         invalid_values: list[str] = []
         unavailable_axes: list[str] = []
+        limit_errors: list[str] = []
         for raw_axis, raw_value in targets.items():
             axis = str(raw_axis).strip().upper()
             if axis not in self.STAGE_AXIS_NAMES:
@@ -445,11 +509,25 @@ class Main(QMainWindow):
             if not math.isfinite(display_target):
                 invalid_values.append(axis)
                 continue
-            raw_target = self._raw_target_from_display_value(axis, display_target)
+            raw_target, resolved_display_target = self._resolve_stage_axis_target(
+                axis,
+                display_target,
+                input_mode,
+            )
             if raw_target is None:
                 unavailable_axes.append(axis)
                 continue
-            parsed_targets[axis] = (float(raw_target), float(display_target))
+            limit_error = self._stage_axis_target_limit_error(
+                axis,
+                resolved_display_target,
+            )
+            if limit_error is not None:
+                limit_errors.append(limit_error)
+                continue
+            parsed_targets[axis] = (
+                float(raw_target),
+                float(resolved_display_target),
+            )
 
         if invalid_axes:
             return {
@@ -472,6 +550,12 @@ class Main(QMainWindow):
                     f"{', '.join(unavailable_axes)}."
                 ),
             }
+        if limit_errors:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": " ".join(limit_errors),
+            }
         ordered_targets = [
             (axis, *parsed_targets[axis])
             for axis in self.STAGE_AXIS_NAMES
@@ -484,23 +568,12 @@ class Main(QMainWindow):
                 "message": "Provide at least one target coordinate.",
             }
 
-        current_feedrate = self._current_linear_feedrate()
+        current_feedrate = move_feedrate
         if self._coordinate_move_axis is not None:
-            for axis, raw_target, display_target in ordered_targets:
-                self._set_pending_stage_axis_target(axis, raw_target, display_target)
-            queued_axes = [axis for axis, _raw, _display in ordered_targets]
-            message = f"API queued coordinate targets: {', '.join(queued_axes)}."
-            self._show_status(message, 3000)
             return {
-                "accepted": True,
-                "message": message,
-                "started_axis": None,
-                "queued_axes": queued_axes,
-                "current_feedrate_mm_min": current_feedrate,
-                "coordinate_display": self.stage_controller.coordinate_display_name(),
-                "targets": {
-                    axis: display for axis, _raw, display in ordered_targets
-                },
+                "accepted": False,
+                "status_code": 409,
+                "message": "Stage is busy. Ignoring API coordinate target.",
             }
 
         if self.stage_controller.is_busy():
@@ -510,30 +583,27 @@ class Main(QMainWindow):
                 "message": "Stage is busy. Ignoring API coordinate target.",
             }
 
-        first_axis, first_raw, first_display = ordered_targets[0]
-        if not self._start_coordinate_axis_move(first_axis, first_raw, first_display):
+        target_map = {
+            axis: (raw_target, display_target)
+            for axis, raw_target, display_target in ordered_targets
+        }
+        if not self._start_coordinate_targets_move(
+            target_map,
+            feedrate_mm_min=current_feedrate,
+            source_label="API",
+        ):
             return {
                 "accepted": False,
                 "status_code": 409,
-                "message": f"Unable to start {first_axis} coordinate move.",
+                "message": "Unable to start coordinate move.",
             }
-        queued_axes: list[str] = []
-        for axis, raw_target, display_target in ordered_targets[1:]:
-            self._set_pending_stage_axis_target(axis, raw_target, display_target)
-            queued_axes.append(axis)
-        if queued_axes:
-            self._show_status(
-                f"API queued next coordinate targets: {', '.join(queued_axes)}.",
-                3000,
-            )
+        axes = [axis for axis, _raw, _display in ordered_targets]
         return {
             "accepted": True,
-            "message": (
-                f"API coordinate move accepted: {first_axis} started"
-                + (f"; {', '.join(queued_axes)} queued." if queued_axes else ".")
-            ),
-            "started_axis": first_axis,
-            "queued_axes": queued_axes,
+            "message": f"API coordinate move accepted: {', '.join(axes)}.",
+            "started_axes": axes,
+            "queued_axes": [],
+            "mode": input_mode,
             "current_feedrate_mm_min": current_feedrate,
             "coordinate_display": self.stage_controller.coordinate_display_name(),
             "targets": {axis: display for axis, _raw, display in ordered_targets},
@@ -561,7 +631,11 @@ class Main(QMainWindow):
                 for axis, values in self._pending_stage_axis_targets.items()
             },
             "active_coordinate_axis": self._coordinate_move_axis,
+            "active_coordinate_axes": sorted(self._coordinate_move_axes),
             "current_feedrate_mm_min": self._current_linear_feedrate(),
+            "api_default_feedrate_mm_min": (
+                self.settings_manager.api_configuration().default_feedrate_mm_min
+            ),
         }
 
     def _api_axis_value_map(self, position: object) -> dict[str, float] | None:
@@ -574,6 +648,25 @@ class Main(QMainWindow):
             except (TypeError, ValueError):
                 continue
         return values or None
+
+    def _normalize_coordinate_input_mode(self, mode: object) -> str | None:
+        raw_mode = str(mode or "G90").strip().lower()
+        if raw_mode in {"", "absolute", "abs", "g90"}:
+            return "G90"
+        if raw_mode in {"relative", "rel", "g91"}:
+            return "G91"
+        return None
+
+    def _api_move_feedrate(self, feedrate: object) -> float | None:
+        if feedrate is None:
+            return self.settings_manager.api_configuration().default_feedrate_mm_min
+        try:
+            value = float(feedrate)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(value) or value <= 0.0:
+            return None
+        return max(0.1, value)
 
     def _preload_design_layout_window(self) -> None:
         if self.design_layout_window is not None or self._design_layout_preload_started:
@@ -688,6 +781,28 @@ class Main(QMainWindow):
             )
             self._stage_axis_fields[axis_name] = field
             layout.addWidget(field)
+        mode_label = QLabel("Input:", widget)
+        mode_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        layout.addWidget(mode_label)
+        self._stage_coordinate_mode_combo = QComboBox(widget)
+        self._stage_coordinate_mode_combo.addItem("Absolute", "G90")
+        self._stage_coordinate_mode_combo.addItem("Relative", "G91")
+        self._stage_coordinate_mode_combo.setToolTip(
+            "Coordinate input mode. Idle fields always show absolute coordinates."
+        )
+        self._stage_coordinate_mode_combo.currentIndexChanged.connect(
+            self._on_stage_coordinate_mode_changed
+        )
+        layout.addWidget(self._stage_coordinate_mode_combo)
+        self._stage_coordinate_apply_button = QPushButton("Apply", widget)
+        self._stage_coordinate_apply_button.setEnabled(False)
+        self._stage_coordinate_apply_button.setToolTip(
+            "Apply changed coordinate fields as one move."
+        )
+        self._stage_coordinate_apply_button.clicked.connect(
+            self._apply_pending_stage_coordinate_targets
+        )
+        layout.addWidget(self._stage_coordinate_apply_button)
         self._set_stage_position_fields_available(False)
         return widget
 
@@ -707,6 +822,7 @@ class Main(QMainWindow):
                 field.blockSignals(False)
         finally:
             self._updating_stage_position_fields = False
+        self._update_stage_coordinate_apply_state()
 
     @staticmethod
     def _style_stage_axis_field(field: QLineEdit, background: str, foreground: str) -> None:
@@ -761,10 +877,11 @@ class Main(QMainWindow):
         background, foreground = self._stage_axis_base_styles.get(
             axis, ("#e6e6e6", "#666666")
         )
-        if axis in self._stage_motion_axes and self._stage_motion_blink_dimmed:
+        if axis in self._pending_stage_axis_targets:
+            background = self.STAGE_AXIS_EDITED_BACKGROUND
+            foreground = self.STAGE_AXIS_EDITED_FOREGROUND
+        elif axis in self._stage_motion_axes and self._stage_motion_blink_dimmed:
             background = self.STAGE_AXIS_DIMMED_BACKGROUNDS.get(background, background)
-        elif axis in self._pending_stage_axis_targets:
-            background = self.STAGE_AXIS_PENDING_BACKGROUNDS.get(background, background)
         self._style_stage_axis_field(target, background, foreground)
 
     def _refresh_stage_axis_styles(self) -> None:
@@ -826,7 +943,33 @@ class Main(QMainWindow):
             field.deselect()
             field.clearFocus()
         self._refresh_stage_axis_styles()
+        self._update_stage_coordinate_apply_state()
         self.view.setFocus(Qt.OtherFocusReason)
+
+    def _on_stage_coordinate_mode_changed(self) -> None:
+        if self._pending_stage_axis_targets:
+            self._pending_stage_axis_targets.clear()
+            self._update_stage_position_display(self.stage_controller.latest_stage_position())
+            self._show_status("Cleared pending coordinate edits after input mode change.", 2000)
+        self._update_stage_coordinate_apply_state()
+
+    def _selected_stage_coordinate_input_mode(self) -> str:
+        combo = self._stage_coordinate_mode_combo
+        if combo is None:
+            return "G90"
+        mode = self._normalize_coordinate_input_mode(combo.currentData())
+        return mode or "G90"
+
+    def _update_stage_coordinate_apply_state(self) -> None:
+        button = self._stage_coordinate_apply_button
+        if button is None:
+            return
+        available = bool(self._pending_stage_axis_targets)
+        controller_busy = (
+            hasattr(self, "stage_controller") and self.stage_controller.is_busy()
+        )
+        active = self._coordinate_move_axis is not None or controller_busy
+        button.setEnabled(available and not active)
 
     def _append_status_log(self, message: str) -> None:
         if not message:
@@ -1048,6 +1191,12 @@ class Main(QMainWindow):
         settings_action.setText("Settings...")
         settings_action.triggered.connect(self._open_settings_dialog)
         app_menu.addAction(settings_action)
+
+        api_settings_action = QAction("API Settings...", self)
+        api_settings_action.triggered.connect(
+            lambda _checked=False: self._open_settings_dialog("API")
+        )
+        app_menu.addAction(api_settings_action)
 
         open_log_action = QAction("Open Status Log…", self)
         open_log_action.setText("Open Status Log...")
@@ -1313,10 +1462,17 @@ class Main(QMainWindow):
             )
         if self.serial_connection and self.serial_connection.is_open:
             self.stage_controller.request_startup_sync(auto_home_a=False)
+        if self._api_bridge is not None:
+            self._configure_api_server_from_settings(start_if_enabled=True)
         self._update_coordinate_display(cursor_xy=None)
 
-    def _open_settings_dialog(self) -> None:
-        dialog = SettingsDialog(self.settings_manager.settings, self)
+    def _open_settings_dialog(self, initial_tab: object = None) -> None:
+        tab_name = initial_tab if isinstance(initial_tab, str) else None
+        dialog = SettingsDialog(
+            self.settings_manager.settings,
+            self,
+            initial_tab=tab_name,
+        )
         dialog.settings_applied.connect(self._apply_settings_from_dialog)
         if dialog.exec() != QDialog.Accepted:
             if not dialog.was_applied():
@@ -1704,6 +1860,32 @@ class Main(QMainWindow):
         if len(values) <= axis_index:
             return None
         values[axis_index] = float(raw_value)
+        return tuple(values)
+
+    def _position_with_axis_values(
+        self,
+        raw_targets: dict[str, float],
+        *,
+        base_position: object | None = None,
+    ) -> tuple[float, ...] | None:
+        position = base_position
+        if not isinstance(position, (tuple, list)):
+            position = self._seed_motion_prediction_position()
+        values: list[float] = []
+        if isinstance(position, (tuple, list)):
+            try:
+                values = [float(value) for value in position]
+            except (TypeError, ValueError):
+                values = []
+        for axis_name, raw_value in raw_targets.items():
+            axis = axis_name.strip().upper()
+            try:
+                axis_index = self.STAGE_AXIS_NAMES.index(axis)
+            except ValueError:
+                return None
+            if len(values) <= axis_index:
+                return None
+            values[axis_index] = float(raw_value)
         return tuple(values)
 
     def _seed_motion_prediction_position(self) -> tuple[float, ...] | None:
@@ -2154,11 +2336,7 @@ class Main(QMainWindow):
             self._show_status(f"{axis} coordinate is unavailable.", 3000)
             return
         if self._coordinate_move_axis is not None:
-            self._set_pending_stage_axis_target(axis, raw_target, display_target)
-            self._show_status(
-                f"Queued {axis} target {display_target:.3f}.",
-                3000,
-            )
+            self._show_status("Stage is busy. Ignoring manual axis move.", 3000)
             return
         if self.stage_controller.is_busy():
             self._show_status("Stage is busy. Ignoring manual axis move.", 3000)
@@ -3188,16 +3366,12 @@ class Main(QMainWindow):
                 axis_name,
                 raw_value,
             )
+            display_value = axis_display_value
             if axis_name in homed_axes:
-                display_value = axis_display_value
                 background = "#1565c0"
                 foreground = "#f5f5f5"
             else:
-                origin = self._stage_unhomed_display_origins.setdefault(
-                    axis_name, raw_value
-                )
-                origin_display = self._display_axis_value_from_raw(axis_name, origin)
-                display_value = axis_display_value - origin_display
+                self._stage_unhomed_display_origins.setdefault(axis_name, raw_value)
                 background = "#f0b429"
                 foreground = "#1f1f1f"
             if axis_name in self._stage_limit_axes:
@@ -3215,7 +3389,7 @@ class Main(QMainWindow):
                 field.setText(self._format_stage_axis_value(visible_value))
                 field.setModified(False)
             field.setToolTip(
-                f"{axis_name} coordinate. Enter target and press Enter. "
+                f"{axis_name} coordinate. Enter targets and press Apply. "
                 f"Move feedrate: {self._current_linear_feedrate():.1f} mm/min."
             )
             self._apply_stage_axis_field_style(axis_name, field)
@@ -3235,28 +3409,45 @@ class Main(QMainWindow):
         if not updated_axes:
             self._set_stage_position_fields_available(False)
             return
+        self._update_stage_coordinate_apply_state()
 
-    def _on_stage_axis_editing_finished(self, axis_name: str) -> None:
+    def _on_stage_axis_editing_finished(self, axis_name: str) -> bool | None:
         if self._updating_stage_position_fields:
-            return
+            return None
         axis = axis_name.strip().upper()
         commit_from_return = axis in self._stage_axis_return_commits
         self._stage_axis_return_commits.discard(axis)
         field = self._stage_axis_fields.get(axis)
         if field is None or not field.isEnabled() or not field.isModified():
-            return
+            return None
         text = field.text().strip().replace(",", ".")
         try:
             display_target = float(text)
         except (TypeError, ValueError):
+            self._pending_stage_axis_targets.pop(axis, None)
             self._reset_stage_axis_field(axis)
             self._show_status(f"Invalid {axis} target coordinate.", 3000)
-            return
-        raw_target = self._raw_target_from_display_value(axis, display_target)
+            return False
+        input_mode = self._selected_stage_coordinate_input_mode()
+        raw_target, resolved_display_target = self._resolve_stage_axis_target(
+            axis,
+            display_target,
+            input_mode,
+        )
         if raw_target is None:
+            self._pending_stage_axis_targets.pop(axis, None)
             self._reset_stage_axis_field(axis)
             self._show_status(f"{axis} coordinate is unavailable.", 3000)
-            return
+            return False
+        limit_error = self._stage_axis_target_limit_error(
+            axis,
+            resolved_display_target,
+        )
+        if limit_error is not None:
+            self._pending_stage_axis_targets.pop(axis, None)
+            self._reset_stage_axis_field(axis)
+            self._show_status(limit_error, 4000)
+            return False
         field.blockSignals(True)
         field.setText(self._format_stage_axis_value(display_target))
         field.setModified(False)
@@ -3265,17 +3456,38 @@ class Main(QMainWindow):
         field.blockSignals(False)
         if commit_from_return:
             self.view.setFocus(Qt.OtherFocusReason)
-        if self._coordinate_move_axis is not None:
-            self._set_pending_stage_axis_target(axis, raw_target, display_target)
-            self._show_status(
-                f"Queued {axis} target {display_target:.3f}.", 3000
-            )
+        self._set_pending_stage_axis_target(
+            axis,
+            raw_target,
+            resolved_display_target,
+        )
+        return True
+
+    def _apply_pending_stage_coordinate_targets(self) -> None:
+        had_error = False
+        for axis in self.STAGE_AXIS_NAMES:
+            field = self._stage_axis_fields.get(axis)
+            if field is not None and field.isEnabled() and field.isModified():
+                if self._on_stage_axis_editing_finished(axis) is False:
+                    had_error = True
+        if had_error:
+            self._update_stage_coordinate_apply_state()
             return
-        if self.stage_controller.is_busy():
-            self._reset_stage_axis_field(axis)
-            self._show_status("Stage is busy. Ignoring coordinate target.", 3000)
+        if not self._pending_stage_axis_targets:
+            self._show_status("No coordinate changes to apply.", 2000)
             return
-        self._start_coordinate_axis_move(axis, raw_target, display_target)
+        if self._coordinate_move_axis is not None or self.stage_controller.is_busy():
+            self._show_status("Stage is busy. Ignoring coordinate targets.", 3000)
+            self._update_stage_coordinate_apply_state()
+            return
+        targets = dict(self._pending_stage_axis_targets)
+        self.view.setFocus(Qt.OtherFocusReason)
+        self._start_coordinate_targets_move(
+            targets,
+            feedrate_mm_min=self._current_linear_feedrate(),
+            source_label="coordinate fields",
+        )
+        self._update_stage_coordinate_apply_state()
 
     def _set_pending_stage_axis_target(
         self, axis_name: str, raw_target: float, display_target: float
@@ -3294,27 +3506,67 @@ class Main(QMainWindow):
             field.setModified(False)
             field.blockSignals(False)
         self._refresh_stage_axis_styles()
+        self._update_stage_coordinate_apply_state()
 
     def _start_coordinate_axis_move(
         self, axis: str, raw_target: float, display_target: float
     ) -> bool:
-        feedrate = self._current_linear_feedrate()
+        return self._start_coordinate_targets_move(
+            {axis: (raw_target, display_target)},
+            feedrate_mm_min=self._current_linear_feedrate(),
+            source_label="coordinate field",
+        )
+
+    def _start_coordinate_targets_move(
+        self,
+        targets: dict[str, tuple[float, float]],
+        *,
+        feedrate_mm_min: float,
+        source_label: str,
+    ) -> bool:
+        ordered_targets = {
+            axis: targets[axis]
+            for axis in self.STAGE_AXIS_NAMES
+            if axis in targets
+        }
+        if not ordered_targets:
+            return False
+        feedrate = max(0.1, float(feedrate_mm_min))
         origin_position = self._seed_motion_prediction_position()
         if origin_position is None:
             origin_position = self.stage_controller.latest_stage_position()
         if not isinstance(origin_position, (tuple, list)):
-            self._show_status(f"{axis} coordinate is unavailable.", 3000)
+            self._show_status("Stage coordinates are unavailable.", 3000)
             return False
-        target_position = self._position_with_axis_value(
-            axis,
-            raw_target,
+        raw_targets = {
+            axis: float(values[0])
+            for axis, values in ordered_targets.items()
+        }
+        display_targets = {
+            axis: float(values[1])
+            for axis, values in ordered_targets.items()
+        }
+        for axis, display_target in display_targets.items():
+            limit_error = self._stage_axis_target_limit_error(axis, display_target)
+            if limit_error is not None:
+                self._show_status(limit_error, 4000)
+                return False
+        target_position = self._position_with_axis_values(
+            raw_targets,
             base_position=origin_position,
         )
         if target_position is None:
-            self._show_status(f"{axis} coordinate is unavailable.", 3000)
+            self._show_status("Stage coordinates are unavailable.", 3000)
             return False
-        self._pending_stage_axis_targets.pop(axis, None)
-        self._coordinate_move_axis = axis
+        for axis in ordered_targets:
+            self._pending_stage_axis_targets.pop(axis, None)
+        axes = list(ordered_targets)
+        self._coordinate_move_axis = axes[0]
+        self._coordinate_move_axes = set(axes)
+        if "B" in self._coordinate_move_axes:
+            self._invalidate_design_registration(
+                "Design registration cleared after B-axis coordinate motion."
+            )
         self._coordinate_move_origin_position = tuple(float(v) for v in origin_position)
         self._coordinate_move_stage_position = self._coordinate_move_origin_position
         self._coordinate_move_target_position = target_position
@@ -3330,9 +3582,10 @@ class Main(QMainWindow):
             ),
             0.05,
         )
-        self._on_manual_motion_axis(axis)
-        accepted = self.stage_controller.request_absolute_axis_move(
-            axis, raw_target, feedrate
+        self._set_stage_motion_axes(set(axes))
+        accepted = self.stage_controller.request_absolute_axis_targets_move(
+            raw_targets,
+            feedrate=feedrate,
         )
         if not accepted:
             self._clear_coordinate_move_tracking(
@@ -3340,8 +3593,11 @@ class Main(QMainWindow):
                 reset_override=True,
             )
             return False
+        target_text = ", ".join(
+            f"{axis}={display_targets[axis]:.3f}" for axis in axes
+        )
         self._show_status(
-            f"Moving {axis} to {display_target:.3f} at F{feedrate:.1f}.",
+            f"Moving {target_text} at F{feedrate:.1f} from {source_label}.",
             3000,
         )
         self._publish_stage_position_estimate(self._coordinate_move_stage_position)
@@ -3355,16 +3611,20 @@ class Main(QMainWindow):
         target_position: tuple[float, ...],
         feedrate_mm_min: float,
     ) -> float:
-        axis = self._coordinate_move_axis
-        if axis is None:
-            return 0.0
-        try:
-            axis_index = self.STAGE_AXIS_NAMES.index(axis)
-        except ValueError:
-            return 0.0
-        if axis_index >= len(origin_position) or axis_index >= len(target_position):
-            return 0.0
-        distance = abs(float(target_position[axis_index]) - float(origin_position[axis_index]))
+        axes = self._coordinate_move_axes
+        if not axes and self._coordinate_move_axis is not None:
+            axes = {self._coordinate_move_axis}
+        squared = 0.0
+        for axis in axes:
+            try:
+                axis_index = self.STAGE_AXIS_NAMES.index(axis)
+            except ValueError:
+                continue
+            if axis_index >= len(origin_position) or axis_index >= len(target_position):
+                continue
+            delta = float(target_position[axis_index]) - float(origin_position[axis_index])
+            squared += delta * delta
+        distance = math.sqrt(squared)
         speed_mm_per_s = max(0.1, float(feedrate_mm_min)) / 60.0
         return (distance / speed_mm_per_s) + self.PLANNED_MOVE_DURATION_PADDING_S
 
@@ -3429,6 +3689,7 @@ class Main(QMainWindow):
         self, *, clear_pending: bool, reset_override: bool
     ) -> None:
         self._coordinate_move_axis = None
+        self._coordinate_move_axes.clear()
         self._coordinate_move_origin_position = None
         self._coordinate_move_stage_position = None
         self._coordinate_move_target_position = None
@@ -3443,6 +3704,7 @@ class Main(QMainWindow):
         if self.joystick_panel is not None:
             self.joystick_panel.clear_temporary_linear_feedrate_bounds()
         self._refresh_stage_axis_styles()
+        self._update_stage_coordinate_apply_state()
 
     def _set_coordinate_move_feedrate_bounds(self, programmed_feedrate: float) -> None:
         if self.joystick_panel is None:
@@ -3491,37 +3753,56 @@ class Main(QMainWindow):
         if isinstance(position, tuple):
             self._coordinate_move_stage_position = tuple(float(v) for v in position)
         self._clear_coordinate_move_tracking(clear_pending=False, reset_override=True)
-        if self._pending_stage_axis_targets:
-            QTimer.singleShot(0, self._start_next_pending_stage_axis_move)
-        elif self._pending_homing_axes:
+        if self._pending_homing_axes:
             QTimer.singleShot(0, self._start_next_pending_homing_action)
 
     def _raw_target_from_display_value(
         self, axis_name: str, display_target: float
     ) -> float | None:
         axis = axis_name.strip().upper()
-        if axis in self._stage_axis_homed:
-            return self._raw_axis_value_from_display(axis, display_target)
         if axis not in self._stage_axis_raw_values:
             return None
-        origin = self._stage_unhomed_display_origins.get(axis)
-        if origin is None:
-            origin = self._stage_axis_raw_values.get(axis)
-        if origin is None:
+        return self._raw_axis_value_from_display(axis, display_target)
+
+    def _resolve_stage_axis_target(
+        self,
+        axis_name: str,
+        input_value: float,
+        input_mode: str,
+    ) -> tuple[float | None, float]:
+        axis = axis_name.strip().upper()
+        if axis not in self.STAGE_AXIS_NAMES:
+            return None, float(input_value)
+        mode = self._normalize_coordinate_input_mode(input_mode) or "G90"
+        if mode == "G91":
+            current_display = self._stage_axis_display_values.get(axis)
+            if current_display is None:
+                return None, float(input_value)
+            display_target = float(current_display) + float(input_value)
+        else:
+            display_target = float(input_value)
+        raw_target = self._raw_target_from_display_value(axis, display_target)
+        return raw_target, display_target
+
+    def _stage_axis_target_limit_error(
+        self,
+        axis_name: str,
+        display_target: float,
+    ) -> str | None:
+        axis = axis_name.strip().upper()
+        if axis not in self._stage_axis_homed:
             return None
-        if axis == "A":
-            origin_display = self._display_axis_value_from_raw(axis, origin)
-            return self._raw_axis_value_from_display(
-                axis,
-                origin_display + float(display_target),
-            )
-        if axis == "Z":
-            origin_display = self._display_axis_value_from_raw(axis, origin)
-            return self._raw_axis_value_from_display(
-                axis,
-                origin_display + float(display_target),
-            )
-        return float(origin) + float(display_target)
+        limits = self.stage_controller.axis_display_limits(axis)
+        if limits is None:
+            return None
+        min_value, max_value = limits
+        target = float(display_target)
+        if min_value <= target <= max_value:
+            return None
+        return (
+            f"{axis} target {target:+.3f} exceeds software limits "
+            f"({min_value:.3f}..{max_value:.3f})."
+        )
 
     def _reset_stage_axis_field(self, axis_name: str) -> None:
         axis = axis_name.strip().upper()
@@ -3536,6 +3817,8 @@ class Main(QMainWindow):
             field.setText(self._format_stage_axis_value(value))
         field.setModified(False)
         field.blockSignals(False)
+        self._refresh_stage_axis_styles()
+        self._update_stage_coordinate_apply_state()
 
     def _on_limit_axes_changed(self, axes: object) -> None:
         if isinstance(axes, (set, list, tuple)):

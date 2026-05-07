@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import math
 from typing import Any, Callable
 
 
@@ -28,6 +29,33 @@ def _axis_targets_from_payload(payload: dict[str, Any]) -> dict[str, float]:
     return targets
 
 
+def _coordinate_mode_from_payload(payload: dict[str, Any]) -> str:
+    """Return the requested coordinate input mode as G90 or G91."""
+
+    raw_mode = payload.get("mode", payload.get("coordinate_mode", None))
+    if raw_mode is None and "relative" in payload:
+        return "G91" if bool(payload.get("relative")) else "G90"
+    mode = str(raw_mode or "G90").strip().lower()
+    if mode in {"", "absolute", "abs", "g90"}:
+        return "G90"
+    if mode in {"relative", "rel", "g91"}:
+        return "G91"
+    raise ValueError(f"Unsupported coordinate mode: {raw_mode!r}")
+
+
+def _feedrate_from_payload(payload: dict[str, Any]) -> float | None:
+    """Extract an optional positive feedrate from the request payload."""
+
+    for key in ("feedrate", "feed_rate", "feedrate_mm_min", "feedrate_mm_per_min", "f"):
+        if key not in payload or payload.get(key) is None:
+            continue
+        value = float(payload[key])
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError("Feedrate must be a positive finite number.")
+        return value
+    return None
+
+
 class ProbeStationApiServer:
     """Run a FastAPI app in a background thread.
 
@@ -39,7 +67,7 @@ class ProbeStationApiServer:
     def __init__(
         self,
         *,
-        move_callback: Callable[[dict[str, float]], dict[str, Any]],
+        move_callback: Callable[[dict[str, Any]], dict[str, Any]],
         status_callback: Callable[[], dict[str, Any]],
         host: str | None = None,
         port: int | None = None,
@@ -137,13 +165,27 @@ class ProbeStationApiServer:
 
         @app.post("/api/v1/stage/move")
         def move_stage(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
-            targets = _axis_targets_from_payload(payload)
+            try:
+                targets = _axis_targets_from_payload(payload)
+                mode = _coordinate_mode_from_payload(payload)
+                feedrate = _feedrate_from_payload(payload)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"message": str(exc)},
+                ) from exc
             if not targets:
                 raise HTTPException(
                     status_code=400,
                     detail={"message": "Provide at least one target coordinate."},
                 )
-            result = self._move_callback(targets)
+            result = self._move_callback(
+                {
+                    "targets": targets,
+                    "mode": mode,
+                    "feedrate": feedrate,
+                }
+            )
             if not result.get("accepted", False):
                 status_code = int(result.get("status_code", 409))
                 detail = {

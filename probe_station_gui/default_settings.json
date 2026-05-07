@@ -67,6 +67,12 @@
     "level": "INFO",
     "file": "probe-station-gui.log"
   },
+  "api": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 8765,
+    "default_feedrate_mm_min": 10.0
+  },
   "oscillation": {
     "mode": "X",
     "amplitude_mm": 0.5,

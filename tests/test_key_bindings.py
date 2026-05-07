@@ -62,6 +62,7 @@ settings_manager = _load_module(
     "settings_manager_test", "probe_station_gui/settings_manager.py"
 )
 KeyBinding = settings_manager.KeyBinding
+ApiSettings = settings_manager.ApiSettings
 JogSettings = settings_manager.JogSettings
 NeedleCalibrationSettings = settings_manager.NeedleCalibrationSettings
 AxisACalibrationSettings = settings_manager.AxisACalibrationSettings
@@ -200,6 +201,37 @@ class JogSettingsTest(unittest.TestCase):
         self.assertEqual(parsed.manual_axis_distance_mm, 0.125)
         self.assertEqual(parsed.manual_axis_mode, "G91")
         self.assertEqual(parsed.manual_axis_feedrate_mm_min, 123.4)
+
+
+class ApiSettingsTest(unittest.TestCase):
+    def test_api_settings_round_trip(self) -> None:
+        settings = ApiSettings(
+            enabled=False,
+            host="0.0.0.0",
+            port=9876,
+            default_feedrate_mm_min=42.5,
+        )
+
+        restored = ApiSettings(**settings.to_dict())
+
+        self.assertEqual(restored, settings)
+
+    def test_parse_api_normalizes_values(self) -> None:
+        manager = object.__new__(SettingsManager)
+
+        parsed = manager._parse_api(
+            {
+                "enabled": True,
+                "host": " 127.0.0.1 ",
+                "port": "8766",
+                "default_feedrate_mm_min": "55.5",
+            }
+        )
+
+        self.assertTrue(parsed.enabled)
+        self.assertEqual(parsed.host, "127.0.0.1")
+        self.assertEqual(parsed.port, 8766)
+        self.assertEqual(parsed.default_feedrate_mm_min, 55.5)
 
 
 class AxisACalibrationSettingsTest(unittest.TestCase):

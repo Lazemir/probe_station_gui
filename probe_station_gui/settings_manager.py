@@ -137,6 +137,36 @@ class LoggingSettings:
 
 
 @dataclass
+class ApiSettings:
+    """Configuration for the local FastAPI control surface."""
+
+    enabled: bool = True
+    host: str = "127.0.0.1"
+    port: int = 8765
+    default_feedrate_mm_min: float = 10.0
+
+    def clone(self) -> "ApiSettings":
+        """Return a copy of the API preferences."""
+
+        return ApiSettings(
+            enabled=self.enabled,
+            host=self.host,
+            port=self.port,
+            default_feedrate_mm_min=self.default_feedrate_mm_min,
+        )
+
+    def to_dict(self) -> dict[str, bool | int | float | str]:
+        """Serialize the API preferences."""
+
+        return {
+            "enabled": self.enabled,
+            "host": self.host,
+            "port": self.port,
+            "default_feedrate_mm_min": self.default_feedrate_mm_min,
+        }
+
+
+@dataclass
 class FeedrateGroup:
     """Collection of presets and a default value for a motion family."""
 
@@ -526,6 +556,7 @@ class Settings:
 
     controls: Dict[str, List[KeyBinding]] = field(default_factory=dict)
     logging: LoggingSettings = field(default_factory=LoggingSettings)
+    api: ApiSettings = field(default_factory=ApiSettings)
     feedrates: FeedrateSettings = field(default_factory=FeedrateSettings)
     oscillation: OscillationSettings = field(default_factory=OscillationSettings)
     jog: JogSettings = field(default_factory=JogSettings)
@@ -549,6 +580,7 @@ class Settings:
         return Settings(
             controls={key: list(value) for key, value in self.controls.items()},
             logging=self.logging.clone(),
+            api=self.api.clone(),
             feedrates=self.feedrates.clone(),
             oscillation=self.oscillation.clone(),
             jog=self.jog.clone(),
@@ -568,6 +600,7 @@ class Settings:
                 for key, bindings in self.controls.items()
             },
             "logging": self.logging.to_dict(),
+            "api": self.api.to_dict(),
             "feedrates": {
                 "linear": {
                     "presets": self.feedrates.linear.presets,
@@ -595,6 +628,10 @@ class SettingsManager:
     CONTROLLER_STATE_FILENAME = "controller-state.json"
     SERIAL_CONNECTION_STATE_FILENAME = "serial-connection-state.json"
     DEFAULT_LOG_FILENAME = "probe-station-gui.log"
+    DEFAULT_API_ENABLED: bool = True
+    DEFAULT_API_HOST: str = "127.0.0.1"
+    DEFAULT_API_PORT: int = 8765
+    DEFAULT_API_FEEDRATE_MM_MIN: float = 10.0
     DEFAULT_LINEAR_FEEDRATE_PRESETS: tuple[float, ...] = (
         1.0,
         3.0,
@@ -904,6 +941,15 @@ class SettingsManager:
         else:
             logging_section["file"] = log_path
 
+        api_section = data.get("api")
+        if not isinstance(api_section, dict):
+            api_section = ApiSettings().to_dict()
+            data["api"] = api_section
+        else:
+            defaults = ApiSettings().to_dict()
+            for key, value in defaults.items():
+                api_section.setdefault(key, value)
+
         feedrates_section = data.get("feedrates")
         legacy_presets = data.get("feedrate_presets")
         if not isinstance(feedrates_section, dict):
@@ -1178,6 +1224,7 @@ class SettingsManager:
         feedrates_raw = raw.get("feedrates") if isinstance(raw, dict) else None
         legacy_presets = raw.get("feedrate_presets") if isinstance(raw, dict) else None
         feedrates = self._parse_feedrates(feedrates_raw, legacy_presets)
+        api_raw = raw.get("api") if isinstance(raw, dict) else None
         oscillation_raw = raw.get("oscillation") if isinstance(raw, dict) else None
         jog_raw = raw.get("jog") if isinstance(raw, dict) else None
         needle_calibration_raw = (
@@ -1200,6 +1247,7 @@ class SettingsManager:
         return Settings(
             controls=controls,
             logging=logging_settings,
+            api=self._parse_api(api_raw),
             feedrates=feedrates,
             oscillation=self._parse_oscillation(oscillation_raw),
             jog=self._parse_jog(jog_raw),
@@ -1221,6 +1269,36 @@ class SettingsManager:
             if isinstance(file_raw, str):
                 file_value = file_raw
         return LoggingSettings(level=level.upper(), file=file_value)
+
+    def _parse_api(self, raw_api) -> ApiSettings:
+        """Normalise local API settings."""
+
+        settings = ApiSettings()
+        if isinstance(raw_api, dict):
+            settings.enabled = bool(raw_api.get("enabled", settings.enabled))
+            host_raw = raw_api.get("host", settings.host)
+            if isinstance(host_raw, str):
+                host = host_raw.strip()
+                if host:
+                    settings.host = host
+            try:
+                port = int(raw_api.get("port", settings.port))
+            except (TypeError, ValueError):
+                port = settings.port
+            if 0 < port <= 65535:
+                settings.port = port
+            try:
+                feedrate = float(
+                    raw_api.get(
+                        "default_feedrate_mm_min",
+                        settings.default_feedrate_mm_min,
+                    )
+                )
+            except (TypeError, ValueError):
+                feedrate = settings.default_feedrate_mm_min
+            if math.isfinite(feedrate) and feedrate > 0.0:
+                settings.default_feedrate_mm_min = max(0.1, feedrate)
+        return settings
 
     def _parse_feedrates(self, raw_feedrates, legacy_presets) -> FeedrateSettings:
         """Normalise persisted feedrate data supporting legacy layouts."""
@@ -2007,6 +2085,7 @@ class SettingsManager:
         """Return a copy of the settings with runtime values normalised."""
 
         clone = settings.clone()
+        clone.api = self._parse_api(clone.api.to_dict())
         clone.feedrates = FeedrateSettings(
             linear=self._normalise_feedrate_group(
                 clone.feedrates.linear, fallback=self.DEFAULT_LINEAR_FEEDRATE_PRESETS
@@ -2042,6 +2121,11 @@ class SettingsManager:
         """Return the full feedrate configuration clone."""
 
         return self._settings.feedrates.clone()
+
+    def api_configuration(self) -> ApiSettings:
+        """Return the current local API configuration clone."""
+
+        return self._settings.api.clone()
 
     def jog_configuration(self) -> JogSettings:
         """Return the current jog configuration clone."""

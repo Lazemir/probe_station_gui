@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 from probe_station_gui.qt_compat import keyboard_modifiers_to_int, native_scan_code_to_int
 from probe_station_gui.settings_manager import (
     CONTROL_ACTIONS,
+    ApiSettings,
     CoordinateSystemSettings,
     FeedrateGroup,
     FeedrateSettings,
@@ -245,6 +246,57 @@ class LoggingSettingsWidget(QWidget):
 
         logging_settings.level = self._level_combo.currentText()
         logging_settings.file = self._file_edit.text().strip()
+
+
+class ApiSettingsWidget(QWidget):
+    """Tab that exposes the local control API settings."""
+
+    def __init__(self, api_settings: ApiSettings, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        layout = QFormLayout(self)
+        layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+
+        self._enabled_checkbox = QCheckBox("Start local FastAPI control API", self)
+        self._enabled_checkbox.setChecked(api_settings.enabled)
+        layout.addRow(QLabel("Enabled", self), self._enabled_checkbox)
+
+        self._host_edit = QLineEdit(self)
+        self._host_edit.setText(api_settings.host)
+        self._host_edit.setPlaceholderText("127.0.0.1")
+        layout.addRow(QLabel("Host", self), self._host_edit)
+
+        self._port_spin = QSpinBox(self)
+        self._port_spin.setRange(1, 65535)
+        self._port_spin.setValue(int(api_settings.port))
+        layout.addRow(QLabel("Port", self), self._port_spin)
+
+        self._feedrate_spin = QDoubleSpinBox(self)
+        self._feedrate_spin.setLocale(QLocale.c())
+        self._feedrate_spin.setDecimals(1)
+        self._feedrate_spin.setRange(0.1, 5000.0)
+        self._feedrate_spin.setSingleStep(10.0)
+        self._feedrate_spin.setSuffix(" mm/min")
+        self._feedrate_spin.setValue(float(api_settings.default_feedrate_mm_min))
+        layout.addRow(QLabel("Default feedrate", self), self._feedrate_spin)
+
+        self._enabled_checkbox.toggled.connect(self._update_enabled_state)
+        self._update_enabled_state(self._enabled_checkbox.isChecked())
+
+    def to_settings(self, settings: Settings) -> None:
+        """Persist the widget state into the provided settings object."""
+
+        host = self._host_edit.text().strip() or "127.0.0.1"
+        settings.api = ApiSettings(
+            enabled=self._enabled_checkbox.isChecked(),
+            host=host,
+            port=int(self._port_spin.value()),
+            default_feedrate_mm_min=float(self._feedrate_spin.value()),
+        )
+
+    def _update_enabled_state(self, enabled: bool) -> None:
+        self._host_edit.setEnabled(enabled)
+        self._port_spin.setEnabled(enabled)
+        self._feedrate_spin.setEnabled(enabled)
 
 
 class FeedrateGroupEditor(QWidget):
@@ -922,7 +974,13 @@ class SettingsDialog(QDialog):
 
     settings_applied = Signal(object)
 
-    def __init__(self, settings: Settings, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        parent: QWidget | None = None,
+        *,
+        initial_tab: str | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.setModal(True)
@@ -935,6 +993,7 @@ class SettingsDialog(QDialog):
         root_layout.addWidget(self._tabs)
 
         self._controls_tab = ControlsSettingsWidget(self._settings, self)
+        self._api_tab = ApiSettingsWidget(self._settings.api, self)
         self._logging_tab = LoggingSettingsWidget(self._settings.logging, self)
         self._jog_tab = JogSettingsWidget(self._settings.jog, self)
         self._needle_calibration_tab = NeedleCalibrationSettingsWidget(
@@ -949,11 +1008,17 @@ class SettingsDialog(QDialog):
             self,
         )
         self._tabs.addTab(self._controls_tab, "Controls")
+        self._tabs.addTab(self._api_tab, "API")
         self._tabs.addTab(self._jog_tab, "Jog")
         self._tabs.addTab(self._coordinate_system_tab, "Coordinates")
         self._tabs.addTab(self._axis_calibration_tab, "Axis Calibration")
         self._tabs.addTab(self._needle_calibration_tab, "Needles")
         self._tabs.addTab(self._logging_tab, "Logging")
+        if initial_tab:
+            for index in range(self._tabs.count()):
+                if self._tabs.tabText(index).lower() == initial_tab.lower():
+                    self._tabs.setCurrentIndex(index)
+                    break
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.Save | QDialogButtonBox.Apply | QDialogButtonBox.Cancel,
@@ -979,6 +1044,7 @@ class SettingsDialog(QDialog):
 
     def _collect_settings(self) -> None:
         self._controls_tab.to_settings(self._settings)
+        self._api_tab.to_settings(self._settings)
         self._jog_tab.to_settings(self._settings)
         self._coordinate_system_tab.to_settings(self._settings)
         self._axis_calibration_tab.to_settings(self._settings)

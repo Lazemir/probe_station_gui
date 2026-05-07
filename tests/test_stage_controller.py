@@ -704,6 +704,95 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
         self.assertIn("G90", commands)
         self.assertIn("G1 B0.2500 F123.4", commands)
 
+    def test_multi_axis_absolute_move_uses_single_g90_command(self) -> None:
+        controller = StageController()
+        controller._serial = _FakeSerial()
+        controller._needles_known = True
+        controller._needles_up = True
+        controller._axis_limits = {"X": (0.0, 64.0), "Y": (0.0, 64.0)}
+        controller._active_work_coordinate_system = "G54"
+        commands = []
+        controller._ensure_axis_limits = lambda _serial: None
+        controller._query_status = lambda _serial: types.SimpleNamespace(
+            state="Idle",
+            position=None,
+            work_position=(0.0, 0.0, 0.0),
+            display_position=(0.0, 0.0, 0.0),
+            work_offset=(32.0, 32.0, 0.0),
+            coordinate_system="G54",
+            homed_axes={"X", "Y"},
+        )
+        controller._write_command = lambda _serial, command: commands.append(command)
+        controller._wait_for_ok = lambda *_args, **_kwargs: None
+        controller._wait_for_idle = lambda *_args, **_kwargs: None
+        controller._reset_feed_override_for_serial = lambda _serial: None
+
+        controller._send_absolute_axis_targets_move(
+            controller._serial,
+            {"X": 10.0, "Y": -5.0},
+            feedrate=123.4,
+        )
+
+        self.assertIn("G90", commands)
+        self.assertIn("G1 X10.0000 Y-5.0000 F123.4", commands)
+
+    def test_homed_work_xy_target_uses_reported_wco_limits(self) -> None:
+        controller = StageController()
+        controller._serial = _FakeSerial()
+        controller._needles_known = True
+        controller._needles_up = True
+        controller._axis_limits = {"X": (0.0, 64.0), "Y": (0.0, 64.0)}
+        controller._position_reporting_mode = "work"
+        controller._ensure_axis_limits = lambda _serial: None
+        controller._query_status = lambda _serial: types.SimpleNamespace(
+            state="Idle",
+            position=None,
+            work_position=(0.0, 0.0, 0.0),
+            display_position=(0.0, 0.0, 0.0),
+            work_offset=(32.0, 32.0, 0.0),
+            coordinate_system="G54",
+            homed_axes={"X", "Y"},
+        )
+
+        with self.assertRaises(StageControllerError):
+            controller._send_absolute_axis_targets_move(
+                controller._serial,
+                {"X": 37.0},
+                feedrate=100.0,
+            )
+
+    def test_unhomed_work_xy_target_does_not_apply_software_limits(self) -> None:
+        controller = StageController()
+        controller._serial = _FakeSerial()
+        controller._needles_known = True
+        controller._needles_up = True
+        controller._axis_limits = {"X": (0.0, 64.0)}
+        commands = []
+        controller._position_reporting_mode = "work"
+        controller._ensure_axis_limits = lambda _serial: None
+        controller._query_status = lambda _serial: types.SimpleNamespace(
+            state="Idle",
+            position=None,
+            work_position=(0.0, 0.0, 0.0),
+            display_position=(0.0, 0.0, 0.0),
+            work_offset=None,
+            coordinate_system=None,
+            homed_axes=set(),
+        )
+        controller._write_command = lambda _serial, command: commands.append(command)
+        controller._wait_for_ok = lambda *_args, **_kwargs: None
+        controller._wait_for_idle = lambda *_args, **_kwargs: None
+        controller._reset_feed_override_for_serial = lambda _serial: None
+
+        controller._send_absolute_axis_targets_move(
+            controller._serial,
+            {"X": 37.0},
+            feedrate=100.0,
+            allow_unhomed=True,
+        )
+
+        self.assertIn("G1 X37.0000 F100", commands)
+
     def test_relative_manual_axis_move_is_resolved_to_absolute_g90(
         self,
     ) -> None:
