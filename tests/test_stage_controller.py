@@ -1,10 +1,13 @@
 import importlib.util
+import math
 import sys
 import threading
 import time
 import types
 import unittest
 from pathlib import Path
+
+import numpy as np
 
 
 def _install_pyside6_stubs() -> None:
@@ -74,11 +77,24 @@ def _load_stage_controller():
     return module
 
 
+def _load_settings_manager():
+    module_path = Path(__file__).resolve().parents[1] / "probe_station_gui" / "settings_manager.py"
+    spec = importlib.util.spec_from_file_location("settings_manager_stage_test", module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 _stage_controller_module = _load_stage_controller()
+_settings_manager_module = _load_settings_manager()
 StageController = _stage_controller_module.StageController
 StageControllerError = _stage_controller_module.StageControllerError
 QueuedSerialWrite = _stage_controller_module._QueuedSerialWrite
 MoveVector = _stage_controller_module.MoveVector
+AxisACalibrationSettings = _settings_manager_module.AxisACalibrationSettings
+AxisZCalibrationSettings = _settings_manager_module.AxisZCalibrationSettings
 
 
 class StageControllerStartupLimitsTest(unittest.TestCase):
@@ -929,6 +945,45 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
         finally:
             controller.shutdown()
 
+    def test_calibrated_axis_a_display_keeps_gcode_sign(self) -> None:
+        controller = StageController()
+        try:
+            controller.apply_axis_a_calibration(
+                types.SimpleNamespace(
+                    configured=True,
+                    model="cosine_displacement",
+                    steps_per_mm=2500.0,
+                    commanded_lowering_min_mm=0.0,
+                    commanded_lowering_max_mm=6.0,
+                    offset_mm=-0.00013272701600556085,
+                    amplitude_mm=4.29496757977153,
+                    angular_frequency_rad_per_mm=0.24349261926759336,
+                    phase_rad=0.8994441869661569,
+                )
+            )
+
+            display = controller.calibrated_axis_display_value("A", -1.0)
+            raw = controller.calibrated_axis_raw_value("A", display)
+
+            self.assertLess(display, 0.0)
+            self.assertAlmostEqual(raw, -1.0, places=6)
+        finally:
+            controller.shutdown()
+
+    def test_calibrated_axis_a_zero_display_is_positive_zero(self) -> None:
+        controller = StageController()
+        try:
+            controller.apply_axis_a_calibration(
+                AxisACalibrationSettings(configured=True)
+            )
+
+            display = controller.calibrated_axis_display_value("A", 0.0)
+
+            self.assertEqual(display, 0.0)
+            self.assertEqual(math.copysign(1.0, display), 1.0)
+        finally:
+            controller.shutdown()
+
     def test_legacy_negative_saved_a_position_is_treated_as_raw_coordinate(self) -> None:
         controller = StageController()
         try:
@@ -958,6 +1013,194 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
             )
         finally:
             controller.shutdown()
+
+
+class StageControllerAxisMotionFitTest(unittest.TestCase):
+    CALIBRATIONS = Path(__file__).resolve().parents[1] / "calibrations"
+
+    @staticmethod
+    def _rmse(values: np.ndarray) -> float:
+        return float(np.sqrt(np.mean(values * values)))
+
+    @staticmethod
+    def _averaged_curve(gcode: np.ndarray, indicator: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        buckets: dict[float, list[float]] = {}
+        for gcode_value, indicator_value in zip(np.round(gcode, 4), indicator):
+            buckets.setdefault(float(gcode_value), []).append(float(indicator_value))
+        keys = np.array(sorted(buckets), dtype=float)
+        values = np.array([np.mean(buckets[float(key)]) for key in keys], dtype=float)
+        return keys, values
+
+    def test_default_axis_a_sine_fit_matches_measured_curves(self) -> None:
+        controller = StageController()
+        try:
+            controller.apply_axis_a_calibration(
+                AxisACalibrationSettings(configured=True)
+            )
+            datasets = [
+                "axis_a_spm2600_pulloff0p25_start0p230_to-lowerlimit_step0p01_settle1p0_feed30_oneshot_20260504_223257.npz",
+                "axis_a_spm2600_pulloff0p25_reverse_startm5p730_to0p230_step0p01_settle1p0_feed30_oneshot_nozero_20260504_225516.npz",
+            ]
+            residuals: list[np.ndarray] = []
+            for filename in datasets:
+                data = np.load(self.CALIBRATIONS / filename)
+                commanded = -data["gcode"]
+                predicted = np.array(
+                    [
+                        controller._axis_a_model_lowering_for_commanded(float(value))
+                        for value in commanded
+                    ],
+                    dtype=float,
+                )
+                residuals.append(predicted - data["indicator"])
+            residual = np.concatenate(residuals)
+
+            self.assertLess(self._rmse(residual), 0.035)
+            self.assertLess(float(np.percentile(np.abs(residual), 95)), 0.043)
+            self.assertLess(float(np.max(np.abs(residual))), 0.05)
+        finally:
+            controller.shutdown()
+
+    def test_default_axis_z_polynomial_fit_matches_stitched_center_curve(self) -> None:
+        controller = StageController()
+        settings = AxisZCalibrationSettings(configured=True)
+        try:
+            controller.apply_axis_z_calibration(settings)
+            up_gcode, up_indicator, down_gcode, down_indicator = (
+                self._stitched_z_indicator_curves(settings)
+            )
+            mask = (up_gcode >= 0.05) & (up_gcode <= 23.35)
+            gcode = up_gcode[mask]
+            center = (
+                up_indicator[mask]
+                + np.interp(gcode, down_gcode, down_indicator)
+            ) * 0.5
+            predicted = np.array(
+                [
+                    controller.calibrated_axis_display_value("Z", float(value))
+                    for value in gcode
+                ],
+                dtype=float,
+            )
+            residual = predicted - center
+
+            self.assertLess(self._rmse(residual), 0.007)
+            self.assertLess(float(np.percentile(np.abs(residual), 95)), 0.013)
+            self.assertLess(float(np.max(np.abs(residual))), 0.022)
+        finally:
+            controller.shutdown()
+
+    def test_calibrated_axis_targets_round_trip(self) -> None:
+        controller = StageController()
+        try:
+            controller.apply_axis_a_calibration(
+                AxisACalibrationSettings(configured=True)
+            )
+            controller.apply_axis_z_calibration(
+                AxisZCalibrationSettings(configured=True)
+            )
+
+            a_raw = controller.calibrated_axis_raw_value("A", -1.25)
+            self.assertLess(a_raw, 0.0)
+            self.assertAlmostEqual(
+                controller.calibrated_axis_display_value("A", a_raw),
+                -1.25,
+                places=6,
+            )
+
+            z_display = controller.calibrated_axis_display_value(
+                "Z",
+                18.0,
+            )
+            z_raw = controller.calibrated_axis_raw_value(
+                "Z",
+                z_display,
+            )
+            self.assertAlmostEqual(z_raw, 18.0, places=6)
+        finally:
+            controller.shutdown()
+
+    def _stitched_z_indicator_curves(
+        self,
+        settings: AxisZCalibrationSettings,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        s1_up = np.load(
+            self.CALIBRATIONS
+            / "axis_z_spm6335_nozero_up_from0p020_until-ind9p95_step0p01_settle1p0_feed50_20260504_233107.npz"
+        )
+        s1_down = np.load(
+            self.CALIBRATIONS
+            / "axis_z_spm6335_nozero_down_to0p020_from-up-end_step0p01_settle1p0_feed50_20260504_233107.npz"
+        )
+        s2_up = np.load(
+            self.CALIBRATIONS
+            / "axis_z_spm6335_section2_nozero_up_step0p005_settle2p0_feed50_20260505_010155.npz"
+        )
+        s2_down = np.load(
+            self.CALIBRATIONS
+            / "axis_z_spm6335_section2_nozero_down_step0p005_settle2p0_feed50_20260505_010155.npz"
+        )
+        s3 = np.load(
+            self.CALIBRATIONS
+            / "axis_z_spm6335_section3_precise_start16p5_top23p4_step0p0025_settle2p0_feed1_transition10_20260505_175825.npz"
+        )
+
+        s1_up_g, s1_up_i = self._averaged_curve(s1_up["gcode"], s1_up["indicator"])
+        s1_down_g, s1_down_i = self._averaged_curve(
+            s1_down["gcode"],
+            s1_down["indicator"],
+        )
+        s2_up_g, s2_up_i = self._averaged_curve(s2_up["gcode"], s2_up["indicator"])
+        s2_down_g, s2_down_i = self._averaged_curve(
+            s2_down["gcode"],
+            s2_down["indicator"],
+        )
+        s2_up_i = s2_up_i + settings.section2_indicator_offset_mm
+        s2_down_i = s2_down_i + settings.section2_indicator_offset_mm
+
+        s3_up_mask = s3["direction"] > 0
+        s3_down_mask = s3["direction"] < 0
+        s3_up_g, s3_up_i = self._averaged_curve(
+            s3["gcode"][s3_up_mask],
+            s3["indicator"][s3_up_mask],
+        )
+        s3_down_g, s3_down_i = self._averaged_curve(
+            s3["gcode"][s3_down_mask],
+            s3["indicator"][s3_down_mask],
+        )
+        s3_up_i = s3_up_i + settings.section3_indicator_offset_mm
+        s3_down_i = s3_down_i + settings.section3_indicator_offset_mm
+
+        up_gcode = np.concatenate(
+            [
+                s1_up_g[s1_up_g < 12.0],
+                s2_up_g[(s2_up_g >= 12.0) & (s2_up_g <= 20.214)],
+                s3_up_g[s3_up_g > 20.214],
+            ]
+        )
+        up_indicator = np.concatenate(
+            [
+                s1_up_i[s1_up_g < 12.0],
+                s2_up_i[(s2_up_g >= 12.0) & (s2_up_g <= 20.214)],
+                s3_up_i[s3_up_g > 20.214],
+            ]
+        )
+        down_gcode = np.concatenate(
+            [
+                s1_down_g[s1_down_g < 12.0],
+                s2_down_g[(s2_down_g >= 12.0) & (s2_down_g <= 20.214)],
+                s3_down_g[s3_down_g > 20.214],
+            ]
+        )
+        down_indicator = np.concatenate(
+            [
+                s1_down_i[s1_down_g < 12.0],
+                s2_down_i[(s2_down_g >= 12.0) & (s2_down_g <= 20.214)],
+                s3_down_i[s3_down_g > 20.214],
+            ]
+        )
+        order = np.argsort(down_gcode)
+        return up_gcode, up_indicator, down_gcode[order], down_indicator[order]
 
 
 class StageControllerNeedlesStateTest(unittest.TestCase):

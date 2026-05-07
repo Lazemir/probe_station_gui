@@ -65,6 +65,7 @@ KeyBinding = settings_manager.KeyBinding
 JogSettings = settings_manager.JogSettings
 NeedleCalibrationSettings = settings_manager.NeedleCalibrationSettings
 AxisACalibrationSettings = settings_manager.AxisACalibrationSettings
+AxisZCalibrationSettings = settings_manager.AxisZCalibrationSettings
 OscillationSettings = settings_manager.OscillationSettings
 SavedStagePositionSettings = settings_manager.SavedStagePositionSettings
 SettingsManager = settings_manager.SettingsManager
@@ -202,16 +203,19 @@ class JogSettingsTest(unittest.TestCase):
 
 
 class AxisACalibrationSettingsTest(unittest.TestCase):
+    def test_axis_a_calibration_defaults_to_disabled(self) -> None:
+        self.assertFalse(AxisACalibrationSettings().configured)
+
     def test_axis_a_calibration_round_trip_preserves_sine_model(self) -> None:
         settings = AxisACalibrationSettings(
             configured=True,
-            steps_per_mm=2500.0,
+            steps_per_mm=2600.0,
             commanded_lowering_min_mm=0.0,
-            commanded_lowering_max_mm=6.0,
-            offset_mm=-0.00013272701600556085,
-            amplitude_mm=4.29496757977153,
-            angular_frequency_rad_per_mm=0.24349261926759336,
-            phase_rad=0.8994441869661569,
+            commanded_lowering_max_mm=5.5,
+            offset_mm=-0.18025492860701603,
+            amplitude_mm=-4.256281153779931,
+            angular_frequency_rad_per_mm=0.2560331555269034,
+            phase_rad=0.9304927419233507,
         )
 
         restored = AxisACalibrationSettings(**settings.to_dict())
@@ -225,6 +229,51 @@ class AxisACalibrationSettingsTest(unittest.TestCase):
             {
                 "configured": True,
                 "steps_per_mm": 0,
+            }
+        )
+
+        self.assertFalse(parsed.configured)
+
+    def test_parse_axis_a_calibration_migrates_positive_parameters_to_signed_model(self) -> None:
+        manager = object.__new__(SettingsManager)
+
+        parsed = manager._parse_axis_a_calibration(
+            {
+                "configured": True,
+                "offset_mm": 0.18025492860701603,
+                "amplitude_mm": 4.256281153779931,
+            }
+        )
+
+        self.assertLess(parsed.offset_mm, 0.0)
+        self.assertLess(parsed.amplitude_mm, 0.0)
+
+
+class AxisZCalibrationSettingsTest(unittest.TestCase):
+    def test_axis_z_calibration_defaults_to_disabled(self) -> None:
+        self.assertFalse(AxisZCalibrationSettings().configured)
+
+    def test_axis_z_calibration_round_trip_preserves_polynomial_model(self) -> None:
+        settings = AxisZCalibrationSettings(
+            configured=True,
+            steps_per_mm=6335.0,
+            gcode_min_mm=0.02,
+            gcode_max_mm=23.4,
+            coefficients_mm=[1, 2, 3, 4, 5, 6],
+        )
+
+        restored = AxisZCalibrationSettings(**settings.to_dict())
+
+        self.assertEqual(restored, settings)
+
+    def test_parse_axis_z_calibration_disables_invalid_range(self) -> None:
+        manager = object.__new__(SettingsManager)
+
+        parsed = manager._parse_axis_z_calibration(
+            {
+                "configured": True,
+                "gcode_min_mm": 5,
+                "gcode_max_mm": 5,
             }
         )
 
@@ -267,6 +316,20 @@ class SerialConnectionStateTest(unittest.TestCase):
             manager.save_serial_connection_state(False)
 
             self.assertFalse(manager.serial_auto_connect_enabled())
+
+
+class SettingsLoadTest(unittest.TestCase):
+    def test_load_accepts_utf8_bom_settings_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / SettingsManager.CONFIG_FILENAME
+            config_path.write_text("\ufeff{}", encoding="utf-8")
+            manager = object.__new__(SettingsManager)
+            manager._config_path = config_path
+            manager._logger = logging.getLogger("settings_manager_test")
+
+            loaded = manager._load()
+
+            self.assertIsInstance(loaded, settings_manager.Settings)
 
 
 if __name__ == "__main__":

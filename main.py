@@ -723,18 +723,33 @@ class Main(QMainWindow):
 
     @staticmethod
     def _format_stage_axis_value(value: float) -> str:
-        text = f"{float(value):.3f}"
+        numeric_value = float(value)
+        if abs(numeric_value) < 0.0005:
+            numeric_value = 0.0
+        text = f"{numeric_value:.3f}"
         return text.rstrip("0").rstrip(".") if "." in text else text
 
     def _display_axis_value_from_raw(self, axis_name: str, raw_value: float) -> float:
-        return float(raw_value)
+        axis = axis_name.strip().upper()
+        if not hasattr(self, "stage_controller"):
+            return float(raw_value)
+        return self.stage_controller.calibrated_axis_display_value(
+            axis,
+            float(raw_value),
+        )
 
     def _raw_axis_value_from_display(
         self,
         axis_name: str,
         display_value: float,
     ) -> float:
-        return float(display_value)
+        axis = axis_name.strip().upper()
+        if not hasattr(self, "stage_controller"):
+            return float(display_value)
+        return self.stage_controller.calibrated_axis_raw_value(
+            axis,
+            float(display_value),
+        )
 
     def _apply_stage_axis_field_style(
         self, axis_name: str, field: QLineEdit | None = None
@@ -1221,6 +1236,9 @@ class Main(QMainWindow):
         oscillation_settings = self.settings_manager.oscillation_configuration()
         self.stage_controller.apply_axis_a_calibration(
             self.settings_manager.axis_a_calibration_configuration()
+        )
+        self.stage_controller.apply_axis_z_calibration(
+            self.settings_manager.axis_z_calibration_configuration()
         )
         self.stage_controller.apply_needle_calibration(
             down_position_mm=(
@@ -2105,6 +2123,47 @@ class Main(QMainWindow):
         settings.jog.manual_axis_feedrate_mm_min = feedrate
         self.settings_manager.replace(settings)
         self.settings_manager.save()
+
+    def _on_manual_axis_move_requested(
+        self,
+        axis: str,
+        value_mm: float,
+        mode: str,
+        _feedrate_mm_min: float,
+    ) -> None:
+        """Route manual +/- axis controls through the coordinate move path."""
+
+        axis = axis.strip().upper()
+        if axis not in self.STAGE_AXIS_NAMES:
+            return
+        mode = mode.strip().upper()
+        if mode not in {"G90", "G91"}:
+            self._show_status(f"Unsupported manual move mode: {mode}.", 3000)
+            return
+        current_display = self._stage_axis_display_values.get(axis)
+        if current_display is None:
+            self._show_status(f"{axis} coordinate is unavailable.", 3000)
+            return
+        display_target = (
+            float(value_mm)
+            if mode == "G90"
+            else float(current_display) + float(value_mm)
+        )
+        raw_target = self._raw_target_from_display_value(axis, display_target)
+        if raw_target is None:
+            self._show_status(f"{axis} coordinate is unavailable.", 3000)
+            return
+        if self._coordinate_move_axis is not None:
+            self._set_pending_stage_axis_target(axis, raw_target, display_target)
+            self._show_status(
+                f"Queued {axis} target {display_target:.3f}.",
+                3000,
+            )
+            return
+        if self.stage_controller.is_busy():
+            self._show_status("Stage is busy. Ignoring manual axis move.", 3000)
+            return
+        self._start_coordinate_axis_move(axis, raw_target, display_target)
 
     def _schedule_linear_feedrate_save(self, feedrate_mm_min: float) -> None:
         try:
@@ -3456,6 +3515,12 @@ class Main(QMainWindow):
                 axis,
                 origin_display + float(display_target),
             )
+        if axis == "Z":
+            origin_display = self._display_axis_value_from_raw(axis, origin)
+            return self._raw_axis_value_from_display(
+                axis,
+                origin_display + float(display_target),
+            )
         return float(origin) + float(display_target)
 
     def _reset_stage_axis_field(self, axis_name: str) -> None:
@@ -3887,7 +3952,7 @@ class Main(QMainWindow):
         )
         self.joystick_panel.zero_b_requested.connect(self._zero_b_axis)
         self.joystick_panel.manual_axis_move_requested.connect(
-            self.stage_controller.request_manual_axis_move
+            self._on_manual_axis_move_requested
         )
         self.joystick_panel.manual_axis_settings_changed.connect(
             self._save_manual_axis_jog_settings
