@@ -620,6 +620,42 @@ class StageControllerJogQueueTest(unittest.TestCase):
         finally:
             controller.shutdown()
 
+    def test_absolute_jog_reissue_queues_stop_before_new_feedrate_command(self) -> None:
+        controller = StageController()
+        controller.SERIAL_JOG_COMMAND_SETTLE_S = 0.0
+        serial_connection = _WritableFakeSerial()
+        try:
+            controller._serial = serial_connection
+            lock_acquired = threading.Event()
+            release_lock = threading.Event()
+
+            def _hold_serial_lock() -> None:
+                with controller._serial_session_lock:
+                    lock_acquired.set()
+                    release_lock.wait(timeout=1.0)
+
+            holder = threading.Thread(target=_hold_serial_lock)
+            holder.start()
+            self.assertTrue(lock_acquired.wait(timeout=1.0))
+            accepted = controller.queue_absolute_axis_targets_jog(
+                {"Y": -2.0, "X": 1.5},
+                feedrate=180.0,
+            )
+            self.assertTrue(accepted)
+            self.assertFalse(controller._jog_motion_active)
+            self.assertEqual(serial_connection.writes, [])
+            release_lock.set()
+            holder.join(timeout=1.0)
+
+            controller._async_write_queue.join()
+
+            self.assertEqual(
+                serial_connection.writes,
+                [b"\x85", b"$J=G90 G21 X1.5000 Y-2.0000 F180\n"],
+            )
+        finally:
+            controller.shutdown()
+
     def test_superseded_jog_command_is_dropped_before_write(self) -> None:
         controller = StageController()
         controller.SERIAL_JOG_COMMAND_SETTLE_S = 0.0

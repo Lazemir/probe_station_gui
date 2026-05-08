@@ -1283,6 +1283,61 @@ class StageController(QObject):
             )
         )
 
+    def queue_absolute_axis_targets_jog(
+        self,
+        targets: dict[str, float],
+        *,
+        feedrate: float,
+    ) -> bool:
+        """Stop and requeue an absolute jog target through the jog command path."""
+
+        if self.is_busy():
+            raise StageControllerError("Stage is busy. Wait for the current operation to finish.")
+        normalized: dict[str, float] = {}
+        for raw_axis, raw_value in targets.items():
+            axis = str(raw_axis).upper().strip()
+            if axis not in self.AXIS_INDEX:
+                self.status_message.emit(f"Unsupported axis: {axis}")
+                return False
+            try:
+                value = float(raw_value)
+            except (TypeError, ValueError):
+                self.status_message.emit(f"Unsupported target for {axis}: {raw_value}")
+                return False
+            if not math.isfinite(value):
+                self.status_message.emit(f"Unsupported target for {axis}: {raw_value}")
+                return False
+            normalized[axis] = value
+        if not normalized:
+            self.status_message.emit("No coordinate targets provided.")
+            return False
+        try:
+            effective_feedrate = max(0.1, float(feedrate))
+        except (TypeError, ValueError):
+            self.status_message.emit(f"Unsupported manual feedrate: {feedrate}")
+            return False
+        command = self._absolute_axis_targets_jog_command(
+            normalized,
+            effective_feedrate,
+        )
+        if not command:
+            return False
+        self.queue_jog_stop()
+        self._queued_jog_generation += 1
+        self._jog_motion_active = False
+        self.queue_feed_override_reset()
+        self._async_write_queue.put(
+            _QueuedSerialWrite(
+                priority=self.SERIAL_PRIORITY_JOG_COMMAND,
+                sequence=self._next_queued_write_sequence(),
+                kind="jog_command",
+                payload=(command + "\n").encode("ascii"),
+                description=command,
+                generation=self._queued_jog_generation,
+            )
+        )
+        return True
+
     @classmethod
     def feed_override_percent_for_feedrates(
         cls, programmed_feedrate: float, target_feedrate: float
@@ -2667,12 +2722,13 @@ class StageController(QObject):
             for axis, value in ordered_targets.items()
         ]
         if as_jog:
-            command_parts = ["$J=G90", "G21"]
-            if self._position_reporting_mode == "machine":
-                command_parts.append("G53")
-            command_parts.extend(move_parts)
-            command_parts.append(f"F{self._format_gcode_value(effective_feedrate)}")
-            self._write_command(serial_connection, " ".join(command_parts))
+            self._write_command(
+                serial_connection,
+                self._absolute_axis_targets_jog_command(
+                    ordered_targets,
+                    effective_feedrate,
+                ),
+            )
             self._wait_for_ok(serial_connection)
             if wait_for_completion:
                 move_distance = self._absolute_move_distance_for_timeout(
@@ -2730,6 +2786,29 @@ class StageController(QObject):
             wait_for_completion=wait_for_completion,
             allow_unhomed=allow_unhomed,
         )
+
+    def _absolute_axis_targets_jog_command(
+        self,
+        targets: dict[str, float],
+        feedrate: float,
+    ) -> str:
+        ordered_targets = {
+            axis: float(targets[axis])
+            for axis in self.AXIS_INDEX
+            if axis in targets
+        }
+        if not ordered_targets:
+            return ""
+        move_parts = [
+            f"{axis}{value:.4f}"
+            for axis, value in ordered_targets.items()
+        ]
+        command_parts = ["$J=G90", "G21"]
+        if self._position_reporting_mode == "machine":
+            command_parts.append("G53")
+        command_parts.extend(move_parts)
+        command_parts.append(f"F{self._format_gcode_value(feedrate)}")
+        return " ".join(command_parts)
 
     @staticmethod
     def _absolute_move_distance_for_timeout(

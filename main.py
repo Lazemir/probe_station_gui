@@ -3978,8 +3978,8 @@ class Main(QMainWindow):
         self._coordinate_move_stage_position = self._coordinate_move_origin_position
         self._coordinate_move_target_position = target_position
         self._coordinate_move_started_at = time.monotonic()
-        self._coordinate_move_programmed_feedrate = None
-        self._coordinate_move_effective_feedrate = None
+        self._coordinate_move_programmed_feedrate = feedrate
+        self._coordinate_move_effective_feedrate = feedrate
         self._coordinate_move_ends_at = self._coordinate_move_started_at + max(
             self._coordinate_move_duration_s(
                 self._coordinate_move_origin_position,
@@ -4046,28 +4046,20 @@ class Main(QMainWindow):
             requested_feedrate = max(0.1, float(feedrate_mm_min))
         except (TypeError, ValueError):
             return
-        min_feedrate = (
-            self._coordinate_move_programmed_feedrate
-            * float(self.stage_controller.FEED_OVERRIDE_MIN_PERCENT)
-            / 100.0
-        )
-        max_feedrate = (
-            self._coordinate_move_programmed_feedrate
-            * float(self.stage_controller.FEED_OVERRIDE_MAX_PERCENT)
-            / 100.0
-        )
-        if requested_feedrate < min_feedrate - 1e-9 or requested_feedrate > max_feedrate + 1e-9:
+        target_position = self._coordinate_move_target_position
+        raw_targets: dict[str, float] = {}
+        for axis in self.STAGE_AXIS_NAMES:
+            if axis not in self._coordinate_move_axes:
+                continue
+            try:
+                axis_index = self.STAGE_AXIS_NAMES.index(axis)
+            except ValueError:
+                continue
+            if axis_index >= len(target_position):
+                continue
+            raw_targets[axis] = float(target_position[axis_index])
+        if not raw_targets:
             return
-        percent = self.stage_controller.queue_feed_override_for_feedrate(
-            self._coordinate_move_programmed_feedrate,
-            requested_feedrate,
-        )
-        if percent is None:
-            return
-        applied_feedrate = (
-            self._coordinate_move_programmed_feedrate * float(percent) / 100.0
-        )
-        self._coordinate_move_effective_feedrate = applied_feedrate
         self._advance_coordinate_move_prediction()
         current_position = (
             self._coordinate_move_stage_position
@@ -4075,20 +4067,34 @@ class Main(QMainWindow):
         )
         if current_position is None:
             return
+        try:
+            accepted = self.stage_controller.queue_absolute_axis_targets_jog(
+                raw_targets,
+                feedrate=requested_feedrate,
+            )
+        except Exception as error:  # pragma: no cover - UI safety guard
+            logger.exception("Failed to update coordinate move feedrate.")
+            accepted = False
+            self._show_status(str(error), 3000)
+        if not accepted:
+            self._show_status("Unable to update coordinate move feedrate.", 3000)
+            self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
+            return
         now = time.monotonic()
         self._coordinate_move_origin_position = tuple(float(v) for v in current_position)
+        self._coordinate_move_programmed_feedrate = requested_feedrate
+        self._coordinate_move_effective_feedrate = requested_feedrate
         self._coordinate_move_started_at = now
         self._coordinate_move_ends_at = now + max(
             self._coordinate_move_duration_s(
                 self._coordinate_move_origin_position,
                 self._coordinate_move_target_position,
-                applied_feedrate,
+                requested_feedrate,
             ),
             0.05,
         )
         self._show_status(
-            f"Active coordinate move feed override: {percent}% "
-            f"(effective F{applied_feedrate:.1f}).",
+            f"Active coordinate move feedrate: F{requested_feedrate:.1f}.",
             1500,
         )
 
@@ -4112,24 +4118,6 @@ class Main(QMainWindow):
             self.joystick_panel.clear_temporary_linear_feedrate_bounds()
         self._refresh_stage_axis_styles()
         self._update_stage_coordinate_apply_state()
-
-    def _set_coordinate_move_feedrate_bounds(self, programmed_feedrate: float) -> None:
-        if self.joystick_panel is None:
-            return
-        min_feedrate = (
-            programmed_feedrate
-            * float(self.stage_controller.FEED_OVERRIDE_MIN_PERCENT)
-            / 100.0
-        )
-        max_feedrate = (
-            programmed_feedrate
-            * float(self.stage_controller.FEED_OVERRIDE_MAX_PERCENT)
-            / 100.0
-        )
-        self.joystick_panel.set_temporary_linear_feedrate_bounds(
-            min_feedrate,
-            max_feedrate,
-        )
 
     def _start_next_pending_stage_axis_move(self) -> None:
         if self._coordinate_move_axis is not None or not self._pending_stage_axis_targets:
