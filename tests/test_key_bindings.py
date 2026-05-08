@@ -132,6 +132,10 @@ class NeedleCalibrationBookmarkTest(unittest.TestCase):
             monitor1="R",
             monitor2="X",
             alc_enabled=True,
+            raise_position_mm=0.25,
+            raise_position_configured=True,
+            down_position_mm=1.25,
+            down_position_configured=True,
         )
 
         restored = settings.to_dict()
@@ -144,6 +148,16 @@ class NeedleCalibrationBookmarkTest(unittest.TestCase):
         self.assertEqual(restored["source_resistance_ohm"], settings.source_resistance_ohm)
         self.assertEqual(restored["monitor1"], settings.monitor1)
         self.assertEqual(restored["monitor2"], settings.monitor2)
+        self.assertEqual(restored["raise_position_mm"], settings.raise_position_mm)
+        self.assertEqual(
+            restored["raise_position_configured"],
+            settings.raise_position_configured,
+        )
+        self.assertEqual(restored["down_position_mm"], settings.down_position_mm)
+        self.assertEqual(
+            restored["down_position_configured"],
+            settings.down_position_configured,
+        )
 
     def test_oscillation_settings_round_trip(self) -> None:
         settings = OscillationSettings(

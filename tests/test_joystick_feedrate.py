@@ -126,6 +126,15 @@ def _install_pyside6_stubs() -> None:
         sys.modules["serial"] = serial_stub
 
 
+def _clear_probe_station_stubs() -> None:
+    package = sys.modules.get("probe_station_gui")
+    if package is not None and not hasattr(package, "__path__"):
+        for name in list(sys.modules):
+            if name == "probe_station_gui" or name.startswith("probe_station_gui."):
+                del sys.modules[name]
+
+
+_clear_probe_station_stubs()
 _install_pyside6_stubs()
 
 from probe_station_gui.views.joystick_window import JoystickWindow
@@ -137,6 +146,14 @@ class _SignalRecorder:
 
     def emit(self, value: float) -> None:
         self.values.append(float(value))
+
+
+class _ArgsSignalRecorder:
+    def __init__(self) -> None:
+        self.values: list[tuple] = []
+
+    def emit(self, *values) -> None:
+        self.values.append(tuple(values))
 
 
 class _FakeSpin:
@@ -151,6 +168,47 @@ class _FakeSpin:
 
     def value(self) -> float:
         return float(self._value)
+
+
+class _FakeButton:
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self.styles: list[str] = []
+        self.properties: dict[str, object] = {}
+        self.checked = False
+        self.enabled = True
+
+    def text(self) -> str:
+        return self._text
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt API style
+        self._text = str(text)
+
+    def setStyleSheet(self, style: str) -> None:  # noqa: N802 - Qt API style
+        self.styles.append(str(style))
+
+    def setProperty(self, name: str, value: object) -> None:  # noqa: N802 - Qt API style
+        self.properties[str(name)] = value
+
+    def setChecked(self, checked: bool) -> None:  # noqa: N802 - Qt API style
+        self.checked = bool(checked)
+
+    def setEnabled(self, enabled: bool) -> None:  # noqa: N802 - Qt API style
+        self.enabled = bool(enabled)
+
+
+class _FakeTimer:
+    def __init__(self) -> None:
+        self.active = False
+
+    def isActive(self) -> bool:  # noqa: N802 - Qt API style
+        return self.active
+
+    def start(self) -> None:
+        self.active = True
+
+    def stop(self) -> None:
+        self.active = False
 
 
 class JoystickFeedrateTest(unittest.TestCase):
@@ -198,6 +256,62 @@ class JoystickFeedrateTest(unittest.TestCase):
         self.assertEqual(widget._linear_feedrate_value, 42.0)
         self.assertEqual(widget.manual_axis_feedrate_spin.value(), 42.0)
         self.assertEqual(widget.linear_feedrate_changed.values, [])
+
+    def test_raise_click_only_emits_request(self) -> None:
+        widget = JoystickWindow.__new__(JoystickWindow)
+        widget._needle_feedrate_value = 77.5
+        widget.needles_raise_requested = _ArgsSignalRecorder()
+        animation_calls: list[tuple] = []
+        widget._start_needle_animation = lambda *args: animation_calls.append(args)
+
+        JoystickWindow._raise_needles(widget)
+
+        self.assertEqual(widget.needles_raise_requested.values, [(77.5,)])
+        self.assertEqual(animation_calls, [])
+
+    def test_known_down_state_marks_lower_button_blue(self) -> None:
+        widget = JoystickWindow.__new__(JoystickWindow)
+        widget.needles_raise_button = _FakeButton("Raise")
+        widget.needles_lower_button = _FakeButton("Lower")
+        widget._needle_targets = {}
+        widget._needle_blink_dimmed = False
+        widget._needles_up = False
+        widget._needles_known = True
+
+        JoystickWindow._apply_needle_button_styles(widget)
+
+        self.assertIn("#f0b429", widget.needles_raise_button.styles[-1])
+        self.assertIn("#1565c0", widget.needles_lower_button.styles[-1])
+
+    def test_needle_action_blinks_yellow_without_spinner_overlay(self) -> None:
+        widget = JoystickWindow.__new__(JoystickWindow)
+        widget.needles_raise_button = _FakeButton("Raise")
+        widget.needles_lower_button = _FakeButton("Lower")
+        widget._needle_targets = {}
+        widget._needle_text = {}
+        widget._needle_blink_dimmed = False
+        widget._needles_up = False
+        widget._needles_known = True
+        widget._needle_animation_timer = _FakeTimer()
+        widget._update_enabled_state = lambda: None
+
+        JoystickWindow._start_needle_animation(
+            widget,
+            "raise",
+            widget.needles_raise_button,
+        )
+        self.assertTrue(widget._needle_animation_timer.isActive())
+        self.assertFalse(widget.needles_raise_button.enabled)
+        self.assertFalse(widget.needles_lower_button.enabled)
+        self.assertIn("#f0b429", widget.needles_raise_button.styles[-1])
+
+        JoystickWindow._advance_needle_blink(widget)
+        self.assertIn("#d8bd78", widget.needles_raise_button.styles[-1])
+
+        JoystickWindow._stop_needle_animation(widget, "raise")
+        self.assertFalse(widget._needle_animation_timer.isActive())
+        self.assertFalse(widget.needles_raise_button.checked)
+        self.assertIn("#f0b429", widget.needles_raise_button.styles[-1])
 
 
 if __name__ == "__main__":

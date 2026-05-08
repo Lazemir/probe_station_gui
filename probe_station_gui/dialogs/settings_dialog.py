@@ -558,6 +558,10 @@ class NeedleCalibrationSettingsWidget(QWidget):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self._raise_position_mm = calibration_settings.raise_position_mm
+        self._raise_position_configured = (
+            calibration_settings.raise_position_configured
+        )
         self._chip_position = calibration_settings.chip_position.clone()
         self._stone_position = calibration_settings.stone_position.clone()
         layout = QFormLayout(self)
@@ -704,6 +708,14 @@ class NeedleCalibrationSettingsWidget(QWidget):
         self._poll_interval_spin.setValue(calibration_settings.poll_interval_ms)
         layout.addRow(QLabel("Polling interval", self), self._poll_interval_spin)
 
+        self._needle_feedrate_spin = QDoubleSpinBox(self)
+        self._needle_feedrate_spin.setDecimals(1)
+        self._needle_feedrate_spin.setRange(0.1, 1000.0)
+        self._needle_feedrate_spin.setSingleStep(10.0)
+        self._needle_feedrate_spin.setSuffix(" mm/min")
+        self._needle_feedrate_spin.setValue(calibration_settings.feedrate_mm_min)
+        layout.addRow(QLabel("Needle A feedrate", self), self._needle_feedrate_spin)
+
         self._configured_checkbox = QCheckBox("Calibrated down height is configured", self)
         self._configured_checkbox.setChecked(
             calibration_settings.down_position_configured
@@ -779,6 +791,9 @@ class NeedleCalibrationSettingsWidget(QWidget):
             alc_enabled=self._alc_checkbox.isChecked(),
             short_threshold_ohm=self._short_threshold_spin.value(),
             poll_interval_ms=int(self._poll_interval_spin.value()),
+            feedrate_mm_min=self._needle_feedrate_spin.value(),
+            raise_position_mm=self._raise_position_mm,
+            raise_position_configured=self._raise_position_configured,
             down_position_mm=self._down_position_spin.value(),
             down_position_configured=self._configured_checkbox.isChecked(),
             chip_position=self._chip_position.clone(),

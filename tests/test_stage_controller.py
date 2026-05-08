@@ -1157,6 +1157,51 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
         finally:
             controller.shutdown()
 
+    def test_needles_raise_moves_to_saved_raise_target(self) -> None:
+        controller = StageController()
+        try:
+            controller._serial = _FakeSerial()
+            controller.apply_needle_calibration(
+                raise_position_mm=0.5,
+                down_position_mm=1.0,
+            )
+            controller._query_status = lambda _serial: types.SimpleNamespace(
+                state="Idle",
+                position=(0.0, 0.0, 0.0, 0.0),
+                work_position=(0.0, 0.0, 0.0, 0.0),
+                display_position=(0.0, 0.0, 0.0, 0.0),
+                homed_axes={"A"},
+            )
+            observed = []
+            states = []
+
+            def _send_absolute_axis_move(_serial, axis, value, **kwargs) -> None:
+                observed.append((axis, value, kwargs.get("feedrate")))
+
+            controller._send_absolute_axis_move = _send_absolute_axis_move
+            controller.needles_action_started = types.SimpleNamespace(
+                emit=lambda *_args, **_kwargs: None
+            )
+            controller.needles_action_finished = types.SimpleNamespace(
+                emit=lambda *_args, **_kwargs: None
+            )
+            controller.needle_height_changed = types.SimpleNamespace(
+                emit=lambda *_args, **_kwargs: None
+            )
+            controller.needles_state_changed = types.SimpleNamespace(
+                emit=lambda raised, known: states.append((raised, known))
+            )
+            controller.axis_a_ready_changed = types.SimpleNamespace(
+                emit=lambda *_args, **_kwargs: None
+            )
+
+            controller._run_needles_action("raise", feedrate=70.0)
+
+            self.assertEqual(observed, [("A", -0.5, 70.0)])
+            self.assertEqual(states[-1], (True, True))
+        finally:
+            controller.shutdown()
+
     def test_manual_axis_a_relative_move_keeps_raw_gcode_sign(self) -> None:
         controller = StageController()
         try:
@@ -1502,6 +1547,66 @@ class StageControllerNeedlesStateTest(unittest.TestCase):
         )
 
         self.assertEqual(emitted[-1], (True, True))
+
+    def test_status_marks_needles_unknown_between_saved_raise_and_lower(self) -> None:
+        controller = StageController()
+        emitted = []
+        controller.apply_needle_calibration(
+            raise_position_mm=0.5,
+            down_position_mm=1.0,
+        )
+        controller._needles_up = True
+        controller._needles_known = True
+        controller.needles_state_changed = types.SimpleNamespace(
+            emit=lambda raised, known: emitted.append((raised, known))
+        )
+        controller.axis_a_ready_changed = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        controller.needle_height_changed = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+
+        controller._update_needles_from_status(
+            types.SimpleNamespace(
+                state="Idle",
+                position=None,
+                display_position=(0.0, 0.0, 0.0, -0.75),
+                work_position=(0.0, 0.0, 0.0, -0.75),
+                homed_axes={"A"},
+            )
+        )
+
+        self.assertEqual(emitted[-1], (False, False))
+
+    def test_status_marks_needles_down_at_or_below_saved_lower(self) -> None:
+        controller = StageController()
+        emitted = []
+        controller.apply_needle_calibration(
+            raise_position_mm=0.5,
+            down_position_mm=1.0,
+        )
+        controller.needles_state_changed = types.SimpleNamespace(
+            emit=lambda raised, known: emitted.append((raised, known))
+        )
+        controller.axis_a_ready_changed = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        controller.needle_height_changed = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+
+        controller._update_needles_from_status(
+            types.SimpleNamespace(
+                state="Idle",
+                position=None,
+                display_position=(0.0, 0.0, 0.0, -1.1),
+                work_position=(0.0, 0.0, 0.0, -1.1),
+                homed_axes={"A"},
+            )
+        )
+
+        self.assertEqual(emitted[-1], (False, True))
 
     def test_latest_a_position_reads_cached_stage_position(self) -> None:
         controller = StageController()

@@ -1649,12 +1649,16 @@ class Main(QMainWindow):
             bindings = self.settings_manager.control_bindings()
             self.joystick_panel.apply_control_bindings(bindings)
             logger.debug("Joystick bindings reapplied from settings")
+            needle_settings = self.settings_manager.needle_calibration_configuration()
             feedrates = self.settings_manager.feedrate_configuration()
             self.joystick_panel.apply_feedrate_settings(
                 feedrates.linear.presets,
                 feedrates.linear.default,
                 feedrates.rotary.presets,
                 feedrates.rotary.default,
+            )
+            self.joystick_panel.apply_needle_settings(
+                needle_settings.feedrate_mm_min
             )
             jog = self.settings_manager.jog_configuration()
             self.joystick_panel.apply_jog_settings(
@@ -1693,25 +1697,34 @@ class Main(QMainWindow):
             self.settings_manager.axis_z_calibration_configuration()
         )
         self.stage_controller.apply_needle_calibration(
+            raise_position_mm=(
+                needle_settings.raise_position_mm
+                if needle_settings.raise_position_configured
+                else None
+            ),
             down_position_mm=(
                 needle_settings.down_position_mm
                 if needle_settings.down_position_configured
                 else None
             ),
         )
-        saved_contact_a = None
-        if needle_settings.down_position_configured:
-            saved_contact_raw_a = (
-                self.stage_controller.axis_a_gcode_coordinate_for_lowering(
-                    needle_settings.down_position_mm
-                )
-            )
-            saved_contact_a = self.stage_controller.calibrated_axis_display_value(
-                "A",
-                saved_contact_raw_a,
-            )
         if self.joystick_panel is not None:
-            self.joystick_panel.set_needle_contact_coordinate(saved_contact_a)
+            self.joystick_panel.set_needle_contact_coordinate(
+                "raise",
+                self._display_a_for_needle_lowering(
+                    needle_settings.raise_position_mm
+                    if needle_settings.raise_position_configured
+                    else None
+                ),
+            )
+            self.joystick_panel.set_needle_contact_coordinate(
+                "lower",
+                self._display_a_for_needle_lowering(
+                    needle_settings.down_position_mm
+                    if needle_settings.down_position_configured
+                    else None
+                ),
+            )
         coordinate_settings = self.settings_manager.coordinate_system_configuration()
         self.stage_controller.apply_coordinate_system_configuration(
             position_mode=coordinate_settings.position_mode,
@@ -2693,7 +2706,18 @@ class Main(QMainWindow):
     def _on_linear_feedrate_changed(self, feedrate_mm_min: float) -> None:
         self._schedule_linear_feedrate_save(feedrate_mm_min)
         self._apply_coordinate_move_feedrate(feedrate_mm_min)
-        self.stage_controller.queue_active_needles_feedrate(feedrate_mm_min)
+
+    def _on_needle_feedrate_changed(self, feedrate_mm_min: float) -> None:
+        try:
+            feedrate = max(0.1, float(feedrate_mm_min))
+        except (TypeError, ValueError):
+            return
+        settings = self.settings_manager.settings.clone()
+        if abs(settings.needle_calibration.feedrate_mm_min - feedrate) > 1e-9:
+            settings.needle_calibration.feedrate_mm_min = feedrate
+            self.settings_manager.replace(settings)
+            self.settings_manager.save()
+        self.stage_controller.queue_active_needles_feedrate(feedrate)
 
     def _save_pending_linear_feedrate_default(self) -> None:
         feedrate = self._pending_linear_feedrate_default
@@ -2711,6 +2735,13 @@ class Main(QMainWindow):
         if self.joystick_panel is not None:
             return self.joystick_panel.current_linear_feedrate()
         return float(self.settings_manager.feedrate_configuration().linear.default)
+
+    def _current_needle_feedrate(self) -> float:
+        if self.joystick_panel is not None:
+            return self.joystick_panel.current_needle_feedrate()
+        return float(
+            self.settings_manager.needle_calibration_configuration().feedrate_mm_min
+        )
 
     def _advance_motion_prediction(self) -> None:
         if self._manual_jog_prediction_active():
@@ -4616,6 +4647,8 @@ class Main(QMainWindow):
             jog.manual_axis_mode,
             jog.manual_axis_feedrate_mm_min,
         )
+        needle_settings = self.settings_manager.needle_calibration_configuration()
+        self.joystick_panel.apply_needle_settings(needle_settings.feedrate_mm_min)
         self.stage_controller.set_motion_safety_disabled(jog.motion_safety_disabled)
         self.joystick_panel.set_serial(self.serial_connection)
         self.joystick_panel.autofocus_requested.connect(
@@ -4634,7 +4667,7 @@ class Main(QMainWindow):
             self.stage_controller.request_needles_lower
         )
         self.joystick_panel.needle_contact_coordinate_save_requested.connect(
-            self._save_needle_down_position_from_display_a_coordinate
+            self._save_needle_position_from_display_a_coordinate
         )
         self.joystick_panel.reset_calibration_requested.connect(
             self._reset_click_calibration
@@ -4648,6 +4681,9 @@ class Main(QMainWindow):
         )
         self.joystick_panel.linear_feedrate_changed.connect(
             self._on_linear_feedrate_changed
+        )
+        self.joystick_panel.needle_feedrate_changed.connect(
+            self._on_needle_feedrate_changed
         )
         self.joystick_panel.motion_axis_requested.connect(self._on_manual_motion_axis)
         self.joystick_panel.jog_command_changed.connect(
@@ -4738,19 +4774,22 @@ class Main(QMainWindow):
             self._stop_needle_calibration
         )
         self.needle_calibration_panel.adjust_requested.connect(
-            self.stage_controller.request_needles_adjust
+            lambda step: self.stage_controller.request_needles_adjust(
+                step,
+                self._current_needle_feedrate(),
+            )
         )
         self.needle_calibration_panel.save_current_requested.connect(
             self._save_current_needle_height
         )
         self.needle_calibration_panel.lower_to_saved_requested.connect(
             lambda: self.stage_controller.request_needles_lower(
-                self._current_linear_feedrate()
+                self._current_needle_feedrate()
             )
         )
         self.needle_calibration_panel.raise_needles_requested.connect(
             lambda: self.stage_controller.request_needles_raise(
-                self._current_linear_feedrate()
+                self._current_needle_feedrate()
             )
         )
         self.lcr_controller.connection_changed.connect(
@@ -5009,6 +5048,14 @@ class Main(QMainWindow):
         if self.needle_calibration_panel:
             self.needle_calibration_panel.set_reading(resistance_ohm, is_short)
 
+    def _display_a_for_needle_lowering(self, lowering_mm: float | None) -> float | None:
+        if lowering_mm is None:
+            return None
+        target_raw_a = self.stage_controller.axis_a_gcode_coordinate_for_lowering(
+            lowering_mm
+        )
+        return self.stage_controller.calibrated_axis_display_value("A", target_raw_a)
+
     def _set_design_snap_enabled(self, enabled: bool) -> None:
         enabled = bool(enabled)
         self._design_snap_enabled = enabled
@@ -5043,8 +5090,9 @@ class Main(QMainWindow):
             return
         self._save_needle_down_position_from_raw_a_coordinate(a_position)
 
-    def _save_needle_down_position_from_display_a_coordinate(
+    def _save_needle_position_from_display_a_coordinate(
         self,
+        action: str,
         a_coordinate: float,
     ) -> None:
         try:
@@ -5056,12 +5104,23 @@ class Main(QMainWindow):
             self._show_status("Invalid A coordinate.")
             return
         raw_a = self.stage_controller.calibrated_axis_raw_value("A", display_a)
-        self._save_needle_down_position_from_raw_a_coordinate(raw_a)
+        self._save_needle_position_from_raw_a_coordinate(action, raw_a)
 
     def _save_needle_down_position_from_raw_a_coordinate(
         self,
         a_coordinate: float,
     ) -> None:
+        self._save_needle_position_from_raw_a_coordinate("lower", a_coordinate)
+
+    def _save_needle_position_from_raw_a_coordinate(
+        self,
+        action: str,
+        a_coordinate: float,
+    ) -> None:
+        action_key = action.strip().lower()
+        if action_key not in {"raise", "lower"}:
+            self._show_status(f"Unknown needle target '{action}'.")
+            return
         try:
             raw_a = float(a_coordinate)
         except (TypeError, ValueError):
@@ -5072,20 +5131,18 @@ class Main(QMainWindow):
             return
         lowering_mm = self.stage_controller.axis_a_lowering_for_gcode_coordinate(raw_a)
         settings = self.settings_manager.settings.clone()
-        settings.needle_calibration.down_position_mm = lowering_mm
-        settings.needle_calibration.down_position_configured = True
+        if action_key == "raise":
+            settings.needle_calibration.raise_position_mm = lowering_mm
+            settings.needle_calibration.raise_position_configured = True
+        else:
+            settings.needle_calibration.down_position_mm = lowering_mm
+            settings.needle_calibration.down_position_configured = True
         self.settings_manager.replace(settings)
         self.settings_manager.save()
         self._apply_settings()
-        target_raw_a = self.stage_controller.axis_a_gcode_coordinate_for_lowering(
-            lowering_mm
-        )
-        target_display_a = self.stage_controller.calibrated_axis_display_value(
-            "A",
-            target_raw_a,
-        )
+        target_display_a = self._display_a_for_needle_lowering(lowering_mm)
         self._show_status(
-            "Saved needle contact "
+            f"Saved needle {action_key} target "
             f"A={target_display_a:.4f} ({lowering_mm:.4f} mm lowering)."
         )
 

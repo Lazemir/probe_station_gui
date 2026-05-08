@@ -329,6 +329,9 @@ class NeedleCalibrationSettings:
     alc_enabled: bool = False
     short_threshold_ohm: float = 10.0
     poll_interval_ms: int = 250
+    feedrate_mm_min: float = 600.0
+    raise_position_mm: float = 0.0
+    raise_position_configured: bool = False
     down_position_mm: float = 0.0
     down_position_configured: bool = False
     chip_position: SavedStagePositionSettings = field(
@@ -364,6 +367,9 @@ class NeedleCalibrationSettings:
             alc_enabled=self.alc_enabled,
             short_threshold_ohm=self.short_threshold_ohm,
             poll_interval_ms=self.poll_interval_ms,
+            feedrate_mm_min=self.feedrate_mm_min,
+            raise_position_mm=self.raise_position_mm,
+            raise_position_configured=self.raise_position_configured,
             down_position_mm=self.down_position_mm,
             down_position_configured=self.down_position_configured,
             chip_position=self.chip_position.clone(),
@@ -396,6 +402,9 @@ class NeedleCalibrationSettings:
             "alc_enabled": self.alc_enabled,
             "short_threshold_ohm": self.short_threshold_ohm,
             "poll_interval_ms": self.poll_interval_ms,
+            "feedrate_mm_min": self.feedrate_mm_min,
+            "raise_position_mm": self.raise_position_mm,
+            "raise_position_configured": self.raise_position_configured,
             "down_position_mm": self.down_position_mm,
             "down_position_configured": self.down_position_configured,
             "chip_position": self.chip_position.to_dict(),
@@ -686,6 +695,7 @@ class SettingsManager:
     DEFAULT_LCR_ALC_ENABLED: bool = False
     DEFAULT_SHORT_THRESHOLD_OHM: float = 10.0
     DEFAULT_LCR_POLL_INTERVAL_MS: int = 250
+    DEFAULT_NEEDLE_FEEDRATE_MM_MIN: float = 600.0
     DEFAULT_AXIS_A_CALIBRATION_MODEL: str = "cosine_displacement"
     DEFAULT_AXIS_A_CALIBRATION_STEPS_PER_MM: float = 2600.0
     DEFAULT_AXIS_A_CALIBRATION_MIN_MM: float = 0.0
@@ -1082,6 +1092,9 @@ class SettingsManager:
                 "alc_enabled": self.DEFAULT_LCR_ALC_ENABLED,
                 "short_threshold_ohm": self.DEFAULT_SHORT_THRESHOLD_OHM,
                 "poll_interval_ms": self.DEFAULT_LCR_POLL_INTERVAL_MS,
+                "feedrate_mm_min": self.DEFAULT_NEEDLE_FEEDRATE_MM_MIN,
+                "raise_position_mm": 0.0,
+                "raise_position_configured": False,
                 "down_position_mm": 0.0,
                 "down_position_configured": False,
                 "chip_position": {
@@ -1141,6 +1154,11 @@ class SettingsManager:
             needle_section.setdefault(
                 "poll_interval_ms", self.DEFAULT_LCR_POLL_INTERVAL_MS
             )
+            needle_section.setdefault(
+                "feedrate_mm_min", self.DEFAULT_NEEDLE_FEEDRATE_MM_MIN
+            )
+            needle_section.setdefault("raise_position_mm", 0.0)
+            needle_section.setdefault("raise_position_configured", False)
             needle_section.setdefault("down_position_mm", 0.0)
             needle_section.setdefault("down_position_configured", False)
             for key in ("chip_position", "stone_position"):
@@ -1479,6 +1497,9 @@ class SettingsManager:
         alc_enabled = self.DEFAULT_LCR_ALC_ENABLED
         short_threshold_ohm = self.DEFAULT_SHORT_THRESHOLD_OHM
         poll_interval_ms = self.DEFAULT_LCR_POLL_INTERVAL_MS
+        feedrate_mm_min = self.DEFAULT_NEEDLE_FEEDRATE_MM_MIN
+        raise_position_mm = 0.0
+        raise_position_configured = False
         down_position_mm = 0.0
         down_position_configured = False
         chip_position = SavedStagePositionSettings()
@@ -1602,6 +1623,27 @@ class SettingsManager:
             except (TypeError, ValueError):
                 poll_interval_ms = self.DEFAULT_LCR_POLL_INTERVAL_MS
             candidate = raw_needle_calibration.get(
+                "feedrate_mm_min", feedrate_mm_min
+            )
+            try:
+                if isinstance(candidate, (int, float, str)):
+                    feedrate_mm_min = float(candidate)
+            except (TypeError, ValueError):
+                feedrate_mm_min = self.DEFAULT_NEEDLE_FEEDRATE_MM_MIN
+            candidate = raw_needle_calibration.get(
+                "raise_position_mm", raise_position_mm
+            )
+            try:
+                if isinstance(candidate, (int, float, str)):
+                    raise_position_mm = float(candidate)
+            except (TypeError, ValueError):
+                raise_position_mm = 0.0
+            raise_position_configured = bool(
+                raw_needle_calibration.get(
+                    "raise_position_configured", raise_position_configured
+                )
+            )
+            candidate = raw_needle_calibration.get(
                 "down_position_mm", down_position_mm
             )
             try:
@@ -1642,7 +1684,12 @@ class SettingsManager:
             short_threshold_ohm = self.DEFAULT_SHORT_THRESHOLD_OHM
         if poll_interval_ms < 50:
             poll_interval_ms = self.DEFAULT_LCR_POLL_INTERVAL_MS
+        if feedrate_mm_min <= 0:
+            feedrate_mm_min = self.DEFAULT_NEEDLE_FEEDRATE_MM_MIN
         auto_range_enabled = range_mode == "AUTO"
+        if not raise_position_configured and down_position_configured:
+            raise_position_mm = down_position_mm
+            raise_position_configured = True
         return NeedleCalibrationSettings(
             visa_resource=visa_resource,
             measurement_function=measurement_function,
@@ -1666,6 +1713,9 @@ class SettingsManager:
             alc_enabled=alc_enabled,
             short_threshold_ohm=short_threshold_ohm,
             poll_interval_ms=poll_interval_ms,
+            feedrate_mm_min=feedrate_mm_min,
+            raise_position_mm=raise_position_mm,
+            raise_position_configured=raise_position_configured,
             down_position_mm=down_position_mm,
             down_position_configured=down_position_configured,
             chip_position=chip_position,
