@@ -222,7 +222,7 @@ class StageController(QObject):
         self._latest_frame: Optional[np.ndarray] = None
         self._frame_counter = 0
         self._frame_condition = threading.Condition()
-        self._task_lock = threading.Lock()
+        self._task_lock = threading.RLock()
         self._active_thread: Optional[threading.Thread] = None
         self._status_refresh_thread: Optional[threading.Thread] = None
         self._cancel_event = threading.Event()

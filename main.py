@@ -64,6 +64,7 @@ from probe_station_gui.views.serial_connection_panel import SerialConnectionPane
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from probe_station_gui.views.surface_map_panel import SurfaceMapWindow
     from probe_station_gui.views.design_navigator_panel import (
         DesignLayoutWindow,
         DesignNavigatorPanel,
@@ -204,11 +205,13 @@ class Main(QMainWindow):
         self.serial_connection_panel: SerialConnectionPanel | None = None
         self.needle_calibration_panel: NeedleCalibrationPanel | None = None
         self.oscillation_panel: OscillationPanel | None = None
+        self.surface_map_window: SurfaceMapWindow | None = None
         self.contact_calibration_window: ContactOscillationWindow | None = None
         self.alignment_panel: AlignmentPanel | None = None
         self.design_navigator_panel: DesignNavigatorPanel | None = None
         self.design_layout_window: DesignLayoutWindow | None = None
         self._design_layout_preload_started = False
+        self._design_layout_window_class: object | None = None
         self._design_layout_window_requested = False
         self._design_load_generation = 0
         self.joystick_dock: CollapsibleDockWidget | None = None
@@ -221,6 +224,7 @@ class Main(QMainWindow):
         self._alignment_capture_action: QAction | None = None
         self._alignment_exit_action: QAction | None = None
         self._contact_calibration_window_action: QAction | None = None
+        self._surface_map_window_action: QAction | None = None
         self._design_layout_window_action: QAction | None = None
         self._ruler_action: QAction | None = None
         self._rect_action: QAction | None = None
@@ -374,7 +378,6 @@ class Main(QMainWindow):
         QTimer.singleShot(0, self._auto_connect_if_possible)
         QTimer.singleShot(0, self._prime_keyboard_focus)
         QTimer.singleShot(0, self._start_camera_thread)
-        QTimer.singleShot(0, self._preload_design_layout_window)
 
         self.setStyleSheet(
             """
@@ -638,6 +641,94 @@ class Main(QMainWindow):
             ),
         }
 
+    def _surface_map_stage_status(self) -> dict[str, Any]:
+        latest_position = self.stage_controller.latest_stage_position()
+        display_position = {
+            axis: float(value)
+            for axis, value in self._stage_axis_display_values.items()
+        }
+        if isinstance(latest_position, (tuple, list)):
+            for axis, value in zip(self.STAGE_AXIS_NAMES, latest_position):
+                display_position.setdefault(axis, float(value))
+        return {
+            "connected": bool(
+                self.serial_connection is not None
+                and getattr(self.serial_connection, "is_open", False)
+            ),
+            "busy": self.stage_controller.is_busy(),
+            "state": self.stage_controller.latest_stage_state(),
+            "coordinate_display": self.stage_controller.coordinate_display_name(),
+            "homed_axes": sorted(self.stage_controller.homed_axes()),
+            "position": self._api_axis_value_map(latest_position),
+            "display_position": display_position,
+            "pending_targets": {
+                axis: float(values[1])
+                for axis, values in self._pending_stage_axis_targets.items()
+            },
+            "active_coordinate_axis": self._coordinate_move_axis,
+            "active_coordinate_axes": sorted(self._coordinate_move_axes),
+            "current_feedrate_mm_min": self._current_linear_feedrate(),
+        }
+
+    def _surface_map_move_to_xy(
+        self,
+        x_mm: float,
+        y_mm: float,
+    ) -> dict[str, Any]:
+        if self.serial_connection is None or not self.serial_connection.is_open:
+            return {
+                "accepted": False,
+                "message": "Serial connection is not available.",
+            }
+        if self._coordinate_move_axis is not None or self.stage_controller.is_busy():
+            return {
+                "accepted": False,
+                "message": "Stage is busy. Ignoring surface-map target.",
+            }
+        feedrate = max(0.1, float(self._current_linear_feedrate()))
+        targets: dict[str, tuple[float, float]] = {}
+        for axis, display_target in (("X", x_mm), ("Y", y_mm)):
+            try:
+                display_value = float(display_target)
+            except (TypeError, ValueError):
+                return {
+                    "accepted": False,
+                    "message": f"Invalid {axis} target: {display_target}.",
+                }
+            if not math.isfinite(display_value):
+                return {
+                    "accepted": False,
+                    "message": f"Invalid {axis} target: {display_target}.",
+                }
+            raw_target, resolved_display_target = self._resolve_stage_axis_target(
+                axis,
+                display_value,
+                "G90",
+            )
+            if raw_target is None:
+                return {
+                    "accepted": False,
+                    "message": f"{axis} coordinate is unavailable.",
+                }
+            limit_error = self._stage_axis_target_limit_error(
+                axis,
+                resolved_display_target,
+            )
+            if limit_error is not None:
+                return {"accepted": False, "message": limit_error}
+            targets[axis] = (float(raw_target), float(resolved_display_target))
+        accepted = self._start_coordinate_targets_move(
+            targets,
+            feedrate_mm_min=feedrate,
+            source_label="Surface Map",
+        )
+        return {
+            "accepted": bool(accepted),
+            "message": "Surface-map XY move accepted." if accepted else "Unable to start XY move.",
+            "targets": {"X": float(x_mm), "Y": float(y_mm)},
+            "current_feedrate_mm_min": feedrate,
+        }
+
     def _api_axis_value_map(self, position: object) -> dict[str, float] | None:
         if not isinstance(position, (tuple, list)):
             return None
@@ -669,7 +760,11 @@ class Main(QMainWindow):
         return max(0.1, value)
 
     def _preload_design_layout_window(self) -> None:
-        if self.design_layout_window is not None or self._design_layout_preload_started:
+        if (
+            self.design_layout_window is not None
+            or self._design_layout_window_class is not None
+            or self._design_layout_preload_started
+        ):
             return
         self._design_layout_preload_started = True
 
@@ -699,7 +794,10 @@ class Main(QMainWindow):
             logger.error("Design window preload failed: %s", error)
             self._show_status(f"Unable to prepare design window: {error}")
             return
-        self._create_design_layout_window(design_layout_window_class)
+        self._design_layout_preload_started = False
+        self._design_layout_window_class = design_layout_window_class
+        if self._design_layout_window_requested:
+            self._create_design_layout_window(design_layout_window_class)
 
     def on_click(self, dx: float, dy: float, _rel_x: float, _rel_y: float) -> None:
         if self._manual_alignment_pick_slot is not None:
@@ -1188,18 +1286,18 @@ class Main(QMainWindow):
         calibration_menu = self.menuBar().addMenu("Calibration")
 
         settings_action = QAction("Settings…", self)
-        settings_action.setText("Settings...")
+        settings_action.setText("Settings")
         settings_action.triggered.connect(self._open_settings_dialog)
         app_menu.addAction(settings_action)
 
-        api_settings_action = QAction("API Settings...", self)
+        api_settings_action = QAction("API Settings", self)
         api_settings_action.triggered.connect(
             lambda _checked=False: self._open_settings_dialog("API")
         )
         app_menu.addAction(api_settings_action)
 
         open_log_action = QAction("Open Status Log…", self)
-        open_log_action.setText("Open Status Log...")
+        open_log_action.setText("Open Status Log")
         open_log_action.triggered.connect(self._open_status_log)
         app_menu.addAction(open_log_action)
 
@@ -1218,6 +1316,10 @@ class Main(QMainWindow):
             self._toggle_contact_calibration_window
         )
         calibration_menu.addAction(self._contact_calibration_window_action)
+
+        self._surface_map_window_action = QAction("Surface Map", self)
+        self._surface_map_window_action.triggered.connect(self._show_surface_map_window)
+        calibration_menu.addAction(self._surface_map_window_action)
 
         for dock, title in (
             (self.oscillation_dock, "Oscillation"),
@@ -1279,6 +1381,9 @@ class Main(QMainWindow):
         if self.design_layout_window is None:
             self._design_layout_window_requested = bool(visible)
             if visible:
+                if self._design_layout_window_class is not None:
+                    self._create_design_layout_window(self._design_layout_window_class)
+                    return
                 self._show_status("Preparing design window...")
                 self._preload_design_layout_window()
             return
@@ -4164,6 +4269,8 @@ class Main(QMainWindow):
             self.design_layout_window.close()
         if self.contact_calibration_window is not None:
             self.contact_calibration_window.close()
+        if self.surface_map_window is not None:
+            self.surface_map_window.close()
         if self.serial_connection_panel:
             self.serial_connection_panel.shutdown()
         event.accept()
@@ -4402,6 +4509,7 @@ class Main(QMainWindow):
         )
         self.addDockWidget(Qt.RightDockWidgetArea, self.alignment_dock)
         self.alignment_dock.hide()
+
         self._refresh_manual_alignment_ui()
         self._update_coordinate_display()
         self._refresh_design_panel()
@@ -4416,6 +4524,19 @@ class Main(QMainWindow):
             Qt.Horizontal,
         )
 
+    def _show_surface_map_window(self) -> None:
+        if self.surface_map_window is None:
+            from probe_station_gui.views.surface_map_panel import SurfaceMapWindow
+
+            self.surface_map_window = SurfaceMapWindow(
+                stage_status_provider=self._surface_map_stage_status,
+                stage_move_requester=self._surface_map_move_to_xy,
+                settings_path=self.settings_manager.config_dir() / "surface-map-settings.json",
+                parent=None,
+            )
+        self.surface_map_window.showNormal()
+        self.surface_map_window.raise_()
+
     def _create_design_layout_window(
         self,
         design_layout_window_class: object | None = None,
@@ -4423,9 +4544,14 @@ class Main(QMainWindow):
         if self.design_layout_window is not None:
             return
         if design_layout_window_class is None:
+            design_layout_window_class = self._design_layout_window_class
+        if design_layout_window_class is None:
             from probe_station_gui.views.design_navigator_panel import (
-                DesignLayoutWindow as design_layout_window_class,
+                DesignLayoutWindow as imported_design_layout_window_class,
             )
+
+            design_layout_window_class = imported_design_layout_window_class
+        self._design_layout_window_class = design_layout_window_class
         self.design_layout_window = design_layout_window_class()
         self.design_navigator_panel = self.design_layout_window.navigator_panel
         self.design_navigator_panel.load_design_requested.connect(self._load_design_document)

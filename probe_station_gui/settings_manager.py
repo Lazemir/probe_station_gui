@@ -720,6 +720,11 @@ class SettingsManager:
 
         return self._settings
 
+    def config_dir(self) -> Path:
+        """Return the application configuration directory."""
+
+        return self._config_dir
+
     def replace(self, settings: Settings) -> None:
         """Replace the stored settings with the provided instance."""
 

@@ -1555,6 +1555,17 @@ class StageControllerReconnectStateTest(unittest.TestCase):
         self.assertTrue(controller._controller_state_stale)
         self.assertFalse(controller._axis_a_ready)
 
+    def test_set_serial_allows_position_signal_slot_to_query_busy(self) -> None:
+        controller = StageController()
+        busy_values = []
+        controller.stage_position_changed = types.SimpleNamespace(
+            emit=lambda _position: busy_values.append(controller.is_busy())
+        )
+
+        controller.set_serial(_FakeSerial())
+
+        self.assertEqual(busy_values, [False])
+
     def test_reconnect_with_reboot_clears_cached_state(self) -> None:
         controller = StageController()
         controller._last_stage_position = (1.0, 2.0, 3.0, 0.0)
