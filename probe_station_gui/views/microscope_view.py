@@ -43,6 +43,8 @@ class MicroscopeView(QWidget):
     _MINIMAP_MARGIN = 16
     _MINIMAP_MIN_SIZE = 160
     _MINIMAP_MAX_SIZE = 240
+    _PROBE_ROUTE_DETAIL_POINT_LIMIT = 300
+    _PROBE_ROUTE_LABEL_POINT_LIMIT = 150
 
     def __init__(self) -> None:
         super().__init__()
@@ -65,6 +67,7 @@ class MicroscopeView(QWidget):
         self._selected_target_id: str | None = None
         self._probe_route: MeasurementRoute | None = None
         self._probe_route_snapshot: tuple[object, ...] | None = None
+        self._probe_route_snapshot_token: tuple[object, ...] | None = None
         self._selected_route_point_index = -1
         self._selected_design_point: tuple[float, float] | None = None
         self._current_design_position: tuple[float, float] | None = None
@@ -73,6 +76,8 @@ class MicroscopeView(QWidget):
         self._check_design_marks: list[tuple[float, float]] = []
         self._minimap_background: QPixmap | None = None
         self._minimap_cache_key: tuple[int, int, int] | None = None
+        self._minimap_static_overlay: QPixmap | None = None
+        self._minimap_static_overlay_key: tuple[object, ...] | None = None
         self._minimap_render_key: tuple[int, int, int] | None = None
         self._minimap_render_generation = 0
         self._minimap_rect: QRect | None = None
@@ -130,8 +135,11 @@ class MicroscopeView(QWidget):
         if document is not self._design_document:
             self._minimap_cache_key = None
             self._minimap_background = None
+            self._minimap_static_overlay = None
+            self._minimap_static_overlay_key = None
             self._minimap_render_key = None
             self._minimap_render_generation += 1
+            self._probe_route_snapshot_token = None
         previous_state = (
             self._design_document,
             tuple(target.id for target in self._design_targets),
@@ -851,9 +859,9 @@ class MicroscopeView(QWidget):
         if background is not None:
             painter.drawPixmap(content_rect.topLeft(), background)
 
-        self._draw_design_route(painter, content_rect)
-        self._draw_probe_route(painter, content_rect)
-        self._draw_design_marks(painter, content_rect)
+        static_overlay = self._minimap_static_overlay_for_size(content_rect.size())
+        if static_overlay is not None:
+            painter.drawPixmap(content_rect.topLeft(), static_overlay)
         self._draw_design_position(painter, content_rect)
 
         painter.setPen(QPen(QColor("#546e7a"), 1))
@@ -874,6 +882,47 @@ class MicroscopeView(QWidget):
 
         self._start_minimap_background_render(size, cache_key)
         return None
+
+    def _minimap_static_overlay_for_size(self, size: QSize) -> QPixmap | None:
+        if self._design_document is None:
+            self._minimap_static_overlay = None
+            self._minimap_static_overlay_key = None
+            return None
+        cache_key = self._minimap_static_overlay_cache_key(size)
+        if (
+            self._minimap_static_overlay_key == cache_key
+            and self._minimap_static_overlay is not None
+        ):
+            return self._minimap_static_overlay
+
+        image = QImage(size, QImage.Format_ARGB32_Premultiplied)
+        image.fill(Qt.transparent)
+        painter = QPainter(image)
+        rect = QRect(QPoint(0, 0), size)
+        self._draw_design_route(painter, rect)
+        self._draw_probe_route(painter, rect)
+        self._draw_design_marks(painter, rect)
+        painter.end()
+        self._minimap_static_overlay = QPixmap.fromImage(image)
+        self._minimap_static_overlay_key = cache_key
+        return self._minimap_static_overlay
+
+    def _minimap_static_overlay_cache_key(self, size: QSize) -> tuple[object, ...]:
+        return (
+            id(self._design_document),
+            int(size.width()),
+            int(size.height()),
+            tuple(
+                (target.id, target.design_center)
+                for target in self._design_targets
+            ),
+            self._selected_target_id,
+            self._probe_route_snapshot,
+            self._selected_route_point_index,
+            self._selected_design_point,
+            tuple(self._source_design_marks),
+            tuple(self._check_design_marks),
+        )
 
     def _start_minimap_background_render(
         self,
@@ -1036,6 +1085,8 @@ class MicroscopeView(QWidget):
         points = [point for point in route.points if point.enabled]
         if not points:
             return
+        draw_details = len(points) <= self._PROBE_ROUTE_DETAIL_POINT_LIMIT
+        draw_labels = len(points) <= self._PROBE_ROUTE_LABEL_POINT_LIMIT
 
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing)
@@ -1051,12 +1102,13 @@ class MicroscopeView(QWidget):
         painter.drawPath(center_path)
         painter.setPen(QPen(QColor("#e1f5fe"), 1.4))
         painter.setBrush(QColor(225, 245, 254, 210))
-        for start, end in zip(points, points[1:]):
-            self._draw_route_arrowhead(
-                painter,
-                self._map_design_point_to_rect(start.camera_center, rect),
-                self._map_design_point_to_rect(end.camera_center, rect),
-            )
+        if draw_details:
+            for start, end in zip(points, points[1:]):
+                self._draw_route_arrowhead(
+                    painter,
+                    self._map_design_point_to_rect(start.camera_center, rect),
+                    self._map_design_point_to_rect(end.camera_center, rect),
+                )
 
         connector_pen = QPen(QColor(207, 216, 220, 120), 1.0)
         connector_pen.setStyle(Qt.DotLine)
@@ -1075,12 +1127,23 @@ class MicroscopeView(QWidget):
             radius = 5.2 if is_selected else 4.0
             painter.drawEllipse(center, radius, radius)
 
-            label_rect = QRectF(center.x() + 5.0, center.y() - 15.0, 30.0, 13.0)
-            painter.setPen(QPen(QColor(0, 0, 0, 180), 3))
-            painter.drawText(label_rect, Qt.AlignLeft | Qt.AlignVCenter, str(route_index + 1))
-            painter.setPen(QPen(QColor("#e3f2fd"), 1))
-            painter.drawText(label_rect, Qt.AlignLeft | Qt.AlignVCenter, str(route_index + 1))
+            if draw_labels or is_selected:
+                label_rect = QRectF(center.x() + 5.0, center.y() - 15.0, 30.0, 13.0)
+                painter.setPen(QPen(QColor(0, 0, 0, 180), 3))
+                painter.drawText(
+                    label_rect,
+                    Qt.AlignLeft | Qt.AlignVCenter,
+                    str(route_index + 1),
+                )
+                painter.setPen(QPen(QColor("#e3f2fd"), 1))
+                painter.drawText(
+                    label_rect,
+                    Qt.AlignLeft | Qt.AlignVCenter,
+                    str(route_index + 1),
+                )
 
+            if not draw_details and not is_selected:
+                continue
             hits = route.needle_hits_for_point(route_point)
             for needle_index, (_offset, hit) in enumerate(hits[:2]):
                 needle_point = self._map_design_point_to_rect(hit, rect)
@@ -1314,10 +1377,30 @@ class MicroscopeView(QWidget):
         hue = int((layer_key[0] * 57 + layer_key[1] * 19) % 360)
         return QColor.fromHsv(hue, 120, 145, 180)
 
-    @staticmethod
-    def _route_snapshot(route: MeasurementRoute | None) -> tuple[object, ...] | None:
+    def _route_snapshot(self, route: MeasurementRoute | None) -> tuple[object, ...] | None:
         if route is None:
+            self._probe_route_snapshot_token = None
             return None
+        points = route.points
+        token = (
+            id(route),
+            route.name,
+            str(route.path) if route.path is not None else "",
+            route.updated_at_utc,
+            len(points),
+            id(points[0]) if points else 0,
+            id(points[-1]) if points else 0,
+            tuple(
+                (offset.id, offset.dx, offset.dy, offset.source)
+                for offset in route.needle_offsets
+            ),
+        )
+        if (
+            token == self._probe_route_snapshot_token
+            and self._probe_route_snapshot is not None
+        ):
+            return self._probe_route_snapshot
+        self._probe_route_snapshot_token = token
         return (
             route.name,
             str(route.path) if route.path is not None else "",

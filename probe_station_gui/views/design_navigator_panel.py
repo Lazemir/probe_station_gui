@@ -478,7 +478,7 @@ class _DesignPlotPane(QWidget):
     ) -> None:
         self._current_design_position = point
         self._fov_design_size = fov_design_size
-        self._redraw_overlays()
+        self._redraw_current_position_overlay()
 
     def set_registration_marks(
         self,

@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import atexit
 import logging
+import queue
+from logging.handlers import QueueHandler, QueueListener
 from pathlib import Path
 
 _HANDLER_FLAG = "_probe_station_gui_managed"
+_LISTENER: QueueListener | None = None
+_LISTENER_HANDLER: logging.Handler | None = None
+_LISTENER_PATH: Path | None = None
 
 
 def configure_logging(log_path: Path, level_name: str) -> None:
@@ -19,7 +25,7 @@ def configure_logging(log_path: Path, level_name: str) -> None:
 
     handler = _find_managed_handler(root_logger)
     if handler is None:
-        handler = logging.FileHandler(log_path, encoding="utf-8")
+        handler = _create_queue_handler(log_path)
         setattr(handler, _HANDLER_FLAG, True)
         root_logger.addHandler(handler)
     else:
@@ -29,6 +35,9 @@ def configure_logging(log_path: Path, level_name: str) -> None:
     handler.setFormatter(
         logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     )
+    if _LISTENER_HANDLER is not None:
+        _LISTENER_HANDLER.setLevel(numeric_level)
+        _LISTENER_HANDLER.setFormatter(logging.Formatter("%(message)s"))
 
     for existing in root_logger.handlers:
         if existing is handler:
@@ -37,6 +46,47 @@ def configure_logging(log_path: Path, level_name: str) -> None:
             existing.setLevel(numeric_level)
 
     root_logger.debug("Logging configured: path=%s level=%s", log_path, level_name)
+
+
+def _create_queue_handler(log_path: Path) -> logging.Handler:
+    """Create a non-blocking frontend for the managed file logger."""
+
+    log_queue: queue.SimpleQueue[logging.LogRecord] = queue.SimpleQueue()
+    handler = QueueHandler(log_queue)
+    _start_listener(log_queue, log_path)
+    return handler
+
+
+def _start_listener(
+    log_queue: queue.SimpleQueue[logging.LogRecord],
+    log_path: Path,
+) -> None:
+    """Start the background file writer for queued log records."""
+
+    global _LISTENER, _LISTENER_HANDLER, _LISTENER_PATH
+    _stop_listener()
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    setattr(file_handler, _HANDLER_FLAG, True)
+    listener = QueueListener(log_queue, file_handler)
+    listener.start()
+    _LISTENER = listener
+    _LISTENER_HANDLER = file_handler
+    _LISTENER_PATH = log_path
+
+
+def _stop_listener() -> None:
+    """Stop the current background file writer, if any."""
+
+    global _LISTENER, _LISTENER_HANDLER, _LISTENER_PATH
+    listener = _LISTENER
+    handler = _LISTENER_HANDLER
+    _LISTENER = None
+    _LISTENER_HANDLER = None
+    _LISTENER_PATH = None
+    if listener is not None:
+        listener.stop()
+    if handler is not None:
+        handler.close()
 
 
 def _normalise_level(level_name: str) -> int:
@@ -64,10 +114,20 @@ def _ensure_handler_destination(
 ) -> logging.Handler:
     """Replace the managed handler if it points to the wrong file."""
 
+    if isinstance(handler, QueueHandler):
+        if _LISTENER_PATH == log_path:
+            return handler
+        root_logger.removeHandler(handler)
+        handler.close()
+        new_handler = _create_queue_handler(log_path)
+        setattr(new_handler, _HANDLER_FLAG, True)
+        root_logger.addHandler(new_handler)
+        return new_handler
+
     if not isinstance(handler, logging.FileHandler):
         root_logger.removeHandler(handler)
         handler.close()
-        new_handler = logging.FileHandler(log_path, encoding="utf-8")
+        new_handler = _create_queue_handler(log_path)
         setattr(new_handler, _HANDLER_FLAG, True)
         root_logger.addHandler(new_handler)
         return new_handler
@@ -76,10 +136,18 @@ def _ensure_handler_destination(
     if current_path != log_path:
         root_logger.removeHandler(handler)
         handler.close()
-        new_handler = logging.FileHandler(log_path, encoding="utf-8")
+        new_handler = _create_queue_handler(log_path)
         setattr(new_handler, _HANDLER_FLAG, True)
         root_logger.addHandler(new_handler)
         return new_handler
 
-    return handler
+    root_logger.removeHandler(handler)
+    handler.close()
+    new_handler = _create_queue_handler(log_path)
+    setattr(new_handler, _HANDLER_FLAG, True)
+    root_logger.addHandler(new_handler)
+    return new_handler
+
+
+atexit.register(_stop_listener)
 
