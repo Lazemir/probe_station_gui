@@ -17,3 +17,6 @@ dist/
 .idea/
 .claude/
 .codex/
+
+# Generated calibration/raw measurement artifacts. Existing tracked files stay tracked.
+calibrations/*
