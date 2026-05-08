@@ -736,6 +736,59 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
         self.assertIn("G90", commands)
         self.assertIn("G1 X10.0000 Y-5.0000 F123.4", commands)
 
+    def test_coordinate_task_uses_cancelable_absolute_jog(self) -> None:
+        controller = StageController()
+        controller.set_motion_safety_disabled(True)
+        controller._serial = _FakeSerial()
+        controller.movement_started = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        movement_results = []
+        controller.movement_finished = types.SimpleNamespace(
+            emit=lambda success, message: movement_results.append((success, message))
+        )
+        controller.status_message = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        commands = []
+        controller._write_command = lambda _serial, command: commands.append(command)
+        controller._wait_for_ok = lambda *_args, **_kwargs: None
+        controller._wait_for_idle = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("waited for idle")
+        )
+
+        controller._run_absolute_axis_targets_move(
+            {"X": 1.5, "Y": -2.0},
+            25.0,
+        )
+
+        self.assertIn("$J=G90 G21 X1.5000 Y-2.0000 F25", commands)
+        self.assertFalse(any(command.startswith("G1 ") for command in commands))
+        self.assertEqual(movement_results[-1][0], True)
+
+    def test_machine_coordinate_jog_uses_g53(self) -> None:
+        controller = StageController()
+        controller.set_motion_safety_disabled(True)
+        controller._position_reporting_mode = "machine"
+        controller._serial = _FakeSerial()
+        commands = []
+        controller._write_command = lambda _serial, command: commands.append(command)
+        controller._wait_for_ok = lambda *_args, **_kwargs: None
+        controller._wait_for_idle = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("waited for idle")
+        )
+
+        controller._send_absolute_axis_targets_move(
+            controller._serial,
+            {"X": 4.0},
+            ignore_needle_safety=True,
+            feedrate=50.0,
+            wait_for_completion=False,
+            as_jog=True,
+        )
+
+        self.assertIn("$J=G90 G21 G53 X4.0000 F50", commands)
+
     def test_homed_work_xy_target_uses_reported_wco_limits(self) -> None:
         controller = StageController()
         controller._serial = _FakeSerial()
@@ -1353,6 +1406,25 @@ class StageControllerNeedlesStateTest(unittest.TestCase):
 
 
 class StageControllerPriorityNeedlesActionTest(unittest.TestCase):
+    def test_cancel_active_motion_sends_jog_cancel_without_invalidating_state(self) -> None:
+        controller = StageController()
+        controller._serial = _WritableFakeSerial()
+        controller._homed_axes = {"X", "Y", "A"}
+        controller._needles_up = True
+        controller._needles_known = True
+        messages = []
+        controller.status_message = types.SimpleNamespace(
+            emit=lambda message: messages.append(message)
+        )
+
+        controller.cancel_active_motion("Coordinate move cancel requested.")
+
+        self.assertIn(b"\x85", controller._serial.writes)
+        self.assertEqual(controller._homed_axes, {"X", "Y", "A"})
+        self.assertTrue(controller._needles_up)
+        self.assertTrue(controller._needles_known)
+        self.assertEqual(messages[-1], "Coordinate move cancel requested.")
+
     def test_needles_lower_queues_during_oscillation(self) -> None:
         controller = StageController()
         controller._oscillation_active = True

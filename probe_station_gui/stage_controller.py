@@ -1081,6 +1081,13 @@ class StageController(QObject):
         self._update_homing_status(set())
         self._set_needles_state(False, known=False)
 
+    def cancel_active_motion(self, reason: str = "Motion cancel requested.") -> None:
+        """Cancel a jog-backed motion without resetting controller state."""
+
+        self._cancel_event.set()
+        self.queue_jog_stop()
+        self.status_message.emit(reason)
+
     def is_busy(self) -> bool:
         """Return True when a background movement task is currently running."""
 
@@ -2327,6 +2334,7 @@ class StageController(QObject):
                     feedrate=feedrate,
                     wait_for_completion=False,
                     allow_unhomed=allow_unhomed,
+                    as_jog=True,
                 )
             self.movement_finished.emit(
                 True,
@@ -2608,6 +2616,7 @@ class StageController(QObject):
         feedrate: Optional[float] = None,
         wait_for_completion: bool = True,
         allow_unhomed: bool = False,
+        as_jog: bool = False,
     ) -> None:
         ordered_targets: dict[str, float] = {}
         for axis in self.AXIS_INDEX:
@@ -2653,15 +2662,35 @@ class StageController(QObject):
         effective_feedrate = (
             self.DEFAULT_FEEDRATE if feedrate is None else max(0.1, float(feedrate))
         )
+        move_parts = [
+            f"{axis}{value:.4f}"
+            for axis, value in ordered_targets.items()
+        ]
+        if as_jog:
+            command_parts = ["$J=G90", "G21"]
+            if self._position_reporting_mode == "machine":
+                command_parts.append("G53")
+            command_parts.extend(move_parts)
+            command_parts.append(f"F{self._format_gcode_value(effective_feedrate)}")
+            self._write_command(serial_connection, " ".join(command_parts))
+            self._wait_for_ok(serial_connection)
+            if wait_for_completion:
+                move_distance = self._absolute_move_distance_for_timeout(
+                    ordered_targets,
+                    current_values,
+                )
+                self._wait_for_idle(
+                    serial_connection,
+                    timeout=self._idle_timeout_for_distance(
+                        move_distance, effective_feedrate
+                    ),
+                )
+            return
         self._write_command(serial_connection, "G21")
         self._wait_for_ok(serial_connection)
         self._write_command(serial_connection, "G90")
         self._wait_for_ok(serial_connection)
         self._reset_feed_override_for_serial(serial_connection)
-        move_parts = [
-            f"{axis}{value:.4f}"
-            for axis, value in ordered_targets.items()
-        ]
         self._write_command(
             serial_connection,
             "G1 "

@@ -282,6 +282,7 @@ class Main(QMainWindow):
         self._stage_axis_escape_shortcuts: list[QShortcut] = []
         self._stage_coordinate_mode_combo: QComboBox | None = None
         self._stage_coordinate_apply_button: QPushButton | None = None
+        self._stage_coordinate_cancel_button: QPushButton | None = None
         self._updating_stage_position_fields = False
         self._pending_linear_feedrate_default: float | None = None
         self._homing_active_key: str | None = None
@@ -877,6 +878,9 @@ class Main(QMainWindow):
             field.editingFinished.connect(
                 lambda axis=axis_name: self._on_stage_axis_editing_finished(axis)
             )
+            field.textEdited.connect(
+                lambda _text, axis=axis_name: self._on_stage_axis_text_edited(axis)
+            )
             self._stage_axis_fields[axis_name] = field
             layout.addWidget(field)
         mode_label = QLabel("Input:", widget)
@@ -901,6 +905,15 @@ class Main(QMainWindow):
             self._apply_pending_stage_coordinate_targets
         )
         layout.addWidget(self._stage_coordinate_apply_button)
+        self._stage_coordinate_cancel_button = QPushButton("Cancel", widget)
+        self._stage_coordinate_cancel_button.setEnabled(False)
+        self._stage_coordinate_cancel_button.setToolTip(
+            "Clear edited coordinate fields or stop the active coordinate move."
+        )
+        self._stage_coordinate_cancel_button.clicked.connect(
+            self._cancel_stage_coordinate_action
+        )
+        layout.addWidget(self._stage_coordinate_cancel_button)
         self._set_stage_position_fields_available(False)
         return widget
 
@@ -1031,6 +1044,11 @@ class Main(QMainWindow):
         if axis in self.STAGE_AXIS_NAMES:
             self._stage_axis_return_commits.add(axis)
 
+    def _on_stage_axis_text_edited(self, _axis_name: str) -> None:
+        if self._updating_stage_position_fields:
+            return
+        self._update_stage_coordinate_apply_state()
+
     def _on_stage_axis_escape_pressed(self, axis_name: str) -> None:
         axis = axis_name.strip().upper()
         self._stage_axis_return_commits.discard(axis)
@@ -1058,16 +1076,60 @@ class Main(QMainWindow):
         mode = self._normalize_coordinate_input_mode(combo.currentData())
         return mode or "G90"
 
+    def _stage_axis_fields_have_modified_text(self) -> bool:
+        return any(
+            field.isEnabled() and field.isModified()
+            for field in self._stage_axis_fields.values()
+        )
+
     def _update_stage_coordinate_apply_state(self) -> None:
-        button = self._stage_coordinate_apply_button
-        if button is None:
-            return
-        available = bool(self._pending_stage_axis_targets)
+        apply_button = self._stage_coordinate_apply_button
+        cancel_button = self._stage_coordinate_cancel_button
+        available = (
+            bool(self._pending_stage_axis_targets)
+            or self._stage_axis_fields_have_modified_text()
+        )
         controller_busy = (
             hasattr(self, "stage_controller") and self.stage_controller.is_busy()
         )
         active = self._coordinate_move_axis is not None or controller_busy
-        button.setEnabled(available and not active)
+        if apply_button is not None:
+            apply_button.setEnabled(available and not active)
+        if cancel_button is not None:
+            cancel_button.setEnabled(
+                available or self._coordinate_move_axis is not None
+            )
+
+    def _clear_pending_stage_coordinate_targets(self) -> bool:
+        had_changes = (
+            bool(self._pending_stage_axis_targets)
+            or self._stage_axis_fields_have_modified_text()
+        )
+        self._stage_axis_return_commits.clear()
+        self._pending_stage_axis_targets.clear()
+        for axis in self.STAGE_AXIS_NAMES:
+            self._reset_stage_axis_field(axis)
+        self._refresh_stage_axis_styles()
+        self._update_stage_coordinate_apply_state()
+        return had_changes
+
+    def _cancel_stage_coordinate_action(self) -> None:
+        if self._coordinate_move_axis is not None:
+            self.stage_controller.cancel_active_motion(
+                "Coordinate move cancel requested."
+            )
+            self._clear_coordinate_move_tracking(
+                clear_pending=True,
+                reset_override=True,
+            )
+            self._clear_stage_motion_axes()
+            self._clear_pending_stage_coordinate_targets()
+            self.view.setFocus(Qt.OtherFocusReason)
+            self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
+            return
+        if self._clear_pending_stage_coordinate_targets():
+            self.view.setFocus(Qt.OtherFocusReason)
+            self._show_status("Cleared pending coordinate edits.", 2000)
 
     def _append_status_log(self, message: str) -> None:
         if not message:
@@ -3676,9 +3738,8 @@ class Main(QMainWindow):
         self._coordinate_move_stage_position = self._coordinate_move_origin_position
         self._coordinate_move_target_position = target_position
         self._coordinate_move_started_at = time.monotonic()
-        self._coordinate_move_programmed_feedrate = max(0.1, float(feedrate))
-        self._coordinate_move_effective_feedrate = self._coordinate_move_programmed_feedrate
-        self._set_coordinate_move_feedrate_bounds(self._coordinate_move_programmed_feedrate)
+        self._coordinate_move_programmed_feedrate = None
+        self._coordinate_move_effective_feedrate = None
         self._coordinate_move_ends_at = self._coordinate_move_started_at + max(
             self._coordinate_move_duration_s(
                 self._coordinate_move_origin_position,
@@ -3688,6 +3749,7 @@ class Main(QMainWindow):
             0.05,
         )
         self._set_stage_motion_axes(set(axes))
+        self._update_stage_coordinate_apply_state()
         accepted = self.stage_controller.request_absolute_axis_targets_move(
             raw_targets,
             feedrate=feedrate,
