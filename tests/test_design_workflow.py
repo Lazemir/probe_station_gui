@@ -252,6 +252,20 @@ class DesignScriptTest(unittest.TestCase):
 
 
 class DesignSessionTest(unittest.TestCase):
+    def _make_document(self) -> DesignDocument:
+        return DesignDocument(
+            path=REPO_ROOT / "tests" / "fixtures" / "synthetic.gds",
+            library=object(),
+            top_cell=object(),
+            top_cell_name="TOP",
+            cell_names=("TOP",),
+            dbu=1e-6,
+            user_unit=1e-9,
+            bounds=(0.0, 0.0, 100.0, 100.0),
+            polygons_by_layer={(1, 0): (np.asarray([[0.0, 0.0], [1.0, 0.0]]),)},
+            visible_layers=frozenset({(1, 0)}),
+        )
+
     def test_registration_invalidation_marks_registration_stale(self) -> None:
         session = DesignSession()
         session.source_design_marks = [(0.0, 0.0), (10.0, 0.0)]
@@ -268,6 +282,49 @@ class DesignSessionTest(unittest.TestCase):
         self.assertEqual(session.registration_status, "Controller reset.")
         self.assertEqual(session.registration.stale_reason, "Controller reset.")
 
+    def test_persisted_state_roundtrip_restores_registration(self) -> None:
+        document = self._make_document()
+        session = DesignSession()
+        session.load_document(document)
+        session.source_design_marks = [(0.0, 0.0), (10.0, 0.0)]
+        session.source_stage_marks = [(1.0, 2.0), (21.0, 2.0)]
+        session.check_design_marks = [(5.0, 0.0)]
+        session.check_stage_marks = [(11.0, 2.0)]
+        session._rebuild_registration()
+
+        state = session.export_persisted_state()
+        assert state is not None
+        restored = DesignSession()
+        restored.restore_persisted_state(document, state)
+
+        self.assertIs(restored.document, document)
+        self.assertEqual(restored.source_design_marks, session.source_design_marks)
+        self.assertEqual(restored.source_stage_marks, session.source_stage_marks)
+        self.assertEqual(restored.check_design_marks, session.check_design_marks)
+        self.assertEqual(restored.check_stage_marks, session.check_stage_marks)
+        assert restored.registration is not None
+        self.assertTrue(restored.registration.valid)
+        self.assertEqual(restored.registration_status, session.registration_status)
+
+    def test_persisted_state_preserves_stale_registration(self) -> None:
+        document = self._make_document()
+        session = DesignSession()
+        session.load_document(document)
+        session.source_design_marks = [(0.0, 0.0), (10.0, 0.0)]
+        session.source_stage_marks = [(1.0, 2.0), (21.0, 2.0)]
+        session._rebuild_registration()
+        session.invalidate_registration("Controller reset.")
+
+        state = session.export_persisted_state()
+        assert state is not None
+        restored = DesignSession()
+        restored.restore_persisted_state(document, state)
+
+        assert restored.registration is not None
+        self.assertFalse(restored.registration.valid)
+        self.assertEqual(restored.registration.stale_reason, "Controller reset.")
+        self.assertEqual(restored.registration_status, "Controller reset.")
+
     def test_target_navigation(self) -> None:
         session = DesignSession()
         session.set_targets(
@@ -283,18 +340,7 @@ class DesignSessionTest(unittest.TestCase):
 
     def test_prepare_and_apply_source_alignment(self) -> None:
         session = DesignSession()
-        session.document = DesignDocument(
-            path=REPO_ROOT / "tests" / "fixtures" / "synthetic.gds",
-            library=object(),
-            top_cell=object(),
-            top_cell_name="TOP",
-            cell_names=("TOP",),
-            dbu=1e-6,
-            user_unit=1e-9,
-            bounds=(0.0, 0.0, 100.0, 100.0),
-            polygons_by_layer={(1, 0): (np.asarray([[0.0, 0.0], [1.0, 0.0]]),)},
-            visible_layers=frozenset({(1, 0)}),
-        )
+        session.document = self._make_document()
         session.capture_source_pair((0.0, 0.0), (10.0, 10.0))
         session.capture_source_pair((1000.0, 0.0), (10.0, 11.0))
 

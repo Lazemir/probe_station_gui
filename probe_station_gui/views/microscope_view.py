@@ -457,7 +457,7 @@ class MicroscopeView(QWidget):
         painter.restore()
 
     def _draw_axis_triad(self, painter: QPainter, display_rect: QRect) -> None:
-        """Draw a small SolidWorks-style axis triad in the camera view."""
+        """Draw a small screen-space axis triad in the camera view."""
 
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing)
@@ -503,6 +503,24 @@ class MicroscopeView(QWidget):
             painter.setPen(QPen(color, 1.0))
             painter.drawText(label_rect, Qt.AlignCenter, label)
 
+        def draw_out_of_plane_axis(center: QPointF, color: QColor) -> None:
+            radius = 7.0
+            painter.setPen(QPen(QColor(0, 0, 0, 180), 4.0))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(center, radius, radius)
+            painter.setPen(QPen(color, 2.0))
+            painter.drawEllipse(center, radius, radius)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 190))
+            painter.drawEllipse(center, 3.2, 3.2)
+            painter.setBrush(color)
+            painter.drawEllipse(center, 2.2, 2.2)
+            label_rect = QRectF(center.x() - 24.0, center.y() - 26.0, 16.0, 16.0)
+            painter.setPen(QPen(QColor(0, 0, 0, 180), 3.0))
+            painter.drawText(label_rect, Qt.AlignCenter, "Z")
+            painter.setPen(QPen(color, 1.0))
+            painter.drawText(label_rect, Qt.AlignCenter, "Z")
+
         draw_axis(
             QPointF(base.x() + length, base.y()),
             QColor("#ef5350"),
@@ -515,15 +533,7 @@ class MicroscopeView(QWidget):
             "Y",
             QPointF(0.0, -10.0),
         )
-        draw_axis(
-            QPointF(base.x() - length * 0.42, base.y() - length * 0.42),
-            QColor("#42a5f5"),
-            "Z",
-            QPointF(-10.0, -8.0),
-        )
-        painter.setPen(QPen(QColor("#eceff1"), 1.0))
-        painter.setBrush(QColor(33, 33, 33, 170))
-        painter.drawEllipse(base, 3.0, 3.0)
+        draw_out_of_plane_axis(base, QColor("#42a5f5"))
         painter.restore()
 
     def _draw_ruler(

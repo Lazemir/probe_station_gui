@@ -148,6 +148,7 @@ class Main(QMainWindow):
     DESIGN_POSITION_REFRESH_MS = 800
     CONTROLLER_STATUS_REFRESH_MS = 800
     DESIGN_OVERLAY_UPDATE_MS = 120
+    DESIGN_RESTORE_POSITION_TOLERANCE = 1e-3
     DESIGN_SPACING_RATIO_TOLERANCE = 0.35
     MANUAL_JOG_UPDATE_MS = 50
     MANUAL_JOG_SETTLE_POLL_DELAYS_MS = (180, 420)
@@ -214,6 +215,10 @@ class Main(QMainWindow):
         self._design_layout_window_class: object | None = None
         self._design_layout_window_requested = False
         self._design_load_generation = 0
+        self._design_load_restore_states: dict[int, dict[str, object]] = {}
+        self._design_load_show_window: dict[int, bool] = {}
+        self._pending_persisted_design_state: dict[str, object] | None = None
+        self._pending_persisted_design_position: tuple[float, ...] | None = None
         self.joystick_dock: CollapsibleDockWidget | None = None
         self.serial_terminal_dock: CollapsibleDockWidget | None = None
         self.serial_connection_dock: CollapsibleDockWidget | None = None
@@ -1279,6 +1284,11 @@ class Main(QMainWindow):
 
     def _on_controller_reboot_detected(self) -> None:
         self._stage_unhomed_display_origins.clear()
+        self._pending_persisted_design_state = None
+        self._pending_persisted_design_position = None
+        self._invalidate_design_registration(
+            "Design registration cleared after controller reboot."
+        )
 
     def _on_controller_reboot_ready(self) -> None:
         if self._controller_reboot_recovery_scheduled:
@@ -1317,6 +1327,8 @@ class Main(QMainWindow):
         if not self.stage_controller.cached_controller_session_is_current(cached_state):
             self.settings_manager.clear_controller_state()
             self.stage_controller.clear_cached_controller_state()
+            self._pending_persisted_design_state = None
+            self._pending_persisted_design_position = None
             self._show_status(
                 "Controller session changed. Cleared cached homing state."
             )
@@ -1324,6 +1336,7 @@ class Main(QMainWindow):
         logger.info(
             "Controller session marker matches; restoring cached homing state pending live status."
         )
+        self._prepare_persisted_design_restore(cached_state)
         self.stage_controller.import_cached_controller_state(cached_state)
         self._show_status("Restored cached homing state; reading live coordinates.")
 
@@ -1331,9 +1344,141 @@ class Main(QMainWindow):
         if self._controller_state_persistence_suspended:
             logger.debug("Skipping controller state persistence while serial state resets.")
             return
-        self.settings_manager.save_controller_state(
-            self.stage_controller.export_cached_controller_state()
+        state = self._controller_state_with_design()
+        self.settings_manager.save_controller_state(state)
+
+    def _persist_controller_state_if_available(self) -> None:
+        if self._controller_state_persistence_suspended:
+            return
+        state = self._controller_state_with_design()
+        if state is None:
+            return
+        self.settings_manager.save_controller_state(state)
+
+    def _controller_state_with_design(self) -> dict[str, object] | None:
+        state = self.stage_controller.export_cached_controller_state()
+        if state is None:
+            return None
+        design_state = self._design_session.export_persisted_state()
+        if design_state is not None:
+            state["design_session"] = design_state
+        return state
+
+    def _prepare_persisted_design_restore(self, cached_state: dict[str, object]) -> None:
+        design_state = cached_state.get("design_session")
+        cached_position = self._coerce_position_tuple(
+            cached_state.get("last_stage_position")
         )
+        if not isinstance(design_state, dict) or cached_position is None:
+            self._pending_persisted_design_state = None
+            self._pending_persisted_design_position = None
+            return
+        self._pending_persisted_design_state = dict(design_state)
+        self._pending_persisted_design_position = cached_position
+
+    def _maybe_restore_persisted_design(self, position: tuple[float, ...]) -> None:
+        design_state = self._pending_persisted_design_state
+        expected_position = self._pending_persisted_design_position
+        if design_state is None:
+            return
+        self._pending_persisted_design_state = None
+        self._pending_persisted_design_position = None
+        if self._design_session.document is not None:
+            return
+        if expected_position is None or not self._positions_match(
+            expected_position,
+            position,
+        ):
+            self._show_status(
+                "Controller coordinates changed. Cleared cached design selection.",
+                5000,
+            )
+            self._save_controller_state_without_design()
+            return
+        if not self._persisted_design_file_is_current(design_state):
+            self._show_status(
+                "Cached design file changed or is unavailable. Cleared cached design selection.",
+                5000,
+            )
+            self._save_controller_state_without_design()
+            return
+        design_path = str(design_state.get("document_path") or "").strip()
+        if not design_path:
+            self._save_controller_state_without_design()
+            return
+        self._start_design_document_load(
+            design_path,
+            restore_state=design_state,
+            show_window=False,
+        )
+
+    def _save_controller_state_without_design(self) -> None:
+        state = self.stage_controller.export_cached_controller_state()
+        if state is None:
+            cached_state = self.settings_manager.load_controller_state()
+            if isinstance(cached_state, dict):
+                cached_state.pop("design_session", None)
+                self.settings_manager.save_controller_state(cached_state)
+            return
+        state.pop("design_session", None)
+        self.settings_manager.save_controller_state(state)
+
+    @classmethod
+    def _positions_match(
+        cls,
+        expected: tuple[float, ...],
+        actual: tuple[float, ...],
+    ) -> bool:
+        if not expected or len(actual) < len(expected):
+            return False
+        tolerance = cls.DESIGN_RESTORE_POSITION_TOLERANCE
+        for expected_value, actual_value in zip(expected, actual):
+            if not math.isfinite(expected_value) or not math.isfinite(actual_value):
+                return False
+            if abs(expected_value - actual_value) > tolerance:
+                return False
+        return True
+
+    @staticmethod
+    def _coerce_position_tuple(value: object) -> tuple[float, ...] | None:
+        if not isinstance(value, (list, tuple)) or not value:
+            return None
+        values: list[float] = []
+        for item in value:
+            try:
+                coordinate = float(item)
+            except (TypeError, ValueError):
+                return None
+            if not math.isfinite(coordinate):
+                return None
+            values.append(coordinate)
+        return tuple(values)
+
+    @staticmethod
+    def _persisted_design_file_is_current(state: dict[str, object]) -> bool:
+        path_text = str(state.get("document_path") or "").strip()
+        if not path_text:
+            return False
+        path = Path(path_text).expanduser()
+        try:
+            stat = path.stat()
+        except OSError:
+            return False
+        saved_size = state.get("document_size")
+        if saved_size is not None:
+            try:
+                if int(saved_size) != int(stat.st_size):
+                    return False
+            except (TypeError, ValueError):
+                return False
+        saved_mtime = state.get("document_mtime_ns")
+        if saved_mtime is not None:
+            try:
+                if int(saved_mtime) != int(stat.st_mtime_ns):
+                    return False
+            except (TypeError, ValueError):
+                return False
+        return True
 
     def _persist_serial_connection_state(self, connected: bool) -> None:
         self.settings_manager.save_serial_connection_state(
@@ -1502,6 +1647,7 @@ class Main(QMainWindow):
         self._set_design_snap_enabled(True)
         self._design_session.set_source_design_mark(slot, snapped_point)
         self._refresh_design_panel()
+        self._set_alignment_panel_expanded()
         slot_label = "1" if slot == 0 else "2"
         self._show_status(
             f"Design mark {slot_label} snapped to X={snapped_point[0]:.3f}, Y={snapped_point[1]:.3f}.",
@@ -2081,7 +2227,9 @@ class Main(QMainWindow):
     ) -> None:
         stage_xy = self._stage_xy_from_position(position)
         design_stage_xy = (
-            stage_xy if self.stage_controller.axes_are_homed({"X", "Y"}) else None
+            stage_xy
+            if stage_xy is not None and self._can_display_design_position()
+            else None
         )
         self._update_stage_position_display(position)
         self._update_coordinate_display(center_xy=design_stage_xy)
@@ -2196,6 +2344,28 @@ class Main(QMainWindow):
         if not self.stage_controller.axes_are_homed({"X", "Y"}):
             return None
         return (float(latest[0]), float(latest[1]))
+
+    def _preferred_design_display_stage_xy(self) -> tuple[float, float] | None:
+        stage_xy = self._preferred_design_stage_xy()
+        if stage_xy is not None:
+            return stage_xy
+        if not self._can_display_design_position():
+            return None
+        latest = self.stage_controller.latest_stage_position()
+        if latest is not None and len(latest) >= 2:
+            try:
+                return (float(latest[0]), float(latest[1]))
+            except (TypeError, ValueError):
+                return None
+        return self._current_design_stage_xy
+
+    def _can_display_design_position(self) -> bool:
+        registration = self._design_session.registration
+        return bool(
+            self._design_session.document is not None
+            and registration is not None
+            and registration.valid
+        )
 
     def _format_coordinate_label(
         self, prefix: str, fluidnc_xy: tuple[float, float] | None
@@ -2883,11 +3053,28 @@ class Main(QMainWindow):
                 action.blockSignals(False)
 
     def _load_design_document(self, design_path: str) -> None:
+        self._start_design_document_load(
+            design_path,
+            restore_state=None,
+            show_window=True,
+        )
+
+    def _start_design_document_load(
+        self,
+        design_path: str,
+        *,
+        restore_state: dict[str, object] | None,
+        show_window: bool,
+    ) -> None:
         self._design_load_generation += 1
         generation = self._design_load_generation
         path_text = str(design_path)
-        self._toggle_design_layout_window(True)
-        if self.design_layout_window is not None:
+        if restore_state is not None:
+            self._design_load_restore_states[generation] = dict(restore_state)
+        self._design_load_show_window[generation] = bool(show_window)
+        if show_window:
+            self._toggle_design_layout_window(True)
+        if self.design_layout_window is not None and show_window:
             self.design_layout_window.set_status_message("Loading design...")
         elif self.design_navigator_panel:
             self.design_navigator_panel.set_status_message("Loading design...")
@@ -2915,25 +3102,39 @@ class Main(QMainWindow):
     ) -> None:
         if generation != self._design_load_generation:
             return
+        restore_state = self._design_load_restore_states.pop(generation, None)
+        show_window = self._design_load_show_window.pop(generation, True)
         if error is not None:
             message = str(error)
             self._show_status(message, 6000)
-            if self.design_layout_window is not None:
+            if self.design_layout_window is not None and show_window:
                 self.design_layout_window.set_status_message(message)
             elif self.design_navigator_panel:
                 self.design_navigator_panel.set_status_message(message)
+            if restore_state is not None:
+                self._save_controller_state_without_design()
             return
         if not isinstance(document, DesignDocument):
             message = "Loaded design has an unexpected type."
             self._show_status(message, 6000)
-            if self.design_layout_window is not None:
+            if self.design_layout_window is not None and show_window:
                 self.design_layout_window.set_status_message(message)
             elif self.design_navigator_panel:
                 self.design_navigator_panel.set_status_message(message)
+            if restore_state is not None:
+                self._save_controller_state_without_design()
             return
         try:
+            if restore_state is not None:
+                document = self._document_with_persisted_design_view(
+                    document,
+                    restore_state,
+                )
             self._reset_manual_alignment(cancel_pick=True)
-            self._design_session.load_document(document)
+            if restore_state is None:
+                self._design_session.load_document(document)
+            else:
+                self._design_session.restore_persisted_state(document, restore_state)
             self._pending_alignment_preparation = None
             self._last_selected_design_point = None
             self._set_design_snap_enabled(True)
@@ -2942,18 +3143,51 @@ class Main(QMainWindow):
                 self.design_navigator_panel.set_design_dialog_directory(
                     document.path.parent
                 )
-            if self.design_layout_window is not None:
+            if self.design_layout_window is not None and show_window:
                 self.design_layout_window.set_status_message("Rendering design...")
                 QApplication.processEvents()
             self._refresh_design_panel()
             self._refresh_design_position()
-            self._toggle_design_layout_window(True)
+            if show_window:
+                self._toggle_design_layout_window(True)
+            self._persist_controller_state_if_available()
             self._show_status(
                 f"Loaded design '{document.path.name}' ({document.top_cell_name}).",
                 5000,
             )
         except DesignModelError as exc:
             self._show_status(str(exc), 6000)
+            if restore_state is not None:
+                self._save_controller_state_without_design()
+
+    def _document_with_persisted_design_view(
+        self,
+        document: DesignDocument,
+        state: dict[str, object],
+    ) -> DesignDocument:
+        top_cell_name = str(state.get("top_cell_name") or "").strip()
+        if top_cell_name and top_cell_name != document.top_cell_name:
+            document = document.with_top_cell(top_cell_name)
+        visible_layers = self._parse_persisted_visible_layers(
+            state.get("visible_layers")
+        )
+        if visible_layers:
+            document = document.with_visible_layers(visible_layers)
+        return document
+
+    @staticmethod
+    def _parse_persisted_visible_layers(value: object) -> set[tuple[int, int]]:
+        layers: set[tuple[int, int]] = set()
+        if not isinstance(value, list):
+            return layers
+        for item in value:
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                continue
+            try:
+                layers.add((int(item[0]), int(item[1])))
+            except (TypeError, ValueError):
+                continue
+        return layers
 
     def _unload_design_document(self) -> None:
         self._design_load_generation += 1
@@ -3402,12 +3636,16 @@ class Main(QMainWindow):
             )
         self._refresh_manual_alignment_ui()
         self._update_design_position(self._current_design_stage_xy)
+        self._persist_controller_state_if_available()
 
     def _on_stage_position_changed(self, position: object) -> None:
         if not isinstance(position, tuple) or len(position) < 2:
             self._update_stage_position_display(position)
             return
         logger.debug("TIMING stage_position_changed position=%s", position)
+        current_position = self._coerce_position_tuple(position)
+        if current_position is not None:
+            self._maybe_restore_persisted_design(current_position)
         latest_state = (self.stage_controller.latest_stage_state() or "").lower()
         xy_homed = self.stage_controller.axes_are_homed({"X", "Y"})
         xyz_homed = self.stage_controller.axes_are_homed({"X", "Y", "Z"})
@@ -3418,6 +3656,7 @@ class Main(QMainWindow):
                 )
             else:
                 self.contact_calibration_window.set_current_stage_position(None)
+        center_xy = (float(position[0]), float(position[1]))
         if not xy_homed:
             if not self._manual_jog_prediction_available():
                 self._update_stage_position_display(position)
@@ -3425,7 +3664,9 @@ class Main(QMainWindow):
                 self._manual_jog_stage_xy = None
                 self._planned_move_stage_xy = None
                 self._update_coordinate_display(center_xy=None)
-                self._update_design_position(None)
+                self._update_design_position(
+                    center_xy if self._can_display_design_position() else None
+                )
                 if latest_state == "idle":
                     self._finish_coordinate_move_if_idle(position)
                     self._clear_stage_motion_axes()
@@ -3462,7 +3703,6 @@ class Main(QMainWindow):
                 )
                 smooth_predicted_status = True
         predicted_stage_xy = self._stage_xy_from_position(predicted_position)
-        center_xy = (float(position[0]), float(position[1]))
         if self._manual_jog_waiting_for_fresh_status and latest_state != "idle":
             logger.debug(
                 "MOTION PREDICTION deferred_stop_sample stage=%s state=%s",
@@ -4035,7 +4275,7 @@ class Main(QMainWindow):
         if self.serial_connection is None or not self.serial_connection.is_open:
             self._update_design_position(None)
             return
-        preferred_stage_xy = self._preferred_design_stage_xy()
+        preferred_stage_xy = self._preferred_design_display_stage_xy()
         if preferred_stage_xy is None:
             self.stage_controller.request_status_refresh()
             return
@@ -4306,6 +4546,8 @@ class Main(QMainWindow):
             self.serial_connection is not None and self.serial_connection.is_open
         )
         self._persist_serial_connection_state(serial_was_connected)
+        if serial_was_connected:
+            self._persist_controller_state()
         if self._api_server is not None:
             self._api_server.stop()
         self._design_position_timer.stop()

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 from .design_model import (
     DesignDocument,
@@ -52,6 +52,86 @@ class DesignSession:
     route: MeasurementRoute | None = None
     selected_route_point_index: int = -1
     registration_status: str = "No design registration."
+
+    def export_persisted_state(self) -> dict[str, object] | None:
+        """Return design state tied to the current controller coordinate session."""
+
+        if self.document is None:
+            return None
+        state: dict[str, object] = {
+            "version": 1,
+            "document_path": str(self.document.path),
+            "top_cell_name": self.document.top_cell_name,
+            "visible_layers": [
+                [int(layer), int(datatype)]
+                for layer, datatype in sorted(self.document.visible_layers)
+            ],
+            "source_design_marks": self._serialize_optional_points(
+                self.source_design_marks
+            ),
+            "source_stage_marks": self._serialize_optional_points(
+                self.source_stage_marks
+            ),
+            "check_design_marks": self._serialize_points(self.check_design_marks),
+            "check_stage_marks": self._serialize_points(self.check_stage_marks),
+            "registration_valid": bool(
+                self.registration is not None and self.registration.valid
+            ),
+            "registration_status": self.registration_status,
+            "registration_stale_reason": (
+                self.registration.stale_reason if self.registration is not None else ""
+            ),
+        }
+        try:
+            stat = self.document.path.stat()
+        except OSError:
+            return state
+        state["document_mtime_ns"] = int(stat.st_mtime_ns)
+        state["document_size"] = int(stat.st_size)
+        return state
+
+    def restore_persisted_state(
+        self,
+        document: DesignDocument,
+        state: dict[str, object],
+    ) -> None:
+        """Restore persisted design state for a verified controller session."""
+
+        self.document = document
+        self.clear_targets()
+        self.clear_route()
+        self.script_path = None
+        self.script_module_name = None
+        self.source_design_marks = self._coerce_optional_points(
+            state.get("source_design_marks"),
+            expected_count=2,
+        )
+        self.source_stage_marks = self._coerce_optional_points(
+            state.get("source_stage_marks"),
+            expected_count=2,
+        )
+        self.check_design_marks = self._coerce_points(state.get("check_design_marks"))
+        self.check_stage_marks = self._coerce_points(state.get("check_stage_marks"))
+        self.registration = None
+        self.registration_status = str(
+            state.get("registration_status") or "No design registration."
+        )
+        try:
+            self._rebuild_registration()
+        except DesignModelError as exc:
+            self.registration = None
+            self.registration_status = str(exc)
+            return
+        if self.registration is None:
+            return
+        if not bool(state.get("registration_valid", True)):
+            reason = str(
+                state.get("registration_stale_reason")
+                or state.get("registration_status")
+                or "Design registration is stale."
+            )
+            self.registration = self.registration.mark_stale(reason)
+            self.registration_status = reason
 
     def load_document(self, document: DesignDocument) -> None:
         """Attach a new design document and clear derived state."""
@@ -488,6 +568,63 @@ class DesignSession:
         if slot not in (0, 1):
             raise DesignModelError("Calibration slot must be 0 or 1.")
         slots[slot] = (float(point[0]), float(point[1]))
+
+    @staticmethod
+    def _serialize_points(points: list[Point2D]) -> list[list[float]]:
+        return [[float(point[0]), float(point[1])] for point in points]
+
+    @staticmethod
+    def _serialize_optional_points(
+        points: list[Optional[Point2D]],
+    ) -> list[list[float] | None]:
+        serialized: list[list[float] | None] = []
+        for point in points:
+            if point is None:
+                serialized.append(None)
+            else:
+                serialized.append([float(point[0]), float(point[1])])
+        return serialized
+
+    @classmethod
+    def _coerce_optional_points(
+        cls,
+        value: Any,
+        *,
+        expected_count: int,
+    ) -> list[Optional[Point2D]]:
+        points: list[Optional[Point2D]] = []
+        if isinstance(value, list):
+            for item in value[:expected_count]:
+                points.append(cls._coerce_optional_point(item))
+        while len(points) < expected_count:
+            points.append(None)
+        return points
+
+    @classmethod
+    def _coerce_points(cls, value: Any) -> list[Point2D]:
+        points: list[Point2D] = []
+        if not isinstance(value, list):
+            return points
+        for item in value:
+            point = cls._coerce_optional_point(item)
+            if point is not None:
+                points.append(point)
+        return points
+
+    @staticmethod
+    def _coerce_optional_point(value: Any) -> Point2D | None:
+        if value is None:
+            return None
+        if not isinstance(value, (list, tuple)) or len(value) != 2:
+            return None
+        try:
+            x_value = float(value[0])
+            y_value = float(value[1])
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(x_value) or not math.isfinite(y_value):
+            return None
+        return (x_value, y_value)
 
 
 __all__ = ["AlignmentPreparation", "DesignSession"]

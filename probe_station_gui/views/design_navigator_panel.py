@@ -249,6 +249,12 @@ class _DesignPlotPane(QWidget):
         self._axis_triad_z_item = self._plot.plot(
             [], [], pen=pg.mkPen("#42a5f5", width=2.2)
         )
+        self._axis_triad_z_dot_item = pg.ScatterPlotItem(
+            pen=pg.mkPen("#42a5f5", width=1.0),
+            brush=pg.mkBrush("#42a5f5"),
+            size=5.0,
+            symbol="o",
+        )
         self._axis_triad_x_label = pg.TextItem(text="X", color="#ef5350", anchor=(0.0, 0.5))
         self._axis_triad_y_label = pg.TextItem(text="Y", color="#66bb6a", anchor=(0.5, 1.0))
         self._axis_triad_z_label = pg.TextItem(text="Z", color="#42a5f5", anchor=(1.0, 1.0))
@@ -307,6 +313,7 @@ class _DesignPlotPane(QWidget):
         self._plot.addItem(self._axis_triad_x_label)
         self._plot.addItem(self._axis_triad_y_label)
         self._plot.addItem(self._axis_triad_z_label)
+        self._plot.addItem(self._axis_triad_z_dot_item)
         self._plot.addItem(self._selected_target_item)
         self._plot.addItem(self._current_item)
         self._plot.addItem(self._source_mark_1_item)
@@ -314,10 +321,14 @@ class _DesignPlotPane(QWidget):
         self._plot.addItem(self._check_mark_item)
         self._plot.scene().sigMouseClicked.connect(self._on_mouse_clicked)
         self._plot.scene().sigMouseMoved.connect(self._on_mouse_moved)
-        view_box.sigRangeChanged.connect(lambda *_unused: self._redraw_axis_triad())
+        view_box.sigRangeChanged.connect(lambda *_unused: self._on_view_range_changed())
         layout.addWidget(self._status_label, 1)
         layout.addWidget(self._plot, 1)
         self._plot.hide()
+
+    def _on_view_range_changed(self) -> None:
+        self._redraw_axis_triad()
+        self._redraw_current_position_overlay()
 
     def set_document(self, document: DesignDocument | None) -> None:
         same_document = document is self._document
@@ -624,34 +635,7 @@ class _DesignPlotPane(QWidget):
                 [selected_target.design_center[1]],
             )
 
-        if self._current_design_position is None:
-            self._current_crosshair_item.setData([], [])
-            self._current_item.setData([], [])
-            self._fov_item.setData([], [])
-        else:
-            pixel_size = self._data_units_per_screen_pixel()
-            if self._document is None or pixel_size is None:
-                self._current_crosshair_item.setData([], [])
-            else:
-                cx, cy = self._current_design_position
-                half_size = self.CURRENT_CROSSHAIR_HALF_SIZE_PX * pixel_size
-                self._current_crosshair_item.setData(
-                    [cx - half_size, cx + half_size, float("nan"), cx, cx],
-                    [cy, cy, float("nan"), cy - half_size, cy + half_size],
-                )
-            self._current_item.setData(
-                [self._current_design_position[0]],
-                [self._current_design_position[1]],
-            )
-            if self._fov_design_size is None:
-                self._fov_item.setData([], [])
-            else:
-                half_w = abs(float(self._fov_design_size[0])) * 0.5
-                half_h = abs(float(self._fov_design_size[1])) * 0.5
-                cx, cy = self._current_design_position
-                xs = [cx - half_w, cx + half_w, cx + half_w, cx - half_w, cx - half_w]
-                ys = [cy - half_h, cy - half_h, cy + half_h, cy + half_h, cy - half_h]
-                self._fov_item.setData(xs, ys)
+        self._redraw_current_position_overlay()
 
         self._set_slot_item_data(self._source_mark_1_item, self._source_design_marks[0])
         self._set_slot_item_data(self._source_mark_2_item, self._source_design_marks[1])
@@ -663,6 +647,39 @@ class _DesignPlotPane(QWidget):
         else:
             self._check_mark_item.setData([], [])
         self._redraw_hover()
+
+    def _redraw_current_position_overlay(self) -> None:
+        if self._plot is None:
+            return
+        if self._current_design_position is None:
+            self._current_crosshair_item.setData([], [])
+            self._current_item.setData([], [])
+            self._fov_item.setData([], [])
+            return
+
+        pixel_size = self._data_units_per_screen_pixel()
+        if self._document is None or pixel_size is None:
+            self._current_crosshair_item.setData([], [])
+        else:
+            cx, cy = self._current_design_position
+            half_size = self.CURRENT_CROSSHAIR_HALF_SIZE_PX * pixel_size
+            self._current_crosshair_item.setData(
+                [cx - half_size, cx + half_size, float("nan"), cx, cx],
+                [cy, cy, float("nan"), cy - half_size, cy + half_size],
+            )
+        self._current_item.setData(
+            [self._current_design_position[0]],
+            [self._current_design_position[1]],
+        )
+        if self._fov_design_size is None:
+            self._fov_item.setData([], [])
+            return
+        half_w = abs(float(self._fov_design_size[0])) * 0.5
+        half_h = abs(float(self._fov_design_size[1])) * 0.5
+        cx, cy = self._current_design_position
+        xs = [cx - half_w, cx + half_w, cx + half_w, cx - half_w, cx - half_w]
+        ys = [cy - half_h, cy - half_h, cy + half_h, cy + half_h, cy - half_h]
+        self._fov_item.setData(xs, ys)
 
     def _redraw_probe_route(self) -> None:
         if self._plot is None:
@@ -894,6 +911,7 @@ class _DesignPlotPane(QWidget):
             self._axis_triad_x_item.setData([], [])
             self._axis_triad_y_item.setData([], [])
             self._axis_triad_z_item.setData([], [])
+            self._axis_triad_z_dot_item.setData([], [])
             for item in (
                 self._axis_triad_x_label,
                 self._axis_triad_y_label,
@@ -914,8 +932,15 @@ class _DesignPlotPane(QWidget):
         base = (float(x_min) + margin, float(y_min) + margin)
         x_end = (base[0] + length, base[1])
         y_end = (base[0], base[1] + length)
-        z_end = (base[0] - length * 0.38, base[1] + length * 0.38)
         arrow = pixel_size * 7.0
+        z_radius = pixel_size * 7.0
+        circle_points = [
+            (
+                base[0] + math.cos(index / 32.0 * math.tau) * z_radius,
+                base[1] + math.sin(index / 32.0 * math.tau) * z_radius,
+            )
+            for index in range(33)
+        ]
         self._axis_triad_x_item.setData(
             [base[0], x_end[0], float("nan"), x_end[0], x_end[0] - arrow, float("nan"), x_end[0], x_end[0] - arrow],
             [base[1], x_end[1], float("nan"), x_end[1], x_end[1] + arrow * 0.55, float("nan"), x_end[1], x_end[1] - arrow * 0.55],
@@ -925,12 +950,16 @@ class _DesignPlotPane(QWidget):
             [base[1], y_end[1], float("nan"), y_end[1], y_end[1] - arrow, float("nan"), y_end[1], y_end[1] - arrow],
         )
         self._axis_triad_z_item.setData(
-            [base[0], z_end[0], float("nan"), z_end[0], z_end[0] + arrow * 0.95, float("nan"), z_end[0], z_end[0] + arrow * 0.2],
-            [base[1], z_end[1], float("nan"), z_end[1], z_end[1] - arrow * 0.2, float("nan"), z_end[1], z_end[1] - arrow * 0.95],
+            [point[0] for point in circle_points],
+            [point[1] for point in circle_points],
         )
+        self._axis_triad_z_dot_item.setData([base[0]], [base[1]])
         self._axis_triad_x_label.setPos(x_end[0] + pixel_size * 5.0, x_end[1])
         self._axis_triad_y_label.setPos(y_end[0], y_end[1] + pixel_size * 5.0)
-        self._axis_triad_z_label.setPos(z_end[0] - pixel_size * 5.0, z_end[1])
+        self._axis_triad_z_label.setPos(
+            base[0] - pixel_size * 10.0,
+            base[1] + pixel_size * 16.0,
+        )
         for item in (
             self._axis_triad_x_label,
             self._axis_triad_y_label,
