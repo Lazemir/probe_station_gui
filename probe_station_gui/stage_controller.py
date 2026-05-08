@@ -236,10 +236,16 @@ class StageController(QObject):
         self._needle_down_lowering_mm: Optional[float] = None
         self._axis_a_calibration: dict[str, float | str] | None = None
         self._axis_z_calibration: dict[str, float | str | tuple[float, ...]] | None = None
+        self._active_needles_action: str | None = None
+        self._active_needles_programmed_feedrate: float | None = None
         self._oscillation_active = False
         self._motion_safety_disabled = False
-        self._queued_needles_actions: deque[tuple[str, float | None]] = deque()
-        self._oscillation_needles_actions: deque[tuple[str, float | None]] = deque()
+        self._queued_needles_actions: deque[
+            tuple[str, float | None, float | None]
+        ] = deque()
+        self._oscillation_needles_actions: deque[
+            tuple[str, float | None, float | None]
+        ] = deque()
         self._b_axis_zero_position: Optional[float] = None
         self._serial_session_lock = threading.RLock()
         self._feed_override_lock = threading.Lock()
@@ -404,6 +410,8 @@ class StageController(QObject):
         self._last_status_timestamp = None
         self._last_jog_write_timestamp = None
         self._jog_motion_active = False
+        self._active_needles_action = None
+        self._active_needles_programmed_feedrate = None
         with self._feed_override_lock:
             self._active_feed_override_percent = None
         self._current_status_report_mask = None
@@ -793,29 +801,35 @@ class StageController(QObject):
             thread.start()
             return True
 
-    def request_needles_raise(self) -> None:
+    def request_needles_raise(self, feedrate: float | None = None) -> None:
         """Raise the needles by homing the A axis."""
 
         with self._task_lock:
             if self._active_thread and self._active_thread.is_alive():
                 if self._oscillation_active:
-                    self._queue_oscillation_needles_action_locked("raise")
+                    self._queue_oscillation_needles_action_locked(
+                        "raise",
+                        feedrate=feedrate,
+                    )
                     return
                 self.status_message.emit("Stage is busy. Ignoring needle raise request.")
                 return
-            self._start_needles_action_locked("raise")
+            self._start_needles_action_locked("raise", feedrate=feedrate)
 
-    def request_needles_lower(self) -> None:
+    def request_needles_lower(self, feedrate: float | None = None) -> None:
         """Lower the needles to the calibrated down position."""
 
         with self._task_lock:
             if self._active_thread and self._active_thread.is_alive():
                 if self._oscillation_active:
-                    self._queue_oscillation_needles_action_locked("lower")
+                    self._queue_oscillation_needles_action_locked(
+                        "lower",
+                        feedrate=feedrate,
+                    )
                     return
                 self.status_message.emit("Stage is busy. Ignoring needle lower request.")
                 return
-            self._start_needles_action_locked("lower")
+            self._start_needles_action_locked("lower", feedrate=feedrate)
 
     def apply_needle_calibration(
         self,
@@ -950,19 +964,29 @@ class StageController(QObject):
 
         return self._axis_limits_for_configured_mode(axis.upper().strip(), None)
 
-    def request_needles_adjust(self, step_mm: float) -> None:
+    def request_needles_adjust(
+        self,
+        step_mm: float,
+        feedrate: float | None = None,
+    ) -> None:
         """Adjust the A axis for needle calibration without the XY safety gate."""
 
         with self._task_lock:
             if self._active_thread and self._active_thread.is_alive():
                 if self._oscillation_active:
                     self._queue_oscillation_needles_action_locked(
-                        "adjust", float(step_mm)
+                        "adjust",
+                        float(step_mm),
+                        feedrate=feedrate,
                     )
                     return
                 self.status_message.emit("Stage is busy. Ignoring needle adjustment.")
                 return
-            self._start_needles_action_locked("adjust", float(step_mm))
+            self._start_needles_action_locked(
+                "adjust",
+                float(step_mm),
+                feedrate=feedrate,
+            )
 
     def request_oscillation(
         self, mode: str, amplitude_mm: float, feedrate: float, turns_per_sweep: float = 3.0
@@ -1080,6 +1104,7 @@ class StageController(QObject):
         self.status_message.emit(reason)
         self._update_homing_status(set())
         self._set_needles_state(False, known=False)
+        self.queue_soft_reset(source="cancel_active_task")
 
     def cancel_active_motion(self, reason: str = "Motion cancel requested.") -> None:
         """Cancel a jog-backed motion without resetting controller state."""
@@ -1393,6 +1418,19 @@ class StageController(QObject):
         except (TypeError, ValueError, ZeroDivisionError):
             return None
         return self._queue_feed_override_percent(target_percent)
+
+    def queue_active_needles_feedrate(self, target_feedrate: float) -> int | None:
+        """Apply a realtime feed override to an active needle G1 move."""
+
+        with self._task_lock:
+            programmed_feedrate = self._active_needles_programmed_feedrate
+            action = self._active_needles_action
+        if action not in {"raise", "lower", "adjust"} or programmed_feedrate is None:
+            return None
+        return self.queue_feed_override_for_feedrate(
+            programmed_feedrate,
+            target_feedrate,
+        )
 
     def queue_feed_override_reset(self) -> int | None:
         """Return feed override to 100% without blocking the UI."""
@@ -2230,7 +2268,32 @@ class StageController(QObject):
         self.status_message.emit("Returning stage to calibration origin…")
         self._send_relative_move(serial_connection, move)
 
-    def _run_needles_action(self, action: str) -> None:
+    def _begin_needles_feedrate_control(
+        self,
+        action: str,
+        feedrate: float | None,
+    ) -> float:
+        programmed_feedrate = (
+            self.DEFAULT_FEEDRATE if feedrate is None else max(0.1, float(feedrate))
+        )
+        with self._task_lock:
+            self._active_needles_action = action
+            self._active_needles_programmed_feedrate = programmed_feedrate
+        return programmed_feedrate
+
+    def _end_needles_feedrate_control(self) -> None:
+        with self._task_lock:
+            had_active_control = self._active_needles_action is not None
+            self._active_needles_action = None
+            self._active_needles_programmed_feedrate = None
+        if had_active_control:
+            self.queue_feed_override_reset()
+
+    def _run_needles_action(
+        self,
+        action: str,
+        feedrate: float | None = None,
+    ) -> None:
         self.needles_action_started.emit(action)
         try:
             serial_connection = self._serial
@@ -2251,12 +2314,23 @@ class StageController(QObject):
                     if current_a is None:
                         raise StageControllerError("A axis position unavailable.")
                     if abs(current_a) >= 1e-6:
-                        self.status_message.emit("Needles: raising to A zero.")
-                        self._send_relative_move(
-                            serial_connection,
-                            MoveVector(a=-current_a),
-                            ignore_needle_safety=True,
+                        programmed_feedrate = self._begin_needles_feedrate_control(
+                            action,
+                            feedrate,
                         )
+                        self.status_message.emit(
+                            "Needles: raising to A zero "
+                            f"F{self._format_gcode_value(programmed_feedrate)}."
+                        )
+                        try:
+                            self._send_relative_move(
+                                serial_connection,
+                                MoveVector(a=-current_a),
+                                ignore_needle_safety=True,
+                                feedrate=programmed_feedrate,
+                            )
+                        finally:
+                            self._end_needles_feedrate_control()
                     self._update_needles_from_a_position(0.0)
                     self.needles_action_finished.emit(True, "Needles raised.", action)
                     return
@@ -2284,12 +2358,20 @@ class StageController(QObject):
                     self._update_needles_from_a_position(target_a)
                     self.needles_action_finished.emit(True, "Needles already lowered.", action)
                     return
-                self._send_absolute_axis_move(
-                    serial_connection,
-                    "A",
-                    target_a,
-                    ignore_needle_safety=True,
+                programmed_feedrate = self._begin_needles_feedrate_control(
+                    action,
+                    feedrate,
                 )
+                try:
+                    self._send_absolute_axis_move(
+                        serial_connection,
+                        "A",
+                        target_a,
+                        ignore_needle_safety=True,
+                        feedrate=programmed_feedrate,
+                    )
+                finally:
+                    self._end_needles_feedrate_control()
                 self._update_needles_from_a_position(target_a)
                 self.needles_action_finished.emit(True, "Needles lowered.", action)
                 return
@@ -2443,7 +2525,11 @@ class StageController(QObject):
             return float(self._last_stage_position[index])
         return None
 
-    def _run_needles_adjust(self, step_mm: float) -> None:
+    def _run_needles_adjust(
+        self,
+        step_mm: float,
+        feedrate: float | None = None,
+    ) -> None:
         action = "adjust"
         try:
             serial_connection = self._serial
@@ -2466,12 +2552,20 @@ class StageController(QObject):
             if abs(target_a - current_a) < 1e-6:
                 self.needles_action_finished.emit(True, "Needle position unchanged.", action)
                 return
-            self._send_absolute_axis_move(
-                serial_connection,
-                "A",
-                target_a,
-                ignore_needle_safety=True,
+            programmed_feedrate = self._begin_needles_feedrate_control(
+                action,
+                feedrate,
             )
+            try:
+                self._send_absolute_axis_move(
+                    serial_connection,
+                    "A",
+                    target_a,
+                    ignore_needle_safety=True,
+                    feedrate=programmed_feedrate,
+                )
+            finally:
+                self._end_needles_feedrate_control()
             current_a = self._read_current_a_position(serial_connection)
             if current_a is None:
                 raise StageControllerError("Unable to confirm A position after move.")
@@ -4110,15 +4204,16 @@ class StageController(QObject):
     ) -> None:
         """Apply queued A-axis actions inline while oscillation continues."""
 
-        pending: list[tuple[str, float | None]] = []
+        pending: list[tuple[str, float | None, float | None]] = []
         with self._task_lock:
             while self._oscillation_needles_actions:
                 pending.append(self._oscillation_needles_actions.popleft())
-        for action, step_mm in pending:
+        for action, step_mm, feedrate in pending:
             self._execute_oscillation_needles_action(
                 serial_connection,
                 action,
                 step_mm,
+                feedrate,
             )
 
     def _execute_oscillation_needles_action(
@@ -4126,6 +4221,7 @@ class StageController(QObject):
         serial_connection: serial.Serial,
         action: str,
         step_mm: float | None,
+        feedrate: float | None,
     ) -> None:
         """Execute an A-axis move inline in G91 during oscillation."""
 
@@ -4183,7 +4279,11 @@ class StageController(QObject):
             self._write_relative_g1_unchecked(
                 serial_connection,
                 MoveVector(a=relative_a_move),
-                feedrate=self.DEFAULT_FEEDRATE,
+                feedrate=(
+                    self.DEFAULT_FEEDRATE
+                    if feedrate is None
+                    else max(0.1, float(feedrate))
+                ),
             )
             new_a = target_a
             self._update_cached_axis_position("A", new_a)
@@ -4311,11 +4411,15 @@ class StageController(QObject):
             raise StageControllerError("Operation cancelled.")
 
     def _queue_needles_action_locked(
-        self, action: str, step_mm: float | None = None
+        self,
+        action: str,
+        step_mm: float | None = None,
+        *,
+        feedrate: float | None = None,
     ) -> None:
         """Queue a needle command so it runs immediately after oscillation stops."""
 
-        self._queued_needles_actions.append((action, step_mm))
+        self._queued_needles_actions.append((action, step_mm, feedrate))
         self._cancel_event.set()
         if action == "raise":
             label = "Needle raise"
@@ -4327,11 +4431,15 @@ class StageController(QObject):
         self.status_message.emit(f"{label} queued with priority. Stopping oscillation.")
 
     def _queue_oscillation_needles_action_locked(
-        self, action: str, step_mm: float | None = None
+        self,
+        action: str,
+        step_mm: float | None = None,
+        *,
+        feedrate: float | None = None,
     ) -> None:
         """Queue an A-axis move to be injected into the running oscillation."""
 
-        self._oscillation_needles_actions.append((action, step_mm))
+        self._oscillation_needles_actions.append((action, step_mm, feedrate))
         self.needles_action_started.emit(action)
         if action == "raise":
             label = "Needle raise"
@@ -4343,7 +4451,11 @@ class StageController(QObject):
         self.status_message.emit(f"{label} queued during oscillation.")
 
     def _start_needles_action_locked(
-        self, action: str, step_mm: float | None = None
+        self,
+        action: str,
+        step_mm: float | None = None,
+        *,
+        feedrate: float | None = None,
     ) -> None:
         """Start a needle action while the caller owns the task lock."""
 
@@ -4353,7 +4465,7 @@ class StageController(QObject):
                 step_mm = 0.0
             thread = threading.Thread(
                 target=self._run_needles_adjust,
-                args=(float(step_mm),),
+                args=(float(step_mm), feedrate),
                 daemon=True,
             )
             self._active_thread = thread
@@ -4362,7 +4474,7 @@ class StageController(QObject):
             return
         thread = threading.Thread(
             target=self._run_needles_action,
-            args=(action,),
+            args=(action, feedrate),
             daemon=True,
         )
         self._active_thread = thread
@@ -4376,8 +4488,12 @@ class StageController(QObject):
                 return
             if not self._queued_needles_actions:
                 return
-            action, step_mm = self._queued_needles_actions.popleft()
-            self._start_needles_action_locked(action, step_mm)
+            action, step_mm, feedrate = self._queued_needles_actions.popleft()
+            self._start_needles_action_locked(
+                action,
+                step_mm,
+                feedrate=feedrate,
+            )
 
     def _latest_known_a_position(self) -> float | None:
         """Return the best available cached A-axis coordinate."""

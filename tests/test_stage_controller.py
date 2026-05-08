@@ -226,6 +226,23 @@ class StageControllerStartupLimitsTest(unittest.TestCase):
             10,
         )
 
+    def test_active_needles_feedrate_queues_realtime_override(self) -> None:
+        controller = StageController()
+        serial_connection = _WritableFakeSerial()
+        try:
+            controller._serial = serial_connection
+            controller._active_needles_action = "lower"
+            controller._active_needles_programmed_feedrate = 100.0
+            controller._active_feed_override_percent = 100
+
+            applied = controller.queue_active_needles_feedrate(150.0)
+            controller._async_write_queue.join()
+
+            self.assertEqual(applied, 150)
+            self.assertEqual(serial_connection.writes, [b"\x91" * 5])
+        finally:
+            controller.shutdown()
+
 
 class _FakeSerial:
     def __init__(self) -> None:
@@ -1088,6 +1105,58 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
         finally:
             controller.shutdown()
 
+    def test_needles_lower_uses_requested_feedrate_while_active(self) -> None:
+        controller = StageController()
+        try:
+            controller._serial = _FakeSerial()
+            controller.apply_needle_calibration(down_position_mm=1.0)
+            controller._query_status = lambda _serial: types.SimpleNamespace(
+                state="Idle",
+                position=(0.0, 0.0, 0.0, 0.0),
+                work_position=(0.0, 0.0, 0.0, 0.0),
+                display_position=(0.0, 0.0, 0.0, 0.0),
+                homed_axes={"A"},
+            )
+            observed = []
+
+            def _send_absolute_axis_move(_serial, axis, value, **kwargs) -> None:
+                observed.append(
+                    (
+                        axis,
+                        value,
+                        kwargs.get("feedrate"),
+                        controller._active_needles_action,
+                        controller._active_needles_programmed_feedrate,
+                    )
+                )
+
+            controller._send_absolute_axis_move = _send_absolute_axis_move
+            controller.needles_action_started = types.SimpleNamespace(
+                emit=lambda *_args, **_kwargs: None
+            )
+            controller.needles_action_finished = types.SimpleNamespace(
+                emit=lambda *_args, **_kwargs: None
+            )
+            controller.needle_height_changed = types.SimpleNamespace(
+                emit=lambda *_args, **_kwargs: None
+            )
+            controller.needles_state_changed = types.SimpleNamespace(
+                emit=lambda *_args, **_kwargs: None
+            )
+            controller.axis_a_ready_changed = types.SimpleNamespace(
+                emit=lambda *_args, **_kwargs: None
+            )
+
+            controller._run_needles_action("lower", feedrate=80.0)
+
+            self.assertEqual(observed[0][0], "A")
+            self.assertAlmostEqual(observed[0][1], -1.0)
+            self.assertEqual(observed[0][2:], (80.0, "lower", 80.0))
+            self.assertIsNone(controller._active_needles_action)
+            self.assertIsNone(controller._active_needles_programmed_feedrate)
+        finally:
+            controller.shutdown()
+
     def test_manual_axis_a_relative_move_keeps_raw_gcode_sign(self) -> None:
         controller = StageController()
         try:
@@ -1461,6 +1530,32 @@ class StageControllerPriorityNeedlesActionTest(unittest.TestCase):
         self.assertTrue(controller._needles_known)
         self.assertEqual(messages[-1], "Coordinate move cancel requested.")
 
+    def test_cancel_active_task_soft_resets_and_clears_needle_feedrate_control(self) -> None:
+        controller = StageController()
+        controller._serial = _WritableFakeSerial()
+        controller._homed_axes = {"X", "Y", "A"}
+        controller._needles_up = False
+        controller._needles_known = True
+        controller._active_needles_action = "lower"
+        controller._active_needles_programmed_feedrate = 80.0
+        messages = []
+        controller.status_message = types.SimpleNamespace(
+            emit=lambda message: messages.append(message)
+        )
+        try:
+            controller.cancel_active_task("Needle move cancel requested.")
+            controller._async_write_queue.join()
+
+            self.assertTrue(controller._cancel_event.is_set())
+            self.assertIn(b"\x18", controller._serial.writes)
+            self.assertEqual(controller._homed_axes, set())
+            self.assertFalse(controller._needles_known)
+            self.assertIsNone(controller._active_needles_action)
+            self.assertIsNone(controller._active_needles_programmed_feedrate)
+            self.assertEqual(messages[0], "Needle move cancel requested.")
+        finally:
+            controller.shutdown()
+
     def test_needles_lower_queues_during_oscillation(self) -> None:
         controller = StageController()
         controller._oscillation_active = True
@@ -1477,7 +1572,7 @@ class StageControllerPriorityNeedlesActionTest(unittest.TestCase):
 
         self.assertFalse(controller._cancel_event.is_set())
         self.assertEqual(
-            list(controller._oscillation_needles_actions), [("lower", None)]
+            list(controller._oscillation_needles_actions), [("lower", None, None)]
         )
         self.assertIn("queued during oscillation", messages[-1])
 

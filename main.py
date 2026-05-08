@@ -1263,16 +1263,6 @@ class Main(QMainWindow):
                 logger.debug(
                     "Skipping serial auto-connect because previous session was disconnected"
                 )
-        needle_settings = self.settings_manager.needle_calibration_configuration()
-        if (
-            needle_settings.visa_resource.strip()
-            and not self.lcr_controller.is_connected()
-        ):
-            logger.debug(
-                "Attempting LCR auto-connect to %s",
-                needle_settings.visa_resource,
-            )
-            self.lcr_controller.request_connect()
 
     def _run_serial_startup_sync(self) -> None:
         if self.serial_connection is None or not self.serial_connection.is_open:
@@ -1709,6 +1699,19 @@ class Main(QMainWindow):
                 else None
             ),
         )
+        saved_contact_a = None
+        if needle_settings.down_position_configured:
+            saved_contact_raw_a = (
+                self.stage_controller.axis_a_gcode_coordinate_for_lowering(
+                    needle_settings.down_position_mm
+                )
+            )
+            saved_contact_a = self.stage_controller.calibrated_axis_display_value(
+                "A",
+                saved_contact_raw_a,
+            )
+        if self.joystick_panel is not None:
+            self.joystick_panel.set_needle_contact_coordinate(saved_contact_a)
         coordinate_settings = self.settings_manager.coordinate_system_configuration()
         self.stage_controller.apply_coordinate_system_configuration(
             position_mode=coordinate_settings.position_mode,
@@ -2690,6 +2693,7 @@ class Main(QMainWindow):
     def _on_linear_feedrate_changed(self, feedrate_mm_min: float) -> None:
         self._schedule_linear_feedrate_save(feedrate_mm_min)
         self._apply_coordinate_move_feedrate(feedrate_mm_min)
+        self.stage_controller.queue_active_needles_feedrate(feedrate_mm_min)
 
     def _save_pending_linear_feedrate_default(self) -> None:
         feedrate = self._pending_linear_feedrate_default
@@ -4629,6 +4633,9 @@ class Main(QMainWindow):
         self.joystick_panel.needles_lower_requested.connect(
             self.stage_controller.request_needles_lower
         )
+        self.joystick_panel.needle_contact_coordinate_save_requested.connect(
+            self._save_needle_down_position_from_display_a_coordinate
+        )
         self.joystick_panel.reset_calibration_requested.connect(
             self._reset_click_calibration
         )
@@ -4737,10 +4744,14 @@ class Main(QMainWindow):
             self._save_current_needle_height
         )
         self.needle_calibration_panel.lower_to_saved_requested.connect(
-            self.stage_controller.request_needles_lower
+            lambda: self.stage_controller.request_needles_lower(
+                self._current_linear_feedrate()
+            )
         )
         self.needle_calibration_panel.raise_needles_requested.connect(
-            self.stage_controller.request_needles_raise
+            lambda: self.stage_controller.request_needles_raise(
+                self._current_linear_feedrate()
+            )
         )
         self.lcr_controller.connection_changed.connect(
             self._on_lcr_connection_changed
@@ -5030,20 +5041,52 @@ class Main(QMainWindow):
             logger.warning("Unable to save needle down height: %s", reason)
             self._show_status(f"Unable to read A position: {status_reason}.")
             return
-        lowering_mm = self.stage_controller.axis_a_lowering_for_gcode_coordinate(
-            a_position
-        )
+        self._save_needle_down_position_from_raw_a_coordinate(a_position)
+
+    def _save_needle_down_position_from_display_a_coordinate(
+        self,
+        a_coordinate: float,
+    ) -> None:
+        try:
+            display_a = float(a_coordinate)
+        except (TypeError, ValueError):
+            self._show_status("Invalid A coordinate.")
+            return
+        if not math.isfinite(display_a):
+            self._show_status("Invalid A coordinate.")
+            return
+        raw_a = self.stage_controller.calibrated_axis_raw_value("A", display_a)
+        self._save_needle_down_position_from_raw_a_coordinate(raw_a)
+
+    def _save_needle_down_position_from_raw_a_coordinate(
+        self,
+        a_coordinate: float,
+    ) -> None:
+        try:
+            raw_a = float(a_coordinate)
+        except (TypeError, ValueError):
+            self._show_status("Invalid A coordinate.")
+            return
+        if not math.isfinite(raw_a):
+            self._show_status("Invalid A coordinate.")
+            return
+        lowering_mm = self.stage_controller.axis_a_lowering_for_gcode_coordinate(raw_a)
         settings = self.settings_manager.settings.clone()
         settings.needle_calibration.down_position_mm = lowering_mm
         settings.needle_calibration.down_position_configured = True
         self.settings_manager.replace(settings)
         self.settings_manager.save()
         self._apply_settings()
-        target_a = self.stage_controller.axis_a_gcode_coordinate_for_lowering(
+        target_raw_a = self.stage_controller.axis_a_gcode_coordinate_for_lowering(
             lowering_mm
         )
+        target_display_a = self.stage_controller.calibrated_axis_display_value(
+            "A",
+            target_raw_a,
+        )
         self._show_status(
-            f"Saved needle down height at {lowering_mm:.4f} mm (A={target_a:.4f})."
+            "Saved needle contact "
+            f"A={target_display_a:.4f} ({lowering_mm:.4f} mm lowering)."
         )
 
     def _save_surface_position(self, target: str) -> None:

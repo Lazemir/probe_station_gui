@@ -105,7 +105,7 @@ class ContactOscillationWindow(QWidget):
         )
         root_layout.addWidget(positions_group)
 
-        needle_group = QGroupBox("LCR Contact Calibration", self)
+        needle_group = QGroupBox("Manual Contact Calibration", self)
         needle_layout = QVBoxLayout(needle_group)
         needle_layout.setContentsMargins(6, 6, 6, 6)
         needle_layout.addWidget(self.needle_panel)
@@ -117,7 +117,7 @@ class ContactOscillationWindow(QWidget):
         warning_layout = QHBoxLayout()
         warning_layout.addWidget(
             QLabel(
-                "Use the same A-step buttons above to lower the needles gradually while oscillation is running.",
+                "Use the joystick A controls to adjust needle height while oscillation is running.",
                 oscillation_group,
             )
         )

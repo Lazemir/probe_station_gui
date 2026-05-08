@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import math
 import sys
 import time
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import serial
 from PySide6.QtCore import QEvent, QLocale, QRectF, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QCloseEvent, QPainter, QPen
+from PySide6.QtGui import QColor, QCloseEvent, QDoubleValidator, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -163,6 +165,93 @@ class _FeedrateSlider(QSlider):
             )
 
 
+class _NeedleContactCoordinateEdit(QWidget):
+    """Temporary editor for the saved needle contact A coordinate."""
+
+    accepted = Signal(float)
+    cancelled = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("NeedleContactCoordinateEdit")
+        self._line_edit = QLineEdit(self)
+        validator = QDoubleValidator(self._line_edit)
+        validator.setLocale(QLocale.c())
+        validator.setNotation(QDoubleValidator.StandardNotation)
+        self._line_edit.setValidator(validator)
+        self._line_edit.setAlignment(Qt.AlignCenter)
+        self._line_edit.installEventFilter(self)
+
+        self._save_button = QPushButton("Save", self)
+        self._save_button.setFocusPolicy(Qt.NoFocus)
+        self._save_button.clicked.connect(self._accept_current_text)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        layout.addWidget(self._line_edit, 1)
+        layout.addWidget(self._save_button)
+
+        for widget in (self, self._line_edit, self._save_button):
+            font = widget.font()
+            font.setBold(False)
+            widget.setFont(font)
+        self.setStyleSheet(
+            "#NeedleContactCoordinateEdit QLineEdit, "
+            "#NeedleContactCoordinateEdit QPushButton { font-weight: normal; }"
+        )
+        self.hide()
+        self._accepting = False
+        self._cancel_on_focus_out = True
+
+    def set_cancel_on_focus_out(self, enabled: bool) -> None:
+        self._cancel_on_focus_out = bool(enabled)
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt API style
+        self._line_edit.setText(text)
+
+    def clear(self) -> None:
+        self._line_edit.clear()
+
+    def setModified(self, modified: bool) -> None:  # noqa: N802 - Qt API style
+        self._line_edit.setModified(modified)
+
+    def selectAll(self) -> None:  # noqa: N802 - Qt API style
+        self._line_edit.selectAll()
+
+    def setFocus(self, reason: Qt.FocusReason = Qt.OtherFocusReason) -> None:  # type: ignore[override]
+        self._line_edit.setFocus(reason)
+
+    def eventFilter(self, obj, event):  # type: ignore[override]
+        if obj is self._line_edit and event.type() == QEvent.KeyPress:
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                self._accept_current_text()
+                event.accept()
+                return True
+            if event.key() == Qt.Key_Escape:
+                self.cancelled.emit()
+                event.accept()
+                return True
+        if (
+            obj is self._line_edit
+            and event.type() == QEvent.FocusOut
+            and not self._accepting
+            and self._cancel_on_focus_out
+        ):
+            self.cancelled.emit()
+        return super().eventFilter(obj, event)
+
+    def _accept_current_text(self) -> None:
+        if not self._line_edit.hasAcceptableInput():
+            QApplication.beep()
+            return
+        self._accepting = True
+        try:
+            self.accepted.emit(float(self._line_edit.text().strip()))
+        finally:
+            self._accepting = False
+
+
 class JoystickWindow(QWidget):
     """Widget that provides directional jogging controls."""
 
@@ -173,8 +262,9 @@ class JoystickWindow(QWidget):
     jog_stopped = Signal()
     home_axis_requested = Signal(str)
     home_all_requested = Signal()
-    needles_raise_requested = Signal()
-    needles_lower_requested = Signal()
+    needles_raise_requested = Signal(float)
+    needles_lower_requested = Signal(float)
+    needle_contact_coordinate_save_requested = Signal(float)
     reset_calibration_requested = Signal()
     manual_axis_move_requested = Signal(str, float, str, float)
     manual_axis_settings_changed = Signal(str, float, str, float)
@@ -310,6 +400,9 @@ class JoystickWindow(QWidget):
         self._needle_targets: dict[str, QPushButton] = {}
         self._needle_text: dict[str, str] = {}
         self._needle_overlays: dict[str, _SpinnerOverlay] = {}
+        self._needle_contact_coordinate_edit: _NeedleContactCoordinateEdit | None = None
+        self._needle_contact_coordinate_button: QPushButton | None = None
+        self._saved_needle_contact_a_coordinate: float | None = None
         self._needle_spinner_angle = 0
         self._homing_animation_timer = QTimer(self)
         self._homing_animation_timer.setInterval(250)
@@ -529,13 +622,30 @@ class JoystickWindow(QWidget):
         self.needles_lower_button = QPushButton("Lower", self)
         self.needles_raise_button.setCheckable(True)
         self.needles_lower_button.setCheckable(True)
-        self.needles_raise_button.setToolTip("Raise needles (home A)")
-        self.needles_lower_button.setToolTip("Lower needles (calibrated)")
+        self.needles_raise_button.setToolTip(
+            "Raise needles (home A). Right-click to edit contact A."
+        )
+        self.needles_lower_button.setToolTip(
+            "Lower needles (calibrated). Right-click to edit contact A."
+        )
+        for button in (self.needles_raise_button, self.needles_lower_button):
+            button.setContextMenuPolicy(Qt.CustomContextMenu)
+            button.customContextMenuRequested.connect(
+                self._show_needle_contact_coordinate_menu
+            )
         self.needles_raise_button.clicked.connect(self._raise_needles)
         self.needles_lower_button.clicked.connect(self._lower_needles)
         needles_layout.addWidget(self.needles_raise_button)
         needles_layout.addWidget(self.needles_lower_button)
         root_layout.addLayout(needles_layout)
+
+        self._needle_contact_coordinate_edit = _NeedleContactCoordinateEdit(self)
+        self._needle_contact_coordinate_edit.accepted.connect(
+            self._save_needle_contact_coordinate
+        )
+        self._needle_contact_coordinate_edit.cancelled.connect(
+            self._cancel_needle_contact_coordinate_edit
+        )
 
         self.needles_status = QLabel("Needles: unknown", self)
         self.needles_status.setAlignment(Qt.AlignCenter)
@@ -773,11 +883,6 @@ class JoystickWindow(QWidget):
             self.manual_axis_mode_combo.setCurrentIndex(mode_index)
         self._manual_axis_mode = mode
         self.manual_axis_distance_spin.setValue(self._manual_axis_distance_mm)
-        if self._manual_axis_controls_enabled:
-            self._set_linear_feedrate(
-                self._manual_axis_feedrate_mm_min,
-                reissue_if_active=False,
-            )
         self.manual_axis_feedrate_spin.blockSignals(True)
         self.manual_axis_feedrate_spin.setValue(self._linear_feedrate_value)
         self.manual_axis_feedrate_spin.blockSignals(False)
@@ -871,6 +976,8 @@ class JoystickWindow(QWidget):
         extra_controls_enabled = enabled and (
             self._axis_a_ready or self._motion_safety_disabled
         )
+        if not enabled:
+            self._cancel_needle_contact_coordinate_edit()
         for widget in (
             self.linear_feedrate_slider,
             self.home_all_button,
@@ -953,6 +1060,17 @@ class JoystickWindow(QWidget):
             self._stop_needle_animation("lower")
         if not success:
             self._show_warning(message)
+
+    def set_needle_contact_coordinate(self, a_coordinate: float | None) -> None:
+        if a_coordinate is None:
+            self._saved_needle_contact_a_coordinate = None
+            return
+        try:
+            value = float(a_coordinate)
+        except (TypeError, ValueError):
+            self._saved_needle_contact_a_coordinate = None
+            return
+        self._saved_needle_contact_a_coordinate = value if math.isfinite(value) else None
 
     def _move_safety_check(self) -> bool:
         if self._motion_safety_disabled:
@@ -1341,11 +1459,114 @@ class JoystickWindow(QWidget):
 
     def _raise_needles(self) -> None:
         self._start_needle_animation("raise", self.needles_raise_button)
-        self.needles_raise_requested.emit()
+        self.needles_raise_requested.emit(self._linear_feedrate_value)
 
     def _lower_needles(self) -> None:
         self._start_needle_animation("lower", self.needles_lower_button)
-        self.needles_lower_requested.emit()
+        self.needles_lower_requested.emit(self._linear_feedrate_value)
+
+    def _show_needle_contact_coordinate_menu(self, pos) -> None:
+        sender = self.sender()
+        target_button = (
+            sender if isinstance(sender, QPushButton) else self.needles_raise_button
+        )
+        default_a_position = self._saved_needle_contact_a_coordinate
+        if default_a_position is None:
+            default_a_position = self._current_needle_contact_a_coordinate()
+        self._show_needle_contact_coordinate_editor(
+            target_button,
+            default_a_position,
+        )
+
+        editor = self._needle_contact_coordinate_edit
+        if editor is not None:
+            editor.set_cancel_on_focus_out(False)
+        menu = QMenu(target_button)
+        use_current_action = menu.addAction("Use Current A Coordinate")
+        menu.setDefaultAction(use_current_action)
+        selected = menu.exec(target_button.mapToGlobal(pos))
+        if editor is not None:
+            editor.set_cancel_on_focus_out(True)
+        if selected == use_current_action:
+            self._show_needle_contact_coordinate_editor(
+                target_button,
+                self._current_needle_contact_a_coordinate(),
+            )
+        elif editor is not None and editor.isVisible():
+            editor.setFocus(Qt.PopupFocusReason)
+            editor.selectAll()
+
+    def _current_needle_contact_a_coordinate(self) -> float | None:
+        if self.stage_controller is None:
+            self._show_warning("Stage controller is not available.")
+            return None
+        raw_a_position = self.stage_controller.latest_a_position()
+        if raw_a_position is None:
+            raw_a_position = self.stage_controller.current_a_position()
+        if raw_a_position is None:
+            reason = self.stage_controller.last_a_position_read_failure()
+            if reason:
+                logger.warning("Unable to open contact coordinate editor: %s", reason)
+            self._show_warning("Unable to read current A coordinate.")
+            return None
+        return self.stage_controller.calibrated_axis_display_value(
+            "A",
+            raw_a_position,
+        )
+
+    def _show_needle_contact_coordinate_editor(
+        self,
+        target_button: QPushButton,
+        display_a_position: float | None,
+    ) -> None:
+        if display_a_position is None:
+            return
+        editor = self._needle_contact_coordinate_edit
+        if editor is None:
+            return
+        self._needle_contact_coordinate_button = target_button
+        self._position_needle_contact_coordinate_editor()
+        editor.setText(f"{display_a_position:.4f}")
+        editor.setModified(False)
+        editor.show()
+        editor.raise_()
+        editor.setFocus(Qt.PopupFocusReason)
+        editor.selectAll()
+
+    def _save_needle_contact_coordinate(self, a_coordinate: float) -> None:
+        editor = self._needle_contact_coordinate_edit
+        if editor is not None:
+            editor.hide()
+        self._needle_contact_coordinate_button = None
+        self.needle_contact_coordinate_save_requested.emit(float(a_coordinate))
+
+    def _cancel_needle_contact_coordinate_edit(self) -> None:
+        editor = self._needle_contact_coordinate_edit
+        if editor is None or not editor.isVisible():
+            return
+        editor.hide()
+        editor.clear()
+        self._needle_contact_coordinate_button = None
+
+    def _position_needle_contact_coordinate_editor(self) -> None:
+        editor = self._needle_contact_coordinate_edit
+        if editor is None:
+            return
+        target_button = (
+            self._needle_contact_coordinate_button or self.needles_raise_button
+        )
+        button_rect = target_button.geometry()
+        desired_width = max(button_rect.width() + 68, 148)
+        left = button_rect.left()
+        if target_button is self.needles_lower_button:
+            left = button_rect.right() - desired_width + 1
+        left = max(0, min(left, max(0, self.width() - desired_width)))
+        editor.setGeometry(
+            left,
+            button_rect.top(),
+            desired_width,
+            button_rect.height(),
+        )
 
     def _start_homing_animation(self, key: str, button: QPushButton) -> None:
         if key in self._homing_targets:
@@ -1443,7 +1664,8 @@ class JoystickWindow(QWidget):
 
     def _send_reset(self) -> None:
         self.reset_requested.emit()
-        self.send_command(b"\x18")
+        if self.stage_controller is None:
+            self.send_command(b"\x18")
 
     def send_command(self, command: str | bytes) -> bool:
         if not self.serial_connection or not self.serial_connection.is_open:
@@ -1544,6 +1766,12 @@ class JoystickWindow(QWidget):
         self._sync_physical_key_watchdog()
         self.stop_jog()
         super().focusOutEvent(event)
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        editor = self._needle_contact_coordinate_edit
+        if editor is not None and editor.isVisible():
+            self._position_needle_contact_coordinate_editor()
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
