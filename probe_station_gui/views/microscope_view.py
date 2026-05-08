@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import math
+import logging
+import threading
+from time import perf_counter
 
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
@@ -23,6 +26,9 @@ from ..design_model import DesignDocument, MeasurementTarget
 from ..route_model import MeasurementRoute
 
 
+logger = logging.getLogger(__name__)
+
+
 class MicroscopeView(QWidget):
     """Widget that renders camera frames with overlay graphics."""
 
@@ -32,6 +38,7 @@ class MicroscopeView(QWidget):
     design_minimap_clicked: Signal = Signal(float, float)
     design_minimap_double_clicked: Signal = Signal()
     measure_mode_exited: Signal = Signal()
+    _minimap_background_ready: Signal = Signal(int, object, object, object)
 
     _MINIMAP_MARGIN = 16
     _MINIMAP_MIN_SIZE = 160
@@ -65,9 +72,12 @@ class MicroscopeView(QWidget):
         self._source_design_marks: list[tuple[float, float]] = []
         self._check_design_marks: list[tuple[float, float]] = []
         self._minimap_background: QPixmap | None = None
-        self._minimap_cache_key: tuple[object, QSize] | None = None
+        self._minimap_cache_key: tuple[int, int, int] | None = None
+        self._minimap_render_key: tuple[int, int, int] | None = None
+        self._minimap_render_generation = 0
         self._minimap_rect: QRect | None = None
         self._pending_minimap_click_point: QPoint | None = None
+        self._minimap_background_ready.connect(self._on_minimap_background_ready)
         self._minimap_click_timer = QTimer(self)
         self._minimap_click_timer.setSingleShot(True)
         self._minimap_click_timer.timeout.connect(self._emit_pending_minimap_click)
@@ -120,6 +130,8 @@ class MicroscopeView(QWidget):
         if document is not self._design_document:
             self._minimap_cache_key = None
             self._minimap_background = None
+            self._minimap_render_key = None
+            self._minimap_render_generation += 1
         previous_state = (
             self._design_document,
             tuple(target.id for target in self._design_targets),
@@ -852,32 +864,142 @@ class MicroscopeView(QWidget):
     def _design_background_for_size(self, size: QSize) -> QPixmap | None:
         if self._design_document is None:
             return None
-        cache_key = (self._design_document, size)
+        cache_key = (
+            id(self._design_document),
+            int(size.width()),
+            int(size.height()),
+        )
         if self._minimap_cache_key == cache_key and self._minimap_background is not None:
             return self._minimap_background
 
-        pixmap = QPixmap(size)
-        pixmap.fill(Qt.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.Antialiasing)
-        for layer_key, polygons in self._design_document.visible_polygons().items():
-            painter.setPen(QPen(self._layer_color(layer_key), 1))
+        self._start_minimap_background_render(size, cache_key)
+        return None
+
+    def _start_minimap_background_render(
+        self,
+        size: QSize,
+        cache_key: tuple[int, int, int],
+    ) -> None:
+        if self._design_document is None:
+            return
+        if self._minimap_render_key == cache_key:
+            return
+        document = self._design_document
+        generation = self._minimap_render_generation
+        render_size = QSize(size)
+        self._minimap_render_key = cache_key
+        logger.debug(
+            "MINIMAP RENDER scheduled size=%dx%d document=%s",
+            render_size.width(),
+            render_size.height(),
+            document.path.name,
+        )
+
+        def render_background() -> None:
+            started = perf_counter()
+            try:
+                image, point_count = self._render_minimap_background_image(
+                    document,
+                    render_size,
+                )
+            except Exception:
+                logger.exception("MINIMAP RENDER failed")
+                image = None
+                point_count = 0
+            elapsed_ms = (perf_counter() - started) * 1000.0
+            logger.debug(
+                "MINIMAP RENDER complete points=%d elapsed_ms=%.2f",
+                point_count,
+                elapsed_ms,
+            )
+            self._minimap_background_ready.emit(
+                generation,
+                cache_key,
+                render_size,
+                image,
+            )
+
+        threading.Thread(
+            target=render_background,
+            name="DesignMinimapRender",
+            daemon=True,
+        ).start()
+
+    def _on_minimap_background_ready(
+        self,
+        generation: int,
+        cache_key: object,
+        _size: object,
+        image: object,
+    ) -> None:
+        if generation != self._minimap_render_generation:
+            return
+        if cache_key != self._minimap_render_key:
+            return
+        self._minimap_render_key = None
+        if not isinstance(cache_key, tuple) or not isinstance(image, QImage):
+            return
+        self._minimap_cache_key = cache_key
+        self._minimap_background = QPixmap.fromImage(image)
+        self.update()
+
+    @classmethod
+    def _render_minimap_background_image(
+        cls,
+        document: DesignDocument,
+        size: QSize,
+    ) -> tuple[QImage, int]:
+        image = QImage(size, QImage.Format_ARGB32_Premultiplied)
+        image.fill(Qt.transparent)
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        target_rect = QRect(QPoint(0, 0), size)
+        left, bottom, right, top = document.bounds
+        width = max(right - left, 1e-9)
+        height = max(top - bottom, 1e-9)
+        pad = 6.0
+        usable_width = max(target_rect.width() - 2.0 * pad, 1.0)
+        usable_height = max(target_rect.height() - 2.0 * pad, 1.0)
+        scale = min(usable_width / width, usable_height / height)
+        offset_x = target_rect.left() + (target_rect.width() - width * scale) * 0.5
+        offset_y = target_rect.top() + (target_rect.height() - height * scale) * 0.5
+        point_count = 0
+        rendered_point_count = 0
+        for layer_key, polygons in document.visible_polygons().items():
+            painter.setPen(QPen(cls._layer_color(layer_key), 1))
             painter.setBrush(Qt.NoBrush)
             for polygon in polygons:
                 if len(polygon) < 2:
                     continue
+                point_count += int(len(polygon))
+                x_values = offset_x + (polygon[:, 0] - left) * scale
+                y_values = offset_y + (top - polygon[:, 1]) * scale
+                if len(polygon) > 2:
+                    pixel_x = x_values.astype(int)
+                    pixel_y = y_values.astype(int)
+                    keep = pixel_x == pixel_x
+                    keep[0] = True
+                    keep[1:] = (pixel_x[1:] != pixel_x[:-1]) | (
+                        pixel_y[1:] != pixel_y[:-1]
+                    )
+                    x_values = x_values[keep]
+                    y_values = y_values[keep]
+                if len(x_values) < 2:
+                    continue
+                rendered_point_count += int(len(x_values))
                 path = QPainterPath()
-                start = self._map_design_point_to_rect((float(polygon[0][0]), float(polygon[0][1])), QRect(QPoint(0, 0), size))
-                path.moveTo(start)
-                for point in polygon[1:]:
-                    mapped = self._map_design_point_to_rect((float(point[0]), float(point[1])), QRect(QPoint(0, 0), size))
-                    path.lineTo(mapped)
+                path.moveTo(QPointF(float(x_values[0]), float(y_values[0])))
+                for x_value, y_value in zip(x_values[1:], y_values[1:]):
+                    path.lineTo(QPointF(float(x_value), float(y_value)))
                 path.closeSubpath()
                 painter.drawPath(path)
         painter.end()
-        self._minimap_cache_key = cache_key
-        self._minimap_background = pixmap
-        return pixmap
+        logger.debug(
+            "MINIMAP RENDER simplified points=%d rendered_points=%d",
+            point_count,
+            rendered_point_count,
+        )
+        return image, point_count
 
     def _draw_design_route(self, painter: QPainter, rect: QRect) -> None:
         if not self._design_targets:
@@ -1108,7 +1230,19 @@ class MicroscopeView(QWidget):
 
     def _map_design_point_to_rect(self, point: tuple[float, float], rect: QRect) -> QPointF:
         assert self._design_document is not None
-        left, bottom, right, top = self._design_document.bounds
+        return self._map_design_point_to_rect_for_bounds(
+            point,
+            rect,
+            self._design_document.bounds,
+        )
+
+    @staticmethod
+    def _map_design_point_to_rect_for_bounds(
+        point: tuple[float, float],
+        rect: QRect,
+        bounds: tuple[float, float, float, float],
+    ) -> QPointF:
+        left, bottom, right, top = bounds
         width = max(right - left, 1e-9)
         height = max(top - bottom, 1e-9)
         pad = 6.0
