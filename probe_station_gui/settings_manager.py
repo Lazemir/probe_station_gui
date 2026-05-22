@@ -45,6 +45,43 @@ WORK_COORDINATE_SYSTEMS: tuple[str, ...] = (
     "G59.3",
 )
 
+OBJECTIVE_NAMES: tuple[str, ...] = ("X5", "X10", "X20", "X50")
+DEFAULT_ACTIVE_OBJECTIVE = "X5"
+OBJECTIVE_DEFAULTS: dict[str, dict[str, float]] = {
+    "X5": {
+        "magnification": 5.0,
+        "calibration_step_mm": 0.2,
+        "calibration_target_pixels": 120.0,
+        "autofocus_range_mm": 1.0,
+        "autofocus_fine_step_mm": 0.02,
+        "autofocus_sweep_feedrate_mm_min": 60.0,
+    },
+    "X10": {
+        "magnification": 10.0,
+        "calibration_step_mm": 0.1,
+        "calibration_target_pixels": 120.0,
+        "autofocus_range_mm": 0.6,
+        "autofocus_fine_step_mm": 0.01,
+        "autofocus_sweep_feedrate_mm_min": 30.0,
+    },
+    "X20": {
+        "magnification": 20.0,
+        "calibration_step_mm": 0.05,
+        "calibration_target_pixels": 120.0,
+        "autofocus_range_mm": 0.35,
+        "autofocus_fine_step_mm": 0.005,
+        "autofocus_sweep_feedrate_mm_min": 15.0,
+    },
+    "X50": {
+        "magnification": 50.0,
+        "calibration_step_mm": 0.02,
+        "calibration_target_pixels": 120.0,
+        "autofocus_range_mm": 0.15,
+        "autofocus_fine_step_mm": 0.002,
+        "autofocus_sweep_feedrate_mm_min": 6.0,
+    },
+}
+
 LCR_MEASUREMENT_FUNCTIONS: tuple[str, ...] = (
     "Cs-Rs",
     "Cs-D",
@@ -560,6 +597,118 @@ class CoordinateSystemSettings:
 
 
 @dataclass
+class ObjectiveCalibrationSettings:
+    """Per-objective optical offsets and camera-stage calibration."""
+
+    name: str = DEFAULT_ACTIVE_OBJECTIVE
+    magnification: float = 5.0
+    xy_offset_x_mm: float = 0.0
+    xy_offset_y_mm: float = 0.0
+    xy_offset_configured: bool = False
+    z_offset_mm: float = 0.0
+    z_offset_configured: bool = False
+    pixels_to_mm: List[List[float]] = field(default_factory=list)
+    xy_calibration_configured: bool = False
+    calibration_step_mm: float = 0.2
+    calibration_target_pixels: float = 120.0
+    autofocus_range_mm: float = 1.0
+    autofocus_fine_step_mm: float = 0.02
+    autofocus_sweep_feedrate_mm_min: float = 60.0
+
+    def clone(self) -> "ObjectiveCalibrationSettings":
+        """Return a copy of the objective calibration."""
+
+        return ObjectiveCalibrationSettings(
+            name=self.name,
+            magnification=self.magnification,
+            xy_offset_x_mm=self.xy_offset_x_mm,
+            xy_offset_y_mm=self.xy_offset_y_mm,
+            xy_offset_configured=self.xy_offset_configured,
+            z_offset_mm=self.z_offset_mm,
+            z_offset_configured=self.z_offset_configured,
+            pixels_to_mm=[list(row) for row in self.pixels_to_mm],
+            xy_calibration_configured=self.xy_calibration_configured,
+            calibration_step_mm=self.calibration_step_mm,
+            calibration_target_pixels=self.calibration_target_pixels,
+            autofocus_range_mm=self.autofocus_range_mm,
+            autofocus_fine_step_mm=self.autofocus_fine_step_mm,
+            autofocus_sweep_feedrate_mm_min=self.autofocus_sweep_feedrate_mm_min,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        """Serialize the objective calibration."""
+
+        return {
+            "name": self.name,
+            "magnification": self.magnification,
+            "xy_offset_x_mm": self.xy_offset_x_mm,
+            "xy_offset_y_mm": self.xy_offset_y_mm,
+            "xy_offset_configured": self.xy_offset_configured,
+            "z_offset_mm": self.z_offset_mm,
+            "z_offset_configured": self.z_offset_configured,
+            "pixels_to_mm": [list(row) for row in self.pixels_to_mm],
+            "xy_calibration_configured": self.xy_calibration_configured,
+            "calibration_step_mm": self.calibration_step_mm,
+            "calibration_target_pixels": self.calibration_target_pixels,
+            "autofocus_range_mm": self.autofocus_range_mm,
+            "autofocus_fine_step_mm": self.autofocus_fine_step_mm,
+            "autofocus_sweep_feedrate_mm_min": self.autofocus_sweep_feedrate_mm_min,
+        }
+
+
+def default_objective(name: str) -> ObjectiveCalibrationSettings:
+    """Return default calibration parameters for one objective."""
+
+    defaults = OBJECTIVE_DEFAULTS.get(name, OBJECTIVE_DEFAULTS[DEFAULT_ACTIVE_OBJECTIVE])
+    return ObjectiveCalibrationSettings(
+        name=name,
+        magnification=defaults["magnification"],
+        calibration_step_mm=defaults["calibration_step_mm"],
+        calibration_target_pixels=defaults["calibration_target_pixels"],
+        autofocus_range_mm=defaults["autofocus_range_mm"],
+        autofocus_fine_step_mm=defaults["autofocus_fine_step_mm"],
+        autofocus_sweep_feedrate_mm_min=defaults["autofocus_sweep_feedrate_mm_min"],
+    )
+
+
+def default_objectives() -> Dict[str, ObjectiveCalibrationSettings]:
+    """Return the default objective profile map."""
+
+    return {name: default_objective(name) for name in OBJECTIVE_NAMES}
+
+
+@dataclass
+class ObjectivesSettings:
+    """Collection of all objective-specific optical calibration values."""
+
+    active_name: str = DEFAULT_ACTIVE_OBJECTIVE
+    apply_offsets_on_change: bool = True
+    objectives: Dict[str, ObjectiveCalibrationSettings] = field(
+        default_factory=default_objectives
+    )
+
+    def clone(self) -> "ObjectivesSettings":
+        """Return a deep copy of objective settings."""
+
+        return ObjectivesSettings(
+            active_name=self.active_name,
+            apply_offsets_on_change=self.apply_offsets_on_change,
+            objectives={key: value.clone() for key, value in self.objectives.items()},
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        """Serialize objective settings."""
+
+        return {
+            "active_name": self.active_name,
+            "apply_offsets_on_change": self.apply_offsets_on_change,
+            "objectives": {
+                key: value.to_dict() for key, value in self.objectives.items()
+            },
+        }
+
+
+@dataclass
 class Settings:
     """Container for all configurable values."""
 
@@ -581,6 +730,7 @@ class Settings:
     coordinate_system: CoordinateSystemSettings = field(
         default_factory=CoordinateSystemSettings
     )
+    objectives: ObjectivesSettings = field(default_factory=ObjectivesSettings)
     design_last_directory: str = ""
 
     def clone(self) -> "Settings":
@@ -597,6 +747,7 @@ class Settings:
             axis_a_calibration=self.axis_a_calibration.clone(),
             axis_z_calibration=self.axis_z_calibration.clone(),
             coordinate_system=self.coordinate_system.clone(),
+            objectives=self.objectives.clone(),
             design_last_directory=self.design_last_directory,
         )
 
@@ -626,6 +777,7 @@ class Settings:
             "axis_a_calibration": self.axis_a_calibration.to_dict(),
             "axis_z_calibration": self.axis_z_calibration.to_dict(),
             "coordinate_system": self.coordinate_system.to_dict(),
+            "objectives": self.objectives.to_dict(),
             "design_last_directory": self.design_last_directory,
         }
 
@@ -1208,6 +1360,31 @@ class SettingsManager:
                 "preferred_system", self.DEFAULT_COORDINATE_SYSTEM
             )
 
+        objectives_section = data.get("objectives")
+        if not isinstance(objectives_section, dict):
+            data["objectives"] = ObjectivesSettings().to_dict()
+        else:
+            defaults = ObjectivesSettings().to_dict()
+            objectives_section.setdefault("active_name", defaults["active_name"])
+            objectives_section.setdefault(
+                "apply_offsets_on_change",
+                defaults["apply_offsets_on_change"],
+            )
+            raw_profiles = objectives_section.get("objectives")
+            if not isinstance(raw_profiles, dict):
+                raw_profiles = {}
+                objectives_section["objectives"] = raw_profiles
+            default_profiles = defaults["objectives"]
+            if isinstance(default_profiles, dict):
+                for name, profile in default_profiles.items():
+                    if not isinstance(raw_profiles.get(name), dict):
+                        raw_profiles[name] = profile
+                        continue
+                    stored = raw_profiles[name]
+                    if isinstance(stored, dict) and isinstance(profile, dict):
+                        for key, value in profile.items():
+                            stored.setdefault(key, value)
+
         design_last_directory = data.get("design_last_directory")
         if not isinstance(design_last_directory, str):
             data["design_last_directory"] = ""
@@ -1262,6 +1439,7 @@ class SettingsManager:
         coordinate_system_raw = (
             raw.get("coordinate_system") if isinstance(raw, dict) else None
         )
+        objectives_raw = raw.get("objectives") if isinstance(raw, dict) else None
         design_last_directory = ""
         if isinstance(raw, dict):
             design_last_directory_raw = raw.get("design_last_directory", "")
@@ -1278,6 +1456,7 @@ class SettingsManager:
             axis_a_calibration=self._parse_axis_a_calibration(axis_a_calibration_raw),
             axis_z_calibration=self._parse_axis_z_calibration(axis_z_calibration_raw),
             coordinate_system=self._parse_coordinate_system(coordinate_system_raw),
+            objectives=self._parse_objectives(objectives_raw),
             design_last_directory=design_last_directory,
         )
 
@@ -1935,6 +2114,18 @@ class SettingsManager:
             pass
         return default
 
+    def _finite_float(self, value, *, default: float) -> float:
+        result = self._coerce_float(value, default=default)
+        if not math.isfinite(result):
+            return default
+        return result
+
+    def _positive_float(self, value, *, default: float) -> float:
+        result = self._finite_float(value, default=default)
+        if result <= 0.0:
+            return default
+        return result
+
     @staticmethod
     def _normalise_choice(value, *, choices: tuple, default: str) -> str:
         if isinstance(value, str):
@@ -2006,6 +2197,154 @@ class SettingsManager:
             startup_mode=startup_mode,
             preferred_system=preferred_system,
         )
+
+    def _parse_objectives(self, raw_objectives) -> ObjectivesSettings:
+        """Normalise persisted objective profiles."""
+
+        active_name = DEFAULT_ACTIVE_OBJECTIVE
+        apply_offsets_on_change = True
+        raw_profiles = None
+        if isinstance(raw_objectives, dict):
+            raw_active = raw_objectives.get("active_name", active_name)
+            if isinstance(raw_active, str):
+                active_name = raw_active.strip().upper() or active_name
+            apply_offsets_on_change = self._coerce_bool(
+                raw_objectives.get(
+                    "apply_offsets_on_change",
+                    apply_offsets_on_change,
+                ),
+                default=apply_offsets_on_change,
+            )
+            raw_profiles = raw_objectives.get("objectives")
+        if active_name not in OBJECTIVE_NAMES:
+            active_name = DEFAULT_ACTIVE_OBJECTIVE
+
+        profiles: Dict[str, ObjectiveCalibrationSettings] = {}
+        profile_map = raw_profiles if isinstance(raw_profiles, dict) else {}
+        for name in OBJECTIVE_NAMES:
+            raw_profile = profile_map.get(name)
+            if not isinstance(raw_profile, dict):
+                raw_profile = profile_map.get(name.lower())
+            profiles[name] = self._parse_objective_profile(name, raw_profile)
+        return ObjectivesSettings(
+            active_name=active_name,
+            apply_offsets_on_change=apply_offsets_on_change,
+            objectives=profiles,
+        )
+
+    def _parse_objective_profile(
+        self,
+        name: str,
+        raw_profile,
+    ) -> ObjectiveCalibrationSettings:
+        """Normalise one objective profile."""
+
+        defaults = default_objective(name)
+        if not isinstance(raw_profile, dict):
+            return defaults
+        matrix = self._parse_pixels_to_mm(raw_profile.get("pixels_to_mm"))
+        xy_configured = self._coerce_bool(
+            raw_profile.get("xy_calibration_configured", bool(matrix)),
+            default=bool(matrix),
+        )
+        if not matrix:
+            xy_configured = False
+        return ObjectiveCalibrationSettings(
+            name=name,
+            magnification=self._positive_float(
+                raw_profile.get("magnification", defaults.magnification),
+                default=defaults.magnification,
+            ),
+            xy_offset_x_mm=self._finite_float(
+                raw_profile.get("xy_offset_x_mm", defaults.xy_offset_x_mm),
+                default=defaults.xy_offset_x_mm,
+            ),
+            xy_offset_y_mm=self._finite_float(
+                raw_profile.get("xy_offset_y_mm", defaults.xy_offset_y_mm),
+                default=defaults.xy_offset_y_mm,
+            ),
+            xy_offset_configured=self._coerce_bool(
+                raw_profile.get(
+                    "xy_offset_configured",
+                    defaults.xy_offset_configured,
+                ),
+                default=defaults.xy_offset_configured,
+            ),
+            z_offset_mm=self._finite_float(
+                raw_profile.get("z_offset_mm", defaults.z_offset_mm),
+                default=defaults.z_offset_mm,
+            ),
+            z_offset_configured=self._coerce_bool(
+                raw_profile.get(
+                    "z_offset_configured",
+                    defaults.z_offset_configured,
+                ),
+                default=defaults.z_offset_configured,
+            ),
+            pixels_to_mm=matrix,
+            xy_calibration_configured=xy_configured,
+            calibration_step_mm=self._positive_float(
+                raw_profile.get(
+                    "calibration_step_mm",
+                    defaults.calibration_step_mm,
+                ),
+                default=defaults.calibration_step_mm,
+            ),
+            calibration_target_pixels=self._positive_float(
+                raw_profile.get(
+                    "calibration_target_pixels",
+                    defaults.calibration_target_pixels,
+                ),
+                default=defaults.calibration_target_pixels,
+            ),
+            autofocus_range_mm=self._positive_float(
+                raw_profile.get(
+                    "autofocus_range_mm",
+                    defaults.autofocus_range_mm,
+                ),
+                default=defaults.autofocus_range_mm,
+            ),
+            autofocus_fine_step_mm=self._positive_float(
+                raw_profile.get(
+                    "autofocus_fine_step_mm",
+                    defaults.autofocus_fine_step_mm,
+                ),
+                default=defaults.autofocus_fine_step_mm,
+            ),
+            autofocus_sweep_feedrate_mm_min=self._positive_float(
+                raw_profile.get(
+                    "autofocus_sweep_feedrate_mm_min",
+                    defaults.autofocus_sweep_feedrate_mm_min,
+                ),
+                default=defaults.autofocus_sweep_feedrate_mm_min,
+            ),
+        )
+
+    def _parse_pixels_to_mm(self, raw_matrix) -> List[List[float]]:
+        """Return a validated 2x2 pixels-to-mm matrix."""
+
+        if not isinstance(raw_matrix, Iterable) or isinstance(raw_matrix, (str, bytes)):
+            return []
+        rows: List[List[float]] = []
+        for raw_row in raw_matrix:
+            if not isinstance(raw_row, Iterable) or isinstance(raw_row, (str, bytes)):
+                return []
+            row: List[float] = []
+            for raw_value in raw_row:
+                try:
+                    value = float(raw_value)
+                except (TypeError, ValueError):
+                    return []
+                if not math.isfinite(value):
+                    return []
+                row.append(value)
+            rows.append(row)
+        if len(rows) != 2 or any(len(row) != 2 for row in rows):
+            return []
+        determinant = rows[0][0] * rows[1][1] - rows[0][1] * rows[1][0]
+        if abs(determinant) < 1e-18:
+            return []
+        return rows
 
     @classmethod
     def _should_keep_control_binding(cls, binding: KeyBinding) -> bool:
@@ -2160,6 +2499,7 @@ class SettingsManager:
         clone.axis_z_calibration = self._parse_axis_z_calibration(
             clone.axis_z_calibration.to_dict()
         )
+        clone.objectives = self._parse_objectives(clone.objectives.to_dict())
         clone.design_last_directory = clone.design_last_directory.strip()
         return clone
 
@@ -2211,6 +2551,20 @@ class SettingsManager:
         """Return the current coordinate-system configuration clone."""
 
         return self._settings.coordinate_system.clone()
+
+    def objectives_configuration(self) -> ObjectivesSettings:
+        """Return the current objective configuration clone."""
+
+        return self._settings.objectives.clone()
+
+    def active_objective_configuration(self) -> ObjectiveCalibrationSettings:
+        """Return the active objective profile clone."""
+
+        objectives = self._settings.objectives
+        profile = objectives.objectives.get(objectives.active_name)
+        if profile is None:
+            profile = default_objective(DEFAULT_ACTIVE_OBJECTIVE)
+        return profile.clone()
 
     def design_last_directory(self) -> Path | None:
         """Return the most recently used design directory, if any."""

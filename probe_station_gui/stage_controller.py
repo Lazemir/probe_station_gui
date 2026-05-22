@@ -17,6 +17,8 @@ import serial
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QImage
 
+from probe_station_gui.motion_prediction import interpolate_position
+
 
 logger = logging.getLogger(__name__)
 
@@ -49,14 +51,6 @@ class _LazyModule:
 
 np = _LazyModule("numpy")
 cv2 = _LazyModule("cv2")
-
-
-def _load_scipy_optimize():
-    try:
-        from scipy import optimize as scipy_optimize
-    except ImportError:  # pragma: no cover - optional dependency for autofocus
-        return None
-    return scipy_optimize
 
 
 @dataclass
@@ -113,6 +107,14 @@ class _QueuedSerialWrite:
     generation: int = field(compare=False, default=0)
 
 
+@dataclass
+class _FocusSweepResult:
+    best_z: float
+    best_score: float
+    sample_count: int
+    edge_peak: bool
+
+
 class StageController(QObject):
     """Translate mouse clicks into stage movements via serial commands."""
 
@@ -121,6 +123,8 @@ class StageController(QObject):
     movement_finished: Signal = Signal(bool, str)
     stage_position_changed: Signal = Signal(object)
     autofocus_finished: Signal = Signal(bool, str)
+    objective_calibration_updated: Signal = Signal(str, object)
+    objective_mismatch_detected: Signal = Signal(str, str)
     homing_status_changed: Signal = Signal(object)
     limit_axes_changed: Signal = Signal(object)
     axis_a_ready_changed: Signal = Signal(bool)
@@ -139,18 +143,19 @@ class StageController(QObject):
     CALIBRATION_MIN_VERIFY_PIXELS = 15.0
     CALIBRATION_STEP_MM = 0.2
     CALIBRATION_MAX_STEPS = 25
+    CALIBRATION_VERIFY_STEP_MM = 0.05
+    CALIBRATION_VERIFY_ERROR_RATIO = 0.35
+    CALIBRATION_VERIFY_MIN_ERROR_MM = 0.01
     DEFAULT_FEEDRATE = 600.0
     MOVE_IDLE_TIMEOUT_MARGIN_S = 5.0
     MOVE_IDLE_TIMEOUT_MIN_S = 10.0
     MOVE_IDLE_TIMEOUT_MAX_S = 3600.0
-    AUTOFOCUS_RANGE_MM = 0.0
-    AUTOFOCUS_INITIAL_STEP_MM = 0.5
     AUTOFOCUS_FINE_STEP_MM = 0.02
-    AUTOFOCUS_REFINEMENT_RANGE_MM = 2.0
-    AUTOFOCUS_SAMPLES = 2
-    AUTOFOCUS_ACCEPT_RATIO = 0.98
-    AUTOFOCUS_MAXFUN = 35
-    AUTOFOCUS_ANNEALING_MAXITER = 12
+    AUTOFOCUS_SWEEP_FEEDRATE_MM_MIN = 60.0
+    AUTOFOCUS_MIN_SWEEP_FRAMES = 4
+    AUTOFOCUS_BACKLASH_MM = 0.03
+    CALIBRATION_MIN_OBSERVATIONS = 4
+    CALIBRATION_MAX_OBSERVATIONS_PER_AXIS = 8
     A_ZERO_TOLERANCE = 1e-3
     OSCILLATION_MIN_AMPLITUDE_MM = 0.001
     OSCILLATION_MAX_AMPLITUDE_MM = 10.0
@@ -225,6 +230,7 @@ class StageController(QObject):
         self._last_machine_position: Optional[tuple[float, ...]] = None
         self._latest_frame: Optional[np.ndarray] = None
         self._frame_counter = 0
+        self._frame_history: deque[tuple[int, float, np.ndarray]] = deque(maxlen=256)
         self._frame_condition = threading.Condition()
         self._task_lock = threading.RLock()
         self._active_thread: Optional[threading.Thread] = None
@@ -241,6 +247,16 @@ class StageController(QObject):
         self._needle_down_lowering_mm: Optional[float] = None
         self._axis_a_calibration: dict[str, float | str] | None = None
         self._axis_z_calibration: dict[str, float | str | tuple[float, ...]] | None = None
+        self._active_objective_name = "X5"
+        self._objective_calibration_step_mm = self.CALIBRATION_STEP_MM
+        self._objective_calibration_target_pixels = self.CALIBRATION_PIXEL_TARGET
+        self._objective_autofocus_range_mm = 1.0
+        self._objective_autofocus_fine_step_mm = self.AUTOFOCUS_FINE_STEP_MM
+        self._objective_autofocus_sweep_feedrate_mm_min = (
+            self.AUTOFOCUS_SWEEP_FEEDRATE_MM_MIN
+        )
+        self._objective_matrices: dict[str, np.ndarray] = {}
+        self._objective_calibration_verified: dict[str, bool] = {}
         self._active_needles_action: str | None = None
         self._active_needles_programmed_feedrate: float | None = None
         self._oscillation_active = False
@@ -544,9 +560,11 @@ class StageController(QObject):
         """Receive camera frames and cache them as grayscale numpy arrays."""
 
         gray = self._qimage_to_gray(frame)
+        timestamp = time.monotonic()
         with self._frame_condition:
             self._latest_frame = gray
             self._frame_counter += 1
+            self._frame_history.append((self._frame_counter, timestamp, gray.copy()))
             self._frame_condition.notify_all()
 
     def _poll_status_once(self) -> None:
@@ -926,6 +944,111 @@ class StageController(QObject):
             self._axis_z_calibration = None
             return
         self._axis_z_calibration = values
+
+    def apply_objective_configuration(
+        self,
+        objective: object | None,
+        candidates: object | None = None,
+    ) -> None:
+        """Apply the active objective profile to calibration and autofocus."""
+
+        if objective is None:
+            self._active_objective_name = "X5"
+            self._pixels_to_mm = None
+            self._objective_matrices.clear()
+            self._objective_calibration_verified.clear()
+            return
+        self._objective_matrices = self._candidate_matrices(candidates)
+        name = str(getattr(objective, "name", "X5")).strip().upper() or "X5"
+        self._active_objective_name = name
+        self._objective_calibration_step_mm = self._positive_profile_value(
+            getattr(objective, "calibration_step_mm", self.CALIBRATION_STEP_MM),
+            self.CALIBRATION_STEP_MM,
+        )
+        self._objective_calibration_target_pixels = self._positive_profile_value(
+            getattr(
+                objective,
+                "calibration_target_pixels",
+                self.CALIBRATION_PIXEL_TARGET,
+            ),
+            self.CALIBRATION_PIXEL_TARGET,
+        )
+        self._objective_autofocus_range_mm = self._positive_profile_value(
+            getattr(objective, "autofocus_range_mm", 1.0),
+            1.0,
+        )
+        self._objective_autofocus_fine_step_mm = self._positive_profile_value(
+            getattr(objective, "autofocus_fine_step_mm", self.AUTOFOCUS_FINE_STEP_MM),
+            self.AUTOFOCUS_FINE_STEP_MM,
+        )
+        self._objective_autofocus_sweep_feedrate_mm_min = self._positive_profile_value(
+            getattr(
+                objective,
+                "autofocus_sweep_feedrate_mm_min",
+                self.AUTOFOCUS_SWEEP_FEEDRATE_MM_MIN,
+            ),
+            self.AUTOFOCUS_SWEEP_FEEDRATE_MM_MIN,
+        )
+        matrix = self._matrix_from_objective(objective)
+        self._pixels_to_mm = matrix
+        if matrix is not None:
+            self._objective_matrices[name] = matrix
+            self._objective_calibration_verified[name] = False
+        else:
+            self._objective_calibration_verified[name] = False
+        if matrix is not None:
+            mm_per_pixel_x, mm_per_pixel_y = self._calibration_magnitudes()
+            self.calibration_changed.emit(mm_per_pixel_x, mm_per_pixel_y)
+
+    @staticmethod
+    def _positive_profile_value(value: object, default: float) -> float:
+        try:
+            result = float(value)
+        except (TypeError, ValueError):
+            return float(default)
+        if not math.isfinite(result) or result <= 0.0:
+            return float(default)
+        return result
+
+    def _matrix_from_objective(self, objective: object) -> Optional[np.ndarray]:
+        configured = bool(getattr(objective, "xy_calibration_configured", False))
+        raw_matrix = getattr(objective, "pixels_to_mm", None)
+        if not configured or not raw_matrix:
+            return None
+        try:
+            matrix = np.asarray(raw_matrix, dtype=float)
+        except (TypeError, ValueError):
+            return None
+        if matrix.shape != (2, 2) or not np.isfinite(matrix).all():
+            return None
+        determinant = float(np.linalg.det(matrix))
+        if abs(determinant) < 1e-18:
+            return None
+        return matrix
+
+    def _candidate_matrices(self, candidates: object | None) -> dict[str, np.ndarray]:
+        matrices: dict[str, np.ndarray] = {}
+        if candidates is None:
+            return matrices
+        if isinstance(candidates, dict):
+            iterable = candidates.items()
+        else:
+            iterable = (
+                (str(getattr(candidate, "name", "")).strip().upper(), candidate)
+                for candidate in candidates
+                if candidate is not None
+            )
+        for name, candidate in iterable:
+            objective_name = str(name).strip().upper()
+            if not objective_name:
+                objective_name = str(getattr(candidate, "name", "")).strip().upper()
+            if not objective_name:
+                continue
+            matrix = self._matrix_from_objective(candidate)
+            if matrix is None:
+                continue
+            matrices[objective_name] = matrix
+        return matrices
 
     def apply_coordinate_system_configuration(
         self,
@@ -1873,6 +1996,9 @@ class StageController(QObject):
                     "Stage is busy. Wait for the current operation to finish."
                 )
             self._pixels_to_mm = None
+            self._objective_matrices.pop(self._active_objective_name, None)
+            self._objective_calibration_verified[self._active_objective_name] = False
+        self.objective_calibration_updated.emit(self._active_objective_name, [])
         self.status_message.emit(reason)
 
     def _run_move(self, dx_pixels: float, dy_pixels: float) -> None:
@@ -2136,22 +2262,15 @@ class StageController(QObject):
             serial_connection = self._serial
             if serial_connection is None or not serial_connection.is_open:
                 raise StageControllerError("Serial connection is not available.")
-            scipy_optimize = _load_scipy_optimize()
-            if scipy_optimize is None:
-                raise StageControllerError(
-                    "SciPy is required for autofocus optimization. Please install it."
-                )
             with self._serial_session_lock:
-                self._run_autofocus_locked(serial_connection, scipy_optimize)
+                self._run_autofocus_locked(serial_connection)
         except StageControllerError as exc:
             self.autofocus_finished.emit(False, str(exc))
         finally:
             with self._task_lock:
                 self._active_thread = None
 
-    def _run_autofocus_locked(
-        self, serial_connection: serial.Serial, scipy_optimize
-    ) -> None:
+    def _run_autofocus_locked(self, serial_connection: serial.Serial) -> None:
         """Run autofocus while the caller owns serial access."""
 
         self._relative_warning_emitted = False
@@ -2164,12 +2283,11 @@ class StageController(QObject):
         self._move_safety_check()
 
         self._ensure_axis_limits(serial_connection)
-        local_range = 1.0
-        fine_step = float(self.AUTOFOCUS_FINE_STEP_MM)
+        local_range = float(self._objective_autofocus_range_mm)
+        fine_step = float(self._objective_autofocus_fine_step_mm)
+        sweep_feedrate = float(self._objective_autofocus_sweep_feedrate_mm_min)
         if fine_step <= 0:
             raise StageControllerError("Autofocus parameters are invalid.")
-        with self._frame_condition:
-            frame_counter = self._frame_counter
 
         status = self._query_synced_status_for_absolute_motion(serial_connection)
         position = self._position_for_configured_mode(status)
@@ -2190,67 +2308,194 @@ class StageController(QObject):
         if upper_limit <= lower_limit:
             raise StageControllerError("Z axis range near current position is empty.")
 
-        current_offset = 0.0
-
-        def move_to_offset(target_offset: float, timeout: float = 3.0) -> np.ndarray:
-            nonlocal current_offset, frame_counter
-            self._check_cancelled()
-            target_offset = max(lower_limit, min(upper_limit, target_offset))
-            delta = target_offset - current_offset
-            if abs(delta) < 1e-6:
-                frame, frame_counter = self._get_frame_snapshot(timeout=timeout)
-            else:
-                self._send_relative_move(
-                    serial_connection, MoveVector(z=delta), allow_relative=True
-                )
-                frame, frame_counter = self._wait_for_new_frame(
-                    frame_counter, timeout=timeout
-                )
-            if frame is None:
-                raise StageControllerError(
-                    "Camera did not update during autofocus movement."
-                )
-            current_offset = target_offset
-            return frame
-
-        def focus_at(offset: float) -> float:
-            offset = max(lower_limit, min(upper_limit, offset))
-            samples = max(1, int(self.AUTOFOCUS_SAMPLES))
-            total = 0.0
-            for _ in range(samples):
-                frame = move_to_offset(offset, timeout=2.5)
-                total += self._focus_metric(frame)
-            return total / samples
-
         self.status_message.emit(
-            f"Autofocus: local search within +/-{local_range:.3f} mm."
+            f"Autofocus {self._active_objective_name}: continuous sweep within +/-{local_range:.3f} mm."
         )
-        start_score = focus_at(0.0)
-
-        self.status_message.emit("Autofocus: local refinement.")
-        result = scipy_optimize.minimize_scalar(
-            lambda x: -focus_at(x),
-            bounds=(lower_limit, upper_limit),
-            method="bounded",
-            options={"xatol": fine_step, "maxiter": self.AUTOFOCUS_MAXFUN},
+        coarse = self._run_focus_sweep_locked(
+            serial_connection,
+            start_z + lower_limit,
+            start_z + upper_limit,
+            feedrate=sweep_feedrate,
         )
-        best_offset = float(result.x)
-        best_score = -float(result.fun)
-
-        if best_score < start_score * self.AUTOFOCUS_ACCEPT_RATIO:
-            move_to_offset(0.0, timeout=3.0)
-            message = (
-                "Autofocus complete. Best focus was worse than start; kept current position."
+        fine_half_range = min(
+            max(fine_step * 6.0, local_range * 0.15),
+            local_range,
+        )
+        fine_lower = max(min_z, coarse.best_z - fine_half_range)
+        fine_upper = min(max_z, coarse.best_z + fine_half_range)
+        best = coarse
+        if fine_upper - fine_lower >= fine_step * 2.0:
+            self.status_message.emit(
+                f"Autofocus {self._active_objective_name}: fine sweep."
             )
-            self.autofocus_finished.emit(True, message)
-            return
+            best = self._run_focus_sweep_locked(
+                serial_connection,
+                fine_lower,
+                fine_upper,
+                feedrate=max(0.1, sweep_feedrate * 0.5),
+            )
 
-        move_to_offset(best_offset, timeout=3.0)
-        message = (
-            "Autofocus complete. "
-            f"Best score {best_score:.2f} at offset {best_offset:+.3f} mm."
+        self._approach_z_from_below_locked(
+            serial_connection,
+            best.best_z,
+            min_z=min_z,
         )
+        message = (
+            f"Autofocus {self._active_objective_name} complete. "
+            f"Best score {best.best_score:.2f} at Z={best.best_z:.4f} mm "
+            f"from {best.sample_count} sweep frames."
+        )
+        if best.edge_peak:
+            message += " Peak was near a sweep edge; consider increasing range."
         self.autofocus_finished.emit(True, message)
+
+    def _run_focus_sweep_locked(
+        self,
+        serial_connection: serial.Serial,
+        lower_z: float,
+        upper_z: float,
+        *,
+        feedrate: float,
+    ) -> _FocusSweepResult:
+        lower_z = float(lower_z)
+        upper_z = float(upper_z)
+        if upper_z <= lower_z:
+            raise StageControllerError("Autofocus sweep range is empty.")
+
+        status = self._query_status(serial_connection)
+        position = self._position_for_configured_mode(status)
+        if status is None or position is None or len(position) < 3:
+            raise StageControllerError("Unable to read Z position for autofocus.")
+        current_z = float(position[2])
+        if abs(lower_z - current_z) >= 1e-5:
+            self._send_relative_move(
+                serial_connection,
+                MoveVector(z=lower_z - current_z),
+                allow_relative=True,
+            )
+
+        with self._frame_condition:
+            start_counter = self._frame_counter
+        sweep_started_at = time.monotonic()
+        sweep_distance = abs(upper_z - lower_z)
+        sweep_ended_at = sweep_started_at + max(
+            sweep_distance / (max(0.1, float(feedrate)) / 60.0),
+            1e-6,
+        )
+        self._send_relative_move(
+            serial_connection,
+            MoveVector(z=upper_z - lower_z),
+            allow_relative=True,
+            feedrate=feedrate,
+        )
+        actual_ended_at = time.monotonic()
+        samples = self._frame_samples(
+            start_counter=start_counter,
+            started_at=sweep_started_at,
+            ended_at=actual_ended_at,
+        )
+        if len(samples) < self.AUTOFOCUS_MIN_SWEEP_FRAMES:
+            raise StageControllerError(
+                "Camera did not provide enough frames during autofocus sweep."
+            )
+
+        scored: list[tuple[float, float]] = []
+        for timestamp, frame in samples:
+            z_value = interpolate_position(
+                (lower_z,),
+                (upper_z,),
+                sweep_started_at,
+                sweep_ended_at,
+                timestamp,
+            )[0]
+            scored.append((float(z_value), self._focus_metric(frame)))
+
+        best_index = max(range(len(scored)), key=lambda index: scored[index][1])
+        best_z, best_score = scored[best_index]
+        fitted_z = self._parabolic_focus_peak(scored, best_index)
+        if fitted_z is not None:
+            best_z = max(lower_z, min(upper_z, fitted_z))
+        edge_margin = max(2, len(scored) // 10)
+        edge_peak = best_index < edge_margin or best_index >= len(scored) - edge_margin
+        return _FocusSweepResult(
+            best_z=float(best_z),
+            best_score=float(best_score),
+            sample_count=len(scored),
+            edge_peak=edge_peak,
+        )
+
+    def _approach_z_from_below_locked(
+        self,
+        serial_connection: serial.Serial,
+        target_z: float,
+        *,
+        min_z: float,
+    ) -> None:
+        status = self._query_status(serial_connection)
+        position = self._position_for_configured_mode(status)
+        if status is None or position is None or len(position) < 3:
+            raise StageControllerError("Unable to read Z position for autofocus.")
+        current_z = float(position[2])
+        target = float(target_z)
+        backlash = min(
+            max(self._objective_autofocus_fine_step_mm * 4.0, 0.002),
+            self.AUTOFOCUS_BACKLASH_MM,
+        )
+        approach_z = max(float(min_z), target - backlash)
+        if abs(approach_z - current_z) >= 1e-5:
+            self._send_relative_move(
+                serial_connection,
+                MoveVector(z=approach_z - current_z),
+                allow_relative=True,
+            )
+            current_z = approach_z
+        if abs(target - current_z) >= 1e-5:
+            self._send_relative_move(
+                serial_connection,
+                MoveVector(z=target - current_z),
+                allow_relative=True,
+            )
+
+    def _frame_samples(
+        self,
+        *,
+        start_counter: int,
+        started_at: float,
+        ended_at: float,
+    ) -> list[tuple[float, np.ndarray]]:
+        with self._frame_condition:
+            return [
+                (timestamp, frame.copy())
+                for counter, timestamp, frame in self._frame_history
+                if counter > start_counter
+                and started_at <= timestamp <= ended_at
+            ]
+
+    @staticmethod
+    def _parabolic_focus_peak(
+        scored: list[tuple[float, float]],
+        best_index: int,
+    ) -> float | None:
+        if best_index <= 0 or best_index >= len(scored) - 1:
+            return None
+        xs = np.asarray(
+            [scored[best_index - 1][0], scored[best_index][0], scored[best_index + 1][0]],
+            dtype=float,
+        )
+        ys = np.asarray(
+            [scored[best_index - 1][1], scored[best_index][1], scored[best_index + 1][1]],
+            dtype=float,
+        )
+        try:
+            a, b, _c = np.polyfit(xs, ys, 2)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(a) or not math.isfinite(b) or a >= 0.0:
+            return None
+        peak = -b / (2.0 * a)
+        if not math.isfinite(peak):
+            return None
+        return float(peak)
 
     def _run_home(self, command: str, axis_key: str) -> None:
         self.movement_started.emit()
@@ -2334,8 +2579,15 @@ class StageController(QObject):
 
     def _ensure_calibration(self, serial_connection: serial.Serial) -> None:
         if self._pixels_to_mm is not None:
+            if not self._objective_calibration_verified.get(
+                self._active_objective_name,
+                False,
+            ):
+                self._verify_active_objective_calibration(serial_connection)
             return
-        self.status_message.emit("Starting calibration sequence…")
+        self.status_message.emit(
+            f"Starting {self._active_objective_name} click calibration sequence..."
+        )
         before_frame, _ = self._get_frame_snapshot(timeout=3.0)
         if before_frame is None:
             raise StageControllerError("Camera frames are unavailable for calibration.")
@@ -2346,21 +2598,24 @@ class StageController(QObject):
             raise StageControllerError("Unable to read position for calibration.")
         self._require_homed_axes(start_status, {"X", "Y"})
 
+        observations: list[tuple[np.ndarray, np.ndarray]] = []
         try:
-            mm_x, shift_x_vec = self._calibrate_axis(
-                serial_connection, before_frame, origin, axis="X"
+            observations.extend(
+                self._calibrate_axis_series(
+                    serial_connection, before_frame, origin, axis="X"
+                )
             )
             latest_frame, _ = self._get_frame_snapshot(timeout=2.0)
             reference_for_y = latest_frame if latest_frame is not None else before_frame
-            mm_y, shift_y_vec = self._calibrate_axis(
-                serial_connection, reference_for_y, origin, axis="Y"
+            observations.extend(
+                self._calibrate_axis_series(
+                    serial_connection, reference_for_y, origin, axis="Y"
+                )
             )
         finally:
             self._return_to_origin(serial_connection, origin)
 
-        calibration_matrix = np.column_stack(
-            (shift_x_vec / mm_x, shift_y_vec / mm_y)
-        )
+        calibration_matrix = self._calibration_matrix_from_observations(observations)
         if not np.isfinite(calibration_matrix).all():
             raise StageControllerError("Calibration produced invalid values.")
         determinant = float(np.linalg.det(calibration_matrix))
@@ -2369,28 +2624,127 @@ class StageController(QObject):
         self._pixels_to_mm = np.linalg.inv(calibration_matrix)
         mm_per_pixel_x, mm_per_pixel_y = self._calibration_magnitudes()
         self.calibration_changed.emit(mm_per_pixel_x, mm_per_pixel_y)
+        self.objective_calibration_updated.emit(
+            self._active_objective_name,
+            self._pixels_to_mm.tolist(),
+        )
+        self._objective_matrices[self._active_objective_name] = self._pixels_to_mm
+        self._objective_calibration_verified[self._active_objective_name] = True
         self.status_message.emit(
-            f"Calibration updated: ΔX {mm_per_pixel_x:.6f} mm/px, ΔY {mm_per_pixel_y:.6f} mm/px"
+            f"{self._active_objective_name} calibration updated: dX {mm_per_pixel_x:.6f} mm/px, dY {mm_per_pixel_y:.6f} mm/px"
         )
 
-    def _calibrate_axis(
+    def _verify_active_objective_calibration(
+        self,
+        serial_connection: serial.Serial,
+    ) -> None:
+        if self._pixels_to_mm is None:
+            return
+        before_frame, frame_counter = self._get_frame_snapshot(timeout=3.0)
+        if before_frame is None:
+            raise StageControllerError("Camera frames are unavailable for calibration check.")
+        status = self._query_status(serial_connection)
+        origin = self._position_for_configured_mode(status)
+        if status is None or origin is None:
+            raise StageControllerError("Unable to read position for calibration check.")
+        self._require_homed_axes(status, {"X", "Y"})
+        step_mm = min(
+            max(float(self._objective_calibration_step_mm) * 0.5, 0.005),
+            self.CALIBRATION_VERIFY_STEP_MM,
+        )
+        self.status_message.emit(
+            f"Checking {self._active_objective_name} click calibration..."
+        )
+        try:
+            self._send_relative_move(serial_connection, MoveVector(x=step_mm))
+            after_frame, _frame_counter = self._wait_for_new_frame(
+                frame_counter,
+                timeout=2.0,
+            )
+            if after_frame is None:
+                raise StageControllerError(
+                    "Camera did not update during calibration check."
+                )
+            measured_pixels = np.asarray(
+                self._estimate_shift(before_frame, after_frame),
+                dtype=float,
+            )
+        finally:
+            self._return_to_origin(serial_connection, origin)
+
+        if np.linalg.norm(measured_pixels) < 1e-6:
+            raise StageControllerError("Calibration check saw no image motion.")
+        expected_mm = np.asarray([step_mm, 0.0], dtype=float)
+        active_error = float(np.linalg.norm(self._pixels_to_mm @ measured_pixels - expected_mm))
+        tolerance = max(
+            self.CALIBRATION_VERIFY_MIN_ERROR_MM,
+            abs(step_mm) * self.CALIBRATION_VERIFY_ERROR_RATIO,
+        )
+        if active_error <= tolerance:
+            self._objective_calibration_verified[self._active_objective_name] = True
+            self.status_message.emit(
+                f"{self._active_objective_name} click calibration verified."
+            )
+            return
+
+        suggestion = self._best_objective_for_measurement(
+            measured_pixels,
+            expected_mm,
+            tolerance=tolerance,
+        )
+        if suggestion and suggestion != self._active_objective_name:
+            message = (
+                f"Selected objective appears to be {suggestion}, not "
+                f"{self._active_objective_name}. Objective switched; click again."
+            )
+            self.objective_mismatch_detected.emit(suggestion, message)
+            raise StageControllerError(message)
+        raise StageControllerError(
+            "Click calibration does not match the selected objective. "
+            "Select the correct objective in the GUI or recalibrate this objective."
+        )
+
+    def _best_objective_for_measurement(
+        self,
+        measured_pixels: np.ndarray,
+        expected_mm: np.ndarray,
+        *,
+        tolerance: float,
+    ) -> str | None:
+        best_name: str | None = None
+        best_error = math.inf
+        for name, matrix in self._objective_matrices.items():
+            try:
+                error = float(np.linalg.norm(matrix @ measured_pixels - expected_mm))
+            except (TypeError, ValueError):
+                continue
+            if error < best_error:
+                best_error = error
+                best_name = name
+        if best_name is None or best_error > tolerance:
+            return None
+        return best_name
+
+    def _calibrate_axis_series(
         self,
         serial_connection: serial.Serial,
         reference_frame: np.ndarray,
         origin: tuple[float, float, float],
         axis: str,
-    ) -> tuple[float, np.ndarray]:
+    ) -> list[tuple[np.ndarray, np.ndarray]]:
         if reference_frame is None:
             raise StageControllerError("Reference frame unavailable for calibration.")
         index = 0 if axis == "X" else 1
-        total_mm = 0.0
+        observations: list[tuple[np.ndarray, np.ndarray]] = []
+        step_mm = float(self._objective_calibration_step_mm)
+        target_pixels = float(self._objective_calibration_target_pixels)
         with self._frame_condition:
             frame_counter = self._frame_counter
-        for _ in range(self.CALIBRATION_MAX_STEPS):
+        for _ in range(self.CALIBRATION_MAX_OBSERVATIONS_PER_AXIS):
             if axis == "X":
-                move = MoveVector(x=self.CALIBRATION_STEP_MM)
+                move = MoveVector(x=step_mm)
             else:
-                move = MoveVector(y=self.CALIBRATION_STEP_MM)
+                move = MoveVector(y=step_mm)
             self._send_relative_move(serial_connection, move)
             new_frame, frame_counter = self._wait_for_new_frame(frame_counter, timeout=2.0)
             if new_frame is None:
@@ -2400,18 +2754,64 @@ class StageController(QObject):
             if status is None or current is None:
                 raise StageControllerError("Unable to query position during calibration.")
             self._require_homed_axes(status, {axis})
-            total_mm = current[index] - origin[index]
-            shift_x, shift_y = self._estimate_shift(reference_frame, new_frame)
-            axis_shift = shift_x if axis == "X" else shift_y
-            if abs(axis_shift) >= self.CALIBRATION_PIXEL_TARGET:
+            mm_vector = np.array(
+                [
+                    float(current[0] - origin[0]),
+                    float(current[1] - origin[1]),
+                ],
+                dtype=float,
+            )
+            shift_x, shift_y, response = self._estimate_shift_with_response(
+                reference_frame,
+                new_frame,
+            )
+            if response >= 0.05:
+                pixel_vector = np.array([shift_x, shift_y], dtype=float)
+                observations.append((mm_vector, pixel_vector))
+            if abs(current[index] - origin[index]) < 1e-6:
+                continue
+            if len(observations) >= self.CALIBRATION_MIN_OBSERVATIONS and (
+                abs(shift_x) >= target_pixels or abs(shift_y) >= target_pixels
+            ):
                 break
 
-        if abs(total_mm) < 1e-6:
-            raise StageControllerError("Detected zero movement while calibrating.")
-        shift_vector = np.array([shift_x, shift_y], dtype=float)
-        if np.linalg.norm(shift_vector) < 1e-6:
-            raise StageControllerError("Pixel shift too small to compute calibration.")
-        return total_mm, shift_vector
+        if not observations:
+            raise StageControllerError(
+                f"Pixel shift too small to compute {axis} calibration."
+            )
+        return observations
+
+    def _calibration_matrix_from_observations(
+        self,
+        observations: list[tuple[np.ndarray, np.ndarray]],
+    ) -> np.ndarray:
+        if len(observations) < self.CALIBRATION_MIN_OBSERVATIONS:
+            raise StageControllerError("Not enough calibration observations.")
+        stage_vectors = np.vstack([item[0] for item in observations])
+        pixel_vectors = np.vstack([item[1] for item in observations])
+        if np.linalg.matrix_rank(stage_vectors) < 2:
+            raise StageControllerError("Calibration observations are degenerate.")
+        coefficients, _residuals, _rank, _singular = np.linalg.lstsq(
+            stage_vectors,
+            pixel_vectors,
+            rcond=None,
+        )
+        calibration_matrix = coefficients.T
+        if not np.isfinite(calibration_matrix).all():
+            raise StageControllerError("Calibration produced invalid values.")
+        predicted = stage_vectors @ coefficients
+        errors = np.linalg.norm(predicted - pixel_vectors, axis=1)
+        if len(errors) >= self.CALIBRATION_MIN_OBSERVATIONS + 2:
+            median_error = float(np.median(errors))
+            keep = errors <= max(2.0, median_error * 3.0)
+            if int(np.count_nonzero(keep)) >= self.CALIBRATION_MIN_OBSERVATIONS:
+                coefficients, _residuals, _rank, _singular = np.linalg.lstsq(
+                    stage_vectors[keep],
+                    pixel_vectors[keep],
+                    rcond=None,
+                )
+                calibration_matrix = coefficients.T
+        return calibration_matrix
 
     def _return_to_origin(
         self, serial_connection: serial.Serial, origin: tuple[float, float, float]
@@ -2856,6 +3256,10 @@ class StageController(QObject):
         self._pixels_to_mm = updated_matrix
         mm_per_pixel_x, mm_per_pixel_y = self._calibration_magnitudes()
         self.calibration_changed.emit(mm_per_pixel_x, mm_per_pixel_y)
+        self.objective_calibration_updated.emit(
+            self._active_objective_name,
+            self._pixels_to_mm.tolist(),
+        )
         message += " Calibration refined."
         return message
 
@@ -4614,16 +5018,42 @@ class StageController(QObject):
 
     @staticmethod
     def _estimate_shift(frame_a: np.ndarray, frame_b: np.ndarray) -> tuple[float, float]:
+        shift_x, shift_y, _response = StageController._estimate_shift_with_response(
+            frame_a,
+            frame_b,
+        )
+        return shift_x, shift_y
+
+    @staticmethod
+    def _estimate_shift_with_response(
+        frame_a: np.ndarray,
+        frame_b: np.ndarray,
+    ) -> tuple[float, float, float]:
         a = frame_a.astype(np.float32)
         b = frame_b.astype(np.float32)
         window = cv2.createHanningWindow((a.shape[1], a.shape[0]), cv2.CV_32F)
-        (shift_x, shift_y), _ = cv2.phaseCorrelate(a, b, window)
-        return float(shift_x), float(-shift_y)
+        (shift_x, shift_y), response = cv2.phaseCorrelate(a, b, window)
+        return float(shift_x), float(-shift_y), float(response)
 
     @staticmethod
     def _focus_metric(frame: np.ndarray) -> float:
-        lap = cv2.Laplacian(frame, cv2.CV_64F)
-        return float(lap.var())
+        height, width = frame.shape[:2]
+        crop_factor = 0.55
+        crop_w = max(16, int(width * crop_factor))
+        crop_h = max(16, int(height * crop_factor))
+        left = max(0, (width - crop_w) // 2)
+        top = max(0, (height - crop_h) // 2)
+        roi = frame[top : top + crop_h, left : left + crop_w]
+        if roi.size == 0:
+            roi = frame
+        filtered = cv2.medianBlur(roi, 3)
+        normalized = filtered.astype(np.float32)
+        mean = float(normalized.mean())
+        if mean > 1e-6:
+            normalized = normalized / mean
+        grad_x = cv2.Sobel(normalized, cv2.CV_32F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(normalized, cv2.CV_32F, 0, 1, ksize=3)
+        return float(np.mean(grad_x * grad_x + grad_y * grad_y))
 
     def _check_cancelled(self) -> None:
         if self._cancel_event.is_set():

@@ -173,6 +173,76 @@
     "startup_mode": "controller",
     "preferred_system": "G54"
   },
+  "objectives": {
+    "active_name": "X5",
+    "apply_offsets_on_change": true,
+    "objectives": {
+      "X5": {
+        "name": "X5",
+        "magnification": 5.0,
+        "xy_offset_x_mm": 0.0,
+        "xy_offset_y_mm": 0.0,
+        "xy_offset_configured": false,
+        "z_offset_mm": 0.0,
+        "z_offset_configured": false,
+        "pixels_to_mm": [],
+        "xy_calibration_configured": false,
+        "calibration_step_mm": 0.2,
+        "calibration_target_pixels": 120.0,
+        "autofocus_range_mm": 1.0,
+        "autofocus_fine_step_mm": 0.02,
+        "autofocus_sweep_feedrate_mm_min": 60.0
+      },
+      "X10": {
+        "name": "X10",
+        "magnification": 10.0,
+        "xy_offset_x_mm": 0.0,
+        "xy_offset_y_mm": 0.0,
+        "xy_offset_configured": false,
+        "z_offset_mm": 0.0,
+        "z_offset_configured": false,
+        "pixels_to_mm": [],
+        "xy_calibration_configured": false,
+        "calibration_step_mm": 0.1,
+        "calibration_target_pixels": 120.0,
+        "autofocus_range_mm": 0.6,
+        "autofocus_fine_step_mm": 0.01,
+        "autofocus_sweep_feedrate_mm_min": 30.0
+      },
+      "X20": {
+        "name": "X20",
+        "magnification": 20.0,
+        "xy_offset_x_mm": 0.0,
+        "xy_offset_y_mm": 0.0,
+        "xy_offset_configured": false,
+        "z_offset_mm": 0.0,
+        "z_offset_configured": false,
+        "pixels_to_mm": [],
+        "xy_calibration_configured": false,
+        "calibration_step_mm": 0.05,
+        "calibration_target_pixels": 120.0,
+        "autofocus_range_mm": 0.35,
+        "autofocus_fine_step_mm": 0.005,
+        "autofocus_sweep_feedrate_mm_min": 15.0
+      },
+      "X50": {
+        "name": "X50",
+        "magnification": 50.0,
+        "xy_offset_x_mm": 0.0,
+        "xy_offset_y_mm": 0.0,
+        "xy_offset_configured": false,
+        "z_offset_mm": 0.0,
+        "z_offset_configured": false,
+        "pixels_to_mm": [],
+        "xy_calibration_configured": false,
+        "calibration_step_mm": 0.02,
+        "calibration_target_pixels": 120.0,
+        "autofocus_range_mm": 0.15,
+        "autofocus_fine_step_mm": 0.002,
+        "autofocus_sweep_feedrate_mm_min": 6.0
+      }
+    }
+  },
   "design_last_directory": "",
   "feedrates": {
     "linear": {

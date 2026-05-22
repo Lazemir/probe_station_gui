@@ -47,6 +47,9 @@ from probe_station_gui.settings_manager import (
     AxisACalibrationSettings,
     AxisZCalibrationSettings,
     NeedleCalibrationSettings,
+    OBJECTIVE_NAMES,
+    ObjectiveCalibrationSettings,
+    ObjectivesSettings,
     Settings,
     WORK_COORDINATE_SYSTEMS,
 )
@@ -801,6 +804,157 @@ class NeedleCalibrationSettingsWidget(QWidget):
         )
 
 
+class ObjectivesSettingsWidget(QWidget):
+    """Tab that exposes objective selection, offsets, and autofocus parameters."""
+
+    def __init__(
+        self,
+        objectives: ObjectivesSettings,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._objectives = objectives.clone()
+        self._active_editor_name = self._objectives.active_name
+
+        layout = QFormLayout(self)
+        layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+
+        self._active_combo = QComboBox(self)
+        self._profile_combo = QComboBox(self)
+        for name in OBJECTIVE_NAMES:
+            self._active_combo.addItem(name, name)
+            self._profile_combo.addItem(name, name)
+        active_index = self._active_combo.findData(self._objectives.active_name)
+        if active_index >= 0:
+            self._active_combo.setCurrentIndex(active_index)
+        profile_index = self._profile_combo.findData(self._active_editor_name)
+        if profile_index >= 0:
+            self._profile_combo.setCurrentIndex(profile_index)
+
+        self._apply_offsets_checkbox = QCheckBox(
+            "Apply saved offset when objective changes",
+            self,
+        )
+        self._apply_offsets_checkbox.setChecked(
+            self._objectives.apply_offsets_on_change
+        )
+        layout.addRow(QLabel("Active objective", self), self._active_combo)
+        layout.addRow(self._apply_offsets_checkbox)
+
+        separator = QFrame(self)
+        separator.setFrameShape(QFrame.HLine)
+        separator.setFrameShadow(QFrame.Sunken)
+        layout.addRow(separator)
+        layout.addRow(QLabel("Edit objective", self), self._profile_combo)
+
+        self._xy_configured_checkbox = QCheckBox("Use X/Y offset", self)
+        self._z_configured_checkbox = QCheckBox("Use Z offset", self)
+        self._x_offset_spin = self._offset_spin(" mm")
+        self._y_offset_spin = self._offset_spin(" mm")
+        self._z_offset_spin = self._offset_spin(" mm")
+        self._calibration_step_spin = self._positive_spin(" mm", decimals=4)
+        self._calibration_target_spin = self._positive_spin(" px", decimals=1)
+        self._autofocus_range_spin = self._positive_spin(" mm", decimals=4)
+        self._autofocus_fine_spin = self._positive_spin(" mm", decimals=4)
+        self._autofocus_feedrate_spin = self._positive_spin(" mm/min", decimals=1)
+        self._xy_calibration_status = QLineEdit(self)
+        self._xy_calibration_status.setReadOnly(True)
+
+        layout.addRow(self._xy_configured_checkbox)
+        layout.addRow(QLabel("X correction", self), self._x_offset_spin)
+        layout.addRow(QLabel("Y correction", self), self._y_offset_spin)
+        layout.addRow(self._z_configured_checkbox)
+        layout.addRow(QLabel("Z correction", self), self._z_offset_spin)
+        layout.addRow(QLabel("Click step", self), self._calibration_step_spin)
+        layout.addRow(QLabel("Click target shift", self), self._calibration_target_spin)
+        layout.addRow(QLabel("AF range", self), self._autofocus_range_spin)
+        layout.addRow(QLabel("AF fine step", self), self._autofocus_fine_spin)
+        layout.addRow(QLabel("AF sweep feedrate", self), self._autofocus_feedrate_spin)
+        layout.addRow(QLabel("Click calibration", self), self._xy_calibration_status)
+
+        self._profile_combo.currentIndexChanged.connect(
+            lambda _index: self._on_profile_changed()
+        )
+        self._load_profile(self._active_editor_name)
+
+    def to_settings(self, settings: Settings) -> None:
+        """Persist the widget state into the provided settings object."""
+
+        self._save_active_profile_edits()
+        settings.objectives = ObjectivesSettings(
+            active_name=str(self._active_combo.currentData() or "X5"),
+            apply_offsets_on_change=self._apply_offsets_checkbox.isChecked(),
+            objectives={
+                key: value.clone()
+                for key, value in self._objectives.objectives.items()
+            },
+        )
+
+    def _on_profile_changed(self) -> None:
+        self._save_active_profile_edits()
+        self._active_editor_name = str(self._profile_combo.currentData() or "X5")
+        self._load_profile(self._active_editor_name)
+
+    def _load_profile(self, name: str) -> None:
+        profile = self._objectives.objectives.get(name)
+        if profile is None:
+            profile = ObjectiveCalibrationSettings(name=name)
+            self._objectives.objectives[name] = profile
+        self._xy_configured_checkbox.setChecked(profile.xy_offset_configured)
+        self._z_configured_checkbox.setChecked(profile.z_offset_configured)
+        self._x_offset_spin.setValue(profile.xy_offset_x_mm)
+        self._y_offset_spin.setValue(profile.xy_offset_y_mm)
+        self._z_offset_spin.setValue(profile.z_offset_mm)
+        self._calibration_step_spin.setValue(profile.calibration_step_mm)
+        self._calibration_target_spin.setValue(profile.calibration_target_pixels)
+        self._autofocus_range_spin.setValue(profile.autofocus_range_mm)
+        self._autofocus_fine_spin.setValue(profile.autofocus_fine_step_mm)
+        self._autofocus_feedrate_spin.setValue(
+            profile.autofocus_sweep_feedrate_mm_min
+        )
+        status = "Configured" if profile.xy_calibration_configured else "Not configured"
+        self._xy_calibration_status.setText(status)
+
+    def _save_active_profile_edits(self) -> None:
+        name = self._active_editor_name
+        profile = self._objectives.objectives.get(name)
+        if profile is None:
+            profile = ObjectiveCalibrationSettings(name=name)
+        updated = profile.clone()
+        updated.name = name
+        updated.xy_offset_configured = self._xy_configured_checkbox.isChecked()
+        updated.z_offset_configured = self._z_configured_checkbox.isChecked()
+        updated.xy_offset_x_mm = self._x_offset_spin.value()
+        updated.xy_offset_y_mm = self._y_offset_spin.value()
+        updated.z_offset_mm = self._z_offset_spin.value()
+        updated.calibration_step_mm = self._calibration_step_spin.value()
+        updated.calibration_target_pixels = self._calibration_target_spin.value()
+        updated.autofocus_range_mm = self._autofocus_range_spin.value()
+        updated.autofocus_fine_step_mm = self._autofocus_fine_spin.value()
+        updated.autofocus_sweep_feedrate_mm_min = (
+            self._autofocus_feedrate_spin.value()
+        )
+        self._objectives.objectives[name] = updated
+
+    def _offset_spin(self, suffix: str) -> QDoubleSpinBox:
+        spin = QDoubleSpinBox(self)
+        spin.setLocale(QLocale.c())
+        spin.setDecimals(4)
+        spin.setRange(-100.0, 100.0)
+        spin.setSingleStep(0.01)
+        spin.setSuffix(suffix)
+        return spin
+
+    def _positive_spin(self, suffix: str, *, decimals: int) -> QDoubleSpinBox:
+        spin = QDoubleSpinBox(self)
+        spin.setLocale(QLocale.c())
+        spin.setDecimals(decimals)
+        spin.setRange(0.0001, 10000.0)
+        spin.setSingleStep(0.01)
+        spin.setSuffix(suffix)
+        return spin
+
+
 class CoordinateSystemSettingsWidget(QWidget):
     """Tab that exposes WCS startup mode."""
 
@@ -1017,6 +1171,10 @@ class SettingsDialog(QDialog):
         self._coordinate_system_tab = CoordinateSystemSettingsWidget(
             self._settings.coordinate_system, self
         )
+        self._objectives_tab = ObjectivesSettingsWidget(
+            self._settings.objectives,
+            self,
+        )
         self._axis_calibration_tab = AxisCalibrationSettingsWidget(
             self._settings.axis_a_calibration,
             self._settings.axis_z_calibration,
@@ -1026,6 +1184,7 @@ class SettingsDialog(QDialog):
         self._tabs.addTab(self._api_tab, "API")
         self._tabs.addTab(self._jog_tab, "Jog")
         self._tabs.addTab(self._coordinate_system_tab, "Coordinates")
+        self._tabs.addTab(self._objectives_tab, "Objectives")
         self._tabs.addTab(self._axis_calibration_tab, "Axis Calibration")
         self._tabs.addTab(self._needle_calibration_tab, "Needles")
         self._tabs.addTab(self._logging_tab, "Logging")
@@ -1062,6 +1221,7 @@ class SettingsDialog(QDialog):
         self._api_tab.to_settings(self._settings)
         self._jog_tab.to_settings(self._settings)
         self._coordinate_system_tab.to_settings(self._settings)
+        self._objectives_tab.to_settings(self._settings)
         self._axis_calibration_tab.to_settings(self._settings)
         self._needle_calibration_tab.to_settings(self._settings)
         self._logging_tab.to_settings(self._settings.logging)

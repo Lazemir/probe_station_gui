@@ -68,6 +68,8 @@ NeedleCalibrationSettings = settings_manager.NeedleCalibrationSettings
 AxisACalibrationSettings = settings_manager.AxisACalibrationSettings
 AxisZCalibrationSettings = settings_manager.AxisZCalibrationSettings
 OscillationSettings = settings_manager.OscillationSettings
+ObjectiveCalibrationSettings = settings_manager.ObjectiveCalibrationSettings
+ObjectivesSettings = settings_manager.ObjectivesSettings
 SavedStagePositionSettings = settings_manager.SavedStagePositionSettings
 SettingsManager = settings_manager.SettingsManager
 derive_native_scan_code_from_qt_key = qt_compat.derive_native_scan_code_from_qt_key
@@ -215,6 +217,58 @@ class JogSettingsTest(unittest.TestCase):
         self.assertEqual(parsed.manual_axis_distance_mm, 0.125)
         self.assertEqual(parsed.manual_axis_mode, "G91")
         self.assertEqual(parsed.manual_axis_feedrate_mm_min, 123.4)
+
+
+class ObjectiveSettingsTest(unittest.TestCase):
+    def test_objective_settings_round_trip_preserves_matrix_and_offsets(self) -> None:
+        profile = ObjectiveCalibrationSettings(
+            name="X20",
+            xy_offset_x_mm=0.12,
+            xy_offset_y_mm=-0.34,
+            xy_offset_configured=True,
+            z_offset_mm=0.056,
+            z_offset_configured=True,
+            pixels_to_mm=[[0.001, 0.0], [0.0, 0.0012]],
+            xy_calibration_configured=True,
+        )
+        settings = ObjectivesSettings(
+            active_name="X20",
+            apply_offsets_on_change=True,
+            objectives={"X20": profile},
+        )
+
+        restored = ObjectivesSettings(
+            active_name=settings.to_dict()["active_name"],
+            apply_offsets_on_change=settings.to_dict()["apply_offsets_on_change"],
+            objectives={
+                "X20": ObjectiveCalibrationSettings(
+                    **settings.to_dict()["objectives"]["X20"]
+                )
+            },
+        )
+
+        self.assertEqual(restored.active_name, "X20")
+        self.assertEqual(restored.objectives["X20"].pixels_to_mm, profile.pixels_to_mm)
+        self.assertTrue(restored.objectives["X20"].xy_offset_configured)
+
+    def test_parse_objectives_rejects_invalid_matrix(self) -> None:
+        manager = object.__new__(SettingsManager)
+
+        parsed = manager._parse_objectives(
+            {
+                "active_name": "x10",
+                "objectives": {
+                    "X10": {
+                        "pixels_to_mm": [[1.0, 2.0], [2.0, 4.0]],
+                        "xy_calibration_configured": True,
+                    }
+                },
+            }
+        )
+
+        self.assertEqual(parsed.active_name, "X10")
+        self.assertFalse(parsed.objectives["X10"].xy_calibration_configured)
+        self.assertEqual(parsed.objectives["X10"].pixels_to_mm, [])
 
 
 class ApiSettingsTest(unittest.TestCase):

@@ -95,6 +95,7 @@ QueuedSerialWrite = _stage_controller_module._QueuedSerialWrite
 MoveVector = _stage_controller_module.MoveVector
 AxisACalibrationSettings = _settings_manager_module.AxisACalibrationSettings
 AxisZCalibrationSettings = _settings_manager_module.AxisZCalibrationSettings
+FocusSweepResult = _stage_controller_module._FocusSweepResult
 
 
 class StageControllerStartupLimitsTest(unittest.TestCase):
@@ -708,17 +709,18 @@ class StageControllerAutofocusTest(unittest.TestCase):
             emit=lambda success, message: finished.append((success, message))
         )
 
-        original_loader = _stage_controller_module._load_scipy_optimize
-        fake_optimize = types.SimpleNamespace(
-            minimize_scalar=lambda func, **_kwargs: types.SimpleNamespace(
-                x=0.0, fun=-func(0.0)
+        controller._run_focus_sweep_locked = (
+            lambda *_args, **_kwargs: FocusSweepResult(
+                best_z=9.520,
+                best_score=10.0,
+                sample_count=5,
+                edge_peak=False,
             )
         )
-        _stage_controller_module._load_scipy_optimize = lambda: fake_optimize
+        controller._approach_z_from_below_locked = lambda *_args, **_kwargs: None
         try:
             controller._run_autofocus()
         finally:
-            _stage_controller_module._load_scipy_optimize = original_loader
             controller.shutdown()
 
         self.assertTrue(finished[-1][0])
@@ -729,6 +731,23 @@ class StageControllerAutofocusTest(unittest.TestCase):
             serial_connection.writes[:3],
             [b"$G\n", b"$#\n", b"?\n"],
         )
+
+
+class StageControllerObjectiveTest(unittest.TestCase):
+    def test_best_objective_for_measurement_uses_saved_candidate_matrices(self) -> None:
+        controller = StageController()
+        controller._objective_matrices = {
+            "X5": np.array([[0.002, 0.0], [0.0, 0.002]], dtype=float),
+            "X20": np.array([[0.0005, 0.0], [0.0, 0.0005]], dtype=float),
+        }
+
+        best = controller._best_objective_for_measurement(
+            np.array([100.0, 0.0]),
+            np.array([0.05, 0.0]),
+            tolerance=0.005,
+        )
+
+        self.assertEqual(best, "X20")
 
 
 class StageControllerJogQueueTest(unittest.TestCase):

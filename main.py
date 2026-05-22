@@ -49,13 +49,19 @@ from probe_station_gui.diagnostics import configure_crash_diagnostics
 from probe_station_gui.dialogs.settings_dialog import SettingsDialog
 from probe_station_gui.api_server import ProbeStationApiServer
 from probe_station_gui.lcr_meter import LCRMeterController
+from probe_station_gui.motion_prediction import interpolate_position, motion_progress
 from probe_station_gui.route_model import MeasurementRoute
 from probe_station_gui.route_measurement import (
     RouteMeasurementPoint,
     RouteMeasurementRecord,
     RouteMeasurementRunner,
 )
-from probe_station_gui.settings_manager import Settings, SettingsManager
+from probe_station_gui.settings_manager import (
+    OBJECTIVE_NAMES,
+    ObjectiveCalibrationSettings,
+    Settings,
+    SettingsManager,
+)
 from probe_station_gui.views.alignment_panel import AlignmentPanel
 from probe_station_gui.views.contact_oscillation_window import (
     ContactOscillationWindow,
@@ -289,6 +295,7 @@ class Main(QMainWindow):
         self._stage_motion_blink_dimmed = False
         self._stage_axis_return_commits: set[str] = set()
         self._stage_axis_escape_shortcuts: list[QShortcut] = []
+        self._objective_combo: QComboBox | None = None
         self._stage_coordinate_mode_combo: QComboBox | None = None
         self._stage_coordinate_apply_button: QPushButton | None = None
         self._stage_coordinate_cancel_button: QPushButton | None = None
@@ -302,6 +309,8 @@ class Main(QMainWindow):
         self._route_measurement_thread: threading.Thread | None = None
         self._design_session = DesignSession()
         self.statusBar()
+        self._objective_widget = self._create_objective_widget()
+        self.statusBar().addPermanentWidget(self._objective_widget, 0)
         self._stage_position_widget = self._create_stage_position_widget()
         self.statusBar().addPermanentWidget(self._stage_position_widget, 0)
         self._status_log = QPlainTextEdit(self)
@@ -336,6 +345,12 @@ class Main(QMainWindow):
         self.stage_controller.status_message.connect(self._show_status)
         self.stage_controller.movement_finished.connect(self.on_move_finished)
         self.stage_controller.calibration_changed.connect(self.on_calibration_changed)
+        self.stage_controller.objective_calibration_updated.connect(
+            self._on_objective_calibration_updated
+        )
+        self.stage_controller.objective_mismatch_detected.connect(
+            self._on_objective_mismatch_detected
+        )
         self.stage_controller.autofocus_finished.connect(self.on_autofocus_finished)
         self.stage_controller.stage_position_changed.connect(self._on_stage_position_changed)
         self.stage_controller.needle_height_changed.connect(self._on_needle_height_changed)
@@ -852,6 +867,26 @@ class Main(QMainWindow):
             self.statusBar().showMessage(message, timeout_ms)
             self._status_log.appendPlainText(message)
             self._append_status_log(message)
+
+    def _create_objective_widget(self) -> QWidget:
+        widget = QWidget(self)
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        label = QLabel("Objective:", widget)
+        label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        layout.addWidget(label)
+        self._objective_combo = QComboBox(widget)
+        for name in OBJECTIVE_NAMES:
+            self._objective_combo.addItem(name, name)
+        self._objective_combo.setToolTip(
+            "Select the installed microscope objective. Click-to-move and autofocus use this profile."
+        )
+        self._objective_combo.currentIndexChanged.connect(
+            self._on_objective_combo_changed
+        )
+        layout.addWidget(self._objective_combo)
+        return widget
 
     def _create_stage_position_widget(self) -> QWidget:
         widget = QWidget(self)
@@ -1741,6 +1776,17 @@ class Main(QMainWindow):
             startup_mode=coordinate_settings.startup_mode,
             preferred_system=coordinate_settings.preferred_system,
         )
+        objective_settings = self.settings_manager.objectives_configuration()
+        active_objective = objective_settings.objectives.get(
+            objective_settings.active_name
+        )
+        if active_objective is None:
+            active_objective = ObjectiveCalibrationSettings(name="X5")
+        self.stage_controller.apply_objective_configuration(
+            active_objective,
+            objective_settings.objectives,
+        )
+        self._sync_objective_combo(objective_settings.active_name)
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_design_dialog_directory(
                 self.settings_manager.design_last_directory()
@@ -1820,6 +1866,134 @@ class Main(QMainWindow):
         self.settings_manager.save()
         self._apply_settings()
         logger.info("Settings updated from dialog")
+
+    def _sync_objective_combo(self, objective_name: str) -> None:
+        combo = self._objective_combo
+        if combo is None:
+            return
+        index = combo.findData(objective_name)
+        if index < 0:
+            return
+        combo.blockSignals(True)
+        combo.setCurrentIndex(index)
+        combo.blockSignals(False)
+
+    def _on_objective_combo_changed(self, _index: int) -> None:
+        combo = self._objective_combo
+        if combo is None:
+            return
+        objective_name = str(combo.currentData() or "").strip().upper()
+        if objective_name:
+            self._set_active_objective(objective_name, apply_motion=True)
+
+    def _set_active_objective(self, objective_name: str, *, apply_motion: bool) -> None:
+        objective_name = objective_name.strip().upper()
+        if objective_name not in OBJECTIVE_NAMES:
+            return
+        settings = self.settings_manager.settings.clone()
+        old_name = settings.objectives.active_name
+        if old_name == objective_name:
+            return
+        settings.objectives.active_name = objective_name
+        self.settings_manager.replace(settings)
+        self.settings_manager.save()
+        self._apply_settings()
+        if apply_motion:
+            self._apply_objective_change_offset(old_name, objective_name)
+        self._show_status(f"Objective selected: {objective_name}.", 3000)
+
+    def _apply_objective_change_offset(self, old_name: str, new_name: str) -> None:
+        objective_settings = self.settings_manager.objectives_configuration()
+        if not objective_settings.apply_offsets_on_change:
+            return
+        old_profile = objective_settings.objectives.get(old_name)
+        new_profile = objective_settings.objectives.get(new_name)
+        if old_profile is None or new_profile is None:
+            return
+        if not (
+            old_profile.xy_offset_configured
+            and new_profile.xy_offset_configured
+        ):
+            self._show_status(
+                "Objective XY offset is not configured for both objectives.",
+                4000,
+            )
+            return
+        latest = self.stage_controller.latest_stage_position()
+        if latest is None or len(latest) < 2:
+            self._show_status("Stage position unavailable; objective offset not applied.", 4000)
+            return
+        raw_targets: dict[str, float] = {
+            "X": float(latest[0])
+            + float(new_profile.xy_offset_x_mm)
+            - float(old_profile.xy_offset_x_mm),
+            "Y": float(latest[1])
+            + float(new_profile.xy_offset_y_mm)
+            - float(old_profile.xy_offset_y_mm),
+        }
+        if (
+            old_profile.z_offset_configured
+            and new_profile.z_offset_configured
+            and len(latest) >= 3
+        ):
+            current_z_display = self._display_axis_value_from_raw("Z", float(latest[2]))
+            z_display = (
+                current_z_display
+                + float(new_profile.z_offset_mm)
+                - float(old_profile.z_offset_mm)
+            )
+            raw_targets["Z"] = self._raw_axis_value_from_display("Z", z_display)
+        if self.stage_controller.is_busy():
+            self._show_status("Stage is busy; objective offset not applied.", 4000)
+            return
+        accepted = self.stage_controller.request_absolute_axis_targets_move(
+            raw_targets,
+            feedrate=self._current_linear_feedrate(),
+            allow_unhomed=False,
+        )
+        if accepted:
+            axes = ", ".join(sorted(raw_targets))
+            self._show_status(f"Applying {new_name} objective offset on {axes}.", 4000)
+        else:
+            self._show_status("Objective offset move was not accepted.", 4000)
+
+    def _on_objective_calibration_updated(
+        self,
+        objective_name: str,
+        pixels_to_mm: object,
+    ) -> None:
+        name = str(objective_name).strip().upper()
+        if name not in OBJECTIVE_NAMES:
+            return
+        settings = self.settings_manager.settings.clone()
+        profile = settings.objectives.objectives.get(name)
+        if profile is None:
+            profile = ObjectiveCalibrationSettings(name=name)
+        matrix: list[list[float]] = []
+        if isinstance(pixels_to_mm, (list, tuple)):
+            try:
+                matrix = [
+                    [float(pixels_to_mm[0][0]), float(pixels_to_mm[0][1])],
+                    [float(pixels_to_mm[1][0]), float(pixels_to_mm[1][1])],
+                ]
+            except (TypeError, ValueError, IndexError):
+                matrix = []
+        profile.pixels_to_mm = matrix
+        profile.xy_calibration_configured = bool(matrix)
+        settings.objectives.objectives[name] = profile
+        self.settings_manager.replace(settings)
+        self.settings_manager.save()
+
+    def _on_objective_mismatch_detected(
+        self,
+        suggested_name: str,
+        message: str,
+    ) -> None:
+        name = str(suggested_name).strip().upper()
+        if name in OBJECTIVE_NAMES:
+            self._set_active_objective(name, apply_motion=False)
+        if message:
+            self._show_status(message, 7000)
 
     def _design_backed_alignment_active(self) -> bool:
         return self._design_session.has_complete_source_design_marks()
@@ -2835,24 +3009,13 @@ class Main(QMainWindow):
             self._clear_coordinate_move_tracking(clear_pending=False, reset_override=True)
             return
         now = time.monotonic()
-        duration = max(
-            self._coordinate_move_ends_at - self._coordinate_move_started_at,
-            1e-6,
+        self._coordinate_move_stage_position = interpolate_position(
+            self._coordinate_move_origin_position,
+            self._coordinate_move_target_position,
+            self._coordinate_move_started_at,
+            self._coordinate_move_ends_at,
+            now,
         )
-        progress = min(
-            1.0,
-            max(0.0, (now - self._coordinate_move_started_at) / duration),
-        )
-        origin = self._coordinate_move_origin_position
-        target = self._coordinate_move_target_position
-        count = min(len(origin), len(target))
-        values = [
-            float(origin[index] + (target[index] - origin[index]) * progress)
-            for index in range(count)
-        ]
-        if len(target) > count:
-            values.extend(float(value) for value in target[count:])
-        self._coordinate_move_stage_position = tuple(values)
         self._publish_stage_position_estimate(self._coordinate_move_stage_position)
 
     def _advance_planned_move_prediction(self) -> None:
@@ -2865,13 +3028,10 @@ class Main(QMainWindow):
             self._clear_planned_move_prediction(clear_wait_state=False)
             return
         now = time.monotonic()
-        duration = max(
-            self._planned_move_ends_at - self._planned_move_started_at,
-            1e-6,
-        )
-        progress = min(
-            1.0,
-            max(0.0, (now - self._planned_move_started_at) / duration),
+        progress = motion_progress(
+            self._planned_move_started_at,
+            self._planned_move_ends_at,
+            now,
         )
         origin_x, origin_y = self._planned_move_origin_xy
         target_x, target_y = self._planned_move_target_xy
