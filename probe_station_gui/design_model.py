@@ -272,8 +272,14 @@ class DesignDocument:
     )
     snap_long_segment_indices: tuple[int, ...] = field(default_factory=tuple, repr=False)
     snap_geometry_built: bool = field(default=False, repr=False)
+    rotation_quarter_turns: int = 0
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "rotation_quarter_turns",
+            int(self.rotation_quarter_turns) % 4,
+        )
         if not self.plot_paths_by_layer and self.polygons_by_layer:
             object.__setattr__(
                 self,
@@ -327,7 +333,9 @@ class DesignDocument:
         library: Any,
         top_cell_name: str,
         visible_layers: Optional[Iterable[LayerKey]] = None,
+        rotation_quarter_turns: int = 0,
     ) -> "DesignDocument":
+        rotation_quarter_turns = int(rotation_quarter_turns) % 4
         cells = tuple(getattr(library, "cells", ()))
         cell_by_name = {
             str(getattr(cell, "name", "")): cell for cell in cells if getattr(cell, "name", "")
@@ -338,6 +346,13 @@ class DesignDocument:
         polygons_by_layer = cls._extract_polygons(top_cell)
         if not polygons_by_layer:
             raise DesignModelError(f"Top cell '{top_cell_name}' has no polygon geometry.")
+        if rotation_quarter_turns:
+            raw_bounds = cls._calculate_bounds(polygons_by_layer)
+            polygons_by_layer = cls._rotate_polygons_by_layer(
+                polygons_by_layer,
+                raw_bounds,
+                rotation_quarter_turns,
+            )
         bounds = cls._calculate_bounds(polygons_by_layer)
         layers = frozenset(polygons_by_layer.keys())
         if visible_layers is None:
@@ -361,6 +376,7 @@ class DesignDocument:
             polygons_by_layer=polygons_by_layer,
             visible_layers=effective_layers,
             plot_paths_by_layer=cls._build_plot_paths(polygons_by_layer, effective_layers),
+            rotation_quarter_turns=rotation_quarter_turns,
         )
 
     def with_top_cell(self, top_cell_name: str) -> "DesignDocument":
@@ -371,6 +387,7 @@ class DesignDocument:
             library=self.library,
             top_cell_name=top_cell_name,
             visible_layers=self.visible_layers,
+            rotation_quarter_turns=self.rotation_quarter_turns,
         )
 
     def with_visible_layers(self, layers: Iterable[LayerKey]) -> "DesignDocument":
@@ -383,7 +400,62 @@ class DesignDocument:
             visible_layers=frozenset(
                 layer for layer in layers if layer in self.polygons_by_layer
             ),
+            rotation_quarter_turns=self.rotation_quarter_turns,
         )
+
+    def with_rotation_delta(self, quarter_turn_delta: int) -> "DesignDocument":
+        """Return a copy rotated by 90-degree steps around the design bounds center."""
+
+        delta = int(quarter_turn_delta) % 4
+        if delta == 0:
+            return self
+        polygons_by_layer = self._rotate_polygons_by_layer(
+            self.polygons_by_layer,
+            self.bounds,
+            delta,
+        )
+        bounds = self._calculate_bounds(polygons_by_layer)
+        empty_points = np.empty((0, 2), dtype=float)
+        return replace(
+            self,
+            bounds=bounds,
+            polygons_by_layer=polygons_by_layer,
+            plot_paths_by_layer=self._build_plot_paths(
+                polygons_by_layer,
+                self.visible_layers,
+            ),
+            snap_vertices=empty_points,
+            snap_segment_starts=empty_points,
+            snap_segment_ends=empty_points,
+            snap_grid_cell_size=0.0,
+            snap_vertex_bins={},
+            snap_segment_bins={},
+            snap_long_segment_indices=(),
+            snap_geometry_built=False,
+            rotation_quarter_turns=self.rotation_quarter_turns + delta,
+        )
+
+    def rotate_point(self, point: Point2D, quarter_turn_delta: int) -> Point2D:
+        """Rotate a point from this document orientation by 90-degree steps."""
+
+        left, bottom, right, top = self.bounds
+        center = ((left + right) * 0.5, (bottom + top) * 0.5)
+        return self._rotate_point_around_center(point, center, quarter_turn_delta)
+
+    @staticmethod
+    def rotate_vector(vector: Point2D, quarter_turn_delta: int) -> Point2D:
+        """Rotate a vector by 90-degree steps without applying translation."""
+
+        x_value = float(vector[0])
+        y_value = float(vector[1])
+        turns = int(quarter_turn_delta) % 4
+        if turns == 1:
+            return (-y_value, x_value)
+        if turns == 2:
+            return (-x_value, -y_value)
+        if turns == 3:
+            return (y_value, -x_value)
+        return (x_value, y_value)
 
     def layer_keys(self) -> tuple[LayerKey, ...]:
         """Return layer keys in display order."""
@@ -764,6 +836,71 @@ class DesignDocument:
         if not mins_x:
             raise DesignModelError("Unable to determine document bounds.")
         return (min(mins_x), min(mins_y), max(maxs_x), max(maxs_y))
+
+    @staticmethod
+    def _rotate_polygons_by_layer(
+        polygons_by_layer: dict[LayerKey, tuple[np.ndarray, ...]],
+        bounds: tuple[float, float, float, float],
+        quarter_turn_delta: int,
+    ) -> dict[LayerKey, tuple[np.ndarray, ...]]:
+        left, bottom, right, top = bounds
+        center = ((left + right) * 0.5, (bottom + top) * 0.5)
+        return {
+            layer_key: tuple(
+                DesignDocument._rotate_points_around_center(
+                    polygon,
+                    center,
+                    quarter_turn_delta,
+                )
+                for polygon in polygons
+            )
+            for layer_key, polygons in polygons_by_layer.items()
+        }
+
+    @staticmethod
+    def _rotate_points_around_center(
+        points: np.ndarray,
+        center: Point2D,
+        quarter_turn_delta: int,
+    ) -> np.ndarray:
+        turns = int(quarter_turn_delta) % 4
+        if turns == 0:
+            return np.asarray(points, dtype=float).copy()
+        values = np.asarray(points, dtype=float)
+        cx, cy = float(center[0]), float(center[1])
+        dx = values[:, 0] - cx
+        dy = values[:, 1] - cy
+        rotated = np.empty_like(values, dtype=float)
+        if turns == 1:
+            rotated[:, 0] = cx - dy
+            rotated[:, 1] = cy + dx
+        elif turns == 2:
+            rotated[:, 0] = cx - dx
+            rotated[:, 1] = cy - dy
+        else:
+            rotated[:, 0] = cx + dy
+            rotated[:, 1] = cy - dx
+        return rotated
+
+    @staticmethod
+    def _rotate_point_around_center(
+        point: Point2D,
+        center: Point2D,
+        quarter_turn_delta: int,
+    ) -> Point2D:
+        x_value = float(point[0])
+        y_value = float(point[1])
+        cx, cy = float(center[0]), float(center[1])
+        dx = x_value - cx
+        dy = y_value - cy
+        turns = int(quarter_turn_delta) % 4
+        if turns == 1:
+            return (cx - dy, cy + dx)
+        if turns == 2:
+            return (cx - dx, cy - dy)
+        if turns == 3:
+            return (cx + dy, cy - dx)
+        return (x_value, y_value)
 
     @staticmethod
     def _build_plot_paths(

@@ -79,14 +79,13 @@ Main window:
 Menus:
 - `Application`: settings and status log;
 - `Tools`: `Connection`, `Joystick`, `Serial Terminal`, `Oscillation`;
-- `Calibration`: `Design Window`, `Alignment`, `Needle Calibration`.
+- `Calibration`: `Design Window`, `Contact / Stone Calibration`, `Surface Map`, `Alignment`.
 
 Main panels:
 - `Connection`
 - `Joystick`
 - `Serial Terminal`
 - `Alignment`
-- `Needle Calibration`
 - `Oscillation`
 
 Separate window:
@@ -97,6 +96,7 @@ Separate window:
 Purpose:
 - scan serial ports;
 - connect to and disconnect from `FluidNC`;
+- connect to and disconnect from the configured `LCR`;
 - run startup synchronization after connect;
 - attempt auto-connect.
 
@@ -105,6 +105,9 @@ How to use it:
 2. Select the controller port.
 3. Check the baud rate, usually `115200`.
 4. Press `Connect`.
+
+The same panel contains the `LCR Meter` block. Configure its resource in
+`Application` -> `Settings` -> `Needles`, then press `Connect LCR`.
 
 After connection:
 - the control panels become active;
@@ -310,9 +313,25 @@ For `Move To` to work correctly you need:
 - valid registration;
 - raised needles.
 
-## `Needle Calibration` Panel
+### Probe Route Measurement
 
-This panel is used to calibrate the lower needle position using an external `LCR`.
+`Probe Route` can run an ordered route and write one numeric resistance value per CSV row.
+
+Typical workflow:
+1. Load a design in `Design Window`.
+2. Complete design-backed alignment so registration is valid.
+3. In `Probe Route`, create points manually or with `Array`.
+4. Connect the stage controller and the LCR meter.
+5. Press `Run Route` and choose the CSV output path.
+6. The runner raises needles, moves to each point, lowers needles, reads the LCR, raises needles again, and continues to the next point.
+
+`Stop` requests a safe stop after the current route action. Completed points are already written to CSV.
+
+## Contact Calibration and LCR
+
+The `Contact / Stone Calibration` window is used to save chip/stone focus
+positions and the lower needle contact position. The external `LCR` is connected
+from the `Connection` panel.
 
 Requirements:
 - properly configured instrument address;
@@ -322,10 +341,10 @@ Requirements:
 Typical workflow:
 1. Open needle settings.
 2. Configure the `LCR` parameters.
-3. In `Needle Calibration`, press `Connect LCR`.
-4. Start calibration.
+3. In `Connection`, press `Connect LCR`.
+4. Open `Contact / Stone Calibration`.
 5. Lower the needles in small steps.
-6. Watch the resistance and `Short/Open` state.
+6. Watch the LCR reading and `Short/Open` state in `Connection`.
 7. When you find the correct contact point, save the current position.
 8. Raise the needles again.
 

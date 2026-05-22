@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .design_model import DesignDocument, DesignModelError, MeasurementTarget, Point2D
 
@@ -404,6 +404,26 @@ class MeasurementRoute:
             )
             for index in range(2)
         ]
+        self.updated_at_utc = _utc_timestamp()
+
+    def transform_design_coordinates(
+        self,
+        document: DesignDocument,
+        point_transform: Callable[[Point2D], Point2D],
+        vector_transform: Callable[[Point2D], Point2D],
+    ) -> None:
+        """Move route points and needle offsets into a transformed design space."""
+
+        self.design = RouteDesignBinding.from_document(document)
+        self.points = [
+            replace(point, camera_center=point_transform(point.camera_center))
+            for point in self.points
+        ]
+        transformed_offsets: list[NeedleOffset] = []
+        for offset in self.needle_offsets:
+            dx, dy = vector_transform((offset.dx, offset.dy))
+            transformed_offsets.append(replace(offset, dx=dx, dy=dy))
+        self.needle_offsets = transformed_offsets
         self.updated_at_utc = _utc_timestamp()
 
     def needle_hits_for_point(

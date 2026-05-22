@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
 )
 
 from probe_station_gui.settings_manager import SavedStagePositionSettings
-from probe_station_gui.views.needle_calibration_panel import NeedleCalibrationPanel
 from probe_station_gui.views.oscillation_panel import OscillationPanel
 
 
@@ -27,6 +26,9 @@ class ContactOscillationWindow(QWidget):
     autofocus_requested = Signal()
     save_surface_position_requested = Signal(str)
     move_to_surface_position_requested = Signal(str)
+    save_current_needle_height_requested = Signal()
+    lower_needles_requested = Signal()
+    raise_needles_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -35,10 +37,11 @@ class ContactOscillationWindow(QWidget):
         self.setWindowTitle("Contact Calibration")
         self.resize(520, 760)
 
-        self.needle_panel = NeedleCalibrationPanel(self)
         self.oscillation_panel = OscillationPanel(self)
 
         self._current_stage_xyz: tuple[float, float, float] | None = None
+        self._current_needle_height: Optional[float] = None
+        self._saved_needle_height: Optional[float] = None
 
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(10, 10, 10, 10)
@@ -106,9 +109,25 @@ class ContactOscillationWindow(QWidget):
         root_layout.addWidget(positions_group)
 
         needle_group = QGroupBox("Manual Contact Calibration", self)
-        needle_layout = QVBoxLayout(needle_group)
+        needle_layout = QGridLayout(needle_group)
         needle_layout.setContentsMargins(6, 6, 6, 6)
-        needle_layout.addWidget(self.needle_panel)
+        needle_layout.addWidget(QLabel("Current lowering:", needle_group), 0, 0)
+        self._current_needle_label = QLabel("n/a", needle_group)
+        needle_layout.addWidget(self._current_needle_label, 0, 1, 1, 3)
+        needle_layout.addWidget(QLabel("Saved lowering:", needle_group), 1, 0)
+        self._saved_needle_label = QLabel("n/a", needle_group)
+        needle_layout.addWidget(self._saved_needle_label, 1, 1, 1, 3)
+        self._save_needle_button = QPushButton("Save Current", needle_group)
+        self._save_needle_button.clicked.connect(
+            self.save_current_needle_height_requested.emit
+        )
+        self._raise_needles_button = QPushButton("Raise", needle_group)
+        self._raise_needles_button.clicked.connect(self.raise_needles_requested.emit)
+        self._lower_needles_button = QPushButton("Lower", needle_group)
+        self._lower_needles_button.clicked.connect(self.lower_needles_requested.emit)
+        needle_layout.addWidget(self._save_needle_button, 2, 0)
+        needle_layout.addWidget(self._raise_needles_button, 2, 1)
+        needle_layout.addWidget(self._lower_needles_button, 2, 2)
         root_layout.addWidget(needle_group)
 
         oscillation_group = QGroupBox("Stone Oscillation", self)
@@ -126,6 +145,8 @@ class ContactOscillationWindow(QWidget):
         root_layout.addWidget(oscillation_group)
 
         self.set_current_stage_position(None)
+        self.set_current_needle_lowering(None)
+        self.set_saved_needle_height(None)
         self.set_saved_surface_position("chip", None)
         self.set_saved_surface_position("stone", None)
 
@@ -171,6 +192,28 @@ class ContactOscillationWindow(QWidget):
             return
         label.setText(self._format_xyz((position.x_mm, position.y_mm, position.z_mm)))
         button.setEnabled(True)
+
+    def set_current_needle_lowering(self, position_mm: Optional[float]) -> None:
+        """Update the displayed current physical A-axis lowering."""
+
+        self._current_needle_height = position_mm
+        if position_mm is None:
+            self._current_needle_label.setText("n/a")
+            self._save_needle_button.setEnabled(False)
+            return
+        self._current_needle_label.setText(f"{position_mm:.4f} mm")
+        self._save_needle_button.setEnabled(True)
+
+    def set_saved_needle_height(self, position_mm: Optional[float]) -> None:
+        """Update the displayed saved physical down height."""
+
+        self._saved_needle_height = position_mm
+        if position_mm is None:
+            self._saved_needle_label.setText("n/a")
+            self._lower_needles_button.setEnabled(False)
+            return
+        self._saved_needle_label.setText(f"{position_mm:.4f} mm")
+        self._lower_needles_button.setEnabled(True)
 
     def _format_xyz(self, position_xyz: tuple[float, float, float]) -> str:
         x_value, y_value, z_value = position_xyz

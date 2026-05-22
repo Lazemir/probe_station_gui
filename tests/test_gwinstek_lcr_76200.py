@@ -63,6 +63,12 @@ class GWInstekLCR76200ParsingTest(unittest.TestCase):
         self.assertEqual(idn["serial"], "GEY894701")
         self.assertEqual(idn["vendor"], "Good Will Instrument Co., Ltd.")
 
+    def test_format_source_level_value_uses_engineering_suffixes(self) -> None:
+        self.assertEqual(driver_module.format_source_level_value(0.01), "10m")
+        self.assertEqual(driver_module.format_source_level_value(0.0001), "100u")
+        self.assertEqual(driver_module.format_source_level_value(0.3), "0.3")
+        self.assertEqual(driver_module.format_source_level_value(1.0), "1")
+
 
 if __name__ == "__main__":
     unittest.main()

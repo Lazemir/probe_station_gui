@@ -34,6 +34,7 @@
 
 ## Development guidelines
 - Avoid running hardware-dependent code in automation unless explicitly requested.
+- Use the local virtual environment for Python commands: `.venv\Scripts\python.exe -m pytest tests`, `.venv\Scripts\python.exe main.py`, etc. Do not rely on bare `python`, which may resolve to the Windows Store alias.
 - Keep startup lightweight: `main.py` should create the main window and show the GUI first. Do not instantiate heavy optional panels, web engines, hardware clients, long scans, network clients, or calibration workers synchronously during startup; initialize them lazily when opened or after startup via timers/background threads.
 - Do not route in-process GUI features through the app's own localhost API. Use direct controller methods, Qt signals, or narrow callbacks inside the process; reserve the FastAPI server for external clients.
 - Do not use ellipses in menu item labels.
@@ -43,5 +44,5 @@
 
 ## How to run (local)
 - Install deps from `pyproject.toml` (PySide6, numpy, opencv-python, rotpy).
-- Run `python main.py`.
+- Run `.venv\Scripts\python.exe main.py`.
 

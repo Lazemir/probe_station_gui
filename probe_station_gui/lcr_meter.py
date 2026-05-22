@@ -10,6 +10,8 @@ from typing import Optional
 
 from PySide6.QtCore import QObject, Signal
 
+from probe_station_gui.gwinstek_lcr_76200 import format_source_level_value
+
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +142,7 @@ class _LCRSession:
                 if level_mode.upper() == "CURRENT":
                     configuration_steps.append(
                         (
-                            f"LEV:CURR {float(current_level_a)}",
+                            f"LEV:CURR {format_source_level_value(current_level_a)}",
                             "LEV:CURR?",
                             str(float(current_level_a)),
                         )
@@ -148,7 +150,7 @@ class _LCRSession:
                 else:
                     configuration_steps.append(
                         (
-                            f"LEV:VOLT {float(voltage_level_v)}",
+                            f"LEV:VOLT {format_source_level_value(voltage_level_v)}",
                             "LEV:VOLT?",
                             str(float(voltage_level_v)),
                         )
@@ -249,6 +251,10 @@ class _LCRSession:
             f"{query} returned {last_response!r}, expected {expected_token!r}"
         )
 
+    def set_trigger_source(self, trigger_source: str) -> None:
+        source = str(trigger_source).strip().upper() or "INT"
+        self._write_and_verify(f"TRIG:SOUR {source}", "TRIG:SOUR?", source)
+
     @staticmethod
     def _configuration_response_matches(response: str, expected: str) -> bool:
         if response == expected:
@@ -279,10 +285,12 @@ class _LCRSession:
     def read_primary_value(self, *, trigger: bool = False) -> float:
         try:
             if trigger:
-                self._instrument.force_trigger()
-            primary_value = self._instrument.fetch_main().primary
+                reading = self._instrument.trigger_fetch()
+            else:
+                reading = self._instrument.fetch_main()
+            primary_value = reading.primary
             if primary_value is None:
-                raise ValueError("FETCH:MAIN? did not return a primary value")
+                raise ValueError("LCR read did not return a primary value")
             primary_value = float(primary_value)
         except Exception as exc:  # pragma: no cover - backend specific failures
             raise LCRMeterError(f"LCR fetch failed: {exc}") from exc
@@ -307,7 +315,7 @@ class LCRMeterController(QObject):
     reading_updated: Signal = Signal(float, bool)
     status_message: Signal = Signal(str)
 
-    DEFAULT_TIMEOUT_MS = 2000
+    DEFAULT_TIMEOUT_MS = 10000
 
     def __init__(self) -> None:
         super().__init__()
@@ -396,6 +404,37 @@ class LCRMeterController(QObject):
 
         return self._session is not None
 
+    def is_short_reading(self, primary_value: float) -> bool:
+        """Return True when a primary reading satisfies the configured short threshold."""
+
+        return self._is_short_reading(float(primary_value))
+
+    def read_primary_value_now(self, *, restart_polling: bool = False) -> float:
+        """Synchronously run one BUS-triggered measurement and return its value."""
+
+        with self._task_lock:
+            if self._active_thread and self._active_thread.is_alive():
+                raise LCRMeterError("LCR meter task already running.")
+            session = self._session
+        if session is None:
+            raise LCRMeterError("LCR meter is not connected.")
+        self._stop_polling_session()
+        try:
+            primary_value = session.read_primary_value(trigger=True)
+        except LCRMeterError:
+            self._disconnect_session()
+            self.connection_changed.emit(False, "", "LCR read failed.")
+            raise
+        finally:
+            if restart_polling and self._session is session:
+                self._stop_polling.clear()
+                self._start_polling_thread()
+        self.reading_updated.emit(
+            primary_value,
+            self._is_short_reading(primary_value),
+        )
+        return primary_value
+
     def request_connect(self) -> None:
         """Open the configured LCR resource in a background thread."""
 
@@ -459,17 +498,13 @@ class LCRMeterController(QObject):
                 instrument_id or "IDN unavailable",
             )
             self._configure_session(session)
-            initial_value = session.read_primary_value(trigger=self._uses_bus_trigger())
             self._session = session
             self._connected_resource_name = self._resource_name
             self._stop_polling.clear()
             self.connection_changed.emit(True, session.backend_name, self._resource_name)
-            self.reading_updated.emit(
-                initial_value,
-                self._is_short_reading(initial_value),
+            self.status_message.emit(
+                f"LCR connected via {session.backend_name}; waiting for explicit triggers."
             )
-            self.status_message.emit(f"LCR connected via {session.backend_name}.")
-            self._start_polling_thread()
         except LCRMeterError as exc:
             self._disconnect_session()
             self.connection_changed.emit(False, "", str(exc))
@@ -505,14 +540,9 @@ class LCRMeterController(QObject):
                 self.connection_changed.emit(True, session.backend_name, desired_resource)
             else:
                 self._stop_polling_session()
-            initial_value = self._configure_active_session(session)
+            self._configure_active_session(session)
             self._stop_polling.clear()
-            self.reading_updated.emit(
-                initial_value,
-                self._is_short_reading(initial_value),
-            )
-            self.status_message.emit("LCR settings applied.")
-            self._start_polling_thread()
+            self.status_message.emit("LCR settings applied; waiting for explicit triggers.")
         except LCRMeterError as exc:
             self._disconnect_session()
             self.connection_changed.emit(False, "", str(exc))
@@ -530,9 +560,8 @@ class LCRMeterController(QObject):
             with self._task_lock:
                 self._active_thread = None
 
-    def _configure_active_session(self, session: _LCRSession) -> float:
+    def _configure_active_session(self, session: _LCRSession) -> None:
         self._configure_session(session)
-        return session.read_primary_value(trigger=self._uses_bus_trigger())
 
     def _configure_session(self, session: _LCRSession) -> None:
         session.configure_measurement(
@@ -547,7 +576,7 @@ class LCRMeterController(QObject):
             source_resistance_ohm=self._source_resistance_ohm,
             aperture_rate=self._aperture_rate,
             aperture_averages=self._aperture_averages,
-            trigger_source=self._trigger_source,
+            trigger_source="BUS",
             trigger_delay_s=self._trigger_delay_s,
             bias_enabled=self._bias_enabled,
             bias_level_v=self._bias_level_v,
@@ -601,7 +630,7 @@ class LCRMeterController(QObject):
             if session is None:
                 return
             try:
-                primary_value = session.read_primary_value(trigger=self._uses_bus_trigger())
+                primary_value = session.read_primary_value(trigger=True)
             except LCRMeterError as exc:
                 self.status_message.emit(f"LCR read failed: {exc}")
                 self.connection_changed.emit(False, "", str(exc))

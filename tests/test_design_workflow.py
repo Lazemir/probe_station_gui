@@ -192,6 +192,39 @@ class DesignDocumentTest(unittest.TestCase):
         self.assertAlmostEqual(segment_snap.point[0], 4.0)
         self.assertAlmostEqual(segment_snap.point[1], 0.0)
 
+    def test_rotate_document_by_quarter_turns(self) -> None:
+        cell_main = _FakeCell(
+            "TOP",
+            {
+                (1, 0): [
+                    np.asarray(
+                        [
+                            [0.0, 0.0],
+                            [10.0, 0.0],
+                            [10.0, 20.0],
+                            [0.0, 20.0],
+                        ]
+                    )
+                ],
+            },
+        )
+        document = DesignDocument._from_components(
+            path=REPO_ROOT / "tests" / "fixtures" / "synthetic.gds",
+            library=_FakeLibrary([cell_main]),
+            top_cell_name="TOP",
+        )
+
+        rotated = document.with_rotation_delta(1)
+
+        self.assertEqual(rotated.rotation_quarter_turns, 1)
+        self.assertEqual(rotated.bounds, (-5.0, 5.0, 15.0, 15.0))
+        self.assertEqual(rotated.rotate_vector((2.0, 3.0), 1), (-3.0, 2.0))
+        self.assertEqual(document.rotate_point((10.0, 0.0), 1), (15.0, 15.0))
+
+        restored = rotated.with_rotation_delta(-1)
+        self.assertEqual(restored.rotation_quarter_turns, 0)
+        self.assertEqual(restored.bounds, document.bounds)
+
 
 class DesignScriptTest(unittest.TestCase):
     def _make_document(self) -> DesignDocument:
@@ -361,6 +394,62 @@ class DesignSessionTest(unittest.TestCase):
         assert mapped is not None
         self.assertAlmostEqual(mapped[0], 9.5)
         self.assertAlmostEqual(mapped[1], 11.0)
+
+    def test_rotate_document_transforms_design_state(self) -> None:
+        document = DesignDocument(
+            path=REPO_ROOT / "tests" / "fixtures" / "synthetic.gds",
+            library=object(),
+            top_cell=object(),
+            top_cell_name="TOP",
+            cell_names=("TOP",),
+            dbu=1e-6,
+            user_unit=1e-9,
+            bounds=(0.0, 0.0, 100.0, 200.0),
+            polygons_by_layer={
+                (1, 0): (
+                    np.asarray(
+                        [
+                            [0.0, 0.0],
+                            [100.0, 0.0],
+                            [100.0, 200.0],
+                            [0.0, 200.0],
+                        ]
+                    ),
+                )
+            },
+            visible_layers=frozenset({(1, 0)}),
+        )
+        session = DesignSession()
+        session.load_document(document)
+        session.source_design_marks = [(0.0, 0.0), (100.0, 0.0)]
+        session.source_stage_marks = [(1.0, 2.0), (3.0, 2.0)]
+        session._rebuild_registration()
+        session.set_targets(
+            [MeasurementTarget(id="target", label="Target", design_center=(20.0, 30.0))]
+        )
+        route = session.create_route()
+        route.add_point((10.0, 20.0))
+        route.set_needle_offsets(1.0, 2.0, -3.0, 4.0)
+        old_target_stage = session.stage_from_design((20.0, 30.0))
+
+        rotated = session.rotate_document(1)
+
+        self.assertIs(session.document, rotated)
+        self.assertEqual(rotated.bounds, (-50.0, 50.0, 150.0, 150.0))
+        self.assertEqual(session.source_design_marks[0], (150.0, 50.0))
+        self.assertEqual(session.source_design_marks[1], (150.0, 150.0))
+        self.assertEqual(session.targets[0].design_center, (120.0, 70.0))
+        assert session.route is not None
+        self.assertEqual(session.route.design.bounds, rotated.bounds)
+        self.assertEqual(session.route.points[0].camera_center, (130.0, 60.0))
+        self.assertEqual(
+            [(offset.dx, offset.dy) for offset in session.route.needle_offsets],
+            [(-2.0, 1.0), (-4.0, -3.0)],
+        )
+        new_target_stage = session.stage_from_design(session.targets[0].design_center)
+        assert old_target_stage is not None and new_target_stage is not None
+        self.assertAlmostEqual(new_target_stage[0], old_target_stage[0])
+        self.assertAlmostEqual(new_target_stage[1], old_target_stage[1])
 
 
 if __name__ == "__main__":

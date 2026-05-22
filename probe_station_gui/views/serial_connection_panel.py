@@ -1,4 +1,4 @@
-"""Dockable panel for managing FluidNC serial connections."""
+"""Dockable panel for managing FluidNC and LCR connections."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import serial
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QComboBox,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -31,10 +32,12 @@ _SERIAL_IO_EXCEPTIONS = (
 
 
 class SerialConnectionPanel(QWidget):
-    """Widget that embeds serial scanning and connection controls."""
+    """Widget that embeds instrument connection controls."""
 
     connected: Signal = Signal(object)
     disconnected: Signal = Signal()
+    lcr_connect_requested: Signal = Signal()
+    lcr_disconnect_requested: Signal = Signal()
 
     _AUTO_RECONNECT_DELAY_MS = 1500
 
@@ -53,16 +56,23 @@ class SerialConnectionPanel(QWidget):
         self._scan_worker: Optional[_SerialPortScanWorker] = None
         self._scan_in_progress = False
         self._pending_auto_connect_after_scan = False
+        self._lcr_connected = False
+        self._lcr_resource_name = ""
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
 
-        self.status_label = QLabel("Disconnected", self)
-        layout.addWidget(self.status_label)
+        fluidnc_group = QGroupBox("FluidNC", self)
+        fluidnc_layout = QVBoxLayout(fluidnc_group)
+        fluidnc_layout.setContentsMargins(6, 6, 6, 6)
+        fluidnc_layout.setSpacing(6)
 
-        self.port_combo = QComboBox(self)
-        self.baud_combo = QComboBox(self)
+        self.status_label = QLabel("Disconnected", fluidnc_group)
+        fluidnc_layout.addWidget(self.status_label)
+
+        self.port_combo = QComboBox(fluidnc_group)
+        self.baud_combo = QComboBox(fluidnc_group)
         self.baud_combo.addItems(
             [
                 "250000",
@@ -78,20 +88,40 @@ class SerialConnectionPanel(QWidget):
         )
         self.baud_combo.setCurrentText("115200")
 
-        layout.addWidget(QLabel("Port", self))
-        layout.addWidget(self.port_combo)
-        layout.addWidget(QLabel("Baud rate", self))
-        layout.addWidget(self.baud_combo)
+        fluidnc_layout.addWidget(QLabel("Port", fluidnc_group))
+        fluidnc_layout.addWidget(self.port_combo)
+        fluidnc_layout.addWidget(QLabel("Baud rate", fluidnc_group))
+        fluidnc_layout.addWidget(self.baud_combo)
 
         button_row = QHBoxLayout()
-        self.refresh_button = QPushButton("Refresh", self)
-        self.connect_button = QPushButton("Connect", self)
+        self.refresh_button = QPushButton("Refresh", fluidnc_group)
+        self.connect_button = QPushButton("Connect", fluidnc_group)
         button_row.addWidget(self.refresh_button)
         button_row.addWidget(self.connect_button)
-        layout.addLayout(button_row)
+        fluidnc_layout.addLayout(button_row)
+        layout.addWidget(fluidnc_group)
+
+        lcr_group = QGroupBox("LCR Meter", self)
+        lcr_layout = QVBoxLayout(lcr_group)
+        lcr_layout.setContentsMargins(6, 6, 6, 6)
+        lcr_layout.setSpacing(6)
+
+        self.lcr_status_label = QLabel("Disconnected", lcr_group)
+        self.lcr_status_label.setWordWrap(True)
+        self.lcr_resource_label = QLabel("Resource: not configured", lcr_group)
+        self.lcr_resource_label.setWordWrap(True)
+        self.lcr_reading_label = QLabel("Reading: n/a", lcr_group)
+        self.lcr_reading_label.setWordWrap(True)
+        self.lcr_connect_button = QPushButton("Connect LCR", lcr_group)
+        lcr_layout.addWidget(self.lcr_status_label)
+        lcr_layout.addWidget(self.lcr_resource_label)
+        lcr_layout.addWidget(self.lcr_reading_label)
+        lcr_layout.addWidget(self.lcr_connect_button)
+        layout.addWidget(lcr_group)
 
         self.refresh_button.clicked.connect(self.populate_ports)
         self.connect_button.clicked.connect(self.on_connect_clicked)
+        self.lcr_connect_button.clicked.connect(self.on_lcr_connect_clicked)
 
         self._auto_timer = QTimer(self)
         self._auto_timer.setSingleShot(True)
@@ -103,6 +133,58 @@ class SerialConnectionPanel(QWidget):
 
     def is_connected(self) -> bool:
         return self._serial is not None and self._serial.is_open
+
+    def set_lcr_resource(self, resource_name: str) -> None:
+        self._lcr_resource_name = resource_name.strip()
+        if self._lcr_resource_name:
+            self.lcr_resource_label.setText(f"Resource: {self._lcr_resource_name}")
+        else:
+            self.lcr_resource_label.setText("Resource: not configured")
+
+    def set_lcr_connection_state(
+        self, connected: bool, backend_name: str, description: str
+    ) -> None:
+        self._lcr_connected = bool(connected)
+        detail = description.strip()
+        if connected:
+            backend = backend_name.strip()
+            if backend and detail:
+                self.lcr_status_label.setText(f"Connected via {backend}: {detail}")
+            elif backend:
+                self.lcr_status_label.setText(f"Connected via {backend}")
+            elif detail:
+                self.lcr_status_label.setText(f"Connected: {detail}")
+            else:
+                self.lcr_status_label.setText("Connected")
+        else:
+            self.lcr_status_label.setText(detail or "Disconnected")
+            self.set_lcr_reading(None, False)
+        self._update_lcr_ui_state()
+
+    def set_lcr_status_message(self, message: str) -> None:
+        message = message.strip()
+        if message:
+            self.lcr_status_label.setText(message)
+
+    def set_lcr_reading(
+        self, resistance_ohm: Optional[float], is_short: bool
+    ) -> None:
+        if resistance_ohm is None:
+            self.lcr_reading_label.setText("Reading: n/a")
+            return
+        state = "Short" if is_short else "Open"
+        self.lcr_reading_label.setText(
+            f"Reading: {resistance_ohm:.6g} ohm ({state})"
+        )
+
+    def on_lcr_connect_clicked(self) -> None:
+        if self._lcr_connected:
+            self.lcr_status_label.setText("Disconnecting LCR...")
+            self.lcr_disconnect_requested.emit()
+            return
+        target = self._lcr_resource_name or "configured resource"
+        self.lcr_status_label.setText(f"Connecting to {target}...")
+        self.lcr_connect_requested.emit()
 
     def populate_ports(self) -> None:
         if self._serial is not None and self._serial.is_open:
@@ -238,6 +320,12 @@ class SerialConnectionPanel(QWidget):
         )
         self.baud_combo.setEnabled(not connected)
         self.refresh_button.setEnabled(not connected and not self._scan_in_progress)
+        self._update_lcr_ui_state()
+
+    def _update_lcr_ui_state(self) -> None:
+        self.lcr_connect_button.setText(
+            "Disconnect LCR" if self._lcr_connected else "Connect LCR"
+        )
 
     def _set_connecting(self, connecting: bool) -> None:
         self._connecting = connecting

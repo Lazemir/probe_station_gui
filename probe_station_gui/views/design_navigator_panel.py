@@ -1304,6 +1304,7 @@ class DesignNavigatorPanel(QWidget):
     unload_design_requested = Signal()
     top_cell_changed = Signal(str)
     layer_visibility_changed = Signal(int, int, bool)
+    design_rotate_requested = Signal(int)
     load_script_requested = Signal(str)
     reload_script_requested = Signal()
     move_to_target_requested = Signal(str)
@@ -1319,6 +1320,8 @@ class DesignNavigatorPanel(QWidget):
     route_remove_selected_requested = Signal()
     route_clear_requested = Signal()
     route_selected = Signal(int)
+    route_measurement_run_requested = Signal(str)
+    route_measurement_stop_requested = Signal()
     route_offsets_changed = Signal(float, float, float, float)
     route_edit_enabled_changed = Signal(bool)
     route_pick_mode_changed = Signal(object)
@@ -1349,6 +1352,8 @@ class DesignNavigatorPanel(QWidget):
         self._selected_target_id: str | None = None
         self._route: MeasurementRoute | None = None
         self._selected_route_point_index = -1
+        self._route_measurement_running = False
+        self._design_registration_active = False
         self._current_design_position: Point2D | None = None
         self._active_design_tool = "select"
         self._route_pick_mode: str | None = None
@@ -1502,6 +1507,12 @@ class DesignNavigatorPanel(QWidget):
             "Array",
             self._make_tool_icon("array"),
         )
+        self._rotate_tool_button = self._make_tool_button(
+            self._tool_toolbar_widget,
+            "Rotate",
+            self._make_tool_icon("rotate"),
+        )
+        self._rotate_tool_button.setCheckable(False)
         self._tool_button_group.addButton(self._select_tool_button)
         self._tool_button_group.addButton(self._ruler_tool_button)
         self._tool_button_group.addButton(self._array_tool_button)
@@ -1509,6 +1520,7 @@ class DesignNavigatorPanel(QWidget):
         tool_buttons.addWidget(self._select_tool_button)
         tool_buttons.addWidget(self._ruler_tool_button)
         tool_buttons.addWidget(self._array_tool_button)
+        tool_buttons.addWidget(self._rotate_tool_button)
         tool_buttons.addStretch(1)
         route_layout.addWidget(self._tool_toolbar_widget)
 
@@ -1610,6 +1622,7 @@ class DesignNavigatorPanel(QWidget):
         array_layout.addWidget(self._route_array_create_button, 7, 2)
         array_layout.addWidget(self._route_array_cancel_button, 7, 3)
         self._tool_stack.addWidget(array_page)
+
         tool_layout.addWidget(self._tool_stack)
         route_layout.addWidget(self._tool_group)
 
@@ -1650,6 +1663,17 @@ class DesignNavigatorPanel(QWidget):
         route_edit_buttons.addWidget(self._route_clear_button)
         route_layout.addLayout(route_edit_buttons)
 
+        route_run_buttons = QHBoxLayout()
+        self._route_run_button = QPushButton("Run Route", route_group)
+        self._route_stop_button = QPushButton("Stop", route_group)
+        self._route_stop_button.setEnabled(False)
+        route_run_buttons.addWidget(self._route_run_button)
+        route_run_buttons.addWidget(self._route_stop_button)
+        route_layout.addLayout(route_run_buttons)
+        self._route_run_status_label = QLabel("Route measurement idle.", route_group)
+        self._route_run_status_label.setWordWrap(True)
+        route_layout.addWidget(self._route_run_status_label)
+
         self._route_new_button.clicked.connect(self.route_new_requested.emit)
         self._route_open_button.clicked.connect(self._choose_route_file)
         self._route_save_button.clicked.connect(self.route_save_requested.emit)
@@ -1661,6 +1685,10 @@ class DesignNavigatorPanel(QWidget):
             self.route_remove_selected_requested.emit
         )
         self._route_clear_button.clicked.connect(self.route_clear_requested.emit)
+        self._route_run_button.clicked.connect(self._choose_route_measurement_csv)
+        self._route_stop_button.clicked.connect(
+            self.route_measurement_stop_requested.emit
+        )
         self._select_tool_button.clicked.connect(
             lambda _checked=False: self._set_design_tool("select")
         )
@@ -1669,6 +1697,9 @@ class DesignNavigatorPanel(QWidget):
         )
         self._array_tool_button.clicked.connect(
             lambda _checked=False: self._set_design_tool("array")
+        )
+        self._rotate_tool_button.clicked.connect(
+            lambda _checked=False: self.design_rotate_requested.emit(1)
         )
         self._ruler_clear_button.clicked.connect(self._clear_ruler)
         self._ruler_cancel_button.clicked.connect(
@@ -1854,8 +1885,23 @@ class DesignNavigatorPanel(QWidget):
         self._update_enabled_state()
         self._update_route_array_preview()
 
+    def set_route_measurement_running(self, running: bool) -> None:
+        self._route_measurement_running = bool(running)
+        if self._route_measurement_running:
+            self._route_run_status_label.setText("Route measurement running.")
+        elif self._route_run_status_label.text() == "Route measurement running.":
+            self._route_run_status_label.setText("Route measurement idle.")
+        self._update_enabled_state()
+
+    def set_route_measurement_status(self, text: str) -> None:
+        self._route_run_status_label.setText(text or "Route measurement idle.")
+
     def set_registration_status(self, text: str) -> None:
         self._registration_status_label.setText(text or "No design registration.")
+
+    def set_design_registration_active(self, active: bool) -> None:
+        self._design_registration_active = bool(active)
+        self._update_enabled_state()
 
     def set_calibration_prompt(self, text: str) -> None:
         self._calibration_prompt_label.setText(text)
@@ -1973,18 +2019,26 @@ class DesignNavigatorPanel(QWidget):
         self._next_button.setEnabled(has_targets)
         self._move_button.setEnabled(has_targets and has_selection)
         has_route = self._route is not None
+        route_running = self._route_measurement_running
         has_route_selection = (
             has_route
             and 0 <= self._selected_route_point_index < len(self._route.points)
         )
         has_current_design_position = self._current_design_position is not None
-        self._route_new_button.setEnabled(has_document)
-        self._route_open_button.setEnabled(has_document)
-        self._route_save_button.setEnabled(has_route and self._route.path is not None)
-        self._route_save_as_button.setEnabled(has_route)
-        self._select_tool_button.setEnabled(has_document)
-        self._ruler_tool_button.setEnabled(has_document)
-        self._array_tool_button.setEnabled(has_document)
+        self._route_new_button.setEnabled(has_document and not route_running)
+        self._route_open_button.setEnabled(has_document and not route_running)
+        self._route_save_button.setEnabled(
+            has_route and self._route.path is not None and not route_running
+        )
+        self._route_save_as_button.setEnabled(has_route and not route_running)
+        self._select_tool_button.setEnabled(has_document and not route_running)
+        self._ruler_tool_button.setEnabled(has_document and not route_running)
+        self._array_tool_button.setEnabled(has_document and not route_running)
+        self._rotate_tool_button.setEnabled(
+            has_document
+            and not route_running
+            and not self._design_registration_active
+        )
         if not has_document and self._route_pick_mode is not None:
             self._clear_route_pick_mode("Load a design to pick route geometry.")
         if not has_document and self._active_design_tool != "select":
@@ -1995,13 +2049,19 @@ class DesignNavigatorPanel(QWidget):
             self._needle_2_dx_spin,
             self._needle_2_dy_spin,
         ):
-            spinbox.setEnabled(has_route)
+            spinbox.setEnabled(has_route and not route_running)
         self._route_table.setEnabled(has_route)
         self._route_add_current_button.setEnabled(
-            has_route and has_current_design_position
+            has_route and has_current_design_position and not route_running
         )
-        self._route_remove_button.setEnabled(has_route_selection)
-        self._route_clear_button.setEnabled(has_route and bool(self._route.points))
+        self._route_remove_button.setEnabled(has_route_selection and not route_running)
+        self._route_clear_button.setEnabled(
+            has_route and bool(self._route.points) and not route_running
+        )
+        self._route_run_button.setEnabled(
+            has_route and bool(self._route.points) and not route_running
+        )
+        self._route_stop_button.setEnabled(route_running)
         for widget in (
             self._ruler_clear_button,
             self._ruler_cancel_button,
@@ -2023,7 +2083,7 @@ class DesignNavigatorPanel(QWidget):
             self._route_array_create_button,
             self._route_array_cancel_button,
         ):
-            widget.setEnabled(has_document)
+            widget.setEnabled(has_document and not route_running)
 
     def _make_route_offset_spinbox(self, parent: QWidget) -> QDoubleSpinBox:
         spinbox = QDoubleSpinBox(parent)
@@ -2130,6 +2190,18 @@ class DesignNavigatorPanel(QWidget):
                     painter.drawEllipse(QPointF(8 + column * 7, 9 + row * 8), 2.2, 2.2)
             painter.setBrush(Qt.NoBrush)
             painter.drawLine(QPointF(8, 9), QPointF(22, 17))
+        elif name == "rotate":
+            painter.save()
+            painter.translate(28, 0)
+            painter.scale(-1, 1)
+            painter.setPen(QPen(accent, 2.4))
+            painter.drawArc(5, 5, 18, 18, 35 * 16, 285 * 16)
+            painter.drawLine(QPointF(20, 5), QPointF(23, 10))
+            painter.drawLine(QPointF(20, 5), QPointF(15, 7))
+            painter.setPen(QPen(dark, 1.8))
+            painter.drawLine(QPointF(14, 9), QPointF(14, 19))
+            painter.drawLine(QPointF(9, 14), QPointF(19, 14))
+            painter.restore()
         elif name == "origin":
             painter.setPen(QPen(accent, 2.0))
             painter.drawLine(QPointF(14, 5), QPointF(14, 23))
@@ -2639,6 +2711,29 @@ class DesignNavigatorPanel(QWidget):
         )
         if path:
             self.route_save_as_requested.emit(path)
+
+    def _choose_route_measurement_csv(self) -> None:  # pragma: no cover - UI interaction
+        if self._route is None or not self._route.points:
+            return
+        default_path = "probe_route_measurements.csv"
+        if self._route.path is not None:
+            default_path = str(
+                self._route.path.with_name(
+                    f"{self._route.path.stem}-measurements.csv"
+                )
+            )
+        elif self._document is not None:
+            default_path = str(
+                self._document.path.parent / "probe_route_measurements.csv"
+            )
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Route Measurements",
+            default_path,
+            "CSV files (*.csv);;All files (*)",
+        )
+        if path:
+            self.route_measurement_run_requested.emit(path)
 
     def _on_top_cell_changed(self, cell_name: str) -> None:
         if self._document is None or not cell_name:

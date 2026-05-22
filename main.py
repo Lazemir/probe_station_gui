@@ -50,13 +50,17 @@ from probe_station_gui.dialogs.settings_dialog import SettingsDialog
 from probe_station_gui.api_server import ProbeStationApiServer
 from probe_station_gui.lcr_meter import LCRMeterController
 from probe_station_gui.route_model import MeasurementRoute
+from probe_station_gui.route_measurement import (
+    RouteMeasurementPoint,
+    RouteMeasurementRecord,
+    RouteMeasurementRunner,
+)
 from probe_station_gui.settings_manager import Settings, SettingsManager
 from probe_station_gui.views.alignment_panel import AlignmentPanel
 from probe_station_gui.views.contact_oscillation_window import (
     ContactOscillationWindow,
 )
 from probe_station_gui.views.dock_widgets import CollapsibleDockWidget
-from probe_station_gui.views.needle_calibration_panel import NeedleCalibrationPanel
 from probe_station_gui.views.oscillation_panel import OscillationPanel
 from probe_station_gui.views.serial_connection_panel import SerialConnectionPanel
 
@@ -142,6 +146,9 @@ class Main(QMainWindow):
 
     design_layout_module_ready: Signal = Signal(object, object)
     design_document_loaded: Signal = Signal(int, object, object)
+    route_measurement_status: Signal = Signal(str)
+    route_measurement_recorded: Signal = Signal(object, int, int)
+    route_measurement_finished: Signal = Signal(bool, str, str)
 
     ALIGNMENT_CAPTURE_SHORTCUT = "Space"
     ALIGNMENT_TARGET_ANGLES = (-180.0, -90.0, 0.0, 90.0, 180.0)
@@ -204,7 +211,6 @@ class Main(QMainWindow):
         self.joystick_panel: JoystickWindow | None = None
         self.serial_terminal_panel: SerialTerminalWindow | None = None
         self.serial_connection_panel: SerialConnectionPanel | None = None
-        self.needle_calibration_panel: NeedleCalibrationPanel | None = None
         self.oscillation_panel: OscillationPanel | None = None
         self.surface_map_window: SurfaceMapWindow | None = None
         self.contact_calibration_window: ContactOscillationWindow | None = None
@@ -222,10 +228,8 @@ class Main(QMainWindow):
         self.joystick_dock: CollapsibleDockWidget | None = None
         self.serial_terminal_dock: CollapsibleDockWidget | None = None
         self.serial_connection_dock: CollapsibleDockWidget | None = None
-        self.needle_calibration_dock: CollapsibleDockWidget | None = None
         self.oscillation_dock: CollapsibleDockWidget | None = None
         self.alignment_dock: CollapsibleDockWidget | None = None
-        self._needle_calibration_active = False
         self._alignment_capture_action: QAction | None = None
         self._alignment_exit_action: QAction | None = None
         self._contact_calibration_window_action: QAction | None = None
@@ -294,6 +298,8 @@ class Main(QMainWindow):
         self._pending_homing_axes: list[str] = []
         self._controller_state_persistence_suspended = False
         self._controller_reboot_recovery_scheduled = False
+        self._route_measurement_runner: RouteMeasurementRunner | None = None
+        self._route_measurement_thread: threading.Thread | None = None
         self._design_session = DesignSession()
         self.statusBar()
         self._stage_position_widget = self._create_stage_position_widget()
@@ -322,6 +328,9 @@ class Main(QMainWindow):
         self.grabber.error.connect(self.on_error)
         self.design_layout_module_ready.connect(self._on_design_layout_module_ready)
         self.design_document_loaded.connect(self._on_design_document_loaded)
+        self.route_measurement_status.connect(self._on_route_measurement_status)
+        self.route_measurement_recorded.connect(self._on_route_measurement_recorded)
+        self.route_measurement_finished.connect(self._on_route_measurement_finished)
 
         self.stage_controller = StageController()
         self.stage_controller.status_message.connect(self._show_status)
@@ -369,9 +378,6 @@ class Main(QMainWindow):
         self._linear_feedrate_save_timer.timeout.connect(
             self._save_pending_linear_feedrate_default
         )
-        self._needle_height_timer = QTimer(self)
-        self._needle_height_timer.setInterval(400)
-        self._needle_height_timer.timeout.connect(self._refresh_needle_height)
 
         self._create_dock_widgets()
 
@@ -1226,7 +1232,6 @@ class Main(QMainWindow):
         self._clear_planned_move_prediction(clear_wait_state=True)
         logger.info("Serial disconnected")
         self.stage_controller.request_stop_oscillation()
-        self._stop_needle_calibration()
         self._controller_state_persistence_suspended = True
         try:
             self.stage_controller.set_serial(None)
@@ -1240,10 +1245,9 @@ class Main(QMainWindow):
             self.joystick_panel.set_serial(None)
         if self.serial_terminal_panel:
             self.serial_terminal_panel.set_serial(None)
-        if self.needle_calibration_panel:
-            self.needle_calibration_panel.set_current_a(None)
         if self.contact_calibration_window is not None:
             self.contact_calibration_window.set_current_stage_position(None)
+            self.contact_calibration_window.set_current_needle_lowering(None)
         if self.oscillation_panel:
             self.oscillation_panel.set_running(False, "")
         self._reset_manual_alignment(cancel_pick=True)
@@ -1532,7 +1536,6 @@ class Main(QMainWindow):
 
         for dock, title in (
             (self.alignment_dock, "Alignment"),
-            (self.needle_calibration_dock, "Needle Calibration"),
         ):
             if dock is None:
                 continue
@@ -1610,6 +1613,13 @@ class Main(QMainWindow):
             return
         if visible:
             self.contact_calibration_window.show_and_raise()
+            latest_lowering = self.stage_controller.latest_axis_a_lowering()
+            if latest_lowering is not None:
+                self.contact_calibration_window.set_current_needle_lowering(
+                    latest_lowering
+                )
+            elif self.serial_connection is not None and self.serial_connection.is_open:
+                self.stage_controller.request_status_refresh()
             return
         self.contact_calibration_window.hide()
 
@@ -1762,18 +1772,14 @@ class Main(QMainWindow):
             poll_interval_ms=needle_settings.poll_interval_ms,
         )
         self.lcr_controller.request_reconfigure()
-        if self.needle_calibration_panel:
-            self.needle_calibration_panel.apply_configuration(
-                resource_name=needle_settings.visa_resource,
-                saved_height=(
-                    needle_settings.down_position_mm
-                    if needle_settings.down_position_configured
-                    else None
-                ),
-                short_threshold_ohm=needle_settings.short_threshold_ohm,
-                measurement_function=needle_settings.measurement_function,
-            )
+        if self.serial_connection_panel is not None:
+            self.serial_connection_panel.set_lcr_resource(needle_settings.visa_resource)
         if self.contact_calibration_window is not None:
+            self.contact_calibration_window.set_saved_needle_height(
+                needle_settings.down_position_mm
+                if needle_settings.down_position_configured
+                else None
+            )
             self.contact_calibration_window.set_saved_surface_position(
                 "chip",
                 needle_settings.chip_position,
@@ -3203,6 +3209,12 @@ class Main(QMainWindow):
         top_cell_name = str(state.get("top_cell_name") or "").strip()
         if top_cell_name and top_cell_name != document.top_cell_name:
             document = document.with_top_cell(top_cell_name)
+        try:
+            rotation_quarter_turns = int(state.get("rotation_quarter_turns", 0))
+        except (TypeError, ValueError):
+            rotation_quarter_turns = 0
+        if rotation_quarter_turns:
+            document = document.with_rotation_delta(rotation_quarter_turns)
         visible_layers = self._parse_persisted_visible_layers(
             state.get("visible_layers")
         )
@@ -3267,6 +3279,53 @@ class Main(QMainWindow):
             self._show_status(str(exc), 5000)
             return
         self._refresh_design_panel()
+
+    def _rotate_design_document(self, quarter_turn_delta: int) -> None:
+        document = self._design_session.document
+        if document is None:
+            self._show_status("Load a design before rotating it.", 4000)
+            return
+        registration = self._design_session.registration
+        if registration is not None and registration.valid:
+            self._show_status(
+                "Clear design registration before rotating the design.",
+                5000,
+            )
+            return
+        if self._pending_alignment_preparation is not None:
+            self._show_status(
+                "Wait for chip rotation to finish before rotating the design.",
+                5000,
+            )
+            return
+        route_measurement_thread = getattr(self, "_route_measurement_thread", None)
+        if (
+            route_measurement_thread is not None
+            and route_measurement_thread.is_alive()
+        ):
+            self._show_status("Stop route measurement before rotating the design.", 5000)
+            return
+        _ = quarter_turn_delta
+        delta = 1
+        previous_selected_point = self._last_selected_design_point
+        try:
+            rotated_document = self._design_session.rotate_document(delta)
+        except DesignModelError as exc:
+            self._show_status(str(exc), 5000)
+            return
+        if previous_selected_point is not None:
+            self._last_selected_design_point = document.rotate_point(
+                previous_selected_point,
+                delta,
+            )
+        self._pending_alignment_preparation = None
+        self._refresh_design_panel()
+        self._refresh_design_position()
+        self._show_status(
+            f"Rotated design counterclockwise: "
+            f"{rotated_document.rotation_quarter_turns * 90} deg.",
+            4000,
+        )
 
     def _load_measurement_script(self, script_path: str) -> None:
         document = self._design_session.document
@@ -3451,6 +3510,156 @@ class Main(QMainWindow):
         self._refresh_design_panel()
         self._show_status("Cleared route points.", 3000)
 
+    def _start_route_measurement(self, csv_path: str) -> None:
+        thread = self._route_measurement_thread
+        if thread is not None and thread.is_alive():
+            self._show_status("Route measurement is already running.", 4000)
+            return
+        if self.serial_connection is None or not self.serial_connection.is_open:
+            self._show_status("Connect the stage controller before running a route.", 5000)
+            return
+        if not self.lcr_controller.is_connected():
+            self._show_status("Connect the LCR meter before running a route.", 5000)
+            return
+        route = self._design_session.route
+        if route is None or not route.points:
+            self._show_status("Create or load a probe route before running it.", 5000)
+            return
+        registration = self._design_session.registration
+        if registration is None or not registration.valid:
+            self._show_status(
+                "Design registration is required before running a route.",
+                6000,
+            )
+            return
+        try:
+            points = self._route_measurement_points(route)
+        except DesignModelError as exc:
+            self._show_status(str(exc), 6000)
+            return
+        if not points:
+            self._show_status("Route has no enabled points.", 5000)
+            return
+        runner = RouteMeasurementRunner(
+            points=points,
+            csv_path=csv_path,
+            stage_controller=self.stage_controller,
+            lcr_controller=self.lcr_controller,
+            needle_feedrate=self._current_needle_feedrate(),
+            status_callback=self.route_measurement_status.emit,
+            record_callback=self.route_measurement_recorded.emit,
+        )
+        self._route_measurement_runner = runner
+        self._route_measurement_thread = threading.Thread(
+            target=self._run_route_measurement,
+            args=(runner,),
+            name="RouteMeasurement",
+            daemon=True,
+        )
+        if self.design_navigator_panel is not None:
+            self.design_navigator_panel.set_route_measurement_running(True)
+            self.design_navigator_panel.set_route_measurement_status(
+                f"Route measurement starting: {len(points)} points."
+            )
+        self._show_status(f"Route measurement starting: {len(points)} points.")
+        self._route_measurement_thread.start()
+
+    def _route_measurement_points(
+        self,
+        route: MeasurementRoute,
+    ) -> list[RouteMeasurementPoint]:
+        points: list[RouteMeasurementPoint] = []
+        for route_index, route_point in enumerate(route.points, start=1):
+            if not route_point.enabled:
+                continue
+            stage_xy = self._design_session.stage_from_design(route_point.camera_center)
+            if stage_xy is None:
+                raise DesignModelError(
+                    "Design registration is required before running a route."
+                )
+            hits = route.needle_hits_for_point(route_point)
+            needle_1_design = (
+                hits[0][1] if len(hits) > 0 else route_point.camera_center
+            )
+            needle_2_design = (
+                hits[1][1] if len(hits) > 1 else route_point.camera_center
+            )
+            points.append(
+                RouteMeasurementPoint(
+                    index=route_index,
+                    point_id=route_point.id,
+                    label=route_point.label,
+                    design_center=(
+                        float(route_point.camera_center[0]),
+                        float(route_point.camera_center[1]),
+                    ),
+                    stage_xy=(float(stage_xy[0]), float(stage_xy[1])),
+                    needle_1_design=(
+                        float(needle_1_design[0]),
+                        float(needle_1_design[1]),
+                    ),
+                    needle_2_design=(
+                        float(needle_2_design[0]),
+                        float(needle_2_design[1]),
+                    ),
+                )
+            )
+        return points
+
+    def _run_route_measurement(self, runner: RouteMeasurementRunner) -> None:
+        success, message = runner.run()
+        self.route_measurement_finished.emit(success, message, str(runner.csv_path))
+
+    def _request_stop_route_measurement(self) -> None:
+        runner = self._route_measurement_runner
+        if runner is None:
+            self._show_status("No route measurement is running.", 3000)
+            return
+        runner.stop()
+        self._show_status("Route measurement stop requested.")
+        if self.design_navigator_panel is not None:
+            self.design_navigator_panel.set_route_measurement_status(
+                "Route measurement will stop after the current action."
+            )
+
+    def _on_route_measurement_status(self, message: str) -> None:
+        self._show_status(message)
+        if self.design_navigator_panel is not None:
+            self.design_navigator_panel.set_route_measurement_status(message)
+
+    def _on_route_measurement_recorded(
+        self,
+        record: RouteMeasurementRecord,
+        position: int,
+        total: int,
+    ) -> None:
+        message = (
+            f"Measured route point {position}/{total}: "
+            f"{record.resistance_ohm:g} ohm."
+        )
+        self._show_status(message)
+        if self.design_navigator_panel is not None:
+            self.design_navigator_panel.set_route_measurement_status(message)
+
+    def _on_route_measurement_finished(
+        self,
+        success: bool,
+        message: str,
+        csv_path: str,
+    ) -> None:
+        thread = self._route_measurement_thread
+        if thread is not None and not thread.is_alive():
+            thread.join(timeout=0.1)
+        self._route_measurement_thread = None
+        self._route_measurement_runner = None
+        if self.design_navigator_panel is not None:
+            self.design_navigator_panel.set_route_measurement_running(False)
+            self.design_navigator_panel.set_route_measurement_status(message)
+        if success:
+            self._show_status(f"{message} CSV: {csv_path}", 8000)
+        else:
+            self._show_status(message, 8000)
+
     def _select_route_point(self, index: int) -> None:
         point = self._design_session.select_route_point(index)
         self._last_selected_design_point = point.camera_center if point is not None else None
@@ -3624,8 +3833,13 @@ class Main(QMainWindow):
         panel = self.design_navigator_panel
         current_target = self._design_session.current_target()
         selected_target_id = current_target.id if current_target else None
+        registration_valid = (
+            self._design_session.registration is not None
+            and self._design_session.registration.valid
+        )
         if panel is not None:
             panel.set_document(self._design_session.document)
+            panel.set_design_registration_active(registration_valid)
             panel.set_script_path(self._design_session.script_path)
             panel.set_targets(
                 self._design_session.targets,
@@ -3634,6 +3848,10 @@ class Main(QMainWindow):
             panel.set_route(
                 self._design_session.route,
                 selected_route_point_index=self._design_session.selected_route_point_index,
+            )
+            panel.set_route_measurement_running(
+                self._route_measurement_thread is not None
+                and self._route_measurement_thread.is_alive()
             )
             if self._pending_alignment_preparation is not None:
                 panel.set_calibration_prompt(
@@ -3658,10 +3876,7 @@ class Main(QMainWindow):
                 self._design_session.route,
                 selected_route_point_index=self._design_session.selected_route_point_index,
             )
-            self.design_layout_window.set_navigation_enabled(
-                self._design_session.registration is not None
-                and self._design_session.registration.valid
-            )
+            self.design_layout_window.set_navigation_enabled(registration_valid)
             self.design_layout_window.set_registration_marks(
                 self._design_session.source_design_marks,
                 self._design_session.check_design_marks,
@@ -4579,6 +4794,13 @@ class Main(QMainWindow):
         if self._linear_feedrate_save_timer.isActive():
             self._linear_feedrate_save_timer.stop()
         self._save_pending_linear_feedrate_default()
+        if self._route_measurement_runner is not None:
+            self._route_measurement_runner.stop()
+        if (
+            self._route_measurement_thread is not None
+            and self._route_measurement_thread.is_alive()
+        ):
+            self._route_measurement_thread.join(timeout=2.0)
         self._stop_jog_before_serial_close("application shutdown")
         self.grabber.stop()
         self.thread.quit()
@@ -4617,6 +4839,15 @@ class Main(QMainWindow):
         self.serial_connection_panel = SerialConnectionPanel(self)
         self.serial_connection_panel.connected.connect(self.on_serial_connected)
         self.serial_connection_panel.disconnected.connect(self.on_serial_disconnected)
+        self.serial_connection_panel.lcr_connect_requested.connect(
+            self.lcr_controller.request_connect
+        )
+        self.serial_connection_panel.lcr_disconnect_requested.connect(
+            self.lcr_controller.request_disconnect
+        )
+        self.lcr_controller.status_message.connect(
+            self.serial_connection_panel.set_lcr_status_message
+        )
         self.serial_connection_dock = CollapsibleDockWidget("Connection", self)
         self.serial_connection_dock.setObjectName("SerialConnectionDock")
         self.serial_connection_dock.setWidget(self.serial_connection_panel)
@@ -4759,35 +4990,15 @@ class Main(QMainWindow):
         self.contact_calibration_window.move_to_surface_position_requested.connect(
             self._move_to_surface_position
         )
-
-        self.needle_calibration_panel = self.contact_calibration_window.needle_panel
-        self.needle_calibration_panel.connect_requested.connect(
-            self.lcr_controller.request_connect
-        )
-        self.needle_calibration_panel.disconnect_requested.connect(
-            self.lcr_controller.request_disconnect
-        )
-        self.needle_calibration_panel.start_requested.connect(
-            self._start_needle_calibration
-        )
-        self.needle_calibration_panel.stop_requested.connect(
-            self._stop_needle_calibration
-        )
-        self.needle_calibration_panel.adjust_requested.connect(
-            lambda step: self.stage_controller.request_needles_adjust(
-                step,
-                self._current_needle_feedrate(),
-            )
-        )
-        self.needle_calibration_panel.save_current_requested.connect(
+        self.contact_calibration_window.save_current_needle_height_requested.connect(
             self._save_current_needle_height
         )
-        self.needle_calibration_panel.lower_to_saved_requested.connect(
+        self.contact_calibration_window.lower_needles_requested.connect(
             lambda: self.stage_controller.request_needles_lower(
                 self._current_needle_feedrate()
             )
         )
-        self.needle_calibration_panel.raise_needles_requested.connect(
+        self.contact_calibration_window.raise_needles_requested.connect(
             lambda: self.stage_controller.request_needles_raise(
                 self._current_needle_feedrate()
             )
@@ -4904,6 +5115,9 @@ class Main(QMainWindow):
         self.design_navigator_panel.layer_visibility_changed.connect(
             self._set_design_layer_visibility
         )
+        self.design_navigator_panel.design_rotate_requested.connect(
+            self._rotate_design_document
+        )
         self.design_navigator_panel.load_script_requested.connect(
             self._load_measurement_script
         )
@@ -4942,6 +5156,12 @@ class Main(QMainWindow):
         )
         self.design_navigator_panel.route_array_requested.connect(
             self._add_route_array_points
+        )
+        self.design_navigator_panel.route_measurement_run_requested.connect(
+            self._start_route_measurement
+        )
+        self.design_navigator_panel.route_measurement_stop_requested.connect(
+            self._request_stop_route_measurement
         )
         self.design_navigator_panel.move_to_target_requested.connect(
             self._move_to_design_target
@@ -4990,63 +5210,21 @@ class Main(QMainWindow):
             3000,
         )
 
-    def _start_needle_calibration(self) -> None:
-        if self.serial_connection is None or not self.serial_connection.is_open:
-            self._show_status("Connect the stage controller before needle calibration.")
-            return
-        if not self.lcr_controller.is_connected():
-            self._show_status("Connect the LCR meter before starting calibration.")
-            return
-        self._needle_calibration_active = True
-        if self.needle_calibration_panel:
-            self.needle_calibration_panel.set_calibration_active(True)
-        latest_lowering = self.stage_controller.latest_axis_a_lowering()
-        if latest_lowering is not None:
-            self._on_needle_height_changed(latest_lowering)
-        else:
-            logger.debug(
-                "Needle calibration started without cached A position; requesting status refresh."
-            )
-            self.stage_controller.request_status_refresh()
-        self._show_status(
-            "Needle calibration started. Move above metal and lower the needles in steps until the LCR reports a short."
-        )
-
-    def _stop_needle_calibration(self) -> None:
-        self._needle_calibration_active = False
-        if self.needle_calibration_panel:
-            self.needle_calibration_panel.set_calibration_active(False)
-        self._show_status("Needle calibration stopped.")
-
-    def _refresh_needle_height(self) -> None:
-        if not self._needle_calibration_active:
-            return
-        lowering_mm = self.stage_controller.latest_axis_a_lowering()
-        if lowering_mm is None:
-            logger.debug(
-                "Needle height refresh has no cached A position; requesting status refresh."
-            )
-            self.stage_controller.request_status_refresh()
-            return
-        self._on_needle_height_changed(lowering_mm)
-
     def _on_needle_height_changed(self, lowering_mm: float) -> None:
-        if self.needle_calibration_panel:
-            self.needle_calibration_panel.set_current_a(lowering_mm)
+        if self.contact_calibration_window is not None:
+            self.contact_calibration_window.set_current_needle_lowering(lowering_mm)
 
     def _on_lcr_connection_changed(
         self, connected: bool, backend_name: str, description: str
     ) -> None:
-        if self.needle_calibration_panel:
-            self.needle_calibration_panel.set_connection_state(
+        if self.serial_connection_panel is not None:
+            self.serial_connection_panel.set_lcr_connection_state(
                 connected, backend_name, description
             )
-            if not connected:
-                self.needle_calibration_panel.set_reading(None, False)
 
     def _on_lcr_reading_updated(self, resistance_ohm: float, is_short: bool) -> None:
-        if self.needle_calibration_panel:
-            self.needle_calibration_panel.set_reading(resistance_ohm, is_short)
+        if self.serial_connection_panel is not None:
+            self.serial_connection_panel.set_lcr_reading(resistance_ohm, is_short)
 
     def _display_a_for_needle_lowering(self, lowering_mm: float | None) -> float | None:
         if lowering_mm is None:

@@ -122,6 +122,19 @@ def _format_bool(value: bool) -> str:
     return "ON" if bool(value) else "OFF"
 
 
+def format_source_level_value(value: float) -> str:
+    """Format source levels in the form accepted by the LCR-76200 firmware."""
+
+    numeric = float(value)
+    if numeric == 0.0 or abs(numeric) >= 0.1:
+        return f"{numeric:.12g}"
+    for scale, suffix in ((1e3, "m"), (1e6, "u"), (1e9, "n")):
+        scaled = numeric * scale
+        if 1.0 <= abs(scaled) < 1000.0:
+            return f"{scaled:.12g}{suffix}"
+    return f"{numeric:.12g}"
+
+
 def _parse_bias_response(token: str) -> Optional[float]:
     value = (token or "").strip().upper()
     if value == "OFF":
@@ -325,6 +338,7 @@ if VisaInstrument is not None and Enum is not None and Ints is not None and Numb
                 unit="V",
                 set_cmd="LEV:VOLT {}",
                 get_cmd="LEV:VOLT?",
+                set_parser=format_source_level_value,
                 get_parser=float,
                 vals=Numbers(min_value=0.0),
             )
@@ -333,6 +347,7 @@ if VisaInstrument is not None and Enum is not None and Ints is not None and Numb
                 unit="A",
                 set_cmd="LEV:CURR {}",
                 get_cmd="LEV:CURR?",
+                set_parser=format_source_level_value,
                 get_parser=float,
                 vals=Numbers(min_value=0.0),
             )
@@ -406,6 +421,11 @@ if VisaInstrument is not None and Enum is not None and Ints is not None and Numb
             """Execute an immediate trigger. The manual requires BUS mode."""
 
             self.write("TRIG")
+
+        def trigger_fetch(self) -> FetchReading:
+            """Execute a BUS trigger and return the completed measurement response."""
+
+            return parse_fetch_response(self.ask("*TRG"))
 
         def fetch(self) -> FetchReading:
             return parse_fetch_response(self.ask("FETCh?"))

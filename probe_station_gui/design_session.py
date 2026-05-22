@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Optional
 
 from .design_model import (
@@ -62,6 +62,7 @@ class DesignSession:
             "version": 1,
             "document_path": str(self.document.path),
             "top_cell_name": self.document.top_cell_name,
+            "rotation_quarter_turns": int(self.document.rotation_quarter_turns),
             "visible_layers": [
                 [int(layer), int(datatype)]
                 for layer, datatype in sorted(self.document.visible_layers)
@@ -164,6 +165,56 @@ class DesignSession:
         if self.document is None:
             raise DesignModelError("No design document is loaded.")
         self.document = self.document.with_visible_layers(layers)
+
+    def rotate_document(self, quarter_turn_delta: int) -> DesignDocument:
+        """Rotate the active design and all design-space annotations by 90-degree steps."""
+
+        if self.document is None:
+            raise DesignModelError("No design document is loaded.")
+        delta = int(quarter_turn_delta) % 4
+        if delta == 0:
+            return self.document
+
+        old_document = self.document
+        new_document = old_document.with_rotation_delta(delta)
+
+        def rotate_point(point: Point2D) -> Point2D:
+            return old_document.rotate_point(point, delta)
+
+        def rotate_optional(point: Point2D | None) -> Point2D | None:
+            return None if point is None else rotate_point(point)
+
+        registration_was_stale = (
+            self.registration is not None and not self.registration.valid
+        )
+        stale_reason = (
+            self.registration.stale_reason
+            if self.registration is not None and self.registration.stale_reason
+            else self.registration_status
+        )
+
+        self.document = new_document
+        self.source_design_marks = [
+            rotate_optional(point) for point in self.source_design_marks
+        ]
+        self.check_design_marks = [rotate_point(point) for point in self.check_design_marks]
+        self.targets = [
+            replace(target, design_center=rotate_point(target.design_center))
+            for target in self.targets
+        ]
+        if self.route is not None:
+            self.route.transform_design_coordinates(
+                new_document,
+                rotate_point,
+                lambda vector: old_document.rotate_vector(vector, delta),
+            )
+
+        self.registration = None
+        self._rebuild_registration()
+        if registration_was_stale and self.registration is not None:
+            self.registration = self.registration.mark_stale(stale_reason)
+            self.registration_status = stale_reason
+        return new_document
 
     def clear_registration(self) -> None:
         """Drop source marks, check marks, and the active registration."""
