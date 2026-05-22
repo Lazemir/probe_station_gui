@@ -2729,7 +2729,7 @@ class StageController(QObject):
         self,
         serial_connection: serial.Serial,
         reference_frame: np.ndarray,
-        origin: tuple[float, float, float],
+        _origin: tuple[float, float, float],
         axis: str,
     ) -> list[tuple[np.ndarray, np.ndarray]]:
         if reference_frame is None:
@@ -2738,6 +2738,11 @@ class StageController(QObject):
         observations: list[tuple[np.ndarray, np.ndarray]] = []
         step_mm = float(self._objective_calibration_step_mm)
         target_pixels = float(self._objective_calibration_target_pixels)
+        reference_status = self._query_status(serial_connection)
+        reference_position = self._position_for_configured_mode(reference_status)
+        if reference_status is None or reference_position is None:
+            raise StageControllerError("Unable to read reference position for calibration.")
+        self._require_homed_axes(reference_status, {axis})
         with self._frame_condition:
             frame_counter = self._frame_counter
         for _ in range(self.CALIBRATION_MAX_OBSERVATIONS_PER_AXIS):
@@ -2756,8 +2761,8 @@ class StageController(QObject):
             self._require_homed_axes(status, {axis})
             mm_vector = np.array(
                 [
-                    float(current[0] - origin[0]),
-                    float(current[1] - origin[1]),
+                    float(current[0] - reference_position[0]),
+                    float(current[1] - reference_position[1]),
                 ],
                 dtype=float,
             )
