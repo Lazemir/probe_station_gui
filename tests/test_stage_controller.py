@@ -169,6 +169,51 @@ class StageControllerStartupLimitsTest(unittest.TestCase):
 
         self.assertFalse(controller._jog_motion_active)
 
+    def test_constrain_jog_distances_does_not_blanket_block_unknown_position(self) -> None:
+        controller = StageController()
+        controller._position_reporting_mode = "machine"
+        controller._axis_limits = {"Z": (0.0, 20.0)}
+        controller._last_stage_position = None
+        controller._homed_axes = {"Z"}
+
+        constrained = controller.constrain_jog_distances((("Z", 250.0),))
+
+        self.assertEqual(constrained, (("Z", 250.0),))
+
+    def test_queue_jog_command_rewrites_known_relative_jog_to_absolute_target(self) -> None:
+        controller = StageController()
+        serial_connection = _WritableFakeSerial()
+        try:
+            controller._serial = serial_connection
+            controller._position_reporting_mode = "machine"
+            controller._axis_limits = {"Z": (0.0, 20.0)}
+            controller._last_stage_position = (0.0, 0.0, 1.0)
+            controller._homed_axes = {"Z"}
+
+            controller.queue_jog_command("$J=G91 G21 Z5.000 F10")
+            controller._async_write_queue.join()
+
+            self.assertEqual(
+                serial_connection.writes,
+                [b"$J=G90 G21 G53 Z6.0000 F10\n"],
+            )
+        finally:
+            controller.shutdown()
+
+    def test_queue_jog_command_allows_unknown_position_without_blanket_block(self) -> None:
+        controller = StageController()
+        try:
+            controller._position_reporting_mode = "machine"
+            controller._axis_limits = {"Z": (0.0, 20.0)}
+            controller._last_stage_position = None
+            controller._homed_axes = {"Z"}
+
+            controller.queue_jog_command("$J=G91 G21 Z250.000 F10")
+
+            self.assertTrue(controller._jog_motion_active)
+        finally:
+            controller.shutdown()
+
     def test_absolute_axis_move_respects_homed_axis_soft_limit(self) -> None:
         controller = StageController()
         controller._serial = _FakeSerial()
@@ -272,6 +317,49 @@ class _LineFakeSerial(_WritableFakeSerial):
             return self.lines.pop(0)
         time.sleep(0.01)
         return b""
+
+
+class _TrackingLock:
+    def __init__(self) -> None:
+        self.depth = 0
+        self.max_depth = 0
+
+    @property
+    def held(self) -> bool:
+        return self.depth > 0
+
+    def acquire(self, blocking: bool = True, timeout: float = -1.0) -> bool:
+        self.depth += 1
+        self.max_depth = max(self.max_depth, self.depth)
+        return True
+
+    def release(self) -> None:
+        if self.depth <= 0:
+            raise RuntimeError("lock released while not held")
+        self.depth -= 1
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *_args) -> None:
+        self.release()
+
+
+class _LockedLineFakeSerial(_LineFakeSerial):
+    def __init__(self, lines: list[bytes], lock: _TrackingLock) -> None:
+        super().__init__(lines)
+        self.lock = lock
+
+    def write(self, payload: bytes) -> None:
+        if not self.lock.held:
+            raise AssertionError("serial write without session lock")
+        super().write(payload)
+
+    def readline(self) -> bytes:
+        if not self.lock.held:
+            raise AssertionError("serial read without session lock")
+        return super().readline()
 
 
 class _BufferedFakeSerial(_WritableFakeSerial):
@@ -578,6 +666,69 @@ class StageControllerStatusParsingTest(unittest.TestCase):
         status = controller._parse_status_line("<Idle|MPos:29.459,31.4|FS:0,0>")
 
         self.assertIsNone(status)
+
+
+class StageControllerAutofocusTest(unittest.TestCase):
+    def test_autofocus_holds_serial_lock_and_refreshes_work_offsets(self) -> None:
+        controller = StageController()
+        lock = _TrackingLock()
+        controller._serial_session_lock = lock
+        serial_connection = _LockedLineFakeSerial(
+            [
+                b"ok\n",
+                b"[GC:G54 G21 G90]\n",
+                b"ok\n",
+                b"[G54:32.000,32.000,0.000,0.000,0.000]\n",
+                b"ok\n",
+                b"<Idle|WPos:-0.842,-2.953,9.520,0.000,0.000|Bf:15,127|FS:0,0>\n",
+            ],
+            lock,
+        )
+        controller._serial = serial_connection
+        controller._needles_known = True
+        controller._needles_up = True
+        controller._homed_axes = {"Z"}
+        controller._axis_limits = {"Z": (0.0, 20.0)}
+        controller._position_reporting_mode = "work"
+        controller._current_status_report_mask = 2
+        controller._active_work_coordinate_system = None
+        controller._controller_coordinate_offsets.clear()
+        controller.AUTOFOCUS_SAMPLES = 1
+        frame = np.array([[1.0, 2.0], [3.0, 4.0]])
+        controller._get_frame_snapshot = lambda timeout=3.0: (frame, 1)
+        controller._focus_metric = lambda _frame: 10.0
+        controller.status_message = types.SimpleNamespace(
+            emit=lambda *args, **kwargs: None
+        )
+        controller.movement_started = types.SimpleNamespace(
+            emit=lambda *args, **kwargs: None
+        )
+        finished = []
+        controller.autofocus_finished = types.SimpleNamespace(
+            emit=lambda success, message: finished.append((success, message))
+        )
+
+        original_loader = _stage_controller_module._load_scipy_optimize
+        fake_optimize = types.SimpleNamespace(
+            minimize_scalar=lambda func, **_kwargs: types.SimpleNamespace(
+                x=0.0, fun=-func(0.0)
+            )
+        )
+        _stage_controller_module._load_scipy_optimize = lambda: fake_optimize
+        try:
+            controller._run_autofocus()
+        finally:
+            _stage_controller_module._load_scipy_optimize = original_loader
+            controller.shutdown()
+
+        self.assertTrue(finished[-1][0])
+        self.assertEqual(controller._active_work_coordinate_system, "G54")
+        self.assertIn("G54", controller._controller_coordinate_offsets)
+        self.assertGreaterEqual(lock.max_depth, 1)
+        self.assertEqual(
+            serial_connection.writes[:3],
+            [b"$G\n", b"$#\n", b"?\n"],
+        )
 
 
 class StageControllerJogQueueTest(unittest.TestCase):

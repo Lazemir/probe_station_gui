@@ -190,6 +190,10 @@ class StageController(QObject):
         r"(?<![A-Za-z])(?P<axis>[XYZABC])(?P<value>[+-]?(?:\d+(?:\.\d*)?|\.\d+))",
         re.IGNORECASE,
     )
+    JOG_FEEDRATE_WORD_PATTERN = re.compile(
+        r"(?<![A-Za-z])F(?P<value>[+-]?(?:\d+(?:\.\d*)?|\.\d+))",
+        re.IGNORECASE,
+    )
     AXIS_RANGE_PATTERN = re.compile(
         r"^\[MSG:INFO: Axis (?P<axis>[A-Za-z]) \((?P<min>-?\d+\.?\d*),(?P<max>-?\d+\.?\d*)\)\]"
     )
@@ -1294,7 +1298,11 @@ class StageController(QObject):
             return
         move = self._move_vector_from_jog_command(stripped)
         if move is not None and not self._motion_safety_disabled:
-            self._check_cached_jog_move_limits(move)
+            checked_move = self._check_cached_jog_move_limits(move)
+            stripped = self._absolute_jog_command_for_relative_move(
+                stripped,
+                checked_move,
+            )
         self._queued_jog_generation += 1
         self._jog_motion_active = True
         self.queue_feed_override_reset()
@@ -1497,6 +1505,7 @@ class StageController(QObject):
         if not normalized or self._motion_safety_disabled:
             return tuple(normalized)
 
+        self._refresh_cached_jog_status_if_missing()
         move = self._move_vector_from_axis_distances(normalized)
         clipped = self._clip_relative_move_to_software_limits(move, emit_status=True)
         clipped_values = {axis: value for axis, value in clipped.items()}
@@ -1521,6 +1530,46 @@ class StageController(QObject):
         if not distances:
             return None
         return self._move_vector_from_axis_distances(distances)
+
+    def _jog_command_feedrate(self, command: str) -> float | None:
+        feedrate: float | None = None
+        for match in self.JOG_FEEDRATE_WORD_PATTERN.finditer(command.strip()):
+            try:
+                value = float(match.group("value"))
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(value):
+                feedrate = max(0.1, value)
+        return feedrate
+
+    def _absolute_jog_command_for_relative_move(
+        self,
+        command: str,
+        move: MoveVector,
+    ) -> str:
+        normalized = command.strip().upper().replace("$J=", " ")
+        tokens = set(normalized.split())
+        if "G91" not in tokens or "G90" in tokens:
+            return command
+        position = self._last_stage_position
+        if position is None:
+            return command
+        targets: dict[str, float] = {}
+        for axis, delta in move.items():
+            if abs(delta) < 1e-6:
+                continue
+            index = self.AXIS_INDEX.get(axis)
+            if index is None or index >= len(position):
+                return command
+            if self._cached_jog_axis_skip_reason(axis, position):
+                return command
+            targets[axis] = float(position[index]) + float(delta)
+        if not targets:
+            return command
+        feedrate = self._jog_command_feedrate(command)
+        if feedrate is None:
+            return command
+        return self._absolute_axis_targets_jog_command(targets, feedrate)
 
     def _move_vector_from_axis_distances(
         self, distances: list[tuple[str, float]] | tuple[tuple[str, float], ...]
@@ -1556,7 +1605,12 @@ class StageController(QObject):
             if abs(delta) < 1e-6:
                 continue
             idx = self.AXIS_INDEX.get(axis)
-            if idx is None or idx >= len(position):
+            reason = self._cached_jog_axis_skip_reason(axis, position)
+            if reason:
+                if emit_status:
+                    self.status_message.emit(
+                        f"Jog soft limit unavailable on {axis}: {reason}."
+                    )
                 continue
             if axis == "B":
                 clipped_delta = self._clip_b_relative_delta(delta)
@@ -1568,8 +1622,6 @@ class StageController(QObject):
                 values[axis] = clipped_delta
                 continue
             limits = self._axis_limits_for_configured_mode(axis, None)
-            if not limits or not self._axis_software_limit_ready(None, axis):
-                continue
             current = float(position[idx])
             min_value, max_value = limits
             target = current + float(delta)
@@ -1592,6 +1644,45 @@ class StageController(QObject):
             c=values["C"],
         )
 
+    def _refresh_cached_jog_status_if_missing(self) -> None:
+        if self._last_stage_position is not None:
+            return
+        serial_connection = self._serial
+        if serial_connection is None or not serial_connection.is_open:
+            return
+        if not self._serial_session_lock.acquire(blocking=False):
+            return
+        try:
+            self._query_status(serial_connection, timeout=0.5)
+        except StageControllerError:
+            return
+        finally:
+            self._serial_session_lock.release()
+
+    def _cached_jog_axis_skip_reason(
+        self,
+        axis: str,
+        position: tuple[float, ...],
+    ) -> str | None:
+        axis = axis.upper().strip()
+        idx = self.AXIS_INDEX.get(axis)
+        if idx is None:
+            return "unsupported axis"
+        if idx >= len(position):
+            return "current position is unavailable"
+        if axis == "B":
+            if self._b_axis_zero_position is None:
+                return "B zero reference is unavailable"
+            return None
+        if axis not in self._axis_limits:
+            return "software limits are unavailable"
+        limits = self._axis_limits_for_configured_mode(axis, None)
+        if limits is None:
+            return "software limits are unavailable in the current coordinate system"
+        if not self._axis_software_limit_ready(None, axis):
+            return "homing state is unavailable"
+        return None
+
     def _clip_b_relative_delta(self, delta: float) -> float:
         if self._last_stage_position is None:
             return float(delta)
@@ -1608,7 +1699,7 @@ class StageController(QObject):
         clipped_target = min(max(target_b, -limit), limit)
         return clipped_target - current_b
 
-    def _check_cached_jog_move_limits(self, move: MoveVector) -> None:
+    def _check_cached_jog_move_limits(self, move: MoveVector) -> MoveVector:
         clipped = self._clip_relative_move_to_software_limits(move)
         for axis, original_delta in move.items():
             clipped_delta = dict(clipped.items()).get(axis, 0.0)
@@ -1616,6 +1707,7 @@ class StageController(QObject):
                 raise StageControllerError(
                     f"Jog exceeds software soft limit on {axis}."
                 )
+        return clipped
 
     def queue_jog_stop(self) -> None:
         """Queue a jog stop command without blocking the UI thread."""
@@ -1964,11 +2056,12 @@ class StageController(QObject):
                 self.movement_finished.emit(True, "Chip is already aligned.")
                 return
             self.status_message.emit(f"Chip alignment: rotating B by {delta_deg:+.3f} deg.")
-            self._send_relative_move(
-                serial_connection,
-                MoveVector(b=delta_deg),
-                allow_relative=True,
-            )
+            with self._serial_session_lock:
+                self._send_relative_move(
+                    serial_connection,
+                    MoveVector(b=delta_deg),
+                    allow_relative=True,
+                )
             self.movement_finished.emit(
                 True,
                 f"Chip alignment rotation complete (B {delta_deg:+.3f} deg).",
@@ -1990,108 +2083,116 @@ class StageController(QObject):
                 raise StageControllerError(
                     "SciPy is required for autofocus optimization. Please install it."
                 )
-            self._relative_warning_emitted = False
-            if not self._needles_up:
-                self.status_message.emit("Autofocus: homing A axis.")
-                self._write_command(serial_connection, "$HA")
-                self._wait_for_ok(serial_connection, timeout=30.0)
-                self._wait_for_idle(serial_connection, timeout=30.0)
-                self._set_needles_state(True, known=True)
-            self._move_safety_check()
-
-            self._ensure_axis_limits(serial_connection)
-            local_range = 1.0
-            fine_step = float(self.AUTOFOCUS_FINE_STEP_MM)
-            if fine_step <= 0:
-                raise StageControllerError("Autofocus parameters are invalid.")
-            with self._frame_condition:
-                frame_counter = self._frame_counter
-
-            status = self._query_status(serial_connection)
-            position = self._position_for_configured_mode(status)
-            if status is None or position is None or len(position) < 3:
-                raise StageControllerError("Unable to read Z position for autofocus.")
-            self._require_homed_axes(status, {"Z"}, allow_relative=True)
-            start_z = float(position[2])
-            z_limits = self._axis_limits_for_configured_mode("Z", status)
-            if not z_limits:
-                raise StageControllerError("Z axis limits unavailable.")
-            min_z, max_z = z_limits
-            if start_z < min_z or start_z > max_z:
-                raise StageControllerError(
-                    f"Current Z position {start_z:.3f} is outside limits ({min_z:.3f}, {max_z:.3f})."
-                )
-            lower_limit = max(min_z - start_z, -local_range)
-            upper_limit = min(max_z - start_z, local_range)
-            if upper_limit <= lower_limit:
-                raise StageControllerError("Z axis range near current position is empty.")
-
-            current_offset = 0.0
-
-            def move_to_offset(target_offset: float, timeout: float = 3.0) -> np.ndarray:
-                nonlocal current_offset, frame_counter
-                self._check_cancelled()
-                target_offset = max(lower_limit, min(upper_limit, target_offset))
-                delta = target_offset - current_offset
-                if abs(delta) < 1e-6:
-                    frame, frame_counter = self._get_frame_snapshot(timeout=timeout)
-                else:
-                    self._send_relative_move(
-                        serial_connection, MoveVector(z=delta), allow_relative=True
-                    )
-                    frame, frame_counter = self._wait_for_new_frame(
-                        frame_counter, timeout=timeout
-                    )
-                if frame is None:
-                    raise StageControllerError(
-                        "Camera did not update during autofocus movement."
-                    )
-                current_offset = target_offset
-                return frame
-
-            def focus_at(offset: float) -> float:
-                offset = max(lower_limit, min(upper_limit, offset))
-                samples = max(1, int(self.AUTOFOCUS_SAMPLES))
-                total = 0.0
-                for _ in range(samples):
-                    frame = move_to_offset(offset, timeout=2.5)
-                    total += self._focus_metric(frame)
-                return total / samples
-
-            self.status_message.emit(
-                f"Autofocus: local search within ±{local_range:.3f} mm."
-            )
-            start_score = focus_at(0.0)
-
-            self.status_message.emit("Autofocus: local refinement.")
-            result = scipy_optimize.minimize_scalar(
-                lambda x: -focus_at(x),
-                bounds=(lower_limit, upper_limit),
-                method="bounded",
-                options={"xatol": fine_step, "maxiter": self.AUTOFOCUS_MAXFUN},
-            )
-            best_offset = float(result.x)
-            best_score = -float(result.fun)
-
-            if best_score < start_score * self.AUTOFOCUS_ACCEPT_RATIO:
-                move_to_offset(0.0, timeout=3.0)
-                message = (
-                    "Autofocus complete. Best focus was worse than start; kept current position."
-                )
-                self.autofocus_finished.emit(True, message)
-                return
-
-            move_to_offset(best_offset, timeout=3.0)
-            message = (
-                "Autofocus complete. "
-                f"Best score {best_score:.2f} at offset {best_offset:+.3f} mm."
-            )
-            self.autofocus_finished.emit(True, message)
+            with self._serial_session_lock:
+                self._run_autofocus_locked(serial_connection, scipy_optimize)
         except StageControllerError as exc:
             self.autofocus_finished.emit(False, str(exc))
         finally:
             with self._task_lock:
                 self._active_thread = None
+
+    def _run_autofocus_locked(
+        self, serial_connection: serial.Serial, scipy_optimize
+    ) -> None:
+        """Run autofocus while the caller owns serial access."""
+
+        self._relative_warning_emitted = False
+        if not self._needles_up:
+            self.status_message.emit("Autofocus: homing A axis.")
+            self._write_command(serial_connection, "$HA")
+            self._wait_for_ok(serial_connection, timeout=30.0)
+            self._wait_for_idle(serial_connection, timeout=30.0)
+            self._set_needles_state(True, known=True)
+        self._move_safety_check()
+
+        self._ensure_axis_limits(serial_connection)
+        local_range = 1.0
+        fine_step = float(self.AUTOFOCUS_FINE_STEP_MM)
+        if fine_step <= 0:
+            raise StageControllerError("Autofocus parameters are invalid.")
+        with self._frame_condition:
+            frame_counter = self._frame_counter
+
+        status = self._query_synced_status_for_absolute_motion(serial_connection)
+        position = self._position_for_configured_mode(status)
+        if status is None or position is None or len(position) < 3:
+            raise StageControllerError("Unable to read Z position for autofocus.")
+        self._require_homed_axes(status, {"Z"}, allow_relative=True)
+        start_z = float(position[2])
+        z_limits = self._axis_limits_for_configured_mode("Z", status)
+        if not z_limits:
+            raise StageControllerError("Z axis limits unavailable.")
+        min_z, max_z = z_limits
+        if start_z < min_z or start_z > max_z:
+            raise StageControllerError(
+                f"Current Z position {start_z:.3f} is outside limits ({min_z:.3f}, {max_z:.3f})."
+            )
+        lower_limit = max(min_z - start_z, -local_range)
+        upper_limit = min(max_z - start_z, local_range)
+        if upper_limit <= lower_limit:
+            raise StageControllerError("Z axis range near current position is empty.")
+
+        current_offset = 0.0
+
+        def move_to_offset(target_offset: float, timeout: float = 3.0) -> np.ndarray:
+            nonlocal current_offset, frame_counter
+            self._check_cancelled()
+            target_offset = max(lower_limit, min(upper_limit, target_offset))
+            delta = target_offset - current_offset
+            if abs(delta) < 1e-6:
+                frame, frame_counter = self._get_frame_snapshot(timeout=timeout)
+            else:
+                self._send_relative_move(
+                    serial_connection, MoveVector(z=delta), allow_relative=True
+                )
+                frame, frame_counter = self._wait_for_new_frame(
+                    frame_counter, timeout=timeout
+                )
+            if frame is None:
+                raise StageControllerError(
+                    "Camera did not update during autofocus movement."
+                )
+            current_offset = target_offset
+            return frame
+
+        def focus_at(offset: float) -> float:
+            offset = max(lower_limit, min(upper_limit, offset))
+            samples = max(1, int(self.AUTOFOCUS_SAMPLES))
+            total = 0.0
+            for _ in range(samples):
+                frame = move_to_offset(offset, timeout=2.5)
+                total += self._focus_metric(frame)
+            return total / samples
+
+        self.status_message.emit(
+            f"Autofocus: local search within +/-{local_range:.3f} mm."
+        )
+        start_score = focus_at(0.0)
+
+        self.status_message.emit("Autofocus: local refinement.")
+        result = scipy_optimize.minimize_scalar(
+            lambda x: -focus_at(x),
+            bounds=(lower_limit, upper_limit),
+            method="bounded",
+            options={"xatol": fine_step, "maxiter": self.AUTOFOCUS_MAXFUN},
+        )
+        best_offset = float(result.x)
+        best_score = -float(result.fun)
+
+        if best_score < start_score * self.AUTOFOCUS_ACCEPT_RATIO:
+            move_to_offset(0.0, timeout=3.0)
+            message = (
+                "Autofocus complete. Best focus was worse than start; kept current position."
+            )
+            self.autofocus_finished.emit(True, message)
+            return
+
+        move_to_offset(best_offset, timeout=3.0)
+        message = (
+            "Autofocus complete. "
+            f"Best score {best_score:.2f} at offset {best_offset:+.3f} mm."
+        )
+        self.autofocus_finished.emit(True, message)
 
     def _run_home(self, command: str, axis_key: str) -> None:
         self.movement_started.emit()
@@ -2099,7 +2200,8 @@ class StageController(QObject):
             serial_connection = self._serial
             if serial_connection is None or not serial_connection.is_open:
                 raise StageControllerError("Serial connection is not available.")
-            self._perform_home_command(serial_connection, command)
+            with self._serial_session_lock:
+                self._perform_home_command(serial_connection, command)
             self.movement_finished.emit(True, "Homing complete.")
             self.homing_action_finished.emit(True, "Homing complete.", axis_key)
         except StageControllerError as exc:
@@ -2300,20 +2402,55 @@ class StageController(QObject):
             serial_connection = self._serial
             if serial_connection is None or not serial_connection.is_open:
                 raise StageControllerError("Serial connection is not available.")
-            if action == "raise":
-                if self._needle_raise_lowering_mm is None:
-                    raise StageControllerError(
-                        "Needle raise calibration missing; cannot raise."
+            with self._serial_session_lock:
+                if action == "raise":
+                    if self._needle_raise_lowering_mm is None:
+                        raise StageControllerError(
+                            "Needle raise calibration missing; cannot raise."
+                        )
+                    status = self._query_status(serial_connection)
+                    current_a = self._axis_value_for_configured_mode(status, "A")
+                    if status is None or current_a is None:
+                        raise StageControllerError("Unable to read A position for needles.")
+                    self._require_homed_axes(status, {"A"})
+                    target_a = self._axis_a_gcode_coordinate_for_lowering(
+                        float(self._needle_raise_lowering_mm)
                     )
-                status = self._query_status(serial_connection)
-                current_a = self._axis_value_for_configured_mode(status, "A")
-                if status is None or current_a is None:
-                    raise StageControllerError("Unable to read A position for needles.")
-                self._require_homed_axes(status, {"A"})
-                target_a = self._axis_a_gcode_coordinate_for_lowering(
-                    float(self._needle_raise_lowering_mm)
-                )
-                if abs(target_a - current_a) >= 1e-6:
+                    if abs(target_a - current_a) >= 1e-6:
+                        programmed_feedrate = self._begin_needles_feedrate_control(
+                            action,
+                            feedrate,
+                        )
+                        try:
+                            self._send_absolute_axis_move(
+                                serial_connection,
+                                "A",
+                                target_a,
+                                ignore_needle_safety=True,
+                                feedrate=programmed_feedrate,
+                            )
+                        finally:
+                            self._end_needles_feedrate_control()
+                    self._update_needles_from_a_position(target_a)
+                    self.needles_action_finished.emit(True, "Needles raised.", action)
+                    return
+                if action == "lower":
+                    if self._needle_down_lowering_mm is None:
+                        raise StageControllerError(
+                            "Needle down calibration missing; cannot lower."
+                        )
+                    status = self._query_status(serial_connection)
+                    current_a = self._axis_value_for_configured_mode(status, "A")
+                    if status is None or current_a is None:
+                        raise StageControllerError("Unable to read A position for needles.")
+                    self._require_homed_axes(status, {"A"})
+                    target_a = self._axis_a_gcode_coordinate_for_lowering(
+                        float(self._needle_down_lowering_mm)
+                    )
+                    if abs(target_a - current_a) < 1e-6:
+                        self._update_needles_from_a_position(target_a)
+                        self.needles_action_finished.emit(True, "Needles already lowered.", action)
+                        return
                     programmed_feedrate = self._begin_needles_feedrate_control(
                         action,
                         feedrate,
@@ -2328,44 +2465,10 @@ class StageController(QObject):
                         )
                     finally:
                         self._end_needles_feedrate_control()
-                self._update_needles_from_a_position(target_a)
-                self.needles_action_finished.emit(True, "Needles raised.", action)
-                return
-            if action == "lower":
-                if self._needle_down_lowering_mm is None:
-                    raise StageControllerError(
-                        "Needle down calibration missing; cannot lower."
-                    )
-                status = self._query_status(serial_connection)
-                current_a = self._axis_value_for_configured_mode(status, "A")
-                if status is None or current_a is None:
-                    raise StageControllerError("Unable to read A position for needles.")
-                self._require_homed_axes(status, {"A"})
-                target_a = self._axis_a_gcode_coordinate_for_lowering(
-                    float(self._needle_down_lowering_mm)
-                )
-                if abs(target_a - current_a) < 1e-6:
                     self._update_needles_from_a_position(target_a)
-                    self.needles_action_finished.emit(True, "Needles already lowered.", action)
+                    self.needles_action_finished.emit(True, "Needles lowered.", action)
                     return
-                programmed_feedrate = self._begin_needles_feedrate_control(
-                    action,
-                    feedrate,
-                )
-                try:
-                    self._send_absolute_axis_move(
-                        serial_connection,
-                        "A",
-                        target_a,
-                        ignore_needle_safety=True,
-                        feedrate=programmed_feedrate,
-                    )
-                finally:
-                    self._end_needles_feedrate_control()
-                self._update_needles_from_a_position(target_a)
-                self.needles_action_finished.emit(True, "Needles lowered.", action)
-                return
-            raise StageControllerError(f"Unknown needle action: {action}.")
+                raise StageControllerError(f"Unknown needle action: {action}.")
         except StageControllerError as exc:
             self.needles_action_finished.emit(False, str(exc), action)
         finally:
@@ -2528,38 +2631,41 @@ class StageController(QObject):
             if abs(step_mm) < 1e-6:
                 self.needles_action_finished.emit(True, "Needle position unchanged.", action)
                 return
-            status = self._query_status(serial_connection)
-            if status is None or self._axis_value_for_configured_mode(status, "A") is None:
-                raise StageControllerError("Unable to read A position for needles.")
-            self._require_homed_axes(status, {"A"})
-            current_a = self._axis_value_for_configured_mode(status, "A")
-            if current_a is None:
-                raise StageControllerError("Unable to read A position for needles.")
-            target_a = self._axis_a_gcode_coordinate_for_lowering_step(
-                current_a,
-                step_mm,
-            )
-            if abs(target_a - current_a) < 1e-6:
-                self.needles_action_finished.emit(True, "Needle position unchanged.", action)
-                return
-            programmed_feedrate = self._begin_needles_feedrate_control(
-                action,
-                feedrate,
-            )
-            try:
-                self._send_absolute_axis_move(
-                    serial_connection,
-                    "A",
-                    target_a,
-                    ignore_needle_safety=True,
-                    feedrate=programmed_feedrate,
+            with self._serial_session_lock:
+                status = self._query_status(serial_connection)
+                if status is None or self._axis_value_for_configured_mode(status, "A") is None:
+                    raise StageControllerError("Unable to read A position for needles.")
+                self._require_homed_axes(status, {"A"})
+                current_a = self._axis_value_for_configured_mode(status, "A")
+                if current_a is None:
+                    raise StageControllerError("Unable to read A position for needles.")
+                target_a = self._axis_a_gcode_coordinate_for_lowering_step(
+                    current_a,
+                    step_mm,
                 )
-            finally:
-                self._end_needles_feedrate_control()
-            current_a = self._read_current_a_position(serial_connection)
-            if current_a is None:
-                raise StageControllerError("Unable to confirm A position after move.")
-            self._update_needles_from_a_position(current_a)
+                if abs(target_a - current_a) < 1e-6:
+                    self.needles_action_finished.emit(
+                        True, "Needle position unchanged.", action
+                    )
+                    return
+                programmed_feedrate = self._begin_needles_feedrate_control(
+                    action,
+                    feedrate,
+                )
+                try:
+                    self._send_absolute_axis_move(
+                        serial_connection,
+                        "A",
+                        target_a,
+                        ignore_needle_safety=True,
+                        feedrate=programmed_feedrate,
+                    )
+                finally:
+                    self._end_needles_feedrate_control()
+                current_a = self._read_current_a_position(serial_connection)
+                if current_a is None:
+                    raise StageControllerError("Unable to confirm A position after move.")
+                self._update_needles_from_a_position(current_a)
             direction = "lowered" if step_mm < 0 else "raised"
             self.needles_action_finished.emit(
                 True,
@@ -2610,39 +2716,41 @@ class StageController(QObject):
                     f"{self.SPIRAL_MIN_TURNS_PER_SWEEP:.2f} and "
                     f"{self.SPIRAL_MAX_TURNS_PER_SWEEP:.2f}."
                 )
-            self._oscillation_active = True
-            self.oscillation_state_changed.emit(True, mode)
-            self.status_message.emit(
-                f"Oscillation started in {mode}: amplitude={amplitude_mm:.3f} mm, "
-                f"feedrate={feedrate:.1f} mm/min."
-            )
-            self._write_command(serial_connection, "G21")
-            self._wait_for_ok(serial_connection)
-            self._write_command(serial_connection, "G91")
-            self._wait_for_ok(serial_connection)
-            if mode == "SPIRAL":
-                self._run_spiral_pattern(
-                    serial_connection,
-                    amplitude_mm=amplitude_mm,
-                    feedrate=feedrate,
-                    turns_per_sweep=turns_per_sweep,
+            with self._serial_session_lock:
+                self._oscillation_active = True
+                self.oscillation_state_changed.emit(True, mode)
+                self.status_message.emit(
+                    f"Oscillation started in {mode}: amplitude={amplitude_mm:.3f} mm, "
+                    f"feedrate={feedrate:.1f} mm/min."
                 )
-            else:
-                self._run_linear_pattern(
-                    serial_connection,
-                    axis=mode,
-                    amplitude_mm=amplitude_mm,
-                    feedrate=feedrate,
-                )
-            self._write_command(serial_connection, "G90")
-            self._wait_for_ok(serial_connection)
-            self.status_message.emit("Oscillation stopped.")
+                self._write_command(serial_connection, "G21")
+                self._wait_for_ok(serial_connection)
+                self._write_command(serial_connection, "G91")
+                self._wait_for_ok(serial_connection)
+                if mode == "SPIRAL":
+                    self._run_spiral_pattern(
+                        serial_connection,
+                        amplitude_mm=amplitude_mm,
+                        feedrate=feedrate,
+                        turns_per_sweep=turns_per_sweep,
+                    )
+                else:
+                    self._run_linear_pattern(
+                        serial_connection,
+                        axis=mode,
+                        amplitude_mm=amplitude_mm,
+                        feedrate=feedrate,
+                    )
+                self._write_command(serial_connection, "G90")
+                self._wait_for_ok(serial_connection)
+                self.status_message.emit("Oscillation stopped.")
         except StageControllerError as exc:
             try:
                 if serial_connection is not None and serial_connection.is_open:
-                    self._cancel_event.clear()
-                    self._write_command(serial_connection, "G90")
-                    self._wait_for_ok(serial_connection)
+                    with self._serial_session_lock:
+                        self._cancel_event.clear()
+                        self._write_command(serial_connection, "G90")
+                        self._wait_for_ok(serial_connection)
             except StageControllerError:
                 pass
             with self._task_lock:
@@ -3312,6 +3420,7 @@ class StageController(QObject):
                     axes = set(self._homed_axes).union(axes)
                 self._update_homing_status(axes)
                 continue
+            self._handle_coordinate_state_line(line)
             lower = line.lower()
             if lower == "ok":
                 return lines
@@ -3346,6 +3455,24 @@ class StageController(QObject):
             if modal_match:
                 return modal_match.group("modal").split()
         return []
+
+    def _handle_coordinate_state_line(self, line: str) -> None:
+        modal_match = self.MODAL_STATE_PATTERN.match(line)
+        if modal_match:
+            for token in modal_match.group("modal").split():
+                candidate = token.strip().upper()
+                if candidate in self.WORK_COORDINATE_SYSTEMS:
+                    self._active_work_coordinate_system = candidate
+                    return
+            return
+        offset_match = self.COORDINATE_OFFSET_PATTERN.match(line)
+        if not offset_match:
+            return
+        coords = self._parse_float_tuple(offset_match.group("coords"))
+        if coords is None:
+            return
+        system = offset_match.group("system").upper()
+        self._controller_coordinate_offsets[system] = coords
 
     def _read_controller_session_marker(
         self, serial_connection: serial.Serial
@@ -3749,6 +3876,7 @@ class StageController(QObject):
                     axes = set(self._homed_axes).union(axes)
                 self._update_homing_status(axes)
                 continue
+            self._handle_coordinate_state_line(line)
             status = self._parse_status_line(line)
             if status is None:
                 continue
