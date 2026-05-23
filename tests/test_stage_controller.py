@@ -734,6 +734,56 @@ class StageControllerAutofocusTest(unittest.TestCase):
 
 
 class StageControllerObjectiveTest(unittest.TestCase):
+    def test_axis_calibration_uses_axis_reference_position(self) -> None:
+        controller = StageController()
+        controller.CALIBRATION_MAX_OBSERVATIONS_PER_AXIS = 4
+        controller.CALIBRATION_MIN_OBSERVATIONS = 4
+        controller._objective_calibration_step_mm = 0.1
+        controller._objective_calibration_target_pixels = 1000.0
+        current = [0.4, 0.0, 0.0]
+        serial_connection = _FakeSerial()
+
+        def _status() -> types.SimpleNamespace:
+            position = tuple(current)
+            return types.SimpleNamespace(
+                state="Idle",
+                position=position,
+                work_position=position,
+                display_position=position,
+                work_offset=(0.0, 0.0, 0.0),
+                homed_axes={"X", "Y"},
+            )
+
+        def _send_relative_move(_serial, move) -> None:
+            current[0] += move.x
+            current[1] += move.y
+
+        controller._query_status = lambda _serial: _status()
+        controller._send_relative_move = _send_relative_move
+        controller._wait_for_new_frame = (
+            lambda frame_counter, timeout=2.0: (
+                np.zeros((8, 8), dtype=np.uint8),
+                frame_counter + 1,
+            )
+        )
+        controller._estimate_shift_with_response = lambda *_args: (
+            0.0,
+            current[1] * 1000.0,
+            1.0,
+        )
+
+        observations = controller._calibrate_axis_series(
+            serial_connection,
+            np.zeros((8, 8), dtype=np.uint8),
+            (0.0, 0.0, 0.0),
+            axis="Y",
+        )
+
+        self.assertEqual(len(observations), 4)
+        for index, (mm_vector, _pixel_vector) in enumerate(observations, start=1):
+            self.assertAlmostEqual(float(mm_vector[0]), 0.0)
+            self.assertAlmostEqual(float(mm_vector[1]), 0.1 * index)
+
     def test_best_objective_for_measurement_uses_saved_candidate_matrices(self) -> None:
         controller = StageController()
         controller._objective_matrices = {

@@ -2773,7 +2773,7 @@ class StageController(QObject):
             if response >= 0.05:
                 pixel_vector = np.array([shift_x, shift_y], dtype=float)
                 observations.append((mm_vector, pixel_vector))
-            if abs(current[index] - origin[index]) < 1e-6:
+            if abs(current[index] - reference_position[index]) < 1e-6:
                 continue
             if len(observations) >= self.CALIBRATION_MIN_OBSERVATIONS and (
                 abs(shift_x) >= target_pixels or abs(shift_y) >= target_pixels
