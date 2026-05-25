@@ -154,6 +154,8 @@ class StageController(QObject):
     AUTOFOCUS_SWEEP_FEEDRATE_MM_MIN = 60.0
     AUTOFOCUS_MIN_SWEEP_FRAMES = 4
     AUTOFOCUS_BACKLASH_MM = 0.03
+    AUTOFOCUS_STATIC_REFINEMENT_POINTS = 9
+    AUTOFOCUS_STATIC_SETTLE_FRAMES = 1
     CALIBRATION_MIN_OBSERVATIONS = 4
     CALIBRATION_MAX_OBSERVATIONS_PER_AXIS = 8
     A_ZERO_TOLERANCE = 1e-3
@@ -2335,6 +2337,16 @@ class StageController(QObject):
                 feedrate=max(0.1, sweep_feedrate * 0.5),
             )
 
+        self.status_message.emit(
+            f"Autofocus {self._active_objective_name}: static verification."
+        )
+        best = self._run_static_focus_refinement_locked(
+            serial_connection,
+            best.best_z,
+            min_z=min_z,
+            max_z=max_z,
+            step_mm=fine_step,
+        )
         self._approach_z_from_below_locked(
             serial_connection,
             best.best_z,
@@ -2343,10 +2355,10 @@ class StageController(QObject):
         message = (
             f"Autofocus {self._active_objective_name} complete. "
             f"Best score {best.best_score:.2f} at Z={best.best_z:.4f} mm "
-            f"from {best.sample_count} sweep frames."
+            f"from {best.sample_count} verified frames."
         )
         if best.edge_peak:
-            message += " Peak was near a sweep edge; consider increasing range."
+            message += " Peak was near a search edge; consider increasing range."
         self.autofocus_finished.emit(True, message)
 
     def _run_focus_sweep_locked(
@@ -2423,6 +2435,99 @@ class StageController(QObject):
             sample_count=len(scored),
             edge_peak=edge_peak,
         )
+
+    def _run_static_focus_refinement_locked(
+        self,
+        serial_connection: serial.Serial,
+        center_z: float,
+        *,
+        min_z: float,
+        max_z: float,
+        step_mm: float,
+    ) -> _FocusSweepResult:
+        candidates = self._static_focus_candidates(
+            center_z,
+            min_z=min_z,
+            max_z=max_z,
+            step_mm=step_mm,
+            max_points=self.AUTOFOCUS_STATIC_REFINEMENT_POINTS,
+        )
+        if len(candidates) < 3:
+            raise StageControllerError("Autofocus static verification range is empty.")
+
+        scored: list[tuple[float, float]] = []
+        frame_counter: int | None = None
+        for target_z in candidates:
+            self._check_cancelled()
+            self._approach_z_from_below_locked(
+                serial_connection,
+                target_z,
+                min_z=min_z,
+            )
+            with self._frame_condition:
+                frame_counter = self._frame_counter
+            frame = None
+            for _ in range(max(1, self.AUTOFOCUS_STATIC_SETTLE_FRAMES + 1)):
+                frame, frame_counter = self._wait_for_new_frame(
+                    frame_counter,
+                    timeout=2.0,
+                )
+                if frame is None:
+                    break
+            if frame is None:
+                raise StageControllerError(
+                    "Camera did not provide frames during autofocus static verification."
+                )
+            scored.append((float(target_z), self._focus_metric(frame)))
+
+        best_index = max(range(len(scored)), key=lambda index: scored[index][1])
+        best_z, best_score = scored[best_index]
+        fitted_z = self._parabolic_focus_peak(scored, best_index)
+        if fitted_z is not None:
+            best_z = max(candidates[0], min(candidates[-1], fitted_z))
+        edge_peak = best_index == 0 or best_index == len(scored) - 1
+        return _FocusSweepResult(
+            best_z=float(best_z),
+            best_score=float(best_score),
+            sample_count=len(scored),
+            edge_peak=edge_peak,
+        )
+
+    @staticmethod
+    def _static_focus_candidates(
+        center_z: float,
+        *,
+        min_z: float,
+        max_z: float,
+        step_mm: float,
+        max_points: int,
+    ) -> list[float]:
+        step = abs(float(step_mm))
+        if step <= 0.0 or not math.isfinite(step):
+            return []
+        lower_limit = float(min_z)
+        upper_limit = float(max_z)
+        if upper_limit <= lower_limit:
+            return []
+        count = max(3, int(max_points))
+        if count % 2 == 0:
+            count += 1
+        radius = count // 2
+        center = max(lower_limit, min(upper_limit, float(center_z)))
+        candidates: list[float] = []
+        for offset in range(-radius, radius + 1):
+            candidate = max(lower_limit, min(upper_limit, center + offset * step))
+            if not candidates or abs(candidate - candidates[-1]) >= step * 0.25:
+                candidates.append(candidate)
+        if len(candidates) >= 3:
+            return candidates
+
+        lower = max(lower_limit, center - step)
+        upper = min(upper_limit, center + step)
+        fallback = sorted({lower, center, upper})
+        if len(fallback) < 3 or fallback[-1] <= fallback[0]:
+            return []
+        return fallback
 
     def _approach_z_from_below_locked(
         self,

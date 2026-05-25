@@ -717,6 +717,14 @@ class StageControllerAutofocusTest(unittest.TestCase):
                 edge_peak=False,
             )
         )
+        controller._run_static_focus_refinement_locked = (
+            lambda *_args, **_kwargs: FocusSweepResult(
+                best_z=9.515,
+                best_score=12.0,
+                sample_count=9,
+                edge_peak=False,
+            )
+        )
         controller._approach_z_from_below_locked = lambda *_args, **_kwargs: None
         try:
             controller._run_autofocus()
@@ -731,6 +739,53 @@ class StageControllerAutofocusTest(unittest.TestCase):
             serial_connection.writes[:3],
             [b"$G\n", b"$#\n", b"?\n"],
         )
+
+    def test_static_autofocus_refinement_corrects_sweep_z_bias(self) -> None:
+        controller = StageController()
+        serial_connection = _FakeSerial()
+        current_z = [10.040]
+        true_focus_z = 9.980
+
+        def _status() -> types.SimpleNamespace:
+            position = (0.0, 0.0, current_z[0])
+            return types.SimpleNamespace(
+                state="Idle",
+                position=position,
+                work_position=position,
+                display_position=position,
+                work_offset=(0.0, 0.0, 0.0),
+                homed_axes={"Z"},
+            )
+
+        def _send_relative_move(_serial, move, **_kwargs) -> None:
+            current_z[0] += move.z
+
+        frame_counter = [0]
+
+        def _wait_for_new_frame(previous_counter, timeout=2.0):
+            frame_counter[0] = max(frame_counter[0], previous_counter) + 1
+            return np.array([[current_z[0]]], dtype=np.float32), frame_counter[0]
+
+        controller._objective_autofocus_fine_step_mm = 0.01
+        controller._query_status = lambda _serial: _status()
+        controller._send_relative_move = _send_relative_move
+        controller._wait_for_new_frame = _wait_for_new_frame
+        controller._focus_metric = (
+            lambda frame: 1.0 - (float(frame[0, 0]) - true_focus_z) ** 2
+        )
+
+        result = controller._run_static_focus_refinement_locked(
+            serial_connection,
+            10.000,
+            min_z=0.0,
+            max_z=20.0,
+            step_mm=0.01,
+        )
+
+        self.assertLess(result.best_z, 10.000)
+        self.assertAlmostEqual(result.best_z, true_focus_z, places=5)
+        self.assertEqual(result.sample_count, controller.AUTOFOCUS_STATIC_REFINEMENT_POINTS)
+        self.assertFalse(result.edge_peak)
 
 
 class StageControllerObjectiveTest(unittest.TestCase):
