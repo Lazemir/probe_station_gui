@@ -2188,18 +2188,7 @@ class Main(QMainWindow):
             )
 
     def _click_calibration_action_text(self) -> str:
-        objectives = self.settings_manager.objectives_configuration()
-        profile = objectives.objectives.get(objectives.active_name)
-        if profile is None or not profile.xy_calibration_configured:
-            return f"Click-to-Move Calibration: {objectives.active_name} not configured"
-        magnitudes = self._click_calibration_magnitudes(profile)
-        if magnitudes is None:
-            return f"Click-to-Move Calibration: {objectives.active_name} invalid"
-        mm_x, mm_y = magnitudes
-        return (
-            f"Click-to-Move Calibration: {objectives.active_name} "
-            f"X {mm_x:.6g} mm/px, Y {mm_y:.6g} mm/px"
-        )
+        return "Click-to-Move Calibration"
 
     @staticmethod
     def _click_calibration_magnitudes(

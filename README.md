@@ -79,7 +79,13 @@ Main window:
 Menus:
 - `Application`: settings and status log;
 - `Tools`: `Connection`, `Joystick`, `Serial Terminal`, `Oscillation`;
-- `Calibration`: `Design Window`, `Contact / Stone Calibration`, `Surface Map`, `Alignment`.
+- `Calibration`: `Design Window`, `Contact / Stone Calibration`, `Surface Map`, `Click-to-Move Calibration`, `Alignment`.
+
+GUI rule:
+- keep menus and primary controls laconic;
+- do not put live measurements, matrices, diagnostics, or implementation detail in top-level menu item text;
+- put detailed calibration numbers inside the relevant dialog, status panel, tooltip, or log entry;
+- if a workflow needs more than one action, expose a compact entry point and keep the detailed controls behind it.
 
 Main panels:
 - `Connection`
@@ -125,7 +131,6 @@ What it contains:
 - `Raise` and `Lower` for the needles;
 - `Unlock`;
 - `Reset`;
-- `Reset Cal`;
 - `Autofocus`;
 - jog speed control.
 
@@ -133,7 +138,7 @@ Behavior:
 - holding a button or key keeps the stage moving;
 - releasing it stops motion;
 - manual `B` motion invalidates design registration;
-- `Reset Cal` resets image click-to-move calibration.
+- click-to-move calibration lives under `Calibration` -> `Click-to-Move Calibration`.
 
 Needles:
 - `Raise` brings the system into a safe state for motion;
@@ -152,7 +157,7 @@ How to use it:
 5. Wait for motion to complete.
 
 Important:
-- on first use, or after `Reset Cal`, the application rebuilds click calibration;
+- on first use, or after `Calibration` -> `Click-to-Move Calibration` -> `Reset`, the application rebuilds click calibration;
 - if the predicted move is too large, the motion is cancelled and calibration is reset;
 - this requires a live and stable camera image.
 
