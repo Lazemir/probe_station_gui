@@ -87,6 +87,12 @@ GUI rule:
 - put detailed calibration numbers inside the relevant dialog, status panel, tooltip, or log entry;
 - if a workflow needs more than one action, expose a compact entry point and keep the detailed controls behind it.
 
+Calibration/automation rule:
+- avoid per-objective magic constants in code, especially motion speeds;
+- prefer values measured from live data, produced by calibration scripts, or stored in user-editable settings;
+- keep unavoidable numeric guards small, named, and tied to algorithm safety or validation;
+- when diagnosing behavior after a run, inspect both `status-history.log` and `probe-station-gui.log` before changing code.
+
 Main panels:
 - `Connection`
 - `Joystick`

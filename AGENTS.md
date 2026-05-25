@@ -39,6 +39,8 @@
 - Do not route in-process GUI features through the app's own localhost API. Use direct controller methods, Qt signals, or narrow callbacks inside the process; reserve the FastAPI server for external clients.
 - Do not use ellipses in menu item labels.
 - Keep GUI menus and primary controls laconic. Do not put live measurements, matrices, diagnostics, or implementation detail in top-level menu item text; put details inside dialogs, status panels, tooltips, or logs.
+- Avoid per-objective magic constants in code, especially motion speeds. Prefer live measurements, calibration-script output, or user-editable settings; keep unavoidable numeric guards named and minimal.
+- After the user runs the app or reports runtime behavior, inspect both `status-history.log` and `probe-station-gui.log` before diagnosing or changing behavior.
 - Do not emit Qt signals while holding a non-reentrant lock. If controller state reset paths can emit signals that call back into the same object, use a reentrant lock or move signal emission outside the locked section.
 - When changing serial behavior, check both `StageController` and `SerialTerminalWindow` for coordination.
 - When updating controls or feedrates, keep `SettingsManager`, `settings_dialog.py`, and `joystick_window.py` in sync.

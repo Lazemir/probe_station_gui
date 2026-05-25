@@ -188,8 +188,7 @@
         "pixels_to_mm": [],
         "xy_calibration_configured": false,
         "autofocus_range_mm": 1.0,
-        "autofocus_fine_step_mm": 0.02,
-        "autofocus_sweep_feedrate_mm_min": 60.0
+        "autofocus_fine_step_mm": 0.02
       },
       "X10": {
         "name": "X10",
@@ -202,8 +201,7 @@
         "pixels_to_mm": [],
         "xy_calibration_configured": false,
         "autofocus_range_mm": 0.6,
-        "autofocus_fine_step_mm": 0.01,
-        "autofocus_sweep_feedrate_mm_min": 30.0
+        "autofocus_fine_step_mm": 0.01
       },
       "X20": {
         "name": "X20",
@@ -216,8 +214,7 @@
         "pixels_to_mm": [],
         "xy_calibration_configured": false,
         "autofocus_range_mm": 0.35,
-        "autofocus_fine_step_mm": 0.005,
-        "autofocus_sweep_feedrate_mm_min": 15.0
+        "autofocus_fine_step_mm": 0.005
       },
       "X50": {
         "name": "X50",
@@ -230,8 +227,7 @@
         "pixels_to_mm": [],
         "xy_calibration_configured": false,
         "autofocus_range_mm": 0.15,
-        "autofocus_fine_step_mm": 0.002,
-        "autofocus_sweep_feedrate_mm_min": 6.0
+        "autofocus_fine_step_mm": 0.002
       }
     }
   },

@@ -854,7 +854,6 @@ class ObjectivesSettingsWidget(QWidget):
         self._z_offset_spin = self._offset_spin(" mm")
         self._autofocus_range_spin = self._positive_spin(" mm", decimals=4)
         self._autofocus_fine_spin = self._positive_spin(" mm", decimals=4)
-        self._autofocus_feedrate_spin = self._positive_spin(" mm/min", decimals=1)
         self._xy_calibration_status = QLineEdit(self)
         self._xy_calibration_status.setReadOnly(True)
 
@@ -865,7 +864,6 @@ class ObjectivesSettingsWidget(QWidget):
         layout.addRow(QLabel("Z correction", self), self._z_offset_spin)
         layout.addRow(QLabel("AF range", self), self._autofocus_range_spin)
         layout.addRow(QLabel("AF fine step", self), self._autofocus_fine_spin)
-        layout.addRow(QLabel("AF sweep feedrate", self), self._autofocus_feedrate_spin)
         layout.addRow(QLabel("Click calibration", self), self._xy_calibration_status)
 
         self._profile_combo.currentIndexChanged.connect(
@@ -903,9 +901,6 @@ class ObjectivesSettingsWidget(QWidget):
         self._z_offset_spin.setValue(profile.z_offset_mm)
         self._autofocus_range_spin.setValue(profile.autofocus_range_mm)
         self._autofocus_fine_spin.setValue(profile.autofocus_fine_step_mm)
-        self._autofocus_feedrate_spin.setValue(
-            profile.autofocus_sweep_feedrate_mm_min
-        )
         status = "Configured" if profile.xy_calibration_configured else "Not configured"
         self._xy_calibration_status.setText(status)
 
@@ -923,9 +918,6 @@ class ObjectivesSettingsWidget(QWidget):
         updated.z_offset_mm = self._z_offset_spin.value()
         updated.autofocus_range_mm = self._autofocus_range_spin.value()
         updated.autofocus_fine_step_mm = self._autofocus_fine_spin.value()
-        updated.autofocus_sweep_feedrate_mm_min = (
-            self._autofocus_feedrate_spin.value()
-        )
         self._objectives.objectives[name] = updated
 
     def _offset_spin(self, suffix: str) -> QDoubleSpinBox:

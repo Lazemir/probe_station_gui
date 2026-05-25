@@ -2057,7 +2057,13 @@ class Main(QMainWindow):
         if objective_name:
             self._set_active_objective(objective_name, apply_motion=True)
 
-    def _set_active_objective(self, objective_name: str, *, apply_motion: bool) -> None:
+    def _set_active_objective(
+        self,
+        objective_name: str,
+        *,
+        apply_motion: bool,
+        allow_busy: bool = False,
+    ) -> None:
         objective_name = normalize_objective_name(objective_name)
         if not objective_name:
             return
@@ -2065,6 +2071,10 @@ class Main(QMainWindow):
         old_name = settings.objectives.active_name
         if old_name == objective_name:
             self._refresh_click_calibration_ui()
+            return
+        if not allow_busy and self.stage_controller.is_busy():
+            self._sync_objective_combo(old_name)
+            self._show_status("Stage is busy; objective not changed.", 4000)
             return
         if objective_name not in settings.objectives.objectives:
             settings.objectives.objectives[objective_name] = default_objective(
@@ -2162,6 +2172,9 @@ class Main(QMainWindow):
         self._click_calibration_dialog.activateWindow()
 
     def _add_objective_profile(self) -> None:
+        if self.stage_controller.is_busy():
+            self._show_status("Stage is busy; objective not added.", 4000)
+            return
         raw_name, accepted = QInputDialog.getText(
             self,
             "Add Objective",
@@ -2189,6 +2202,10 @@ class Main(QMainWindow):
         self._show_status(f"Objective added: {name}.", 3000)
 
     def _delete_objective_profile(self, objective_name: str) -> None:
+        if self.stage_controller.is_busy():
+            self._show_status("Stage is busy; objective not deleted.", 4000)
+            self._refresh_click_calibration_ui()
+            return
         name = normalize_objective_name(objective_name)
         if not name:
             return
@@ -2267,7 +2284,7 @@ class Main(QMainWindow):
         name = normalize_objective_name(suggested_name)
         objective_settings = self.settings_manager.objectives_configuration()
         if name in objective_settings.objectives:
-            self._set_active_objective(name, apply_motion=False)
+            self._set_active_objective(name, apply_motion=False, allow_busy=True)
         if message:
             self._show_status(message, 7000)
 

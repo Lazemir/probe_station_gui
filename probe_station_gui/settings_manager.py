@@ -52,25 +52,21 @@ OBJECTIVE_DEFAULTS: dict[str, dict[str, float]] = {
         "magnification": 5.0,
         "autofocus_range_mm": 1.0,
         "autofocus_fine_step_mm": 0.02,
-        "autofocus_sweep_feedrate_mm_min": 60.0,
     },
     "X10": {
         "magnification": 10.0,
         "autofocus_range_mm": 0.6,
         "autofocus_fine_step_mm": 0.01,
-        "autofocus_sweep_feedrate_mm_min": 30.0,
     },
     "X20": {
         "magnification": 20.0,
         "autofocus_range_mm": 0.35,
         "autofocus_fine_step_mm": 0.005,
-        "autofocus_sweep_feedrate_mm_min": 15.0,
     },
     "X50": {
         "magnification": 50.0,
         "autofocus_range_mm": 0.15,
         "autofocus_fine_step_mm": 0.002,
-        "autofocus_sweep_feedrate_mm_min": 6.0,
     },
 }
 
@@ -634,7 +630,6 @@ class ObjectiveCalibrationSettings:
     xy_calibration_configured: bool = False
     autofocus_range_mm: float = 1.0
     autofocus_fine_step_mm: float = 0.02
-    autofocus_sweep_feedrate_mm_min: float = 60.0
 
     def clone(self) -> "ObjectiveCalibrationSettings":
         """Return a copy of the objective calibration."""
@@ -651,7 +646,6 @@ class ObjectiveCalibrationSettings:
             xy_calibration_configured=self.xy_calibration_configured,
             autofocus_range_mm=self.autofocus_range_mm,
             autofocus_fine_step_mm=self.autofocus_fine_step_mm,
-            autofocus_sweep_feedrate_mm_min=self.autofocus_sweep_feedrate_mm_min,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -669,7 +663,6 @@ class ObjectiveCalibrationSettings:
             "xy_calibration_configured": self.xy_calibration_configured,
             "autofocus_range_mm": self.autofocus_range_mm,
             "autofocus_fine_step_mm": self.autofocus_fine_step_mm,
-            "autofocus_sweep_feedrate_mm_min": self.autofocus_sweep_feedrate_mm_min,
         }
 
 
@@ -682,7 +675,6 @@ def default_objective(name: str) -> ObjectiveCalibrationSettings:
         magnification=defaults["magnification"],
         autofocus_range_mm=defaults["autofocus_range_mm"],
         autofocus_fine_step_mm=defaults["autofocus_fine_step_mm"],
-        autofocus_sweep_feedrate_mm_min=defaults["autofocus_sweep_feedrate_mm_min"],
     )
 
 
@@ -2323,13 +2315,6 @@ class SettingsManager:
                     defaults.autofocus_fine_step_mm,
                 ),
                 default=defaults.autofocus_fine_step_mm,
-            ),
-            autofocus_sweep_feedrate_mm_min=self._positive_float(
-                raw_profile.get(
-                    "autofocus_sweep_feedrate_mm_min",
-                    defaults.autofocus_sweep_feedrate_mm_min,
-                ),
-                default=defaults.autofocus_sweep_feedrate_mm_min,
             ),
         )
 

@@ -156,11 +156,15 @@ class StageController(QObject):
     MOVE_IDLE_TIMEOUT_MIN_S = 10.0
     MOVE_IDLE_TIMEOUT_MAX_S = 3600.0
     AUTOFOCUS_FINE_STEP_MM = 0.02
-    AUTOFOCUS_SWEEP_FEEDRATE_MM_MIN = 60.0
     AUTOFOCUS_MIN_SWEEP_FRAMES = 4
     AUTOFOCUS_BACKLASH_MM = 0.03
     AUTOFOCUS_STATIC_REFINEMENT_POINTS = 9
+    AUTOFOCUS_STATIC_EDGE_REFINEMENT_ROUNDS = 2
     AUTOFOCUS_STATIC_SETTLE_FRAMES = 1
+    AUTOFOCUS_FRAME_RATE_SAMPLE_FRAMES = 6
+    AUTOFOCUS_FRAME_RATE_MAX_AGE_S = 2.0
+    AUTOFOCUS_FRAME_RATE_SAMPLE_TIMEOUT_S = 1.0
+    AUTOFOCUS_MIN_SWEEP_FEEDRATE_MM_MIN = 0.1
     CALIBRATION_MIN_OBSERVATIONS = 4
     CALIBRATION_MAX_OBSERVATIONS_PER_AXIS = 8
     A_ZERO_TOLERANCE = 1e-3
@@ -258,9 +262,6 @@ class StageController(QObject):
         self._objective_calibration_target_pixels = self.CALIBRATION_PIXEL_TARGET
         self._objective_autofocus_range_mm = 1.0
         self._objective_autofocus_fine_step_mm = self.AUTOFOCUS_FINE_STEP_MM
-        self._objective_autofocus_sweep_feedrate_mm_min = (
-            self.AUTOFOCUS_SWEEP_FEEDRATE_MM_MIN
-        )
         self._objective_matrices: dict[str, np.ndarray] = {}
         self._objective_calibration_verified: dict[str, bool] = {}
         self._active_needles_action: str | None = None
@@ -975,14 +976,6 @@ class StageController(QObject):
         self._objective_autofocus_fine_step_mm = self._positive_profile_value(
             getattr(objective, "autofocus_fine_step_mm", self.AUTOFOCUS_FINE_STEP_MM),
             self.AUTOFOCUS_FINE_STEP_MM,
-        )
-        self._objective_autofocus_sweep_feedrate_mm_min = self._positive_profile_value(
-            getattr(
-                objective,
-                "autofocus_sweep_feedrate_mm_min",
-                self.AUTOFOCUS_SWEEP_FEEDRATE_MM_MIN,
-            ),
-            self.AUTOFOCUS_SWEEP_FEEDRATE_MM_MIN,
         )
         matrix = self._matrix_from_objective(objective)
         self._pixels_to_mm = matrix
@@ -2269,6 +2262,7 @@ class StageController(QObject):
         """Run autofocus while the caller owns serial access."""
 
         self._relative_warning_emitted = False
+        objective_name = str(self._active_objective_name)
         if not self._needles_up:
             self.status_message.emit("Autofocus: homing A axis.")
             self._write_command(serial_connection, "$HA")
@@ -2280,9 +2274,9 @@ class StageController(QObject):
         self._ensure_axis_limits(serial_connection)
         local_range = float(self._objective_autofocus_range_mm)
         fine_step = float(self._objective_autofocus_fine_step_mm)
-        sweep_feedrate = float(self._objective_autofocus_sweep_feedrate_mm_min)
         if fine_step <= 0:
             raise StageControllerError("Autofocus parameters are invalid.")
+        sweep_feedrate = self._autofocus_sweep_feedrate_mm_min(fine_step)
 
         status = self._query_synced_status_for_absolute_motion(serial_connection)
         position = self._position_for_configured_mode(status)
@@ -2303,8 +2297,17 @@ class StageController(QObject):
         if upper_limit <= lower_limit:
             raise StageControllerError("Z axis range near current position is empty.")
 
+        logger.debug(
+            "Autofocus %s parameters start_z=%.6f range=%.6f fine_step=%.6f "
+            "sweep_feedrate=%.6f",
+            objective_name,
+            start_z,
+            local_range,
+            fine_step,
+            sweep_feedrate,
+        )
         self.status_message.emit(
-            f"Autofocus {self._active_objective_name}: continuous sweep within +/-{local_range:.3f} mm."
+            f"Autofocus {objective_name}: continuous sweep within +/-{local_range:.3f} mm."
         )
         coarse = self._run_focus_sweep_locked(
             serial_connection,
@@ -2321,17 +2324,17 @@ class StageController(QObject):
         best = coarse
         if fine_upper - fine_lower >= fine_step * 2.0:
             self.status_message.emit(
-                f"Autofocus {self._active_objective_name}: fine sweep."
+                f"Autofocus {objective_name}: fine sweep."
             )
             best = self._run_focus_sweep_locked(
                 serial_connection,
                 fine_lower,
                 fine_upper,
-                feedrate=max(0.1, sweep_feedrate * 0.5),
+                feedrate=sweep_feedrate,
             )
 
         self.status_message.emit(
-            f"Autofocus {self._active_objective_name}: static verification."
+            f"Autofocus {objective_name}: static verification."
         )
         best = self._run_static_focus_refinement_locked(
             serial_connection,
@@ -2344,9 +2347,10 @@ class StageController(QObject):
             serial_connection,
             best.best_z,
             min_z=min_z,
+            fine_step_mm=fine_step,
         )
         message = (
-            f"Autofocus {self._active_objective_name} complete. "
+            f"Autofocus {objective_name} complete. "
             f"Best score {best.best_score:.2f} at Z={best.best_z:.4f} mm "
             f"from {best.sample_count} verified frames."
         )
@@ -2384,7 +2388,8 @@ class StageController(QObject):
         sweep_started_at = time.monotonic()
         sweep_distance = abs(upper_z - lower_z)
         sweep_ended_at = sweep_started_at + max(
-            sweep_distance / (max(0.1, float(feedrate)) / 60.0),
+            sweep_distance
+            / (max(self.AUTOFOCUS_MIN_SWEEP_FEEDRATE_MM_MIN, float(feedrate)) / 60.0),
             1e-6,
         )
         self._send_relative_move(
@@ -2422,12 +2427,83 @@ class StageController(QObject):
             best_z = max(lower_z, min(upper_z, fitted_z))
         edge_margin = max(2, len(scored) // 10)
         edge_peak = best_index < edge_margin or best_index >= len(scored) - edge_margin
+        logger.debug(
+            "Autofocus sweep lower=%.6f upper=%.6f feedrate=%.6f frames=%d "
+            "best_z=%.6f best_score=%.6f edge=%s",
+            lower_z,
+            upper_z,
+            feedrate,
+            len(scored),
+            best_z,
+            best_score,
+            edge_peak,
+        )
         return _FocusSweepResult(
             best_z=float(best_z),
             best_score=float(best_score),
             sample_count=len(scored),
             edge_peak=edge_peak,
         )
+
+    def _autofocus_sweep_feedrate_mm_min(self, fine_step_mm: float) -> float:
+        frame_rate_hz = self._autofocus_frame_rate_hz()
+        if frame_rate_hz is None:
+            raise StageControllerError(
+                "Camera did not provide enough frames to estimate autofocus speed."
+            )
+        feedrate = abs(float(fine_step_mm)) * frame_rate_hz * 60.0
+        if not math.isfinite(feedrate) or feedrate <= 0.0:
+            raise StageControllerError("Autofocus speed estimate is invalid.")
+        feedrate = max(self.AUTOFOCUS_MIN_SWEEP_FEEDRATE_MM_MIN, feedrate)
+        logger.debug(
+            "Autofocus dynamic sweep feedrate %.6f mm/min from %.3f fps and %.6f mm step",
+            feedrate,
+            frame_rate_hz,
+            fine_step_mm,
+        )
+        return float(feedrate)
+
+    def _autofocus_frame_rate_hz(self) -> float | None:
+        frame_rate = self._frame_rate_from_timestamps(
+            self._recent_frame_timestamps(max_age_s=self.AUTOFOCUS_FRAME_RATE_MAX_AGE_S)
+        )
+        if frame_rate is not None:
+            return frame_rate
+
+        timestamps: list[float] = []
+        with self._frame_condition:
+            frame_counter = self._frame_counter
+        for _ in range(max(2, self.AUTOFOCUS_FRAME_RATE_SAMPLE_FRAMES)):
+            frame, frame_counter = self._wait_for_new_frame(
+                frame_counter,
+                timeout=self.AUTOFOCUS_FRAME_RATE_SAMPLE_TIMEOUT_S,
+            )
+            if frame is None:
+                break
+            timestamps.append(time.monotonic())
+        return self._frame_rate_from_timestamps(timestamps)
+
+    def _recent_frame_timestamps(self, *, max_age_s: float) -> list[float]:
+        now = time.monotonic()
+        with self._frame_condition:
+            timestamps = [
+                timestamp
+                for _counter, timestamp, _frame in self._frame_history
+                if now - timestamp <= max_age_s
+            ]
+        return timestamps[-max(2, self.AUTOFOCUS_FRAME_RATE_SAMPLE_FRAMES) :]
+
+    @staticmethod
+    def _frame_rate_from_timestamps(timestamps: list[float]) -> float | None:
+        if len(timestamps) < 2:
+            return None
+        duration = float(timestamps[-1]) - float(timestamps[0])
+        if duration <= 0.0:
+            return None
+        frame_rate = (len(timestamps) - 1) / duration
+        if not math.isfinite(frame_rate) or frame_rate <= 0.0:
+            return None
+        return float(frame_rate)
 
     def _run_static_focus_refinement_locked(
         self,
@@ -2438,47 +2514,104 @@ class StageController(QObject):
         max_z: float,
         step_mm: float,
     ) -> _FocusSweepResult:
-        candidates = self._static_focus_candidates(
-            center_z,
-            min_z=min_z,
-            max_z=max_z,
-            step_mm=step_mm,
-            max_points=self.AUTOFOCUS_STATIC_REFINEMENT_POINTS,
-        )
-        if len(candidates) < 3:
-            raise StageControllerError("Autofocus static verification range is empty.")
-
         scored: list[tuple[float, float]] = []
         frame_counter: int | None = None
-        for target_z in candidates:
-            self._check_cancelled()
-            self._approach_z_from_below_locked(
-                serial_connection,
-                target_z,
+        center = float(center_z)
+        for round_index in range(self.AUTOFOCUS_STATIC_EDGE_REFINEMENT_ROUNDS + 1):
+            candidates = self._static_focus_candidates(
+                center,
                 min_z=min_z,
+                max_z=max_z,
+                step_mm=step_mm,
+                max_points=self.AUTOFOCUS_STATIC_REFINEMENT_POINTS,
             )
-            with self._frame_condition:
-                frame_counter = self._frame_counter
-            frame = None
-            for _ in range(max(1, self.AUTOFOCUS_STATIC_SETTLE_FRAMES + 1)):
-                frame, frame_counter = self._wait_for_new_frame(
-                    frame_counter,
-                    timeout=2.0,
-                )
-                if frame is None:
-                    break
-            if frame is None:
+            if len(candidates) < 3:
                 raise StageControllerError(
-                    "Camera did not provide frames during autofocus static verification."
+                    "Autofocus static verification range is empty."
                 )
-            scored.append((float(target_z), self._focus_metric(frame)))
+            round_scored: list[tuple[float, float]] = []
+            for target_z in candidates:
+                if any(
+                    abs(target_z - previous_z) <= abs(step_mm) * 0.1
+                    for previous_z, _score in scored
+                ):
+                    continue
+                self._check_cancelled()
+                self._approach_z_from_below_locked(
+                    serial_connection,
+                    target_z,
+                    min_z=min_z,
+                    fine_step_mm=step_mm,
+                )
+                with self._frame_condition:
+                    frame_counter = self._frame_counter
+                frame = None
+                for _ in range(max(1, self.AUTOFOCUS_STATIC_SETTLE_FRAMES + 1)):
+                    frame, frame_counter = self._wait_for_new_frame(
+                        frame_counter,
+                        timeout=2.0,
+                    )
+                    if frame is None:
+                        break
+                if frame is None:
+                    raise StageControllerError(
+                        "Camera did not provide frames during autofocus static verification."
+                    )
+                score = self._focus_metric(frame)
+                logger.debug(
+                    "Autofocus static candidate round=%d z=%.6f score=%.6f",
+                    round_index,
+                    target_z,
+                    score,
+                )
+                sample = (float(target_z), float(score))
+                scored.append(sample)
+                round_scored.append(sample)
 
+            if not round_scored:
+                break
+            round_best_index = max(
+                range(len(round_scored)),
+                key=lambda index: round_scored[index][1],
+            )
+            round_edge_peak = (
+                round_best_index == 0
+                or round_best_index == len(round_scored) - 1
+            )
+            if not round_edge_peak:
+                break
+            if round_index >= self.AUTOFOCUS_STATIC_EDGE_REFINEMENT_ROUNDS:
+                break
+            direction = -1.0 if round_best_index == 0 else 1.0
+            next_center = round_scored[round_best_index][0] + (
+                direction * abs(step_mm) * max(1, len(candidates) // 2)
+            )
+            next_center = max(float(min_z), min(float(max_z), next_center))
+            if abs(next_center - center) <= abs(step_mm) * 0.5:
+                break
+            logger.debug(
+                "Autofocus static edge peak; expanding center %.6f -> %.6f",
+                center,
+                next_center,
+            )
+            center = next_center
+
+        if len(scored) < 3:
+            raise StageControllerError("Autofocus static verification range is empty.")
+        scored.sort(key=lambda sample: sample[0])
         best_index = max(range(len(scored)), key=lambda index: scored[index][1])
         best_z, best_score = scored[best_index]
         fitted_z = self._parabolic_focus_peak(scored, best_index)
         if fitted_z is not None:
-            best_z = max(candidates[0], min(candidates[-1], fitted_z))
+            best_z = max(scored[0][0], min(scored[-1][0], fitted_z))
         edge_peak = best_index == 0 or best_index == len(scored) - 1
+        logger.debug(
+            "Autofocus static result samples=%d best_z=%.6f best_score=%.6f edge=%s",
+            len(scored),
+            best_z,
+            best_score,
+            edge_peak,
+        )
         return _FocusSweepResult(
             best_z=float(best_z),
             best_score=float(best_score),
@@ -2528,6 +2661,7 @@ class StageController(QObject):
         target_z: float,
         *,
         min_z: float,
+        fine_step_mm: float | None = None,
     ) -> None:
         status = self._query_status(serial_connection)
         position = self._position_for_configured_mode(status)
@@ -2535,8 +2669,13 @@ class StageController(QObject):
             raise StageControllerError("Unable to read Z position for autofocus.")
         current_z = float(position[2])
         target = float(target_z)
+        fine_step = (
+            self._objective_autofocus_fine_step_mm
+            if fine_step_mm is None
+            else float(fine_step_mm)
+        )
         backlash = min(
-            max(self._objective_autofocus_fine_step_mm * 4.0, 0.002),
+            max(abs(fine_step) * 4.0, 0.002),
             self.AUTOFOCUS_BACKLASH_MM,
         )
         approach_z = max(float(min_z), target - backlash)

@@ -670,6 +670,23 @@ class StageControllerStatusParsingTest(unittest.TestCase):
 
 
 class StageControllerAutofocusTest(unittest.TestCase):
+    def test_autofocus_sweep_feedrate_uses_live_frame_rate(self) -> None:
+        controller = StageController()
+        start = time.monotonic() - 0.25
+        with controller._frame_condition:
+            for index in range(6):
+                controller._frame_history.append(
+                    (
+                        index + 1,
+                        start + index * 0.05,
+                        np.zeros((2, 2), dtype=np.uint8),
+                    )
+                )
+
+        feedrate = controller._autofocus_sweep_feedrate_mm_min(0.002)
+
+        self.assertAlmostEqual(feedrate, 2.4, places=5)
+
     def test_autofocus_holds_serial_lock_and_refreshes_work_offsets(self) -> None:
         controller = StageController()
         lock = _TrackingLock()
@@ -698,6 +715,7 @@ class StageControllerAutofocusTest(unittest.TestCase):
         frame = np.array([[1.0, 2.0], [3.0, 4.0]])
         controller._get_frame_snapshot = lambda timeout=3.0: (frame, 1)
         controller._focus_metric = lambda _frame: 10.0
+        controller._autofocus_sweep_feedrate_mm_min = lambda _fine_step: 12.0
         controller.status_message = types.SimpleNamespace(
             emit=lambda *args, **kwargs: None
         )
@@ -784,7 +802,58 @@ class StageControllerAutofocusTest(unittest.TestCase):
 
         self.assertLess(result.best_z, 10.000)
         self.assertAlmostEqual(result.best_z, true_focus_z, places=5)
-        self.assertEqual(result.sample_count, controller.AUTOFOCUS_STATIC_REFINEMENT_POINTS)
+        self.assertEqual(
+            result.sample_count,
+            controller.AUTOFOCUS_STATIC_REFINEMENT_POINTS,
+        )
+        self.assertFalse(result.edge_peak)
+
+    def test_static_autofocus_refinement_expands_from_edge_peak(self) -> None:
+        controller = StageController()
+        serial_connection = _FakeSerial()
+        current_z = [10.000]
+        true_focus_z = 10.060
+
+        def _status() -> types.SimpleNamespace:
+            position = (0.0, 0.0, current_z[0])
+            return types.SimpleNamespace(
+                state="Idle",
+                position=position,
+                work_position=position,
+                display_position=position,
+                work_offset=(0.0, 0.0, 0.0),
+                homed_axes={"Z"},
+            )
+
+        def _send_relative_move(_serial, move, **_kwargs) -> None:
+            current_z[0] += move.z
+
+        frame_counter = [0]
+
+        def _wait_for_new_frame(previous_counter, timeout=2.0):
+            frame_counter[0] = max(frame_counter[0], previous_counter) + 1
+            return np.array([[current_z[0]]], dtype=np.float32), frame_counter[0]
+
+        controller._query_status = lambda _serial: _status()
+        controller._send_relative_move = _send_relative_move
+        controller._wait_for_new_frame = _wait_for_new_frame
+        controller._focus_metric = (
+            lambda frame: 1.0 - (float(frame[0, 0]) - true_focus_z) ** 2
+        )
+
+        result = controller._run_static_focus_refinement_locked(
+            serial_connection,
+            10.000,
+            min_z=0.0,
+            max_z=20.0,
+            step_mm=0.01,
+        )
+
+        self.assertAlmostEqual(result.best_z, true_focus_z, places=5)
+        self.assertGreater(
+            result.sample_count,
+            controller.AUTOFOCUS_STATIC_REFINEMENT_POINTS,
+        )
         self.assertFalse(result.edge_peak)
 
 
