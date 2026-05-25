@@ -82,6 +82,37 @@ OBJECTIVE_DEFAULTS: dict[str, dict[str, float]] = {
     },
 }
 
+
+def normalize_objective_name(value: object) -> str:
+    """Return a compact persisted objective profile name."""
+
+    if not isinstance(value, str):
+        return ""
+    name = re.sub(r"\s+", "", value.strip().upper())
+    if not name or len(name) > 32:
+        return ""
+    if not re.fullmatch(r"[A-Z0-9_.-]+", name):
+        return ""
+    return name
+
+
+def ordered_objective_names(
+    profiles: object,
+) -> list[str]:
+    """Return objective names with built-in profiles first and custom profiles after."""
+
+    if not isinstance(profiles, dict):
+        return list(OBJECTIVE_NAMES)
+    normalized: list[str] = []
+    for name in OBJECTIVE_NAMES:
+        if name in profiles:
+            normalized.append(name)
+    for raw_name in profiles:
+        name = normalize_objective_name(raw_name)
+        if name and name not in normalized:
+            normalized.append(name)
+    return normalized or [DEFAULT_ACTIVE_OBJECTIVE]
+
 LCR_MEASUREMENT_FUNCTIONS: tuple[str, ...] = (
     "Cs-Rs",
     "Cs-D",
@@ -1371,17 +1402,17 @@ class SettingsManager:
                 defaults["apply_offsets_on_change"],
             )
             raw_profiles = objectives_section.get("objectives")
-            if not isinstance(raw_profiles, dict):
-                raw_profiles = {}
+            if not isinstance(raw_profiles, dict) or not raw_profiles:
+                raw_profiles = dict(defaults["objectives"])
                 objectives_section["objectives"] = raw_profiles
             default_profiles = defaults["objectives"]
             if isinstance(default_profiles, dict):
-                for name, profile in default_profiles.items():
-                    if not isinstance(raw_profiles.get(name), dict):
-                        raw_profiles[name] = profile
-                        continue
-                    stored = raw_profiles[name]
-                    if isinstance(stored, dict) and isinstance(profile, dict):
+                for name, stored in list(raw_profiles.items()):
+                    normalized_name = normalize_objective_name(name)
+                    profile = default_profiles.get(normalized_name)
+                    if not isinstance(profile, dict):
+                        profile = default_objective(normalized_name).to_dict()
+                    if isinstance(stored, dict):
                         for key, value in profile.items():
                             stored.setdefault(key, value)
 
@@ -2206,8 +2237,9 @@ class SettingsManager:
         raw_profiles = None
         if isinstance(raw_objectives, dict):
             raw_active = raw_objectives.get("active_name", active_name)
-            if isinstance(raw_active, str):
-                active_name = raw_active.strip().upper() or active_name
+            normalized_active = normalize_objective_name(raw_active)
+            if normalized_active:
+                active_name = normalized_active
             apply_offsets_on_change = self._coerce_bool(
                 raw_objectives.get(
                     "apply_offsets_on_change",
@@ -2216,15 +2248,26 @@ class SettingsManager:
                 default=apply_offsets_on_change,
             )
             raw_profiles = raw_objectives.get("objectives")
-        if active_name not in OBJECTIVE_NAMES:
-            active_name = DEFAULT_ACTIVE_OBJECTIVE
 
         profiles: Dict[str, ObjectiveCalibrationSettings] = {}
         profile_map = raw_profiles if isinstance(raw_profiles, dict) else {}
-        for name in OBJECTIVE_NAMES:
-            raw_profile = profile_map.get(name)
-            if not isinstance(raw_profile, dict):
-                raw_profile = profile_map.get(name.lower())
+        names: list[str] = []
+        for raw_name in profile_map:
+            name = normalize_objective_name(raw_name)
+            if name and name not in names:
+                names.append(name)
+        if not names:
+            names = list(OBJECTIVE_NAMES)
+        if active_name not in names and profile_map:
+            active_name = names[0]
+        elif active_name not in names:
+            names.append(active_name)
+        for name in names:
+            raw_profile = None
+            for raw_key, candidate in profile_map.items():
+                if normalize_objective_name(raw_key) == name:
+                    raw_profile = candidate
+                    break
             profiles[name] = self._parse_objective_profile(name, raw_profile)
         return ObjectivesSettings(
             active_name=active_name,
@@ -2563,7 +2606,7 @@ class SettingsManager:
         objectives = self._settings.objectives
         profile = objectives.objectives.get(objectives.active_name)
         if profile is None:
-            profile = default_objective(DEFAULT_ACTIVE_OBJECTIVE)
+            profile = default_objective(objectives.active_name)
         return profile.clone()
 
     def design_last_directory(self) -> Path | None:

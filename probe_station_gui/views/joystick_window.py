@@ -269,7 +269,6 @@ class JoystickWindow(QWidget):
     needles_raise_requested = Signal(float)
     needles_lower_requested = Signal(float)
     needle_contact_coordinate_save_requested = Signal(str, float)
-    reset_calibration_requested = Signal()
     manual_axis_move_requested = Signal(str, float, str, float)
     manual_axis_settings_changed = Signal(str, float, str, float)
     linear_feedrate_changed = Signal(float)
@@ -677,10 +676,8 @@ class JoystickWindow(QWidget):
         safety_layout = QHBoxLayout()
         self.unlock_button = QPushButton("Unlock", self)
         self.reset_button = QPushButton("Reset", self)
-        self.reset_calibration_button = QPushButton("Reset Cal", self)
         safety_layout.addWidget(self.unlock_button)
         safety_layout.addWidget(self.reset_button)
-        safety_layout.addWidget(self.reset_calibration_button)
         root_layout.addLayout(safety_layout)
 
         self.autofocus_button = QPushButton("Autofocus", self)
@@ -690,9 +687,6 @@ class JoystickWindow(QWidget):
 
         self.unlock_button.clicked.connect(lambda: self.send_command("$X\n"))
         self.reset_button.clicked.connect(self._send_reset)
-        self.reset_calibration_button.clicked.connect(
-            self.reset_calibration_requested.emit
-        )
 
         root_layout.addStretch(1)
         self._update_enabled_state()
@@ -1036,7 +1030,6 @@ class JoystickWindow(QWidget):
             self.needles_lower_button,
             self.unlock_button,
             self.reset_button,
-            self.reset_calibration_button,
         ):
             widget.setEnabled(enabled)
         for widget in (

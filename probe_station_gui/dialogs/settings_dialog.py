@@ -47,11 +47,11 @@ from probe_station_gui.settings_manager import (
     AxisACalibrationSettings,
     AxisZCalibrationSettings,
     NeedleCalibrationSettings,
-    OBJECTIVE_NAMES,
     ObjectiveCalibrationSettings,
     ObjectivesSettings,
     Settings,
     WORK_COORDINATE_SYSTEMS,
+    ordered_objective_names,
 )
 
 
@@ -821,7 +821,7 @@ class ObjectivesSettingsWidget(QWidget):
 
         self._active_combo = QComboBox(self)
         self._profile_combo = QComboBox(self)
-        for name in OBJECTIVE_NAMES:
+        for name in ordered_objective_names(self._objectives.objectives):
             self._active_combo.addItem(name, name)
             self._profile_combo.addItem(name, name)
         active_index = self._active_combo.findData(self._objectives.active_name)

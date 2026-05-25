@@ -25,10 +25,13 @@ from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QDialog,
+    QFormLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
@@ -57,10 +60,13 @@ from probe_station_gui.route_measurement import (
     RouteMeasurementRunner,
 )
 from probe_station_gui.settings_manager import (
-    OBJECTIVE_NAMES,
     ObjectiveCalibrationSettings,
+    ObjectivesSettings,
     Settings,
     SettingsManager,
+    default_objective,
+    normalize_objective_name,
+    ordered_objective_names,
 )
 from probe_station_gui.views.alignment_panel import AlignmentPanel
 from probe_station_gui.views.contact_oscillation_window import (
@@ -145,6 +151,112 @@ class _ApiRequestBridge(QObject):
         finally:
             if isinstance(event, threading.Event):
                 event.set()
+
+
+class ClickCalibrationDialog(QDialog):
+    """Small objective-aware click-to-move calibration editor."""
+
+    objective_selected: Signal = Signal(str)
+    reset_requested: Signal = Signal()
+    add_requested: Signal = Signal()
+    delete_requested: Signal = Signal(str)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Click-to-Move Calibration")
+        self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
+        self._updating = False
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self._objective_combo = QComboBox(self)
+        self._objective_combo.currentIndexChanged.connect(
+            self._on_objective_changed
+        )
+        form.addRow(QLabel("Objective", self), self._objective_combo)
+
+        self._calibration_label = QLabel(self)
+        self._calibration_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._calibration_label.setMinimumWidth(360)
+        form.addRow(QLabel("Click calibration", self), self._calibration_label)
+        layout.addLayout(form)
+
+        button_layout = QHBoxLayout()
+        self._reset_button = QPushButton("Reset", self)
+        self._add_button = QPushButton("Add", self)
+        self._delete_button = QPushButton("Delete", self)
+        close_button = QPushButton("Close", self)
+        button_layout.addWidget(self._reset_button)
+        button_layout.addStretch(1)
+        button_layout.addWidget(self._add_button)
+        button_layout.addWidget(self._delete_button)
+        button_layout.addWidget(close_button)
+        layout.addLayout(button_layout)
+
+        self._reset_button.clicked.connect(self.reset_requested.emit)
+        self._add_button.clicked.connect(self.add_requested.emit)
+        self._delete_button.clicked.connect(self._request_delete)
+        close_button.clicked.connect(self.close)
+
+    def set_objectives(self, objectives: ObjectivesSettings) -> None:
+        names = ordered_objective_names(objectives.objectives)
+        active_name = normalize_objective_name(objectives.active_name)
+        if active_name and active_name not in names:
+            names.append(active_name)
+
+        self._updating = True
+        try:
+            self._objective_combo.clear()
+            for name in names:
+                self._objective_combo.addItem(name, name)
+            index = self._objective_combo.findData(active_name)
+            if index < 0:
+                index = 0
+            self._objective_combo.setCurrentIndex(index)
+        finally:
+            self._updating = False
+
+        self._delete_button.setEnabled(len(names) > 1)
+        profile = objectives.objectives.get(str(self._objective_combo.currentData()))
+        self._calibration_label.setText(self._format_profile(profile))
+
+    def _on_objective_changed(self, _index: int) -> None:
+        if self._updating:
+            return
+        name = str(self._objective_combo.currentData() or "")
+        if name:
+            self.objective_selected.emit(name)
+
+    def _request_delete(self) -> None:
+        name = str(self._objective_combo.currentData() or "")
+        if name:
+            self.delete_requested.emit(name)
+
+    @staticmethod
+    def _format_profile(profile: ObjectiveCalibrationSettings | None) -> str:
+        if profile is None or not profile.xy_calibration_configured:
+            return "Not configured"
+        try:
+            row_x = profile.pixels_to_mm[0]
+            row_y = profile.pixels_to_mm[1]
+            a = float(row_x[0])
+            b = float(row_x[1])
+            c = float(row_y[0])
+            d = float(row_y[1])
+        except (TypeError, ValueError, IndexError):
+            return "Not configured"
+        mm_per_px_x = math.hypot(a, c)
+        mm_per_px_y = math.hypot(b, d)
+        px_per_mm_x = 1.0 / mm_per_px_x if mm_per_px_x > 1e-18 else math.inf
+        px_per_mm_y = 1.0 / mm_per_px_y if mm_per_px_y > 1e-18 else math.inf
+        return (
+            f"Image X: {mm_per_px_x:.8f} mm/px ({px_per_mm_x:.1f} px/mm)\n"
+            f"Image Y: {mm_per_px_y:.8f} mm/px ({px_per_mm_y:.1f} px/mm)\n"
+            "Matrix px->mm:\n"
+            f"[{a:.8g}, {b:.8g}]\n"
+            f"[{c:.8g}, {d:.8g}]"
+        )
 
 
 class Main(QMainWindow):
@@ -241,6 +353,8 @@ class Main(QMainWindow):
         self._contact_calibration_window_action: QAction | None = None
         self._surface_map_window_action: QAction | None = None
         self._design_layout_window_action: QAction | None = None
+        self._click_calibration_action: QAction | None = None
+        self._click_calibration_dialog: ClickCalibrationDialog | None = None
         self._ruler_action: QAction | None = None
         self._rect_action: QAction | None = None
         self._last_selected_design_point: tuple[float, float] | None = None
@@ -877,7 +991,7 @@ class Main(QMainWindow):
         label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         layout.addWidget(label)
         self._objective_combo = QComboBox(widget)
-        for name in OBJECTIVE_NAMES:
+        for name in self._objective_names():
             self._objective_combo.addItem(name, name)
         self._objective_combo.setToolTip(
             "Select the installed microscope objective. Click-to-move and autofocus use this profile."
@@ -887,6 +1001,10 @@ class Main(QMainWindow):
         )
         layout.addWidget(self._objective_combo)
         return widget
+
+    def _objective_names(self) -> list[str]:
+        settings = self.settings_manager.objectives_configuration()
+        return ordered_objective_names(settings.objectives)
 
     def _create_stage_position_widget(self) -> QWidget:
         widget = QWidget(self)
@@ -1557,6 +1675,15 @@ class Main(QMainWindow):
         self._surface_map_window_action.triggered.connect(self._show_surface_map_window)
         calibration_menu.addAction(self._surface_map_window_action)
 
+        self._click_calibration_action = QAction(
+            self._click_calibration_action_text(),
+            self,
+        )
+        self._click_calibration_action.triggered.connect(
+            self._show_click_calibration_dialog
+        )
+        calibration_menu.addAction(self._click_calibration_action)
+
         for dock, title in (
             (self.oscillation_dock, "Oscillation"),
             (self.serial_connection_dock, "Connection"),
@@ -1781,7 +1908,7 @@ class Main(QMainWindow):
             objective_settings.active_name
         )
         if active_objective is None:
-            active_objective = ObjectiveCalibrationSettings(name="X5")
+            active_objective = default_objective(objective_settings.active_name)
         self.stage_controller.apply_objective_configuration(
             active_objective,
             objective_settings.objectives,
@@ -1871,12 +1998,25 @@ class Main(QMainWindow):
         combo = self._objective_combo
         if combo is None:
             return
+        objective_name = normalize_objective_name(objective_name)
+        current_names = [
+            str(combo.itemData(index) or "")
+            for index in range(combo.count())
+        ]
+        names = self._objective_names()
+        if current_names != names:
+            combo.blockSignals(True)
+            combo.clear()
+            for name in names:
+                combo.addItem(name, name)
+            combo.blockSignals(False)
         index = combo.findData(objective_name)
         if index < 0:
             return
         combo.blockSignals(True)
         combo.setCurrentIndex(index)
         combo.blockSignals(False)
+        self._refresh_click_calibration_ui()
 
     def _on_objective_combo_changed(self, _index: int) -> None:
         combo = self._objective_combo
@@ -1887,13 +2027,18 @@ class Main(QMainWindow):
             self._set_active_objective(objective_name, apply_motion=True)
 
     def _set_active_objective(self, objective_name: str, *, apply_motion: bool) -> None:
-        objective_name = objective_name.strip().upper()
-        if objective_name not in OBJECTIVE_NAMES:
+        objective_name = normalize_objective_name(objective_name)
+        if not objective_name:
             return
         settings = self.settings_manager.settings.clone()
         old_name = settings.objectives.active_name
         if old_name == objective_name:
+            self._refresh_click_calibration_ui()
             return
+        if objective_name not in settings.objectives.objectives:
+            settings.objectives.objectives[objective_name] = default_objective(
+                objective_name
+            )
         settings.objectives.active_name = objective_name
         self.settings_manager.replace(settings)
         self.settings_manager.save()
@@ -1957,18 +2102,129 @@ class Main(QMainWindow):
         else:
             self._show_status("Objective offset move was not accepted.", 4000)
 
+    def _show_click_calibration_dialog(self) -> None:
+        if self._click_calibration_dialog is None:
+            dialog = ClickCalibrationDialog(self)
+            dialog.objective_selected.connect(
+                lambda name: self._set_active_objective(name, apply_motion=True)
+            )
+            dialog.reset_requested.connect(self._reset_click_calibration)
+            dialog.add_requested.connect(self._add_objective_profile)
+            dialog.delete_requested.connect(self._delete_objective_profile)
+            self._click_calibration_dialog = dialog
+        self._refresh_click_calibration_ui()
+        self._click_calibration_dialog.show()
+        self._click_calibration_dialog.raise_()
+        self._click_calibration_dialog.activateWindow()
+
+    def _add_objective_profile(self) -> None:
+        raw_name, accepted = QInputDialog.getText(
+            self,
+            "Add Objective",
+            "Objective name",
+        )
+        if not accepted:
+            return
+        name = normalize_objective_name(raw_name)
+        if not name:
+            self._show_status(
+                "Objective name must use letters, digits, dot, dash, or underscore.",
+                5000,
+            )
+            return
+        settings = self.settings_manager.settings.clone()
+        if name in settings.objectives.objectives:
+            self._set_active_objective(name, apply_motion=True)
+            self._show_status(f"Objective already exists: {name}.", 3000)
+            return
+        settings.objectives.objectives[name] = default_objective(name)
+        settings.objectives.active_name = name
+        self.settings_manager.replace(settings)
+        self.settings_manager.save()
+        self._apply_settings()
+        self._show_status(f"Objective added: {name}.", 3000)
+
+    def _delete_objective_profile(self, objective_name: str) -> None:
+        name = normalize_objective_name(objective_name)
+        if not name:
+            return
+        settings = self.settings_manager.settings.clone()
+        profiles = settings.objectives.objectives
+        if name not in profiles:
+            self._show_status(f"Objective does not exist: {name}.", 4000)
+            return
+        if len(profiles) <= 1:
+            self._show_status("At least one objective profile is required.", 4000)
+            return
+        response = QMessageBox.question(
+            self,
+            "Delete Objective",
+            f"Delete objective profile {name}?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if response != QMessageBox.Yes:
+            return
+        del profiles[name]
+        if settings.objectives.active_name == name:
+            remaining = ordered_objective_names(profiles)
+            settings.objectives.active_name = remaining[0]
+        self.settings_manager.replace(settings)
+        self.settings_manager.save()
+        self._apply_settings()
+        self._show_status(f"Objective deleted: {name}.", 3000)
+
+    def _refresh_click_calibration_ui(self) -> None:
+        if self._click_calibration_action is not None:
+            self._click_calibration_action.setText(
+                self._click_calibration_action_text()
+            )
+        if self._click_calibration_dialog is not None:
+            self._click_calibration_dialog.set_objectives(
+                self.settings_manager.objectives_configuration()
+            )
+
+    def _click_calibration_action_text(self) -> str:
+        objectives = self.settings_manager.objectives_configuration()
+        profile = objectives.objectives.get(objectives.active_name)
+        if profile is None or not profile.xy_calibration_configured:
+            return f"Click-to-Move Calibration: {objectives.active_name} not configured"
+        magnitudes = self._click_calibration_magnitudes(profile)
+        if magnitudes is None:
+            return f"Click-to-Move Calibration: {objectives.active_name} invalid"
+        mm_x, mm_y = magnitudes
+        return (
+            f"Click-to-Move Calibration: {objectives.active_name} "
+            f"X {mm_x:.6g} mm/px, Y {mm_y:.6g} mm/px"
+        )
+
+    @staticmethod
+    def _click_calibration_magnitudes(
+        profile: ObjectiveCalibrationSettings,
+    ) -> tuple[float, float] | None:
+        try:
+            row_x = profile.pixels_to_mm[0]
+            row_y = profile.pixels_to_mm[1]
+            a = float(row_x[0])
+            b = float(row_x[1])
+            c = float(row_y[0])
+            d = float(row_y[1])
+        except (TypeError, ValueError, IndexError):
+            return None
+        return math.hypot(a, c), math.hypot(b, d)
+
     def _on_objective_calibration_updated(
         self,
         objective_name: str,
         pixels_to_mm: object,
     ) -> None:
-        name = str(objective_name).strip().upper()
-        if name not in OBJECTIVE_NAMES:
+        name = normalize_objective_name(objective_name)
+        if not name:
             return
         settings = self.settings_manager.settings.clone()
         profile = settings.objectives.objectives.get(name)
         if profile is None:
-            profile = ObjectiveCalibrationSettings(name=name)
+            profile = default_objective(name)
         matrix: list[list[float]] = []
         if isinstance(pixels_to_mm, (list, tuple)):
             try:
@@ -1983,14 +2239,16 @@ class Main(QMainWindow):
         settings.objectives.objectives[name] = profile
         self.settings_manager.replace(settings)
         self.settings_manager.save()
+        self._refresh_click_calibration_ui()
 
     def _on_objective_mismatch_detected(
         self,
         suggested_name: str,
         message: str,
     ) -> None:
-        name = str(suggested_name).strip().upper()
-        if name in OBJECTIVE_NAMES:
+        name = normalize_objective_name(suggested_name)
+        objective_settings = self.settings_manager.objectives_configuration()
+        if name in objective_settings.objectives:
             self._set_active_objective(name, apply_motion=False)
         if message:
             self._show_status(message, 7000)
@@ -2119,7 +2377,9 @@ class Main(QMainWindow):
 
     def _reset_click_calibration(self) -> None:
         try:
-            self.stage_controller.reset_calibration()
+            self.stage_controller.reset_calibration(
+                "Click-to-move calibration cleared. Click in the microscope view to recalibrate the active objective."
+            )
         except Exception as exc:
             self._show_status(str(exc), 5000)
 
@@ -5059,9 +5319,6 @@ class Main(QMainWindow):
         )
         self.joystick_panel.needle_contact_coordinate_save_requested.connect(
             self._save_needle_position_from_display_a_coordinate
-        )
-        self.joystick_panel.reset_calibration_requested.connect(
-            self._reset_click_calibration
         )
         self.joystick_panel.zero_b_requested.connect(self._zero_b_axis)
         self.joystick_panel.manual_axis_move_requested.connect(
