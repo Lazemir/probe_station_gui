@@ -1903,17 +1903,7 @@ class Main(QMainWindow):
             startup_mode=coordinate_settings.startup_mode,
             preferred_system=coordinate_settings.preferred_system,
         )
-        objective_settings = self.settings_manager.objectives_configuration()
-        active_objective = objective_settings.objectives.get(
-            objective_settings.active_name
-        )
-        if active_objective is None:
-            active_objective = default_objective(objective_settings.active_name)
-        self.stage_controller.apply_objective_configuration(
-            active_objective,
-            objective_settings.objectives,
-        )
-        self._sync_objective_combo(objective_settings.active_name)
+        self._apply_objective_settings()
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_design_dialog_directory(
                 self.settings_manager.design_last_directory()
@@ -2042,7 +2032,7 @@ class Main(QMainWindow):
         settings.objectives.active_name = objective_name
         self.settings_manager.replace(settings)
         self.settings_manager.save()
-        self._apply_settings()
+        self._apply_objective_settings()
         if apply_motion:
             self._apply_objective_change_offset(old_name, objective_name)
         self._show_status(f"Objective selected: {objective_name}.", 3000)
@@ -2102,6 +2092,19 @@ class Main(QMainWindow):
         else:
             self._show_status("Objective offset move was not accepted.", 4000)
 
+    def _apply_objective_settings(self) -> None:
+        objective_settings = self.settings_manager.objectives_configuration()
+        active_objective = objective_settings.objectives.get(
+            objective_settings.active_name
+        )
+        if active_objective is None:
+            active_objective = default_objective(objective_settings.active_name)
+        self.stage_controller.apply_objective_configuration(
+            active_objective,
+            objective_settings.objectives,
+        )
+        self._sync_objective_combo(objective_settings.active_name)
+
     def _show_click_calibration_dialog(self) -> None:
         if self._click_calibration_dialog is None:
             dialog = ClickCalibrationDialog(self)
@@ -2141,7 +2144,7 @@ class Main(QMainWindow):
         settings.objectives.active_name = name
         self.settings_manager.replace(settings)
         self.settings_manager.save()
-        self._apply_settings()
+        self._apply_objective_settings()
         self._show_status(f"Objective added: {name}.", 3000)
 
     def _delete_objective_profile(self, objective_name: str) -> None:
@@ -2171,7 +2174,7 @@ class Main(QMainWindow):
             settings.objectives.active_name = remaining[0]
         self.settings_manager.replace(settings)
         self.settings_manager.save()
-        self._apply_settings()
+        self._apply_objective_settings()
         self._show_status(f"Objective deleted: {name}.", 3000)
 
     def _refresh_click_calibration_ui(self) -> None:
