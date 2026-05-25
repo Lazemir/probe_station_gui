@@ -187,8 +187,6 @@
         "z_offset_configured": false,
         "pixels_to_mm": [],
         "xy_calibration_configured": false,
-        "calibration_step_mm": 0.2,
-        "calibration_target_pixels": 120.0,
         "autofocus_range_mm": 1.0,
         "autofocus_fine_step_mm": 0.02,
         "autofocus_sweep_feedrate_mm_min": 60.0
@@ -203,8 +201,6 @@
         "z_offset_configured": false,
         "pixels_to_mm": [],
         "xy_calibration_configured": false,
-        "calibration_step_mm": 0.1,
-        "calibration_target_pixels": 120.0,
         "autofocus_range_mm": 0.6,
         "autofocus_fine_step_mm": 0.01,
         "autofocus_sweep_feedrate_mm_min": 30.0
@@ -219,8 +215,6 @@
         "z_offset_configured": false,
         "pixels_to_mm": [],
         "xy_calibration_configured": false,
-        "calibration_step_mm": 0.05,
-        "calibration_target_pixels": 120.0,
         "autofocus_range_mm": 0.35,
         "autofocus_fine_step_mm": 0.005,
         "autofocus_sweep_feedrate_mm_min": 15.0
@@ -235,8 +229,6 @@
         "z_offset_configured": false,
         "pixels_to_mm": [],
         "xy_calibration_configured": false,
-        "calibration_step_mm": 0.02,
-        "calibration_target_pixels": 120.0,
         "autofocus_range_mm": 0.15,
         "autofocus_fine_step_mm": 0.002,
         "autofocus_sweep_feedrate_mm_min": 6.0

@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFormLayout,
+    QGridLayout,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -176,10 +177,8 @@ class ClickCalibrationDialog(QDialog):
         )
         form.addRow(QLabel("Objective", self), self._objective_combo)
 
-        self._calibration_label = QLabel(self)
-        self._calibration_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self._calibration_label.setMinimumWidth(360)
-        form.addRow(QLabel("Click calibration", self), self._calibration_label)
+        self._matrix_cells: list[list[QLabel]] = []
+        form.addRow(QLabel("pixels_to_mm", self), self._create_matrix_table())
         layout.addLayout(form)
 
         button_layout = QHBoxLayout()
@@ -219,7 +218,7 @@ class ClickCalibrationDialog(QDialog):
 
         self._delete_button.setEnabled(len(names) > 1)
         profile = objectives.objectives.get(str(self._objective_combo.currentData()))
-        self._calibration_label.setText(self._format_profile(profile))
+        self._set_matrix(profile)
 
     def _on_objective_changed(self, _index: int) -> None:
         if self._updating:
@@ -233,30 +232,72 @@ class ClickCalibrationDialog(QDialog):
         if name:
             self.delete_requested.emit(name)
 
+    def _create_matrix_table(self) -> QWidget:
+        table = QWidget(self)
+        layout = QGridLayout(table)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setHorizontalSpacing(12)
+        layout.setVerticalSpacing(6)
+
+        headers = (
+            (0, 0, "bed \\ camera"),
+            (0, 1, "X_camera px"),
+            (0, 2, "Y_camera px"),
+            (1, 0, "X_bed mm"),
+            (2, 0, "Y_bed mm"),
+        )
+        for row, column, text in headers:
+            label = QLabel(text, table)
+            label.setStyleSheet("font-weight: 600;")
+            label.setAlignment(Qt.AlignCenter)
+            layout.addWidget(label, row, column)
+
+        for row in range(2):
+            row_cells: list[QLabel] = []
+            for column in range(2):
+                value = QLabel("--", table)
+                value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                value.setMinimumWidth(120)
+                value.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                value.setStyleSheet(
+                    "font-family: Consolas, monospace; padding: 2px 6px;"
+                )
+                layout.addWidget(value, row + 1, column + 1)
+                row_cells.append(value)
+            self._matrix_cells.append(row_cells)
+        return table
+
+    def _set_matrix(self, profile: ObjectiveCalibrationSettings | None) -> None:
+        matrix = self._matrix_from_profile(profile)
+        for row, cells in enumerate(self._matrix_cells):
+            for column, cell in enumerate(cells):
+                if matrix is None:
+                    cell.setText("--")
+                else:
+                    cell.setText(self._format_matrix_value(matrix[row][column]))
+
     @staticmethod
-    def _format_profile(profile: ObjectiveCalibrationSettings | None) -> str:
+    def _matrix_from_profile(
+        profile: ObjectiveCalibrationSettings | None,
+    ) -> tuple[tuple[float, float], tuple[float, float]] | None:
         if profile is None or not profile.xy_calibration_configured:
-            return "Not configured"
+            return None
         try:
             row_x = profile.pixels_to_mm[0]
             row_y = profile.pixels_to_mm[1]
-            a = float(row_x[0])
-            b = float(row_x[1])
-            c = float(row_y[0])
-            d = float(row_y[1])
+            matrix = (
+                (float(row_x[0]), float(row_x[1])),
+                (float(row_y[0]), float(row_y[1])),
+            )
         except (TypeError, ValueError, IndexError):
-            return "Not configured"
-        mm_per_px_x = math.hypot(a, c)
-        mm_per_px_y = math.hypot(b, d)
-        px_per_mm_x = 1.0 / mm_per_px_x if mm_per_px_x > 1e-18 else math.inf
-        px_per_mm_y = 1.0 / mm_per_px_y if mm_per_px_y > 1e-18 else math.inf
-        return (
-            f"Image X: {mm_per_px_x:.8f} mm/px ({px_per_mm_x:.1f} px/mm)\n"
-            f"Image Y: {mm_per_px_y:.8f} mm/px ({px_per_mm_y:.1f} px/mm)\n"
-            "Matrix px->mm:\n"
-            f"[{a:.8g}, {b:.8g}]\n"
-            f"[{c:.8g}, {d:.8g}]"
-        )
+            return None
+        if not all(math.isfinite(value) for row in matrix for value in row):
+            return None
+        return matrix
+
+    @staticmethod
+    def _format_matrix_value(value: float) -> str:
+        return f"{value:.9g}"
 
 
 class Main(QMainWindow):
@@ -2189,21 +2230,6 @@ class Main(QMainWindow):
 
     def _click_calibration_action_text(self) -> str:
         return "Click-to-Move Calibration"
-
-    @staticmethod
-    def _click_calibration_magnitudes(
-        profile: ObjectiveCalibrationSettings,
-    ) -> tuple[float, float] | None:
-        try:
-            row_x = profile.pixels_to_mm[0]
-            row_y = profile.pixels_to_mm[1]
-            a = float(row_x[0])
-            b = float(row_x[1])
-            c = float(row_y[0])
-            d = float(row_y[1])
-        except (TypeError, ValueError, IndexError):
-            return None
-        return math.hypot(a, c), math.hypot(b, d)
 
     def _on_objective_calibration_updated(
         self,

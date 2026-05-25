@@ -793,7 +793,9 @@ class StageControllerObjectiveTest(unittest.TestCase):
         controller = StageController()
         controller.CALIBRATION_MAX_OBSERVATIONS_PER_AXIS = 4
         controller.CALIBRATION_MIN_OBSERVATIONS = 4
-        controller._objective_calibration_step_mm = 0.1
+        controller.CALIBRATION_PROBE_STEP_MM = 0.1
+        controller.CALIBRATION_MAX_ADAPTIVE_STEP_MM = 0.1
+        controller.CALIBRATION_MAX_UNVERIFIED_STEP_MM = 0.1
         controller._objective_calibration_target_pixels = 1000.0
         current = [0.4, 0.0, 0.0]
         serial_connection = _FakeSerial()
@@ -838,6 +840,70 @@ class StageControllerObjectiveTest(unittest.TestCase):
         for index, (mm_vector, _pixel_vector) in enumerate(observations, start=1):
             self.assertAlmostEqual(float(mm_vector[0]), 0.0)
             self.assertAlmostEqual(float(mm_vector[1]), 0.1 * index)
+
+    def test_axis_calibration_adapts_probe_step_from_measured_pixels(self) -> None:
+        controller = StageController()
+        controller.CALIBRATION_MAX_OBSERVATIONS_PER_AXIS = 4
+        controller.CALIBRATION_MIN_OBSERVATIONS = 4
+        controller.CALIBRATION_PROBE_STEP_MM = 0.005
+        controller.CALIBRATION_MAX_ADAPTIVE_STEP_MM = 0.08
+        controller._objective_calibration_target_pixels = 120.0
+        current = [0.0, 0.0, 0.0]
+        moves: list[float] = []
+        serial_connection = _FakeSerial()
+
+        def _status() -> types.SimpleNamespace:
+            position = tuple(current)
+            return types.SimpleNamespace(
+                state="Idle",
+                position=position,
+                work_position=position,
+                display_position=position,
+                work_offset=(0.0, 0.0, 0.0),
+                homed_axes={"X", "Y"},
+            )
+
+        def _send_relative_move(_serial, move) -> None:
+            moves.append(move.x)
+            current[0] += move.x
+
+        controller._query_status = lambda _serial: _status()
+        controller._send_relative_move = _send_relative_move
+        controller._wait_for_new_frame = (
+            lambda frame_counter, timeout=2.0: (
+                np.zeros((8, 8), dtype=np.uint8),
+                frame_counter + 1,
+            )
+        )
+        controller._estimate_shift_with_response = lambda *_args: (
+            current[0] * 600.0,
+            0.0,
+            1.0,
+        )
+
+        observations = controller._calibrate_axis_series(
+            serial_connection,
+            np.zeros((8, 8), dtype=np.uint8),
+            (0.0, 0.0, 0.0),
+            axis="X",
+        )
+
+        self.assertEqual(len(observations), 4)
+        self.assertAlmostEqual(moves[0], 0.005)
+        self.assertTrue(all(move < 0.1 for move in moves))
+        self.assertNotIn(1.0, moves)
+
+    def test_calibration_verify_step_uses_saved_matrix_scale(self) -> None:
+        controller = StageController()
+        controller.CALIBRATION_VERIFY_TARGET_PIXELS = 40.0
+        controller.CALIBRATION_VERIFY_STEP_MM = 0.05
+        controller.CALIBRATION_PROBE_STEP_MM = 0.005
+        controller._pixels_to_mm = np.array(
+            [[0.001, 0.0], [0.0, 0.001]],
+            dtype=float,
+        )
+
+        self.assertAlmostEqual(controller._calibration_verify_step_mm(), 0.04)
 
     def test_best_objective_for_measurement_uses_saved_candidate_matrices(self) -> None:
         controller = StageController()

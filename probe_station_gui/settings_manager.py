@@ -50,32 +50,24 @@ DEFAULT_ACTIVE_OBJECTIVE = "X5"
 OBJECTIVE_DEFAULTS: dict[str, dict[str, float]] = {
     "X5": {
         "magnification": 5.0,
-        "calibration_step_mm": 0.2,
-        "calibration_target_pixels": 120.0,
         "autofocus_range_mm": 1.0,
         "autofocus_fine_step_mm": 0.02,
         "autofocus_sweep_feedrate_mm_min": 60.0,
     },
     "X10": {
         "magnification": 10.0,
-        "calibration_step_mm": 0.1,
-        "calibration_target_pixels": 120.0,
         "autofocus_range_mm": 0.6,
         "autofocus_fine_step_mm": 0.01,
         "autofocus_sweep_feedrate_mm_min": 30.0,
     },
     "X20": {
         "magnification": 20.0,
-        "calibration_step_mm": 0.05,
-        "calibration_target_pixels": 120.0,
         "autofocus_range_mm": 0.35,
         "autofocus_fine_step_mm": 0.005,
         "autofocus_sweep_feedrate_mm_min": 15.0,
     },
     "X50": {
         "magnification": 50.0,
-        "calibration_step_mm": 0.02,
-        "calibration_target_pixels": 120.0,
         "autofocus_range_mm": 0.15,
         "autofocus_fine_step_mm": 0.002,
         "autofocus_sweep_feedrate_mm_min": 6.0,
@@ -640,8 +632,6 @@ class ObjectiveCalibrationSettings:
     z_offset_configured: bool = False
     pixels_to_mm: List[List[float]] = field(default_factory=list)
     xy_calibration_configured: bool = False
-    calibration_step_mm: float = 0.2
-    calibration_target_pixels: float = 120.0
     autofocus_range_mm: float = 1.0
     autofocus_fine_step_mm: float = 0.02
     autofocus_sweep_feedrate_mm_min: float = 60.0
@@ -659,8 +649,6 @@ class ObjectiveCalibrationSettings:
             z_offset_configured=self.z_offset_configured,
             pixels_to_mm=[list(row) for row in self.pixels_to_mm],
             xy_calibration_configured=self.xy_calibration_configured,
-            calibration_step_mm=self.calibration_step_mm,
-            calibration_target_pixels=self.calibration_target_pixels,
             autofocus_range_mm=self.autofocus_range_mm,
             autofocus_fine_step_mm=self.autofocus_fine_step_mm,
             autofocus_sweep_feedrate_mm_min=self.autofocus_sweep_feedrate_mm_min,
@@ -679,8 +667,6 @@ class ObjectiveCalibrationSettings:
             "z_offset_configured": self.z_offset_configured,
             "pixels_to_mm": [list(row) for row in self.pixels_to_mm],
             "xy_calibration_configured": self.xy_calibration_configured,
-            "calibration_step_mm": self.calibration_step_mm,
-            "calibration_target_pixels": self.calibration_target_pixels,
             "autofocus_range_mm": self.autofocus_range_mm,
             "autofocus_fine_step_mm": self.autofocus_fine_step_mm,
             "autofocus_sweep_feedrate_mm_min": self.autofocus_sweep_feedrate_mm_min,
@@ -694,8 +680,6 @@ def default_objective(name: str) -> ObjectiveCalibrationSettings:
     return ObjectiveCalibrationSettings(
         name=name,
         magnification=defaults["magnification"],
-        calibration_step_mm=defaults["calibration_step_mm"],
-        calibration_target_pixels=defaults["calibration_target_pixels"],
         autofocus_range_mm=defaults["autofocus_range_mm"],
         autofocus_fine_step_mm=defaults["autofocus_fine_step_mm"],
         autofocus_sweep_feedrate_mm_min=defaults["autofocus_sweep_feedrate_mm_min"],
@@ -2326,20 +2310,6 @@ class SettingsManager:
             ),
             pixels_to_mm=matrix,
             xy_calibration_configured=xy_configured,
-            calibration_step_mm=self._positive_float(
-                raw_profile.get(
-                    "calibration_step_mm",
-                    defaults.calibration_step_mm,
-                ),
-                default=defaults.calibration_step_mm,
-            ),
-            calibration_target_pixels=self._positive_float(
-                raw_profile.get(
-                    "calibration_target_pixels",
-                    defaults.calibration_target_pixels,
-                ),
-                default=defaults.calibration_target_pixels,
-            ),
             autofocus_range_mm=self._positive_float(
                 raw_profile.get(
                     "autofocus_range_mm",

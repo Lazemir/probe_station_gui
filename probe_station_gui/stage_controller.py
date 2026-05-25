@@ -141,11 +141,16 @@ class StageController(QObject):
 
     CALIBRATION_PIXEL_TARGET = 120.0
     CALIBRATION_MIN_VERIFY_PIXELS = 15.0
-    CALIBRATION_STEP_MM = 0.2
     CALIBRATION_MAX_STEPS = 25
     CALIBRATION_VERIFY_STEP_MM = 0.05
     CALIBRATION_VERIFY_ERROR_RATIO = 0.35
     CALIBRATION_VERIFY_MIN_ERROR_MM = 0.01
+    CALIBRATION_PROBE_STEP_MM = 0.005
+    CALIBRATION_MAX_UNVERIFIED_STEP_MM = 0.04
+    CALIBRATION_MAX_ADAPTIVE_STEP_MM = 0.08
+    CALIBRATION_MIN_OBSERVATION_PIXELS = 1.0
+    CALIBRATION_MIN_RESPONSE = 0.05
+    CALIBRATION_VERIFY_TARGET_PIXELS = 40.0
     DEFAULT_FEEDRATE = 600.0
     MOVE_IDLE_TIMEOUT_MARGIN_S = 5.0
     MOVE_IDLE_TIMEOUT_MIN_S = 10.0
@@ -250,7 +255,6 @@ class StageController(QObject):
         self._axis_a_calibration: dict[str, float | str] | None = None
         self._axis_z_calibration: dict[str, float | str | tuple[float, ...]] | None = None
         self._active_objective_name = "X5"
-        self._objective_calibration_step_mm = self.CALIBRATION_STEP_MM
         self._objective_calibration_target_pixels = self.CALIBRATION_PIXEL_TARGET
         self._objective_autofocus_range_mm = 1.0
         self._objective_autofocus_fine_step_mm = self.AUTOFOCUS_FINE_STEP_MM
@@ -963,18 +967,7 @@ class StageController(QObject):
         self._objective_matrices = self._candidate_matrices(candidates)
         name = str(getattr(objective, "name", "X5")).strip().upper() or "X5"
         self._active_objective_name = name
-        self._objective_calibration_step_mm = self._positive_profile_value(
-            getattr(objective, "calibration_step_mm", self.CALIBRATION_STEP_MM),
-            self.CALIBRATION_STEP_MM,
-        )
-        self._objective_calibration_target_pixels = self._positive_profile_value(
-            getattr(
-                objective,
-                "calibration_target_pixels",
-                self.CALIBRATION_PIXEL_TARGET,
-            ),
-            self.CALIBRATION_PIXEL_TARGET,
-        )
+        self._objective_calibration_target_pixels = self.CALIBRATION_PIXEL_TARGET
         self._objective_autofocus_range_mm = self._positive_profile_value(
             getattr(objective, "autofocus_range_mm", 1.0),
             1.0,
@@ -2753,10 +2746,7 @@ class StageController(QObject):
         if status is None or origin is None:
             raise StageControllerError("Unable to read position for calibration check.")
         self._require_homed_axes(status, {"X", "Y"})
-        step_mm = min(
-            max(float(self._objective_calibration_step_mm) * 0.5, 0.005),
-            self.CALIBRATION_VERIFY_STEP_MM,
-        )
+        step_mm = self._calibration_verify_step_mm()
         self.status_message.emit(
             f"Checking {self._active_objective_name} click calibration..."
         )
@@ -2841,7 +2831,7 @@ class StageController(QObject):
             raise StageControllerError("Reference frame unavailable for calibration.")
         index = 0 if axis == "X" else 1
         observations: list[tuple[np.ndarray, np.ndarray]] = []
-        step_mm = float(self._objective_calibration_step_mm)
+        step_mm = float(self.CALIBRATION_PROBE_STEP_MM)
         target_pixels = float(self._objective_calibration_target_pixels)
         reference_status = self._query_status(serial_connection)
         reference_position = self._position_for_configured_mode(reference_status)
@@ -2875,21 +2865,87 @@ class StageController(QObject):
                 reference_frame,
                 new_frame,
             )
-            if response >= 0.05:
+            shift_pixels = math.hypot(float(shift_x), float(shift_y))
+            reliable_shift = (
+                response >= self.CALIBRATION_MIN_RESPONSE
+                and shift_pixels >= self.CALIBRATION_MIN_OBSERVATION_PIXELS
+            )
+            if reliable_shift:
                 pixel_vector = np.array([shift_x, shift_y], dtype=float)
                 observations.append((mm_vector, pixel_vector))
             if abs(current[index] - reference_position[index]) < 1e-6:
                 continue
-            if len(observations) >= self.CALIBRATION_MIN_OBSERVATIONS and (
-                abs(shift_x) >= target_pixels or abs(shift_y) >= target_pixels
+            if (
+                len(observations) >= self.CALIBRATION_MIN_OBSERVATIONS
+                and shift_pixels >= target_pixels
             ):
                 break
+            if not reliable_shift:
+                if step_mm >= self.CALIBRATION_MAX_UNVERIFIED_STEP_MM - 1e-12:
+                    raise StageControllerError(
+                        f"Unable to measure reliable image motion for {axis} calibration."
+                    )
+                step_mm = min(
+                    step_mm * 2.0,
+                    self.CALIBRATION_MAX_UNVERIFIED_STEP_MM,
+                )
+                continue
+            axis_delta = abs(float(current[index] - reference_position[index]))
+            step_mm = self._next_calibration_probe_step_mm(
+                axis_delta_mm=axis_delta,
+                shift_pixels=shift_pixels,
+                observations_count=len(observations),
+                target_pixels=target_pixels,
+            )
 
         if not observations:
             raise StageControllerError(
                 f"Pixel shift too small to compute {axis} calibration."
             )
         return observations
+
+    def _next_calibration_probe_step_mm(
+        self,
+        *,
+        axis_delta_mm: float,
+        shift_pixels: float,
+        observations_count: int,
+        target_pixels: float,
+    ) -> float:
+        min_step = float(self.CALIBRATION_PROBE_STEP_MM)
+        max_step = float(self.CALIBRATION_MAX_ADAPTIVE_STEP_MM)
+        if axis_delta_mm <= 1e-9 or shift_pixels <= 1e-9:
+            return min_step
+        px_per_mm = shift_pixels / axis_delta_mm
+        if px_per_mm <= 1e-9 or not math.isfinite(px_per_mm):
+            return min_step
+        target_distance_mm = max(axis_delta_mm, float(target_pixels) / px_per_mm)
+        remaining_distance = max(0.0, target_distance_mm - axis_delta_mm)
+        remaining_observations = max(
+            1,
+            self.CALIBRATION_MIN_OBSERVATIONS - int(observations_count),
+        )
+        step = remaining_distance / remaining_observations
+        if step <= 0.0:
+            step = min_step
+        return min(max(step, min_step), max_step)
+
+    def _calibration_verify_step_mm(self) -> float:
+        if self._pixels_to_mm is None:
+            return self.CALIBRATION_VERIFY_STEP_MM
+        try:
+            stage_to_pixels = np.linalg.inv(self._pixels_to_mm)
+            pixels_for_x_mm = stage_to_pixels @ np.array([1.0, 0.0], dtype=float)
+            px_per_mm = float(np.linalg.norm(pixels_for_x_mm))
+        except (TypeError, ValueError, np.linalg.LinAlgError):
+            px_per_mm = 0.0
+        if not math.isfinite(px_per_mm) or px_per_mm <= 1e-9:
+            return self.CALIBRATION_VERIFY_STEP_MM
+        step = float(self.CALIBRATION_VERIFY_TARGET_PIXELS) / px_per_mm
+        return min(
+            max(step, float(self.CALIBRATION_PROBE_STEP_MM)),
+            float(self.CALIBRATION_VERIFY_STEP_MM),
+        )
 
     def _calibration_matrix_from_observations(
         self,
