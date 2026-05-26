@@ -2192,8 +2192,14 @@ class StageController(QObject):
         dy_pixels: float,
     ) -> int | None:
         with self._serial_session_lock:
-            self._ensure_calibration(serial_connection)
+            pixel_vector = np.array([dx_pixels, dy_pixels], dtype=float)
+            target_handled, before_counter = self._ensure_calibration(
+                serial_connection,
+                target_pixels=pixel_vector,
+            )
             self._check_cancelled()
+            if target_handled:
+                return before_counter
             if self._pixels_to_mm is None:
                 raise StageControllerError("Calibration failed. Cannot move stage.")
 
@@ -2201,7 +2207,6 @@ class StageController(QObject):
                 return None
 
             _, before_counter = self._get_frame_snapshot()
-            pixel_vector = np.array([dx_pixels, dy_pixels], dtype=float)
             mm_vector = -(self._pixels_to_mm @ pixel_vector)
             move = MoveVector(x=float(mm_vector[0]), y=float(mm_vector[1]))
             move_magnitude = float(np.linalg.norm(mm_vector))
@@ -2814,14 +2819,21 @@ class StageController(QObject):
                     self._controller_reboot_ready_notified = False
                 self._active_thread = None
 
-    def _ensure_calibration(self, serial_connection: serial.Serial) -> None:
+    def _ensure_calibration(
+        self,
+        serial_connection: serial.Serial,
+        target_pixels: np.ndarray | None = None,
+    ) -> tuple[bool, int | None]:
         if self._pixels_to_mm is not None:
             if not self._objective_calibration_verified.get(
                 self._active_objective_name,
                 False,
             ):
-                self._verify_active_objective_calibration(serial_connection)
-            return
+                return self._verify_active_objective_calibration(
+                    serial_connection,
+                    target_pixels=target_pixels,
+                )
+            return (False, None)
         self.status_message.emit(
             f"Starting {self._active_objective_name} click calibration sequence..."
         )
@@ -2849,34 +2861,42 @@ class StageController(QObject):
                     serial_connection, reference_for_y, origin, axis="Y"
                 )
             )
-        finally:
+            calibration_matrix = self._calibration_matrix_from_observations(observations)
+            if not np.isfinite(calibration_matrix).all():
+                raise StageControllerError("Calibration produced invalid values.")
+            determinant = float(np.linalg.det(calibration_matrix))
+            if abs(determinant) < 1e-9:
+                raise StageControllerError("Calibration matrix is singular.")
+            self._pixels_to_mm = np.linalg.inv(calibration_matrix)
+            mm_per_pixel_x, mm_per_pixel_y = self._calibration_magnitudes()
+            self.calibration_changed.emit(mm_per_pixel_x, mm_per_pixel_y)
+            self.objective_calibration_updated.emit(
+                self._active_objective_name,
+                self._pixels_to_mm.tolist(),
+            )
+            self._objective_matrices[self._active_objective_name] = self._pixels_to_mm
+            self._objective_calibration_verified[self._active_objective_name] = True
+            target_handled, before_counter = self._move_from_calibration_to_target(
+                serial_connection,
+                origin,
+                target_pixels,
+            )
+        except Exception:
             self._return_to_origin(serial_connection, origin)
+            raise
 
-        calibration_matrix = self._calibration_matrix_from_observations(observations)
-        if not np.isfinite(calibration_matrix).all():
-            raise StageControllerError("Calibration produced invalid values.")
-        determinant = float(np.linalg.det(calibration_matrix))
-        if abs(determinant) < 1e-9:
-            raise StageControllerError("Calibration matrix is singular.")
-        self._pixels_to_mm = np.linalg.inv(calibration_matrix)
-        mm_per_pixel_x, mm_per_pixel_y = self._calibration_magnitudes()
-        self.calibration_changed.emit(mm_per_pixel_x, mm_per_pixel_y)
-        self.objective_calibration_updated.emit(
-            self._active_objective_name,
-            self._pixels_to_mm.tolist(),
-        )
-        self._objective_matrices[self._active_objective_name] = self._pixels_to_mm
-        self._objective_calibration_verified[self._active_objective_name] = True
         self.status_message.emit(
             f"{self._active_objective_name} calibration updated: dX {mm_per_pixel_x:.6f} mm/px, dY {mm_per_pixel_y:.6f} mm/px"
         )
+        return (target_handled, before_counter)
 
     def _verify_active_objective_calibration(
         self,
         serial_connection: serial.Serial,
-    ) -> None:
+        target_pixels: np.ndarray | None = None,
+    ) -> tuple[bool, int | None]:
         if self._pixels_to_mm is None:
-            return
+            return (False, None)
         before_frame, frame_counter = self._get_frame_snapshot(timeout=3.0)
         if before_frame is None:
             raise StageControllerError("Camera frames are unavailable for calibration check.")
@@ -2903,40 +2923,47 @@ class StageController(QObject):
                 self._estimate_shift(before_frame, after_frame),
                 dtype=float,
             )
-        finally:
+            if np.linalg.norm(measured_pixels) < 1e-6:
+                raise StageControllerError("Calibration check saw no image motion.")
+            expected_mm = np.asarray([step_mm, 0.0], dtype=float)
+            active_error = float(
+                np.linalg.norm(self._pixels_to_mm @ measured_pixels - expected_mm)
+            )
+            tolerance = max(
+                self.CALIBRATION_VERIFY_MIN_ERROR_MM,
+                abs(step_mm) * self.CALIBRATION_VERIFY_ERROR_RATIO,
+            )
+            if active_error <= tolerance:
+                self._objective_calibration_verified[self._active_objective_name] = True
+                target_handled, before_counter = self._move_from_calibration_to_target(
+                    serial_connection,
+                    origin,
+                    target_pixels,
+                )
+                self.status_message.emit(
+                    f"{self._active_objective_name} click calibration verified."
+                )
+                return (target_handled, before_counter)
+
+            suggestion = self._best_objective_for_measurement(
+                measured_pixels,
+                expected_mm,
+                tolerance=tolerance,
+            )
+            if suggestion and suggestion != self._active_objective_name:
+                message = (
+                    f"Selected objective appears to be {suggestion}, not "
+                    f"{self._active_objective_name}. Objective switched; click again."
+                )
+                self.objective_mismatch_detected.emit(suggestion, message)
+                raise StageControllerError(message)
+            raise StageControllerError(
+                "Click calibration does not match the selected objective. "
+                "Select the correct objective in the GUI or recalibrate this objective."
+            )
+        except Exception:
             self._return_to_origin(serial_connection, origin)
-
-        if np.linalg.norm(measured_pixels) < 1e-6:
-            raise StageControllerError("Calibration check saw no image motion.")
-        expected_mm = np.asarray([step_mm, 0.0], dtype=float)
-        active_error = float(np.linalg.norm(self._pixels_to_mm @ measured_pixels - expected_mm))
-        tolerance = max(
-            self.CALIBRATION_VERIFY_MIN_ERROR_MM,
-            abs(step_mm) * self.CALIBRATION_VERIFY_ERROR_RATIO,
-        )
-        if active_error <= tolerance:
-            self._objective_calibration_verified[self._active_objective_name] = True
-            self.status_message.emit(
-                f"{self._active_objective_name} click calibration verified."
-            )
-            return
-
-        suggestion = self._best_objective_for_measurement(
-            measured_pixels,
-            expected_mm,
-            tolerance=tolerance,
-        )
-        if suggestion and suggestion != self._active_objective_name:
-            message = (
-                f"Selected objective appears to be {suggestion}, not "
-                f"{self._active_objective_name}. Objective switched; click again."
-            )
-            self.objective_mismatch_detected.emit(suggestion, message)
-            raise StageControllerError(message)
-        raise StageControllerError(
-            "Click calibration does not match the selected objective. "
-            "Select the correct objective in the GUI or recalibrate this objective."
-        )
+            raise
 
     def _best_objective_for_measurement(
         self,
@@ -3117,6 +3144,53 @@ class StageController(QObject):
                 )
                 calibration_matrix = coefficients.T
         return calibration_matrix
+
+    def _move_from_calibration_to_target(
+        self,
+        serial_connection: serial.Serial,
+        origin: tuple[float, float, float],
+        target_pixels: np.ndarray | None,
+    ) -> tuple[bool, int | None]:
+        if target_pixels is None:
+            self._return_to_origin(serial_connection, origin)
+            return (False, None)
+        if self._pixels_to_mm is None:
+            raise StageControllerError("Calibration failed. Cannot move stage.")
+        pixel_vector = np.asarray(target_pixels, dtype=float)
+        if pixel_vector.shape != (2,):
+            raise StageControllerError("Invalid click target for calibration move.")
+        if float(np.linalg.norm(pixel_vector)) < 1e-3:
+            self._return_to_origin(serial_connection, origin)
+            return (False, None)
+
+        click_delta_mm = -(self._pixels_to_mm @ pixel_vector)
+        move_magnitude = float(np.linalg.norm(click_delta_mm))
+        if move_magnitude > self.MAX_CLICK_MOVE_MM:
+            self._pixels_to_mm = None
+            raise StageControllerError(
+                "Predicted click move is too large; calibration was reset. Recalibrate and try again."
+            )
+
+        status = self._query_status(serial_connection)
+        current = self._position_for_configured_mode(status)
+        if status is None or current is None:
+            raise StageControllerError("Unable to read position after calibration.")
+        self._require_homed_axes(status, {"X", "Y"})
+        target_x = float(origin[0]) + float(click_delta_mm[0])
+        target_y = float(origin[1]) + float(click_delta_mm[1])
+        move = MoveVector(
+            x=target_x - float(current[0]),
+            y=target_y - float(current[1]),
+        )
+        if move.is_zero(tol=1e-5):
+            return (True, None)
+        with self._frame_condition:
+            before_counter = self._frame_counter
+        self.status_message.emit(
+            f"Jogging stage dX={move.x:.3f} mm dY={move.y:.3f} mm"
+        )
+        self._send_relative_move(serial_connection, move)
+        return (True, before_counter)
 
     def _return_to_origin(
         self, serial_connection: serial.Serial, origin: tuple[float, float, float]

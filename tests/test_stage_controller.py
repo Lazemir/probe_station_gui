@@ -540,7 +540,10 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
         controller._serial = _FakeSerial()
         controller._pixels_to_mm = _stage_controller_module.np.eye(2) * 0.1
         controller._move_safety_check = lambda: None
-        controller._ensure_calibration = lambda _serial: None
+        controller._ensure_calibration = lambda _serial, target_pixels=None: (
+            False,
+            None,
+        )
         controller._get_frame_snapshot = lambda timeout=3.0: (object(), 1)
         controller._wait_for_new_frame = (
             lambda frame_counter, timeout=4.0: (object(), frame_counter + 1)
@@ -858,6 +861,137 @@ class StageControllerAutofocusTest(unittest.TestCase):
 
 
 class StageControllerObjectiveTest(unittest.TestCase):
+    def test_verification_moves_directly_to_click_target(self) -> None:
+        controller = StageController()
+        serial_connection = _FakeSerial()
+        current = [0.0, 0.0, 0.0]
+        moves: list[MoveVector] = []
+        controller._pixels_to_mm = np.array(
+            [[0.001, 0.0], [0.0, 0.001]],
+            dtype=float,
+        )
+        controller._frame_counter = 10
+
+        def _status() -> types.SimpleNamespace:
+            position = tuple(current)
+            return types.SimpleNamespace(
+                state="Idle",
+                position=position,
+                work_position=position,
+                display_position=position,
+                work_offset=(0.0, 0.0, 0.0),
+                homed_axes={"X", "Y"},
+            )
+
+        def _send_relative_move(_serial, move) -> None:
+            moves.append(move)
+            current[0] += move.x
+            current[1] += move.y
+
+        controller._query_status = lambda _serial: _status()
+        controller._send_relative_move = _send_relative_move
+        controller._get_frame_snapshot = (
+            lambda timeout=3.0: (np.zeros((8, 8), dtype=np.uint8), 10)
+        )
+        controller._wait_for_new_frame = (
+            lambda frame_counter, timeout=2.0: (
+                np.zeros((8, 8), dtype=np.uint8),
+                frame_counter + 1,
+            )
+        )
+        controller._estimate_shift = lambda *_args: (40.0, 0.0)
+        controller.status_message = types.SimpleNamespace(
+            emit=lambda *args, **kwargs: None
+        )
+
+        handled, before_counter = controller._verify_active_objective_calibration(
+            serial_connection,
+            target_pixels=np.array([10.0, -5.0], dtype=float),
+        )
+
+        self.assertTrue(handled)
+        self.assertEqual(before_counter, 10)
+        self.assertEqual(len(moves), 2)
+        self.assertAlmostEqual(moves[0].x, 0.04)
+        self.assertAlmostEqual(moves[0].y, 0.0)
+        self.assertAlmostEqual(moves[1].x, -0.05)
+        self.assertAlmostEqual(moves[1].y, 0.005)
+        self.assertAlmostEqual(current[0], -0.01)
+        self.assertAlmostEqual(current[1], 0.005)
+
+    def test_fresh_calibration_moves_directly_to_click_target(self) -> None:
+        controller = StageController()
+        serial_connection = _FakeSerial()
+        current = [0.0, 0.0, 0.0]
+        moves: list[MoveVector] = []
+        axis_calls: list[str] = []
+        controller._frame_counter = 12
+
+        def _status() -> types.SimpleNamespace:
+            position = tuple(current)
+            return types.SimpleNamespace(
+                state="Idle",
+                position=position,
+                work_position=position,
+                display_position=position,
+                work_offset=(0.0, 0.0, 0.0),
+                homed_axes={"X", "Y"},
+            )
+
+        def _send_relative_move(_serial, move) -> None:
+            moves.append(move)
+            current[0] += move.x
+            current[1] += move.y
+
+        def _calibrate_axis_series(_serial, _frame, _origin, axis: str):
+            axis_calls.append(axis)
+            if axis == "Y":
+                current[0] = 0.02
+                current[1] = 0.03
+            return [
+                (
+                    np.array([1.0, 0.0], dtype=float),
+                    np.array([1000.0, 0.0], dtype=float),
+                ),
+                (
+                    np.array([0.0, 1.0], dtype=float),
+                    np.array([0.0, 1000.0], dtype=float),
+                ),
+            ]
+
+        controller._query_status = lambda _serial: _status()
+        controller._send_relative_move = _send_relative_move
+        controller._get_frame_snapshot = (
+            lambda timeout=3.0: (np.zeros((8, 8), dtype=np.uint8), 12)
+        )
+        controller._calibrate_axis_series = _calibrate_axis_series
+        controller._calibration_matrix_from_observations = (
+            lambda _observations: np.eye(2, dtype=float) * 1000.0
+        )
+        controller.calibration_changed = types.SimpleNamespace(
+            emit=lambda *args, **kwargs: None
+        )
+        controller.objective_calibration_updated = types.SimpleNamespace(
+            emit=lambda *args, **kwargs: None
+        )
+        controller.status_message = types.SimpleNamespace(
+            emit=lambda *args, **kwargs: None
+        )
+
+        handled, before_counter = controller._ensure_calibration(
+            serial_connection,
+            target_pixels=np.array([10.0, -5.0], dtype=float),
+        )
+
+        self.assertTrue(handled)
+        self.assertEqual(before_counter, 12)
+        self.assertEqual(axis_calls, ["X", "Y"])
+        self.assertEqual(len(moves), 1)
+        self.assertAlmostEqual(moves[0].x, -0.03)
+        self.assertAlmostEqual(moves[0].y, -0.025)
+        self.assertAlmostEqual(current[0], -0.01)
+        self.assertAlmostEqual(current[1], 0.005)
+
     def test_axis_calibration_uses_axis_reference_position(self) -> None:
         controller = StageController()
         controller.CALIBRATION_MAX_OBSERVATIONS_PER_AXIS = 4
