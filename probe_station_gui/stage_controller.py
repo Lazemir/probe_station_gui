@@ -121,6 +121,7 @@ class StageController(QObject):
     calibration_changed: Signal = Signal(float, float)
     movement_started: Signal = Signal()
     movement_finished: Signal = Signal(bool, str)
+    click_move_started: Signal = Signal(float, float, float)
     stage_position_changed: Signal = Signal(object)
     autofocus_finished: Signal = Signal(bool, str)
     objective_calibration_updated: Signal = Signal(str, object)
@@ -2220,6 +2221,7 @@ class StageController(QObject):
             self.status_message.emit(
                 f"Jogging stage dX={move.x:.3f} mm dY={move.y:.3f} mm"
             )
+            self._emit_click_move_started(move)
             self._send_relative_move(serial_connection, move)
             return before_counter
 
@@ -3190,8 +3192,20 @@ class StageController(QObject):
         self.status_message.emit(
             f"Jogging stage dX={move.x:.3f} mm dY={move.y:.3f} mm"
         )
+        self._emit_click_move_started(move)
         self._send_relative_move(serial_connection, move)
         return (True, before_counter)
+
+    def _emit_click_move_started(
+        self,
+        move: MoveVector,
+        *,
+        feedrate: Optional[float] = None,
+    ) -> None:
+        effective_feedrate = (
+            self.DEFAULT_FEEDRATE if feedrate is None else max(0.1, float(feedrate))
+        )
+        self.click_move_started.emit(float(move.x), float(move.y), effective_feedrate)
 
     def _return_to_origin(
         self, serial_connection: serial.Serial, origin: tuple[float, float, float]

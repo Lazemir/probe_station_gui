@@ -356,6 +356,7 @@ class Main(QMainWindow):
 
         self.view = MicroscopeView()
         self.view.set_target_pending_blink_interval(self.STAGE_COORDINATE_BLINK_MS)
+        self.view.set_target_motion_update_interval(self.MANUAL_JOG_UPDATE_MS)
         central_container = QWidget(self)
         central_layout = QVBoxLayout(central_container)
         central_layout.setContentsMargins(0, 0, 0, 0)
@@ -503,6 +504,7 @@ class Main(QMainWindow):
         self.stage_controller = StageController()
         self.stage_controller.status_message.connect(self._show_status)
         self.stage_controller.movement_finished.connect(self.on_move_finished)
+        self.stage_controller.click_move_started.connect(self._on_click_move_started)
         self.stage_controller.calibration_changed.connect(self.on_calibration_changed)
         self.stage_controller.objective_calibration_updated.connect(
             self._on_objective_calibration_updated
@@ -1080,6 +1082,24 @@ class Main(QMainWindow):
         self.view.set_target_pending(False)
         if clear_cross:
             self.view.clear_target_cross()
+
+    def _on_click_move_started(
+        self,
+        move_x_mm: float,
+        move_y_mm: float,
+        feedrate_mm_min: float,
+    ) -> None:
+        try:
+            distance_mm = math.hypot(float(move_x_mm), float(move_y_mm))
+            feedrate = max(0.1, float(feedrate_mm_min))
+        except (TypeError, ValueError):
+            return
+        if distance_mm <= 1e-9:
+            self.view.finish_target_motion_to_center()
+            return
+        duration_s = (distance_mm / feedrate) * 60.0
+        duration_s += self.PLANNED_MOVE_DURATION_PADDING_S
+        self.view.animate_target_cross_to_center(max(duration_s, 0.05))
 
     def on_error(self, message: str) -> None:
         logger.error("Camera error: %s", message)
@@ -3580,6 +3600,7 @@ class Main(QMainWindow):
                 self._collapse_alignment_panel_if_design_open()
         if success:
             if self._pending_click_to_move is None:
+                self.view.finish_target_motion_to_center()
                 self.view.clear_target_cross()
             self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
         elif self._pending_click_to_move is None:

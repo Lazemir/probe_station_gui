@@ -23,6 +23,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QApplication, QWidget
 
 from ..design_model import DesignDocument, MeasurementTarget
+from ..motion_prediction import interpolate_position
 from ..route_model import MeasurementRoute
 
 
@@ -44,6 +45,7 @@ class MicroscopeView(QWidget):
     _MINIMAP_MIN_SIZE = 160
     _MINIMAP_MAX_SIZE = 240
     _TARGET_BLINK_MS = 250
+    _TARGET_MOTION_UPDATE_MS = 50
     _TARGET_PENDING_COLOR = QColor("#c62828")
     _TARGET_PENDING_DIMMED_COLOR = QColor("#ad6b6b")
     _PROBE_ROUTE_DETAIL_POINT_LIMIT = 300
@@ -66,6 +68,12 @@ class MicroscopeView(QWidget):
         self._target_blink_timer = QTimer(self)
         self._target_blink_timer.setInterval(self._TARGET_BLINK_MS)
         self._target_blink_timer.timeout.connect(self._advance_target_blink)
+        self._target_motion_origin_rel: tuple[float, float] | None = None
+        self._target_motion_started_at: float | None = None
+        self._target_motion_ends_at: float | None = None
+        self._target_motion_timer = QTimer(self)
+        self._target_motion_timer.setInterval(self._TARGET_MOTION_UPDATE_MS)
+        self._target_motion_timer.timeout.connect(self._advance_target_motion)
         self._alignment_mode = False
         self._alignment_points: list[tuple[float, float]] = []
         self._alignment_instruction = ""
@@ -342,6 +350,7 @@ class MicroscopeView(QWidget):
         rel_x = max(0.0, min(1.0, rel_x))
         rel_y = max(0.0, min(1.0, rel_y))
         if not self._alignment_mode:
+            self._clear_target_motion()
             self.set_target_pending(False)
             self._target_rel = (rel_x, rel_y)
         self.clicked.emit(dx, dy, rel_x, rel_y)
@@ -416,6 +425,7 @@ class MicroscopeView(QWidget):
         """Remove the movable cross overlay."""
 
         self._target_rel = None
+        self._clear_target_motion()
         self.set_target_pending(False)
         self.update()
 
@@ -438,6 +448,74 @@ class MicroscopeView(QWidget):
         """Set the movable cross blink interval."""
 
         self._target_blink_timer.setInterval(max(1, int(interval_ms)))
+
+    def set_target_motion_update_interval(self, interval_ms: int) -> None:
+        """Set the movable cross animation update interval."""
+
+        self._target_motion_timer.setInterval(max(1, int(interval_ms)))
+
+    def animate_target_cross_to_center(self, duration_s: float) -> None:
+        """Animate the movable target cross to the image center."""
+
+        if self._target_rel is None:
+            return
+        self.set_target_pending(False)
+        origin = (float(self._target_rel[0]), float(self._target_rel[1]))
+        target = (0.5, 0.5)
+        if (
+            duration_s <= 0.0
+            or (
+                abs(origin[0] - target[0]) < 1e-6
+                and abs(origin[1] - target[1]) < 1e-6
+            )
+        ):
+            self._target_rel = target
+            self._clear_target_motion()
+            self.update()
+            return
+        started_at = perf_counter()
+        self._target_motion_origin_rel = origin
+        self._target_motion_started_at = started_at
+        self._target_motion_ends_at = started_at + max(1e-3, float(duration_s))
+        self._target_motion_timer.start()
+        self._advance_target_motion()
+
+    def finish_target_motion_to_center(self) -> None:
+        """Snap the movable target cross to the center and stop target animation."""
+
+        if self._target_rel is not None:
+            self._target_rel = (0.5, 0.5)
+        self._clear_target_motion()
+        self.update()
+
+    def _clear_target_motion(self) -> None:
+        if self._target_motion_timer.isActive():
+            self._target_motion_timer.stop()
+        self._target_motion_origin_rel = None
+        self._target_motion_started_at = None
+        self._target_motion_ends_at = None
+
+    def _advance_target_motion(self) -> None:
+        if (
+            self._target_motion_origin_rel is None
+            or self._target_motion_started_at is None
+            or self._target_motion_ends_at is None
+        ):
+            self._clear_target_motion()
+            return
+        now = perf_counter()
+        interpolated = interpolate_position(
+            self._target_motion_origin_rel,
+            (0.5, 0.5),
+            self._target_motion_started_at,
+            self._target_motion_ends_at,
+            now,
+        )
+        self._target_rel = (float(interpolated[0]), float(interpolated[1]))
+        if now >= self._target_motion_ends_at:
+            self._target_rel = (0.5, 0.5)
+            self._clear_target_motion()
+        self.update()
 
     def _advance_target_blink(self) -> None:
         if not self._target_pending or self._target_rel is None:
