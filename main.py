@@ -347,6 +347,7 @@ class Main(QMainWindow):
     STAGE_AXIS_EDITED_FOREGROUND = "#1f1233"
     B_POSITION_CHANGE_TOLERANCE_DEG = 1e-3
     CAMERA_UI_FRAME_GAP_WARNING_S = 0.25
+    CLICK_TO_MOVE_PENDING_RETRY_MS = 150
 
     def __init__(self) -> None:
         super().__init__()
@@ -435,6 +436,8 @@ class Main(QMainWindow):
         self._coordinate_move_ends_at: float | None = None
         self._coordinate_move_programmed_feedrate: float | None = None
         self._coordinate_move_effective_feedrate: float | None = None
+        self._pending_click_to_move: tuple[float, float, float, float] | None = None
+        self._pending_click_deadline: float | None = None
         self._pending_stage_axis_targets: dict[str, tuple[float, float]] = {}
         self._design_snap_enabled = True
         self._last_reported_b_position: float | None = None
@@ -542,6 +545,9 @@ class Main(QMainWindow):
         self._stage_motion_blink_timer = QTimer(self)
         self._stage_motion_blink_timer.setInterval(self.STAGE_COORDINATE_BLINK_MS)
         self._stage_motion_blink_timer.timeout.connect(self._advance_stage_motion_blink)
+        self._pending_click_timer = QTimer(self)
+        self._pending_click_timer.setInterval(self.CLICK_TO_MOVE_PENDING_RETRY_MS)
+        self._pending_click_timer.timeout.connect(self._retry_pending_click_to_move)
         self._linear_feedrate_save_timer = QTimer(self)
         self._linear_feedrate_save_timer.setSingleShot(True)
         self._linear_feedrate_save_timer.setInterval(400)
@@ -981,13 +987,98 @@ class Main(QMainWindow):
         if self._design_layout_window_requested:
             self._create_design_layout_window(design_layout_window_class)
 
-    def on_click(self, dx: float, dy: float, _rel_x: float, _rel_y: float) -> None:
+    def on_click(self, dx: float, dy: float, rel_x: float, rel_y: float) -> None:
         if self._manual_alignment_pick_slot is not None:
             self._capture_manual_alignment_clicked(dx, dy)
             return
-        if not self.stage_controller.is_busy():
+        if self._start_click_to_move(dx, dy):
+            self._clear_pending_click_to_move(clear_cross=False)
+            return
+        self._queue_pending_click_to_move(dx, dy, rel_x, rel_y)
+
+    def _stage_serial_ready(self) -> bool:
+        return bool(
+            self.serial_connection is not None
+            and getattr(self.serial_connection, "is_open", False)
+        )
+
+    def _click_to_move_pending_timeout_s(self) -> float:
+        default_timeout_s = (
+            self.settings_manager.DEFAULT_CLICK_TO_MOVE_PENDING_TIMEOUT_S
+        )
+        timeout_s = self.settings_manager.settings.click_to_move.pending_timeout_s
+        try:
+            timeout_s = float(timeout_s)
+        except (TypeError, ValueError):
+            timeout_s = default_timeout_s
+        if not math.isfinite(timeout_s):
+            timeout_s = default_timeout_s
+        return min(
+            self.settings_manager.MAX_CLICK_TO_MOVE_PENDING_TIMEOUT_S,
+            max(
+                self.settings_manager.MIN_CLICK_TO_MOVE_PENDING_TIMEOUT_S,
+                timeout_s,
+            ),
+        )
+
+    def _start_click_to_move(self, dx: float, dy: float) -> bool:
+        if not self._stage_serial_ready() or self.stage_controller.is_busy():
+            return False
+        accepted = self.stage_controller.request_move(dx, dy)
+        if accepted:
             self._set_stage_motion_axes({"X", "Y"})
-        self.stage_controller.request_move(dx, dy)
+        return bool(accepted)
+
+    def _queue_pending_click_to_move(
+        self,
+        dx: float,
+        dy: float,
+        rel_x: float,
+        rel_y: float,
+    ) -> None:
+        self._pending_click_to_move = (dx, dy, rel_x, rel_y)
+        self._pending_click_deadline = (
+            time.monotonic() + self._click_to_move_pending_timeout_s()
+        )
+        self.view.set_target_pending(True)
+        if not self._pending_click_timer.isActive():
+            self._pending_click_timer.start()
+        if self._stage_serial_ready():
+            self._show_status(
+                "Stage is busy; click-to-move will start when it is ready.",
+                3000,
+            )
+        else:
+            self._show_status(
+                "Stage is not connected; click-to-move will wait for it.",
+                3000,
+            )
+
+    def _retry_pending_click_to_move(self) -> None:
+        pending = self._pending_click_to_move
+        if pending is None:
+            self._clear_pending_click_to_move(clear_cross=False)
+            return
+        deadline = self._pending_click_deadline
+        if deadline is not None and time.monotonic() >= deadline:
+            self._clear_pending_click_to_move(clear_cross=True)
+            self._show_status(
+                "Click-to-move timed out waiting for the stage.",
+                5000,
+            )
+            return
+        dx, dy, _rel_x, _rel_y = pending
+        if self._start_click_to_move(dx, dy):
+            self._clear_pending_click_to_move(clear_cross=False)
+
+    def _clear_pending_click_to_move(self, *, clear_cross: bool) -> None:
+        self._pending_click_to_move = None
+        self._pending_click_deadline = None
+        if self._pending_click_timer.isActive():
+            self._pending_click_timer.stop()
+        self.view.set_target_pending(False)
+        if clear_cross:
+            self.view.clear_target_cross()
 
     def on_error(self, message: str) -> None:
         logger.error("Camera error: %s", message)
@@ -3487,8 +3578,11 @@ class Main(QMainWindow):
             if success:
                 self._collapse_alignment_panel_if_design_open()
         if success:
-            self.view.clear_target_cross()
+            if self._pending_click_to_move is None:
+                self.view.clear_target_cross()
             self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
+        elif self._pending_click_to_move is None:
+            self.view.clear_target_cross()
         if (
             not success
             or "skipped" in message_lower

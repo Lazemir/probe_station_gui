@@ -595,13 +595,13 @@ class StageController(QObject):
             with self._task_lock:
                 self._status_refresh_thread = None
 
-    def request_move(self, dx_pixels: float, dy_pixels: float) -> None:
+    def request_move(self, dx_pixels: float, dy_pixels: float) -> bool:
         """Begin an asynchronous move so the clicked point aligns with the cross."""
 
         with self._task_lock:
             if self._active_thread and self._active_thread.is_alive():
                 self.status_message.emit("Stage is busy. Ignoring the new click.")
-                return
+                return False
             self._cancel_event.clear()
             thread = threading.Thread(
                 target=self._run_move,
@@ -610,6 +610,7 @@ class StageController(QObject):
             )
             self._active_thread = thread
             thread.start()
+            return True
 
     def request_move_to_xy(self, target_x_mm: float, target_y_mm: float) -> None:
         """Move to an absolute X/Y coordinate in the configured report mode."""

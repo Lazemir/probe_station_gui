@@ -206,6 +206,17 @@ class ControlsSettingsWidget(QWidget):
         super().__init__(parent)
         layout = QFormLayout(self)
         layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self._pending_timeout_spin = QDoubleSpinBox(self)
+        self._pending_timeout_spin.setLocale(QLocale.c())
+        self._pending_timeout_spin.setDecimals(1)
+        self._pending_timeout_spin.setRange(0.5, 60.0)
+        self._pending_timeout_spin.setSingleStep(0.5)
+        self._pending_timeout_spin.setSuffix(" s")
+        self._pending_timeout_spin.setValue(
+            float(settings.click_to_move.pending_timeout_s)
+        )
+        layout.addRow(QLabel("Click wait timeout", self), self._pending_timeout_spin)
+
         self._editors: Dict[str, KeyBindingListEditor] = {}
         for action in CONTROL_ACTIONS:
             bindings = settings.controls.get(action.key, [])
@@ -220,6 +231,9 @@ class ControlsSettingsWidget(QWidget):
         for key, editor in self._editors.items():
             controls[key] = editor.bindings()
         settings.controls = controls
+        settings.click_to_move.pending_timeout_s = float(
+            self._pending_timeout_spin.value()
+        )
 
 
 class LoggingSettingsWidget(QWidget):

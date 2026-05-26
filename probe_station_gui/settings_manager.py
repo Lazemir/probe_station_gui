@@ -330,6 +330,23 @@ class JogSettings:
 
 
 @dataclass
+class ClickToMoveSettings:
+    """Configuration for click-to-move UI behavior."""
+
+    pending_timeout_s: float = 8.0
+
+    def clone(self) -> "ClickToMoveSettings":
+        """Return a copy of the click-to-move preferences."""
+
+        return ClickToMoveSettings(pending_timeout_s=self.pending_timeout_s)
+
+    def to_dict(self) -> dict[str, float]:
+        """Serialize the click-to-move preferences."""
+
+        return {"pending_timeout_s": self.pending_timeout_s}
+
+
+@dataclass
 class SavedStagePositionSettings:
     """A persisted XYZ bookmark used by calibration workflows."""
 
@@ -725,6 +742,7 @@ class Settings:
     feedrates: FeedrateSettings = field(default_factory=FeedrateSettings)
     oscillation: OscillationSettings = field(default_factory=OscillationSettings)
     jog: JogSettings = field(default_factory=JogSettings)
+    click_to_move: ClickToMoveSettings = field(default_factory=ClickToMoveSettings)
     needle_calibration: NeedleCalibrationSettings = field(
         default_factory=NeedleCalibrationSettings
     )
@@ -750,6 +768,7 @@ class Settings:
             feedrates=self.feedrates.clone(),
             oscillation=self.oscillation.clone(),
             jog=self.jog.clone(),
+            click_to_move=self.click_to_move.clone(),
             needle_calibration=self.needle_calibration.clone(),
             axis_a_calibration=self.axis_a_calibration.clone(),
             axis_z_calibration=self.axis_z_calibration.clone(),
@@ -780,6 +799,7 @@ class Settings:
             },
             "oscillation": self.oscillation.to_dict(),
             "jog": self.jog.to_dict(),
+            "click_to_move": self.click_to_move.to_dict(),
             "needle_calibration": self.needle_calibration.to_dict(),
             "axis_a_calibration": self.axis_a_calibration.to_dict(),
             "axis_z_calibration": self.axis_z_calibration.to_dict(),
@@ -831,6 +851,9 @@ class SettingsManager:
     DEFAULT_MANUAL_AXIS_DISTANCE_MM: float = 1.0
     DEFAULT_MANUAL_AXIS_MODE: str = "G91"
     DEFAULT_MANUAL_AXIS_FEEDRATE_MM_MIN: float = 600.0
+    DEFAULT_CLICK_TO_MOVE_PENDING_TIMEOUT_S: float = 8.0
+    MIN_CLICK_TO_MOVE_PENDING_TIMEOUT_S: float = 0.5
+    MAX_CLICK_TO_MOVE_PENDING_TIMEOUT_S: float = 60.0
     MANUAL_AXIS_MODES: tuple[str, ...] = ("G91", "G90")
     MANUAL_JOG_AXES: tuple[str, ...] = ("X", "Y", "Z", "A", "B", "C")
     DEFAULT_LCR_VISA_RESOURCE: str = "COM4"
@@ -1205,6 +1228,18 @@ class SettingsManager:
                 self.DEFAULT_MANUAL_AXIS_FEEDRATE_MM_MIN,
             )
 
+        click_to_move_section = data.get("click_to_move")
+        if not isinstance(click_to_move_section, dict):
+            click_to_move_section = ClickToMoveSettings(
+                pending_timeout_s=self.DEFAULT_CLICK_TO_MOVE_PENDING_TIMEOUT_S
+            ).to_dict()
+            data["click_to_move"] = click_to_move_section
+        else:
+            click_to_move_section.setdefault(
+                "pending_timeout_s",
+                self.DEFAULT_CLICK_TO_MOVE_PENDING_TIMEOUT_S,
+            )
+
         oscillation_section = data.get("oscillation")
         if not isinstance(oscillation_section, dict):
             oscillation_section = {
@@ -1434,6 +1469,9 @@ class SettingsManager:
         api_raw = raw.get("api") if isinstance(raw, dict) else None
         oscillation_raw = raw.get("oscillation") if isinstance(raw, dict) else None
         jog_raw = raw.get("jog") if isinstance(raw, dict) else None
+        click_to_move_raw = (
+            raw.get("click_to_move") if isinstance(raw, dict) else None
+        )
         needle_calibration_raw = (
             raw.get("needle_calibration") if isinstance(raw, dict) else None
         )
@@ -1459,6 +1497,7 @@ class SettingsManager:
             feedrates=feedrates,
             oscillation=self._parse_oscillation(oscillation_raw),
             jog=self._parse_jog(jog_raw),
+            click_to_move=self._parse_click_to_move(click_to_move_raw),
             needle_calibration=self._parse_needle_calibration(needle_calibration_raw),
             axis_a_calibration=self._parse_axis_a_calibration(axis_a_calibration_raw),
             axis_z_calibration=self._parse_axis_z_calibration(axis_z_calibration_raw),
@@ -1610,6 +1649,21 @@ class SettingsManager:
             manual_axis_mode=manual_axis_mode,
             manual_axis_feedrate_mm_min=manual_axis_feedrate,
         )
+
+    def _parse_click_to_move(self, raw_click_to_move) -> ClickToMoveSettings:
+        """Normalise click-to-move UI timing settings."""
+
+        timeout_s = self.DEFAULT_CLICK_TO_MOVE_PENDING_TIMEOUT_S
+        if isinstance(raw_click_to_move, dict):
+            timeout_s = self._finite_float(
+                raw_click_to_move.get("pending_timeout_s", timeout_s),
+                default=self.DEFAULT_CLICK_TO_MOVE_PENDING_TIMEOUT_S,
+            )
+        if timeout_s < self.MIN_CLICK_TO_MOVE_PENDING_TIMEOUT_S:
+            timeout_s = self.MIN_CLICK_TO_MOVE_PENDING_TIMEOUT_S
+        if timeout_s > self.MAX_CLICK_TO_MOVE_PENDING_TIMEOUT_S:
+            timeout_s = self.MAX_CLICK_TO_MOVE_PENDING_TIMEOUT_S
+        return ClickToMoveSettings(pending_timeout_s=float(timeout_s))
 
     def _parse_oscillation(self, raw_oscillation) -> OscillationSettings:
         """Normalise persisted oscillation-panel settings."""
@@ -2488,6 +2542,9 @@ class SettingsManager:
         )
         clone.oscillation = self._parse_oscillation(clone.oscillation.to_dict())
         clone.jog = self._parse_jog(clone.jog.to_dict())
+        clone.click_to_move = self._parse_click_to_move(
+            clone.click_to_move.to_dict()
+        )
         clone.needle_calibration = self._parse_needle_calibration(
             clone.needle_calibration.to_dict()
         )

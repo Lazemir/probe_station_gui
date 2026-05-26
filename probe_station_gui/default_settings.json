@@ -73,6 +73,9 @@
     "port": 8765,
     "default_feedrate_mm_min": 10.0
   },
+  "click_to_move": {
+    "pending_timeout_s": 8.0
+  },
   "oscillation": {
     "mode": "X",
     "amplitude_mm": 0.5,

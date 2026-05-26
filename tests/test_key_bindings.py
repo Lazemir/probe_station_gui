@@ -64,6 +64,7 @@ settings_manager = _load_module(
 KeyBinding = settings_manager.KeyBinding
 ApiSettings = settings_manager.ApiSettings
 JogSettings = settings_manager.JogSettings
+ClickToMoveSettings = settings_manager.ClickToMoveSettings
 NeedleCalibrationSettings = settings_manager.NeedleCalibrationSettings
 AxisACalibrationSettings = settings_manager.AxisACalibrationSettings
 AxisZCalibrationSettings = settings_manager.AxisZCalibrationSettings
@@ -217,6 +218,35 @@ class JogSettingsTest(unittest.TestCase):
         self.assertEqual(parsed.manual_axis_distance_mm, 0.125)
         self.assertEqual(parsed.manual_axis_mode, "G91")
         self.assertEqual(parsed.manual_axis_feedrate_mm_min, 123.4)
+
+
+class ClickToMoveSettingsTest(unittest.TestCase):
+    def test_click_to_move_settings_round_trip(self) -> None:
+        settings = ClickToMoveSettings(pending_timeout_s=12.5)
+
+        restored = ClickToMoveSettings(**settings.to_dict())
+
+        self.assertEqual(restored.pending_timeout_s, 12.5)
+
+    def test_parse_click_to_move_clamps_invalid_timeout(self) -> None:
+        manager = object.__new__(SettingsManager)
+
+        low = manager._parse_click_to_move({"pending_timeout_s": -1})
+        high = manager._parse_click_to_move({"pending_timeout_s": 999})
+        fallback = manager._parse_click_to_move({"pending_timeout_s": "nan"})
+
+        self.assertEqual(
+            low.pending_timeout_s,
+            SettingsManager.MIN_CLICK_TO_MOVE_PENDING_TIMEOUT_S,
+        )
+        self.assertEqual(
+            high.pending_timeout_s,
+            SettingsManager.MAX_CLICK_TO_MOVE_PENDING_TIMEOUT_S,
+        )
+        self.assertEqual(
+            fallback.pending_timeout_s,
+            SettingsManager.DEFAULT_CLICK_TO_MOVE_PENDING_TIMEOUT_S,
+        )
 
 
 class ObjectiveSettingsTest(unittest.TestCase):

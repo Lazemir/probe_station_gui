@@ -43,6 +43,7 @@ class MicroscopeView(QWidget):
     _MINIMAP_MARGIN = 16
     _MINIMAP_MIN_SIZE = 160
     _MINIMAP_MAX_SIZE = 240
+    _TARGET_PULSE_MS = 120
     _PROBE_ROUTE_DETAIL_POINT_LIMIT = 300
     _PROBE_ROUTE_LABEL_POINT_LIMIT = 150
 
@@ -58,6 +59,11 @@ class MicroscopeView(QWidget):
         self.setMouseTracking(True)
         self._pix: QPixmap | None = None
         self._target_rel: tuple[float, float] | None = None
+        self._target_pending = False
+        self._target_pulse_phase = 0
+        self._target_pulse_timer = QTimer(self)
+        self._target_pulse_timer.setInterval(self._TARGET_PULSE_MS)
+        self._target_pulse_timer.timeout.connect(self._advance_target_pulse)
         self._alignment_mode = False
         self._alignment_points: list[tuple[float, float]] = []
         self._alignment_instruction = ""
@@ -220,7 +226,15 @@ class MicroscopeView(QWidget):
                 rel_x, rel_y = self._target_rel
                 target_x = self._display_rect.left() + rel_x * self._display_rect.width()
                 target_y = self._display_rect.top() + rel_y * self._display_rect.height()
-                painter.setPen(QPen(QColor("red"), 1))
+                radius = 6
+                pen_width = 1
+                color = QColor("red")
+                if self._target_pending:
+                    pulse = (math.sin(self._target_pulse_phase * 0.65) + 1.0) / 2.0
+                    radius = 7 + int(round(pulse * 5.0))
+                    pen_width = 1 + int(round(pulse * 2.0))
+                    color = QColor(255, 48, 48, 130 + int(round(pulse * 100.0)))
+                painter.setPen(QPen(color, pen_width))
                 painter.drawLine(
                     self._display_rect.left(),
                     int(target_y),
@@ -233,7 +247,7 @@ class MicroscopeView(QWidget):
                     int(target_x),
                     self._display_rect.bottom(),
                 )
-                painter.drawEllipse(QPoint(int(target_x), int(target_y)), 6, 6)
+                painter.drawEllipse(QPoint(int(target_x), int(target_y)), radius, radius)
 
             if self._alignment_mode and self._display_rect:
                 painter.setPen(QPen(QColor("#ffd54f"), 2))
@@ -325,6 +339,7 @@ class MicroscopeView(QWidget):
         rel_x = max(0.0, min(1.0, rel_x))
         rel_y = max(0.0, min(1.0, rel_y))
         if not self._alignment_mode:
+            self.set_target_pending(False)
             self._target_rel = (rel_x, rel_y)
         self.clicked.emit(dx, dy, rel_x, rel_y)
         self.update()
@@ -398,6 +413,28 @@ class MicroscopeView(QWidget):
         """Remove the movable cross overlay."""
 
         self._target_rel = None
+        self.set_target_pending(False)
+        self.update()
+
+    def set_target_pending(self, pending: bool) -> None:
+        """Mark the movable cross as waiting for the stage to accept the click."""
+
+        pending = bool(pending and self._target_rel is not None)
+        if self._target_pending == pending:
+            return
+        self._target_pending = pending
+        if pending:
+            self._target_pulse_timer.start()
+        else:
+            self._target_pulse_timer.stop()
+            self._target_pulse_phase = 0
+        self.update()
+
+    def _advance_target_pulse(self) -> None:
+        if not self._target_pending or self._target_rel is None:
+            self.set_target_pending(False)
+            return
+        self._target_pulse_phase = (self._target_pulse_phase + 1) % 128
         self.update()
 
     def set_alignment_mode(self, enabled: bool) -> None:
