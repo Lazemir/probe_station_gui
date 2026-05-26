@@ -348,6 +348,7 @@ class Main(QMainWindow):
     B_POSITION_CHANGE_TOLERANCE_DEG = 1e-3
     CAMERA_UI_FRAME_GAP_WARNING_S = 0.25
     CLICK_TO_MOVE_PENDING_RETRY_MS = 150
+    CLICK_TARGET_ANIMATION_PADDING_S = 0.03
 
     def __init__(self) -> None:
         super().__init__()
@@ -1098,7 +1099,7 @@ class Main(QMainWindow):
             self.view.finish_target_motion_to_center()
             return
         duration_s = (distance_mm / feedrate) * 60.0
-        duration_s += self.PLANNED_MOVE_DURATION_PADDING_S
+        duration_s += self.CLICK_TARGET_ANIMATION_PADDING_S
         self.view.animate_target_cross_to_center(max(duration_s, 0.05))
 
     def on_error(self, message: str) -> None:

@@ -11,7 +11,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 import serial
 from PySide6.QtCore import QObject, Signal
@@ -2221,8 +2221,11 @@ class StageController(QObject):
             self.status_message.emit(
                 f"Jogging stage dX={move.x:.3f} mm dY={move.y:.3f} mm"
             )
-            self._emit_click_move_started(move)
-            self._send_relative_move(serial_connection, move)
+            self._send_relative_move(
+                serial_connection,
+                move,
+                motion_started_callback=self._emit_click_move_started,
+            )
             return before_counter
 
     def _run_rotate_b(self, delta_deg: float) -> None:
@@ -3192,14 +3195,16 @@ class StageController(QObject):
         self.status_message.emit(
             f"Jogging stage dX={move.x:.3f} mm dY={move.y:.3f} mm"
         )
-        self._emit_click_move_started(move)
-        self._send_relative_move(serial_connection, move)
+        self._send_relative_move(
+            serial_connection,
+            move,
+            motion_started_callback=self._emit_click_move_started,
+        )
         return (True, before_counter)
 
     def _emit_click_move_started(
         self,
         move: MoveVector,
-        *,
         feedrate: Optional[float] = None,
     ) -> None:
         effective_feedrate = (
@@ -3673,6 +3678,7 @@ class StageController(QObject):
         ignore_needle_safety: bool = False,
         feedrate: Optional[float] = None,
         wait_for_completion: bool = True,
+        motion_started_callback: Optional[Callable[[MoveVector, float], None]] = None,
     ) -> None:
         if move.is_zero():
             return
@@ -3706,6 +3712,8 @@ class StageController(QObject):
         self._reset_feed_override_for_serial(serial_connection)
         self._write_command(serial_connection, command)
         self._wait_for_ok(serial_connection)
+        if motion_started_callback is not None:
+            motion_started_callback(move, effective_feedrate)
         self._write_command(serial_connection, "G90")
         self._wait_for_ok(serial_connection)
         if wait_for_completion:
