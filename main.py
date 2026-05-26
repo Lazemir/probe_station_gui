@@ -355,6 +355,7 @@ class Main(QMainWindow):
         self.menuBar().setNativeMenuBar(False)
 
         self.view = MicroscopeView()
+        self.view.set_target_pending_blink_interval(self.STAGE_COORDINATE_BLINK_MS)
         central_container = QWidget(self)
         central_layout = QVBoxLayout(central_container)
         central_layout.setContentsMargins(0, 0, 0, 0)

@@ -43,7 +43,9 @@ class MicroscopeView(QWidget):
     _MINIMAP_MARGIN = 16
     _MINIMAP_MIN_SIZE = 160
     _MINIMAP_MAX_SIZE = 240
-    _TARGET_PULSE_MS = 120
+    _TARGET_BLINK_MS = 250
+    _TARGET_PENDING_COLOR = QColor("#c62828")
+    _TARGET_PENDING_DIMMED_COLOR = QColor("#ad6b6b")
     _PROBE_ROUTE_DETAIL_POINT_LIMIT = 300
     _PROBE_ROUTE_LABEL_POINT_LIMIT = 150
 
@@ -60,10 +62,10 @@ class MicroscopeView(QWidget):
         self._pix: QPixmap | None = None
         self._target_rel: tuple[float, float] | None = None
         self._target_pending = False
-        self._target_pulse_phase = 0
-        self._target_pulse_timer = QTimer(self)
-        self._target_pulse_timer.setInterval(self._TARGET_PULSE_MS)
-        self._target_pulse_timer.timeout.connect(self._advance_target_pulse)
+        self._target_blink_dimmed = False
+        self._target_blink_timer = QTimer(self)
+        self._target_blink_timer.setInterval(self._TARGET_BLINK_MS)
+        self._target_blink_timer.timeout.connect(self._advance_target_blink)
         self._alignment_mode = False
         self._alignment_points: list[tuple[float, float]] = []
         self._alignment_instruction = ""
@@ -230,10 +232,11 @@ class MicroscopeView(QWidget):
                 pen_width = 1
                 color = QColor("red")
                 if self._target_pending:
-                    pulse = (math.sin(self._target_pulse_phase * 0.65) + 1.0) / 2.0
-                    radius = 7 + int(round(pulse * 5.0))
-                    pen_width = 1 + int(round(pulse * 2.0))
-                    color = QColor(255, 48, 48, 130 + int(round(pulse * 100.0)))
+                    color = (
+                        self._TARGET_PENDING_DIMMED_COLOR
+                        if self._target_blink_dimmed
+                        else self._TARGET_PENDING_COLOR
+                    )
                 painter.setPen(QPen(color, pen_width))
                 painter.drawLine(
                     self._display_rect.left(),
@@ -424,17 +427,23 @@ class MicroscopeView(QWidget):
             return
         self._target_pending = pending
         if pending:
-            self._target_pulse_timer.start()
+            self._target_blink_dimmed = False
+            self._target_blink_timer.start()
         else:
-            self._target_pulse_timer.stop()
-            self._target_pulse_phase = 0
+            self._target_blink_timer.stop()
+            self._target_blink_dimmed = False
         self.update()
 
-    def _advance_target_pulse(self) -> None:
+    def set_target_pending_blink_interval(self, interval_ms: int) -> None:
+        """Set the movable cross blink interval."""
+
+        self._target_blink_timer.setInterval(max(1, int(interval_ms)))
+
+    def _advance_target_blink(self) -> None:
         if not self._target_pending or self._target_rel is None:
             self.set_target_pending(False)
             return
-        self._target_pulse_phase = (self._target_pulse_phase + 1) % 128
+        self._target_blink_dimmed = not self._target_blink_dimmed
         self.update()
 
     def set_alignment_mode(self, enabled: bool) -> None:
