@@ -54,6 +54,15 @@ from probe_station_gui.dialogs.settings_dialog import SettingsDialog
 from probe_station_gui.api_server import ProbeStationApiServer
 from probe_station_gui.lcr_meter import LCRMeterController
 from probe_station_gui.motion_prediction import interpolate_position, motion_progress
+from probe_station_gui.objective_offsets import (
+    ObjectiveOffsetReference,
+    base_objective_name,
+    calibrated_objective_offset,
+    camera_stage_to_raw_stage,
+    objective_xy_offset,
+    objective_xy_offset_is_configured,
+    raw_stage_to_camera_stage,
+)
 from probe_station_gui.route_model import MeasurementRoute
 from probe_station_gui.route_measurement import (
     RouteMeasurementPoint,
@@ -161,6 +170,9 @@ class ClickCalibrationDialog(QDialog):
     reset_requested: Signal = Signal()
     add_requested: Signal = Signal()
     delete_requested: Signal = Signal(str)
+    offset_reference_requested: Signal = Signal()
+    offset_save_requested: Signal = Signal()
+    offset_reset_requested: Signal = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -179,7 +191,20 @@ class ClickCalibrationDialog(QDialog):
 
         self._matrix_cells: list[list[QLabel]] = []
         form.addRow(QLabel("pixels_to_mm", self), self._create_matrix_table())
+        self._offset_label = QLabel("--", self)
+        self._offset_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        form.addRow(QLabel("objective_xy_offset", self), self._offset_label)
         layout.addLayout(form)
+
+        offset_button_layout = QHBoxLayout()
+        self._set_offset_reference_button = QPushButton("Set Reference", self)
+        self._save_offset_button = QPushButton("Save Offset", self)
+        self._reset_offset_button = QPushButton("Reset Offset", self)
+        offset_button_layout.addWidget(self._set_offset_reference_button)
+        offset_button_layout.addWidget(self._save_offset_button)
+        offset_button_layout.addWidget(self._reset_offset_button)
+        offset_button_layout.addStretch(1)
+        layout.addLayout(offset_button_layout)
 
         button_layout = QHBoxLayout()
         self._reset_button = QPushButton("Reset", self)
@@ -196,6 +221,11 @@ class ClickCalibrationDialog(QDialog):
         self._reset_button.clicked.connect(self.reset_requested.emit)
         self._add_button.clicked.connect(self.add_requested.emit)
         self._delete_button.clicked.connect(self._request_delete)
+        self._set_offset_reference_button.clicked.connect(
+            self.offset_reference_requested.emit
+        )
+        self._save_offset_button.clicked.connect(self.offset_save_requested.emit)
+        self._reset_offset_button.clicked.connect(self.offset_reset_requested.emit)
         close_button.clicked.connect(self.close)
 
     def set_objectives(self, objectives: ObjectivesSettings) -> None:
@@ -217,8 +247,10 @@ class ClickCalibrationDialog(QDialog):
             self._updating = False
 
         self._delete_button.setEnabled(len(names) > 1)
-        profile = objectives.objectives.get(str(self._objective_combo.currentData()))
+        name = str(self._objective_combo.currentData())
+        profile = objectives.objectives.get(name)
         self._set_matrix(profile)
+        self._set_offset(objectives, name, profile)
 
     def _on_objective_changed(self, _index: int) -> None:
         if self._updating:
@@ -275,6 +307,27 @@ class ClickCalibrationDialog(QDialog):
                     cell.setText("--")
                 else:
                     cell.setText(self._format_matrix_value(matrix[row][column]))
+
+    def _set_offset(
+        self,
+        objectives: ObjectivesSettings,
+        objective_name: str,
+        profile: ObjectiveCalibrationSettings | None,
+    ) -> None:
+        name = normalize_objective_name(objective_name)
+        if not name:
+            self._offset_label.setText("--")
+            return
+        if name == base_objective_name(objectives.objectives):
+            self._offset_label.setText("X +0.0000 mm, Y +0.0000 mm (base)")
+            return
+        if profile is None or not profile.xy_offset_configured:
+            self._offset_label.setText("--")
+            return
+        self._offset_label.setText(
+            f"X {float(profile.xy_offset_x_mm):+.4f} mm, "
+            f"Y {float(profile.xy_offset_y_mm):+.4f} mm"
+        )
 
     @staticmethod
     def _matrix_from_profile(
@@ -400,6 +453,7 @@ class Main(QMainWindow):
         self._design_layout_window_action: QAction | None = None
         self._click_calibration_action: QAction | None = None
         self._click_calibration_dialog: ClickCalibrationDialog | None = None
+        self._objective_offset_reference: ObjectiveOffsetReference | None = None
         self._ruler_action: QAction | None = None
         self._rect_action: QAction | None = None
         self._last_selected_design_point: tuple[float, float] | None = None
@@ -1159,6 +1213,43 @@ class Main(QMainWindow):
     def _objective_names(self) -> list[str]:
         settings = self.settings_manager.objectives_configuration()
         return ordered_objective_names(settings.objectives)
+
+    def _active_objective_xy_offset(self) -> tuple[float, float]:
+        settings = self.settings_manager.objectives_configuration()
+        return objective_xy_offset(settings.objectives, settings.active_name)
+
+    def _camera_stage_xy_from_raw_stage_xy(
+        self,
+        raw_stage_xy: tuple[float, float],
+    ) -> tuple[float, float]:
+        return raw_stage_to_camera_stage(raw_stage_xy, self._active_objective_xy_offset())
+
+    def _raw_stage_xy_from_camera_stage_xy(
+        self,
+        camera_stage_xy: tuple[float, float],
+    ) -> tuple[float, float]:
+        return camera_stage_to_raw_stage(
+            camera_stage_xy,
+            self._active_objective_xy_offset(),
+        )
+
+    def _design_xy_from_raw_stage_xy(
+        self,
+        raw_stage_xy: tuple[float, float],
+    ) -> tuple[float, float] | None:
+        camera_stage_xy = self._camera_stage_xy_from_raw_stage_xy(raw_stage_xy)
+        return self._design_session.design_from_stage(camera_stage_xy)
+
+    def _raw_stage_xy_from_design_xy(
+        self,
+        design_xy: tuple[float, float],
+    ) -> tuple[float, float] | None:
+        camera_stage_xy = self._design_session.stage_from_design(design_xy)
+        if camera_stage_xy is None:
+            return None
+        return self._raw_stage_xy_from_camera_stage_xy(
+            (float(camera_stage_xy[0]), float(camera_stage_xy[1]))
+        )
 
     def _create_stage_position_widget(self) -> QWidget:
         widget = QWidget(self)
@@ -2210,25 +2301,26 @@ class Main(QMainWindow):
         if old_profile is None or new_profile is None:
             return
         if not (
-            old_profile.xy_offset_configured
-            and new_profile.xy_offset_configured
+            objective_xy_offset_is_configured(objective_settings.objectives, old_name)
+            and objective_xy_offset_is_configured(
+                objective_settings.objectives,
+                new_name,
+            )
         ):
             self._show_status(
                 "Objective XY offset is not configured for both objectives.",
                 4000,
             )
             return
+        old_offset = objective_xy_offset(objective_settings.objectives, old_name)
+        new_offset = objective_xy_offset(objective_settings.objectives, new_name)
         latest = self.stage_controller.latest_stage_position()
         if latest is None or len(latest) < 2:
             self._show_status("Stage position unavailable; objective offset not applied.", 4000)
             return
         raw_targets: dict[str, float] = {
-            "X": float(latest[0])
-            + float(new_profile.xy_offset_x_mm)
-            - float(old_profile.xy_offset_x_mm),
-            "Y": float(latest[1])
-            + float(new_profile.xy_offset_y_mm)
-            - float(old_profile.xy_offset_y_mm),
+            "X": float(latest[0]) + float(new_offset[0]) - float(old_offset[0]),
+            "Y": float(latest[1]) + float(new_offset[1]) - float(old_offset[1]),
         }
         if (
             old_profile.z_offset_configured
@@ -2268,6 +2360,8 @@ class Main(QMainWindow):
             objective_settings.objectives,
         )
         self._sync_objective_combo(objective_settings.active_name)
+        if self._design_session.document is not None:
+            self._refresh_design_position()
 
     def _show_click_calibration_dialog(self) -> None:
         if self._click_calibration_dialog is None:
@@ -2278,6 +2372,11 @@ class Main(QMainWindow):
             dialog.reset_requested.connect(self._reset_click_calibration)
             dialog.add_requested.connect(self._add_objective_profile)
             dialog.delete_requested.connect(self._delete_objective_profile)
+            dialog.offset_reference_requested.connect(
+                self._set_objective_offset_reference
+            )
+            dialog.offset_save_requested.connect(self._save_active_objective_offset)
+            dialog.offset_reset_requested.connect(self._reset_active_objective_offset)
             self._click_calibration_dialog = dialog
         self._refresh_click_calibration_ui()
         self._click_calibration_dialog.show()
@@ -2347,6 +2446,110 @@ class Main(QMainWindow):
         self.settings_manager.save()
         self._apply_objective_settings()
         self._show_status(f"Objective deleted: {name}.", 3000)
+
+    def _set_objective_offset_reference(self) -> None:
+        if self.stage_controller.is_busy():
+            self._show_status("Stage is busy; objective offset reference not set.", 4000)
+            return
+        raw_stage_xy = self._resolve_alignment_capture_stage_position()
+        if raw_stage_xy is None:
+            return
+        settings = self.settings_manager.settings.clone()
+        active_name = normalize_objective_name(settings.objectives.active_name)
+        if not active_name:
+            return
+        profiles = settings.objectives.objectives
+        if active_name not in profiles:
+            profiles[active_name] = default_objective(active_name)
+        base_name = base_objective_name(profiles)
+        if active_name == base_name:
+            profile = profiles[active_name]
+            profile.xy_offset_x_mm = 0.0
+            profile.xy_offset_y_mm = 0.0
+            profile.xy_offset_configured = True
+            profiles[active_name] = profile
+            self.settings_manager.replace(settings)
+            self.settings_manager.save()
+            self._apply_objective_settings()
+        elif not objective_xy_offset_is_configured(profiles, active_name):
+            self._show_status(
+                "Set the objective offset reference with the base objective first.",
+                6000,
+            )
+            return
+        reference_offset = objective_xy_offset(profiles, active_name)
+        self._objective_offset_reference = ObjectiveOffsetReference(
+            objective_name=active_name,
+            stage_xy=raw_stage_xy,
+            offset_xy=reference_offset,
+        )
+        self._refresh_click_calibration_ui()
+        self._show_status(
+            f"Objective offset reference set with {active_name}. "
+            "Center the same feature under another objective and press Save Offset.",
+            8000,
+        )
+
+    def _save_active_objective_offset(self) -> None:
+        if self.stage_controller.is_busy():
+            self._show_status("Stage is busy; objective offset not saved.", 4000)
+            return
+        reference = self._objective_offset_reference
+        if reference is None:
+            self._show_status("Set an objective offset reference first.", 5000)
+            return
+        raw_stage_xy = self._resolve_alignment_capture_stage_position()
+        if raw_stage_xy is None:
+            return
+        settings = self.settings_manager.settings.clone()
+        active_name = normalize_objective_name(settings.objectives.active_name)
+        if not active_name:
+            return
+        profiles = settings.objectives.objectives
+        if active_name not in profiles:
+            profiles[active_name] = default_objective(active_name)
+        profile = profiles[active_name]
+        base_name = base_objective_name(profiles)
+        if active_name == base_name:
+            offset_xy = (0.0, 0.0)
+        else:
+            offset_xy = calibrated_objective_offset(reference, raw_stage_xy)
+        profile.xy_offset_x_mm = float(offset_xy[0])
+        profile.xy_offset_y_mm = float(offset_xy[1])
+        profile.xy_offset_configured = True
+        profiles[active_name] = profile
+        self.settings_manager.replace(settings)
+        self.settings_manager.save()
+        self._apply_objective_settings()
+        self._refresh_design_position()
+        self._show_status(
+            f"Saved {active_name} objective offset: "
+            f"X={offset_xy[0]:+.4f}, Y={offset_xy[1]:+.4f} mm.",
+            6000,
+        )
+
+    def _reset_active_objective_offset(self) -> None:
+        if self.stage_controller.is_busy():
+            self._show_status("Stage is busy; objective offset not reset.", 4000)
+            return
+        settings = self.settings_manager.settings.clone()
+        active_name = normalize_objective_name(settings.objectives.active_name)
+        if not active_name:
+            return
+        profiles = settings.objectives.objectives
+        if active_name not in profiles:
+            profiles[active_name] = default_objective(active_name)
+        profile = profiles[active_name]
+        profile.xy_offset_x_mm = 0.0
+        profile.xy_offset_y_mm = 0.0
+        profile.xy_offset_configured = active_name == base_objective_name(profiles)
+        profiles[active_name] = profile
+        self.settings_manager.replace(settings)
+        self.settings_manager.save()
+        self._apply_objective_settings()
+        self._refresh_design_position()
+        self._refresh_click_calibration_ui()
+        self._show_status(f"Reset {active_name} objective offset.", 4000)
 
     def _refresh_click_calibration_ui(self) -> None:
         if self._click_calibration_action is not None:
@@ -2558,15 +2761,19 @@ class Main(QMainWindow):
 
         label = "image" if source == "image" else "center"
         if self._design_backed_alignment_active():
+            registration_stage_xy = self._camera_stage_xy_from_raw_stage_xy(captured)
             self._pending_alignment_preparation = None
-            self._design_session.set_source_stage_mark(slot, captured)
+            self._design_session.set_source_stage_mark(slot, registration_stage_xy)
             self._refresh_design_panel()
             self._refresh_design_position()
             pair_count = self._design_session.source_pair_count()
             if pair_count < 2:
                 self._set_alignment_panel_expanded()
                 self._show_status(
-                    f"Design alignment: point {slot + 1} captured from {label} at X={captured[0]:.3f}, Y={captured[1]:.3f}. Capture the other point next.",
+                    f"Design alignment: point {slot + 1} captured from {label} "
+                    f"at X={registration_stage_xy[0]:.3f}, "
+                    f"Y={registration_stage_xy[1]:.3f}. "
+                    "Capture the other point next.",
                     6000,
                 )
                 return
@@ -3013,17 +3220,18 @@ class Main(QMainWindow):
             return None
         if not registration.source_stage_marks:
             return None
+        camera_xy = self._camera_stage_xy_from_raw_stage_xy(fluidnc_xy)
         origin = registration.source_stage_marks[0]
         return (
-            float(fluidnc_xy[0]) - float(origin[0]),
-            float(fluidnc_xy[1]) - float(origin[1]),
+            float(camera_xy[0]) - float(origin[0]),
+            float(camera_xy[1]) - float(origin[1]),
         )
 
     def _resolve_design_coordinates(
         self, fluidnc_xy: tuple[float, float]
     ) -> tuple[float, float] | None:
         try:
-            return self._design_session.design_from_stage(fluidnc_xy)
+            return self._design_xy_from_raw_stage_xy(fluidnc_xy)
         except Exception:
             return None
 
@@ -3166,7 +3374,7 @@ class Main(QMainWindow):
             "MOTION PREDICTION start stage=%s design=%s velocity=(%.4f, %.4f) feedrate=%.3f command=%s source=%s",
             self._format_optional_point(self._manual_jog_stage_xy),
             self._format_optional_point(
-                self._design_session.design_from_stage(self._manual_jog_stage_xy)
+                self._design_xy_from_raw_stage_xy(self._manual_jog_stage_xy)
                 if self._manual_jog_stage_xy is not None
                 else None
             ),
@@ -3188,7 +3396,7 @@ class Main(QMainWindow):
             "MOTION PREDICTION stop_requested stage=%s design=%s stop_tail_s=%.4f",
             self._format_optional_point(self._manual_jog_stage_xy),
             self._format_optional_point(
-                self._design_session.design_from_stage(self._manual_jog_stage_xy)
+                self._design_xy_from_raw_stage_xy(self._manual_jog_stage_xy)
                 if self._manual_jog_stage_xy is not None
                 else None
             ),
@@ -3391,7 +3599,9 @@ class Main(QMainWindow):
                 "MOTION PREDICTION tick stage=%s design=%s dt=%.4f velocity=(%.4f, %.4f)",
                 self._format_optional_point(self._manual_jog_stage_xy),
                 self._format_optional_point(
-                    self._design_session.design_from_stage(self._manual_jog_stage_xy)
+                    self._design_xy_from_raw_stage_xy(self._manual_jog_stage_xy)
+                    if self._manual_jog_stage_xy is not None
+                    else None
                 ),
                 dt,
                 velocity_x,
@@ -4000,7 +4210,7 @@ class Main(QMainWindow):
         if self._current_design_stage_xy is None:
             self._show_status("Current design position is unavailable.", 4000)
             return
-        design_xy = self._design_session.design_from_stage(self._current_design_stage_xy)
+        design_xy = self._design_xy_from_raw_stage_xy(self._current_design_stage_xy)
         if design_xy is None:
             self._show_status(
                 "Design registration is required before adding the current position.",
@@ -4144,7 +4354,7 @@ class Main(QMainWindow):
         for route_index, route_point in enumerate(route.points, start=1):
             if not route_point.enabled:
                 continue
-            stage_xy = self._design_session.stage_from_design(route_point.camera_center)
+            stage_xy = self._raw_stage_xy_from_design_xy(route_point.camera_center)
             if stage_xy is None:
                 raise DesignModelError(
                     "Design registration is required before running a route."
@@ -4290,7 +4500,8 @@ class Main(QMainWindow):
         if len(stage_position) < 2:
             self._show_status("X/Y coordinates are unavailable.", 5000)
             return
-        stage_xy = (float(stage_position[0]), float(stage_position[1]))
+        raw_stage_xy = (float(stage_position[0]), float(stage_position[1]))
+        stage_xy = self._camera_stage_xy_from_raw_stage_xy(raw_stage_xy)
         if check_mark:
             self._design_session.add_check_stage_mark(stage_xy)
             label = "check"
@@ -4349,7 +4560,7 @@ class Main(QMainWindow):
         if target is None:
             self._show_status(f"Unknown target '{target_id}'.", 5000)
             return
-        stage_xy = self._design_session.selected_target_stage_xy()
+        stage_xy = self._raw_stage_xy_from_design_xy(target.design_center)
         if stage_xy is None:
             self._show_status(
                 "Design registration is required before moving to a target.",
@@ -4377,7 +4588,7 @@ class Main(QMainWindow):
         if self.stage_controller.is_busy():
             self._show_status("Stage is busy. Ignoring design move request.", 3000)
             return False
-        stage_xy = self._design_session.stage_from_design(design_xy)
+        stage_xy = self._raw_stage_xy_from_design_xy(design_xy)
         if stage_xy is None:
             self._show_status(
                 "Design click-to-move requires completed registration.",
@@ -5102,7 +5313,7 @@ class Main(QMainWindow):
         design_xy = None
         fov_design_size = None
         if stage_xy is not None:
-            design_xy = self._design_session.design_from_stage(stage_xy)
+            design_xy = self._design_xy_from_raw_stage_xy(stage_xy)
             fov_design_size = self._resolve_design_fov_size()
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_current_position(
@@ -5135,8 +5346,8 @@ class Main(QMainWindow):
         actual_stage_xy: tuple[float, float],
     ) -> None:
         state = self.stage_controller.latest_stage_state()
-        predicted_design_xy = self._design_session.design_from_stage(predicted_stage_xy)
-        actual_design_xy = self._design_session.design_from_stage(actual_stage_xy)
+        predicted_design_xy = self._design_xy_from_raw_stage_xy(predicted_stage_xy)
+        actual_design_xy = self._design_xy_from_raw_stage_xy(actual_stage_xy)
         delta_x = float(actual_stage_xy[0] - predicted_stage_xy[0])
         delta_y = float(actual_stage_xy[1] - predicted_stage_xy[1])
         logger.debug(

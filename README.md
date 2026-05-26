@@ -167,6 +167,22 @@ Important:
 - if the predicted move is too large, the motion is cancelled and calibration is reset;
 - this requires a live and stable camera image.
 
+### Objective Profiles
+
+Objectives can have independent click-to-move matrices and optical XY offsets.
+The lowest-magnification objective is treated as the zero-offset reference.
+
+To calibrate objective XY offset:
+1. Select the base objective and center a recognizable chip feature.
+2. Open `Calibration` -> `Click-to-Move Calibration`.
+3. Press `Set Reference`.
+4. Select another objective, center the same feature, then press `Save Offset`.
+
+Design registration uses the base-objective optical center. When another
+objective is active, design navigation applies that objective offset before
+commanding XY motion. Needle calibration and saved needle heights remain
+physical stage/A-axis values and are not per-objective.
+
 ## `Serial Terminal` Panel
 
 This panel is used for direct controller commands.

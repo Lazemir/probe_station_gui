@@ -34,6 +34,7 @@ def _install_pyside6_stubs() -> None:
 
 def _install_probe_station_stubs() -> None:
     package = types.ModuleType("probe_station_gui")
+    package.__path__ = [str(Path(__file__).resolve().parents[1] / "probe_station_gui")]
     logging_config = types.ModuleType("probe_station_gui.logging_config")
 
     def configure_logging(*_args, **_kwargs) -> None:
