@@ -2200,6 +2200,36 @@ class StageControllerNeedlesStateTest(unittest.TestCase):
 
         self.assertEqual(emitted[-1], (False, True))
 
+    def test_configured_needle_safety_zone_marks_near_lower_as_down(self) -> None:
+        controller = StageController()
+        emitted = []
+        controller.apply_needle_calibration(
+            raise_position_mm=0.5,
+            down_position_mm=1.0,
+            safety_zone_mm=0.05,
+        )
+        controller.needles_state_changed = types.SimpleNamespace(
+            emit=lambda raised, known: emitted.append((raised, known))
+        )
+        controller.axis_a_ready_changed = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        controller.needle_height_changed = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+
+        controller._update_needles_from_status(
+            types.SimpleNamespace(
+                state="Idle",
+                position=None,
+                display_position=(0.0, 0.0, 0.0, -0.96),
+                work_position=(0.0, 0.0, 0.0, -0.96),
+                homed_axes={"A"},
+            )
+        )
+
+        self.assertEqual(emitted[-1], (False, True))
+
     def test_latest_a_position_reads_cached_stage_position(self) -> None:
         controller = StageController()
         controller._last_stage_position = (1.0, 2.0, 3.0, -0.25)

@@ -269,6 +269,20 @@ class JoystickFeedrateTest(unittest.TestCase):
         self.assertEqual(widget.needles_raise_requested.values, [(77.5,)])
         self.assertEqual(animation_calls, [])
 
+    def test_lower_double_click_save_emits_lower_contact_coordinate(self) -> None:
+        widget = JoystickWindow.__new__(JoystickWindow)
+        widget._needle_contact_coordinate_edit = None
+        widget._needle_contact_coordinate_button = None
+        widget.needle_contact_coordinate_save_requested = _ArgsSignalRecorder()
+        widget._current_needle_contact_a_coordinate = lambda: -1.234
+
+        JoystickWindow._save_lower_needle_contact_from_current_position(widget)
+
+        self.assertEqual(
+            widget.needle_contact_coordinate_save_requested.values,
+            [("lower", -1.234)],
+        )
+
     def test_known_down_state_marks_lower_button_blue(self) -> None:
         widget = JoystickWindow.__new__(JoystickWindow)
         widget.needles_raise_button = _FakeButton("Raise")

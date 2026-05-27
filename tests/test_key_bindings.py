@@ -141,6 +141,7 @@ class NeedleCalibrationBookmarkTest(unittest.TestCase):
             monitor1="R",
             monitor2="X",
             alc_enabled=True,
+            safety_zone_mm=0.123,
             raise_position_mm=0.25,
             raise_position_configured=True,
             down_position_mm=1.25,
@@ -167,6 +168,7 @@ class NeedleCalibrationBookmarkTest(unittest.TestCase):
         self.assertEqual(restored["source_resistance_ohm"], settings.source_resistance_ohm)
         self.assertEqual(restored["monitor1"], settings.monitor1)
         self.assertEqual(restored["monitor2"], settings.monitor2)
+        self.assertEqual(restored["safety_zone_mm"], settings.safety_zone_mm)
         self.assertEqual(restored["raise_position_mm"], settings.raise_position_mm)
         self.assertEqual(
             restored["raise_position_configured"],

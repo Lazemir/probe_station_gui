@@ -569,8 +569,8 @@ class JogSettingsWidget(QWidget):
         settings.jog = jog
 
 
-class NeedleCalibrationSettingsWidget(QWidget):
-    """Tab that exposes measurement-instrument and needle calibration settings."""
+class MeasurementSettingsWidget(QWidget):
+    """Tab that exposes measurement-instrument settings."""
 
     def __init__(
         self,
@@ -578,12 +578,6 @@ class NeedleCalibrationSettingsWidget(QWidget):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self._raise_position_mm = calibration_settings.raise_position_mm
-        self._raise_position_configured = (
-            calibration_settings.raise_position_configured
-        )
-        self._chip_position = calibration_settings.chip_position.clone()
-        self._stone_position = calibration_settings.stone_position.clone()
         layout = QFormLayout(self)
         layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
@@ -761,28 +755,6 @@ class NeedleCalibrationSettingsWidget(QWidget):
         self._poll_interval_spin.setValue(calibration_settings.poll_interval_ms)
         layout.addRow(QLabel("Polling interval", self), self._poll_interval_spin)
 
-        self._needle_feedrate_spin = QDoubleSpinBox(self)
-        self._needle_feedrate_spin.setDecimals(1)
-        self._needle_feedrate_spin.setRange(0.1, 1000.0)
-        self._needle_feedrate_spin.setSingleStep(10.0)
-        self._needle_feedrate_spin.setSuffix(" mm/min")
-        self._needle_feedrate_spin.setValue(calibration_settings.feedrate_mm_min)
-        layout.addRow(QLabel("Needle A feedrate", self), self._needle_feedrate_spin)
-
-        self._configured_checkbox = QCheckBox("Calibrated down height is configured", self)
-        self._configured_checkbox.setChecked(
-            calibration_settings.down_position_configured
-        )
-        layout.addRow(self._configured_checkbox)
-
-        self._down_position_spin = QDoubleSpinBox(self)
-        self._down_position_spin.setDecimals(4)
-        self._down_position_spin.setRange(-1000.0, 1000.0)
-        self._down_position_spin.setSingleStep(0.01)
-        self._down_position_spin.setSuffix(" mm")
-        self._down_position_spin.setValue(calibration_settings.down_position_mm)
-        layout.addRow(QLabel("Calibrated down lowering", self), self._down_position_spin)
-
         self._function_combo.currentTextChanged.connect(
             lambda _text: self._update_lcr_control_state()
         )
@@ -841,42 +813,75 @@ class NeedleCalibrationSettingsWidget(QWidget):
     def to_settings(self, settings: Settings) -> None:
         """Persist the widget state into the provided settings object."""
 
-        settings.needle_calibration = NeedleCalibrationSettings(
-            meter_type=str(self._meter_type_combo.currentData() or LCR_METER_TYPE_GWINSTEK),
-            visa_resource=self._visa_resource_edit.text().strip(),
-            keithley_source_resource=self._keithley_source_resource_edit.text().strip(),
-            keithley_voltmeter_resource=self._keithley_voltmeter_resource_edit.text().strip(),
-            measurement_function=self._function_combo.currentText(),
-            range_mode=str(self._range_mode_combo.currentData() or "HOLD"),
-            auto_range_enabled=str(self._range_mode_combo.currentData() or "") == "AUTO",
-            impedance_range=int(self._impedance_range_spin.value()),
-            dcr_range=int(self._dcr_range_spin.value()),
-            frequency_hz=self._frequency_spin.value(),
-            level_mode=str(self._level_mode_combo.currentData() or "VOLTAGE"),
-            voltage_level_v=self._voltage_level_spin.value(),
-            current_level_a=self._current_level_spin.value(),
-            source_resistance_ohm=int(
-                self._source_resistance_combo.currentData() or 30
-            ),
-            aperture_rate=self._aperture_combo.currentText(),
-            aperture_averages=int(self._averages_spin.value()),
-            trigger_source=self._trigger_source_combo.currentText(),
-            trigger_delay_s=self._trigger_delay_spin.value(),
-            bias_enabled=self._bias_checkbox.isChecked(),
-            bias_level_v=self._bias_level_spin.value(),
-            monitor1=self._monitor1_combo.currentText(),
-            monitor2=self._monitor2_combo.currentText(),
-            alc_enabled=self._alc_checkbox.isChecked(),
-            short_threshold_ohm=self._short_threshold_spin.value(),
-            poll_interval_ms=int(self._poll_interval_spin.value()),
-            feedrate_mm_min=self._needle_feedrate_spin.value(),
-            raise_position_mm=self._raise_position_mm,
-            raise_position_configured=self._raise_position_configured,
-            down_position_mm=self._down_position_spin.value(),
-            down_position_configured=self._configured_checkbox.isChecked(),
-            chip_position=self._chip_position.clone(),
-            stone_position=self._stone_position.clone(),
+        needle_settings = settings.needle_calibration.clone()
+        needle_settings.meter_type = str(
+            self._meter_type_combo.currentData() or LCR_METER_TYPE_GWINSTEK
         )
+        needle_settings.visa_resource = self._visa_resource_edit.text().strip()
+        needle_settings.keithley_source_resource = (
+            self._keithley_source_resource_edit.text().strip()
+        )
+        needle_settings.keithley_voltmeter_resource = (
+            self._keithley_voltmeter_resource_edit.text().strip()
+        )
+        needle_settings.measurement_function = self._function_combo.currentText()
+        needle_settings.range_mode = str(
+            self._range_mode_combo.currentData() or "HOLD"
+        )
+        needle_settings.auto_range_enabled = (
+            str(self._range_mode_combo.currentData() or "") == "AUTO"
+        )
+        needle_settings.impedance_range = int(self._impedance_range_spin.value())
+        needle_settings.dcr_range = int(self._dcr_range_spin.value())
+        needle_settings.frequency_hz = self._frequency_spin.value()
+        needle_settings.level_mode = str(
+            self._level_mode_combo.currentData() or "VOLTAGE"
+        )
+        needle_settings.voltage_level_v = self._voltage_level_spin.value()
+        needle_settings.current_level_a = self._current_level_spin.value()
+        needle_settings.source_resistance_ohm = int(
+            self._source_resistance_combo.currentData() or 30
+        )
+        needle_settings.aperture_rate = self._aperture_combo.currentText()
+        needle_settings.aperture_averages = int(self._averages_spin.value())
+        needle_settings.trigger_source = self._trigger_source_combo.currentText()
+        needle_settings.trigger_delay_s = self._trigger_delay_spin.value()
+        needle_settings.bias_enabled = self._bias_checkbox.isChecked()
+        needle_settings.bias_level_v = self._bias_level_spin.value()
+        needle_settings.monitor1 = self._monitor1_combo.currentText()
+        needle_settings.monitor2 = self._monitor2_combo.currentText()
+        needle_settings.alc_enabled = self._alc_checkbox.isChecked()
+        needle_settings.short_threshold_ohm = self._short_threshold_spin.value()
+        needle_settings.poll_interval_ms = int(self._poll_interval_spin.value())
+        settings.needle_calibration = needle_settings
+
+
+class NeedleSettingsWidget(QWidget):
+    """Tab that exposes needle-only settings."""
+
+    def __init__(
+        self,
+        calibration_settings: NeedleCalibrationSettings,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        layout = QFormLayout(self)
+        layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+
+        self._safety_zone_spin = QDoubleSpinBox(self)
+        self._safety_zone_spin.setDecimals(4)
+        self._safety_zone_spin.setRange(0.0, 10.0)
+        self._safety_zone_spin.setSingleStep(0.001)
+        self._safety_zone_spin.setSuffix(" mm")
+        self._safety_zone_spin.setValue(calibration_settings.safety_zone_mm)
+        layout.addRow(QLabel("Safety zone", self), self._safety_zone_spin)
+
+    def to_settings(self, settings: Settings) -> None:
+        """Persist the widget state into the provided settings object."""
+
+        needle_settings = settings.needle_calibration.clone()
+        needle_settings.safety_zone_mm = self._safety_zone_spin.value()
+        settings.needle_calibration = needle_settings
 
 
 class ObjectivesSettingsWidget(QWidget):
@@ -1224,7 +1229,10 @@ class SettingsDialog(QDialog):
         self._api_tab = ApiSettingsWidget(self._settings.api, self)
         self._logging_tab = LoggingSettingsWidget(self._settings.logging, self)
         self._jog_tab = JogSettingsWidget(self._settings.jog, self)
-        self._needle_calibration_tab = NeedleCalibrationSettingsWidget(
+        self._measurement_tab = MeasurementSettingsWidget(
+            self._settings.needle_calibration, self
+        )
+        self._needles_tab = NeedleSettingsWidget(
             self._settings.needle_calibration, self
         )
         self._coordinate_system_tab = CoordinateSystemSettingsWidget(
@@ -1245,7 +1253,8 @@ class SettingsDialog(QDialog):
         self._tabs.addTab(self._coordinate_system_tab, "Coordinates")
         self._tabs.addTab(self._objectives_tab, "Objectives")
         self._tabs.addTab(self._axis_calibration_tab, "Axis Calibration")
-        self._tabs.addTab(self._needle_calibration_tab, "Measurement")
+        self._tabs.addTab(self._measurement_tab, "Measurement")
+        self._tabs.addTab(self._needles_tab, "Needles")
         self._tabs.addTab(self._logging_tab, "Logging")
         if initial_tab:
             for index in range(self._tabs.count()):
@@ -1282,7 +1291,8 @@ class SettingsDialog(QDialog):
         self._coordinate_system_tab.to_settings(self._settings)
         self._objectives_tab.to_settings(self._settings)
         self._axis_calibration_tab.to_settings(self._settings)
-        self._needle_calibration_tab.to_settings(self._settings)
+        self._measurement_tab.to_settings(self._settings)
+        self._needles_tab.to_settings(self._settings)
         self._logging_tab.to_settings(self._settings.logging)
 
     def result_settings(self) -> Settings:

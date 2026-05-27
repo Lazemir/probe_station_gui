@@ -388,7 +388,7 @@ class SavedStagePositionSettings:
 
 @dataclass
 class NeedleCalibrationSettings:
-    """Configuration for needle calibration and the external LCR meter."""
+    """Configuration for needle control and the external measurement instrument."""
 
     meter_type: str = LCR_METER_TYPE_GWINSTEK
     visa_resource: str = "COM4"
@@ -416,6 +416,7 @@ class NeedleCalibrationSettings:
     short_threshold_ohm: float = 10.0
     poll_interval_ms: int = 250
     feedrate_mm_min: float = 600.0
+    safety_zone_mm: float = 0.001
     raise_position_mm: float = 0.0
     raise_position_configured: bool = False
     down_position_mm: float = 0.0
@@ -457,6 +458,7 @@ class NeedleCalibrationSettings:
             short_threshold_ohm=self.short_threshold_ohm,
             poll_interval_ms=self.poll_interval_ms,
             feedrate_mm_min=self.feedrate_mm_min,
+            safety_zone_mm=self.safety_zone_mm,
             raise_position_mm=self.raise_position_mm,
             raise_position_configured=self.raise_position_configured,
             down_position_mm=self.down_position_mm,
@@ -495,6 +497,7 @@ class NeedleCalibrationSettings:
             "short_threshold_ohm": self.short_threshold_ohm,
             "poll_interval_ms": self.poll_interval_ms,
             "feedrate_mm_min": self.feedrate_mm_min,
+            "safety_zone_mm": self.safety_zone_mm,
             "raise_position_mm": self.raise_position_mm,
             "raise_position_configured": self.raise_position_configured,
             "down_position_mm": self.down_position_mm,
@@ -900,6 +903,7 @@ class SettingsManager:
     DEFAULT_SHORT_THRESHOLD_OHM: float = 10.0
     DEFAULT_LCR_POLL_INTERVAL_MS: int = 250
     DEFAULT_NEEDLE_FEEDRATE_MM_MIN: float = 600.0
+    DEFAULT_NEEDLE_SAFETY_ZONE_MM: float = 0.001
     DEFAULT_AXIS_A_CALIBRATION_MODEL: str = "cosine_displacement"
     DEFAULT_AXIS_A_CALIBRATION_STEPS_PER_MM: float = 2600.0
     DEFAULT_AXIS_A_CALIBRATION_MIN_MM: float = 0.0
@@ -1312,6 +1316,7 @@ class SettingsManager:
                 "short_threshold_ohm": self.DEFAULT_SHORT_THRESHOLD_OHM,
                 "poll_interval_ms": self.DEFAULT_LCR_POLL_INTERVAL_MS,
                 "feedrate_mm_min": self.DEFAULT_NEEDLE_FEEDRATE_MM_MIN,
+                "safety_zone_mm": self.DEFAULT_NEEDLE_SAFETY_ZONE_MM,
                 "raise_position_mm": 0.0,
                 "raise_position_configured": False,
                 "down_position_mm": 0.0,
@@ -1383,6 +1388,9 @@ class SettingsManager:
             )
             needle_section.setdefault(
                 "feedrate_mm_min", self.DEFAULT_NEEDLE_FEEDRATE_MM_MIN
+            )
+            needle_section.setdefault(
+                "safety_zone_mm", self.DEFAULT_NEEDLE_SAFETY_ZONE_MM
             )
             needle_section.setdefault("raise_position_mm", 0.0)
             needle_section.setdefault("raise_position_configured", False)
@@ -1774,6 +1782,7 @@ class SettingsManager:
         short_threshold_ohm = self.DEFAULT_SHORT_THRESHOLD_OHM
         poll_interval_ms = self.DEFAULT_LCR_POLL_INTERVAL_MS
         feedrate_mm_min = self.DEFAULT_NEEDLE_FEEDRATE_MM_MIN
+        safety_zone_mm = self.DEFAULT_NEEDLE_SAFETY_ZONE_MM
         raise_position_mm = 0.0
         raise_position_configured = False
         down_position_mm = 0.0
@@ -1922,6 +1931,14 @@ class SettingsManager:
             except (TypeError, ValueError):
                 feedrate_mm_min = self.DEFAULT_NEEDLE_FEEDRATE_MM_MIN
             candidate = raw_needle_calibration.get(
+                "safety_zone_mm", safety_zone_mm
+            )
+            try:
+                if isinstance(candidate, (int, float, str)):
+                    safety_zone_mm = float(candidate)
+            except (TypeError, ValueError):
+                safety_zone_mm = self.DEFAULT_NEEDLE_SAFETY_ZONE_MM
+            candidate = raw_needle_calibration.get(
                 "raise_position_mm", raise_position_mm
             )
             try:
@@ -1977,6 +1994,8 @@ class SettingsManager:
             poll_interval_ms = self.DEFAULT_LCR_POLL_INTERVAL_MS
         if feedrate_mm_min <= 0:
             feedrate_mm_min = self.DEFAULT_NEEDLE_FEEDRATE_MM_MIN
+        if safety_zone_mm < 0 or safety_zone_mm > 10:
+            safety_zone_mm = self.DEFAULT_NEEDLE_SAFETY_ZONE_MM
         auto_range_enabled = range_mode == "AUTO"
         if not raise_position_configured and down_position_configured:
             raise_position_mm = down_position_mm
@@ -2008,6 +2027,7 @@ class SettingsManager:
             short_threshold_ohm=short_threshold_ohm,
             poll_interval_ms=poll_interval_ms,
             feedrate_mm_min=feedrate_mm_min,
+            safety_zone_mm=safety_zone_mm,
             raise_position_mm=raise_position_mm,
             raise_position_configured=raise_position_configured,
             down_position_mm=down_position_mm,

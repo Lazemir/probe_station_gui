@@ -258,6 +258,7 @@ class StageController(QObject):
         self._needles_known = False
         self._needle_raise_lowering_mm: Optional[float] = None
         self._needle_down_lowering_mm: Optional[float] = None
+        self._needle_safety_zone_mm = self.A_ZERO_TOLERANCE
         self._axis_a_calibration: dict[str, float | str] | None = None
         self._axis_z_calibration: dict[str, float | str | tuple[float, ...]] | None = None
         self._active_objective_name = "X5"
@@ -869,6 +870,7 @@ class StageController(QObject):
         *,
         raise_position_mm: Optional[float] = None,
         down_position_mm: Optional[float],
+        safety_zone_mm: Optional[float] = None,
     ) -> None:
         """Apply the persisted physical needle raise/lower targets."""
 
@@ -878,6 +880,10 @@ class StageController(QObject):
         self._needle_down_lowering_mm = self._normalise_needle_lowering_target(
             down_position_mm
         )
+        if safety_zone_mm is None:
+            self._needle_safety_zone_mm = self.A_ZERO_TOLERANCE
+        else:
+            self._needle_safety_zone_mm = max(0.0, float(safety_zone_mm))
 
     def apply_axis_a_calibration(self, calibration: object | None) -> None:
         """Apply the compact nonlinear A-axis calibration model."""
@@ -5035,19 +5041,16 @@ class StageController(QObject):
 
     def _needle_zone_for_a_position(self, a_position: float) -> str | None:
         current_a = float(a_position)
+        current_lowering = self._axis_a_lowering_for_gcode_coordinate(current_a)
+        tolerance = max(self.A_ZERO_TOLERANCE, float(self._needle_safety_zone_mm))
         if self._needle_raise_lowering_mm is None:
-            raise_target_a = 0.0
+            raise_lowering = 0.0
         else:
-            raise_target_a = self._axis_a_gcode_coordinate_for_lowering(
-                float(self._needle_raise_lowering_mm)
-            )
-        if current_a >= raise_target_a - self.A_ZERO_TOLERANCE:
+            raise_lowering = float(self._needle_raise_lowering_mm)
+        if current_lowering <= raise_lowering + tolerance:
             return "raise"
         if self._needle_down_lowering_mm is not None:
-            down_target_a = self._axis_a_gcode_coordinate_for_lowering(
-                float(self._needle_down_lowering_mm)
-            )
-            if current_a <= down_target_a + self.A_ZERO_TOLERANCE:
+            if current_lowering >= float(self._needle_down_lowering_mm) - tolerance:
                 return "lower"
         return None
 

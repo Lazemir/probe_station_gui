@@ -151,6 +151,7 @@ Behavior:
 Needles:
 - `Raise` brings the system into a safe state for motion;
 - `Lower` moves the needles to the saved lower position;
+- double-click `Lower` saves the current A coordinate as the lower position;
 - if the status is `Needles: unknown`, raise them again first.
 
 ## Motion By Camera Image
@@ -450,7 +451,8 @@ Open settings through `Application -> Settings...`.
 Typical items:
 - `Controls`: key bindings;
 - `Jog`: manual jog parameters;
-- `Measurement`: instrument connection, lowering direction, saved lower position;
+- `Measurement`: instrument connection and live measurement defaults;
+- `Needles`: needle safety zone;
 - `Coordinates`: coordinate mode;
 - `Logging`: log path and log level.
 

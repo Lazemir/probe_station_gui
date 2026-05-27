@@ -2175,6 +2175,7 @@ class Main(QMainWindow):
                 if needle_settings.down_position_configured
                 else None
             ),
+            safety_zone_mm=needle_settings.safety_zone_mm,
         )
         if self.joystick_panel is not None:
             self.joystick_panel.set_needle_contact_coordinate(

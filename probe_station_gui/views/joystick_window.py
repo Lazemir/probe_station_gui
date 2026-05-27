@@ -411,6 +411,11 @@ class JoystickWindow(QWidget):
         self._needle_contact_coordinate_button: QPushButton | None = None
         self._saved_needle_contact_a_coordinates: dict[str, float] = {}
         self._needle_blink_dimmed = False
+        self._lower_click_suppress_until = 0.0
+        self._lower_click_timer = QTimer(self)
+        self._lower_click_timer.setSingleShot(True)
+        self._lower_click_timer.setInterval(250)
+        self._lower_click_timer.timeout.connect(self._lower_needles)
         self._homing_animation_timer = QTimer(self)
         self._homing_animation_timer.setInterval(250)
         self._homing_animation_timer.timeout.connect(self._advance_homing_spinner)
@@ -645,7 +650,7 @@ class JoystickWindow(QWidget):
             "Raise needles (home A). Right-click to edit contact A."
         )
         self.needles_lower_button.setToolTip(
-            "Lower needles (calibrated). Right-click to edit contact A."
+            "Lower needles (calibrated). Double-click to save current A as lower target. Right-click to edit contact A."
         )
         for button in (self.needles_raise_button, self.needles_lower_button):
             button.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -653,7 +658,8 @@ class JoystickWindow(QWidget):
                 self._show_needle_contact_coordinate_menu
             )
         self.needles_raise_button.clicked.connect(self._raise_needles)
-        self.needles_lower_button.clicked.connect(self._lower_needles)
+        self.needles_lower_button.clicked.connect(self._schedule_lower_needles)
+        self.needles_lower_button.installEventFilter(self)
         self.needle_feedrate_spin.valueChanged.connect(
             self._on_needle_feedrate_changed
         )
@@ -1516,8 +1522,21 @@ class JoystickWindow(QWidget):
     def _raise_needles(self) -> None:
         self.needles_raise_requested.emit(self._needle_feedrate_value)
 
+    def _schedule_lower_needles(self) -> None:
+        if time.monotonic() < self._lower_click_suppress_until:
+            return
+        if self._lower_click_timer.isActive():
+            return
+        self._lower_click_timer.start()
+
     def _lower_needles(self) -> None:
         self.needles_lower_requested.emit(self._needle_feedrate_value)
+
+    def _save_lower_needle_contact_from_current_position(self) -> None:
+        display_a = self._current_needle_contact_a_coordinate()
+        if display_a is None:
+            return
+        self._save_needle_contact_coordinate_value("lower", display_a)
 
     def _needle_action_for_key(self, action: str) -> str | None:
         action_key = str(action).strip().lower()
@@ -1889,6 +1908,17 @@ class JoystickWindow(QWidget):
         super().closeEvent(event)
 
     def eventFilter(self, obj, event):  # type: ignore[override]
+        mouse_double_click = getattr(QEvent, "MouseButtonDblClick", None)
+        if (
+            mouse_double_click is not None
+            and obj is getattr(self, "needles_lower_button", None)
+            and event.type() == mouse_double_click
+        ):
+            self._lower_click_suppress_until = time.monotonic() + 0.5
+            self._lower_click_timer.stop()
+            self._save_lower_needle_contact_from_current_position()
+            event.accept()
+            return True
         if event.type() in (QEvent.KeyPress, QEvent.KeyRelease, QEvent.ShortcutOverride):
             event_type_name = {
                 QEvent.KeyPress: "KeyPress",

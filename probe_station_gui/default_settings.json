@@ -121,6 +121,7 @@
     "short_threshold_ohm": 10.0,
     "poll_interval_ms": 250,
     "feedrate_mm_min": 600.0,
+    "safety_zone_mm": 0.001,
     "raise_position_mm": 0.0,
     "raise_position_configured": false,
     "down_position_mm": 0.0,
