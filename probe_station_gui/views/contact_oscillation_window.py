@@ -117,7 +117,7 @@ class ContactOscillationWindow(QWidget):
         needle_layout.addWidget(QLabel("Saved lowering:", needle_group), 1, 0)
         self._saved_needle_label = QLabel("n/a", needle_group)
         needle_layout.addWidget(self._saved_needle_label, 1, 1, 1, 3)
-        self._save_needle_button = QPushButton("Save Current", needle_group)
+        self._save_needle_button = QPushButton("Save Down / A0", needle_group)
         self._save_needle_button.clicked.connect(
             self.save_current_needle_height_requested.emit
         )

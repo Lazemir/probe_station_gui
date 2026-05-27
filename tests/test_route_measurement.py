@@ -48,6 +48,35 @@ class _FakeLCR:
 
 
 class RouteMeasurementRunnerTest(unittest.TestCase):
+    def test_stop_before_run_does_not_raise_needles(self) -> None:
+        points = [
+            RouteMeasurementPoint(
+                index=1,
+                point_id="p001",
+                label="P001",
+                design_center=(100.0, 200.0),
+                stage_xy=(1.0, 2.0),
+                needle_1_design=(101.0, 201.0),
+                needle_2_design=(99.0, 199.0),
+            )
+        ]
+        stage = _FakeStage()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = RouteMeasurementRunner(
+                points=points,
+                csv_path=Path(tmpdir) / "route.csv",
+                stage_controller=stage,
+                lcr_controller=_FakeLCR([10.0]),
+                needle_feedrate=80.0,
+            )
+            runner.stop()
+
+            success, message = runner.run()
+
+        self.assertFalse(success)
+        self.assertEqual(message, "Route measurement stopped by user.")
+        self.assertEqual(stage.calls, [("begin", "route measurement"), ("finish",)])
+
     def test_runner_writes_csv_and_raises_between_points(self) -> None:
         points = [
             RouteMeasurementPoint(

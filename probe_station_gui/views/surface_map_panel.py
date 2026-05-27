@@ -251,8 +251,11 @@ class SurfaceMapWorker(QObject):
                     message = "Surface map stopped by user."
                     break
                 self._move_to_xy(target)
-                if self._config.settle_s > 0.0:
-                    time.sleep(max(0.0, float(self._config.settle_s)))
+                if self._config.settle_s > 0.0 and self._stop_requested.wait(
+                    max(0.0, float(self._config.settle_s))
+                ):
+                    message = "Surface map stopped by user."
+                    break
                 sample = self._sample_indicator()
                 indicator_mm = float(sample["median_mm"])
                 if start_indicator is None:
@@ -395,13 +398,18 @@ class SurfaceMapWorker(QObject):
         deadline = time.monotonic() + timeout_s
         last_status: dict[str, Any] | None = None
         while time.monotonic() < deadline:
+            if self._stop_requested.is_set():
+                raise RuntimeError("Surface map stopped by user.")
             last_status = self._request_stage_status()
             if self._stage_is_idle(last_status):
                 return last_status
-            time.sleep(0.05)
+            if self._stop_requested.wait(0.05):
+                raise RuntimeError("Surface map stopped by user.")
         raise TimeoutError(f"Stage did not become idle; last={last_status}")
 
     def _move_to_xy(self, target: tuple[float, float]) -> None:
+        if self._stop_requested.is_set():
+            raise RuntimeError("Surface map stopped by user.")
         status = self._request_stage_status()
         current = self._display_xy(status)
         distance = math.hypot(float(target[0] - current[0]), float(target[1] - current[1]))
@@ -452,6 +460,8 @@ class SurfaceMapWorker(QObject):
 class SurfaceMapPanel(QWidget):
     """Control and live Plotly view for surface mapping."""
 
+    running_changed = Signal(bool)
+
     def __init__(
         self,
         *,
@@ -470,6 +480,7 @@ class SurfaceMapPanel(QWidget):
         self._route: list[tuple[float, float]] = []
         self._plot_ready = False
         self._pending_plot_payload: dict[str, Any] | None = None
+        self._capture_running = False
 
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(8, 8, 8, 8)
@@ -709,6 +720,9 @@ class SurfaceMapPanel(QWidget):
     def stop_capture(self) -> None:
         self._stop_capture()
 
+    def is_capture_running(self) -> bool:
+        return self._capture_running
+
     def _preview_route(self) -> None:
         try:
             self._save_settings()
@@ -813,6 +827,10 @@ class SurfaceMapPanel(QWidget):
         self._update_mode_fields()
 
     def _set_running(self, running: bool) -> None:
+        running = bool(running)
+        if self._capture_running != running:
+            self._capture_running = running
+            self.running_changed.emit(running)
         for widget in (
             self._mode_combo,
             self._indicator_api_edit,
@@ -916,6 +934,8 @@ class SurfaceMapPanel(QWidget):
 class SurfaceMapWindow(QMainWindow):
     """Top-level window that owns the surface map panel."""
 
+    capture_running_changed = Signal(bool)
+
     def __init__(
         self,
         *,
@@ -932,8 +952,15 @@ class SurfaceMapWindow(QMainWindow):
             settings_path=settings_path,
             parent=self,
         )
+        self._panel.running_changed.connect(self.capture_running_changed.emit)
         self.setCentralWidget(self._panel)
         self.resize(980, 760)
+
+    def stop_capture(self) -> None:
+        self._panel.stop_capture()
+
+    def is_capture_running(self) -> bool:
+        return self._panel.is_capture_running()
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
         self._panel.save_settings()

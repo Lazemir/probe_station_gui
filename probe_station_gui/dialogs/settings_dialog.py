@@ -538,34 +538,12 @@ class JogSettingsWidget(QWidget):
         )
         layout.addRow(self._motion_safety_checkbox)
 
-        self._show_axis_a_checkbox = QCheckBox("Show A-axis controls", self)
-        self._show_axis_a_checkbox.setChecked(jog_settings.show_axis_a_controls)
-        layout.addRow(self._show_axis_a_checkbox)
-
-        self._show_axis_b_checkbox = QCheckBox("Show B-axis controls", self)
-        self._show_axis_b_checkbox.setChecked(jog_settings.show_axis_b_controls)
-        layout.addRow(self._show_axis_b_checkbox)
-
-        self._manual_axis_controls_checkbox = QCheckBox(
-            "Show manual axis move controls",
-            self,
-        )
-        self._manual_axis_controls_checkbox.setChecked(
-            jog_settings.manual_axis_controls_enabled
-        )
-        layout.addRow(self._manual_axis_controls_checkbox)
-
     def to_settings(self, settings: Settings) -> None:
         """Persist the widget state into the provided settings object."""
 
         jog = settings.jog.clone()
         jog.linear_distance_mm = self._linear_distance_spin.value()
         jog.motion_safety_disabled = self._motion_safety_checkbox.isChecked()
-        jog.show_axis_a_controls = self._show_axis_a_checkbox.isChecked()
-        jog.show_axis_b_controls = self._show_axis_b_checkbox.isChecked()
-        jog.manual_axis_controls_enabled = (
-            self._manual_axis_controls_checkbox.isChecked()
-        )
         settings.jog = jog
 
 
@@ -870,13 +848,13 @@ class NeedleSettingsWidget(QWidget):
         layout = QFormLayout(self)
         layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
-        self._safety_zone_spin = QDoubleSpinBox(self)
-        self._safety_zone_spin.setDecimals(4)
-        self._safety_zone_spin.setRange(0.0, 10.0)
-        self._safety_zone_spin.setSingleStep(0.001)
-        self._safety_zone_spin.setSuffix(" mm")
-        self._safety_zone_spin.setValue(calibration_settings.safety_zone_mm)
-        layout.addRow(QLabel("Safety zone", self), self._safety_zone_spin)
+        self._contact_zone_spin = QDoubleSpinBox(self)
+        self._contact_zone_spin.setDecimals(3)
+        self._contact_zone_spin.setRange(0.0, 10.0)
+        self._contact_zone_spin.setSingleStep(0.01)
+        self._contact_zone_spin.setSuffix(" mm")
+        self._contact_zone_spin.setValue(calibration_settings.contact_zone_mm)
+        layout.addRow(QLabel("Needle contact zone", self), self._contact_zone_spin)
 
         self._chip_contact_configured_checkbox = QCheckBox("Configured", self)
         self._chip_contact_configured_checkbox.setChecked(
@@ -919,7 +897,7 @@ class NeedleSettingsWidget(QWidget):
         """Persist the widget state into the provided settings object."""
 
         needle_settings = settings.needle_calibration.clone()
-        needle_settings.safety_zone_mm = self._safety_zone_spin.value()
+        needle_settings.contact_zone_mm = self._contact_zone_spin.value()
         chip_position = needle_settings.chip_position
         chip_position.configured = self._chip_contact_configured_checkbox.isChecked()
         if chip_position.configured:

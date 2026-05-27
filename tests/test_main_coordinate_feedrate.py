@@ -33,6 +33,22 @@ class _FakeTimer:
         self.started = True
 
 
+class _FakeButton:
+    def __init__(self) -> None:
+        self.enabled = False
+
+    def setEnabled(self, enabled: bool) -> None:  # noqa: N802 - Qt naming
+        self.enabled = bool(enabled)
+
+
+class _FakeView:
+    def __init__(self) -> None:
+        self.focus_count = 0
+
+    def setFocus(self, *_args, **_kwargs) -> None:  # noqa: N802 - Qt naming
+        self.focus_count += 1
+
+
 class _FakeJoystick:
     def __init__(self, current_feedrate: float) -> None:
         self._current_feedrate = float(current_feedrate)
@@ -49,6 +65,9 @@ class _FakeStageController:
         self.requests: list[tuple[dict[str, float], float | None]] = []
         self.jog_stops = 0
         self.next_absolute_jog_accept = True
+        self.busy = False
+        self.cancelled_tasks: list[str] = []
+        self.cancelled_motions: list[str] = []
 
     def request_absolute_axis_targets_move(
         self,
@@ -76,6 +95,15 @@ class _FakeStageController:
 
     def queue_feed_override_reset(self) -> int:
         return 100
+
+    def is_busy(self) -> bool:
+        return self.busy
+
+    def cancel_active_task(self, reason: str) -> None:
+        self.cancelled_tasks.append(reason)
+
+    def cancel_active_motion(self, reason: str) -> None:
+        self.cancelled_motions.append(reason)
 
 
 def _make_main(current_feedrate: float = 120.0) -> tuple[
@@ -137,6 +165,42 @@ def _make_main(current_feedrate: float = 120.0) -> tuple[
         lambda position: estimates.append(tuple(float(value) for value in position))
     )
     return window, stage_controller, joystick, timer, statuses
+
+
+def _make_cancel_main() -> tuple[Main, _FakeStageController, _FakeButton, list[str]]:
+    window = Main.__new__(Main)
+    stage_controller = _FakeStageController()
+    cancel_button = _FakeButton()
+    statuses: list[str] = []
+
+    window.stage_controller = stage_controller
+    window._stage_coordinate_apply_button = _FakeButton()
+    window._stage_coordinate_cancel_button = cancel_button
+    window._pending_stage_axis_targets = {}
+    window._stage_axis_fields = {}
+    window._stage_axis_return_commits = set()
+    window._stage_axis_base_styles = {}
+    window._coordinate_move_axis = None
+    window._coordinate_move_axes = set()
+    window._route_measurement_runner = None
+    window.surface_map_window = None
+    window._manual_alignment_pick_slot = None
+    window._pending_click_to_move = None
+    window._pending_homing_axes = []
+    window._homing_active_key = None
+    window._pending_alignment_preparation = None
+    window._pending_quick_alignment_rotation = False
+    window.design_navigator_panel = None
+    window.view = _FakeView()
+    window._show_status = (
+        lambda message, _timeout_ms=None: statuses.append(str(message))
+    )
+    window._clear_stage_motion_axes = lambda: None
+    window._clear_planned_move_prediction = lambda *, clear_wait_state: None
+    window._schedule_status_refreshes = lambda _delays: None
+    window._schedule_cancel_state_refresh = lambda: None
+    window._refresh_stage_axis_styles = lambda: None
+    return window, stage_controller, cancel_button, statuses
 
 
 class MainCoordinateFeedrateTest(unittest.TestCase):
@@ -241,6 +305,47 @@ class MainCoordinateFeedrateTest(unittest.TestCase):
                 for item in statuses
             )
         )
+
+    def test_cancel_button_is_enabled_for_generic_busy_stage_task(self) -> None:
+        window, stage_controller, cancel_button, _statuses = _make_cancel_main()
+        stage_controller.busy = True
+
+        Main._update_stage_coordinate_apply_state(window)
+
+        self.assertTrue(cancel_button.enabled)
+
+    def test_cancel_button_cancels_generic_busy_stage_task(self) -> None:
+        window, stage_controller, _cancel_button, statuses = _make_cancel_main()
+        stage_controller.busy = True
+
+        Main._cancel_stage_coordinate_action(window)
+
+        self.assertEqual(
+            stage_controller.cancelled_tasks,
+            ["Operation cancel requested."],
+        )
+        self.assertEqual(stage_controller.cancelled_motions, [])
+        self.assertIn("Cancel requested.", statuses)
+
+    def test_cancel_button_keeps_coordinate_move_on_jog_cancel_path(self) -> None:
+        window, stage_controller, _cancel_button, _statuses = _make_cancel_main()
+        window._coordinate_move_axis = "X"
+        window._coordinate_move_axes = {"X"}
+        window._clear_coordinate_move_tracking = (
+            lambda *, clear_pending, reset_override: setattr(
+                window,
+                "_coordinate_move_axis",
+                None,
+            )
+        )
+
+        Main._cancel_stage_coordinate_action(window)
+
+        self.assertEqual(
+            stage_controller.cancelled_motions,
+            ["Coordinate move cancel requested."],
+        )
+        self.assertEqual(stage_controller.cancelled_tasks, [])
 
 
 if __name__ == "__main__":
