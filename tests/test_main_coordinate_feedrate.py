@@ -52,9 +52,20 @@ class _FakeView:
 class _FakeJoystick:
     def __init__(self, current_feedrate: float) -> None:
         self._current_feedrate = float(current_feedrate)
+        self.common_targets: list[tuple[float, float]] = []
+        self.common_cleared = 0
 
     def current_linear_feedrate(self) -> float:
         return self._current_feedrate
+
+    def set_common_feedrate_target(self, feedrate: float, max_feedrate: float) -> None:
+        self.common_targets.append((float(feedrate), float(max_feedrate)))
+
+    def clear_common_feedrate_target(self) -> None:
+        self.common_cleared += 1
+
+    def clear_temporary_linear_feedrate_bounds(self) -> None:
+        pass
 
 
 class _FakeStageController:
@@ -66,6 +77,7 @@ class _FakeStageController:
         self.jog_stops = 0
         self.next_absolute_jog_accept = True
         self.busy = False
+        self.latest_state = "Idle"
         self.cancelled_tasks: list[str] = []
         self.cancelled_motions: list[str] = []
 
@@ -98,6 +110,12 @@ class _FakeStageController:
 
     def is_busy(self) -> bool:
         return self.busy
+
+    def latest_stage_state(self) -> str:
+        return self.latest_state
+
+    def axis_max_feedrates(self) -> dict[str, float]:
+        return {"X": 100.0, "Y": 150.0, "Z": 80.0, "A": 70.0, "B": 60.0}
 
     def cancel_active_task(self, reason: str) -> None:
         self.cancelled_tasks.append(reason)
@@ -132,6 +150,8 @@ def _make_main(current_feedrate: float = 120.0) -> tuple[
     window._coordinate_move_ends_at = None
     window._coordinate_move_programmed_feedrate = None
     window._coordinate_move_effective_feedrate = None
+    window._coordinate_move_seen_active_state = False
+    window._pending_homing_axes = []
     window._manual_jog_timer = timer
     window._seed_motion_prediction_position = lambda: (
         0.0,
@@ -158,6 +178,7 @@ def _make_main(current_feedrate: float = 120.0) -> tuple[
         window, "_motion_axes", set(axes)
     )
     window._update_stage_coordinate_apply_state = lambda: None
+    window._refresh_stage_axis_styles = lambda: None
     window._show_status = (
         lambda message, _timeout_ms=None: statuses.append(str(message))
     )
@@ -182,6 +203,7 @@ def _make_cancel_main() -> tuple[Main, _FakeStageController, _FakeButton, list[s
     window._stage_axis_base_styles = {}
     window._coordinate_move_axis = None
     window._coordinate_move_axes = set()
+    window._coordinate_move_seen_active_state = False
     window._route_measurement_runner = None
     window.surface_map_window = None
     window._manual_alignment_pick_slot = None
@@ -222,6 +244,21 @@ class MainCoordinateFeedrateTest(unittest.TestCase):
         self.assertEqual(window._coordinate_move_programmed_feedrate, 120.0)
         self.assertEqual(window._coordinate_move_effective_feedrate, 120.0)
         self.assertTrue(timer.started)
+        self.assertEqual(_joystick.common_targets, [(120.0, 150.0)])
+
+    def test_single_axis_coordinate_move_does_not_show_common_feedrate(self) -> None:
+        window, _stage_controller, joystick, _timer, _statuses = _make_main(120.0)
+
+        accepted = Main._start_coordinate_targets_move(
+            window,
+            {"X": (5.0, 5.0)},
+            feedrate_mm_min=120.0,
+            source_label="coordinate fields",
+        )
+
+        self.assertTrue(accepted)
+        self.assertEqual(joystick.common_targets, [])
+        self.assertEqual(joystick.common_cleared, 1)
 
     def test_coordinate_move_feedrate_change_reissues_absolute_jog(self) -> None:
         window, stage_controller, _joystick, _timer, statuses = _make_main(120.0)
@@ -314,6 +351,14 @@ class MainCoordinateFeedrateTest(unittest.TestCase):
 
         self.assertTrue(cancel_button.enabled)
 
+    def test_cancel_button_is_enabled_for_reported_controller_motion(self) -> None:
+        window, stage_controller, cancel_button, _statuses = _make_cancel_main()
+        stage_controller.latest_state = "Jog"
+
+        Main._update_stage_coordinate_apply_state(window)
+
+        self.assertTrue(cancel_button.enabled)
+
     def test_cancel_button_cancels_generic_busy_stage_task(self) -> None:
         window, stage_controller, _cancel_button, statuses = _make_cancel_main()
         stage_controller.busy = True
@@ -346,6 +391,51 @@ class MainCoordinateFeedrateTest(unittest.TestCase):
             ["Coordinate move cancel requested."],
         )
         self.assertEqual(stage_controller.cancelled_tasks, [])
+
+    def test_cancel_button_cancels_reported_controller_motion(self) -> None:
+        window, stage_controller, _cancel_button, statuses = _make_cancel_main()
+        stage_controller.latest_state = "Jog"
+
+        Main._cancel_stage_coordinate_action(window)
+
+        self.assertEqual(
+            stage_controller.cancelled_motions,
+            ["Motion cancel requested."],
+        )
+        self.assertEqual(stage_controller.cancelled_tasks, [])
+        self.assertIn("Cancel requested.", statuses)
+
+    def test_idle_status_before_motion_does_not_clear_coordinate_tracking(self) -> None:
+        window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
+        Main._start_coordinate_targets_move(
+            window,
+            {"X": (5.0, 5.0), "Y": (-2.0, -2.0)},
+            feedrate_mm_min=120.0,
+            source_label="coordinate fields",
+        )
+        stage_controller.latest_state = "Idle"
+        window._coordinate_move_started_at = None
+
+        Main._finish_coordinate_move_if_idle(window, (0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+
+        self.assertEqual(window._coordinate_move_axis, "X")
+        self.assertEqual(window._coordinate_move_axes, {"X", "Y"})
+
+    def test_idle_status_after_motion_clears_coordinate_tracking(self) -> None:
+        window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
+        Main._start_coordinate_targets_move(
+            window,
+            {"X": (5.0, 5.0), "Y": (-2.0, -2.0)},
+            feedrate_mm_min=120.0,
+            source_label="coordinate fields",
+        )
+        stage_controller.latest_state = "Idle"
+        window._coordinate_move_started_at = None
+        window._coordinate_move_seen_active_state = True
+
+        Main._finish_coordinate_move_if_idle(window, (5.0, -2.0, 0.0, 0.0, 0.0, 0.0))
+
+        self.assertIsNone(window._coordinate_move_axis)
 
 
 if __name__ == "__main__":

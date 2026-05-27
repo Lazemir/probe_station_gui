@@ -90,12 +90,12 @@
     "manual_axis": "A",
     "manual_axis_distance_mm": 1.0,
     "manual_axis_mode": "G91",
-    "manual_axis_feedrate_mm_min": 0.1,
-    "focus_feedrate_mm_min": 0.1,
-    "focus_step_feedrate_mm_min": 0.1,
-    "needles_step_feedrate_mm_min": 0.1,
-    "turntable_feedrate_mm_min": 0.1,
-    "turntable_step_feedrate_mm_min": 0.1
+    "manual_axis_feedrate_mm_min": 1.0,
+    "focus_feedrate_mm_min": 1.0,
+    "focus_step_feedrate_mm_min": 1.0,
+    "needles_step_feedrate_mm_min": 1.0,
+    "turntable_feedrate_mm_min": 1.0,
+    "turntable_step_feedrate_mm_min": 1.0
   },
   "needle_calibration": {
     "meter_type": "gwinstek_lcr_76200",
@@ -123,7 +123,7 @@
     "alc_enabled": false,
     "short_threshold_ohm": 10.0,
     "poll_interval_ms": 250,
-    "feedrate_mm_min": 0.1,
+    "feedrate_mm_min": 1.0,
     "contact_zone_mm": 0.1,
     "raise_position_mm": 0.0,
     "raise_position_configured": false,
@@ -245,7 +245,6 @@
   "feedrates": {
     "linear": {
       "presets": [
-        0.1,
         1.0,
         3.0,
         10.0,
@@ -253,11 +252,10 @@
         100.0,
         300.0
       ],
-      "default": 0.1
+      "default": 1.0
     },
     "rotary": {
       "presets": [
-        0.1,
         1.0,
         3.0,
         10.0,
@@ -265,7 +263,7 @@
         90.0,
         360.0
       ],
-      "default": 0.1
+      "default": 1.0
     }
   }
 }

@@ -293,7 +293,7 @@ class ApiSettingsWidget(QWidget):
         self._feedrate_spin = QDoubleSpinBox(self)
         self._feedrate_spin.setLocale(QLocale.c())
         self._feedrate_spin.setDecimals(1)
-        self._feedrate_spin.setRange(0.1, 5000.0)
+        self._feedrate_spin.setRange(1.0, 5000.0)
         self._feedrate_spin.setSingleStep(10.0)
         self._feedrate_spin.setSuffix(" mm/min")
         self._feedrate_spin.setValue(float(api_settings.default_feedrate_mm_min))
@@ -360,8 +360,8 @@ class FeedrateGroupEditor(QWidget):
 
         input_row = QHBoxLayout()
         self._value_edit = QLineEdit(self)
-        self._value_edit.setPlaceholderText("Enter feed rate (e.g. 0.5)")
-        validator = QDoubleValidator(0.000001, 1000000.0, 6, self)
+        self._value_edit.setPlaceholderText("Enter feed rate (e.g. 1)")
+        validator = QDoubleValidator(1.0, 1000000.0, 6, self)
         validator.setNotation(QDoubleValidator.StandardNotation)
         self._value_edit.setValidator(validator)
         input_row.addWidget(self._value_edit)
@@ -448,7 +448,7 @@ class FeedrateGroupEditor(QWidget):
             value = float(text)
         except ValueError:
             return
-        if value <= 0:
+        if value < 1.0:
             return
         if any(math.isclose(value, existing, rel_tol=1e-9, abs_tol=1e-9) for existing in self._presets):
             return
@@ -484,7 +484,7 @@ class FeedrateGroupEditor(QWidget):
 class FeedrateSettingsWidget(QWidget):
     """Tab that lets users manage linear feed rates."""
 
-    DEFAULT_PRESETS = (0.01, 0.1, 1.0, 10.0, 100.0)
+    DEFAULT_PRESETS = (1.0, 3.0, 10.0, 30.0, 100.0, 300.0)
     DEFAULT_VALUE = 1.0
 
     def __init__(self, feedrates: FeedrateSettings, parent: QWidget | None = None) -> None:

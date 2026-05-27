@@ -159,15 +159,50 @@ class _ArgsSignalRecorder:
 class _FakeSpin:
     def __init__(self) -> None:
         self._value = 0.0
+        self.range: tuple[float, float] | None = None
 
     def blockSignals(self, _blocked: bool) -> None:  # noqa: N802 - Qt API style
         pass
+
+    def setRange(self, minimum: float, maximum: float) -> None:  # noqa: N802 - Qt API style
+        self.range = (float(minimum), float(maximum))
 
     def setValue(self, value: float) -> None:  # noqa: N802 - Qt API style
         self._value = float(value)
 
     def value(self) -> float:
         return float(self._value)
+
+
+class _FakeSlider(_FakeSpin):
+    def __init__(self) -> None:
+        super().__init__()
+        self._minimum = 0
+        self._maximum = 0
+        self.temporary_bounds: tuple[int | None, int | None] | None = None
+
+    def setRange(self, minimum: int, maximum: int) -> None:  # noqa: N802 - Qt API style
+        self._minimum = int(minimum)
+        self._maximum = int(maximum)
+
+    def minimum(self) -> int:
+        return self._minimum
+
+    def maximum(self) -> int:
+        return self._maximum
+
+    def set_temporary_bounds(  # noqa: N802 - Qt API style
+        self, minimum: int | None, maximum: int | None
+    ) -> None:
+        self.temporary_bounds = (minimum, maximum)
+
+
+class _FakeLabel:
+    def __init__(self) -> None:
+        self.text = ""
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt API style
+        self.text = str(text)
 
 
 class _FakeButton:
@@ -211,6 +246,37 @@ class _FakeTimer:
         self.active = False
 
 
+class _FakeCombo:
+    def __init__(self) -> None:
+        self.items: list[tuple[str, str]] = []
+        self.index = -1
+
+    def addItem(self, label: str, data: str) -> None:  # noqa: N802 - Qt API style
+        self.items.append((str(label), str(data)))
+        if self.index < 0:
+            self.index = 0
+
+    def findData(self, data: str) -> int:  # noqa: N802 - Qt API style
+        for index, (_label, item_data) in enumerate(self.items):
+            if item_data == data:
+                return index
+        return -1
+
+    def currentIndex(self) -> int:  # noqa: N802 - Qt API style
+        return self.index
+
+    def setCurrentIndex(self, index: int) -> None:  # noqa: N802 - Qt API style
+        self.index = int(index)
+
+    def blockSignals(self, _blocked: bool) -> None:  # noqa: N802 - Qt API style
+        pass
+
+    def removeItem(self, index: int) -> None:  # noqa: N802 - Qt API style
+        self.items.pop(int(index))
+        if self.index >= len(self.items):
+            self.index = len(self.items) - 1
+
+
 class JoystickFeedrateTest(unittest.TestCase):
     def test_feed_target_labels_do_not_duplicate_selected_mode(self) -> None:
         labels = [
@@ -220,6 +286,58 @@ class JoystickFeedrateTest(unittest.TestCase):
 
         self.assertEqual(labels, ["XY", "Z Focus", "A Needles", "B Turntable"])
         self.assertFalse(any("Jog" in label or "Step" in label for label in labels))
+
+    def test_common_feed_target_is_not_in_normal_menu_order(self) -> None:
+        self.assertNotIn(
+            JoystickWindow.FEED_TARGET_COMMON,
+            JoystickWindow.FEED_TARGET_ORDER,
+        )
+        self.assertEqual(
+            JoystickWindow.FEED_TARGET_LABELS[JoystickWindow.FEED_TARGET_COMMON],
+            "Common",
+        )
+
+    def test_wheel_changes_feedrate_before_axis_limits_are_known(self) -> None:
+        widget = JoystickWindow.__new__(JoystickWindow)
+        widget._linear_feedrate_value = JoystickWindow.MIN_LINEAR_FEEDRATE
+        widget._linear_default = JoystickWindow.MIN_LINEAR_FEEDRATE
+        widget._linear_presets = [1.0, 3.0, 10.0, 30.0, 100.0, 300.0]
+        widget._linear_feedrate_bounds = None
+        widget._axis_feedrate_limits = {}
+        widget._active_feedrate_target = JoystickWindow.FEED_TARGET_XY
+        widget._control_mode = JoystickWindow.MODE_JOG
+        widget._feedrate_values = {
+            JoystickWindow._feedrate_key(
+                widget,
+                JoystickWindow.FEED_TARGET_XY,
+                JoystickWindow.MODE_JOG,
+            ): JoystickWindow.MIN_LINEAR_FEEDRATE
+        }
+        widget.linear_feedrate_slider = _FakeSlider()
+        widget.linear_feedrate_spin = _FakeSpin()
+        widget.linear_feedrate_target_label = _FakeLabel()
+        widget.needle_feedrate_spin = _FakeSpin()
+        widget._needle_feedrate_value = JoystickWindow.MIN_LINEAR_FEEDRATE
+        widget._active_axes = None
+        widget._last_feedrate_wheel_at = 0.0
+        widget.linear_feedrate_changed = _SignalRecorder()
+        JoystickWindow._update_linear_feedrate_slider_range(widget)
+
+        changed = JoystickWindow._apply_wheel_delta(widget, 120)
+
+        self.assertTrue(changed)
+        self.assertGreater(
+            widget._linear_feedrate_value,
+            JoystickWindow.MIN_LINEAR_FEEDRATE,
+        )
+        self.assertGreater(
+            widget.linear_feedrate_slider.maximum(),
+            widget.linear_feedrate_slider.minimum(),
+        )
+        self.assertEqual(
+            widget.linear_feedrate_changed.values,
+            [widget._linear_feedrate_value],
+        )
 
     def test_manual_axis_settings_do_not_override_linear_feedrate(self) -> None:
         widget = JoystickWindow.__new__(JoystickWindow)
@@ -366,18 +484,24 @@ class JoystickFeedrateTest(unittest.TestCase):
         self.assertEqual(widget.needles_raise_requested.values, [(77.5,)])
         self.assertEqual(animation_calls, [])
 
-    def test_lower_double_click_save_emits_lower_contact_coordinate(self) -> None:
+    def test_lift_click_only_emits_request(self) -> None:
         widget = JoystickWindow.__new__(JoystickWindow)
-        widget._needle_contact_coordinate_edit = None
-        widget._needle_contact_coordinate_button = None
-        widget.needle_contact_coordinate_save_requested = _ArgsSignalRecorder()
-        widget._current_needle_contact_a_coordinate = lambda: -1.234
+        widget._needle_feedrate_value = 66.5
+        widget.needles_lift_requested = _ArgsSignalRecorder()
+
+        JoystickWindow._lift_needles(widget)
+
+        self.assertEqual(widget.needles_lift_requested.values, [(66.5,)])
+
+    def test_lower_right_click_save_requests_current_contact_save(self) -> None:
+        widget = JoystickWindow.__new__(JoystickWindow)
+        widget.needle_current_lower_contact_save_requested = _ArgsSignalRecorder()
 
         JoystickWindow._save_lower_needle_contact_from_current_position(widget)
 
         self.assertEqual(
-            widget.needle_contact_coordinate_save_requested.values,
-            [("lower", -1.234)],
+            widget.needle_current_lower_contact_save_requested.values,
+            [()],
         )
 
     def test_stop_without_active_jog_does_not_send_cancel(self) -> None:
@@ -398,6 +522,7 @@ class JoystickFeedrateTest(unittest.TestCase):
     def test_known_down_state_marks_lower_button_blue(self) -> None:
         widget = JoystickWindow.__new__(JoystickWindow)
         widget.needles_raise_button = _FakeButton("Raise")
+        widget.needles_lift_button = _FakeButton("Lift")
         widget.needles_lower_button = _FakeButton("Lower")
         widget._needle_targets = {}
         widget._needle_blink_dimmed = False
@@ -407,11 +532,29 @@ class JoystickFeedrateTest(unittest.TestCase):
         JoystickWindow._apply_needle_button_styles(widget)
 
         self.assertIn("#f0b429", widget.needles_raise_button.styles[-1])
+        self.assertIn("#f0b429", widget.needles_lift_button.styles[-1])
         self.assertIn("#1565c0", widget.needles_lower_button.styles[-1])
+
+    def test_lift_state_marks_lift_button_blue(self) -> None:
+        widget = JoystickWindow.__new__(JoystickWindow)
+        widget.needles_raise_button = _FakeButton("Raise")
+        widget.needles_lift_button = _FakeButton("Lift")
+        widget.needles_lower_button = _FakeButton("Lower")
+        widget._needle_targets = {}
+        widget._needle_blink_dimmed = False
+        widget._needles_up = False
+        widget._needles_known = False
+
+        JoystickWindow.set_needles_zone(widget, "lift")
+
+        self.assertIn("#f0b429", widget.needles_raise_button.styles[-1])
+        self.assertIn("#1565c0", widget.needles_lift_button.styles[-1])
+        self.assertIn("#f0b429", widget.needles_lower_button.styles[-1])
 
     def test_needle_action_blinks_yellow_without_spinner_overlay(self) -> None:
         widget = JoystickWindow.__new__(JoystickWindow)
         widget.needles_raise_button = _FakeButton("Raise")
+        widget.needles_lift_button = _FakeButton("Lift")
         widget.needles_lower_button = _FakeButton("Lower")
         widget._needle_targets = {}
         widget._needle_text = {}
@@ -428,6 +571,7 @@ class JoystickFeedrateTest(unittest.TestCase):
         )
         self.assertTrue(widget._needle_animation_timer.isActive())
         self.assertFalse(widget.needles_raise_button.enabled)
+        self.assertFalse(widget.needles_lift_button.enabled)
         self.assertFalse(widget.needles_lower_button.enabled)
         self.assertIn("#f0b429", widget.needles_raise_button.styles[-1])
 

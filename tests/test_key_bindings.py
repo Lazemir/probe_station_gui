@@ -249,6 +249,43 @@ class JogSettingsTest(unittest.TestCase):
         self.assertEqual(parsed.turntable_feedrate_mm_min, 222.0)
         self.assertEqual(parsed.turntable_step_feedrate_mm_min, 111.0)
 
+    def test_parse_jog_clamps_legacy_sub_one_feedrates(self) -> None:
+        manager = object.__new__(SettingsManager)
+
+        parsed = manager._parse_jog(
+            {
+                "manual_axis_feedrate_mm_min": "0.1",
+                "focus_feedrate_mm_min": "0.1",
+                "focus_step_feedrate_mm_min": "0.1",
+                "needles_step_feedrate_mm_min": "0.1",
+                "turntable_feedrate_mm_min": "0.1",
+                "turntable_step_feedrate_mm_min": "0.1",
+            }
+        )
+
+        self.assertEqual(parsed.manual_axis_feedrate_mm_min, 1.0)
+        self.assertEqual(parsed.focus_feedrate_mm_min, 1.0)
+        self.assertEqual(parsed.focus_step_feedrate_mm_min, 1.0)
+        self.assertEqual(parsed.needles_step_feedrate_mm_min, 1.0)
+        self.assertEqual(parsed.turntable_feedrate_mm_min, 1.0)
+        self.assertEqual(parsed.turntable_step_feedrate_mm_min, 1.0)
+
+    def test_parse_feedrates_clamps_legacy_sub_one_values(self) -> None:
+        manager = object.__new__(SettingsManager)
+
+        parsed = manager._parse_feedrates(
+            {
+                "linear": {"presets": [0.1, 1.0, 3.0], "default": 0.1},
+                "rotary": {"presets": [0.1, 1.0, 90.0], "default": 0.1},
+            },
+            legacy_presets=[],
+        )
+
+        self.assertEqual(parsed.linear.presets, [1.0, 3.0])
+        self.assertEqual(parsed.linear.default, 1.0)
+        self.assertEqual(parsed.rotary.presets, [1.0, 90.0])
+        self.assertEqual(parsed.rotary.default, 1.0)
+
     def test_parse_fluidnc_axis_max_feedrates(self) -> None:
         rates = settings_manager.parse_fluidnc_axis_max_feedrates(
             [

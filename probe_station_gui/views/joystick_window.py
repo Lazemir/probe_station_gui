@@ -267,7 +267,9 @@ class JoystickWindow(QWidget):
     home_axis_requested = Signal(str)
     home_all_requested = Signal()
     needles_raise_requested = Signal(float)
+    needles_lift_requested = Signal(float)
     needles_lower_requested = Signal(float)
+    needle_current_lower_contact_save_requested = Signal()
     needle_contact_coordinate_save_requested = Signal(str, float)
     manual_axis_move_requested = Signal(str, float, str, float)
     manual_axis_settings_changed = Signal(str, float, str, float)
@@ -280,21 +282,21 @@ class JoystickWindow(QWidget):
     needle_step_feedrate_changed = Signal(float)
     turntable_feedrate_changed = Signal(float)
     turntable_step_feedrate_changed = Signal(float)
+    common_feedrate_changed = Signal(float)
     zero_b_requested = Signal()
 
     DEFAULT_JOG_DISTANCE_MM = 25.0
     DEFAULT_ROTATE_DISTANCE_DEG = 5.0
     DEFAULT_MANUAL_AXIS_DISTANCE_MM = 1.0
     DEFAULT_MANUAL_AXIS_MODE = "G91"
-    DEFAULT_MANUAL_AXIS_FEEDRATE_MM_MIN = 0.1
-    DEFAULT_NEEDLE_FEEDRATE_MM_MIN = 0.1
-    DEFAULT_NEEDLE_STEP_FEEDRATE_MM_MIN = 0.1
-    DEFAULT_FOCUS_FEEDRATE_MM_MIN = 0.1
-    DEFAULT_FOCUS_STEP_FEEDRATE_MM_MIN = 0.1
-    DEFAULT_TURNTABLE_FEEDRATE_MM_MIN = 0.1
-    DEFAULT_TURNTABLE_STEP_FEEDRATE_MM_MIN = 0.1
+    DEFAULT_MANUAL_AXIS_FEEDRATE_MM_MIN = 1.0
+    DEFAULT_NEEDLE_FEEDRATE_MM_MIN = 1.0
+    DEFAULT_NEEDLE_STEP_FEEDRATE_MM_MIN = 1.0
+    DEFAULT_FOCUS_FEEDRATE_MM_MIN = 1.0
+    DEFAULT_FOCUS_STEP_FEEDRATE_MM_MIN = 1.0
+    DEFAULT_TURNTABLE_FEEDRATE_MM_MIN = 1.0
+    DEFAULT_TURNTABLE_STEP_FEEDRATE_MM_MIN = 1.0
     DEFAULT_LINEAR_FEEDRATE_PRESETS: tuple[float, ...] = (
-        0.1,
         1.0,
         3.0,
         10.0,
@@ -314,7 +316,7 @@ class JoystickWindow(QWidget):
     LINEAR_AXES = {"X", "Y", "Z"}
     HOMING_AXES = ("X", "Y", "Z", "A")
     LINEAR_FEEDRATE_SCALE = 10
-    MIN_LINEAR_FEEDRATE = 0.1
+    MIN_LINEAR_FEEDRATE = 1.0
     MAX_LINEAR_FEEDRATE = 1000.0
     MODE_JOG = "jog"
     MODE_STEP = "step"
@@ -322,6 +324,7 @@ class JoystickWindow(QWidget):
     FEED_TARGET_FOCUS = "focus"
     FEED_TARGET_NEEDLES = "needles"
     FEED_TARGET_TURNTABLE = "turntable"
+    FEED_TARGET_COMMON = "common"
     FEED_TARGET_ORDER = (
         FEED_TARGET_XY,
         FEED_TARGET_FOCUS,
@@ -333,6 +336,7 @@ class JoystickWindow(QWidget):
         FEED_TARGET_FOCUS: "Z Focus",
         FEED_TARGET_NEEDLES: "A Needles",
         FEED_TARGET_TURNTABLE: "B Turntable",
+        FEED_TARGET_COMMON: "Common",
     }
     HOMED_STYLE = (
         "QPushButton { padding: 2px 6px; border-radius: 4px; background: #1565c0; color: #f5f5f5; }"
@@ -378,7 +382,7 @@ class JoystickWindow(QWidget):
     )
     ALL_HOMED_STYLE = HOMED_STYLE
     NEEDLES_UP_STYLE = (
-        "QPushButton { padding: 2px 6px; border-radius: 4px; background: #1565c0; color: #f5f5f5; }"
+        "QPushButton { padding: 2px 6px; border: 1px solid transparent; border-radius: 4px; background: #1565c0; color: #f5f5f5; }"
         "QPushButton:pressed { background: #0d47a1; }"
         "QPushButton:checked { background: #1565c0; }"
         "QPushButton[homing=\"true\"] { background: #e6e6e6; color: #9e9e9e; border: 1px solid #cfcfcf; }"
@@ -386,7 +390,7 @@ class JoystickWindow(QWidget):
         "QPushButton:disabled { color: #9e9e9e; }"
     )
     NEEDLES_DOWN_STYLE = (
-        "QPushButton { padding: 2px 6px; border-radius: 4px; background: #f0b429; color: #1f1f1f; }"
+        "QPushButton { padding: 2px 6px; border: 1px solid transparent; border-radius: 4px; background: #f0b429; color: #1f1f1f; }"
         "QPushButton:pressed { background: #d89b19; }"
         "QPushButton:checked { background: #f0b429; }"
         "QPushButton[homing=\"true\"] { background: #e6e6e6; color: #9e9e9e; border: 1px solid #cfcfcf; }"
@@ -394,7 +398,12 @@ class JoystickWindow(QWidget):
         "QPushButton:disabled { color: #9e9e9e; }"
     )
     NEEDLES_ACTIVE_STYLE = NEEDLES_DOWN_STYLE
-    NEEDLES_ACTIVE_DIM_STYLE = HOMING_PENDING_STYLE
+    NEEDLES_ACTIVE_DIM_STYLE = (
+        "QPushButton { padding: 2px 6px; border: 1px solid transparent; border-radius: 4px; background: #d8bd78; color: #1f1f1f; }"
+        "QPushButton:pressed { background: #c8ad68; }"
+        "QPushButton:checked { background: #d8bd78; }"
+        "QPushButton:disabled { color: #6f6f6f; }"
+    )
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -430,6 +439,8 @@ class JoystickWindow(QWidget):
         self._turntable_step_feedrate_value: float = (
             self.DEFAULT_TURNTABLE_STEP_FEEDRATE_MM_MIN
         )
+        self._common_feedrate_value: float = self._linear_default
+        self._common_feedrate_max: float | None = None
         self._motion_safety_disabled = False
         self._applying_jog_settings = False
         self._control_mode = self.MODE_JOG
@@ -476,17 +487,13 @@ class JoystickWindow(QWidget):
         self._axis_a_ready = False
         self._needles_known = False
         self._needles_up = False
+        self._needles_zone: str | None = None
         self._needle_targets: dict[str, QPushButton] = {}
         self._needle_text: dict[str, str] = {}
         self._needle_contact_coordinate_edit: _NeedleContactCoordinateEdit | None = None
         self._needle_contact_coordinate_button: QPushButton | None = None
         self._saved_needle_contact_a_coordinates: dict[str, float] = {}
         self._needle_blink_dimmed = False
-        self._lower_click_suppress_until = 0.0
-        self._lower_click_timer = QTimer(self)
-        self._lower_click_timer.setSingleShot(True)
-        self._lower_click_timer.setInterval(250)
-        self._lower_click_timer.timeout.connect(self._lower_needles)
         self._homing_animation_timer = QTimer(self)
         self._homing_animation_timer.setInterval(250)
         self._homing_animation_timer.timeout.connect(self._advance_homing_spinner)
@@ -682,23 +689,55 @@ class JoystickWindow(QWidget):
         self.needle_feedrate_spin.setFixedWidth(96)
         self.needle_feedrate_spin.setToolTip("Needle A feedrate")
         self.needles_raise_button = QPushButton("Raise", self)
+        self.needles_lift_button = QPushButton("Lift", self)
         self.needles_lower_button = QPushButton("Lower", self)
         self.needles_raise_button.setCheckable(True)
+        self.needles_lift_button.setCheckable(True)
         self.needles_lower_button.setCheckable(True)
         self.needles_raise_button.setToolTip(
             "Raise needles to the top A position."
         )
+        self.needles_lift_button.setToolTip(
+            "Lift needles to the upper edge of the contact zone."
+        )
         self.needles_lower_button.setToolTip(
-            "Lower needles to the saved contact A0 position. Double-click to save current A as lower target. Right-click to edit contact A."
+            "Lower needles to the saved contact A0 position. Right-click to save current A as the contact position."
+        )
+        needle_button_width = max(
+            self.needles_raise_button.sizeHint().width(),
+            self.needles_lift_button.sizeHint().width(),
+            self.needles_lower_button.sizeHint().width(),
+        ) + 2
+        needle_button_height = max(
+            self.needles_raise_button.sizeHint().height(),
+            self.needles_lift_button.sizeHint().height(),
+            self.needles_lower_button.sizeHint().height(),
+        ) + 2
+        self.needles_raise_button.setFixedSize(
+            needle_button_width,
+            needle_button_height,
+        )
+        self.needles_lift_button.setFixedSize(
+            needle_button_width,
+            needle_button_height,
+        )
+        self.needles_lower_button.setFixedSize(
+            needle_button_width,
+            needle_button_height,
         )
         self.needles_raise_button.clicked.connect(self._raise_needles)
-        self.needles_lower_button.clicked.connect(self._schedule_lower_needles)
-        self.needles_lower_button.installEventFilter(self)
+        self.needles_lift_button.clicked.connect(self._lift_needles)
+        self.needles_lower_button.clicked.connect(self._lower_needles)
+        self.needles_lower_button.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.needles_lower_button.customContextMenuRequested.connect(
+            lambda _pos: self._save_lower_needle_contact_from_current_position()
+        )
         self.needle_feedrate_spin.valueChanged.connect(
             self._on_needle_feedrate_changed
         )
         needles_layout.addWidget(self.needle_feedrate_spin)
         needles_layout.addWidget(self.needles_raise_button)
+        needles_layout.addWidget(self.needles_lift_button)
         needles_layout.addWidget(self.needles_lower_button)
         root_layout.addLayout(needles_layout)
 
@@ -776,6 +815,8 @@ class JoystickWindow(QWidget):
         key = self._feedrate_key(target, mode_key)
         if key in self._feedrate_values:
             return self._feedrate_values[key]
+        if target == self.FEED_TARGET_COMMON:
+            return self._common_feedrate_value
         if target == self.FEED_TARGET_XY:
             return (
                 self._manual_axis_feedrate_mm_min
@@ -845,7 +886,24 @@ class JoystickWindow(QWidget):
             limit = axis_limit("B")
             if limit is not None:
                 return limit
-        return self.MIN_LINEAR_FEEDRATE
+        elif target == self.FEED_TARGET_COMMON:
+            if self._common_feedrate_max is not None:
+                try:
+                    value = float(self._common_feedrate_max)
+                except (TypeError, ValueError):
+                    value = self.MIN_LINEAR_FEEDRATE
+                if math.isfinite(value) and value > 0:
+                    return value
+        fallback_values = [
+            self.MIN_LINEAR_FEEDRATE,
+            float(self._linear_feedrate_value),
+            float(self._linear_default),
+            *(float(value) for value in self._linear_presets),
+        ]
+        return min(
+            self.MAX_LINEAR_FEEDRATE,
+            max(value for value in fallback_values if math.isfinite(value)),
+        )
 
     def _feedrate_limit_known_for_target(self, target: str) -> bool:
         if target == self.FEED_TARGET_XY:
@@ -856,6 +914,8 @@ class JoystickWindow(QWidget):
             return "A" in self._axis_feedrate_limits
         if target == self.FEED_TARGET_TURNTABLE:
             return "B" in self._axis_feedrate_limits
+        if target == self.FEED_TARGET_COMMON:
+            return self._common_feedrate_max is not None
         return False
 
     def _bounded_feedrate_setting(self, target: str, value: float) -> float:
@@ -998,6 +1058,10 @@ class JoystickWindow(QWidget):
                 self._turntable_feedrate_value = value
                 if emit_changed:
                     self.turntable_feedrate_changed.emit(value)
+        elif target == self.FEED_TARGET_COMMON:
+            self._common_feedrate_value = value
+            if emit_changed:
+                self.common_feedrate_changed.emit(value)
 
     def _set_active_feedrate_target(self, target: str) -> None:
         if target not in self.FEED_TARGET_LABELS:
@@ -1014,6 +1078,54 @@ class JoystickWindow(QWidget):
             self._feedrate_value_for_target(target),
             reissue_if_active=False,
         )
+
+    def set_common_feedrate_target(
+        self,
+        feedrate: float,
+        max_feedrate: float,
+    ) -> None:
+        try:
+            feedrate_value = max(self.MIN_LINEAR_FEEDRATE, float(feedrate))
+        except (TypeError, ValueError):
+            feedrate_value = self.MIN_LINEAR_FEEDRATE
+        try:
+            max_value = max(self.MIN_LINEAR_FEEDRATE, float(max_feedrate))
+        except (TypeError, ValueError):
+            max_value = feedrate_value
+        self._common_feedrate_max = max(max_value, feedrate_value)
+        self._feedrate_values[
+            self._feedrate_key(self.FEED_TARGET_COMMON, self.MODE_JOG)
+        ] = min(self._common_feedrate_max, feedrate_value)
+        self._ensure_common_feedrate_combo_item()
+        self._set_active_feedrate_target(self.FEED_TARGET_COMMON)
+
+    def clear_common_feedrate_target(self) -> None:
+        if self._active_feedrate_target == self.FEED_TARGET_COMMON:
+            self._set_active_feedrate_target(self.FEED_TARGET_XY)
+        self._common_feedrate_max = None
+        self._feedrate_values.pop(
+            self._feedrate_key(self.FEED_TARGET_COMMON, self.MODE_JOG),
+            None,
+        )
+        self._remove_common_feedrate_combo_item()
+        self._update_linear_feedrate_slider_range()
+
+    def _ensure_common_feedrate_combo_item(self) -> None:
+        if not hasattr(self, "feedrate_target_combo"):
+            return
+        if self.feedrate_target_combo.findData(self.FEED_TARGET_COMMON) >= 0:
+            return
+        self.feedrate_target_combo.addItem(
+            self.FEED_TARGET_LABELS[self.FEED_TARGET_COMMON],
+            self.FEED_TARGET_COMMON,
+        )
+
+    def _remove_common_feedrate_combo_item(self) -> None:
+        if not hasattr(self, "feedrate_target_combo"):
+            return
+        index = self.feedrate_target_combo.findData(self.FEED_TARGET_COMMON)
+        if index >= 0:
+            self.feedrate_target_combo.removeItem(index)
 
     def set_temporary_linear_feedrate_bounds(
         self, min_feedrate: float, max_feedrate: float
@@ -1109,6 +1221,7 @@ class JoystickWindow(QWidget):
         self._feedrate_values[
             self._feedrate_key(self.FEED_TARGET_XY, self.MODE_JOG)
         ] = self._linear_default
+        self._update_linear_feedrate_slider_range()
         if (
             self._active_feedrate_target == self.FEED_TARGET_XY
             and self._control_mode == self.MODE_JOG
@@ -1362,6 +1475,7 @@ class JoystickWindow(QWidget):
             self.home_all_button,
             self.needle_feedrate_spin,
             self.needles_raise_button,
+            self.needles_lift_button,
             self.needles_lower_button,
             self.unlock_button,
             self.reset_button,
@@ -1400,20 +1514,37 @@ class JoystickWindow(QWidget):
         self._update_enabled_state()
 
     def set_needles_state(self, raised: bool, known: bool) -> None:
-        self._needles_up = raised
-        self._needles_known = known
+        self._needles_up = bool(raised)
+        self._needles_known = bool(known)
+        if not self._needles_known:
+            self._needles_zone = None
+        elif self._needles_up:
+            self._needles_zone = "raise"
+        elif getattr(self, "_needles_zone", None) not in {"lift", "lower"}:
+            self._needles_zone = "lower"
+        self._apply_needle_button_styles()
+
+    def set_needles_zone(self, zone: str) -> None:
+        zone_key = str(zone).strip().lower()
+        self._needles_zone = (
+            zone_key if zone_key in {"raise", "lift", "lower"} else None
+        )
+        self._needles_known = self._needles_zone is not None
+        self._needles_up = self._needles_zone == "raise"
         self._apply_needle_button_styles()
 
     def _apply_needle_button_styles(self) -> None:
-        if not self._needles_known:
-            self.needles_raise_button.setStyleSheet(self.NEEDLES_DOWN_STYLE)
-            self.needles_lower_button.setStyleSheet(self.NEEDLES_DOWN_STYLE)
-        elif self._needles_up:
-            self.needles_raise_button.setStyleSheet(self.NEEDLES_UP_STYLE)
-            self.needles_lower_button.setStyleSheet(self.NEEDLES_DOWN_STYLE)
-        else:
-            self.needles_raise_button.setStyleSheet(self.NEEDLES_DOWN_STYLE)
-            self.needles_lower_button.setStyleSheet(self.NEEDLES_UP_STYLE)
+        self.needles_raise_button.setStyleSheet(self.NEEDLES_DOWN_STYLE)
+        self.needles_lift_button.setStyleSheet(self.NEEDLES_DOWN_STYLE)
+        self.needles_lower_button.setStyleSheet(self.NEEDLES_DOWN_STYLE)
+        if self._needles_known:
+            zone = getattr(self, "_needles_zone", None)
+            if zone == "raise" or (zone is None and self._needles_up):
+                self.needles_raise_button.setStyleSheet(self.NEEDLES_UP_STYLE)
+            elif zone == "lift":
+                self.needles_lift_button.setStyleSheet(self.NEEDLES_UP_STYLE)
+            else:
+                self.needles_lower_button.setStyleSheet(self.NEEDLES_UP_STYLE)
         active_style = (
             self.NEEDLES_ACTIVE_DIM_STYLE
             if self._needle_blink_dimmed
@@ -1425,12 +1556,16 @@ class JoystickWindow(QWidget):
     def set_needles_action_started(self, action: str) -> None:
         if action == "raise":
             self._start_needle_animation("raise", self.needles_raise_button)
+        elif action == "lift":
+            self._start_needle_animation("lift", self.needles_lift_button)
         elif action == "lower":
             self._start_needle_animation("lower", self.needles_lower_button)
 
     def set_needles_action_finished(self, success: bool, message: str, action: str) -> None:
         if action == "raise":
             self._stop_needle_animation("raise")
+        elif action == "lift":
+            self._stop_needle_animation("lift")
         elif action == "lower":
             self._stop_needle_animation("lower")
         if not success:
@@ -1841,12 +1976,10 @@ class JoystickWindow(QWidget):
             self._set_active_feedrate_target(self.FEED_TARGET_NEEDLES)
         self.needles_raise_requested.emit(self._needle_feedrate_value)
 
-    def _schedule_lower_needles(self) -> None:
-        if time.monotonic() < self._lower_click_suppress_until:
-            return
-        if self._lower_click_timer.isActive():
-            return
-        self._lower_click_timer.start()
+    def _lift_needles(self) -> None:
+        if hasattr(self, "linear_feedrate_slider"):
+            self._set_active_feedrate_target(self.FEED_TARGET_NEEDLES)
+        self.needles_lift_requested.emit(self._needle_feedrate_value)
 
     def _lower_needles(self) -> None:
         if hasattr(self, "linear_feedrate_slider"):
@@ -1854,19 +1987,20 @@ class JoystickWindow(QWidget):
         self.needles_lower_requested.emit(self._needle_feedrate_value)
 
     def _save_lower_needle_contact_from_current_position(self) -> None:
-        display_a = self._current_needle_contact_a_coordinate()
-        if display_a is None:
-            return
-        self._save_needle_contact_coordinate_value("lower", display_a)
+        self.needle_current_lower_contact_save_requested.emit()
 
     def _needle_action_for_key(self, action: str) -> str | None:
         action_key = str(action).strip().lower()
-        if action_key in {"raise", "lower"}:
+        if action_key in {"raise", "lift", "lower"}:
             return action_key
         return None
 
     def _needle_action_for_button(self, button: QPushButton) -> str:
-        return "lower" if button is self.needles_lower_button else "raise"
+        if button is self.needles_lower_button:
+            return "lower"
+        if button is self.needles_lift_button:
+            return "lift"
+        return "raise"
 
     def _show_needle_contact_coordinate_menu(self, pos) -> None:
         sender = self.sender()
@@ -2073,6 +2207,7 @@ class JoystickWindow(QWidget):
         button.setProperty("homing", True)
         button.setChecked(True)
         self.needles_raise_button.setEnabled(False)
+        self.needles_lift_button.setEnabled(False)
         self.needles_lower_button.setEnabled(False)
         self._apply_needle_button_styles()
         if not self._needle_animation_timer.isActive():
@@ -2229,17 +2364,6 @@ class JoystickWindow(QWidget):
         super().closeEvent(event)
 
     def eventFilter(self, obj, event):  # type: ignore[override]
-        mouse_double_click = getattr(QEvent, "MouseButtonDblClick", None)
-        if (
-            mouse_double_click is not None
-            and obj is getattr(self, "needles_lower_button", None)
-            and event.type() == mouse_double_click
-        ):
-            self._lower_click_suppress_until = time.monotonic() + 0.5
-            self._lower_click_timer.stop()
-            self._save_lower_needle_contact_from_current_position()
-            event.accept()
-            return True
         if event.type() in (QEvent.KeyPress, QEvent.KeyRelease, QEvent.ShortcutOverride):
             event_type_name = {
                 QEvent.KeyPress: "KeyPress",

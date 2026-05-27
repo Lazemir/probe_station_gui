@@ -269,7 +269,7 @@ class FeedrateGroup:
     """Collection of presets and a default value for a motion family."""
 
     presets: List[float] = field(default_factory=list)
-    default: float = 0.1
+    default: float = 1.0
 
     def clone(self) -> "FeedrateGroup":
         """Return a deep copy of the feedrate group."""
@@ -334,12 +334,12 @@ class JogSettings:
     manual_axis: str = "A"
     manual_axis_distance_mm: float = 1.0
     manual_axis_mode: str = "G91"
-    manual_axis_feedrate_mm_min: float = 0.1
-    focus_feedrate_mm_min: float = 0.1
-    focus_step_feedrate_mm_min: float = 0.1
-    needles_step_feedrate_mm_min: float = 0.1
-    turntable_feedrate_mm_min: float = 0.1
-    turntable_step_feedrate_mm_min: float = 0.1
+    manual_axis_feedrate_mm_min: float = 1.0
+    focus_feedrate_mm_min: float = 1.0
+    focus_step_feedrate_mm_min: float = 1.0
+    needles_step_feedrate_mm_min: float = 1.0
+    turntable_feedrate_mm_min: float = 1.0
+    turntable_step_feedrate_mm_min: float = 1.0
 
     def clone(self) -> "JogSettings":
         """Return a copy of the jog preferences."""
@@ -456,7 +456,7 @@ class NeedleCalibrationSettings:
     alc_enabled: bool = False
     short_threshold_ohm: float = 10.0
     poll_interval_ms: int = 250
-    feedrate_mm_min: float = 0.1
+    feedrate_mm_min: float = 1.0
     contact_zone_mm: float = 0.1
     raise_position_mm: float = 0.0
     raise_position_configured: bool = False
@@ -883,8 +883,8 @@ class SettingsManager:
     DEFAULT_API_HOST: str = "127.0.0.1"
     DEFAULT_API_PORT: int = 8765
     DEFAULT_API_FEEDRATE_MM_MIN: float = 10.0
+    MIN_FEEDRATE_MM_MIN: float = 1.0
     DEFAULT_LINEAR_FEEDRATE_PRESETS: tuple[float, ...] = (
-        0.1,
         1.0,
         3.0,
         10.0,
@@ -893,7 +893,6 @@ class SettingsManager:
         300.0,
     )
     DEFAULT_ROTARY_FEEDRATE_PRESETS: tuple[float, ...] = (
-        0.1,
         1.0,
         3.0,
         10.0,
@@ -901,7 +900,7 @@ class SettingsManager:
         90.0,
         360.0,
     )
-    DEFAULT_FEEDRATE_DEFAULT: float = 0.1
+    DEFAULT_FEEDRATE_DEFAULT: float = 1.0
     DEFAULT_OSCILLATION_MODE: str = "X"
     DEFAULT_OSCILLATION_AMPLITUDE_MM: float = 0.5
     DEFAULT_OSCILLATION_FEEDRATE_MM_MIN: float = 120.0
@@ -913,12 +912,12 @@ class SettingsManager:
     DEFAULT_MANUAL_AXIS: str = "A"
     DEFAULT_MANUAL_AXIS_DISTANCE_MM: float = 1.0
     DEFAULT_MANUAL_AXIS_MODE: str = "G91"
-    DEFAULT_MANUAL_AXIS_FEEDRATE_MM_MIN: float = 0.1
-    DEFAULT_FOCUS_FEEDRATE_MM_MIN: float = 0.1
-    DEFAULT_FOCUS_STEP_FEEDRATE_MM_MIN: float = 0.1
-    DEFAULT_NEEDLES_STEP_FEEDRATE_MM_MIN: float = 0.1
-    DEFAULT_TURNTABLE_FEEDRATE_MM_MIN: float = 0.1
-    DEFAULT_TURNTABLE_STEP_FEEDRATE_MM_MIN: float = 0.1
+    DEFAULT_MANUAL_AXIS_FEEDRATE_MM_MIN: float = 1.0
+    DEFAULT_FOCUS_FEEDRATE_MM_MIN: float = 1.0
+    DEFAULT_FOCUS_STEP_FEEDRATE_MM_MIN: float = 1.0
+    DEFAULT_NEEDLES_STEP_FEEDRATE_MM_MIN: float = 1.0
+    DEFAULT_TURNTABLE_FEEDRATE_MM_MIN: float = 1.0
+    DEFAULT_TURNTABLE_STEP_FEEDRATE_MM_MIN: float = 1.0
     DEFAULT_CLICK_TO_MOVE_PENDING_TIMEOUT_S: float = 8.0
     MIN_CLICK_TO_MOVE_PENDING_TIMEOUT_S: float = 0.5
     MAX_CLICK_TO_MOVE_PENDING_TIMEOUT_S: float = 60.0
@@ -948,7 +947,7 @@ class SettingsManager:
     DEFAULT_LCR_ALC_ENABLED: bool = False
     DEFAULT_SHORT_THRESHOLD_OHM: float = 10.0
     DEFAULT_LCR_POLL_INTERVAL_MS: int = 250
-    DEFAULT_NEEDLE_FEEDRATE_MM_MIN: float = 0.1
+    DEFAULT_NEEDLE_FEEDRATE_MM_MIN: float = 1.0
     DEFAULT_NEEDLE_CONTACT_ZONE_MM: float = 0.1
     DEFAULT_AXIS_A_CALIBRATION_MODEL: str = "cosine_displacement"
     DEFAULT_AXIS_A_CALIBRATION_STEPS_PER_MM: float = 2600.0
@@ -1646,7 +1645,10 @@ class SettingsManager:
             except (TypeError, ValueError):
                 feedrate = settings.default_feedrate_mm_min
             if math.isfinite(feedrate) and feedrate > 0.0:
-                settings.default_feedrate_mm_min = max(0.1, feedrate)
+                settings.default_feedrate_mm_min = max(
+                    self.MIN_FEEDRATE_MM_MIN,
+                    feedrate,
+                )
         return settings
 
     def _parse_feedrates(self, raw_feedrates, legacy_presets) -> FeedrateSettings:
@@ -1775,16 +1777,25 @@ class SettingsManager:
             manual_axis_mode = self.DEFAULT_MANUAL_AXIS_MODE
         if manual_axis_feedrate <= 0:
             manual_axis_feedrate = self.DEFAULT_MANUAL_AXIS_FEEDRATE_MM_MIN
+        manual_axis_feedrate = max(self.MIN_FEEDRATE_MM_MIN, manual_axis_feedrate)
         if focus_feedrate <= 0:
             focus_feedrate = self.DEFAULT_FOCUS_FEEDRATE_MM_MIN
+        focus_feedrate = max(self.MIN_FEEDRATE_MM_MIN, focus_feedrate)
         if focus_step_feedrate <= 0:
             focus_step_feedrate = self.DEFAULT_FOCUS_STEP_FEEDRATE_MM_MIN
+        focus_step_feedrate = max(self.MIN_FEEDRATE_MM_MIN, focus_step_feedrate)
         if needles_step_feedrate <= 0:
             needles_step_feedrate = self.DEFAULT_NEEDLES_STEP_FEEDRATE_MM_MIN
+        needles_step_feedrate = max(self.MIN_FEEDRATE_MM_MIN, needles_step_feedrate)
         if turntable_feedrate <= 0:
             turntable_feedrate = self.DEFAULT_TURNTABLE_FEEDRATE_MM_MIN
+        turntable_feedrate = max(self.MIN_FEEDRATE_MM_MIN, turntable_feedrate)
         if turntable_step_feedrate <= 0:
             turntable_step_feedrate = self.DEFAULT_TURNTABLE_STEP_FEEDRATE_MM_MIN
+        turntable_step_feedrate = max(
+            self.MIN_FEEDRATE_MM_MIN,
+            turntable_step_feedrate,
+        )
         return JogSettings(
             mode=mode,
             linear_distance_mm=linear_distance,
@@ -2104,6 +2115,7 @@ class SettingsManager:
             poll_interval_ms = self.DEFAULT_LCR_POLL_INTERVAL_MS
         if feedrate_mm_min <= 0:
             feedrate_mm_min = self.DEFAULT_NEEDLE_FEEDRATE_MM_MIN
+        feedrate_mm_min = max(self.MIN_FEEDRATE_MM_MIN, feedrate_mm_min)
         if contact_zone_mm < 0:
             contact_zone_mm = self.DEFAULT_NEEDLE_CONTACT_ZONE_MM
         auto_range_enabled = range_mode == "AUTO"
@@ -2672,6 +2684,7 @@ class SettingsManager:
                     continue
                 if number <= 0:
                     continue
+                number = max(self.MIN_FEEDRATE_MM_MIN, number)
                 key = round(number, 9)
                 if key in seen:
                     continue
@@ -2689,6 +2702,7 @@ class SettingsManager:
         presets = self._parse_feedrate_list(group.presets, fallback=fallback)
         presets.sort()
         default_value = group.default if group.default > 0 else self.DEFAULT_FEEDRATE_DEFAULT
+        default_value = max(self.MIN_FEEDRATE_MM_MIN, default_value)
         default_text = self._select_default(default_value, presets, fallback=fallback)
         return FeedrateGroup(presets=presets, default=default_text)
 
@@ -2708,6 +2722,7 @@ class SettingsManager:
 
         if candidate_value <= 0:
             candidate_value = self.DEFAULT_FEEDRATE_DEFAULT
+        candidate_value = max(self.MIN_FEEDRATE_MM_MIN, candidate_value)
 
         return candidate_value
 

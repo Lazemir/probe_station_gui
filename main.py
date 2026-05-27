@@ -391,6 +391,7 @@ class Main(QMainWindow):
     TERMINAL_RESET_REFRESH_DELAYS_MS = (500, 1100, 1800)
     TERMINAL_RESUME_AFTER_JOG_MS = 180
     STAGE_AXIS_NAMES = ("X", "Y", "Z", "A", "B", "C")
+    MIN_FEEDRATE_MM_MIN = 1.0
     STAGE_AXIS_DIMMED_BACKGROUNDS = {
         "#1565c0": "#6f8fb8",
         "#f0b429": "#cda75a",
@@ -500,6 +501,7 @@ class Main(QMainWindow):
         self._coordinate_move_ends_at: float | None = None
         self._coordinate_move_programmed_feedrate: float | None = None
         self._coordinate_move_effective_feedrate: float | None = None
+        self._coordinate_move_seen_active_state = False
         self._pending_click_to_move: tuple[float, float, float, float] | None = None
         self._pending_click_deadline: float | None = None
         self._pending_stage_axis_targets: dict[str, tuple[float, float]] = {}
@@ -944,7 +946,7 @@ class Main(QMainWindow):
                 "accepted": False,
                 "message": "Stage is busy. Ignoring surface-map target.",
             }
-        feedrate = max(0.1, float(self._current_linear_feedrate()))
+        feedrate = max(self.MIN_FEEDRATE_MM_MIN, float(self._current_linear_feedrate()))
         targets: dict[str, tuple[float, float]] = {}
         for axis, display_target in (("X", x_mm), ("Y", y_mm)):
             try:
@@ -1016,7 +1018,7 @@ class Main(QMainWindow):
             return None
         if not math.isfinite(value) or value <= 0.0:
             return None
-        return max(0.1, value)
+        return max(self.MIN_FEEDRATE_MM_MIN, value)
 
     def _preload_design_layout_window(self) -> None:
         if (
@@ -1161,7 +1163,7 @@ class Main(QMainWindow):
     ) -> None:
         try:
             distance_mm = math.hypot(float(move_x_mm), float(move_y_mm))
-            feedrate = max(0.1, float(feedrate_mm_min))
+            feedrate = max(self.MIN_FEEDRATE_MM_MIN, float(feedrate_mm_min))
         except (TypeError, ValueError):
             return
         if distance_mm <= 1e-9:
@@ -1562,6 +1564,7 @@ class Main(QMainWindow):
         return (
             self._coordinate_move_axis is not None
             or controller_busy
+            or self._controller_reports_active_motion()
             or self._route_measurement_runner is not None
             or self._surface_map_capture_running()
             or self._manual_alignment_pick_slot is not None
@@ -1571,6 +1574,12 @@ class Main(QMainWindow):
             or self._pending_alignment_preparation is not None
             or self._pending_quick_alignment_rotation
         )
+
+    def _controller_reports_active_motion(self) -> bool:
+        if not hasattr(self, "stage_controller"):
+            return False
+        state = (self.stage_controller.latest_stage_state() or "").strip().lower()
+        return state in {"run", "jog"}
 
     def _schedule_cancel_state_refresh(self) -> None:
         for delay_ms in (0, 100, 300, 1000, 2500):
@@ -1652,6 +1661,12 @@ class Main(QMainWindow):
             self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
             self._schedule_cancel_state_refresh()
             return
+        if self._controller_reports_active_motion():
+            self.stage_controller.cancel_active_motion("Motion cancel requested.")
+            self._clear_stage_motion_axes()
+            self._clear_planned_move_prediction(clear_wait_state=True)
+            cancelled_any = True
+            self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
         if self.stage_controller.is_busy():
             self.stage_controller.cancel_active_task("Operation cancel requested.")
             self._clear_stage_motion_axes()
@@ -3609,7 +3624,7 @@ class Main(QMainWindow):
         if mode not in {"G90", "G91"}:
             return
         distance = max(0.001, float(distance_mm))
-        feedrate = max(0.1, float(feedrate_mm_min))
+        feedrate = max(self.MIN_FEEDRATE_MM_MIN, float(feedrate_mm_min))
         settings = self.settings_manager.settings.clone()
         if (
             settings.jog.manual_axis == axis
@@ -3638,7 +3653,7 @@ class Main(QMainWindow):
 
     def _save_jog_feedrate_setting(self, key: str, feedrate_mm_min: float) -> None:
         try:
-            feedrate = max(0.1, float(feedrate_mm_min))
+            feedrate = max(self.MIN_FEEDRATE_MM_MIN, float(feedrate_mm_min))
         except (TypeError, ValueError):
             return
         settings = self.settings_manager.settings.clone()
@@ -3719,7 +3734,10 @@ class Main(QMainWindow):
 
     def _schedule_linear_feedrate_save(self, feedrate_mm_min: float) -> None:
         try:
-            self._pending_linear_feedrate_default = max(0.1, float(feedrate_mm_min))
+            self._pending_linear_feedrate_default = max(
+                self.MIN_FEEDRATE_MM_MIN,
+                float(feedrate_mm_min),
+            )
         except (TypeError, ValueError):
             return
         self._linear_feedrate_save_timer.start()
@@ -3730,7 +3748,7 @@ class Main(QMainWindow):
 
     def _on_needle_feedrate_changed(self, feedrate_mm_min: float) -> None:
         try:
-            feedrate = max(0.1, float(feedrate_mm_min))
+            feedrate = max(self.MIN_FEEDRATE_MM_MIN, float(feedrate_mm_min))
         except (TypeError, ValueError):
             return
         settings = self.settings_manager.settings.clone()
@@ -3942,7 +3960,7 @@ class Main(QMainWindow):
         feedrate = (
             float(self.stage_controller.DEFAULT_FEEDRATE)
             if feedrate_mm_min is None
-            else max(0.1, float(feedrate_mm_min))
+            else max(self.MIN_FEEDRATE_MM_MIN, float(feedrate_mm_min))
         )
         speed_mm_per_s = feedrate / 60.0
         if speed_mm_per_s <= 1e-6:
@@ -5030,6 +5048,11 @@ class Main(QMainWindow):
         if current_position is not None:
             self._maybe_restore_persisted_design(current_position)
         latest_state = (self.stage_controller.latest_stage_state() or "").lower()
+        if (
+            getattr(self, "_coordinate_move_axis", None) is not None
+            and latest_state in {"run", "jog"}
+        ):
+            self._coordinate_move_seen_active_state = True
         xy_homed = self.stage_controller.axes_are_homed({"X", "Y"})
         xyz_homed = self.stage_controller.axes_are_homed({"X", "Y", "Z"})
         if self.contact_calibration_window is not None:
@@ -5338,7 +5361,7 @@ class Main(QMainWindow):
         }
         if not ordered_targets:
             return False
-        feedrate = max(0.1, float(feedrate_mm_min))
+        feedrate = max(self.MIN_FEEDRATE_MM_MIN, float(feedrate_mm_min))
         origin_position = self._seed_motion_prediction_position()
         if origin_position is None:
             origin_position = self.stage_controller.latest_stage_position()
@@ -5380,6 +5403,7 @@ class Main(QMainWindow):
         self._coordinate_move_started_at = time.monotonic()
         self._coordinate_move_programmed_feedrate = feedrate
         self._coordinate_move_effective_feedrate = feedrate
+        self._coordinate_move_seen_active_state = False
         self._coordinate_move_ends_at = self._coordinate_move_started_at + max(
             self._coordinate_move_duration_s(
                 self._coordinate_move_origin_position,
@@ -5389,6 +5413,7 @@ class Main(QMainWindow):
             0.05,
         )
         self._set_stage_motion_axes(set(axes))
+        self._activate_coordinate_common_feedrate(axes, feedrate)
         self._update_stage_coordinate_apply_state()
         accepted = self.stage_controller.request_absolute_axis_targets_move(
             raw_targets,
@@ -5412,6 +5437,34 @@ class Main(QMainWindow):
             self._manual_jog_timer.start()
         return True
 
+    def _activate_coordinate_common_feedrate(
+        self,
+        axes: list[str],
+        feedrate: float,
+    ) -> None:
+        if self.joystick_panel is None:
+            return
+        if len(set(axes)) <= 1:
+            if hasattr(self.joystick_panel, "clear_common_feedrate_target"):
+                self.joystick_panel.clear_common_feedrate_target()
+            return
+        limits = self.stage_controller.axis_max_feedrates()
+        axis_limits: list[float] = []
+        for axis in axes:
+            try:
+                value = float(limits.get(axis, 0.0))
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(value) and value > 0.0:
+                axis_limits.append(value)
+        max_feedrate = (
+            max(axis_limits)
+            if axis_limits
+            else max(self.MIN_FEEDRATE_MM_MIN, float(feedrate))
+        )
+        if hasattr(self.joystick_panel, "set_common_feedrate_target"):
+            self.joystick_panel.set_common_feedrate_target(feedrate, max_feedrate)
+
     def _coordinate_move_duration_s(
         self,
         origin_position: tuple[float, ...],
@@ -5432,8 +5485,28 @@ class Main(QMainWindow):
             delta = float(target_position[axis_index]) - float(origin_position[axis_index])
             squared += delta * delta
         distance = math.sqrt(squared)
-        speed_mm_per_s = max(0.1, float(feedrate_mm_min)) / 60.0
+        speed_mm_per_s = max(self.MIN_FEEDRATE_MM_MIN, float(feedrate_mm_min)) / 60.0
         return (distance / speed_mm_per_s) + self.PLANNED_MOVE_DURATION_PADDING_S
+
+    def _coordinate_position_is_at_target(self, position: object | None) -> bool:
+        target_position = self._coordinate_move_target_position
+        if target_position is None or not isinstance(position, (tuple, list)):
+            return False
+        active_axes = set(self._coordinate_move_axes)
+        if not active_axes and self._coordinate_move_axis is not None:
+            active_axes.add(self._coordinate_move_axis)
+        if not active_axes:
+            return False
+        for axis in active_axes:
+            try:
+                axis_index = self.STAGE_AXIS_NAMES.index(axis)
+            except ValueError:
+                return False
+            if axis_index >= len(position) or axis_index >= len(target_position):
+                return False
+            if abs(float(position[axis_index]) - float(target_position[axis_index])) > 0.01:
+                return False
+        return True
 
     def _apply_coordinate_move_feedrate(self, feedrate_mm_min: float) -> None:
         active_axes = set(self._coordinate_move_axes)
@@ -5446,7 +5519,10 @@ class Main(QMainWindow):
         ):
             return
         try:
-            requested_feedrate = max(0.1, float(feedrate_mm_min))
+            requested_feedrate = max(
+                self.MIN_FEEDRATE_MM_MIN,
+                float(feedrate_mm_min),
+            )
         except (TypeError, ValueError):
             return
         target_position = self._coordinate_move_target_position
@@ -5513,12 +5589,15 @@ class Main(QMainWindow):
         self._coordinate_move_ends_at = None
         self._coordinate_move_programmed_feedrate = None
         self._coordinate_move_effective_feedrate = None
+        self._coordinate_move_seen_active_state = False
         if clear_pending:
             self._pending_stage_axis_targets.clear()
         if reset_override:
             self.stage_controller.queue_feed_override_reset()
         if self.joystick_panel is not None:
             self.joystick_panel.clear_temporary_linear_feedrate_bounds()
+            if hasattr(self.joystick_panel, "clear_common_feedrate_target"):
+                self.joystick_panel.clear_common_feedrate_target()
         self._refresh_stage_axis_styles()
         self._update_stage_coordinate_apply_state()
 
@@ -5541,6 +5620,11 @@ class Main(QMainWindow):
             return
         latest_state = (self.stage_controller.latest_stage_state() or "").lower()
         if latest_state != "idle":
+            return
+        if (
+            not self._coordinate_move_seen_active_state
+            and not self._coordinate_position_is_at_target(position)
+        ):
             return
         if (
             self._coordinate_move_started_at is not None
@@ -6058,8 +6142,14 @@ class Main(QMainWindow):
         self.joystick_panel.needles_raise_requested.connect(
             self.stage_controller.request_needles_raise
         )
+        self.joystick_panel.needles_lift_requested.connect(
+            self.stage_controller.request_needles_lift
+        )
         self.joystick_panel.needles_lower_requested.connect(
             self.stage_controller.request_needles_lower
+        )
+        self.joystick_panel.needle_current_lower_contact_save_requested.connect(
+            self._save_current_needle_height
         )
         self.joystick_panel.needle_contact_coordinate_save_requested.connect(
             self._save_needle_position_from_display_a_coordinate
@@ -6076,6 +6166,9 @@ class Main(QMainWindow):
         )
         self.joystick_panel.linear_feedrate_changed.connect(
             self._on_linear_feedrate_changed
+        )
+        self.joystick_panel.common_feedrate_changed.connect(
+            self._apply_coordinate_move_feedrate
         )
         self.joystick_panel.step_feedrate_changed.connect(
             self._on_step_feedrate_changed
@@ -6132,6 +6225,9 @@ class Main(QMainWindow):
             self.joystick_panel.set_needles_state
         )
         self.stage_controller.needles_state_changed.connect(self._persist_controller_state)
+        self.stage_controller.needles_zone_changed.connect(
+            self.joystick_panel.set_needles_zone
+        )
         self.stage_controller.needles_action_started.connect(
             self.joystick_panel.set_needles_action_started
         )
@@ -6432,7 +6528,13 @@ class Main(QMainWindow):
         self._set_design_snap_enabled(enabled)
 
     def _save_current_needle_height(self) -> None:
-        a_position = self.stage_controller.current_a_position()
+        a_position = self.stage_controller.latest_a_position()
+        latest_state = self.stage_controller.latest_stage_state()
+        if latest_state not in (None, "Idle"):
+            self._show_status("Wait for the stage to stop before saving needle contact.")
+            return
+        if a_position is None:
+            a_position = self.stage_controller.current_a_position()
         if a_position is None:
             reason = (
                 self.stage_controller.last_a_position_read_failure()
@@ -6450,6 +6552,10 @@ class Main(QMainWindow):
                 status_reason = "see log for details"
             logger.warning("Unable to save needle down height: %s", reason)
             self._show_status(f"Unable to read A position: {status_reason}.")
+            return
+        latest_state = self.stage_controller.latest_stage_state()
+        if latest_state not in (None, "Idle"):
+            self._show_status("Wait for the stage to stop before saving needle contact.")
             return
         lowering_mm = self.stage_controller.axis_a_lowering_for_configured_coordinate(
             a_position

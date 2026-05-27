@@ -45,6 +45,8 @@ from ..surface_mapping import (
     save_surface_map,
 )
 
+MIN_FEEDRATE_MM_MIN = 1.0
+
 
 def _plotly_script_tag_and_base_url() -> tuple[str, QUrl]:
     """Return a Plotly.js script tag, preferring the local plotly package."""
@@ -414,7 +416,10 @@ class SurfaceMapWorker(QObject):
         current = self._display_xy(status)
         distance = math.hypot(float(target[0] - current[0]), float(target[1] - current[1]))
         try:
-            feedrate = max(0.1, float(status.get("current_feedrate_mm_min", 0.0)))
+            feedrate = max(
+                MIN_FEEDRATE_MM_MIN,
+                float(status.get("current_feedrate_mm_min", 0.0)),
+            )
         except (TypeError, ValueError):
             feedrate = 10.0
         timeout_s = max(

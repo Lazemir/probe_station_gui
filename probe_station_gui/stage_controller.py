@@ -134,6 +134,7 @@ class StageController(QObject):
     homing_action_started: Signal = Signal(str)
     homing_action_finished: Signal = Signal(bool, str, str)
     needles_state_changed: Signal = Signal(bool, bool)
+    needles_zone_changed: Signal = Signal(str)
     needles_action_started: Signal = Signal(str)
     needles_action_finished: Signal = Signal(bool, str, str)
     needle_height_changed: Signal = Signal(float)
@@ -156,6 +157,7 @@ class StageController(QObject):
     CALIBRATION_MIN_RESPONSE = 0.05
     CALIBRATION_VERIFY_TARGET_PIXELS = 40.0
     DEFAULT_FEEDRATE = 600.0
+    MIN_FEEDRATE = 1.0
     DEFAULT_NEEDLE_CONTACT_ZONE_MM = 0.1
     MOVE_IDLE_TIMEOUT_MARGIN_S = 5.0
     MOVE_IDLE_TIMEOUT_MIN_S = 10.0
@@ -169,7 +171,7 @@ class StageController(QObject):
     AUTOFOCUS_FRAME_RATE_SAMPLE_FRAMES = 6
     AUTOFOCUS_FRAME_RATE_MAX_AGE_S = 2.0
     AUTOFOCUS_FRAME_RATE_SAMPLE_TIMEOUT_S = 1.0
-    AUTOFOCUS_MIN_SWEEP_FEEDRATE_MM_MIN = 0.1
+    AUTOFOCUS_MIN_SWEEP_FEEDRATE_MM_MIN = MIN_FEEDRATE
     CALIBRATION_MIN_OBSERVATIONS = 4
     CALIBRATION_MAX_OBSERVATIONS_PER_AXIS = 8
     A_ZERO_TOLERANCE = 1e-3
@@ -270,6 +272,7 @@ class StageController(QObject):
         self._axis_a_ready = False
         self._needles_up = False
         self._needles_known = False
+        self._needles_zone: str | None = None
         self._needle_raise_lowering_mm: Optional[float] = None
         self._needle_down_lowering_mm: Optional[float] = None
         self._needle_contact_zone_mm = self.DEFAULT_NEEDLE_CONTACT_ZONE_MM
@@ -715,7 +718,7 @@ class StageController(QObject):
             return False
         try:
             effective_feedrate = (
-                None if feedrate is None else max(0.1, float(feedrate))
+                None if feedrate is None else max(self.MIN_FEEDRATE, float(feedrate))
             )
         except (TypeError, ValueError):
             self.status_message.emit(f"Unsupported manual feedrate: {feedrate}")
@@ -784,7 +787,7 @@ class StageController(QObject):
             return False
         try:
             effective_feedrate = (
-                None if feedrate is None else max(0.1, float(feedrate))
+                None if feedrate is None else max(self.MIN_FEEDRATE, float(feedrate))
             )
         except (TypeError, ValueError):
             self.status_message.emit(f"Unsupported manual feedrate: {feedrate}")
@@ -865,6 +868,21 @@ class StageController(QObject):
                 return
             self._start_needles_action_locked("raise", feedrate=feedrate)
 
+    def request_needles_lift(self, feedrate: float | None = None) -> None:
+        """Lift the needles out of the contact zone without fully raising A."""
+
+        with self._task_lock:
+            if self._active_thread and self._active_thread.is_alive():
+                if self._oscillation_active:
+                    self._queue_oscillation_needles_action_locked(
+                        "lift",
+                        feedrate=feedrate,
+                    )
+                    return
+                self.status_message.emit("Stage is busy. Ignoring needle lift request.")
+                return
+            self._start_needles_action_locked("lift", feedrate=feedrate)
+
     def request_needles_lower(self, feedrate: float | None = None) -> None:
         """Lower the needles to the calibrated down position."""
 
@@ -917,7 +935,7 @@ class StageController(QObject):
             except (TypeError, ValueError):
                 continue
             if math.isfinite(rate) and rate > 0.0:
-                cleaned[axis] = max(0.1, rate)
+                cleaned[axis] = max(self.MIN_FEEDRATE, rate)
         self._axis_max_feedrates = cleaned
 
     def axis_max_feedrates(self) -> dict[str, float]:
@@ -1664,7 +1682,7 @@ class StageController(QObject):
             self.status_message.emit("No coordinate targets provided.")
             return False
         try:
-            effective_feedrate = max(0.1, float(feedrate))
+            effective_feedrate = max(self.MIN_FEEDRATE, float(feedrate))
         except (TypeError, ValueError):
             self.status_message.emit(f"Unsupported manual feedrate: {feedrate}")
             return False
@@ -1694,8 +1712,8 @@ class StageController(QObject):
     def feed_override_percent_for_feedrates(
         cls, programmed_feedrate: float, target_feedrate: float
     ) -> int:
-        programmed = max(0.1, float(programmed_feedrate))
-        target = max(0.1, float(target_feedrate))
+        programmed = max(cls.MIN_FEEDRATE, float(programmed_feedrate))
+        target = max(cls.MIN_FEEDRATE, float(target_feedrate))
         percent = int(round((target / programmed) * 100.0))
         return min(
             max(percent, cls.FEED_OVERRIDE_MIN_PERCENT),
@@ -1857,7 +1875,7 @@ class StageController(QObject):
             except (TypeError, ValueError):
                 continue
             if math.isfinite(value):
-                feedrate = max(0.1, value)
+                feedrate = max(self.MIN_FEEDRATE, value)
         return feedrate
 
     def _absolute_jog_command_for_relative_move(
@@ -2436,7 +2454,7 @@ class StageController(QObject):
             self._write_command(serial_connection, "$HA")
             self._wait_for_ok(serial_connection, timeout=30.0)
             self._wait_for_idle(serial_connection, timeout=30.0)
-            self._set_needles_state(True, known=True)
+            self._set_needles_state(True, known=True, zone="raise")
         self._move_safety_check()
 
         self._ensure_axis_limits(serial_connection)
@@ -3378,7 +3396,7 @@ class StageController(QObject):
         feedrate: Optional[float] = None,
     ) -> None:
         effective_feedrate = (
-            self.DEFAULT_FEEDRATE if feedrate is None else max(0.1, float(feedrate))
+            self.DEFAULT_FEEDRATE if feedrate is None else max(self.MIN_FEEDRATE, float(feedrate))
         )
         self.click_move_started.emit(float(move.x), float(move.y), effective_feedrate)
 
@@ -3426,20 +3444,31 @@ class StageController(QObject):
             raise StageControllerError(f"Unsupported needle feedrate: {feedrate}") from exc
         if not math.isfinite(value):
             raise StageControllerError(f"Unsupported needle feedrate: {feedrate}")
-        return max(0.1, value)
+        return max(self.MIN_FEEDRATE, value)
 
     def _axis_max_feedrate(self, axis: str) -> float:
         axis_key = str(axis).upper().strip()
         value = self._axis_max_feedrates.get(axis_key, self.DEFAULT_FEEDRATE)
         if not math.isfinite(value) or value <= 0.0:
             return self.DEFAULT_FEEDRATE
-        return max(0.1, float(value))
+        return max(self.MIN_FEEDRATE, float(value))
 
     def _needle_target_lowering_for_action(self, action: str) -> float:
-        if action not in {"raise", "lower"}:
+        if action not in {"raise", "lift", "lower"}:
             raise StageControllerError(f"Unknown needle action: {action}.")
         if action == "raise":
             return 0.0
+        if action == "lift":
+            boundary_lowering = self._needle_contact_boundary_lowering()
+            if boundary_lowering is None:
+                if self._needle_down_lowering_mm is None:
+                    raise StageControllerError(
+                        "Needle down calibration missing; cannot lift."
+                    )
+                raise StageControllerError(
+                    "Needle contact zone is zero; cannot lift."
+                )
+            return boundary_lowering
         if self._needle_down_lowering_mm is None:
             raise StageControllerError(
                 "Needle down calibration missing; cannot lower."
@@ -3492,7 +3521,7 @@ class StageController(QObject):
             segments.append(
                 (
                     segment_target_lowering,
-                    max(0.1, float(segment_feedrate)),
+                    max(self.MIN_FEEDRATE, float(segment_feedrate)),
                     bool(slow_zone),
                 )
             )
@@ -3546,7 +3575,7 @@ class StageController(QObject):
         if serial_connection is None or not serial_connection.is_open:
             raise StageControllerError("Serial connection is not available.")
         with self._serial_session_lock:
-            if action in {"raise", "lower"}:
+            if action in {"raise", "lift", "lower"}:
                 status = self._query_status(serial_connection)
                 current_a = self._axis_value_for_configured_mode(status, "A")
                 if status is None or current_a is None:
@@ -3564,9 +3593,12 @@ class StageController(QObject):
                     status,
                 )
                 if not segments:
-                    self._update_needles_from_a_position(target_a)
+                    update_a = current_a if action == "lift" else target_a
+                    self._update_needles_from_a_position(update_a)
                     if action == "raise":
                         return "Needles already raised."
+                    if action == "lift":
+                        return "Needles already lifted."
                     return "Needles already lowered."
                 for segment_lowering, segment_feedrate, slow_zone in segments:
                     self._check_cancelled()
@@ -3603,6 +3635,8 @@ class StageController(QObject):
                 self._update_needles_from_a_position(target_a)
                 if action == "raise":
                     return "Needles raised."
+                if action == "lift":
+                    return "Needles lifted."
                 return "Needles lowered."
             raise StageControllerError(f"Unknown needle action: {action}.")
 
@@ -3624,7 +3658,7 @@ class StageController(QObject):
                 self.movement_finished.emit(True, "Manual axis move skipped.")
                 return
             feedrate_text = (
-                self.DEFAULT_FEEDRATE if feedrate is None else max(0.1, float(feedrate))
+                self.DEFAULT_FEEDRATE if feedrate is None else max(self.MIN_FEEDRATE, float(feedrate))
             )
             with self._serial_session_lock:
                 target_value = self._manual_axis_absolute_target(
@@ -3672,7 +3706,7 @@ class StageController(QObject):
             if serial_connection is None or not serial_connection.is_open:
                 raise StageControllerError("Serial connection is not available.")
             feedrate_text = (
-                self.DEFAULT_FEEDRATE if feedrate is None else max(0.1, float(feedrate))
+                self.DEFAULT_FEEDRATE if feedrate is None else max(self.MIN_FEEDRATE, float(feedrate))
             )
             ordered_targets = {
                 axis: float(targets[axis])
@@ -3968,7 +4002,7 @@ class StageController(QObject):
         if not move_parts:
             return
         effective_feedrate = (
-            self.DEFAULT_FEEDRATE if feedrate is None else max(0.1, float(feedrate))
+            self.DEFAULT_FEEDRATE if feedrate is None else max(self.MIN_FEEDRATE, float(feedrate))
         )
         move_distance = self._move_distance_for_timeout(move)
         command = (
@@ -4044,7 +4078,7 @@ class StageController(QObject):
                             f"{axis} target {value:+.3f} exceeds limits ({min_value:.3f}, {max_value:.3f})."
                         )
         effective_feedrate = (
-            self.DEFAULT_FEEDRATE if feedrate is None else max(0.1, float(feedrate))
+            self.DEFAULT_FEEDRATE if feedrate is None else max(self.MIN_FEEDRATE, float(feedrate))
         )
         move_parts = [
             f"{axis}{value:.4f}"
@@ -4436,7 +4470,7 @@ class StageController(QObject):
 
         try:
             distance_value = abs(float(distance))
-            feedrate_value = max(0.1, float(feedrate))
+            feedrate_value = max(self.MIN_FEEDRATE, float(feedrate))
         except (TypeError, ValueError):
             return self.MOVE_IDLE_TIMEOUT_MIN_S
         travel_time_s = (distance_value / feedrate_value) * 60.0
@@ -4465,7 +4499,7 @@ class StageController(QObject):
         if not move_parts:
             return
         effective_feedrate = (
-            self.DEFAULT_FEEDRATE if feedrate is None else max(0.1, float(feedrate))
+            self.DEFAULT_FEEDRATE if feedrate is None else max(self.MIN_FEEDRATE, float(feedrate))
         )
         self._write_command(
             serial_connection,
@@ -4730,14 +4764,48 @@ class StageController(QObject):
     def _query_axis_max_feedrates_locked(
         self,
         serial_connection: serial.Serial,
-        timeout: float = 4.0,
+        timeout: float = 20.0,
     ) -> dict[str, float]:
         self._write_command(serial_connection, "$CD")
-        lines = self._read_response_lines(
-            serial_connection,
-            timeout=timeout,
-            description="$CD",
-        )
+        deadline = time.monotonic() + timeout
+        lines: list[str] = []
+        saw_final_ok = False
+        while time.monotonic() < deadline:
+            self._check_cancelled()
+            try:
+                raw = serial_connection.readline()
+            except _SERIAL_IO_EXCEPTIONS as exc:  # pragma: no cover - hardware interaction
+                raise StageControllerError(f"Serial read failed: {exc}") from exc
+            line = raw.decode("ascii", errors="ignore").strip()
+            if not line:
+                continue
+            logger.debug("SERIAL TRACE stage_readline $CD line=%r", line)
+            self._raise_if_controller_reboot_line(line, "$CD")
+            self._handle_limit_line(line)
+            homed_msg = self.HOMED_MSG_PATTERN.match(line)
+            if homed_msg:
+                axes = set(homed_msg.group("axes").upper())
+                if self._homed_axes:
+                    axes = set(self._homed_axes).union(axes)
+                self._update_homing_status(axes)
+                continue
+            self._handle_coordinate_state_line(line)
+            lower = line.lower()
+            if lower == "ok":
+                if lines:
+                    saw_final_ok = True
+                    break
+                continue
+            if lower.startswith("alarm"):
+                raise StageControllerError(f"Controller alarm: {line}")
+            if lower.startswith("error") or line.startswith("[MSG:ERR:"):
+                raise StageControllerError(f"Controller reported: {line}")
+            lines.append(line)
+        if lines and not saw_final_ok:
+            try:
+                serial_connection.reset_input_buffer()
+            except AttributeError:
+                pass
         rates = parse_fluidnc_axis_max_feedrates(lines)
         if not rates:
             raise StageControllerError(
@@ -5356,14 +5424,32 @@ class StageController(QObject):
         )
         self._update_axis_a_ready(bool(ready))
 
-    def _set_needles_state(self, raised: bool, *, known: bool) -> None:
-        if self._needles_up == raised and self._needles_known == known:
-            self._refresh_axis_a_ready_from_state()
-            return
-        self._needles_up = raised
-        self._needles_known = known
+    def _set_needles_state(
+        self,
+        raised: bool,
+        *,
+        known: bool,
+        zone: str | None = None,
+    ) -> None:
+        normalized_zone: str | None = None
+        if known:
+            zone_key = str(zone).strip().lower() if zone is not None else ""
+            if zone_key in {"raise", "lift", "lower"}:
+                normalized_zone = zone_key
+            else:
+                normalized_zone = "raise" if raised else "lower"
+
+        old_raised = self._needles_up
+        old_known = self._needles_known
+        old_zone = self._needles_zone
+        self._needles_up = bool(raised)
+        self._needles_known = bool(known)
+        self._needles_zone = normalized_zone
         self._refresh_axis_a_ready_from_state()
-        self.needles_state_changed.emit(raised, known)
+        if old_raised != self._needles_up or old_known != self._needles_known:
+            self.needles_state_changed.emit(self._needles_up, self._needles_known)
+        if old_zone != self._needles_zone:
+            self.needles_zone_changed.emit(self._needles_zone or "unknown")
 
     def _needle_zone_for_a_position(
         self,
@@ -5381,6 +5467,10 @@ class StageController(QObject):
             raise_lowering = float(self._needle_raise_lowering_mm)
         if current_lowering <= raise_lowering + tolerance:
             return "raise"
+        boundary_lowering = self._needle_contact_boundary_lowering()
+        if boundary_lowering is not None:
+            if current_lowering <= boundary_lowering + tolerance:
+                return "lift"
         if self._needle_down_lowering_mm is not None:
             if current_lowering >= float(self._needle_down_lowering_mm) - tolerance:
                 return "lower"
@@ -5393,7 +5483,11 @@ class StageController(QObject):
             self._axis_a_lowering_for_configured_coordinate(a_position)
         )
         zone = self._needle_zone_for_a_position(a_position)
-        self._set_needles_state(zone == "raise", known=zone is not None)
+        self._set_needles_state(
+            zone == "raise",
+            known=zone is not None,
+            zone=zone,
+        )
 
     def _update_needles_from_status(self, status: _Status) -> None:
         """Update needle state only when A homing is actually known."""
@@ -5414,7 +5508,11 @@ class StageController(QObject):
             return
 
         zone = self._needle_zone_for_a_position(a_position, status)
-        self._set_needles_state(zone == "raise", known=zone is not None)
+        self._set_needles_state(
+            zone == "raise",
+            known=zone is not None,
+            zone=zone,
+        )
 
     def _read_current_a_position(
         self, serial_connection: serial.Serial
@@ -5480,7 +5578,7 @@ class StageController(QObject):
             self._update_homing_status(axes)
             self._update_limit_axes(self._limit_axes.difference(axes))
             self._controller_state_stale = False
-            self._set_needles_state(True, known=True)
+            self._set_needles_state(True, known=True, zone="raise")
             if self._controller_session_marker is None:
                 self._ensure_controller_session_marker(serial_connection)
 
@@ -5596,7 +5694,7 @@ class StageController(QObject):
                 raise StageControllerError(
                     "A axis position is unknown; cannot adjust needles during oscillation."
                 )
-            if action in {"raise", "lower"}:
+            if action in {"raise", "lift", "lower"}:
                 target_lowering = self._needle_target_lowering_for_action(action)
                 target_a = self._axis_a_configured_coordinate_for_lowering(
                     target_lowering
@@ -5607,13 +5705,18 @@ class StageController(QObject):
                     feedrate,
                 )
                 if not segments:
-                    self._update_needles_from_a_position(target_a)
+                    update_a = current_a if action == "lift" else target_a
+                    self._update_needles_from_a_position(update_a)
                     self.needles_action_finished.emit(
                         True,
                         (
                             "Needles already raised."
                             if action == "raise"
-                            else "Needles already lowered."
+                            else (
+                                "Needles already lifted."
+                                if action == "lift"
+                                else "Needles already lowered."
+                            )
                         ),
                         action,
                     )
@@ -5648,9 +5751,15 @@ class StageController(QObject):
                     new_a = segment_target_a
                 self._update_cached_axis_position("A", new_a)
                 self._update_needles_from_a_position(new_a)
+                if action == "lift":
+                    message = "Needles lifted."
+                else:
+                    message = (
+                        "Needles raised." if action == "raise" else "Needles lowered."
+                    )
                 self.needles_action_finished.emit(
                     True,
-                    "Needles raised." if action == "raise" else "Needles lowered.",
+                    message,
                     action,
                 )
                 return
@@ -5840,6 +5949,8 @@ class StageController(QObject):
         self._cancel_event.set()
         if action == "raise":
             label = "Needle raise"
+        elif action == "lift":
+            label = "Needle lift"
         elif action == "lower":
             label = "Needle lower"
         else:
@@ -5860,6 +5971,8 @@ class StageController(QObject):
         self.needles_action_started.emit(action)
         if action == "raise":
             label = "Needle raise"
+        elif action == "lift":
+            label = "Needle lift"
         elif action == "lower":
             label = "Needle lower"
         else:
