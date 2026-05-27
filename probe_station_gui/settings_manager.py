@@ -141,6 +141,16 @@ LCR_MONITOR_PARAMETERS: tuple[str, ...] = (
     "VAC",
     "IAC",
 )
+LCR_METER_TYPE_GWINSTEK = "gwinstek_lcr_76200"
+LCR_METER_TYPE_KEITHLEY = "keithley_2400_2182a"
+LCR_METER_TYPES: tuple[str, ...] = (
+    LCR_METER_TYPE_GWINSTEK,
+    LCR_METER_TYPE_KEITHLEY,
+)
+LCR_METER_TYPE_LABELS: dict[str, str] = {
+    LCR_METER_TYPE_GWINSTEK: "GW Instek LCR-76200",
+    LCR_METER_TYPE_KEITHLEY: "Keithley 2400 + 2182A",
+}
 
 
 @dataclass(eq=True, frozen=True)
@@ -380,7 +390,10 @@ class SavedStagePositionSettings:
 class NeedleCalibrationSettings:
     """Configuration for needle calibration and the external LCR meter."""
 
+    meter_type: str = LCR_METER_TYPE_GWINSTEK
     visa_resource: str = "COM4"
+    keithley_source_resource: str = "GPIB2::1::INSTR"
+    keithley_voltmeter_resource: str = "GPIB2::2::INSTR"
     measurement_function: str = "R-X"
     range_mode: str = "AUTO"
     auto_range_enabled: bool = True
@@ -418,7 +431,10 @@ class NeedleCalibrationSettings:
         """Return a copy of the needle calibration settings."""
 
         return NeedleCalibrationSettings(
+            meter_type=self.meter_type,
             visa_resource=self.visa_resource,
+            keithley_source_resource=self.keithley_source_resource,
+            keithley_voltmeter_resource=self.keithley_voltmeter_resource,
             measurement_function=self.measurement_function,
             range_mode=self.range_mode,
             auto_range_enabled=self.auto_range_enabled,
@@ -453,7 +469,10 @@ class NeedleCalibrationSettings:
         """Serialize the needle calibration preferences."""
 
         return {
+            "meter_type": self.meter_type,
             "visa_resource": self.visa_resource,
+            "keithley_source_resource": self.keithley_source_resource,
+            "keithley_voltmeter_resource": self.keithley_voltmeter_resource,
             "measurement_function": self.measurement_function,
             "range_mode": self.range_mode,
             "auto_range_enabled": self.auto_range_enabled,
@@ -857,6 +876,9 @@ class SettingsManager:
     MANUAL_AXIS_MODES: tuple[str, ...] = ("G91", "G90")
     MANUAL_JOG_AXES: tuple[str, ...] = ("X", "Y", "Z", "A", "B", "C")
     DEFAULT_LCR_VISA_RESOURCE: str = "COM4"
+    DEFAULT_LCR_METER_TYPE: str = LCR_METER_TYPE_GWINSTEK
+    DEFAULT_KEITHLEY_SOURCE_RESOURCE: str = "GPIB2::1::INSTR"
+    DEFAULT_KEITHLEY_VOLTMETER_RESOURCE: str = "GPIB2::2::INSTR"
     DEFAULT_LCR_AUTO_RANGE_ENABLED: bool = True
     DEFAULT_LCR_MEASUREMENT_FUNCTION: str = "R-X"
     DEFAULT_LCR_RANGE_MODE: str = "AUTO"
@@ -1264,7 +1286,10 @@ class SettingsManager:
         needle_section = data.get("needle_calibration")
         if not isinstance(needle_section, dict):
             needle_section = {
+                "meter_type": self.DEFAULT_LCR_METER_TYPE,
                 "visa_resource": self.DEFAULT_LCR_VISA_RESOURCE,
+                "keithley_source_resource": self.DEFAULT_KEITHLEY_SOURCE_RESOURCE,
+                "keithley_voltmeter_resource": self.DEFAULT_KEITHLEY_VOLTMETER_RESOURCE,
                 "measurement_function": self.DEFAULT_LCR_MEASUREMENT_FUNCTION,
                 "range_mode": self.DEFAULT_LCR_RANGE_MODE,
                 "auto_range_enabled": self.DEFAULT_LCR_AUTO_RANGE_ENABLED,
@@ -1306,7 +1331,15 @@ class SettingsManager:
             }
             data["needle_calibration"] = needle_section
         else:
+            needle_section.setdefault("meter_type", self.DEFAULT_LCR_METER_TYPE)
             needle_section.setdefault("visa_resource", self.DEFAULT_LCR_VISA_RESOURCE)
+            needle_section.setdefault(
+                "keithley_source_resource", self.DEFAULT_KEITHLEY_SOURCE_RESOURCE
+            )
+            needle_section.setdefault(
+                "keithley_voltmeter_resource",
+                self.DEFAULT_KEITHLEY_VOLTMETER_RESOURCE,
+            )
             needle_section.setdefault(
                 "measurement_function", self.DEFAULT_LCR_MEASUREMENT_FUNCTION
             )
@@ -1716,6 +1749,9 @@ class SettingsManager:
         """Normalise persisted needle calibration settings."""
 
         visa_resource = self.DEFAULT_LCR_VISA_RESOURCE
+        meter_type = self.DEFAULT_LCR_METER_TYPE
+        keithley_source_resource = self.DEFAULT_KEITHLEY_SOURCE_RESOURCE
+        keithley_voltmeter_resource = self.DEFAULT_KEITHLEY_VOLTMETER_RESOURCE
         measurement_function = self.DEFAULT_LCR_MEASUREMENT_FUNCTION
         range_mode = self.DEFAULT_LCR_RANGE_MODE
         auto_range_enabled = self.DEFAULT_LCR_AUTO_RANGE_ENABLED
@@ -1745,9 +1781,24 @@ class SettingsManager:
         chip_position = SavedStagePositionSettings()
         stone_position = SavedStagePositionSettings()
         if isinstance(raw_needle_calibration, dict):
+            meter_type = self._normalise_choice(
+                raw_needle_calibration.get("meter_type", meter_type),
+                choices=LCR_METER_TYPES,
+                default=meter_type,
+            )
             resource_raw = raw_needle_calibration.get("visa_resource", visa_resource)
             if isinstance(resource_raw, str):
                 visa_resource = resource_raw.strip()
+            source_resource_raw = raw_needle_calibration.get(
+                "keithley_source_resource", keithley_source_resource
+            )
+            if isinstance(source_resource_raw, str):
+                keithley_source_resource = source_resource_raw.strip()
+            voltmeter_resource_raw = raw_needle_calibration.get(
+                "keithley_voltmeter_resource", keithley_voltmeter_resource
+            )
+            if isinstance(voltmeter_resource_raw, str):
+                keithley_voltmeter_resource = voltmeter_resource_raw.strip()
             measurement_function = self._normalise_choice(
                 raw_needle_calibration.get(
                     "measurement_function", measurement_function
@@ -1931,7 +1982,10 @@ class SettingsManager:
             raise_position_mm = down_position_mm
             raise_position_configured = True
         return NeedleCalibrationSettings(
+            meter_type=meter_type,
             visa_resource=visa_resource,
+            keithley_source_resource=keithley_source_resource,
+            keithley_voltmeter_resource=keithley_voltmeter_resource,
             measurement_function=measurement_function,
             range_mode=range_mode,
             auto_range_enabled=auto_range_enabled,

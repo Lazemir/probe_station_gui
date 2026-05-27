@@ -56,7 +56,7 @@ from probe_station_gui.dialogs.route_measurement_dialog import (
 )
 from probe_station_gui.dialogs.settings_dialog import SettingsDialog
 from probe_station_gui.api_server import ProbeStationApiServer
-from probe_station_gui.lcr_meter import LCRMeterController, RouteMeter
+from probe_station_gui.lcr_meter import LCRMeterController, LCRMeterError
 from probe_station_gui.motion_prediction import interpolate_position, motion_progress
 from probe_station_gui.objective_offsets import (
     ObjectiveOffsetReference,
@@ -2207,7 +2207,10 @@ class Main(QMainWindow):
         if self.design_layout_window is not None:
             self.design_layout_window.set_snap_enabled(self._design_snap_enabled)
         self.lcr_controller.apply_configuration(
+            meter_type=needle_settings.meter_type,
             resource_name=needle_settings.visa_resource,
+            keithley_source_resource=needle_settings.keithley_source_resource,
+            keithley_voltmeter_resource=needle_settings.keithley_voltmeter_resource,
             measurement_function=needle_settings.measurement_function,
             range_mode=needle_settings.range_mode,
             auto_range_enabled=needle_settings.auto_range_enabled,
@@ -2232,7 +2235,9 @@ class Main(QMainWindow):
         )
         self.lcr_controller.request_reconfigure()
         if self.serial_connection_panel is not None:
-            self.serial_connection_panel.set_lcr_resource(needle_settings.visa_resource)
+            self.serial_connection_panel.set_lcr_resource(
+                self.lcr_controller.connection_label()
+            )
         if self.contact_calibration_window is not None:
             self.contact_calibration_window.set_saved_needle_height(
                 needle_settings.down_position_mm
@@ -4380,6 +4385,7 @@ class Main(QMainWindow):
                 route_name=route.name,
                 route_point_count=len(route.points),
                 default_csv_path=default_path,
+                default_meter_type=self.lcr_controller.meter_type(),
                 parent=self,
             )
             dialog.run_requested.connect(self._start_route_measurement)
@@ -4426,11 +4432,26 @@ class Main(QMainWindow):
         if not points:
             self._show_status("Route has no enabled points.", 5000)
             return
+        if not self.lcr_controller.is_connected():
+            self._show_status(
+                "Connect the measurement instrument before running a route.",
+                5000,
+            )
+            return
+        try:
+            self.lcr_controller.apply_route_meter_configuration(configuration.meter)
+        except LCRMeterError as exc:
+            message = f"Route measurement instrument setup failed: {exc}"
+            self._show_status(message, 8000)
+            if self._route_measurement_dialog is not None:
+                self._route_measurement_dialog.set_running(False)
+                self._route_measurement_dialog.set_status(message)
+            return
         runner = RouteMeasurementRunner(
             points=points,
             csv_path=configuration.csv_path,
             stage_controller=self.stage_controller,
-            lcr_controller=RouteMeter(configuration.meter),
+            lcr_controller=self.lcr_controller,
             needle_feedrate=self._current_needle_feedrate(),
             measurement_count=configuration.measurement_count,
             confirm_each_point=True,

@@ -728,14 +728,14 @@ class RouteMeter:
             self._session = session
             return
         raise LCRMeterError(
-            f"Unsupported route measurement meter: {self._configuration.meter_type}"
+            f"Unsupported route measurement instrument: {self._configuration.meter_type}"
         )
 
     def read_primary_value_now(self, *, restart_polling: bool = False) -> float:
         if self._session is None:
             self.open()
         if self._session is None:
-            raise LCRMeterError("Route measurement meter is not open.")
+            raise LCRMeterError("Route measurement instrument is not open.")
         return self._session.read_primary_value(trigger=True)
 
     def close(self) -> None:
@@ -746,7 +746,7 @@ class RouteMeter:
 
 
 class LCRMeterController(QObject):
-    """Manage connection and polling for the external LCR meter."""
+    """Manage connection and polling for the external measurement instrument."""
 
     connection_changed: Signal = Signal(bool, str, str)
     reading_updated: Signal = Signal(float, bool)
@@ -756,8 +756,11 @@ class LCRMeterController(QObject):
 
     def __init__(self) -> None:
         super().__init__()
+        self._meter_type = ROUTE_METER_GWINSTEK
         self._resource_name = ""
         self._connected_resource_name = ""
+        self._keithley_source_resource = ""
+        self._keithley_voltmeter_resource = ""
         self._measurement_function = "DCR"
         self._range_mode = "HOLD"
         self._auto_range_enabled = False
@@ -779,7 +782,7 @@ class LCRMeterController(QObject):
         self._alc_enabled = False
         self._short_threshold_ohm = 10.0
         self._poll_interval_ms = 250
-        self._session: Optional[_LCRSession] = None
+        self._session: Optional[_LCRSession | _Keithley2400With2182ASession] = None
         self._task_lock = threading.Lock()
         self._active_thread: Optional[threading.Thread] = None
         self._poll_thread: Optional[threading.Thread] = None
@@ -788,7 +791,10 @@ class LCRMeterController(QObject):
     def apply_configuration(
         self,
         *,
+        meter_type: str = ROUTE_METER_GWINSTEK,
         resource_name: str,
+        keithley_source_resource: str = "",
+        keithley_voltmeter_resource: str = "",
         measurement_function: str,
         range_mode: str,
         auto_range_enabled: bool,
@@ -813,7 +819,13 @@ class LCRMeterController(QObject):
     ) -> None:
         """Store the runtime configuration used by future connections."""
 
+        meter_type = str(meter_type).strip() or ROUTE_METER_GWINSTEK
+        if meter_type not in ROUTE_METER_TYPES:
+            meter_type = ROUTE_METER_GWINSTEK
+        self._meter_type = meter_type
         self._resource_name = resource_name.strip()
+        self._keithley_source_resource = keithley_source_resource.strip()
+        self._keithley_voltmeter_resource = keithley_voltmeter_resource.strip()
         self._measurement_function = str(measurement_function).strip() or "DCR"
         self._range_mode = str(range_mode).strip().upper() or "HOLD"
         self._auto_range_enabled = bool(auto_range_enabled)
@@ -837,9 +849,82 @@ class LCRMeterController(QObject):
         self._poll_interval_ms = max(50, int(poll_interval_ms))
 
     def is_connected(self) -> bool:
-        """Return True when the LCR backend is connected."""
+        """Return True when the measurement backend is connected."""
 
         return self._session is not None
+
+    def meter_type(self) -> str:
+        """Return the currently configured meter type."""
+
+        return self._meter_type
+
+    def connection_label(self) -> str:
+        """Return a human readable connection target for the configured meter."""
+
+        if self._meter_type == ROUTE_METER_KEITHLEY:
+            source = self._keithley_source_resource or "source not configured"
+            voltmeter = (
+                self._keithley_voltmeter_resource or "voltmeter not configured"
+            )
+            return f"Keithley 2400 {source}; 2182A {voltmeter}"
+        return self._resource_name
+
+    def apply_route_meter_configuration(
+        self,
+        configuration: RouteMeterConfiguration,
+    ) -> None:
+        """Apply per-run measurement settings to the connected meter."""
+
+        if configuration.meter_type != self._meter_type:
+            configured_label = ROUTE_METER_LABELS.get(
+                self._meter_type, self._meter_type
+            )
+            requested_label = ROUTE_METER_LABELS.get(
+                configuration.meter_type, configuration.meter_type
+            )
+            raise LCRMeterError(
+                f"Connected instrument is {configured_label}; route requested {requested_label}."
+            )
+        session = self._session
+        if session is None:
+            raise LCRMeterError("Measurement instrument is not connected.")
+        if configuration.meter_type == ROUTE_METER_GWINSTEK:
+            if not isinstance(session, _LCRSession):
+                raise LCRMeterError("Connected instrument is not a GW Instek LCR.")
+            settings = configuration.gwinstek
+            session.configure_measurement(
+                measurement_function=settings.measurement_function,
+                range_mode=settings.range_mode,
+                impedance_range=settings.impedance_range,
+                dcr_range=settings.dcr_range,
+                frequency_hz=settings.frequency_hz,
+                level_mode=settings.level_mode,
+                voltage_level_v=settings.voltage_level_v,
+                current_level_a=settings.current_level_a,
+                source_resistance_ohm=settings.source_resistance_ohm,
+                aperture_rate=settings.aperture_rate,
+                aperture_averages=settings.aperture_averages,
+                trigger_source="BUS",
+                trigger_delay_s=settings.trigger_delay_s,
+                bias_enabled=settings.bias_enabled,
+                bias_level_v=settings.bias_level_v,
+                monitor1=settings.monitor1,
+                monitor2=settings.monitor2,
+                alc_enabled=settings.alc_enabled,
+            )
+            return
+        if configuration.meter_type == ROUTE_METER_KEITHLEY:
+            if not isinstance(session, _Keithley2400With2182ASession):
+                raise LCRMeterError("Connected instrument is not a Keithley pair.")
+            settings = configuration.keithley
+            session.configure_measurement(
+                keithley_measurement_voltage_v=settings.measurement_voltage_v,
+                keithley_source_voltage_range_v=settings.source_voltage_range_v,
+                keithley_compliance_current_a=settings.compliance_current_a,
+                keithley_nplc=settings.nplc,
+                keithley_terminals=settings.terminals,
+                keithley_trigger_delay_s=settings.trigger_delay_s,
+            )
 
     def is_short_reading(self, primary_value: float) -> bool:
         """Return True when a primary reading satisfies the configured short threshold."""
@@ -851,16 +936,16 @@ class LCRMeterController(QObject):
 
         with self._task_lock:
             if self._active_thread and self._active_thread.is_alive():
-                raise LCRMeterError("LCR meter task already running.")
+                raise LCRMeterError("Measurement instrument task already running.")
             session = self._session
         if session is None:
-            raise LCRMeterError("LCR meter is not connected.")
+            raise LCRMeterError("Measurement instrument is not connected.")
         self._stop_polling_session()
         try:
             primary_value = session.read_primary_value(trigger=True)
         except LCRMeterError:
             self._disconnect_session()
-            self.connection_changed.emit(False, "", "LCR read failed.")
+            self.connection_changed.emit(False, "", "Instrument read failed.")
             raise
         finally:
             if restart_polling and self._session is session:
@@ -873,22 +958,26 @@ class LCRMeterController(QObject):
         return primary_value
 
     def request_connect(self) -> None:
-        """Open the configured LCR resource in a background thread."""
+        """Open the configured measurement instrument in a background thread."""
 
         with self._task_lock:
             if self._active_thread and self._active_thread.is_alive():
-                self.status_message.emit("LCR meter task already running.")
+                self.status_message.emit(
+                    "Measurement instrument task already running."
+                )
                 return
             thread = threading.Thread(target=self._run_connect, daemon=True)
             self._active_thread = thread
             thread.start()
 
     def request_disconnect(self) -> None:
-        """Close the current LCR resource and stop polling."""
+        """Close the current measurement instrument and stop polling."""
 
         with self._task_lock:
             if self._active_thread and self._active_thread.is_alive():
-                self.status_message.emit("LCR meter task already running.")
+                self.status_message.emit(
+                    "Measurement instrument task already running."
+                )
                 return
             thread = threading.Thread(target=self._run_disconnect, daemon=True)
             self._active_thread = thread
@@ -901,7 +990,9 @@ class LCRMeterController(QObject):
             if self._session is None:
                 return
             if self._active_thread and self._active_thread.is_alive():
-                self.status_message.emit("LCR meter task already running.")
+                self.status_message.emit(
+                    "Measurement instrument task already running."
+                )
                 return
             thread = threading.Thread(target=self._run_reconfigure, daemon=True)
             self._active_thread = thread
@@ -920,32 +1011,46 @@ class LCRMeterController(QObject):
             try:
                 session.close()
             except Exception:  # pragma: no cover - best effort shutdown
-                logger.exception("Failed to close LCR session during shutdown")
+                logger.exception(
+                    "Failed to close measurement instrument session during shutdown"
+                )
 
     def _run_connect(self) -> None:
         try:
-            if not self._resource_name:
-                raise LCRMeterError("LCR resource is empty. Set it in Settings.")
+            if self._meter_type == ROUTE_METER_GWINSTEK and not self._resource_name:
+                raise LCRMeterError("GW Instek resource is empty. Set it in Settings.")
+            if self._meter_type == ROUTE_METER_KEITHLEY:
+                if not self._keithley_source_resource:
+                    raise LCRMeterError(
+                        "Keithley 2400 resource is empty. Set it in Settings."
+                    )
+                if not self._keithley_voltmeter_resource:
+                    raise LCRMeterError(
+                        "Keithley 2182A resource is empty. Set it in Settings."
+                    )
             self._disconnect_session()
-            session = _LCRSession(self._resource_name, self.DEFAULT_TIMEOUT_MS)
+            session = self._open_configured_session()
             instrument_id = session.identify()
             logger.info(
-                "Connected to LCR resource %s (%s)",
-                self._resource_name,
+                "Connected to measurement instrument %s (%s)",
+                self.connection_label(),
                 instrument_id or "IDN unavailable",
             )
-            self._configure_session(session)
+            if self._meter_type == ROUTE_METER_GWINSTEK:
+                self._configure_session(session)
             self._session = session
-            self._connected_resource_name = self._resource_name
+            self._connected_resource_name = self._connection_key()
             self._stop_polling.clear()
-            self.connection_changed.emit(True, session.backend_name, self._resource_name)
+            self.connection_changed.emit(
+                True, session.backend_name, self.connection_label()
+            )
             self.status_message.emit(
-                f"LCR connected via {session.backend_name}; waiting for explicit triggers."
+                f"Measurement instrument connected via {session.backend_name}."
             )
         except LCRMeterError as exc:
             self._disconnect_session()
             self.connection_changed.emit(False, "", str(exc))
-            self.status_message.emit(f"LCR connection failed: {exc}")
+            self.status_message.emit(f"Instrument connection failed: {exc}")
         finally:
             with self._task_lock:
                 self._active_thread = None
@@ -955,35 +1060,40 @@ class LCRMeterController(QObject):
             session = self._session
             if session is None:
                 return
-            desired_resource = self._resource_name.strip()
-            connected_resource = self._connected_resource_name.strip()
+            desired_resource = self._connection_key()
+            connected_resource = self._connected_resource_name
             if not desired_resource:
-                raise LCRMeterError("LCR resource is empty. Set it in Settings.")
-            if normalize_resource_name(desired_resource) != normalize_resource_name(
-                connected_resource
-            ):
-                self.status_message.emit("LCR resource changed. Reconnecting meter.")
+                raise LCRMeterError(
+                    "Measurement instrument resource is empty. Set it in Settings."
+                )
+            if desired_resource != connected_resource:
+                self.status_message.emit(
+                    "Instrument connection settings changed. Reconnecting."
+                )
                 self._disconnect_session()
-                replacement = _LCRSession(desired_resource, self.DEFAULT_TIMEOUT_MS)
+                replacement = self._open_configured_session()
                 instrument_id = replacement.identify()
                 logger.info(
-                    "Reconnected to LCR resource %s (%s)",
-                    desired_resource,
+                    "Reconnected to measurement instrument %s (%s)",
+                    self.connection_label(),
                     instrument_id or "IDN unavailable",
                 )
                 session = replacement
                 self._session = session
                 self._connected_resource_name = desired_resource
-                self.connection_changed.emit(True, session.backend_name, desired_resource)
+                self.connection_changed.emit(
+                    True, session.backend_name, self.connection_label()
+                )
             else:
                 self._stop_polling_session()
-            self._configure_active_session(session)
+            if self._meter_type == ROUTE_METER_GWINSTEK:
+                self._configure_active_session(session)
             self._stop_polling.clear()
-            self.status_message.emit("LCR settings applied; waiting for explicit triggers.")
+            self.status_message.emit("Instrument settings applied.")
         except LCRMeterError as exc:
             self._disconnect_session()
             self.connection_changed.emit(False, "", str(exc))
-            self.status_message.emit(f"LCR reconfiguration failed: {exc}")
+            self.status_message.emit(f"Instrument reconfiguration failed: {exc}")
         finally:
             with self._task_lock:
                 self._active_thread = None
@@ -992,7 +1102,7 @@ class LCRMeterController(QObject):
         try:
             self._disconnect_session()
             self.connection_changed.emit(False, "", "Disconnected")
-            self.status_message.emit("LCR disconnected.")
+            self.status_message.emit("Measurement instrument disconnected.")
         finally:
             with self._task_lock:
                 self._active_thread = None
@@ -1001,6 +1111,8 @@ class LCRMeterController(QObject):
         self._configure_session(session)
 
     def _configure_session(self, session: _LCRSession) -> None:
+        if not isinstance(session, _LCRSession):
+            return
         session.configure_measurement(
             measurement_function=self._measurement_function,
             range_mode=self._range_mode,
@@ -1021,6 +1133,27 @@ class LCRMeterController(QObject):
             monitor2=self._monitor2,
             alc_enabled=self._alc_enabled,
         )
+
+    def _open_configured_session(self) -> _LCRSession | _Keithley2400With2182ASession:
+        if self._meter_type == ROUTE_METER_KEITHLEY:
+            return _Keithley2400With2182ASession(
+                self._keithley_source_resource,
+                self._keithley_voltmeter_resource,
+                self.DEFAULT_TIMEOUT_MS,
+            )
+        return _LCRSession(self._resource_name, self.DEFAULT_TIMEOUT_MS)
+
+    def _connection_key(self) -> str:
+        if self._meter_type == ROUTE_METER_KEITHLEY:
+            source = normalize_resource_name(self._keithley_source_resource)
+            voltmeter = normalize_resource_name(self._keithley_voltmeter_resource)
+            if not source or not voltmeter:
+                return ""
+            return f"{ROUTE_METER_KEITHLEY}|{source}|{voltmeter}"
+        resource = normalize_resource_name(self._resource_name)
+        if not resource:
+            return ""
+        return f"{ROUTE_METER_GWINSTEK}|{resource}"
 
     def _is_short_reading(self, primary_value: float) -> bool:
         return (
@@ -1052,7 +1185,9 @@ class LCRMeterController(QObject):
             try:
                 session.close()
             except Exception:  # pragma: no cover - best effort cleanup
-                logger.exception("Failed to close LCR session cleanly")
+                logger.exception(
+                    "Failed to close measurement instrument session cleanly"
+                )
 
     def _start_polling_thread(self) -> None:
         if self._poll_thread and self._poll_thread.is_alive():
@@ -1069,7 +1204,7 @@ class LCRMeterController(QObject):
             try:
                 primary_value = session.read_primary_value(trigger=True)
             except LCRMeterError as exc:
-                self.status_message.emit(f"LCR read failed: {exc}")
+                self.status_message.emit(f"Instrument read failed: {exc}")
                 self.connection_changed.emit(False, "", str(exc))
                 self._disconnect_session()
                 return

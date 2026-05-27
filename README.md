@@ -29,7 +29,8 @@ In practice this means:
 Hardware:
 - a camera compatible with `rotpy` / Spinnaker;
 - a `FluidNC` controller connected over serial;
-- for needle calibration mode: a supported `GW Instek LCR`.
+- for contact checks and route measurements: a supported measurement instrument
+  (`GW Instek LCR-76200` or `Keithley 2400 + 2182A`).
 
 Core Python packages:
 - `PySide6`
@@ -108,7 +109,7 @@ Separate window:
 Purpose:
 - scan serial ports;
 - connect to and disconnect from `FluidNC`;
-- connect to and disconnect from the configured `LCR`;
+- connect to and disconnect from the configured measurement instrument;
 - run startup synchronization after connect;
 - attempt auto-connect.
 
@@ -118,8 +119,9 @@ How to use it:
 3. Check the baud rate, usually `115200`.
 4. Press `Connect`.
 
-The same panel contains the `LCR Meter` block. Configure its resource in
-`Application` -> `Settings` -> `Needles`, then press `Connect LCR`.
+The same panel contains the `Instrument` block. Configure the instrument type
+and resource in `Application` -> `Settings` -> `Needles`, then press
+`Connect Instrument`.
 
 After connection:
 - the control panels become active;
@@ -348,27 +350,27 @@ Typical workflow:
 1. Load a design in `Design Window`.
 2. Complete design-backed alignment so registration is valid.
 3. In `Probe Route`, create points manually or with `Array`.
-4. Connect the stage controller and the LCR meter.
-5. Press `Run Route` and choose the CSV output path.
-6. The runner raises needles, moves to each point, lowers needles, reads the LCR, raises needles again, and continues to the next point.
+4. Connect the stage controller and the measurement instrument.
+5. Press `Run Route`, choose the CSV output path, select the instrument type, and enter the per-run measurement settings.
+6. The runner raises needles, moves to each point, lowers needles, reads the instrument, raises needles again, and continues to the next point.
 
 `Stop` requests a safe stop after the current route action. Completed points are already written to CSV.
 
-## Contact Calibration and LCR
+## Contact Calibration and Instruments
 
 The `Contact / Stone Calibration` window is used to save chip/stone focus
-positions and the lower needle contact position. The external `LCR` is connected
-from the `Connection` panel.
+positions and the lower needle contact position. The external measurement
+instrument is connected from the `Connection` panel.
 
 Requirements:
 - properly configured instrument address;
 - installed `pyvisa` and `qcodes`;
-- a supported `GW Instek LCR`.
+- a supported instrument.
 
 Typical workflow:
 1. Open needle settings.
-2. Configure the `LCR` parameters.
-3. In `Connection`, press `Connect LCR`.
+2. Configure the instrument type and resource.
+3. In `Connection`, press `Connect Instrument`.
 4. Open `Contact / Stone Calibration`.
 5. Lower the needles in small steps.
 6. Watch the LCR reading and `Short/Open` state in `Connection`.
@@ -448,7 +450,7 @@ Open settings through `Application -> Settings...`.
 Typical items:
 - `Controls`: key bindings;
 - `Jog`: manual jog parameters;
-- `Needles`: `LCR` parameters, lowering direction, saved lower position;
+- `Needles`: instrument connection, lowering direction, saved lower position;
 - `Coordinates`: coordinate mode;
 - `Logging`: log path and log level.
 

@@ -38,6 +38,9 @@ from probe_station_gui.settings_manager import (
     KeyBinding,
     LCR_APERTURE_RATES,
     LCR_LEVEL_MODES,
+    LCR_METER_TYPE_GWINSTEK,
+    LCR_METER_TYPE_LABELS,
+    LCR_METER_TYPES,
     LCR_MEASUREMENT_FUNCTIONS,
     LCR_MONITOR_PARAMETERS,
     LCR_RANGE_MODES,
@@ -567,7 +570,7 @@ class JogSettingsWidget(QWidget):
 
 
 class NeedleCalibrationSettingsWidget(QWidget):
-    """Tab that exposes LCR and needle calibration settings."""
+    """Tab that exposes measurement-instrument and needle calibration settings."""
 
     def __init__(
         self,
@@ -584,10 +587,43 @@ class NeedleCalibrationSettingsWidget(QWidget):
         layout = QFormLayout(self)
         layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
+        self._meter_type_combo = QComboBox(self)
+        for meter_type in LCR_METER_TYPES:
+            self._meter_type_combo.addItem(
+                LCR_METER_TYPE_LABELS.get(meter_type, meter_type),
+                meter_type,
+            )
+        meter_type_index = self._meter_type_combo.findData(
+            calibration_settings.meter_type
+        )
+        if meter_type_index >= 0:
+            self._meter_type_combo.setCurrentIndex(meter_type_index)
+        layout.addRow(QLabel("Instrument type", self), self._meter_type_combo)
+
         self._visa_resource_edit = QLineEdit(self)
         self._visa_resource_edit.setPlaceholderText("COM4 or ASRL4::INSTR")
         self._visa_resource_edit.setText(calibration_settings.visa_resource)
-        layout.addRow(QLabel("LCR resource", self), self._visa_resource_edit)
+        layout.addRow(QLabel("GW Instek resource", self), self._visa_resource_edit)
+
+        self._keithley_source_resource_edit = QLineEdit(self)
+        self._keithley_source_resource_edit.setPlaceholderText("GPIB2::1::INSTR")
+        self._keithley_source_resource_edit.setText(
+            calibration_settings.keithley_source_resource
+        )
+        layout.addRow(
+            QLabel("Keithley 2400 resource", self),
+            self._keithley_source_resource_edit,
+        )
+
+        self._keithley_voltmeter_resource_edit = QLineEdit(self)
+        self._keithley_voltmeter_resource_edit.setPlaceholderText("GPIB2::2::INSTR")
+        self._keithley_voltmeter_resource_edit.setText(
+            calibration_settings.keithley_voltmeter_resource
+        )
+        layout.addRow(
+            QLabel("Keithley 2182A resource", self),
+            self._keithley_voltmeter_resource_edit,
+        )
 
         self._function_combo = QComboBox(self)
         self._function_combo.addItems(LCR_MEASUREMENT_FUNCTIONS)
@@ -750,6 +786,9 @@ class NeedleCalibrationSettingsWidget(QWidget):
         self._function_combo.currentTextChanged.connect(
             lambda _text: self._update_lcr_control_state()
         )
+        self._meter_type_combo.currentIndexChanged.connect(
+            lambda _index: self._update_lcr_control_state()
+        )
         self._range_mode_combo.currentIndexChanged.connect(
             lambda _index: self._update_lcr_control_state()
         )
@@ -762,29 +801,51 @@ class NeedleCalibrationSettingsWidget(QWidget):
         self._update_lcr_control_state()
 
     def _update_lcr_control_state(self) -> None:
+        meter_type = str(self._meter_type_combo.currentData() or LCR_METER_TYPE_GWINSTEK)
+        gwinstek_meter = meter_type == LCR_METER_TYPE_GWINSTEK
         function = self._function_combo.currentText()
         range_mode = str(self._range_mode_combo.currentData() or "HOLD")
         level_mode = str(self._level_mode_combo.currentData() or "VOLTAGE")
         fixed_range = range_mode == "HOLD"
         dcr_mode = function == "DCR"
-        self._dcr_range_spin.setEnabled(fixed_range and dcr_mode)
-        self._impedance_range_spin.setEnabled(fixed_range and not dcr_mode)
-        self._frequency_spin.setEnabled(not dcr_mode)
-        self._level_mode_combo.setEnabled(not dcr_mode)
-        self._voltage_level_spin.setEnabled(not dcr_mode and level_mode == "VOLTAGE")
-        self._current_level_spin.setEnabled(not dcr_mode and level_mode == "CURRENT")
-        self._source_resistance_combo.setEnabled(not dcr_mode)
-        self._bias_checkbox.setEnabled(not dcr_mode)
-        self._bias_level_spin.setEnabled(not dcr_mode and self._bias_checkbox.isChecked())
-        self._monitor1_combo.setEnabled(not dcr_mode)
-        self._monitor2_combo.setEnabled(not dcr_mode)
-        self._alc_checkbox.setEnabled(not dcr_mode)
+        self._visa_resource_edit.setEnabled(gwinstek_meter)
+        self._keithley_source_resource_edit.setEnabled(not gwinstek_meter)
+        self._keithley_voltmeter_resource_edit.setEnabled(not gwinstek_meter)
+        self._function_combo.setEnabled(gwinstek_meter)
+        self._range_mode_combo.setEnabled(gwinstek_meter)
+        self._aperture_combo.setEnabled(gwinstek_meter)
+        self._averages_spin.setEnabled(gwinstek_meter)
+        self._trigger_source_combo.setEnabled(gwinstek_meter)
+        self._trigger_delay_spin.setEnabled(gwinstek_meter)
+        self._dcr_range_spin.setEnabled(gwinstek_meter and fixed_range and dcr_mode)
+        self._impedance_range_spin.setEnabled(
+            gwinstek_meter and fixed_range and not dcr_mode
+        )
+        self._frequency_spin.setEnabled(gwinstek_meter and not dcr_mode)
+        self._level_mode_combo.setEnabled(gwinstek_meter and not dcr_mode)
+        self._voltage_level_spin.setEnabled(
+            gwinstek_meter and not dcr_mode and level_mode == "VOLTAGE"
+        )
+        self._current_level_spin.setEnabled(
+            gwinstek_meter and not dcr_mode and level_mode == "CURRENT"
+        )
+        self._source_resistance_combo.setEnabled(gwinstek_meter and not dcr_mode)
+        self._bias_checkbox.setEnabled(gwinstek_meter and not dcr_mode)
+        self._bias_level_spin.setEnabled(
+            gwinstek_meter and not dcr_mode and self._bias_checkbox.isChecked()
+        )
+        self._monitor1_combo.setEnabled(gwinstek_meter and not dcr_mode)
+        self._monitor2_combo.setEnabled(gwinstek_meter and not dcr_mode)
+        self._alc_checkbox.setEnabled(gwinstek_meter and not dcr_mode)
 
     def to_settings(self, settings: Settings) -> None:
         """Persist the widget state into the provided settings object."""
 
         settings.needle_calibration = NeedleCalibrationSettings(
+            meter_type=str(self._meter_type_combo.currentData() or LCR_METER_TYPE_GWINSTEK),
             visa_resource=self._visa_resource_edit.text().strip(),
+            keithley_source_resource=self._keithley_source_resource_edit.text().strip(),
+            keithley_voltmeter_resource=self._keithley_voltmeter_resource_edit.text().strip(),
             measurement_function=self._function_combo.currentText(),
             range_mode=str(self._range_mode_combo.currentData() or "HOLD"),
             auto_range_enabled=str(self._range_mode_combo.currentData() or "") == "AUTO",

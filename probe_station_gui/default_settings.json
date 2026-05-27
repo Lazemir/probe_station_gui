@@ -95,7 +95,10 @@
     "manual_axis_feedrate_mm_min": 600.0
   },
   "needle_calibration": {
+    "meter_type": "gwinstek_lcr_76200",
     "visa_resource": "COM4",
+    "keithley_source_resource": "GPIB2::1::INSTR",
+    "keithley_voltmeter_resource": "GPIB2::2::INSTR",
     "measurement_function": "R-X",
     "range_mode": "AUTO",
     "auto_range_enabled": true,

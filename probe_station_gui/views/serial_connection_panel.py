@@ -1,4 +1,4 @@
-"""Dockable panel for managing FluidNC and LCR connections."""
+"""Dockable panel for managing FluidNC and measurement-instrument connections."""
 
 from __future__ import annotations
 
@@ -101,18 +101,18 @@ class SerialConnectionPanel(QWidget):
         fluidnc_layout.addLayout(button_row)
         layout.addWidget(fluidnc_group)
 
-        lcr_group = QGroupBox("LCR Meter", self)
+        lcr_group = QGroupBox("Instrument", self)
         lcr_layout = QVBoxLayout(lcr_group)
         lcr_layout.setContentsMargins(6, 6, 6, 6)
         lcr_layout.setSpacing(6)
 
         self.lcr_status_label = QLabel("Disconnected", lcr_group)
         self.lcr_status_label.setWordWrap(True)
-        self.lcr_resource_label = QLabel("Resource: not configured", lcr_group)
+        self.lcr_resource_label = QLabel("Target: not configured", lcr_group)
         self.lcr_resource_label.setWordWrap(True)
         self.lcr_reading_label = QLabel("Reading: n/a", lcr_group)
         self.lcr_reading_label.setWordWrap(True)
-        self.lcr_connect_button = QPushButton("Connect LCR", lcr_group)
+        self.lcr_connect_button = QPushButton("Connect Instrument", lcr_group)
         lcr_layout.addWidget(self.lcr_status_label)
         lcr_layout.addWidget(self.lcr_resource_label)
         lcr_layout.addWidget(self.lcr_reading_label)
@@ -137,9 +137,9 @@ class SerialConnectionPanel(QWidget):
     def set_lcr_resource(self, resource_name: str) -> None:
         self._lcr_resource_name = resource_name.strip()
         if self._lcr_resource_name:
-            self.lcr_resource_label.setText(f"Resource: {self._lcr_resource_name}")
+            self.lcr_resource_label.setText(f"Target: {self._lcr_resource_name}")
         else:
-            self.lcr_resource_label.setText("Resource: not configured")
+            self.lcr_resource_label.setText("Target: not configured")
 
     def set_lcr_connection_state(
         self, connected: bool, backend_name: str, description: str
@@ -179,10 +179,10 @@ class SerialConnectionPanel(QWidget):
 
     def on_lcr_connect_clicked(self) -> None:
         if self._lcr_connected:
-            self.lcr_status_label.setText("Disconnecting LCR...")
+            self.lcr_status_label.setText("Disconnecting instrument...")
             self.lcr_disconnect_requested.emit()
             return
-        target = self._lcr_resource_name or "configured resource"
+        target = self._lcr_resource_name or "configured instrument"
         self.lcr_status_label.setText(f"Connecting to {target}...")
         self.lcr_connect_requested.emit()
 
@@ -324,7 +324,7 @@ class SerialConnectionPanel(QWidget):
 
     def _update_lcr_ui_state(self) -> None:
         self.lcr_connect_button.setText(
-            "Disconnect LCR" if self._lcr_connected else "Connect LCR"
+            "Disconnect Instrument" if self._lcr_connected else "Connect Instrument"
         )
 
     def _set_connecting(self, connecting: bool) -> None:

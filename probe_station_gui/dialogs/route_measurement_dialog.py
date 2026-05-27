@@ -65,6 +65,7 @@ class RouteMeasurementDialog(QDialog):
         route_name: str,
         route_point_count: int,
         default_csv_path: str,
+        default_meter_type: str = ROUTE_METER_KEITHLEY,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -94,7 +95,10 @@ class RouteMeasurementDialog(QDialog):
         self._measurement_count_spin = QSpinBox(common_group)
         self._measurement_count_spin.setRange(1, 1000)
         self._measurement_count_spin.setValue(5)
-        common_layout.addRow(QLabel("Readings per point", common_group), self._measurement_count_spin)
+        common_layout.addRow(
+            QLabel("Readings per point", common_group),
+            self._measurement_count_spin,
+        )
 
         self._contact_settle_spin = QDoubleSpinBox(common_group)
         self._contact_settle_spin.setLocale(QLocale.c())
@@ -103,16 +107,23 @@ class RouteMeasurementDialog(QDialog):
         self._contact_settle_spin.setSingleStep(0.05)
         self._contact_settle_spin.setSuffix(" s")
         self._contact_settle_spin.setValue(0.2)
-        common_layout.addRow(QLabel("Contact settle", common_group), self._contact_settle_spin)
+        common_layout.addRow(
+            QLabel("Contact settle", common_group),
+            self._contact_settle_spin,
+        )
         layout.addWidget(common_group)
 
-        meter_group = QGroupBox("Meter", self)
+        meter_group = QGroupBox("Instrument", self)
         meter_layout = QVBoxLayout(meter_group)
         meter_form = QFormLayout()
         self._meter_combo = QComboBox(meter_group)
         for meter_type in ROUTE_METER_TYPES:
             self._meter_combo.addItem(ROUTE_METER_LABELS[meter_type], meter_type)
-        self._meter_combo.setCurrentIndex(self._meter_combo.findData(ROUTE_METER_KEITHLEY))
+        meter_index = self._meter_combo.findData(default_meter_type)
+        if meter_index < 0:
+            meter_index = self._meter_combo.findData(ROUTE_METER_KEITHLEY)
+        if meter_index >= 0:
+            self._meter_combo.setCurrentIndex(meter_index)
         meter_form.addRow(QLabel("Type", meter_group), self._meter_combo)
         meter_layout.addLayout(meter_form)
 
@@ -195,11 +206,6 @@ class RouteMeasurementDialog(QDialog):
         layout = QFormLayout(page)
         layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
-        self._gw_resource_edit = QLineEdit(page)
-        self._gw_resource_edit.setText("COM4")
-        self._gw_resource_edit.setPlaceholderText("COM4 or ASRL4::INSTR")
-        layout.addRow(QLabel("Resource", page), self._gw_resource_edit)
-
         self._gw_function_combo = QComboBox(page)
         self._gw_function_combo.addItems(LCR_MEASUREMENT_FUNCTIONS)
         self._gw_function_combo.setCurrentText("DCR")
@@ -209,7 +215,9 @@ class RouteMeasurementDialog(QDialog):
         for mode in LCR_RANGE_MODES:
             label = "Fixed range" if mode == "HOLD" else "Auto range"
             self._gw_range_mode_combo.addItem(label, mode)
-        self._gw_range_mode_combo.setCurrentIndex(self._gw_range_mode_combo.findData("AUTO"))
+        self._gw_range_mode_combo.setCurrentIndex(
+            self._gw_range_mode_combo.findData("AUTO")
+        )
         layout.addRow(QLabel("Range mode", page), self._gw_range_mode_combo)
 
         self._gw_impedance_range_spin = QSpinBox(page)
@@ -257,7 +265,9 @@ class RouteMeasurementDialog(QDialog):
         self._gw_source_resistance_combo.setCurrentIndex(
             self._gw_source_resistance_combo.findData(100)
         )
-        layout.addRow(QLabel("Source resistance", page), self._gw_source_resistance_combo)
+        layout.addRow(
+            QLabel("Source resistance", page), self._gw_source_resistance_combo
+        )
 
         self._gw_aperture_combo = QComboBox(page)
         self._gw_aperture_combo.addItems(LCR_APERTURE_RATES)
@@ -294,14 +304,6 @@ class RouteMeasurementDialog(QDialog):
         layout = QFormLayout(page)
         layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
-        self._keithley_source_edit = QLineEdit(page)
-        self._keithley_source_edit.setText("GPIB2::1::INSTR")
-        layout.addRow(QLabel("2400 source", page), self._keithley_source_edit)
-
-        self._keithley_voltmeter_edit = QLineEdit(page)
-        self._keithley_voltmeter_edit.setText("GPIB2::2::INSTR")
-        layout.addRow(QLabel("2182A voltmeter", page), self._keithley_voltmeter_edit)
-
         self._keithley_voltage_spin = QDoubleSpinBox(page)
         self._keithley_voltage_spin.setLocale(QLocale.c())
         self._keithley_voltage_spin.setDecimals(6)
@@ -327,7 +329,9 @@ class RouteMeasurementDialog(QDialog):
         self._keithley_compliance_spin.setSingleStep(0.000001)
         self._keithley_compliance_spin.setSuffix(" A")
         self._keithley_compliance_spin.setValue(500e-6)
-        layout.addRow(QLabel("Compliance current", page), self._keithley_compliance_spin)
+        layout.addRow(
+            QLabel("Compliance current", page), self._keithley_compliance_spin
+        )
 
         self._keithley_nplc_spin = QDoubleSpinBox(page)
         self._keithley_nplc_spin.setLocale(QLocale.c())
@@ -390,7 +394,9 @@ class RouteMeasurementDialog(QDialog):
             self._gw_bias_spin,
         ):
             widget.setEnabled(not dcr_mode)
-        self._gw_bias_spin.setEnabled(not dcr_mode and self._gw_bias_checkbox.isChecked())
+        self._gw_bias_spin.setEnabled(
+            not dcr_mode and self._gw_bias_checkbox.isChecked()
+        )
 
     def _emit_run_requested(self) -> None:
         csv_path = self._csv_path_edit.text().strip()
@@ -411,7 +417,6 @@ class RouteMeasurementDialog(QDialog):
         return RouteMeterConfiguration(
             meter_type=meter_type,
             gwinstek=GWInstekRouteMeterSettings(
-                resource_name=self._gw_resource_edit.text().strip(),
                 measurement_function=self._gw_function_combo.currentText(),
                 range_mode=str(self._gw_range_mode_combo.currentData() or "AUTO"),
                 impedance_range=int(self._gw_impedance_range_spin.value()),
@@ -430,8 +435,6 @@ class RouteMeasurementDialog(QDialog):
                 bias_level_v=float(self._gw_bias_spin.value()),
             ),
             keithley=KeithleyRouteMeterSettings(
-                source_resource=self._keithley_source_edit.text().strip(),
-                voltmeter_resource=self._keithley_voltmeter_edit.text().strip(),
                 measurement_voltage_v=float(self._keithley_voltage_spin.value()),
                 source_voltage_range_v=float(self._keithley_range_spin.value()),
                 compliance_current_a=float(self._keithley_compliance_spin.value()),

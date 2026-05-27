@@ -272,7 +272,7 @@ class RouteMeasurementRunner:
                 try:
                     self._lcr_controller.close()
                 except Exception as exc:
-                    message = f"{message} Meter close failed: {exc}"
+                    message = f"{message} Instrument close failed: {exc}"
         return success, message
 
     def _sleep_contact_settle(self) -> bool:

@@ -67,6 +67,7 @@ ApiSettings = settings_manager.ApiSettings
 JogSettings = settings_manager.JogSettings
 ClickToMoveSettings = settings_manager.ClickToMoveSettings
 NeedleCalibrationSettings = settings_manager.NeedleCalibrationSettings
+LCR_METER_TYPE_KEITHLEY = settings_manager.LCR_METER_TYPE_KEITHLEY
 AxisACalibrationSettings = settings_manager.AxisACalibrationSettings
 AxisZCalibrationSettings = settings_manager.AxisZCalibrationSettings
 OscillationSettings = settings_manager.OscillationSettings
@@ -117,6 +118,10 @@ class NeedleCalibrationBookmarkTest(unittest.TestCase):
 
     def test_lcr_settings_round_trip(self) -> None:
         settings = NeedleCalibrationSettings(
+            meter_type=LCR_METER_TYPE_KEITHLEY,
+            visa_resource="COM5",
+            keithley_source_resource="GPIB2::7::INSTR",
+            keithley_voltmeter_resource="GPIB2::8::INSTR",
             measurement_function="Cp-Rp",
             range_mode="AUTO",
             auto_range_enabled=True,
@@ -144,6 +149,16 @@ class NeedleCalibrationBookmarkTest(unittest.TestCase):
 
         restored = settings.to_dict()
 
+        self.assertEqual(restored["meter_type"], settings.meter_type)
+        self.assertEqual(restored["visa_resource"], settings.visa_resource)
+        self.assertEqual(
+            restored["keithley_source_resource"],
+            settings.keithley_source_resource,
+        )
+        self.assertEqual(
+            restored["keithley_voltmeter_resource"],
+            settings.keithley_voltmeter_resource,
+        )
         self.assertEqual(restored["measurement_function"], settings.measurement_function)
         self.assertEqual(restored["range_mode"], settings.range_mode)
         self.assertEqual(restored["impedance_range"], settings.impedance_range)

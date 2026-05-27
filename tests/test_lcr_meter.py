@@ -48,8 +48,11 @@ _restore_real_imports()
 _install_pyside6_stubs_if_missing()
 
 from probe_station_gui.lcr_meter import (
+    GWInstekRouteMeterSettings,
     KeithleyRouteMeterSettings,
+    LCRMeterError,
     LCRMeterController,
+    ROUTE_METER_GWINSTEK,
     ROUTE_METER_KEITHLEY,
     RouteMeterConfiguration,
     _Keithley2400With2182ASession,
@@ -80,6 +83,32 @@ class _FakeSession:
 
     def read_primary_value(self, *, trigger: bool = False) -> float:
         self.read_triggers.append(bool(trigger))
+        return 42.0
+
+    def configure_measurement(self, **kwargs) -> None:
+        self.configurations.append(dict(kwargs))
+
+
+class _FakeLCRSession(_LCRSession):
+    backend_name = "fake-lcr"
+
+    def __init__(self) -> None:
+        self.configurations: list[dict] = []
+
+    def read_primary_value(self, *, trigger: bool = False) -> float:
+        return 42.0
+
+    def configure_measurement(self, **kwargs) -> None:
+        self.configurations.append(dict(kwargs))
+
+
+class _FakeKeithleySession(_Keithley2400With2182ASession):
+    backend_name = "fake-keithley"
+
+    def __init__(self) -> None:
+        self.configurations: list[dict] = []
+
+    def read_primary_value(self, *, trigger: bool = False) -> float:
         return 42.0
 
     def configure_measurement(self, **kwargs) -> None:
@@ -159,11 +188,131 @@ class LCRMeterTest(unittest.TestCase):
             short_threshold_ohm=10.0,
             poll_interval_ms=250,
         )
-        session = _FakeSession()
+        session = _FakeLCRSession()
 
         controller._configure_session(session)
 
         self.assertEqual(session.configurations[-1]["trigger_source"], "BUS")
+
+    def test_controller_connection_label_uses_keithley_resources(self) -> None:
+        controller = LCRMeterController()
+        controller.apply_configuration(
+            meter_type=ROUTE_METER_KEITHLEY,
+            resource_name="COM4",
+            keithley_source_resource="GPIB2::7::INSTR",
+            keithley_voltmeter_resource="GPIB2::8::INSTR",
+            measurement_function="DCR",
+            range_mode="AUTO",
+            auto_range_enabled=True,
+            impedance_range=3,
+            dcr_range=4,
+            frequency_hz=50.0,
+            level_mode="VOLTAGE",
+            voltage_level_v=0.01,
+            current_level_a=0.0001,
+            source_resistance_ohm=100,
+            aperture_rate="SLOW",
+            aperture_averages=1,
+            trigger_source="INT",
+            trigger_delay_s=0.0,
+            bias_enabled=False,
+            bias_level_v=0.0,
+            monitor1="OFF",
+            monitor2="OFF",
+            alc_enabled=False,
+            short_threshold_ohm=10.0,
+            poll_interval_ms=250,
+        )
+
+        label = controller.connection_label()
+
+        self.assertIn("Keithley 2400 GPIB2::7::INSTR", label)
+        self.assertIn("2182A GPIB2::8::INSTR", label)
+
+    def test_controller_applies_connected_keithley_route_settings(self) -> None:
+        controller = LCRMeterController()
+        controller.apply_configuration(
+            meter_type=ROUTE_METER_KEITHLEY,
+            resource_name="COM4",
+            keithley_source_resource="GPIB2::1::INSTR",
+            keithley_voltmeter_resource="GPIB2::2::INSTR",
+            measurement_function="DCR",
+            range_mode="AUTO",
+            auto_range_enabled=True,
+            impedance_range=3,
+            dcr_range=4,
+            frequency_hz=50.0,
+            level_mode="VOLTAGE",
+            voltage_level_v=0.01,
+            current_level_a=0.0001,
+            source_resistance_ohm=100,
+            aperture_rate="SLOW",
+            aperture_averages=1,
+            trigger_source="INT",
+            trigger_delay_s=0.0,
+            bias_enabled=False,
+            bias_level_v=0.0,
+            monitor1="OFF",
+            monitor2="OFF",
+            alc_enabled=False,
+            short_threshold_ohm=10.0,
+            poll_interval_ms=250,
+        )
+        session = _FakeKeithleySession()
+        controller._session = session
+
+        controller.apply_route_meter_configuration(
+            RouteMeterConfiguration(
+                meter_type=ROUTE_METER_KEITHLEY,
+                keithley=KeithleyRouteMeterSettings(
+                    measurement_voltage_v=0.03,
+                    nplc=7.5,
+                ),
+            )
+        )
+
+        self.assertEqual(
+            session.configurations[-1]["keithley_measurement_voltage_v"],
+            0.03,
+        )
+        self.assertEqual(session.configurations[-1]["keithley_nplc"], 7.5)
+
+    def test_controller_rejects_route_meter_type_mismatch(self) -> None:
+        controller = LCRMeterController()
+        controller.apply_configuration(
+            meter_type=ROUTE_METER_GWINSTEK,
+            resource_name="COM4",
+            measurement_function="DCR",
+            range_mode="AUTO",
+            auto_range_enabled=True,
+            impedance_range=3,
+            dcr_range=4,
+            frequency_hz=50.0,
+            level_mode="VOLTAGE",
+            voltage_level_v=0.01,
+            current_level_a=0.0001,
+            source_resistance_ohm=100,
+            aperture_rate="SLOW",
+            aperture_averages=1,
+            trigger_source="INT",
+            trigger_delay_s=0.0,
+            bias_enabled=False,
+            bias_level_v=0.0,
+            monitor1="OFF",
+            monitor2="OFF",
+            alc_enabled=False,
+            short_threshold_ohm=10.0,
+            poll_interval_ms=250,
+        )
+        controller._session = _FakeLCRSession()
+
+        with self.assertRaises(LCRMeterError):
+            controller.apply_route_meter_configuration(
+                RouteMeterConfiguration(
+                    meter_type=ROUTE_METER_KEITHLEY,
+                    gwinstek=GWInstekRouteMeterSettings(),
+                )
+            )
 
     def test_keithley_session_reads_four_wire_resistance_from_two_biases(self) -> None:
         session = _Keithley2400With2182ASession.__new__(
