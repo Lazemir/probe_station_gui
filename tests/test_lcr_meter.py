@@ -80,6 +80,7 @@ class _FakeSession:
     def __init__(self) -> None:
         self.read_triggers: list[bool] = []
         self.configurations: list[dict] = []
+        self.abort_count = 0
 
     def read_primary_value(self, *, trigger: bool = False) -> float:
         self.read_triggers.append(bool(trigger))
@@ -87,6 +88,9 @@ class _FakeSession:
 
     def configure_measurement(self, **kwargs) -> None:
         self.configurations.append(dict(kwargs))
+
+    def abort_measurement(self) -> None:
+        self.abort_count += 1
 
 
 class _FakeLCRSession(_LCRSession):
@@ -161,6 +165,15 @@ class LCRMeterTest(unittest.TestCase):
         self.assertEqual(session.read_triggers, [True])
         self.assertEqual(stopped, [True])
         self.assertEqual(started, [])
+
+    def test_controller_abort_delegates_to_active_session(self) -> None:
+        controller = LCRMeterController()
+        session = _FakeSession()
+        controller._session = session
+
+        controller.abort_current_measurement()
+
+        self.assertEqual(session.abort_count, 1)
 
     def test_controller_forces_bus_trigger_source_when_configuring(self) -> None:
         controller = LCRMeterController()
@@ -324,7 +337,7 @@ class LCRMeterTest(unittest.TestCase):
                 ":SENS:CURR:PROT:TRIP?": ["0"],
             }
         )
-        voltmeter = _FakeVisaHandle({"FETC?": ["-0.029", "0.031"]})
+        voltmeter = _FakeVisaHandle({"READ?": ["-0.029", "0.031"]})
         session._source = source
         session._voltmeter = voltmeter
         session._measurement_voltage_v = 0.03
@@ -337,6 +350,68 @@ class LCRMeterTest(unittest.TestCase):
         self.assertIn(":SOUR:VOLT -0.03", source.writes)
         self.assertIn(":SOUR:VOLT 0.03", source.writes)
         self.assertEqual(source.writes[-1], ":SOUR:VOLT 0")
+        self.assertNotIn("INIT", voltmeter.writes)
+
+    def test_keithley_route_measurement_exposes_raw_polarities(self) -> None:
+        session = _Keithley2400With2182ASession.__new__(
+            _Keithley2400With2182ASession
+        )
+        source = _FakeVisaHandle(
+            {
+                "FETC?": ["-0.03,-0.001", "0.03,0.001"],
+                ":SENS:CURR:PROT:TRIP?": ["1"],
+                "SYST:ERR?": ['0,"No error"'],
+            }
+        )
+        voltmeter = _FakeVisaHandle(
+            {
+                "READ?": ["-0.029", "0.031"],
+                "SYST:ERR?": ['0,"No error"'],
+            }
+        )
+        session._source = source
+        session._voltmeter = voltmeter
+        session._measurement_voltage_v = 0.03
+        session._trigger_delay_s = 0.0
+        session._compliance_current_a = 0.5
+
+        measurement = session.read_route_measurement(trigger=True)
+
+        self.assertAlmostEqual(measurement["differential_resistance_ohm"], 30.0)
+        self.assertEqual(measurement["compliance_hit"], True)
+        self.assertAlmostEqual(measurement["negative"]["resistance_ohm"], 29.0)
+        self.assertAlmostEqual(measurement["positive"]["resistance_ohm"], 31.0)
+
+    def test_keithley_session_surfaces_voltmeter_scpi_errors(self) -> None:
+        session = _Keithley2400With2182ASession.__new__(
+            _Keithley2400With2182ASession
+        )
+        source = _FakeVisaHandle(
+            {
+                "FETC?": ["-0.03,-0.001", "0.03,0.001"],
+                ":SENS:CURR:PROT:TRIP?": ["0"],
+                "SYST:ERR?": ['0,"No error"'],
+            }
+        )
+        voltmeter = _FakeVisaHandle(
+            {
+                "READ?": ["-0.029", "0.031"],
+                "SYST:ERR?": ['+213,"Init ignored"', '0,"No error"'],
+            }
+        )
+        session._source = source
+        session._voltmeter = voltmeter
+        session._measurement_voltage_v = 0.03
+        session._trigger_delay_s = 0.0
+        session._compliance_current_a = 0.5
+
+        with self.assertLogs("probe_station_gui.lcr_meter", level="WARNING") as logs:
+            with self.assertRaises(LCRMeterError) as context:
+                session.read_primary_value(trigger=True)
+
+        self.assertIn("+213", str(context.exception))
+        self.assertIn("2182A voltmeter", str(context.exception))
+        self.assertTrue(any("+213" in message for message in logs.output))
 
     def test_route_meter_configuration_reports_keithley_nplc_label(self) -> None:
         config = RouteMeterConfiguration(

@@ -20,6 +20,7 @@ def _restore_real_imports_for_main() -> None:
 
 _restore_real_imports_for_main()
 from main import Main
+from probe_station_gui.settings_manager import Settings
 
 
 class _FakeTimer:
@@ -54,6 +55,7 @@ class _FakeJoystick:
         self._current_feedrate = float(current_feedrate)
         self.common_targets: list[tuple[float, float]] = []
         self.common_cleared = 0
+        self.needle_contacts: list[tuple[str, float | None]] = []
 
     def current_linear_feedrate(self) -> float:
         return self._current_feedrate
@@ -66,6 +68,13 @@ class _FakeJoystick:
 
     def clear_temporary_linear_feedrate_bounds(self) -> None:
         pass
+
+    def set_needle_contact_coordinate(
+        self,
+        action: str,
+        value: float | None,
+    ) -> None:
+        self.needle_contacts.append((action, value))
 
 
 class _FakeStageController:
@@ -80,6 +89,7 @@ class _FakeStageController:
         self.latest_state = "Idle"
         self.cancelled_tasks: list[str] = []
         self.cancelled_motions: list[str] = []
+        self.needle_calibrations: list[dict[str, float | None]] = []
 
     def request_absolute_axis_targets_move(
         self,
@@ -122,6 +132,45 @@ class _FakeStageController:
 
     def cancel_active_motion(self, reason: str) -> None:
         self.cancelled_motions.append(reason)
+
+    def apply_needle_calibration(
+        self,
+        *,
+        raise_position_mm: float | None,
+        down_position_mm: float | None,
+        contact_zone_mm: float | None = None,
+    ) -> None:
+        self.needle_calibrations.append(
+            {
+                "raise_position_mm": raise_position_mm,
+                "down_position_mm": down_position_mm,
+                "contact_zone_mm": contact_zone_mm,
+            }
+        )
+
+    def axis_a_configured_coordinate_for_lowering(self, lowering_mm: float) -> float:
+        return float(lowering_mm)
+
+    def calibrated_axis_display_value(self, axis: str, raw_value: float) -> float:
+        self._last_display_axis = axis
+        return float(raw_value)
+
+    def axis_a_lowering_for_configured_coordinate(self, coordinate: float) -> float:
+        return float(coordinate)
+
+
+class _FakeSettingsManager:
+    def __init__(self) -> None:
+        self.settings = Settings()
+        self.saved_count = 0
+        self.replaced_settings: list[Settings] = []
+
+    def replace(self, settings: Settings) -> None:
+        self.settings = settings
+        self.replaced_settings.append(settings)
+
+    def save(self) -> None:
+        self.saved_count += 1
 
 
 def _make_main(current_feedrate: float = 120.0) -> tuple[
@@ -226,6 +275,44 @@ def _make_cancel_main() -> tuple[Main, _FakeStageController, _FakeButton, list[s
 
 
 class MainCoordinateFeedrateTest(unittest.TestCase):
+    def test_saving_needle_down_target_does_not_reapply_full_settings(self) -> None:
+        window = Main.__new__(Main)
+        stage_controller = _FakeStageController()
+        joystick = _FakeJoystick(120.0)
+        settings_manager = _FakeSettingsManager()
+        statuses: list[str] = []
+        full_apply_called: list[bool] = []
+
+        window.stage_controller = stage_controller
+        window.joystick_panel = joystick
+        window.settings_manager = settings_manager
+        window.contact_calibration_window = None
+        window._apply_settings = lambda: full_apply_called.append(True)
+        window._show_status = (
+            lambda message, _timeout_ms=None: statuses.append(str(message))
+        )
+
+        Main._save_needle_down_position_from_lowering(window, 2.885)
+
+        self.assertEqual(full_apply_called, [])
+        self.assertEqual(settings_manager.saved_count, 1)
+        self.assertEqual(
+            settings_manager.settings.needle_calibration.down_position_mm,
+            2.885,
+        )
+        self.assertTrue(
+            settings_manager.settings.needle_calibration.down_position_configured
+        )
+        self.assertEqual(
+            stage_controller.needle_calibrations[-1]["down_position_mm"],
+            2.885,
+        )
+        self.assertIn(("lower", 2.885), joystick.needle_contacts)
+        self.assertIn(
+            "Saved needle down target and set current A position to A0.",
+            statuses,
+        )
+
     def test_coordinate_move_records_programmed_feedrate(self) -> None:
         window, stage_controller, _joystick, timer, _statuses = _make_main(120.0)
 

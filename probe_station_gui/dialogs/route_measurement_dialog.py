@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+import math
+from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
-from PySide6.QtCore import QLocale, Signal
+from PySide6.QtCore import QLocale, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -20,6 +26,9 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QStackedWidget,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
     QVBoxLayout,
     QWidget,
 )
@@ -48,6 +57,9 @@ class RouteMeasurementRunConfiguration:
 
     csv_path: str
     measurement_count: int
+    start_point: int
+    max_relative_rms: float
+    short_threshold_ohm: float
     contact_settle_s: float
     meter: RouteMeterConfiguration
 
@@ -57,6 +69,11 @@ class RouteMeasurementDialog(QDialog):
 
     run_requested = Signal(object)
     next_requested = Signal()
+    remeasure_requested = Signal()
+    skip_requested = Signal()
+    save_shift_requested = Signal()
+    interrupt_requested = Signal()
+    jump_requested = Signal(int)
     cancel_requested = Signal()
 
     def __init__(
@@ -66,6 +83,8 @@ class RouteMeasurementDialog(QDialog):
         route_point_count: int,
         default_csv_path: str,
         default_meter_type: str = ROUTE_METER_KEITHLEY,
+        default_short_threshold_ohm: float = 10.0,
+        settings_path: str | Path | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -73,6 +92,10 @@ class RouteMeasurementDialog(QDialog):
         self.setModal(False)
         self._running = False
         self._waiting = False
+        self._route_point_count = max(1, int(route_point_count))
+        self._default_csv_path = default_csv_path
+        self._settings_path = Path(settings_path).expanduser() if settings_path else None
+        self._last_raw_samples: tuple[object, ...] = ()
 
         layout = QVBoxLayout(self)
 
@@ -100,6 +123,35 @@ class RouteMeasurementDialog(QDialog):
             self._measurement_count_spin,
         )
 
+        self._max_relative_rms_spin = QDoubleSpinBox(common_group)
+        self._max_relative_rms_spin.setLocale(QLocale.c())
+        self._max_relative_rms_spin.setDecimals(3)
+        self._max_relative_rms_spin.setRange(0.001, 100.0)
+        self._max_relative_rms_spin.setSingleStep(0.1)
+        self._max_relative_rms_spin.setSuffix(" %")
+        self._max_relative_rms_spin.setValue(1.0)
+        common_layout.addRow(
+            QLabel("Max rel RMS", common_group),
+            self._max_relative_rms_spin,
+        )
+
+        self._short_threshold_spin = QDoubleSpinBox(common_group)
+        self._short_threshold_spin.setLocale(QLocale.c())
+        self._short_threshold_spin.setDecimals(3)
+        self._short_threshold_spin.setRange(0.0, 1_000_000_000.0)
+        self._short_threshold_spin.setSingleStep(1.0)
+        self._short_threshold_spin.setSuffix(" ohm")
+        self._short_threshold_spin.setValue(max(0.0, float(default_short_threshold_ohm)))
+        common_layout.addRow(
+            QLabel("Short threshold", common_group),
+            self._short_threshold_spin,
+        )
+
+        self._start_point_spin = QSpinBox(common_group)
+        self._start_point_spin.setRange(1, self._route_point_count)
+        self._start_point_spin.setValue(1)
+        common_layout.addRow(QLabel("Start point", common_group), self._start_point_spin)
+
         self._contact_settle_spin = QDoubleSpinBox(common_group)
         self._contact_settle_spin.setLocale(QLocale.c())
         self._contact_settle_spin.setDecimals(3)
@@ -111,6 +163,13 @@ class RouteMeasurementDialog(QDialog):
             QLabel("Contact settle", common_group),
             self._contact_settle_spin,
         )
+        profile_row = QHBoxLayout()
+        self._load_profile_button = QPushButton("Load Profile", common_group)
+        self._save_profile_button = QPushButton("Save Profile", common_group)
+        profile_row.addWidget(self._load_profile_button)
+        profile_row.addWidget(self._save_profile_button)
+        profile_row.addStretch(1)
+        common_layout.addRow(QLabel("Profile", common_group), profile_row)
         layout.addWidget(common_group)
 
         meter_group = QGroupBox("Instrument", self)
@@ -138,13 +197,50 @@ class RouteMeasurementDialog(QDialog):
         self._status_label = QLabel("Idle.", self)
         self._status_label.setWordWrap(True)
         layout.addWidget(self._status_label)
+        self._result_label = QLabel("Last result: none.", self)
+        self._result_label.setWordWrap(True)
+        layout.addWidget(self._result_label)
+
+        analysis_row = QHBoxLayout()
+        self._histogram_mode_combo = QComboBox(self)
+        self._histogram_mode_combo.addItem("Differential dV/dI", "differential")
+        self._histogram_mode_combo.addItem("Polarity V/I", "polarity")
+        self._raw_data_button = QPushButton("Raw Data", self)
+        self._raw_data_button.setEnabled(False)
+        analysis_row.addWidget(QLabel("Histogram", self))
+        analysis_row.addWidget(self._histogram_mode_combo)
+        analysis_row.addWidget(self._raw_data_button)
+        analysis_row.addStretch(1)
+        layout.addLayout(analysis_row)
+        self._histogram_widget = _RouteMeasurementHistogram(self)
+        self._histogram_widget.setMinimumHeight(140)
+        layout.addWidget(self._histogram_widget)
+
+        jump_row = QHBoxLayout()
+        self._jump_point_spin = QSpinBox(self)
+        self._jump_point_spin.setRange(1, self._route_point_count)
+        self._jump_point_spin.setValue(1)
+        self._jump_button = QPushButton("Go To", self)
+        jump_row.addWidget(QLabel("Point", self))
+        jump_row.addWidget(self._jump_point_spin)
+        jump_row.addWidget(self._jump_button)
+        jump_row.addStretch(1)
+        layout.addLayout(jump_row)
 
         button_row = QHBoxLayout()
         self._run_button = QPushButton("Run", self)
+        self._interrupt_button = QPushButton("Interrupt", self)
+        self._save_shift_button = QPushButton("Save Shift", self)
+        self._remeasure_button = QPushButton("Remeasure", self)
+        self._skip_button = QPushButton("Skip", self)
         self._next_button = QPushButton("Next", self)
         self._cancel_button = QPushButton("Cancel", self)
         self._close_button = QPushButton("Close", self)
         button_row.addWidget(self._run_button)
+        button_row.addWidget(self._interrupt_button)
+        button_row.addWidget(self._save_shift_button)
+        button_row.addWidget(self._remeasure_button)
+        button_row.addWidget(self._skip_button)
         button_row.addWidget(self._next_button)
         button_row.addWidget(self._cancel_button)
         button_row.addStretch(1)
@@ -163,9 +259,25 @@ class RouteMeasurementDialog(QDialog):
             lambda _checked: self._update_gwinstek_state()
         )
         self._run_button.clicked.connect(self._emit_run_requested)
+        self._load_profile_button.clicked.connect(self._load_profile)
+        self._save_profile_button.clicked.connect(self._save_profile)
+        self._histogram_mode_combo.currentIndexChanged.connect(
+            lambda _index: self._update_histogram_mode()
+        )
+        self._raw_data_button.clicked.connect(self._show_raw_data)
+        self._interrupt_button.clicked.connect(self.interrupt_requested.emit)
+        self._save_shift_button.clicked.connect(self.save_shift_requested.emit)
+        self._remeasure_button.clicked.connect(self.remeasure_requested.emit)
+        self._skip_button.clicked.connect(self.skip_requested.emit)
         self._next_button.clicked.connect(self.next_requested.emit)
+        self._jump_button.clicked.connect(
+            lambda _checked=False: self.jump_requested.emit(
+                int(self._jump_point_spin.value())
+            )
+        )
         self._cancel_button.clicked.connect(self.cancel_requested.emit)
         self._close_button.clicked.connect(self.close)
+        self._load_settings_file()
         self._update_meter_page()
         self.set_running(False)
 
@@ -174,10 +286,56 @@ class RouteMeasurementDialog(QDialog):
             self.set_status("Cancel the route measurement before closing.")
             event.ignore()
             return
+        self._save_settings_file()
         super().closeEvent(event)
 
     def set_status(self, message: str) -> None:
         self._status_label.setText(message or "Idle.")
+
+    def set_result(
+        self,
+        record: object,
+        position: int,
+        total: int,
+        saved: bool,
+    ) -> None:
+        resistance = getattr(record, "resistance_ohm", math.nan)
+        rms = getattr(record, "resistance_rms_ohm", math.nan)
+        relative_rms = getattr(record, "relative_rms", math.nan)
+        status = str(getattr(record, "status", ""))
+        prefix = "Saved" if saved else "Not saved"
+        self._result_label.setText(
+            f"{prefix} point {position}/{total}: "
+            f"R={_format_ohm(float(resistance))}, "
+            f"RMS={_format_ohm(float(rms))}, "
+            f"rel={_format_percent(float(relative_rms))}, "
+            f"status={status or 'unknown'}."
+        )
+        self._last_raw_samples = tuple(getattr(record, "raw_samples", ()) or ())
+        self._histogram_widget.set_samples(self._last_raw_samples)
+        self._raw_data_button.setEnabled(bool(self._last_raw_samples))
+
+    def set_route(
+        self,
+        *,
+        route_name: str,
+        route_point_count: int,
+        default_csv_path: str,
+    ) -> None:
+        self._route_point_count = max(1, int(route_point_count))
+        self._route_combo.setItemText(
+            0,
+            f"{route_name} ({route_point_count} points)",
+        )
+        for spinbox in (self._start_point_spin, self._jump_point_spin):
+            value = min(max(1, int(spinbox.value())), self._route_point_count)
+            spinbox.setRange(1, self._route_point_count)
+            spinbox.setValue(value)
+        if not self._running:
+            current_csv = self._csv_path_edit.text().strip()
+            if not current_csv or current_csv == self._default_csv_path:
+                self._csv_path_edit.setText(default_csv_path)
+            self._default_csv_path = default_csv_path
 
     def set_running(self, running: bool) -> None:
         self._running = bool(running)
@@ -186,10 +344,15 @@ class RouteMeasurementDialog(QDialog):
             self._csv_path_edit,
             self._csv_browse_button,
             self._measurement_count_spin,
+            self._max_relative_rms_spin,
+            self._short_threshold_spin,
+            self._start_point_spin,
             self._contact_settle_spin,
             self._meter_combo,
             self._gwinstek_page,
             self._keithley_page,
+            self._load_profile_button,
+            self._save_profile_button,
         ):
             widget.setEnabled(not self._running)
         self._run_button.setEnabled(not self._running)
@@ -199,7 +362,14 @@ class RouteMeasurementDialog(QDialog):
 
     def set_waiting(self, waiting: bool) -> None:
         self._waiting = bool(waiting)
-        self._next_button.setEnabled(self._running and self._waiting)
+        can_confirm = self._running and self._waiting
+        self._interrupt_button.setEnabled(self._running and not self._waiting)
+        self._save_shift_button.setEnabled(self._running and self._waiting)
+        self._remeasure_button.setEnabled(can_confirm)
+        self._skip_button.setEnabled(can_confirm)
+        self._next_button.setEnabled(can_confirm)
+        self._jump_point_spin.setEnabled(can_confirm)
+        self._jump_button.setEnabled(can_confirm)
 
     def _build_gwinstek_page(self) -> QWidget:
         page = QWidget(self)
@@ -368,6 +538,45 @@ class RouteMeasurementDialog(QDialog):
         )
         if path:
             self._csv_path_edit.setText(path)
+            self._save_settings_file()
+
+    def _load_profile(self) -> None:
+        start = str(self._profile_start_directory() / "route-measurement-profile.json")
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Route Measurement Profile",
+            start,
+            "JSON files (*.json);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            with Path(path).open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            self._apply_profile_data(data)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            self.set_status(f"Unable to load profile: {exc}")
+            return
+        self._save_settings_file()
+        self.set_status(f"Loaded profile {path}.")
+
+    def _save_profile(self) -> None:
+        start = str(self._profile_start_directory() / "route-measurement-profile.json")
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Route Measurement Profile",
+            start,
+            "JSON files (*.json);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            self._write_profile(Path(path), self._profile_data())
+        except OSError as exc:
+            self.set_status(f"Unable to save profile: {exc}")
+            return
+        self._save_settings_file()
+        self.set_status(f"Saved profile {path}.")
 
     def _update_meter_page(self) -> None:
         meter_type = str(self._meter_combo.currentData() or ROUTE_METER_KEITHLEY)
@@ -398,19 +607,188 @@ class RouteMeasurementDialog(QDialog):
             not dcr_mode and self._gw_bias_checkbox.isChecked()
         )
 
+    def _update_histogram_mode(self) -> None:
+        mode = str(self._histogram_mode_combo.currentData() or "differential")
+        self._histogram_widget.set_mode(mode)
+
+    def _show_raw_data(self) -> None:
+        if not self._last_raw_samples:
+            self.set_status("No raw measurement data yet.")
+            return
+        dialog = RouteMeasurementRawDataDialog(self._last_raw_samples, self)
+        dialog.exec()
+
     def _emit_run_requested(self) -> None:
         csv_path = self._csv_path_edit.text().strip()
         if not csv_path:
             self.set_status("Choose a CSV path before running.")
             return
+        self._save_settings_file()
         self.run_requested.emit(
             RouteMeasurementRunConfiguration(
                 csv_path=csv_path,
                 measurement_count=int(self._measurement_count_spin.value()),
+                start_point=int(self._start_point_spin.value()),
+                max_relative_rms=float(self._max_relative_rms_spin.value()) / 100.0,
+                short_threshold_ohm=float(self._short_threshold_spin.value()),
                 contact_settle_s=float(self._contact_settle_spin.value()),
                 meter=self._meter_configuration(),
             )
         )
+
+    def _profile_start_directory(self) -> Path:
+        csv_path = Path(self._csv_path_edit.text().strip() or ".").expanduser()
+        if csv_path.parent != Path("."):
+            return csv_path.parent
+        if self._settings_path is not None:
+            return self._settings_path.parent
+        return Path.cwd()
+
+    def _load_settings_file(self) -> None:
+        if self._settings_path is None or not self._settings_path.exists():
+            return
+        try:
+            with self._settings_path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            self._apply_profile_data(data)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            return
+
+    def _save_settings_file(self) -> None:
+        if self._settings_path is None:
+            return
+        try:
+            self._write_profile(self._settings_path, self._profile_data())
+        except OSError:
+            return
+
+    def _write_profile(self, path: Path, data: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2, ensure_ascii=False)
+
+    def _profile_data(self) -> dict[str, Any]:
+        meter = self._meter_configuration()
+        return {
+            "version": 1,
+            "csv_path": self._csv_path_edit.text().strip(),
+            "measurement_count": int(self._measurement_count_spin.value()),
+            "start_point": int(self._start_point_spin.value()),
+            "max_relative_rms": float(self._max_relative_rms_spin.value()) / 100.0,
+            "short_threshold_ohm": float(self._short_threshold_spin.value()),
+            "contact_settle_s": float(self._contact_settle_spin.value()),
+            "meter": {
+                "meter_type": meter.meter_type,
+                "gwinstek": asdict(meter.gwinstek),
+                "keithley": asdict(meter.keithley),
+            },
+        }
+
+    def _apply_profile_data(self, data: object) -> None:
+        if not isinstance(data, dict):
+            raise ValueError("Profile JSON root must be an object.")
+        csv_path = data.get("csv_path")
+        if isinstance(csv_path, str) and csv_path.strip():
+            self._csv_path_edit.setText(csv_path.strip())
+        self._set_spinbox_value(
+            self._measurement_count_spin,
+            data.get("measurement_count"),
+        )
+        self._set_spinbox_value(self._start_point_spin, data.get("start_point"))
+        max_relative_rms = data.get("max_relative_rms")
+        try:
+            max_relative_rms_percent = float(max_relative_rms) * 100.0
+        except (TypeError, ValueError):
+            max_relative_rms_percent = math.nan
+        if math.isfinite(max_relative_rms_percent):
+            self._max_relative_rms_spin.setValue(max_relative_rms_percent)
+        self._set_spinbox_value(
+            self._short_threshold_spin,
+            data.get("short_threshold_ohm"),
+        )
+        self._set_spinbox_value(self._contact_settle_spin, data.get("contact_settle_s"))
+        meter = data.get("meter")
+        if isinstance(meter, dict):
+            meter_type = meter.get("meter_type")
+            if isinstance(meter_type, str):
+                self._set_combo_data(self._meter_combo, meter_type)
+            self._apply_gwinstek_profile(meter.get("gwinstek"))
+            self._apply_keithley_profile(meter.get("keithley"))
+        self._update_meter_page()
+        self._update_gwinstek_state()
+
+    def _apply_gwinstek_profile(self, data: object) -> None:
+        if not isinstance(data, dict):
+            return
+        self._set_combo_text(self._gw_function_combo, data.get("measurement_function"))
+        self._set_combo_data(self._gw_range_mode_combo, data.get("range_mode"))
+        self._set_spinbox_value(self._gw_impedance_range_spin, data.get("impedance_range"))
+        self._set_spinbox_value(self._gw_dcr_range_spin, data.get("dcr_range"))
+        self._set_spinbox_value(self._gw_frequency_spin, data.get("frequency_hz"))
+        self._set_combo_data(self._gw_level_mode_combo, data.get("level_mode"))
+        self._set_spinbox_value(self._gw_voltage_spin, data.get("voltage_level_v"))
+        self._set_spinbox_value(self._gw_current_spin, data.get("current_level_a"))
+        self._set_combo_data(
+            self._gw_source_resistance_combo,
+            data.get("source_resistance_ohm"),
+        )
+        self._set_combo_text(self._gw_aperture_combo, data.get("aperture_rate"))
+        self._set_spinbox_value(self._gw_averages_spin, data.get("aperture_averages"))
+        self._set_spinbox_value(
+            self._gw_trigger_delay_spin,
+            data.get("trigger_delay_s"),
+        )
+        if isinstance(data.get("bias_enabled"), bool):
+            self._gw_bias_checkbox.setChecked(bool(data["bias_enabled"]))
+        self._set_spinbox_value(self._gw_bias_spin, data.get("bias_level_v"))
+
+    def _apply_keithley_profile(self, data: object) -> None:
+        if not isinstance(data, dict):
+            return
+        self._set_spinbox_value(
+            self._keithley_voltage_spin,
+            data.get("measurement_voltage_v"),
+        )
+        self._set_spinbox_value(
+            self._keithley_range_spin,
+            data.get("source_voltage_range_v"),
+        )
+        self._set_spinbox_value(
+            self._keithley_compliance_spin,
+            data.get("compliance_current_a"),
+        )
+        self._set_spinbox_value(self._keithley_nplc_spin, data.get("nplc"))
+        self._set_combo_data(self._keithley_terminals_combo, data.get("terminals"))
+        self._set_spinbox_value(
+            self._keithley_delay_spin,
+            data.get("trigger_delay_s"),
+        )
+
+    @staticmethod
+    def _set_spinbox_value(spinbox, value: object) -> None:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return
+        if math.isfinite(numeric):
+            if isinstance(spinbox, QSpinBox):
+                spinbox.setValue(int(round(numeric)))
+            else:
+                spinbox.setValue(numeric)
+
+    @staticmethod
+    def _set_combo_data(combo: QComboBox, value: object) -> None:
+        index = combo.findData(value)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+
+    @staticmethod
+    def _set_combo_text(combo: QComboBox, value: object) -> None:
+        if not isinstance(value, str):
+            return
+        index = combo.findText(value)
+        if index >= 0:
+            combo.setCurrentIndex(index)
 
     def _meter_configuration(self) -> RouteMeterConfiguration:
         meter_type = str(self._meter_combo.currentData() or ROUTE_METER_KEITHLEY)
@@ -443,3 +821,273 @@ class RouteMeasurementDialog(QDialog):
                 trigger_delay_s=float(self._keithley_delay_spin.value()),
             ),
         )
+
+
+class _RouteMeasurementHistogram(QWidget):
+    """Small histogram preview for the raw samples of the latest point."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._samples: tuple[object, ...] = ()
+        self._mode = "differential"
+
+    def set_samples(self, samples: tuple[object, ...]) -> None:
+        self._samples = tuple(samples)
+        self.update()
+
+    def set_mode(self, mode: str) -> None:
+        self._mode = "polarity" if mode == "polarity" else "differential"
+        self.update()
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        _ = event
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), self.palette().base())
+        series = self._series()
+        values = [value for _label, _color, data in series for value in data]
+        if not values:
+            painter.setPen(self.palette().mid().color())
+            painter.drawText(self.rect(), Qt.AlignCenter, "No raw data")
+            return
+
+        minimum = min(values)
+        maximum = max(values)
+        if minimum == maximum:
+            span = abs(minimum) * 0.1 or 1.0
+            minimum -= span
+            maximum += span
+        bin_count = max(1, min(20, int(math.sqrt(max(1, len(values)))) + 1))
+        counts = [
+            _histogram_counts(data, bin_count, minimum, maximum)
+            for _label, _color, data in series
+        ]
+        max_count = max((max(item) if item else 0 for item in counts), default=1)
+        max_count = max(1, max_count)
+
+        plot = self.rect().adjusted(10, 12, -10, -24)
+        if plot.width() <= 0 or plot.height() <= 0:
+            return
+        bar_width = plot.width() / bin_count
+        painter.setPen(self.palette().mid().color())
+        painter.drawLine(plot.bottomLeft(), plot.bottomRight())
+        painter.drawText(
+            self.rect().adjusted(10, 0, -10, -2),
+            Qt.AlignBottom | Qt.AlignLeft,
+            f"{_format_ohm(minimum)}",
+        )
+        painter.drawText(
+            self.rect().adjusted(10, 0, -10, -2),
+            Qt.AlignBottom | Qt.AlignRight,
+            f"{_format_ohm(maximum)}",
+        )
+
+        for series_index, (_label, color, _data) in enumerate(series):
+            count_row = counts[series_index]
+            color = QColor(color)
+            color.setAlpha(150 if len(series) > 1 else 190)
+            painter.setPen(color.darker(125))
+            painter.setBrush(color)
+            for index, count in enumerate(count_row):
+                if count <= 0:
+                    continue
+                height = plot.height() * (count / max_count)
+                if len(series) > 1:
+                    width = max(1.0, bar_width / len(series))
+                    x = plot.left() + index * bar_width + series_index * width
+                else:
+                    width = max(1.0, bar_width - 2.0)
+                    x = plot.left() + index * bar_width + 1.0
+                rect = QRectF(
+                    x,
+                    plot.bottom() - height,
+                    width,
+                    height,
+                )
+                painter.drawRect(rect)
+
+    def _series(self) -> list[tuple[str, QColor, list[float]]]:
+        if self._mode == "polarity":
+            return [
+                (
+                    "negative",
+                    QColor(200, 52, 60),
+                    _sample_values(self._samples, "negative_resistance_ohm"),
+                ),
+                (
+                    "positive",
+                    QColor(36, 100, 210),
+                    _sample_values(self._samples, "positive_resistance_ohm"),
+                ),
+            ]
+        return [
+            (
+                "differential",
+                QColor(43, 140, 96),
+                _sample_values(self._samples, "differential_resistance_ohm"),
+            )
+        ]
+
+
+class RouteMeasurementRawDataDialog(QDialog):
+    """Copyable table of raw samples for one route measurement point."""
+
+    HEADERS = (
+        "sample",
+        "polarity",
+        "source_v",
+        "measured_v",
+        "current_a",
+        "v_over_i_ohm",
+        "differential_ohm",
+        "compliance",
+    )
+
+    def __init__(self, samples: tuple[object, ...], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Raw Measurement Data")
+        self.resize(840, 420)
+        self._rows = _raw_data_rows(samples)
+
+        layout = QVBoxLayout(self)
+        self._table = QTableWidget(len(self._rows), len(self.HEADERS), self)
+        self._table.setHorizontalHeaderLabels(self.HEADERS)
+        self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectItems)
+        for row_index, row in enumerate(self._rows):
+            for column_index, value in enumerate(row):
+                self._table.setItem(
+                    row_index,
+                    column_index,
+                    QTableWidgetItem(value),
+                )
+        header = self._table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeToContents)
+        header.setStretchLastSection(True)
+        layout.addWidget(self._table)
+
+        button_row = QHBoxLayout()
+        copy_button = QPushButton("Copy All", self)
+        close_button = QPushButton("Close", self)
+        button_row.addWidget(copy_button)
+        button_row.addStretch(1)
+        button_row.addWidget(close_button)
+        layout.addLayout(button_row)
+
+        copy_button.clicked.connect(self._copy_all)
+        close_button.clicked.connect(self.accept)
+
+    def _copy_all(self) -> None:
+        lines = ["\t".join(self.HEADERS)]
+        lines.extend("\t".join(row) for row in self._rows)
+        clipboard = QApplication.clipboard()
+        clipboard.setText("\n".join(lines))
+
+
+def _sample_values(samples: tuple[object, ...], attribute: str) -> list[float]:
+    values: list[float] = []
+    for sample in samples:
+        try:
+            value = float(getattr(sample, attribute))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            values.append(value)
+    return values
+
+
+def _histogram_counts(
+    values: list[float],
+    bin_count: int,
+    minimum: float,
+    maximum: float,
+) -> list[int]:
+    counts = [0 for _index in range(bin_count)]
+    span = maximum - minimum
+    if span <= 0.0:
+        return counts
+    for value in values:
+        index = int((value - minimum) / span * bin_count)
+        index = max(0, min(bin_count - 1, index))
+        counts[index] += 1
+    return counts
+
+
+def _raw_data_rows(samples: tuple[object, ...]) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for sample in samples:
+        sample_index = str(getattr(sample, "sample_index", ""))
+        differential = _format_number(
+            getattr(sample, "differential_resistance_ohm", math.nan)
+        )
+        compliance = "yes" if bool(getattr(sample, "compliance_hit", False)) else ""
+        added = False
+        for polarity in ("negative", "positive"):
+            values = (
+                getattr(sample, f"{polarity}_source_voltage_v", None),
+                getattr(sample, f"{polarity}_measured_voltage_v", None),
+                getattr(sample, f"{polarity}_current_a", None),
+                getattr(sample, f"{polarity}_resistance_ohm", None),
+            )
+            if all(value is None for value in values):
+                continue
+            rows.append(
+                [
+                    sample_index,
+                    polarity,
+                    _format_number(values[0]),
+                    _format_number(values[1]),
+                    _format_number(values[2]),
+                    _format_number(values[3]),
+                    differential,
+                    compliance,
+                ]
+            )
+            added = True
+        if not added:
+            rows.append(
+                [
+                    sample_index,
+                    "differential",
+                    "",
+                    "",
+                    "",
+                    "",
+                    differential,
+                    compliance,
+                ]
+            )
+    return rows
+
+
+def _format_number(value: object) -> str:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if not math.isfinite(numeric):
+        return ""
+    return f"{numeric:.12g}"
+
+
+def _format_ohm(value: float) -> str:
+    if not math.isfinite(value):
+        return "nan Ohm"
+    abs_value = abs(value)
+    for scale, unit in (
+        (1e9, "GOhm"),
+        (1e6, "MOhm"),
+        (1e3, "kOhm"),
+        (1.0, "Ohm"),
+        (1e-3, "mOhm"),
+        (1e-6, "uOhm"),
+    ):
+        if abs_value >= scale:
+            return f"{value / scale:.3g} {unit}"
+    return f"{value:.3g} Ohm"
+
+
+def _format_percent(value: float) -> str:
+    if not math.isfinite(value):
+        return "nan%"
+    return f"{value * 100.0:.3g}%"

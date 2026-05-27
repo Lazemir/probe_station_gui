@@ -1321,7 +1321,10 @@ class DesignNavigatorPanel(QWidget):
     route_selected = Signal(int)
     route_measurement_run_requested = Signal()
     route_measurement_stop_requested = Signal()
+    route_measurement_interrupt_requested = Signal()
+    route_measurement_save_shift_requested = Signal()
     route_measurement_confirmation_requested = Signal(str)
+    route_measurement_jump_requested = Signal(int)
     route_offsets_changed = Signal(float, float, float, float)
     route_edit_enabled_changed = Signal(bool)
     route_pick_mode_changed = Signal(object)
@@ -1666,15 +1669,30 @@ class DesignNavigatorPanel(QWidget):
 
         route_run_buttons = QHBoxLayout()
         self._route_run_button = QPushButton("Run Route", route_group)
+        self._route_interrupt_button = QPushButton("Interrupt", route_group)
+        self._route_interrupt_button.setEnabled(False)
         self._route_stop_button = QPushButton("Cancel", route_group)
         self._route_stop_button.setEnabled(False)
         route_run_buttons.addWidget(self._route_run_button)
+        route_run_buttons.addWidget(self._route_interrupt_button)
         route_run_buttons.addWidget(self._route_stop_button)
         route_layout.addLayout(route_run_buttons)
         route_confirm_buttons = QHBoxLayout()
+        self._route_save_shift_button = QPushButton("Save Shift", route_group)
+        self._route_save_shift_button.setEnabled(False)
+        self._route_remeasure_button = QPushButton("Remeasure", route_group)
+        self._route_remeasure_button.setEnabled(False)
+        self._route_skip_button = QPushButton("Skip", route_group)
+        self._route_skip_button.setEnabled(False)
         self._route_next_button = QPushButton("Next", route_group)
         self._route_next_button.setEnabled(False)
+        self._route_jump_selected_button = QPushButton("Go Selected", route_group)
+        self._route_jump_selected_button.setEnabled(False)
+        route_confirm_buttons.addWidget(self._route_save_shift_button)
+        route_confirm_buttons.addWidget(self._route_remeasure_button)
+        route_confirm_buttons.addWidget(self._route_skip_button)
         route_confirm_buttons.addWidget(self._route_next_button)
+        route_confirm_buttons.addWidget(self._route_jump_selected_button)
         route_layout.addLayout(route_confirm_buttons)
         self._route_run_status_label = QLabel("Route measurement idle.", route_group)
         self._route_run_status_label.setWordWrap(True)
@@ -1697,10 +1715,29 @@ class DesignNavigatorPanel(QWidget):
         self._route_stop_button.clicked.connect(
             self.route_measurement_stop_requested.emit
         )
+        self._route_interrupt_button.clicked.connect(
+            self.route_measurement_interrupt_requested.emit
+        )
+        self._route_save_shift_button.clicked.connect(
+            self.route_measurement_save_shift_requested.emit
+        )
+        self._route_remeasure_button.clicked.connect(
+            lambda _checked=False: self.route_measurement_confirmation_requested.emit(
+                "remeasure"
+            )
+        )
+        self._route_skip_button.clicked.connect(
+            lambda _checked=False: self.route_measurement_confirmation_requested.emit(
+                "skip"
+            )
+        )
         self._route_next_button.clicked.connect(
             lambda _checked=False: self.route_measurement_confirmation_requested.emit(
                 "next"
             )
+        )
+        self._route_jump_selected_button.clicked.connect(
+            self._emit_route_measurement_jump_to_selected
         )
         self._select_tool_button.clicked.connect(
             lambda _checked=False: self._set_design_tool("select")
@@ -2081,7 +2118,16 @@ class DesignNavigatorPanel(QWidget):
             has_route and bool(self._route.points) and not route_running
         )
         self._route_stop_button.setEnabled(route_running)
+        self._route_interrupt_button.setEnabled(
+            route_running and not self._route_measurement_waiting
+        )
+        self._route_save_shift_button.setEnabled(self._route_measurement_waiting)
+        self._route_remeasure_button.setEnabled(self._route_measurement_waiting)
+        self._route_skip_button.setEnabled(self._route_measurement_waiting)
         self._route_next_button.setEnabled(self._route_measurement_waiting)
+        self._route_jump_selected_button.setEnabled(
+            self._route_measurement_waiting and has_route_selection
+        )
         for widget in (
             self._ruler_clear_button,
             self._ruler_cancel_button,
@@ -2793,6 +2839,13 @@ class DesignNavigatorPanel(QWidget):
         if self._selected_target_id is None:
             return
         self.move_to_target_requested.emit(self._selected_target_id)
+
+    def _emit_route_measurement_jump_to_selected(self) -> None:
+        if self._selected_route_point_index < 0:
+            return
+        self.route_measurement_jump_requested.emit(
+            self._selected_route_point_index + 1
+        )
 
     @staticmethod
     def _format_bounds(bounds: tuple[float, float, float, float]) -> str:

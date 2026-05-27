@@ -35,16 +35,67 @@ class _FakeStage:
         return f"{action} done"
 
 
+class _NotifyingStage(_FakeStage):
+    def __init__(self) -> None:
+        super().__init__()
+        self.changed = threading.Condition()
+
+    def run_external_needles_action(
+        self,
+        action: str,
+        feedrate: float | None = None,
+    ) -> str:
+        result = super().run_external_needles_action(action, feedrate)
+        with self.changed:
+            self.changed.notify_all()
+        return result
+
+    def wait_for_needles_action(self, action: str) -> bool:
+        with self.changed:
+            return self.changed.wait_for(
+                lambda: any(
+                    call[0] == "needles" and call[1] == action
+                    for call in self.calls
+                    if isinstance(call, tuple)
+                ),
+                timeout=2.0,
+            )
+
+
 class _FakeLCR:
     def __init__(self, values: list[float], on_read=None) -> None:
         self.values = list(values)
         self.on_read = on_read
+        self.abort_count = 0
 
     def read_primary_value_now(self) -> float:
         value = self.values.pop(0)
         if self.on_read is not None:
             self.on_read()
         return value
+
+    def abort_current_measurement(self) -> None:
+        self.abort_count += 1
+
+
+class _FakeRouteLCR:
+    def __init__(self, measurements: list[dict[str, object]]) -> None:
+        self.measurements = list(measurements)
+
+    def read_route_measurement_now(self) -> dict[str, object]:
+        return dict(self.measurements.pop(0))
+
+
+def _point(index: int) -> RouteMeasurementPoint:
+    return RouteMeasurementPoint(
+        index=index,
+        point_id=f"p{index:03d}",
+        label=f"P{index:03d}",
+        design_center=(100.0 + index, 200.0),
+        stage_xy=(float(index), 10.0 + float(index)),
+        needle_1_design=(101.0 + index, 201.0),
+        needle_2_design=(99.0 + index, 199.0),
+    )
 
 
 class RouteMeasurementRunnerTest(unittest.TestCase):
@@ -77,7 +128,7 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
         self.assertEqual(message, "Route measurement stopped by user.")
         self.assertEqual(stage.calls, [("begin", "route measurement"), ("finish",)])
 
-    def test_runner_writes_csv_and_raises_between_points(self) -> None:
+    def test_runner_writes_csv_and_lifts_between_points(self) -> None:
         points = [
             RouteMeasurementPoint(
                 index=1,
@@ -122,7 +173,7 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                 rows = list(csv.DictReader(handle))
             self.assertEqual(list(rows[0].keys()), CSV_FIELDS)
             self.assertEqual(len(rows), 2)
-            self.assertEqual(rows[0]["junction"], "1")
+            self.assertEqual(rows[0]["structure_number"], "1")
             self.assertEqual(rows[0]["nplc"], "")
             self.assertEqual(rows[0]["n_measurements"], "1")
             self.assertEqual(rows[0]["resistance_ohm"], "5")
@@ -130,7 +181,7 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
             self.assertEqual(rows[0]["relative_rms"], "0")
             self.assertEqual(rows[0]["status"], "ok")
             self.assertTrue(rows[0]["timestamp"])
-            self.assertEqual(rows[1]["junction"], "2")
+            self.assertEqual(rows[1]["structure_number"], "2")
             self.assertEqual(rows[1]["resistance_ohm"], "25")
 
         self.assertEqual(stage.calls[0], ("begin", "route measurement"))
@@ -141,6 +192,80 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
             call for call in stage.calls if call == ("needles", "lower", 75.0)
         ]
         self.assertEqual(len(lower_calls), 2)
+        lift_calls = [
+            call for call in stage.calls if call == ("needles", "lift", 75.0)
+        ]
+        self.assertEqual(len(lift_calls), 3)
+        self.assertNotIn(("needles", "raise", 75.0), stage.calls)
+
+    def test_interactive_wait_releases_stage_and_shift_moves_following_points(self) -> None:
+        points = [
+            RouteMeasurementPoint(
+                index=1,
+                point_id="p001",
+                label="P001",
+                design_center=(100.0, 200.0),
+                stage_xy=(1.0, 2.0),
+                needle_1_design=(101.0, 201.0),
+                needle_2_design=(99.0, 199.0),
+            ),
+            RouteMeasurementPoint(
+                index=2,
+                point_id="p002",
+                label="P002",
+                design_center=(110.0, 200.0),
+                stage_xy=(3.0, 4.0),
+                needle_1_design=(111.0, 201.0),
+                needle_2_design=(109.0, 199.0),
+            ),
+        ]
+        stage = _FakeStage()
+        records = []
+        records_changed = threading.Condition()
+
+        def on_record(record, _position, _total) -> None:
+            with records_changed:
+                records.append(record)
+                records_changed.notify_all()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = RouteMeasurementRunner(
+                points=points,
+                csv_path=Path(tmpdir) / "route.csv",
+                stage_controller=stage,
+                lcr_controller=_FakeLCR([5.0, 7.0]),
+                needle_feedrate=70.0,
+                confirm_each_point=True,
+                contact_settle_s=0.0,
+                record_callback=on_record,
+            )
+            result = []
+            thread = threading.Thread(
+                target=lambda: result.append(runner.run()),
+                daemon=True,
+            )
+
+            thread.start()
+            with records_changed:
+                self.assertTrue(
+                    records_changed.wait_for(lambda: len(records) >= 1, timeout=2.0)
+                )
+            self.assertEqual(stage.calls[-1], ("finish",))
+
+            saved, message = runner.save_current_position_adjustment((1.25, 1.75))
+            self.assertTrue(saved, message)
+            runner.submit_confirmation("next")
+            with records_changed:
+                self.assertTrue(
+                    records_changed.wait_for(lambda: len(records) >= 2, timeout=2.0)
+                )
+            runner.submit_confirmation("next")
+            thread.join(timeout=2.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result[0][0], True, result[0][1])
+        self.assertIn(("move", 1.0, 2.0), stage.calls)
+        self.assertIn(("move", 3.25, 3.75), stage.calls)
 
     def test_runner_records_overload_for_nonfinite_lcr_reading(self) -> None:
         point = RouteMeasurementPoint(
@@ -169,7 +294,7 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
             self.assertTrue(success, message)
             with csv_path.open("r", encoding="utf-8", newline="") as handle:
                 rows = list(csv.DictReader(handle))
-            self.assertEqual(rows[0]["junction"], "7")
+            self.assertEqual(rows[0]["structure_number"], "7")
             self.assertEqual(rows[0]["resistance_ohm"], "")
             self.assertEqual(rows[0]["resistance_rms_ohm"], "")
             self.assertEqual(rows[0]["relative_rms"], "")
@@ -210,7 +335,367 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
             self.assertEqual(rows[0]["resistance_rms_ohm"], "1")
             self.assertEqual(rows[0]["relative_rms"], "0.166666666667")
 
-    def test_interactive_remeasure_replaces_same_junction_row(self) -> None:
+    def test_short_check_saves_one_reading_and_skips_batch(self) -> None:
+        point = _point(1)
+        lcr = _FakeLCR([0.5])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "route.csv"
+            runner = RouteMeasurementRunner(
+                points=[point],
+                csv_path=csv_path,
+                stage_controller=_FakeStage(),
+                lcr_controller=lcr,
+                needle_feedrate=None,
+                measurement_count=5,
+                short_threshold_ohm=1.0,
+                contact_settle_s=0.0,
+            )
+
+            success, message = runner.run()
+
+            self.assertTrue(success, message)
+            self.assertEqual(lcr.values, [])
+            with csv_path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[0]["n_measurements"], "1")
+            self.assertEqual(rows[0]["resistance_ohm"], "0.5")
+            self.assertEqual(rows[0]["resistance_rms_ohm"], "0")
+            self.assertEqual(rows[0]["relative_rms"], "0")
+            self.assertEqual(rows[0]["status"], "short")
+
+    def test_non_short_check_runs_full_measurement_batch(self) -> None:
+        point = _point(1)
+        lcr = _FakeLCR([100.0, 5.0, 7.0])
+        records = []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "route.csv"
+            runner = RouteMeasurementRunner(
+                points=[point],
+                csv_path=csv_path,
+                stage_controller=_FakeStage(),
+                lcr_controller=lcr,
+                needle_feedrate=None,
+                measurement_count=2,
+                short_threshold_ohm=1.0,
+                contact_settle_s=0.0,
+                record_callback=lambda record, _position, _total: records.append(record),
+            )
+
+            success, message = runner.run()
+
+            self.assertTrue(success, message)
+            self.assertEqual(lcr.values, [])
+            self.assertEqual(len(records), 1)
+            self.assertEqual(
+                [sample.differential_resistance_ohm for sample in records[0].raw_samples],
+                [5.0, 7.0],
+            )
+            with csv_path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[0]["n_measurements"], "2")
+            self.assertEqual(rows[0]["resistance_ohm"], "6")
+            self.assertEqual(rows[0]["status"], "ok")
+
+    def test_compliance_hit_marks_short_even_above_threshold(self) -> None:
+        point = _point(1)
+        lcr = _FakeRouteLCR(
+            [
+                {
+                    "differential_resistance_ohm": 100.0,
+                    "compliance_hit": True,
+                }
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "route.csv"
+            runner = RouteMeasurementRunner(
+                points=[point],
+                csv_path=csv_path,
+                stage_controller=_FakeStage(),
+                lcr_controller=lcr,
+                needle_feedrate=None,
+                measurement_count=5,
+                short_threshold_ohm=1.0,
+                contact_settle_s=0.0,
+            )
+
+            success, message = runner.run()
+
+            self.assertTrue(success, message)
+            with csv_path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[0]["n_measurements"], "1")
+            self.assertEqual(rows[0]["resistance_ohm"], "100")
+            self.assertEqual(rows[0]["status"], "short")
+
+    def test_interactive_quality_limit_rejects_noisy_result_without_csv_row(self) -> None:
+        point = _point(1)
+        records = []
+        records_changed = threading.Condition()
+        results = []
+        results_changed = threading.Condition()
+
+        def on_record(record, _position, _total) -> None:
+            with records_changed:
+                records.append(record)
+                records_changed.notify_all()
+
+        def on_result(record, _position, _total, saved) -> None:
+            with results_changed:
+                results.append((record, saved))
+                results_changed.notify_all()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "route.csv"
+            runner = RouteMeasurementRunner(
+                points=[point],
+                csv_path=csv_path,
+                stage_controller=_FakeStage(),
+                lcr_controller=_FakeLCR([5.0, 7.0, 10.0, 10.0]),
+                needle_feedrate=None,
+                measurement_count=2,
+                max_relative_rms=0.01,
+                confirm_each_point=True,
+                contact_settle_s=0.0,
+                record_callback=on_record,
+                result_callback=on_result,
+            )
+            result = []
+            thread = threading.Thread(
+                target=lambda: result.append(runner.run()),
+                daemon=True,
+            )
+
+            thread.start()
+            with results_changed:
+                self.assertTrue(
+                    results_changed.wait_for(
+                        lambda: len(results) >= 1,
+                        timeout=2.0,
+                    )
+                )
+            self.assertFalse(results[0][1])
+            self.assertEqual(results[0][0].status, "unstable")
+            with csv_path.open("r", encoding="utf-8", newline="") as handle:
+                self.assertEqual(list(csv.DictReader(handle)), [])
+
+            runner.submit_confirmation("remeasure")
+            with results_changed:
+                self.assertTrue(
+                    results_changed.wait_for(
+                        lambda: len(results) >= 2,
+                        timeout=2.0,
+                    )
+                )
+            runner.submit_confirmation("next")
+            thread.join(timeout=2.0)
+
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(result[0][0], True, result[0][1])
+            self.assertTrue(results[1][1])
+            self.assertEqual(len(records), 1)
+            with csv_path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["structure_number"], "1")
+            self.assertEqual(rows[0]["resistance_ohm"], "10")
+
+    def test_runner_starts_from_configured_point_number(self) -> None:
+        points = [_point(1), _point(2), _point(3)]
+        stage = _FakeStage()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "route.csv"
+            runner = RouteMeasurementRunner(
+                points=points,
+                csv_path=csv_path,
+                stage_controller=stage,
+                lcr_controller=_FakeLCR([20.0, 30.0]),
+                needle_feedrate=None,
+                start_point_number=2,
+                contact_settle_s=0.0,
+            )
+
+            success, message = runner.run()
+
+            self.assertTrue(success, message)
+            with csv_path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual([row["structure_number"] for row in rows], ["2", "3"])
+
+        self.assertNotIn(("move", 1.0, 11.0), stage.calls)
+        self.assertIn(("move", 2.0, 12.0), stage.calls)
+        self.assertIn(("move", 3.0, 13.0), stage.calls)
+
+    def test_runner_preserves_existing_csv_rows_when_starting_later(self) -> None:
+        points = [_point(1), _point(2)]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "route.csv"
+            with csv_path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "timestamp": "2026-05-27T10:00:00",
+                        "structure_number": "1",
+                        "nplc": "10",
+                        "n_measurements": "5",
+                        "resistance_ohm": "11",
+                        "resistance_rms_ohm": "0",
+                        "relative_rms": "0",
+                        "status": "ok",
+                    }
+                )
+            runner = RouteMeasurementRunner(
+                points=points,
+                csv_path=csv_path,
+                stage_controller=_FakeStage(),
+                lcr_controller=_FakeLCR([22.0]),
+                needle_feedrate=None,
+                start_point_number=2,
+                contact_settle_s=0.0,
+            )
+
+            success, message = runner.run()
+
+            self.assertTrue(success, message)
+            with csv_path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual([row["structure_number"] for row in rows], ["1", "2"])
+            self.assertEqual(rows[0]["resistance_ohm"], "11")
+            self.assertEqual(rows[1]["resistance_ohm"], "22")
+
+    def test_interactive_jump_to_point_number_continues_from_target(self) -> None:
+        points = [_point(1), _point(2), _point(3)]
+        records = []
+        records_changed = threading.Condition()
+
+        def on_record(record, _position, _total) -> None:
+            with records_changed:
+                records.append(record)
+                records_changed.notify_all()
+
+        def wait_for_record_count(count: int) -> None:
+            with records_changed:
+                self.assertTrue(
+                    records_changed.wait_for(
+                        lambda: len(records) >= count,
+                        timeout=2.0,
+                    )
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "route.csv"
+            runner = RouteMeasurementRunner(
+                points=points,
+                csv_path=csv_path,
+                stage_controller=_FakeStage(),
+                lcr_controller=_FakeLCR([10.0, 30.0]),
+                needle_feedrate=None,
+                confirm_each_point=True,
+                contact_settle_s=0.0,
+                record_callback=on_record,
+            )
+            result = []
+            thread = threading.Thread(
+                target=lambda: result.append(runner.run()),
+                daemon=True,
+            )
+
+            thread.start()
+            wait_for_record_count(1)
+            runner.submit_jump(3)
+            wait_for_record_count(2)
+            runner.submit_confirmation("next")
+            thread.join(timeout=2.0)
+
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(result[0][0], True, result[0][1])
+            with csv_path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual([row["structure_number"] for row in rows], ["1", "3"])
+            self.assertEqual(rows[1]["resistance_ohm"], "30")
+
+    def test_current_point_correction_waits_without_writing_partial_row(self) -> None:
+        point = _point(1)
+        stage = _NotifyingStage()
+        lcr = _FakeLCR([8.0])
+        records = []
+        records_changed = threading.Condition()
+        waiting_values: list[bool] = []
+        waiting_changed = threading.Condition()
+
+        def on_record(record, _position, _total) -> None:
+            with records_changed:
+                records.append(record)
+                records_changed.notify_all()
+
+        def on_waiting(waiting: bool) -> None:
+            with waiting_changed:
+                waiting_values.append(bool(waiting))
+                waiting_changed.notify_all()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "route.csv"
+            runner = RouteMeasurementRunner(
+                points=[point],
+                csv_path=csv_path,
+                stage_controller=stage,
+                lcr_controller=lcr,
+                needle_feedrate=None,
+                confirm_each_point=True,
+                contact_settle_s=0.5,
+                record_callback=on_record,
+                waiting_callback=on_waiting,
+            )
+            result = []
+            thread = threading.Thread(
+                target=lambda: result.append(runner.run()),
+                daemon=True,
+            )
+
+            thread.start()
+            self.assertTrue(stage.wait_for_needles_action("lower"))
+            runner.request_current_point_correction()
+            with waiting_changed:
+                self.assertTrue(
+                    waiting_changed.wait_for(
+                        lambda: waiting_values and waiting_values[-1],
+                        timeout=2.0,
+                    )
+                )
+
+            self.assertEqual(lcr.abort_count, 1)
+            with csv_path.open("r", encoding="utf-8", newline="") as handle:
+                self.assertEqual(list(csv.DictReader(handle)), [])
+            self.assertEqual(stage.calls[-1], ("finish",))
+
+            saved, message = runner.save_current_position_adjustment((1.25, 11.75))
+            self.assertTrue(saved, message)
+            runner.submit_confirmation("remeasure")
+            with records_changed:
+                self.assertTrue(
+                    records_changed.wait_for(
+                        lambda: len(records) >= 1,
+                        timeout=2.0,
+                    )
+                )
+            runner.submit_confirmation("next")
+            thread.join(timeout=2.0)
+
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(result[0][0], True, result[0][1])
+            with csv_path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["structure_number"], "1")
+            self.assertEqual(rows[0]["resistance_ohm"], "8")
+
+    def test_interactive_remeasure_replaces_same_structure_row(self) -> None:
         point = RouteMeasurementPoint(
             index=9,
             point_id="p009",
@@ -267,7 +752,7 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
             with csv_path.open("r", encoding="utf-8", newline="") as handle:
                 rows = list(csv.DictReader(handle))
             self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["junction"], "9")
+            self.assertEqual(rows[0]["structure_number"], "9")
             self.assertEqual(rows[0]["resistance_ohm"], "7")
 
     def test_stop_during_measurement_batch_does_not_write_partial_row(self) -> None:
