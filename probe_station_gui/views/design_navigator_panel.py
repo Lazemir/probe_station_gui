@@ -3020,7 +3020,11 @@ class DesignLayoutWindow(QWidget):
         self._main_view.set_current_design_position(point, fov_design_size=fov_design_size)
 
     def show_and_raise(self) -> None:
-        self.show()
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
+        self.setWindowState(self.windowState() | Qt.WindowActive)
         self.raise_()
         self.activateWindow()
 

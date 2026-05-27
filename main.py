@@ -484,6 +484,8 @@ class Main(QMainWindow):
         self._planned_move_ends_at: float | None = None
         self._planned_move_waiting_for_fresh_status = False
         self._planned_move_stop_status_timestamp: float | None = None
+        self._pending_planned_move_target_xy: tuple[float, float] | None = None
+        self._pending_planned_move_source_label: str | None = None
         self._coordinate_move_axis: str | None = None
         self._coordinate_move_axes: set[str] = set()
         self._coordinate_move_origin_position: tuple[float, ...] | None = None
@@ -560,6 +562,9 @@ class Main(QMainWindow):
         self.stage_controller.status_message.connect(self._show_status)
         self.stage_controller.movement_finished.connect(self.on_move_finished)
         self.stage_controller.click_move_started.connect(self._on_click_move_started)
+        self.stage_controller.absolute_xy_move_started.connect(
+            self._on_absolute_xy_move_started
+        )
         self.stage_controller.calibration_changed.connect(self.on_calibration_changed)
         self.stage_controller.objective_calibration_updated.connect(
             self._on_objective_calibration_updated
@@ -1156,6 +1161,46 @@ class Main(QMainWindow):
         duration_s = (distance_mm / feedrate) * 60.0
         duration_s += self.CLICK_TARGET_ANIMATION_PADDING_S
         self.view.animate_target_cross_to_center(max(duration_s, 0.05))
+
+    def _on_absolute_xy_move_started(
+        self,
+        target_x_mm: float,
+        target_y_mm: float,
+        feedrate_mm_min: float,
+    ) -> None:
+        pending_target = self._pending_planned_move_target_xy
+        if pending_target is None:
+            return
+        try:
+            target = (float(target_x_mm), float(target_y_mm))
+            feedrate = float(feedrate_mm_min)
+        except (TypeError, ValueError):
+            self._pending_planned_move_target_xy = None
+            self._pending_planned_move_source_label = None
+            return
+        if (
+            math.hypot(
+                target[0] - pending_target[0],
+                target[1] - pending_target[1],
+            )
+            > 1e-4
+        ):
+            logger.debug(
+                "MOTION PREDICTION planned_move_start_ignored pending=%s actual=%s",
+                self._format_optional_point(pending_target),
+                self._format_optional_point(target),
+            )
+            self._pending_planned_move_target_xy = None
+            self._pending_planned_move_source_label = None
+            return
+        source_label = self._pending_planned_move_source_label or "absolute XY move"
+        self._pending_planned_move_target_xy = None
+        self._pending_planned_move_source_label = None
+        self._start_planned_move_prediction(
+            target,
+            source_label=source_label,
+            feedrate_mm_min=feedrate,
+        )
 
     def on_error(self, message: str) -> None:
         logger.error("Camera error: %s", message)
@@ -3674,6 +3719,8 @@ class Main(QMainWindow):
             self._planned_move_ends_at = None
 
     def _clear_planned_move_prediction(self, *, clear_wait_state: bool) -> None:
+        self._pending_planned_move_target_xy = None
+        self._pending_planned_move_source_label = None
         self._planned_move_origin_xy = None
         self._planned_move_target_xy = None
         self._planned_move_started_at = None
@@ -3688,6 +3735,7 @@ class Main(QMainWindow):
         target_stage_xy: tuple[float, float],
         *,
         source_label: str,
+        feedrate_mm_min: float | None = None,
     ) -> None:
         origin_stage_xy = self._preferred_design_stage_xy()
         if origin_stage_xy is None:
@@ -3705,7 +3753,12 @@ class Main(QMainWindow):
         if distance_mm <= 1e-6:
             self._clear_planned_move_prediction(clear_wait_state=True)
             return
-        speed_mm_per_s = float(self.stage_controller.DEFAULT_FEEDRATE) / 60.0
+        feedrate = (
+            float(self.stage_controller.DEFAULT_FEEDRATE)
+            if feedrate_mm_min is None
+            else max(0.1, float(feedrate_mm_min))
+        )
+        speed_mm_per_s = feedrate / 60.0
         if speed_mm_per_s <= 1e-6:
             return
         duration_s = (
@@ -3730,7 +3783,7 @@ class Main(QMainWindow):
             self._format_optional_point(target_stage_xy),
             distance_mm,
             duration_s,
-            float(self.stage_controller.DEFAULT_FEEDRATE),
+            feedrate,
         )
         self._publish_stage_position_estimate(
             self._position_with_stage_xy(origin_stage_xy)
@@ -3759,6 +3812,14 @@ class Main(QMainWindow):
 
     def on_move_finished(self, success: bool, message: str) -> None:
         message_lower = message.lower() if message else ""
+        if self._pending_planned_move_target_xy is not None:
+            logger.debug(
+                "MOTION PREDICTION planned_move_pending_cleared success=%s message=%s",
+                success,
+                message,
+            )
+            self._pending_planned_move_target_xy = None
+            self._pending_planned_move_source_label = None
         if (
             self._planned_move_started_at is not None
             or self._planned_move_waiting_for_fresh_status
@@ -4619,10 +4680,9 @@ class Main(QMainWindow):
             return False
         self._last_selected_design_point = design_xy
         self._refresh_design_panel()
-        self._start_planned_move_prediction(
-            (float(stage_xy[0]), float(stage_xy[1])),
-            source_label=source_label,
-        )
+        self._clear_planned_move_prediction(clear_wait_state=True)
+        self._pending_planned_move_target_xy = (float(stage_xy[0]), float(stage_xy[1]))
+        self._pending_planned_move_source_label = source_label
         self.stage_controller.request_move_to_xy(stage_xy[0], stage_xy[1])
         logger.debug(
             "DESIGN MOVE source=%s design=(%.3f, %.3f) stage=(%.3f, %.3f)",
@@ -4758,6 +4818,10 @@ class Main(QMainWindow):
                 )
                 smooth_predicted_status = True
         predicted_stage_xy = self._stage_xy_from_position(predicted_position)
+        planned_move_active = (
+            self._planned_move_started_at is not None
+            and predicted_stage_xy is not None
+        )
         if self._manual_jog_waiting_for_fresh_status and latest_state != "idle":
             logger.debug(
                 "MOTION PREDICTION deferred_stop_sample stage=%s state=%s",
@@ -4770,16 +4834,20 @@ class Main(QMainWindow):
         if predicted_stage_xy is not None:
             self._log_design_position_reconcile(predicted_stage_xy, center_xy)
             if smooth_predicted_status:
-                center_xy = self._smooth_manual_jog_actual_position(
-                    predicted_stage_xy, center_xy
-                )
+                if planned_move_active:
+                    center_xy = predicted_stage_xy
+                else:
+                    center_xy = self._smooth_manual_jog_actual_position(
+                        predicted_stage_xy, center_xy
+                    )
         display_position = self._position_with_stage_xy(
             center_xy,
             base_position=position,
         )
         self._manual_jog_stage_position = display_position
         self._manual_jog_stage_xy = center_xy
-        self._planned_move_stage_xy = center_xy
+        if not planned_move_active:
+            self._planned_move_stage_xy = center_xy
         if self._manual_jog_waiting_for_fresh_status and latest_state == "idle":
             self._learn_manual_jog_stop_tail(
                 self._manual_jog_stop_tail_position or predicted_position,

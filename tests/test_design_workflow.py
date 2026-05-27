@@ -383,8 +383,11 @@ class DesignSessionTest(unittest.TestCase):
         self.assertAlmostEqual(preparation.design_distance_mm, 1.0)
         self.assertAlmostEqual(preparation.stage_distance_mm, 1.0)
         self.assertAlmostEqual(preparation.distance_ratio, 1.0)
-        self.assertAlmostEqual(preparation.stage_marks_after_rotation[0][0], 9.0)
-        self.assertAlmostEqual(preparation.stage_marks_after_rotation[0][1], 11.0)
+        self.assertEqual(preparation.pivot_stage, (0.0, 0.0))
+        self.assertAlmostEqual(preparation.stage_marks_after_rotation[0][0], 10.0)
+        self.assertAlmostEqual(preparation.stage_marks_after_rotation[0][1], -10.0)
+        self.assertAlmostEqual(preparation.stage_marks_after_rotation[1][0], 11.0)
+        self.assertAlmostEqual(preparation.stage_marks_after_rotation[1][1], -10.0)
 
         session.apply_prepared_alignment(preparation)
 
@@ -392,8 +395,8 @@ class DesignSessionTest(unittest.TestCase):
         self.assertTrue(session.registration.valid)
         mapped = session.stage_from_design((500.0, 0.0))
         assert mapped is not None
-        self.assertAlmostEqual(mapped[0], 9.5)
-        self.assertAlmostEqual(mapped[1], 11.0)
+        self.assertAlmostEqual(mapped[0], 10.5)
+        self.assertAlmostEqual(mapped[1], -10.0)
 
     def test_rotate_document_transforms_design_state(self) -> None:
         document = DesignDocument(

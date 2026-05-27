@@ -122,6 +122,7 @@ class StageController(QObject):
     movement_started: Signal = Signal()
     movement_finished: Signal = Signal(bool, str)
     click_move_started: Signal = Signal(float, float, float)
+    absolute_xy_move_started: Signal = Signal(float, float, float)
     stage_position_changed: Signal = Signal(object)
     autofocus_finished: Signal = Signal(bool, str)
     objective_calibration_updated: Signal = Signal(str, object)
@@ -2096,7 +2097,17 @@ class StageController(QObject):
             self.status_message.emit(
                 f"Moving to X={target_x_mm:.3f} mm, Y={target_y_mm:.3f} mm"
             )
-            self._send_relative_move(serial_connection, move)
+            self._send_relative_move(
+                serial_connection,
+                move,
+                motion_started_callback=lambda _move, feedrate: (
+                    self.absolute_xy_move_started.emit(
+                        float(target_x_mm),
+                        float(target_y_mm),
+                        float(feedrate),
+                    )
+                ),
+            )
             self._wait_for_idle(serial_connection)
             self._query_status(serial_connection)
             return f"Arrived at X={target_x_mm:.3f} mm, Y={target_y_mm:.3f} mm."

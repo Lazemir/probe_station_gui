@@ -17,6 +17,9 @@ from .design_model import (
 from .route_model import MeasurementRoute, RoutePoint
 
 
+DEFAULT_B_AXIS_ROTATION_PIVOT_STAGE: Point2D = (0.0, 0.0)
+
+
 @dataclass(frozen=True)
 class AlignmentPreparation:
     """Prepared source-mark alignment ready to be committed after B rotation."""
@@ -344,13 +347,14 @@ class DesignSession:
         while rotation_deg > 180.0:
             rotation_deg -= 360.0
 
-        pivot_stage = stage_b
+        pivot_stage = DEFAULT_B_AXIS_ROTATION_PIVOT_STAGE
         adjusted_stage_a = self._rotate_stage_point(stage_a, pivot_stage, rotation_deg)
+        adjusted_stage_b = self._rotate_stage_point(stage_b, pivot_stage, rotation_deg)
         distance_ratio = stage_distance_mm / design_distance_mm
         return AlignmentPreparation(
             design_marks=(design_a, design_b),
             stage_marks_before_rotation=(stage_a, stage_b),
-            stage_marks_after_rotation=(adjusted_stage_a, stage_b),
+            stage_marks_after_rotation=(adjusted_stage_a, adjusted_stage_b),
             pivot_stage=pivot_stage,
             rotation_deg=rotation_deg,
             design_distance_mm=design_distance_mm,

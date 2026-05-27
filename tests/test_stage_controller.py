@@ -427,7 +427,18 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
         controller._move_safety_check = lambda: None
         controller._wait_for_idle = lambda _serial: None
         controller._query_status = lambda _serial: statuses.pop(0)
-        controller._send_relative_move = lambda _serial, move: sent_moves.append(move)
+        started_moves = []
+
+        def send_relative_move(_serial, move, **kwargs) -> None:
+            sent_moves.append(move)
+            callback = kwargs.get("motion_started_callback")
+            if callback is not None:
+                callback(move, 600.0)
+
+        controller._send_relative_move = send_relative_move
+        controller.absolute_xy_move_started = types.SimpleNamespace(
+            emit=lambda *args: started_moves.append(args)
+        )
         controller.movement_started = types.SimpleNamespace(emit=lambda *args, **kwargs: None)
         controller.status_message = types.SimpleNamespace(emit=lambda *args, **kwargs: None)
         movement_results = []
@@ -443,6 +454,7 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
         self.assertEqual(len(sent_moves), 1)
         self.assertAlmostEqual(sent_moves[0].x, 5.0)
         self.assertAlmostEqual(sent_moves[0].y, 6.0)
+        self.assertEqual(started_moves, [(15.0, 26.0, 600.0)])
         self.assertEqual(movement_results[-1][0], True)
         self.assertIn("Arrived", movement_results[-1][1])
 
@@ -487,7 +499,18 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
         )
         controller._wait_for_idle = lambda _serial: None
         controller._query_status = lambda _serial: statuses.pop(0)
-        controller._send_relative_move = lambda _serial, move: sent_moves.append(move)
+        started_moves = []
+
+        def send_relative_move(_serial, move, **kwargs) -> None:
+            sent_moves.append(move)
+            callback = kwargs.get("motion_started_callback")
+            if callback is not None:
+                callback(move, 600.0)
+
+        controller._send_relative_move = send_relative_move
+        controller.absolute_xy_move_started = types.SimpleNamespace(
+            emit=lambda *args: started_moves.append(args)
+        )
         controller.movement_started = types.SimpleNamespace(emit=lambda *args, **kwargs: None)
         controller.status_message = types.SimpleNamespace(emit=lambda *args, **kwargs: None)
         movement_results = []
@@ -500,6 +523,7 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
         self.assertEqual(len(sent_moves), 1)
         self.assertAlmostEqual(sent_moves[0].x, 24.903)
         self.assertAlmostEqual(sent_moves[0].y, 22.984)
+        self.assertEqual(started_moves, [(29.887, 26.689, 600.0)])
         self.assertEqual(movement_results[-1][0], True)
 
     def test_absolute_xy_move_requires_serial(self) -> None:
