@@ -72,7 +72,7 @@ class _DesignPlotPane(QWidget):
     route_pick_requested = Signal(str, float, float)
     hover_snap_changed = Signal(object)
     snap_geometry_ready = Signal(int, object, object, object)
-    HOVER_SNAP_LOG_INTERVAL_S = 0.2
+    HOVER_SNAP_LOG_INTERVAL_S = 1.0
     HOVER_SNAP_SLOW_MS = 8.0
     SNAP_RADIUS_PX = 14.0
     CURRENT_CROSSHAIR_HALF_SIZE_PX = 8.0
@@ -1266,7 +1266,6 @@ class _DesignPlotPane(QWidget):
         now = monotonic()
         should_log = (
             elapsed_ms >= self.HOVER_SNAP_SLOW_MS
-            or signature != self._last_hover_log_signature
             or (now - self._last_hover_log_at) >= self.HOVER_SNAP_LOG_INTERVAL_S
         )
         if not should_log:
@@ -1320,8 +1319,9 @@ class DesignNavigatorPanel(QWidget):
     route_remove_selected_requested = Signal()
     route_clear_requested = Signal()
     route_selected = Signal(int)
-    route_measurement_run_requested = Signal(str)
+    route_measurement_run_requested = Signal(str, int)
     route_measurement_stop_requested = Signal()
+    route_measurement_confirmation_requested = Signal(str)
     route_offsets_changed = Signal(float, float, float, float)
     route_edit_enabled_changed = Signal(bool)
     route_pick_mode_changed = Signal(object)
@@ -1353,6 +1353,7 @@ class DesignNavigatorPanel(QWidget):
         self._route: MeasurementRoute | None = None
         self._selected_route_point_index = -1
         self._route_measurement_running = False
+        self._route_measurement_waiting = False
         self._design_registration_active = False
         self._current_design_position: Point2D | None = None
         self._active_design_tool = "select"
@@ -1664,12 +1665,29 @@ class DesignNavigatorPanel(QWidget):
         route_layout.addLayout(route_edit_buttons)
 
         route_run_buttons = QHBoxLayout()
+        route_run_buttons.addWidget(QLabel("N", route_group))
+        self._route_measurement_count_spin = QSpinBox(route_group)
+        self._route_measurement_count_spin.setRange(1, 1000)
+        self._route_measurement_count_spin.setValue(1)
+        self._route_measurement_count_spin.setMaximumWidth(72)
+        self._route_measurement_count_spin.setToolTip(
+            "Number of LCR readings per route point."
+        )
+        route_run_buttons.addWidget(self._route_measurement_count_spin)
         self._route_run_button = QPushButton("Run Route", route_group)
         self._route_stop_button = QPushButton("Stop", route_group)
         self._route_stop_button.setEnabled(False)
         route_run_buttons.addWidget(self._route_run_button)
         route_run_buttons.addWidget(self._route_stop_button)
         route_layout.addLayout(route_run_buttons)
+        route_confirm_buttons = QHBoxLayout()
+        self._route_next_button = QPushButton("Next", route_group)
+        self._route_remeasure_button = QPushButton("Remeasure", route_group)
+        self._route_next_button.setEnabled(False)
+        self._route_remeasure_button.setEnabled(False)
+        route_confirm_buttons.addWidget(self._route_next_button)
+        route_confirm_buttons.addWidget(self._route_remeasure_button)
+        route_layout.addLayout(route_confirm_buttons)
         self._route_run_status_label = QLabel("Route measurement idle.", route_group)
         self._route_run_status_label.setWordWrap(True)
         route_layout.addWidget(self._route_run_status_label)
@@ -1688,6 +1706,16 @@ class DesignNavigatorPanel(QWidget):
         self._route_run_button.clicked.connect(self._choose_route_measurement_csv)
         self._route_stop_button.clicked.connect(
             self.route_measurement_stop_requested.emit
+        )
+        self._route_next_button.clicked.connect(
+            lambda _checked=False: self.route_measurement_confirmation_requested.emit(
+                "next"
+            )
+        )
+        self._route_remeasure_button.clicked.connect(
+            lambda _checked=False: self.route_measurement_confirmation_requested.emit(
+                "remeasure"
+            )
         )
         self._select_tool_button.clicked.connect(
             lambda _checked=False: self._set_design_tool("select")
@@ -1887,10 +1915,16 @@ class DesignNavigatorPanel(QWidget):
 
     def set_route_measurement_running(self, running: bool) -> None:
         self._route_measurement_running = bool(running)
+        if not self._route_measurement_running:
+            self._route_measurement_waiting = False
         if self._route_measurement_running:
             self._route_run_status_label.setText("Route measurement running.")
         elif self._route_run_status_label.text() == "Route measurement running.":
             self._route_run_status_label.setText("Route measurement idle.")
+        self._update_enabled_state()
+
+    def set_route_measurement_waiting(self, waiting: bool) -> None:
+        self._route_measurement_waiting = bool(waiting)
         self._update_enabled_state()
 
     def set_route_measurement_status(self, text: str) -> None:
@@ -2061,7 +2095,12 @@ class DesignNavigatorPanel(QWidget):
         self._route_run_button.setEnabled(
             has_route and bool(self._route.points) and not route_running
         )
+        self._route_measurement_count_spin.setEnabled(
+            has_route and bool(self._route.points) and not route_running
+        )
         self._route_stop_button.setEnabled(route_running)
+        self._route_next_button.setEnabled(self._route_measurement_waiting)
+        self._route_remeasure_button.setEnabled(self._route_measurement_waiting)
         for widget in (
             self._ruler_clear_button,
             self._ruler_cancel_button,
@@ -2733,7 +2772,10 @@ class DesignNavigatorPanel(QWidget):
             "CSV files (*.csv);;All files (*)",
         )
         if path:
-            self.route_measurement_run_requested.emit(path)
+            self.route_measurement_run_requested.emit(
+                path,
+                int(self._route_measurement_count_spin.value()),
+            )
 
     def _on_top_cell_changed(self, cell_name: str) -> None:
         if self._document is None or not cell_name:

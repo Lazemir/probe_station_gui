@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import csv
 import math
+import os
+import re
 import threading
-import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -31,24 +33,77 @@ class RouteMeasurementPoint:
 class RouteMeasurementRecord:
     """One completed measurement row written to CSV."""
 
+    timestamp: str
+    junction: int
+    nplc: str
+    n_measurements: int
     resistance_ohm: float
+    resistance_rms_ohm: float
+    relative_rms: float
+    status: str
+
+
+CSV_FIELDS = [
+    "timestamp",
+    "junction",
+    "nplc",
+    "n_measurements",
+    "resistance_ohm",
+    "resistance_rms_ohm",
+    "relative_rms",
+    "status",
+]
 
 
 class RouteMeasurementCsvWriter:
-    """Incrementally write route measurements so partial runs are preserved."""
+    """Write route measurements after each point so partial runs are preserved."""
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path).expanduser().resolve()
 
     def write_header(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text("", encoding="utf-8")
+        with self.path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
+            writer.writeheader()
+            handle.flush()
+            os.fsync(handle.fileno())
 
     def append(self, record: RouteMeasurementRecord) -> None:
-        with self.path.open("a", encoding="utf-8", newline="") as handle:
-            writer = csv.writer(handle)
-            writer.writerow([record.resistance_ohm])
+        rows = self._read_rows()
+        rows[record.junction] = _record_to_csv_row(record)
+        self._write_rows(rows)
+
+    def _read_rows(self) -> dict[int, dict[str, str]]:
+        if not self.path.exists():
+            return {}
+        rows: dict[int, dict[str, str]] = {}
+        with self.path.open("r", encoding="utf-8", newline="") as handle:
+            for row in csv.DictReader(handle):
+                try:
+                    junction = int(row.get("junction", ""))
+                except (TypeError, ValueError):
+                    continue
+                rows[junction] = {
+                    field: str(row.get(field, "")) for field in CSV_FIELDS
+                }
+        return rows
+
+    def _write_rows(self, rows: dict[int, dict[str, str]]) -> None:
+        tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
+        with tmp_path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
+            writer.writeheader()
+            for junction in sorted(rows):
+                writer.writerow(
+                    {
+                        field: rows[junction].get(field, "")
+                        for field in CSV_FIELDS
+                    }
+                )
             handle.flush()
+            os.fsync(handle.fileno())
+        tmp_path.replace(self.path)
 
 
 class RouteMeasurementRunner:
@@ -64,6 +119,8 @@ class RouteMeasurementRunner:
         stage_controller: Any,
         lcr_controller: Any,
         needle_feedrate: float | None,
+        measurement_count: int = 1,
+        confirm_each_point: bool = False,
         contact_settle_s: float = DEFAULT_CONTACT_SETTLE_S,
         status_callback: Callable[[str], None] | None = None,
         record_callback: Callable[[RouteMeasurementRecord, int, int], None] | None = None,
@@ -73,10 +130,14 @@ class RouteMeasurementRunner:
         self._stage_controller = stage_controller
         self._lcr_controller = lcr_controller
         self._needle_feedrate = needle_feedrate
+        self._measurement_count = max(1, int(measurement_count))
+        self._confirm_each_point = bool(confirm_each_point)
         self._contact_settle_s = max(0.0, float(contact_settle_s))
         self._status_callback = status_callback
         self._record_callback = record_callback
         self._stop_requested = threading.Event()
+        self._confirmation_condition = threading.Condition()
+        self._pending_confirmation: str | None = None
 
     @property
     def csv_path(self) -> Path:
@@ -84,11 +145,22 @@ class RouteMeasurementRunner:
 
     def stop(self) -> None:
         self._stop_requested.set()
+        with self._confirmation_condition:
+            self._confirmation_condition.notify_all()
+
+    def submit_confirmation(self, action: str) -> None:
+        normalized = str(action).strip().lower()
+        if normalized not in {"next", "remeasure"}:
+            return
+        with self._confirmation_condition:
+            self._pending_confirmation = normalized
+            self._confirmation_condition.notify_all()
 
     def run(self) -> tuple[bool, str]:
         task_started = False
         needs_final_raise = False
-        records_written = 0
+        measurements_saved = 0
+        completed_points = 0
         success = False
         message = "Route measurement stopped."
         try:
@@ -103,10 +175,13 @@ class RouteMeasurementRunner:
                 self._needle_feedrate,
             )
             total = len(self._points)
-            for position, point in enumerate(self._points, start=1):
+            position_index = 0
+            while position_index < total:
                 if self._stop_requested.is_set():
                     message = "Route measurement stopped by user."
                     break
+                position = position_index + 1
+                point = self._points[position_index]
                 self._status(
                     f"Route measurement: point {position}/{total} "
                     f"{point.label}."
@@ -119,6 +194,7 @@ class RouteMeasurementRunner:
                     message = "Route measurement stopped by user."
                     break
                 needles_lowered = False
+                record: RouteMeasurementRecord | None = None
                 try:
                     needs_final_raise = True
                     self._stage_controller.run_external_needles_action(
@@ -129,16 +205,16 @@ class RouteMeasurementRunner:
                     if not self._sleep_contact_settle():
                         message = "Route measurement stopped by user."
                         break
-                    resistance_ohm = float(
-                        self._lcr_controller.read_primary_value_now()
-                    )
+                    resistances_ohm = self._measure_resistances()
+                    if resistances_ohm is None:
+                        message = "Route measurement stopped by user."
+                        break
                     record = self._record_for_point(
-                        resistance_ohm=resistance_ohm,
+                        point=point,
+                        resistances_ohm=resistances_ohm,
                     )
                     self._csv_writer.append(record)
-                    records_written += 1
-                    if self._record_callback is not None:
-                        self._record_callback(record, position, total)
+                    measurements_saved += 1
                 finally:
                     if needles_lowered:
                         self._stage_controller.run_external_needles_action(
@@ -146,11 +222,32 @@ class RouteMeasurementRunner:
                             self._needle_feedrate,
                         )
                         needs_final_raise = False
-            else:
+                if record is None:
+                    continue
+                if self._confirm_each_point:
+                    with self._confirmation_condition:
+                        self._pending_confirmation = None
+                if self._record_callback is not None:
+                    self._record_callback(record, position, total)
+                if self._confirm_each_point:
+                    self._status(
+                        f"Route measurement: point {position}/{total} saved; "
+                        "choose Next or Remeasure."
+                    )
+                    decision = self._wait_for_confirmation()
+                    if decision == "stop":
+                        message = "Route measurement stopped by user."
+                        break
+                    if decision == "remeasure":
+                        continue
+                completed_points += 1
+                position_index += 1
+            if position_index >= total:
                 success = True
                 message = (
                     "Route measurement complete: "
-                    f"{records_written} points written to {self.csv_path}."
+                    f"{completed_points} points saved to {self.csv_path} "
+                    f"({measurements_saved} measurements)."
                 )
         except Exception as exc:
             message = str(exc)
@@ -177,20 +274,99 @@ class RouteMeasurementRunner:
         if self._status_callback is not None:
             self._status_callback(message)
 
+    def _measure_resistances(self) -> list[float] | None:
+        readings: list[float] = []
+        for _ in range(self._measurement_count):
+            if self._stop_requested.is_set():
+                return None
+            readings.append(float(self._lcr_controller.read_primary_value_now()))
+            if self._stop_requested.is_set():
+                return None
+        return readings
+
+    def _wait_for_confirmation(self) -> str:
+        with self._confirmation_condition:
+            while not self._stop_requested.is_set():
+                if self._pending_confirmation is not None:
+                    decision = self._pending_confirmation
+                    self._pending_confirmation = None
+                    return decision
+                self._confirmation_condition.wait(timeout=0.2)
+        return "stop"
+
     @staticmethod
     def _record_for_point(
         *,
-        resistance_ohm: float,
+        point: RouteMeasurementPoint,
+        resistances_ohm: list[float],
     ) -> RouteMeasurementRecord:
-        stored_resistance = resistance_ohm if math.isfinite(resistance_ohm) else math.inf
+        finite_resistances = [
+            float(value) for value in resistances_ohm if math.isfinite(value)
+        ]
+        complete_finite_batch = len(finite_resistances) == len(resistances_ohm)
+        if complete_finite_batch and finite_resistances:
+            mean_resistance = sum(finite_resistances) / len(finite_resistances)
+            variance = sum(
+                (value - mean_resistance) ** 2 for value in finite_resistances
+            ) / len(finite_resistances)
+            rms_resistance = math.sqrt(variance)
+            relative_rms = (
+                rms_resistance / abs(mean_resistance)
+                if mean_resistance
+                else math.nan
+            )
+            status = "ok"
+        else:
+            mean_resistance = math.inf
+            rms_resistance = math.nan
+            relative_rms = math.nan
+            status = "overload"
         return RouteMeasurementRecord(
-            resistance_ohm=stored_resistance,
+            timestamp=datetime.now().isoformat(timespec="seconds"),
+            junction=_junction_for_point(point),
+            nplc="",
+            n_measurements=len(resistances_ohm),
+            resistance_ohm=mean_resistance,
+            resistance_rms_ohm=rms_resistance,
+            relative_rms=relative_rms,
+            status=status,
         )
 
 
 __all__ = [
     "RouteMeasurementCsvWriter",
+    "CSV_FIELDS",
     "RouteMeasurementPoint",
     "RouteMeasurementRecord",
     "RouteMeasurementRunner",
 ]
+
+
+def _junction_for_point(point: RouteMeasurementPoint) -> int:
+    for value in (point.label, point.point_id):
+        match = re.search(r"(\d+)\s*$", str(value).strip())
+        if match is not None:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                pass
+    return int(point.index)
+
+
+def _format_float(value: float) -> str:
+    if not math.isfinite(value):
+        return ""
+    return f"{float(value):.12g}"
+
+
+def _record_to_csv_row(record: RouteMeasurementRecord) -> dict[str, str]:
+    return {
+        "timestamp": record.timestamp,
+        "junction": str(record.junction),
+        "nplc": str(record.nplc),
+        "n_measurements": str(record.n_measurements),
+        "resistance_ohm": _format_float(record.resistance_ohm),
+        "resistance_rms_ohm": _format_float(record.resistance_rms_ohm),
+        "relative_rms": _format_float(record.relative_rms),
+        "status": record.status,
+    }

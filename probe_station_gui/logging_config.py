@@ -12,6 +12,10 @@ _HANDLER_FLAG = "_probe_station_gui_managed"
 _LISTENER: QueueListener | None = None
 _LISTENER_HANDLER: logging.Handler | None = None
 _LISTENER_PATH: Path | None = None
+_NOISY_EXTERNAL_LOGGERS = (
+    "pyvisa",
+    "qcodes",
+)
 
 
 def configure_logging(log_path: Path, level_name: str) -> None:
@@ -22,6 +26,7 @@ def configure_logging(log_path: Path, level_name: str) -> None:
     numeric_level = _normalise_level(level_name)
     root_logger = logging.getLogger()
     root_logger.setLevel(numeric_level)
+    _cap_noisy_external_loggers(numeric_level)
 
     handler = _find_managed_handler(root_logger)
     if handler is None:
@@ -46,6 +51,14 @@ def configure_logging(log_path: Path, level_name: str) -> None:
             existing.setLevel(numeric_level)
 
     root_logger.debug("Logging configured: path=%s level=%s", log_path, level_name)
+
+
+def _cap_noisy_external_loggers(root_level: int) -> None:
+    """Keep third-party transport traces from dominating debug logs."""
+
+    external_level = max(root_level, logging.INFO)
+    for logger_name in _NOISY_EXTERNAL_LOGGERS:
+        logging.getLogger(logger_name).setLevel(external_level)
 
 
 def _create_queue_handler(log_path: Path) -> logging.Handler:

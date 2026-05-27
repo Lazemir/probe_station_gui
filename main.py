@@ -624,6 +624,7 @@ class Main(QMainWindow):
         QTimer.singleShot(0, self._auto_connect_if_possible)
         QTimer.singleShot(0, self._prime_keyboard_focus)
         QTimer.singleShot(0, self._start_camera_thread)
+        QTimer.singleShot(1500, self._preload_design_layout_window)
 
         self.setStyleSheet(
             """
@@ -4292,7 +4293,11 @@ class Main(QMainWindow):
         self._refresh_design_panel()
         self._show_status("Cleared route points.", 3000)
 
-    def _start_route_measurement(self, csv_path: str) -> None:
+    def _start_route_measurement(
+        self,
+        csv_path: str,
+        n_measurements: int = 1,
+    ) -> None:
         thread = self._route_measurement_thread
         if thread is not None and thread.is_alive():
             self._show_status("Route measurement is already running.", 4000)
@@ -4328,6 +4333,8 @@ class Main(QMainWindow):
             stage_controller=self.stage_controller,
             lcr_controller=self.lcr_controller,
             needle_feedrate=self._current_needle_feedrate(),
+            measurement_count=n_measurements,
+            confirm_each_point=True,
             status_callback=self.route_measurement_status.emit,
             record_callback=self.route_measurement_recorded.emit,
         )
@@ -4340,6 +4347,7 @@ class Main(QMainWindow):
         )
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_route_measurement_running(True)
+            self.design_navigator_panel.set_route_measurement_waiting(False)
             self.design_navigator_panel.set_route_measurement_status(
                 f"Route measurement starting: {len(points)} points."
             )
@@ -4400,9 +4408,21 @@ class Main(QMainWindow):
         runner.stop()
         self._show_status("Route measurement stop requested.")
         if self.design_navigator_panel is not None:
+            self.design_navigator_panel.set_route_measurement_waiting(False)
             self.design_navigator_panel.set_route_measurement_status(
                 "Route measurement will stop after the current action."
             )
+
+    def _submit_route_measurement_confirmation(self, action: str) -> None:
+        runner = self._route_measurement_runner
+        if runner is None:
+            self._show_status("No route measurement is waiting.", 3000)
+            return
+        runner.submit_confirmation(action)
+        if self.design_navigator_panel is not None:
+            self.design_navigator_panel.set_route_measurement_waiting(False)
+        action_label = "remeasure" if action == "remeasure" else "next"
+        self._show_status(f"Route measurement: {action_label}.")
 
     def _on_route_measurement_status(self, message: str) -> None:
         self._show_status(message)
@@ -4421,6 +4441,7 @@ class Main(QMainWindow):
         )
         self._show_status(message)
         if self.design_navigator_panel is not None:
+            self.design_navigator_panel.set_route_measurement_waiting(True)
             self.design_navigator_panel.set_route_measurement_status(message)
 
     def _on_route_measurement_finished(
@@ -4436,6 +4457,7 @@ class Main(QMainWindow):
         self._route_measurement_runner = None
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_route_measurement_running(False)
+            self.design_navigator_panel.set_route_measurement_waiting(False)
             self.design_navigator_panel.set_route_measurement_status(message)
         if success:
             self._show_status(f"{message} CSV: {csv_path}", 8000)
@@ -5069,8 +5091,11 @@ class Main(QMainWindow):
         return (distance / speed_mm_per_s) + self.PLANNED_MOVE_DURATION_PADDING_S
 
     def _apply_coordinate_move_feedrate(self, feedrate_mm_min: float) -> None:
+        active_axes = set(self._coordinate_move_axes)
+        if not active_axes and self._coordinate_move_axis is not None:
+            active_axes.add(self._coordinate_move_axis)
         if (
-            self._coordinate_move_axis is None
+            not active_axes
             or self._coordinate_move_programmed_feedrate is None
             or self._coordinate_move_target_position is None
         ):
@@ -5082,7 +5107,7 @@ class Main(QMainWindow):
         target_position = self._coordinate_move_target_position
         raw_targets: dict[str, float] = {}
         for axis in self.STAGE_AXIS_NAMES:
-            if axis not in self._coordinate_move_axes:
+            if axis not in active_axes:
                 continue
             try:
                 axis_index = self.STAGE_AXIS_NAMES.index(axis)
@@ -5942,6 +5967,9 @@ class Main(QMainWindow):
         )
         self.design_navigator_panel.route_measurement_stop_requested.connect(
             self._request_stop_route_measurement
+        )
+        self.design_navigator_panel.route_measurement_confirmation_requested.connect(
+            self._submit_route_measurement_confirmation
         )
         self.design_navigator_panel.move_to_target_requested.connect(
             self._move_to_design_target

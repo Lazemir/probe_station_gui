@@ -187,6 +187,30 @@ class MainCoordinateFeedrateTest(unittest.TestCase):
             )
         )
 
+    def test_coordinate_move_feedrate_change_uses_active_axis_set(self) -> None:
+        window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
+        Main._start_coordinate_targets_move(
+            window,
+            {"X": (5.0, 5.0), "Y": (-2.0, -2.0)},
+            feedrate_mm_min=120.0,
+            source_label="coordinate fields",
+        )
+        window._coordinate_move_axis = None
+        window._advance_coordinate_move_prediction = lambda: None
+
+        Main._apply_coordinate_move_feedrate(window, 180.0)
+
+        self.assertEqual(stage_controller.jog_stops, 1)
+        self.assertEqual(
+            stage_controller.requests,
+            [
+                ({"X": 5.0, "Y": -2.0}, 120.0),
+                ({"X": 5.0, "Y": -2.0}, 180.0),
+            ],
+        )
+        self.assertEqual(window._coordinate_move_programmed_feedrate, 180.0)
+        self.assertEqual(window._coordinate_move_effective_feedrate, 180.0)
+
     def test_coordinate_move_feedrate_reissue_failure_keeps_tracking(self) -> None:
         window, stage_controller, _joystick, _timer, statuses = _make_main(120.0)
         Main._start_coordinate_targets_move(
