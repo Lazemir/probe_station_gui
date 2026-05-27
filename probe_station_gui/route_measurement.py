@@ -169,11 +169,17 @@ class RouteMeasurementRunner:
             self._csv_writer.write_header()
             self._stage_controller.begin_external_task("route measurement")
             task_started = True
+            if self._stop_requested.is_set():
+                message = "Route measurement stopped by user."
+                return success, message
             self._status("Route measurement: raising needles.")
             self._stage_controller.run_external_needles_action(
                 "raise",
                 self._needle_feedrate,
             )
+            if self._stop_requested.is_set():
+                message = "Route measurement stopped by user."
+                return success, message
             total = len(self._points)
             position_index = 0
             while position_index < total:

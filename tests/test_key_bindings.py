@@ -136,6 +136,7 @@ class NeedleCalibrationBookmarkTest(unittest.TestCase):
             monitor1="R",
             monitor2="X",
             alc_enabled=True,
+            contact_zone_mm=0.125,
             raise_position_mm=0.25,
             raise_position_configured=True,
             down_position_mm=1.25,
@@ -152,6 +153,7 @@ class NeedleCalibrationBookmarkTest(unittest.TestCase):
         self.assertEqual(restored["source_resistance_ohm"], settings.source_resistance_ohm)
         self.assertEqual(restored["monitor1"], settings.monitor1)
         self.assertEqual(restored["monitor2"], settings.monitor2)
+        self.assertEqual(restored["contact_zone_mm"], settings.contact_zone_mm)
         self.assertEqual(restored["raise_position_mm"], settings.raise_position_mm)
         self.assertEqual(
             restored["raise_position_configured"],
@@ -177,48 +179,80 @@ class NeedleCalibrationBookmarkTest(unittest.TestCase):
 
 
 class JogSettingsTest(unittest.TestCase):
-    def test_jog_settings_round_trip_preserves_manual_axis_controls(self) -> None:
+    def test_jog_settings_round_trip_preserves_machine_control_settings(self) -> None:
         settings = JogSettings(
+            mode="step",
             linear_distance_mm=12.5,
             rotary_distance_deg=7.5,
             motion_safety_disabled=True,
-            show_axis_a_controls=True,
-            show_axis_b_controls=True,
-            manual_axis_controls_enabled=True,
             manual_axis="B",
             manual_axis_distance_mm=0.25,
             manual_axis_mode="G90",
             manual_axis_feedrate_mm_min=123.4,
+            focus_feedrate_mm_min=55.0,
+            focus_step_feedrate_mm_min=44.0,
+            needles_step_feedrate_mm_min=33.0,
+            turntable_feedrate_mm_min=321.0,
+            turntable_step_feedrate_mm_min=222.0,
         )
 
         restored = JogSettings(**settings.to_dict())
 
         self.assertEqual(restored, settings)
 
-    def test_parse_jog_normalizes_manual_axis_controls(self) -> None:
+    def test_parse_jog_normalizes_machine_control_settings(self) -> None:
         manager = object.__new__(SettingsManager)
 
         parsed = manager._parse_jog(
             {
+                "mode": "step",
                 "linear_distance_mm": "2.5",
                 "rotary_distance_deg": "3.5",
                 "unsafe_motion_enabled": "true",
                 "manual_axis": "b",
                 "manual_axis_distance_mm": "0.125",
                 "manual_axis_feedrate_mm_min": "123.4",
+                "focus_feedrate_mm_min": "44.5",
+                "focus_step_feedrate_mm_min": "22.5",
+                "needles_step_feedrate_mm_min": "11.5",
+                "turntable_feedrate_mm_min": "222.0",
+                "turntable_step_feedrate_mm_min": "111.0",
             }
         )
 
+        self.assertEqual(parsed.mode, "step")
         self.assertEqual(parsed.linear_distance_mm, 2.5)
         self.assertEqual(parsed.rotary_distance_deg, 3.5)
         self.assertTrue(parsed.motion_safety_disabled)
-        self.assertTrue(parsed.show_axis_a_controls)
-        self.assertTrue(parsed.show_axis_b_controls)
-        self.assertTrue(parsed.manual_axis_controls_enabled)
         self.assertEqual(parsed.manual_axis, "B")
         self.assertEqual(parsed.manual_axis_distance_mm, 0.125)
         self.assertEqual(parsed.manual_axis_mode, "G91")
         self.assertEqual(parsed.manual_axis_feedrate_mm_min, 123.4)
+        self.assertEqual(parsed.focus_feedrate_mm_min, 44.5)
+        self.assertEqual(parsed.focus_step_feedrate_mm_min, 22.5)
+        self.assertEqual(parsed.needles_step_feedrate_mm_min, 11.5)
+        self.assertEqual(parsed.turntable_feedrate_mm_min, 222.0)
+        self.assertEqual(parsed.turntable_step_feedrate_mm_min, 111.0)
+
+    def test_parse_fluidnc_axis_max_feedrates(self) -> None:
+        rates = settings_manager.parse_fluidnc_axis_max_feedrates(
+            [
+                "axes:",
+                "  x:",
+                "    max_rate_mm_per_min: 500",
+                "  z:",
+                "    max_rate_mm_per_min: 100",
+                "a:",
+                "max_rate_mm_per_min: 80",
+                "  b:",
+                "    max_rate_mm_per_min: 360",
+            ]
+        )
+
+        self.assertEqual(
+            rates,
+            {"X": 500.0, "Z": 100.0, "A": 80.0, "B": 360.0},
+        )
 
 
 class ClickToMoveSettingsTest(unittest.TestCase):

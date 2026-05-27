@@ -18,6 +18,7 @@ from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QImage
 
 from probe_station_gui.motion_prediction import interpolate_position
+from probe_station_gui.settings_manager import parse_fluidnc_axis_max_feedrates
 
 
 logger = logging.getLogger(__name__)
@@ -136,6 +137,7 @@ class StageController(QObject):
     needles_action_started: Signal = Signal(str)
     needles_action_finished: Signal = Signal(bool, str, str)
     needle_height_changed: Signal = Signal(float)
+    axis_max_feedrates_changed: Signal = Signal(object)
     oscillation_state_changed: Signal = Signal(bool, str)
     status_message: Signal = Signal(str)
     controller_reboot_detected: Signal = Signal()
@@ -154,6 +156,7 @@ class StageController(QObject):
     CALIBRATION_MIN_RESPONSE = 0.05
     CALIBRATION_VERIFY_TARGET_PIXELS = 40.0
     DEFAULT_FEEDRATE = 600.0
+    DEFAULT_NEEDLE_CONTACT_ZONE_MM = 0.1
     MOVE_IDLE_TIMEOUT_MARGIN_S = 5.0
     MOVE_IDLE_TIMEOUT_MIN_S = 10.0
     MOVE_IDLE_TIMEOUT_MAX_S = 3600.0
@@ -233,6 +236,17 @@ class StageController(QObject):
         "G59.2",
         "G59.3",
     )
+    WORK_COORDINATE_SYSTEM_P_VALUES = {
+        "G54": 1,
+        "G55": 2,
+        "G56": 3,
+        "G57": 4,
+        "G58": 5,
+        "G59": 6,
+        "G59.1": 7,
+        "G59.2": 8,
+        "G59.3": 9,
+    }
     DEFAULT_WORK_COORDINATE_SYSTEM = "G54"
 
     def __init__(self) -> None:
@@ -258,6 +272,8 @@ class StageController(QObject):
         self._needles_known = False
         self._needle_raise_lowering_mm: Optional[float] = None
         self._needle_down_lowering_mm: Optional[float] = None
+        self._needle_contact_zone_mm = self.DEFAULT_NEEDLE_CONTACT_ZONE_MM
+        self._axis_max_feedrates: dict[str, float] = {}
         self._axis_a_calibration: dict[str, float | str] | None = None
         self._axis_z_calibration: dict[str, float | str | tuple[float, ...]] | None = None
         self._active_objective_name = "X5"
@@ -869,6 +885,7 @@ class StageController(QObject):
         *,
         raise_position_mm: Optional[float] = None,
         down_position_mm: Optional[float],
+        contact_zone_mm: Optional[float] = None,
     ) -> None:
         """Apply the persisted physical needle raise/lower targets."""
 
@@ -878,6 +895,52 @@ class StageController(QObject):
         self._needle_down_lowering_mm = self._normalise_needle_lowering_target(
             down_position_mm
         )
+        if contact_zone_mm is not None:
+            try:
+                zone_mm = float(contact_zone_mm)
+            except (TypeError, ValueError):
+                zone_mm = self.DEFAULT_NEEDLE_CONTACT_ZONE_MM
+            if not math.isfinite(zone_mm) or zone_mm < 0.0:
+                zone_mm = self.DEFAULT_NEEDLE_CONTACT_ZONE_MM
+            self._needle_contact_zone_mm = zone_mm
+
+    def apply_axis_max_feedrates(self, rates: dict[str, float] | None) -> None:
+        """Apply axis maximum feedrates parsed from the active FluidNC config."""
+
+        cleaned: dict[str, float] = {}
+        for raw_axis, raw_rate in (rates or {}).items():
+            axis = str(raw_axis).upper().strip()
+            if axis not in self.AXIS_INDEX:
+                continue
+            try:
+                rate = float(raw_rate)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(rate) and rate > 0.0:
+                cleaned[axis] = max(0.1, rate)
+        self._axis_max_feedrates = cleaned
+
+    def axis_max_feedrates(self) -> dict[str, float]:
+        """Return the currently applied per-axis maximum feedrates."""
+
+        return dict(self._axis_max_feedrates)
+
+    def query_axis_max_feedrates(self) -> dict[str, float]:
+        """Query the live FluidNC configuration for per-axis maximum feedrates."""
+
+        serial_connection = self._serial
+        if serial_connection is None or not serial_connection.is_open:
+            raise StageControllerError("Serial connection is not available.")
+        with self._task_lock:
+            if self._active_thread and self._active_thread.is_alive():
+                raise StageControllerError(
+                    "Stage is busy. Cannot read controller feedrate limits."
+                )
+            with self._serial_session_lock:
+                rates = self._query_axis_max_feedrates_locked(serial_connection)
+        self.apply_axis_max_feedrates(rates)
+        self.axis_max_feedrates_changed.emit(dict(rates))
+        return rates
 
     def apply_axis_a_calibration(self, calibration: object | None) -> None:
         """Apply the compact nonlinear A-axis calibration model."""
@@ -1083,6 +1146,84 @@ class StageController(QObject):
 
         return self._axis_limits_for_configured_mode(axis.upper().strip(), None)
 
+    def set_current_axis_work_coordinate(
+        self,
+        axis: str,
+        value: float = 0.0,
+    ) -> None:
+        """Shift the active work offset so the current axis position reads value."""
+
+        axis_key = axis.upper().strip()
+        if axis_key not in self.AXIS_INDEX:
+            raise StageControllerError(f"Unsupported axis: {axis}")
+        try:
+            target_value = float(value)
+        except (TypeError, ValueError) as exc:
+            raise StageControllerError(f"Unsupported {axis_key} coordinate: {value}") from exc
+        if not math.isfinite(target_value):
+            raise StageControllerError(f"Unsupported {axis_key} coordinate: {value}")
+        with self._task_lock:
+            if self._active_thread and self._active_thread.is_alive():
+                raise StageControllerError(
+                    "Stage is busy. Wait for the current operation to finish."
+                )
+            serial_connection = self._serial
+            if serial_connection is None or not serial_connection.is_open:
+                raise StageControllerError("Serial connection is not available.")
+            with self._serial_session_lock:
+                self._set_current_axis_work_coordinate_locked(
+                    serial_connection,
+                    axis_key,
+                    target_value,
+                )
+
+    def _set_current_axis_work_coordinate_locked(
+        self,
+        serial_connection: serial.Serial,
+        axis: str,
+        value: float,
+    ) -> None:
+        status = self._query_status(serial_connection)
+        if status is None:
+            raise StageControllerError("Unable to read controller status.")
+        if status.state.lower() in {"jog", "run"}:
+            raise StageControllerError(
+                "Wait for the stage to stop before setting a work coordinate."
+            )
+        coordinate_system = (
+            status.coordinate_system
+            or self._active_work_coordinate_system
+            or self._preferred_work_coordinate_system
+        )
+        coordinate_system = coordinate_system.strip().upper()
+        p_value = self.WORK_COORDINATE_SYSTEM_P_VALUES.get(coordinate_system)
+        if p_value is None:
+            raise StageControllerError(
+                f"Unsupported work coordinate system: {coordinate_system}."
+            )
+        self._require_homed_axes(status, {axis})
+        command = (
+            f"G10 L20 P{p_value} {axis}"
+            f"{self._format_gcode_value(value, decimals=4)}"
+        )
+        self._write_command(serial_connection, command)
+        self._wait_for_ok(serial_connection)
+        self._active_work_coordinate_system = coordinate_system
+        if self._position_reporting_mode != "machine":
+            try:
+                self._controller_coordinate_offsets = (
+                    self._query_work_coordinate_offsets(serial_connection)
+                )
+            except StageControllerError as exc:
+                logger.warning("Unable to refresh work coordinate offsets: %s", exc)
+        refreshed = self._query_status(serial_connection)
+        if axis == "A" and refreshed is not None:
+            self._update_needles_from_status(refreshed)
+        self.status_message.emit(
+            f"{axis} work coordinate set to {self._format_gcode_value(value)} "
+            f"in {coordinate_system}."
+        )
+
     def request_needles_adjust(
         self,
         step_mm: float,
@@ -1166,7 +1307,7 @@ class StageController(QObject):
         if a_position is None:
             return None
         self.needle_height_changed.emit(
-            self._axis_a_lowering_for_gcode_coordinate(a_position)
+            self._axis_a_lowering_for_configured_coordinate(a_position)
         )
         return a_position
 
@@ -1220,6 +1361,11 @@ class StageController(QObject):
         """Signal any active task to stop as soon as possible."""
 
         self._cancel_event.set()
+        with self._task_lock:
+            self._queued_needles_actions.clear()
+            self._oscillation_needles_actions.clear()
+            self._active_needles_action = None
+            self._active_needles_programmed_feedrate = None
         self.status_message.emit(reason)
         self._update_homing_status(set())
         self._set_needles_state(False, known=False)
@@ -1349,7 +1495,7 @@ class StageController(QObject):
         a_position = self.latest_a_position()
         if a_position is None:
             return None
-        return self._axis_a_lowering_for_gcode_coordinate(a_position)
+        return self._axis_a_lowering_for_configured_coordinate(a_position)
 
     def latest_stage_state(self) -> str | None:
         """Return the most recently observed controller motion state."""
@@ -2782,6 +2928,19 @@ class StageController(QObject):
 
             self.status_message.emit("Loading controller startup state...")
             with self._serial_session_lock:
+                try:
+                    axis_feedrates = self._query_axis_max_feedrates_locked(
+                        serial_connection
+                    )
+                except StageControllerError as exc:
+                    axis_feedrates = {}
+                    logger.warning(
+                        "Unable to read axis max feedrates from controller: %s",
+                        exc,
+                    )
+                if axis_feedrates:
+                    self.apply_axis_max_feedrates(axis_feedrates)
+                    self.axis_max_feedrates_changed.emit(dict(axis_feedrates))
                 self._ensure_axis_limits(serial_connection)
                 self._refresh_coordinate_system_state(
                     serial_connection, apply_preference=True
@@ -3244,9 +3403,7 @@ class StageController(QObject):
         action: str,
         feedrate: float | None,
     ) -> float:
-        programmed_feedrate = (
-            self.DEFAULT_FEEDRATE if feedrate is None else max(0.1, float(feedrate))
-        )
+        programmed_feedrate = self._needle_programmed_feedrate(feedrate)
         with self._task_lock:
             self._active_needles_action = action
             self._active_needles_programmed_feedrate = programmed_feedrate
@@ -3259,6 +3416,109 @@ class StageController(QObject):
             self._active_needles_programmed_feedrate = None
         if had_active_control:
             self.queue_feed_override_reset()
+
+    def _needle_programmed_feedrate(self, feedrate: float | None) -> float:
+        if feedrate is None:
+            return self.DEFAULT_FEEDRATE
+        try:
+            value = float(feedrate)
+        except (TypeError, ValueError) as exc:
+            raise StageControllerError(f"Unsupported needle feedrate: {feedrate}") from exc
+        if not math.isfinite(value):
+            raise StageControllerError(f"Unsupported needle feedrate: {feedrate}")
+        return max(0.1, value)
+
+    def _axis_max_feedrate(self, axis: str) -> float:
+        axis_key = str(axis).upper().strip()
+        value = self._axis_max_feedrates.get(axis_key, self.DEFAULT_FEEDRATE)
+        if not math.isfinite(value) or value <= 0.0:
+            return self.DEFAULT_FEEDRATE
+        return max(0.1, float(value))
+
+    def _needle_target_lowering_for_action(self, action: str) -> float:
+        if action not in {"raise", "lower"}:
+            raise StageControllerError(f"Unknown needle action: {action}.")
+        if action == "raise":
+            return 0.0
+        if self._needle_down_lowering_mm is None:
+            raise StageControllerError(
+                "Needle down calibration missing; cannot lower."
+            )
+        return max(0.0, float(self._needle_down_lowering_mm))
+
+    def _needle_contact_boundary_lowering(self) -> float | None:
+        if self._needle_down_lowering_mm is None:
+            return None
+        contact_zone_mm = max(0.0, float(self._needle_contact_zone_mm))
+        if contact_zone_mm <= 1e-9:
+            return None
+        return max(0.0, float(self._needle_down_lowering_mm) - contact_zone_mm)
+
+    def _needle_motion_profile_segments(
+        self,
+        action: str,
+        current_a: float,
+        feedrate: float | None,
+        status: _Status | None = None,
+    ) -> list[tuple[float, float, bool]]:
+        """Return physical lowering targets, feedrates, and slow-zone markers."""
+
+        target_lowering = self._needle_target_lowering_for_action(action)
+        target_a = self._axis_a_configured_coordinate_for_lowering(
+            target_lowering,
+            status,
+        )
+        if abs(target_a - float(current_a)) < 1e-6:
+            return []
+
+        current_lowering = self._axis_a_lowering_for_configured_coordinate(
+            current_a,
+            status,
+        )
+        fast_feedrate = self._axis_max_feedrate("A")
+        slow_feedrate = self._needle_programmed_feedrate(feedrate)
+        boundary_lowering = self._needle_contact_boundary_lowering()
+        segments: list[tuple[float, float, bool]] = []
+
+        def append_segment(
+            segment_target_lowering: float,
+            segment_feedrate: float,
+            slow_zone: bool,
+        ) -> None:
+            nonlocal current_lowering
+            segment_target_lowering = float(segment_target_lowering)
+            if abs(segment_target_lowering - current_lowering) < 1e-9:
+                return
+            segments.append(
+                (
+                    segment_target_lowering,
+                    max(0.1, float(segment_feedrate)),
+                    bool(slow_zone),
+                )
+            )
+            current_lowering = segment_target_lowering
+
+        if boundary_lowering is None:
+            append_segment(target_lowering, fast_feedrate, False)
+            return segments
+
+        if target_lowering > current_lowering:
+            if current_lowering < boundary_lowering:
+                append_segment(
+                    min(boundary_lowering, target_lowering),
+                    fast_feedrate,
+                    False,
+                )
+            append_segment(target_lowering, slow_feedrate, True)
+        else:
+            if current_lowering > boundary_lowering:
+                append_segment(
+                    max(boundary_lowering, target_lowering),
+                    slow_feedrate,
+                    True,
+                )
+            append_segment(target_lowering, fast_feedrate, False)
+        return segments
 
     def _run_needles_action(
         self,
@@ -3286,69 +3546,65 @@ class StageController(QObject):
         if serial_connection is None or not serial_connection.is_open:
             raise StageControllerError("Serial connection is not available.")
         with self._serial_session_lock:
-            if action == "raise":
-                if self._needle_raise_lowering_mm is None:
-                    raise StageControllerError(
-                        "Needle raise calibration missing; cannot raise."
-                    )
+            if action in {"raise", "lower"}:
                 status = self._query_status(serial_connection)
                 current_a = self._axis_value_for_configured_mode(status, "A")
                 if status is None or current_a is None:
                     raise StageControllerError("Unable to read A position for needles.")
                 self._require_homed_axes(status, {"A"})
-                target_a = self._axis_a_gcode_coordinate_for_lowering(
-                    float(self._needle_raise_lowering_mm)
+                target_lowering = self._needle_target_lowering_for_action(action)
+                target_a = self._axis_a_configured_coordinate_for_lowering(
+                    target_lowering,
+                    status,
                 )
-                if abs(target_a - current_a) >= 1e-6:
-                    programmed_feedrate = self._begin_needles_feedrate_control(
-                        action,
-                        feedrate,
+                segments = self._needle_motion_profile_segments(
+                    action,
+                    current_a,
+                    feedrate,
+                    status,
+                )
+                if not segments:
+                    self._update_needles_from_a_position(target_a)
+                    if action == "raise":
+                        return "Needles already raised."
+                    return "Needles already lowered."
+                for segment_lowering, segment_feedrate, slow_zone in segments:
+                    self._check_cancelled()
+                    segment_target_a = self._axis_a_configured_coordinate_for_lowering(
+                        segment_lowering,
+                        status,
                     )
-                    try:
+                    if abs(segment_target_a - current_a) < 1e-6:
+                        continue
+                    if slow_zone:
+                        programmed_feedrate = self._begin_needles_feedrate_control(
+                            action,
+                            segment_feedrate,
+                        )
+                        try:
+                            self._send_absolute_axis_move(
+                                serial_connection,
+                                "A",
+                                segment_target_a,
+                                ignore_needle_safety=True,
+                                feedrate=programmed_feedrate,
+                            )
+                        finally:
+                            self._end_needles_feedrate_control()
+                    else:
                         self._send_absolute_axis_move(
                             serial_connection,
                             "A",
-                            target_a,
+                            segment_target_a,
                             ignore_needle_safety=True,
-                            feedrate=programmed_feedrate,
+                            feedrate=segment_feedrate,
                         )
-                    finally:
-                        self._end_needles_feedrate_control()
+                    current_a = segment_target_a
                 self._update_needles_from_a_position(target_a)
-                return "Needles raised."
-            if action == "lower":
-                if self._needle_down_lowering_mm is None:
-                    raise StageControllerError(
-                        "Needle down calibration missing; cannot lower."
-                    )
-                status = self._query_status(serial_connection)
-                current_a = self._axis_value_for_configured_mode(status, "A")
-                if status is None or current_a is None:
-                    raise StageControllerError("Unable to read A position for needles.")
-                self._require_homed_axes(status, {"A"})
-                target_a = self._axis_a_gcode_coordinate_for_lowering(
-                    float(self._needle_down_lowering_mm)
-                )
-                if abs(target_a - current_a) < 1e-6:
-                    self._update_needles_from_a_position(target_a)
-                    return "Needles already lowered."
-                programmed_feedrate = self._begin_needles_feedrate_control(
-                    action,
-                    feedrate,
-                )
-                try:
-                    self._send_absolute_axis_move(
-                        serial_connection,
-                        "A",
-                        target_a,
-                        ignore_needle_safety=True,
-                        feedrate=programmed_feedrate,
-                    )
-                finally:
-                    self._end_needles_feedrate_control()
-                self._update_needles_from_a_position(target_a)
+                if action == "raise":
+                    return "Needles raised."
                 return "Needles lowered."
-        raise StageControllerError(f"Unknown needle action: {action}.")
+            raise StageControllerError(f"Unknown needle action: {action}.")
 
     def _run_manual_axis_move(
         self,
@@ -3917,6 +4173,22 @@ class StageController(QObject):
 
         return self._axis_a_lowering_for_gcode_coordinate(a_coordinate_mm)
 
+    def axis_a_configured_coordinate_for_lowering(
+        self,
+        lowering_mm: float,
+    ) -> float:
+        """Map physical A lowering to the current GUI/controller coordinate basis."""
+
+        return self._axis_a_configured_coordinate_for_lowering(lowering_mm)
+
+    def axis_a_lowering_for_configured_coordinate(
+        self,
+        a_coordinate_mm: float,
+    ) -> float:
+        """Map the current GUI/controller A coordinate to physical calibrated lowering."""
+
+        return self._axis_a_lowering_for_configured_coordinate(a_coordinate_mm)
+
     def _normalise_needle_lowering_target(
         self,
         position_mm: Optional[float],
@@ -4009,6 +4281,48 @@ class StageController(QObject):
             a_coordinate_mm
         )
 
+    def _axis_work_offset_for_configured_mode(
+        self,
+        axis: str,
+        status: _Status | None = None,
+    ) -> float:
+        if self._position_reporting_mode == "machine":
+            return 0.0
+        idx = self.AXIS_INDEX.get(axis.upper().strip())
+        if idx is None:
+            return 0.0
+        work_offset = None if status is None else getattr(status, "work_offset", None)
+        coordinate_system = (
+            None if status is None else getattr(status, "coordinate_system", None)
+        ) or self._active_work_coordinate_system
+        if work_offset is None and coordinate_system:
+            work_offset = self._controller_coordinate_offsets.get(coordinate_system)
+        if work_offset is None or idx >= len(work_offset):
+            return 0.0
+        return float(work_offset[idx])
+
+    def _axis_a_lowering_for_configured_coordinate(
+        self,
+        a_coordinate_mm: float,
+        status: _Status | None = None,
+    ) -> float:
+        machine_coordinate = (
+            float(a_coordinate_mm)
+            + self._axis_work_offset_for_configured_mode("A", status)
+        )
+        return self._axis_a_lowering_for_gcode_coordinate(machine_coordinate)
+
+    def _axis_a_configured_coordinate_for_lowering(
+        self,
+        lowering_mm: float,
+        status: _Status | None = None,
+    ) -> float:
+        machine_coordinate = self._axis_a_gcode_coordinate_for_lowering(lowering_mm)
+        return machine_coordinate - self._axis_work_offset_for_configured_mode(
+            "A",
+            status,
+        )
+
     def _axis_a_gcode_coordinate_for_calibrated_coordinate(
         self,
         calibrated_coordinate_mm: float,
@@ -4065,9 +4379,9 @@ class StageController(QObject):
         current_a: float,
         requested_step_mm: float,
     ) -> float:
-        current_physical = self._axis_a_lowering_for_gcode_coordinate(current_a)
+        current_physical = self._axis_a_lowering_for_configured_coordinate(current_a)
         target_physical = current_physical - float(requested_step_mm)
-        return self._axis_a_gcode_coordinate_for_lowering(target_physical)
+        return self._axis_a_configured_coordinate_for_lowering(target_physical)
 
     @staticmethod
     def _evaluate_polynomial(coefficients: tuple[float, ...], x_value: float) -> float:
@@ -4412,6 +4726,24 @@ class StageController(QObject):
                 continue
             offsets[match.group("system").upper()] = coords
         return offsets
+
+    def _query_axis_max_feedrates_locked(
+        self,
+        serial_connection: serial.Serial,
+        timeout: float = 4.0,
+    ) -> dict[str, float]:
+        self._write_command(serial_connection, "$CD")
+        lines = self._read_response_lines(
+            serial_connection,
+            timeout=timeout,
+            description="$CD",
+        )
+        rates = parse_fluidnc_axis_max_feedrates(lines)
+        if not rates:
+            raise StageControllerError(
+                "Controller config dump did not include axis max feedrates."
+            )
+        return rates
 
     def _refresh_coordinate_system_state(
         self,
@@ -5033,19 +5365,19 @@ class StageController(QObject):
         self._refresh_axis_a_ready_from_state()
         self.needles_state_changed.emit(raised, known)
 
-    def _needle_zone_for_a_position(self, a_position: float) -> str | None:
+    def _needle_zone_for_a_position(
+        self,
+        a_position: float,
+        status: _Status | None = None,
+    ) -> str | None:
         current_a = float(a_position)
-        if self._needle_raise_lowering_mm is None:
-            raise_target_a = 0.0
-        else:
-            raise_target_a = self._axis_a_gcode_coordinate_for_lowering(
-                float(self._needle_raise_lowering_mm)
-            )
+        raise_target_a = self._axis_a_configured_coordinate_for_lowering(0.0, status)
         if current_a >= raise_target_a - self.A_ZERO_TOLERANCE:
             return "raise"
         if self._needle_down_lowering_mm is not None:
-            down_target_a = self._axis_a_gcode_coordinate_for_lowering(
-                float(self._needle_down_lowering_mm)
+            down_target_a = self._axis_a_configured_coordinate_for_lowering(
+                float(self._needle_down_lowering_mm),
+                status,
             )
             if current_a <= down_target_a + self.A_ZERO_TOLERANCE:
                 return "lower"
@@ -5055,7 +5387,7 @@ class StageController(QObject):
         """Update the coarse needles state using the current A coordinate."""
 
         self.needle_height_changed.emit(
-            self._axis_a_lowering_for_gcode_coordinate(a_position)
+            self._axis_a_lowering_for_configured_coordinate(a_position)
         )
         zone = self._needle_zone_for_a_position(a_position)
         self._set_needles_state(zone == "raise", known=zone is not None)
@@ -5068,7 +5400,7 @@ class StageController(QObject):
             return
 
         self.needle_height_changed.emit(
-            self._axis_a_lowering_for_gcode_coordinate(a_position)
+            self._axis_a_lowering_for_configured_coordinate(a_position, status)
         )
 
         effective_homed = status.homed_axes
@@ -5078,7 +5410,7 @@ class StageController(QObject):
             self._set_needles_state(False, known=False)
             return
 
-        zone = self._needle_zone_for_a_position(a_position)
+        zone = self._needle_zone_for_a_position(a_position, status)
         self._set_needles_state(zone == "raise", known=zone is not None)
 
     def _read_current_a_position(
@@ -5261,41 +5593,65 @@ class StageController(QObject):
                 raise StageControllerError(
                     "A axis position is unknown; cannot adjust needles during oscillation."
                 )
-            if action == "raise":
-                if self._needle_raise_lowering_mm is None:
-                    raise StageControllerError(
-                        "Needle raise calibration missing; cannot raise."
-                    )
-                target_a = self._axis_a_gcode_coordinate_for_lowering(
-                    float(self._needle_raise_lowering_mm)
+            if action in {"raise", "lower"}:
+                target_lowering = self._needle_target_lowering_for_action(action)
+                target_a = self._axis_a_configured_coordinate_for_lowering(
+                    target_lowering
                 )
-                relative_a_move = target_a - current_a
-                if abs(relative_a_move) < 1e-6:
+                segments = self._needle_motion_profile_segments(
+                    action,
+                    current_a,
+                    feedrate,
+                )
+                if not segments:
                     self._update_needles_from_a_position(target_a)
                     self.needles_action_finished.emit(
                         True,
-                        "Needles already raised.",
+                        (
+                            "Needles already raised."
+                            if action == "raise"
+                            else "Needles already lowered."
+                        ),
                         action,
                     )
                     return
-            elif action == "lower":
-                if self._needle_down_lowering_mm is None:
-                    raise StageControllerError(
-                        "Needle down calibration missing; cannot lower."
+                new_a = current_a
+                for segment_lowering, segment_feedrate, slow_zone in segments:
+                    segment_target_a = self._axis_a_configured_coordinate_for_lowering(
+                        segment_lowering
                     )
-                target_a = self._axis_a_gcode_coordinate_for_lowering(
-                    float(self._needle_down_lowering_mm)
+                    relative_a_move = segment_target_a - new_a
+                    if abs(relative_a_move) < 1e-6:
+                        continue
+                    if slow_zone:
+                        programmed_feedrate = self._begin_needles_feedrate_control(
+                            action,
+                            segment_feedrate,
+                        )
+                        try:
+                            self._write_relative_g1_unchecked(
+                                serial_connection,
+                                MoveVector(a=relative_a_move),
+                                feedrate=programmed_feedrate,
+                            )
+                        finally:
+                            self._end_needles_feedrate_control()
+                    else:
+                        self._write_relative_g1_unchecked(
+                            serial_connection,
+                            MoveVector(a=relative_a_move),
+                            feedrate=segment_feedrate,
+                        )
+                    new_a = segment_target_a
+                self._update_cached_axis_position("A", new_a)
+                self._update_needles_from_a_position(new_a)
+                self.needles_action_finished.emit(
+                    True,
+                    "Needles raised." if action == "raise" else "Needles lowered.",
+                    action,
                 )
-                relative_a_move = target_a - current_a
-                if abs(relative_a_move) < 1e-6:
-                    self._update_needles_from_a_position(target_a)
-                    self.needles_action_finished.emit(
-                        True,
-                        "Needles already lowered.",
-                        action,
-                    )
-                    return
-            elif action == "adjust":
+                return
+            if action == "adjust":
                 requested_step = 0.0 if step_mm is None else float(step_mm)
                 target_a = self._axis_a_gcode_coordinate_for_lowering_step(
                     current_a,
@@ -5315,11 +5671,7 @@ class StageController(QObject):
             self._write_relative_g1_unchecked(
                 serial_connection,
                 MoveVector(a=relative_a_move),
-                feedrate=(
-                    self.DEFAULT_FEEDRATE
-                    if feedrate is None
-                    else max(0.1, float(feedrate))
-                ),
+                feedrate=self._needle_programmed_feedrate(feedrate),
             )
             new_a = target_a
             self._update_cached_axis_position("A", new_a)

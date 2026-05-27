@@ -271,17 +271,30 @@ class JoystickWindow(QWidget):
     needle_contact_coordinate_save_requested = Signal(str, float)
     manual_axis_move_requested = Signal(str, float, str, float)
     manual_axis_settings_changed = Signal(str, float, str, float)
+    control_mode_changed = Signal(str)
     linear_feedrate_changed = Signal(float)
+    step_feedrate_changed = Signal(float)
+    focus_feedrate_changed = Signal(float)
+    focus_step_feedrate_changed = Signal(float)
     needle_feedrate_changed = Signal(float)
+    needle_step_feedrate_changed = Signal(float)
+    turntable_feedrate_changed = Signal(float)
+    turntable_step_feedrate_changed = Signal(float)
     zero_b_requested = Signal()
 
     DEFAULT_JOG_DISTANCE_MM = 25.0
     DEFAULT_ROTATE_DISTANCE_DEG = 5.0
     DEFAULT_MANUAL_AXIS_DISTANCE_MM = 1.0
     DEFAULT_MANUAL_AXIS_MODE = "G91"
-    DEFAULT_MANUAL_AXIS_FEEDRATE_MM_MIN = 600.0
-    DEFAULT_NEEDLE_FEEDRATE_MM_MIN = 600.0
+    DEFAULT_MANUAL_AXIS_FEEDRATE_MM_MIN = 0.1
+    DEFAULT_NEEDLE_FEEDRATE_MM_MIN = 0.1
+    DEFAULT_NEEDLE_STEP_FEEDRATE_MM_MIN = 0.1
+    DEFAULT_FOCUS_FEEDRATE_MM_MIN = 0.1
+    DEFAULT_FOCUS_STEP_FEEDRATE_MM_MIN = 0.1
+    DEFAULT_TURNTABLE_FEEDRATE_MM_MIN = 0.1
+    DEFAULT_TURNTABLE_STEP_FEEDRATE_MM_MIN = 0.1
     DEFAULT_LINEAR_FEEDRATE_PRESETS: tuple[float, ...] = (
+        0.1,
         1.0,
         3.0,
         10.0,
@@ -303,6 +316,24 @@ class JoystickWindow(QWidget):
     LINEAR_FEEDRATE_SCALE = 10
     MIN_LINEAR_FEEDRATE = 0.1
     MAX_LINEAR_FEEDRATE = 1000.0
+    MODE_JOG = "jog"
+    MODE_STEP = "step"
+    FEED_TARGET_XY = "xy"
+    FEED_TARGET_FOCUS = "focus"
+    FEED_TARGET_NEEDLES = "needles"
+    FEED_TARGET_TURNTABLE = "turntable"
+    FEED_TARGET_ORDER = (
+        FEED_TARGET_XY,
+        FEED_TARGET_FOCUS,
+        FEED_TARGET_NEEDLES,
+        FEED_TARGET_TURNTABLE,
+    )
+    FEED_TARGET_LABELS = {
+        FEED_TARGET_XY: "XY",
+        FEED_TARGET_FOCUS: "Z Focus",
+        FEED_TARGET_NEEDLES: "A Needles",
+        FEED_TARGET_TURNTABLE: "B Turntable",
+    }
     HOMED_STYLE = (
         "QPushButton { padding: 2px 6px; border-radius: 4px; background: #1565c0; color: #f5f5f5; }"
         "QPushButton:pressed { background: #0d47a1; }"
@@ -377,20 +408,60 @@ class JoystickWindow(QWidget):
         self._pending_key_activations: dict[Tuple[str, object], QTimer] = {}
         self._key_bindings: Dict[tuple, tuple[str, int]] = {}
         self._linear_presets: List[float] = list(self.DEFAULT_LINEAR_FEEDRATE_PRESETS)
-        self._linear_default: float = 1.0
+        self._linear_default: float = self.MIN_LINEAR_FEEDRATE
         self._linear_jog_distance_mm: float = self.DEFAULT_JOG_DISTANCE_MM
+        self._rotary_jog_distance_deg: float = self.DEFAULT_ROTATE_DISTANCE_DEG
         self._manual_axis_distance_mm: float = self.DEFAULT_MANUAL_AXIS_DISTANCE_MM
         self._manual_axis_mode = self.DEFAULT_MANUAL_AXIS_MODE
         self._manual_axis_feedrate_mm_min: float = (
             self.DEFAULT_MANUAL_AXIS_FEEDRATE_MM_MIN
         )
         self._needle_feedrate_value: float = self.DEFAULT_NEEDLE_FEEDRATE_MM_MIN
+        self._needle_step_feedrate_value: float = (
+            self.DEFAULT_NEEDLE_STEP_FEEDRATE_MM_MIN
+        )
+        self._focus_feedrate_value: float = self.DEFAULT_FOCUS_FEEDRATE_MM_MIN
+        self._focus_step_feedrate_value: float = (
+            self.DEFAULT_FOCUS_STEP_FEEDRATE_MM_MIN
+        )
+        self._turntable_feedrate_value: float = (
+            self.DEFAULT_TURNTABLE_FEEDRATE_MM_MIN
+        )
+        self._turntable_step_feedrate_value: float = (
+            self.DEFAULT_TURNTABLE_STEP_FEEDRATE_MM_MIN
+        )
         self._motion_safety_disabled = False
-        self._show_axis_a_controls = False
-        self._show_axis_b_controls = False
-        self._manual_axis_controls_enabled = False
         self._applying_jog_settings = False
+        self._control_mode = self.MODE_JOG
+        self._active_feedrate_target = self.FEED_TARGET_XY
+        self._axis_feedrate_limits: dict[str, float] = {}
         self._linear_feedrate_value: float = self._linear_default
+        self._feedrate_values: dict[str, float] = {
+            self._feedrate_key(self.FEED_TARGET_XY, self.MODE_JOG): (
+                self._linear_feedrate_value
+            ),
+            self._feedrate_key(self.FEED_TARGET_XY, self.MODE_STEP): (
+                self._manual_axis_feedrate_mm_min
+            ),
+            self._feedrate_key(self.FEED_TARGET_FOCUS, self.MODE_JOG): (
+                self._focus_feedrate_value
+            ),
+            self._feedrate_key(self.FEED_TARGET_FOCUS, self.MODE_STEP): (
+                self._focus_step_feedrate_value
+            ),
+            self._feedrate_key(self.FEED_TARGET_NEEDLES, self.MODE_JOG): (
+                self._needle_feedrate_value
+            ),
+            self._feedrate_key(self.FEED_TARGET_NEEDLES, self.MODE_STEP): (
+                self._needle_step_feedrate_value
+            ),
+            self._feedrate_key(self.FEED_TARGET_TURNTABLE, self.MODE_JOG): (
+                self._turntable_feedrate_value
+            ),
+            self._feedrate_key(self.FEED_TARGET_TURNTABLE, self.MODE_STEP): (
+                self._turntable_step_feedrate_value
+            ),
+        }
         self._linear_feedrate_bounds: tuple[float, float] | None = None
         self._last_feedrate_wheel_at = 0.0
         self._homing_buttons: dict[str, QPushButton] = {}
@@ -439,28 +510,58 @@ class JoystickWindow(QWidget):
         self.status_label = QLabel("Disconnected", self)
         root_layout.addWidget(self.status_label)
 
-        feed_container = QVBoxLayout()
+        mode_layout = QHBoxLayout()
+        mode_layout.addWidget(QLabel("Mode:", self))
+        self.jog_mode_combo = QComboBox(self)
+        self.jog_mode_combo.addItem("Jog", self.MODE_JOG)
+        self.jog_mode_combo.addItem("Step", self.MODE_STEP)
+        mode_layout.addWidget(self.jog_mode_combo)
+        self.step_distance_label = QLabel("Step:", self)
+        self.step_distance_spin = QDoubleSpinBox(self)
+        self.step_distance_spin.setLocale(QLocale.c())
+        self.step_distance_spin.setDecimals(3)
+        self.step_distance_spin.setRange(0.001, 1000.0)
+        self.step_distance_spin.setSingleStep(0.1)
+        self.step_distance_spin.setSuffix(" mm/deg")
+        self.step_distance_spin.setValue(self._manual_axis_distance_mm)
+        mode_layout.addWidget(self.step_distance_label)
+        mode_layout.addWidget(self.step_distance_spin)
+        root_layout.addLayout(mode_layout)
 
-        linear_feed_layout = QHBoxLayout()
-        linear_feed_layout.addWidget(QLabel("Linear feed (mm/min):", self))
-        self.linear_feedrate_value_label = QLabel(self)
-        self.linear_feedrate_value_label.setMinimumWidth(160)
-        self.linear_feedrate_value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        linear_feed_layout.addWidget(self.linear_feedrate_value_label)
-
-        feed_container.addLayout(linear_feed_layout)
-
+        feed_layout = QHBoxLayout()
+        feed_layout.addWidget(QLabel("Feed for:", self))
+        self.feedrate_target_combo = QComboBox(self)
+        for target in self.FEED_TARGET_ORDER:
+            self.feedrate_target_combo.addItem(
+                self.FEED_TARGET_LABELS[target],
+                target,
+            )
+        feed_layout.addWidget(self.feedrate_target_combo)
         self.linear_feedrate_slider = _FeedrateSlider(Qt.Horizontal, self)
         self.linear_feedrate_slider.setRange(
             int(self.MIN_LINEAR_FEEDRATE * self.LINEAR_FEEDRATE_SCALE),
-            int(self.MAX_LINEAR_FEEDRATE * self.LINEAR_FEEDRATE_SCALE),
+            int(self.MIN_LINEAR_FEEDRATE * self.LINEAR_FEEDRATE_SCALE),
         )
         self.linear_feedrate_slider.valueChanged.connect(
             self._on_linear_feedrate_slider_changed
         )
-        feed_container.addWidget(self.linear_feedrate_slider)
+        feed_layout.addWidget(self.linear_feedrate_slider, 1)
+        self.linear_feedrate_spin = QDoubleSpinBox(self)
+        self.linear_feedrate_spin.setLocale(QLocale.c())
+        self.linear_feedrate_spin.setDecimals(1)
+        self.linear_feedrate_spin.setRange(
+            self.MIN_LINEAR_FEEDRATE,
+            self.MIN_LINEAR_FEEDRATE,
+        )
+        self.linear_feedrate_spin.setSingleStep(10.0)
+        self.linear_feedrate_spin.setSuffix(" mm/min")
+        self.linear_feedrate_spin.setFixedWidth(112)
+        self.linear_feedrate_spin.valueChanged.connect(
+            self._on_linear_feedrate_spin_changed
+        )
+        feed_layout.addWidget(self.linear_feedrate_spin)
 
-        root_layout.addLayout(feed_container)
+        root_layout.addLayout(feed_layout)
 
         self._set_linear_feedrate(self._linear_default, reissue_if_active=False)
 
@@ -477,87 +578,37 @@ class JoystickWindow(QWidget):
 
         root_layout.addLayout(grid_layout)
 
-        focus_layout = QHBoxLayout()
-        focus_layout.addStretch(1)
-        focus_layout.addWidget(QLabel("Focus (Z):", self))
+        axis_layout = QGridLayout()
+        focus_label = QLabel("Focus (Z):", self)
         self.focus_down_button = QPushButton("Z-", self)
         self.focus_up_button = QPushButton("Z+", self)
         self.focus_down_button.setToolTip("Focus down (Z-)")
         self.focus_up_button.setToolTip("Focus up (Z+)")
-        focus_layout.addWidget(self.focus_down_button)
-        focus_layout.addWidget(self.focus_up_button)
-        focus_layout.addStretch(1)
-        root_layout.addLayout(focus_layout)
+        axis_layout.addWidget(focus_label, 0, 0)
+        axis_layout.addWidget(self.focus_down_button, 0, 1)
+        axis_layout.addWidget(self.focus_up_button, 0, 2)
 
-        self.extra_axis_widget = QWidget(self)
-        extra_axis_layout = QVBoxLayout(self.extra_axis_widget)
-        extra_axis_layout.setContentsMargins(0, 0, 0, 0)
-
-        rotate_layout = QHBoxLayout()
-        rotate_layout.addStretch(1)
-        self.rotate_label = QLabel("Extra axes:", self)
-        rotate_layout.addWidget(self.rotate_label)
+        axis_a_label = QLabel("Needles (A):", self)
         self.axis_a_negative_button = QPushButton("A-", self)
         self.axis_a_positive_button = QPushButton("A+", self)
-        self.rotate_negative_button = QPushButton("B-", self)
-        self.rotate_positive_button = QPushButton("B+", self)
-        self.zero_b_button = QPushButton("Zero B", self)
-        self.axis_a_negative_button.setToolTip("Move A negative")
-        self.axis_a_positive_button.setToolTip("Move A positive")
-        self.rotate_negative_button.setToolTip("Move B negative")
-        self.rotate_positive_button.setToolTip("Move B positive")
-        self.zero_b_button.setToolTip("Use the current B position as zero")
-        rotate_layout.addWidget(self.axis_a_negative_button)
-        rotate_layout.addWidget(self.axis_a_positive_button)
-        rotate_layout.addWidget(self.rotate_negative_button)
-        rotate_layout.addWidget(self.rotate_positive_button)
-        rotate_layout.addWidget(self.zero_b_button)
-        rotate_layout.addStretch(1)
-        extra_axis_layout.addLayout(rotate_layout)
+        self.axis_a_negative_button.setToolTip("Move needles down (A-)")
+        self.axis_a_positive_button.setToolTip("Move needles up (A+)")
+        axis_layout.addWidget(axis_a_label, 1, 0)
+        axis_layout.addWidget(self.axis_a_negative_button, 1, 1)
+        axis_layout.addWidget(self.axis_a_positive_button, 1, 2)
 
-        manual_axis_layout = QHBoxLayout()
-        self.manual_axis_label = QLabel("Axis:", self)
-        manual_axis_layout.addWidget(self.manual_axis_label)
-        self.manual_axis_combo = QComboBox(self)
-        self.manual_axis_combo.addItems(self.MANUAL_JOG_AXES)
-        manual_axis_layout.addWidget(self.manual_axis_combo)
-        self.manual_axis_mode_label = QLabel("Mode:", self)
-        manual_axis_layout.addWidget(self.manual_axis_mode_label)
-        self.manual_axis_mode_combo = QComboBox(self)
-        self.manual_axis_mode_combo.addItems(self.MANUAL_AXIS_MODES)
-        manual_axis_layout.addWidget(self.manual_axis_mode_combo)
-        self.manual_axis_distance_label = QLabel("Step:", self)
-        manual_axis_layout.addWidget(self.manual_axis_distance_label)
-        self.manual_axis_distance_spin = QDoubleSpinBox(self)
-        self.manual_axis_distance_spin.setLocale(QLocale.c())
-        self.manual_axis_distance_spin.setDecimals(3)
-        self.manual_axis_distance_spin.setRange(0.001, 1000.0)
-        self.manual_axis_distance_spin.setSingleStep(0.1)
-        self.manual_axis_distance_spin.setSuffix(" mm")
-        self.manual_axis_distance_spin.setValue(self._manual_axis_distance_mm)
-        manual_axis_layout.addWidget(self.manual_axis_distance_spin)
-        self.manual_axis_feedrate_label = QLabel("Feed:", self)
-        self.manual_axis_feedrate_spin = QDoubleSpinBox(self)
-        self.manual_axis_feedrate_spin.setLocale(QLocale.c())
-        self.manual_axis_feedrate_spin.setDecimals(1)
-        self.manual_axis_feedrate_spin.setRange(
-            self.MIN_LINEAR_FEEDRATE,
-            self.MAX_LINEAR_FEEDRATE,
-        )
-        self.manual_axis_feedrate_spin.setSingleStep(10.0)
-        self.manual_axis_feedrate_spin.setSuffix(" mm/min")
-        self.manual_axis_feedrate_spin.setValue(self._manual_axis_feedrate_mm_min)
-        self.manual_axis_feedrate_label.hide()
-        self.manual_axis_feedrate_spin.hide()
-        manual_axis_layout.addWidget(self.manual_axis_feedrate_label)
-        manual_axis_layout.addWidget(self.manual_axis_feedrate_spin)
-        self.manual_axis_negative_button = QPushButton("Move -", self)
-        self.manual_axis_positive_button = QPushButton("Move +", self)
-        manual_axis_layout.addWidget(self.manual_axis_negative_button)
-        manual_axis_layout.addWidget(self.manual_axis_positive_button)
-        extra_axis_layout.addLayout(manual_axis_layout)
-        root_layout.addWidget(self.extra_axis_widget)
-        self.extra_axis_widget.hide()
+        turntable_label = QLabel("Turntable (B):", self)
+        self.rotate_negative_button = QPushButton("↺", self)
+        self.rotate_positive_button = QPushButton("↻", self)
+        self.zero_b_button = QPushButton("Zero B", self)
+        self.rotate_negative_button.setToolTip("Rotate B counter-clockwise")
+        self.rotate_positive_button.setToolTip("Rotate B clockwise")
+        self.zero_b_button.setToolTip("Use the current B position as zero")
+        axis_layout.addWidget(turntable_label, 2, 0)
+        axis_layout.addWidget(self.rotate_negative_button, 2, 1)
+        axis_layout.addWidget(self.rotate_positive_button, 2, 2)
+        axis_layout.addWidget(self.zero_b_button, 2, 3)
+        root_layout.addLayout(axis_layout)
 
         self.up_button.pressed.connect(lambda: self.start_jog("Y", 1))
         self.up_button.released.connect(self.stop_jog)
@@ -571,37 +622,25 @@ class JoystickWindow(QWidget):
         self.focus_down_button.released.connect(self.stop_jog)
         self.focus_up_button.pressed.connect(lambda: self.start_jog("Z", 1))
         self.focus_up_button.released.connect(self.stop_jog)
-        self.axis_a_negative_button.clicked.connect(
-            lambda: self._manual_axis_step("A", -1, mode="G91")
-        )
-        self.axis_a_positive_button.clicked.connect(
-            lambda: self._manual_axis_step("A", 1, mode="G91")
-        )
-        self.rotate_negative_button.clicked.connect(
-            lambda: self._manual_axis_step("B", -1, mode="G91")
-        )
-        self.rotate_positive_button.clicked.connect(
-            lambda: self._manual_axis_step("B", 1, mode="G91")
-        )
+        self.axis_a_negative_button.pressed.connect(lambda: self.start_jog("A", -1))
+        self.axis_a_negative_button.released.connect(self.stop_jog)
+        self.axis_a_positive_button.pressed.connect(lambda: self.start_jog("A", 1))
+        self.axis_a_positive_button.released.connect(self.stop_jog)
+        self.rotate_negative_button.pressed.connect(lambda: self.start_jog("B", -1))
+        self.rotate_negative_button.released.connect(self.stop_jog)
+        self.rotate_positive_button.pressed.connect(lambda: self.start_jog("B", 1))
+        self.rotate_positive_button.released.connect(self.stop_jog)
         self.zero_b_button.clicked.connect(self.zero_b_requested.emit)
-        self.manual_axis_negative_button.clicked.connect(
-            lambda: self._manual_axis_step(self._selected_manual_axis(), -1)
+        self.jog_mode_combo.currentIndexChanged.connect(
+            lambda _index: self._on_jog_mode_changed()
         )
-        self.manual_axis_positive_button.clicked.connect(
-            lambda: self._manual_axis_step(self._selected_manual_axis(), 1)
+        self.feedrate_target_combo.currentIndexChanged.connect(
+            lambda _index: self._on_feedrate_target_changed()
         )
-        self.manual_axis_combo.currentTextChanged.connect(
-            lambda _text: self._emit_manual_axis_settings_changed()
-        )
-        self.manual_axis_mode_combo.currentTextChanged.connect(
-            lambda _text: self._emit_manual_axis_settings_changed()
-        )
-        self.manual_axis_distance_spin.valueChanged.connect(
+        self.step_distance_spin.valueChanged.connect(
             lambda _value: self._emit_manual_axis_settings_changed()
         )
-        self.manual_axis_feedrate_spin.valueChanged.connect(
-            self._on_manual_axis_feedrate_changed
-        )
+        self._update_mode_controls()
 
         homing_layout = QHBoxLayout()
         homing_layout.addWidget(QLabel("Homing:", self))
@@ -630,7 +669,7 @@ class JoystickWindow(QWidget):
         self.needle_feedrate_spin.setDecimals(1)
         self.needle_feedrate_spin.setRange(
             self.MIN_LINEAR_FEEDRATE,
-            self.MAX_LINEAR_FEEDRATE,
+            self.MIN_LINEAR_FEEDRATE,
         )
         self.needle_feedrate_spin.setSingleStep(10.0)
         self.needle_feedrate_spin.setSuffix(" mm/min")
@@ -642,16 +681,11 @@ class JoystickWindow(QWidget):
         self.needles_raise_button.setCheckable(True)
         self.needles_lower_button.setCheckable(True)
         self.needles_raise_button.setToolTip(
-            "Raise needles (home A). Right-click to edit contact A."
+            "Raise needles to the top A position."
         )
         self.needles_lower_button.setToolTip(
-            "Lower needles (calibrated). Right-click to edit contact A."
+            "Lower needles to the saved contact A0 position."
         )
-        for button in (self.needles_raise_button, self.needles_lower_button):
-            button.setContextMenuPolicy(Qt.CustomContextMenu)
-            button.customContextMenuRequested.connect(
-                self._show_needle_contact_coordinate_menu
-            )
         self.needles_raise_button.clicked.connect(self._raise_needles)
         self.needles_lower_button.clicked.connect(self._lower_needles)
         self.needle_feedrate_spin.valueChanged.connect(
@@ -720,29 +754,135 @@ class JoystickWindow(QWidget):
         self._event_filter_retry_scheduled = False
         logger.debug("Joystick event filter removed")
 
-    def _format_feedrate(self, value: float) -> str:
-        text = f"{float(value):.1f} mm/min"
-        if self._linear_feedrate_bounds is not None:
-            min_value, max_value = self._linear_feedrate_bounds
-            text += f" [{min_value:.1f}-{max_value:.1f}]"
-        return text
+    def _feedrate_key(self, target: str, mode: str | None = None) -> str:
+        target_key = str(target).strip().lower()
+        if target_key not in self.FEED_TARGET_LABELS:
+            target_key = self.FEED_TARGET_XY
+        mode_key = str(mode or self._control_mode).strip().lower()
+        if mode_key not in {self.MODE_JOG, self.MODE_STEP}:
+            mode_key = self.MODE_JOG
+        return f"{mode_key}:{target_key}"
+
+    def _feedrate_value_for_target(self, target: str, mode: str | None = None) -> float:
+        mode_key = str(mode or self._control_mode).strip().lower()
+        if mode_key not in {self.MODE_JOG, self.MODE_STEP}:
+            mode_key = self.MODE_JOG
+        key = self._feedrate_key(target, mode_key)
+        if key in self._feedrate_values:
+            return self._feedrate_values[key]
+        if target == self.FEED_TARGET_XY:
+            return (
+                self._manual_axis_feedrate_mm_min
+                if mode_key == self.MODE_STEP
+                else self._linear_default
+            )
+        if target == self.FEED_TARGET_FOCUS:
+            return (
+                self._focus_step_feedrate_value
+                if mode_key == self.MODE_STEP
+                else self._focus_feedrate_value
+            )
+        if target == self.FEED_TARGET_NEEDLES:
+            return (
+                self._needle_step_feedrate_value
+                if mode_key == self.MODE_STEP
+                else self._needle_feedrate_value
+            )
+        if target == self.FEED_TARGET_TURNTABLE:
+            return (
+                self._turntable_step_feedrate_value
+                if mode_key == self.MODE_STEP
+                else self._turntable_feedrate_value
+            )
+        return self._linear_default
+
+    def _feedrate_target_for_axis(self, axis: str) -> str:
+        axis = axis.upper().strip()
+        if axis == "Z":
+            return self.FEED_TARGET_FOCUS
+        if axis == "A":
+            return self.FEED_TARGET_NEEDLES
+        if axis == "B":
+            return self.FEED_TARGET_TURNTABLE
+        return self.FEED_TARGET_XY
+
+    def _feedrate_max_for_target(self, target: str) -> float:
+        def axis_limit(axis: str) -> float | None:
+            value = self._axis_feedrate_limits.get(axis)
+            if value is None:
+                return None
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                return None
+            if not math.isfinite(value) or value <= 0:
+                return None
+            return value
+
+        if target == self.FEED_TARGET_XY:
+            limits = [
+                value
+                for axis in ("X", "Y")
+                if (value := axis_limit(axis)) is not None
+            ]
+            if limits:
+                return max(limits)
+        elif target == self.FEED_TARGET_FOCUS:
+            limit = axis_limit("Z")
+            if limit is not None:
+                return limit
+        elif target == self.FEED_TARGET_NEEDLES:
+            limit = axis_limit("A")
+            if limit is not None:
+                return limit
+        elif target == self.FEED_TARGET_TURNTABLE:
+            limit = axis_limit("B")
+            if limit is not None:
+                return limit
+        return self.MIN_LINEAR_FEEDRATE
+
+    def _feedrate_limit_known_for_target(self, target: str) -> bool:
+        if target == self.FEED_TARGET_XY:
+            return any(axis in self._axis_feedrate_limits for axis in ("X", "Y"))
+        if target == self.FEED_TARGET_FOCUS:
+            return "Z" in self._axis_feedrate_limits
+        if target == self.FEED_TARGET_NEEDLES:
+            return "A" in self._axis_feedrate_limits
+        if target == self.FEED_TARGET_TURNTABLE:
+            return "B" in self._axis_feedrate_limits
+        return False
+
+    def _bounded_feedrate_setting(self, target: str, value: float) -> float:
+        bounded = max(self.MIN_LINEAR_FEEDRATE, float(value))
+        if self._feedrate_limit_known_for_target(target):
+            bounded = min(self._feedrate_max_for_target(target), bounded)
+        return bounded
 
     def _linear_feedrate_min_max(self) -> tuple[float, float]:
-        if self._linear_feedrate_bounds is None:
-            return (self.MIN_LINEAR_FEEDRATE, self.MAX_LINEAR_FEEDRATE)
-        min_value, max_value = self._linear_feedrate_bounds
-        return (
-            max(self.MIN_LINEAR_FEEDRATE, float(min_value)),
-            max(self.MIN_LINEAR_FEEDRATE, float(max_value)),
+        target_max = max(
+            self.MIN_LINEAR_FEEDRATE,
+            float(self._feedrate_max_for_target(self._active_feedrate_target)),
         )
+        if self._linear_feedrate_bounds is None:
+            return (self.MIN_LINEAR_FEEDRATE, target_max)
+        min_value, max_value = self._linear_feedrate_bounds
+        minimum = max(self.MIN_LINEAR_FEEDRATE, float(min_value))
+        maximum = min(target_max, max(self.MIN_LINEAR_FEEDRATE, float(max_value)))
+        return (minimum, max(minimum, maximum))
 
     def _update_linear_feedrate_slider_range(self) -> None:
         minimum = int(round(self.MIN_LINEAR_FEEDRATE * self.LINEAR_FEEDRATE_SCALE))
-        maximum = int(round(self.MAX_LINEAR_FEEDRATE * self.LINEAR_FEEDRATE_SCALE))
+        _min_value, max_value = self._linear_feedrate_min_max()
+        maximum = int(round(max_value * self.LINEAR_FEEDRATE_SCALE))
         self.linear_feedrate_slider.blockSignals(True)
         if self.linear_feedrate_slider.minimum() != minimum or self.linear_feedrate_slider.maximum() != maximum:
             self.linear_feedrate_slider.setRange(minimum, maximum)
         self.linear_feedrate_slider.blockSignals(False)
+        if hasattr(self, "linear_feedrate_spin"):
+            self.linear_feedrate_spin.blockSignals(True)
+            self.linear_feedrate_spin.setRange(self.MIN_LINEAR_FEEDRATE, max_value)
+            self.linear_feedrate_spin.blockSignals(False)
+        self._update_needle_feedrate_spin_range()
         if isinstance(self.linear_feedrate_slider, _FeedrateSlider):
             if self._linear_feedrate_bounds is None:
                 self.linear_feedrate_slider.set_temporary_bounds(None, None)
@@ -752,6 +892,17 @@ class JoystickWindow(QWidget):
                     int(round(min_value * self.LINEAR_FEEDRATE_SCALE)),
                     int(round(max_value * self.LINEAR_FEEDRATE_SCALE)),
                 )
+
+    def _update_needle_feedrate_spin_range(self) -> None:
+        if not hasattr(self, "needle_feedrate_spin"):
+            return
+        needle_max = max(
+            self.MIN_LINEAR_FEEDRATE,
+            float(self._feedrate_max_for_target(self.FEED_TARGET_NEEDLES)),
+        )
+        self.needle_feedrate_spin.blockSignals(True)
+        self.needle_feedrate_spin.setRange(self.MIN_LINEAR_FEEDRATE, needle_max)
+        self.needle_feedrate_spin.blockSignals(False)
 
     def _slider_value_from_feedrate(self, value: float) -> int:
         min_value, max_value = self._linear_feedrate_min_max()
@@ -772,23 +923,91 @@ class JoystickWindow(QWidget):
         bounded = self._feedrate_from_slider_value(
             self._slider_value_from_feedrate(bounded)
         )
-        changed = abs(bounded - self._linear_feedrate_value) > 1e-9
+        target = self._active_feedrate_target
+        mode = self._control_mode
+        key = self._feedrate_key(target, mode)
+        previous = self._feedrate_values.get(key, self._linear_feedrate_value)
+        changed = abs(bounded - previous) > 1e-9
+        self._feedrate_values[key] = bounded
         self._linear_feedrate_value = bounded
         slider_value = self._slider_value_from_feedrate(bounded)
         if self.linear_feedrate_slider.value() != slider_value:
             self.linear_feedrate_slider.blockSignals(True)
             self.linear_feedrate_slider.setValue(slider_value)
             self.linear_feedrate_slider.blockSignals(False)
-        self.linear_feedrate_value_label.setText(self._format_feedrate(bounded))
-        if hasattr(self, "manual_axis_feedrate_spin"):
-            self.manual_axis_feedrate_spin.blockSignals(True)
-            self.manual_axis_feedrate_spin.setValue(bounded)
-            self.manual_axis_feedrate_spin.blockSignals(False)
+        if hasattr(self, "linear_feedrate_spin"):
+            self.linear_feedrate_spin.blockSignals(True)
+            self.linear_feedrate_spin.setValue(bounded)
+            self.linear_feedrate_spin.blockSignals(False)
+        if hasattr(self, "linear_feedrate_target_label"):
+            self.linear_feedrate_target_label.setText(
+                self.FEED_TARGET_LABELS.get(target, "Feed")
+            )
         if changed:
-            self._manual_axis_feedrate_mm_min = bounded
-            self.linear_feedrate_changed.emit(bounded)
-        if reissue_if_active:
+            self._store_feedrate_value(target, mode, bounded, emit_changed=True)
+        if reissue_if_active and self._active_axes:
             self._restart_active_jog_with_current_feedrate()
+
+    def _store_feedrate_value(
+        self, target: str, mode: str, value: float, *, emit_changed: bool
+    ) -> None:
+        is_step = mode == self.MODE_STEP
+        if target == self.FEED_TARGET_XY:
+            if is_step:
+                self._manual_axis_feedrate_mm_min = value
+                if emit_changed:
+                    self.step_feedrate_changed.emit(value)
+            else:
+                self._linear_default = value
+                if emit_changed:
+                    self.linear_feedrate_changed.emit(value)
+        elif target == self.FEED_TARGET_FOCUS:
+            if is_step:
+                self._focus_step_feedrate_value = value
+                if emit_changed:
+                    self.focus_step_feedrate_changed.emit(value)
+            else:
+                self._focus_feedrate_value = value
+                if emit_changed:
+                    self.focus_feedrate_changed.emit(value)
+        elif target == self.FEED_TARGET_NEEDLES:
+            if is_step:
+                self._needle_step_feedrate_value = value
+                if emit_changed:
+                    self.needle_step_feedrate_changed.emit(value)
+            else:
+                self._needle_feedrate_value = value
+                if hasattr(self, "needle_feedrate_spin"):
+                    self.needle_feedrate_spin.blockSignals(True)
+                    self.needle_feedrate_spin.setValue(value)
+                    self.needle_feedrate_spin.blockSignals(False)
+                if emit_changed:
+                    self.needle_feedrate_changed.emit(value)
+        elif target == self.FEED_TARGET_TURNTABLE:
+            if is_step:
+                self._turntable_step_feedrate_value = value
+                if emit_changed:
+                    self.turntable_step_feedrate_changed.emit(value)
+            else:
+                self._turntable_feedrate_value = value
+                if emit_changed:
+                    self.turntable_feedrate_changed.emit(value)
+
+    def _set_active_feedrate_target(self, target: str) -> None:
+        if target not in self.FEED_TARGET_LABELS:
+            target = self.FEED_TARGET_XY
+        self._active_feedrate_target = target
+        if hasattr(self, "feedrate_target_combo"):
+            index = self.feedrate_target_combo.findData(target)
+            if index >= 0 and self.feedrate_target_combo.currentIndex() != index:
+                self.feedrate_target_combo.blockSignals(True)
+                self.feedrate_target_combo.setCurrentIndex(index)
+                self.feedrate_target_combo.blockSignals(False)
+        self._update_linear_feedrate_slider_range()
+        self._set_linear_feedrate(
+            self._feedrate_value_for_target(target),
+            reissue_if_active=False,
+        )
 
     def set_temporary_linear_feedrate_bounds(
         self, min_feedrate: float, max_feedrate: float
@@ -818,6 +1037,43 @@ class JoystickWindow(QWidget):
             reissue_if_active=True,
         )
 
+    def _on_linear_feedrate_spin_changed(self, value: float) -> None:
+        self._set_linear_feedrate(float(value), reissue_if_active=True)
+
+    def _on_feedrate_target_changed(self) -> None:
+        self._set_active_feedrate_target(self._selected_feedrate_target())
+
+    def _on_jog_mode_changed(self) -> None:
+        mode = self._selected_control_mode()
+        if mode == self._control_mode:
+            return
+        if self._active_axes is not None:
+            self.stop_jog()
+        previous_target = self._active_feedrate_target
+        self._control_mode = mode
+        self._update_mode_controls()
+        self._set_active_feedrate_target(previous_target)
+        self.control_mode_changed.emit(mode)
+
+    def _selected_control_mode(self) -> str:
+        data = self.jog_mode_combo.currentData()
+        mode = str(data).strip().lower() if data is not None else ""
+        if mode in {self.MODE_JOG, self.MODE_STEP}:
+            return mode
+        return self.MODE_JOG
+
+    def _selected_feedrate_target(self) -> str:
+        data = self.feedrate_target_combo.currentData()
+        target = str(data).strip().lower() if data is not None else ""
+        if target in self.FEED_TARGET_LABELS:
+            return target
+        return self.FEED_TARGET_XY
+
+    def _update_mode_controls(self) -> None:
+        is_step = self._control_mode == self.MODE_STEP
+        self.step_distance_label.setVisible(is_step)
+        self.step_distance_spin.setVisible(is_step)
+
     def apply_feedrate_settings(
         self,
         linear_presets: List[float],
@@ -840,11 +1096,18 @@ class JoystickWindow(QWidget):
             candidate = float(linear_default)
         except (TypeError, ValueError):
             candidate = self._linear_presets[0] if self._linear_presets else 10.0
-        self._linear_default = min(
-            self.MAX_LINEAR_FEEDRATE,
-            max(self.MIN_LINEAR_FEEDRATE, candidate),
+        self._linear_default = self._bounded_feedrate_setting(
+            self.FEED_TARGET_XY,
+            candidate,
         )
-        self._set_linear_feedrate(self._linear_default, reissue_if_active=False)
+        self._feedrate_values[
+            self._feedrate_key(self.FEED_TARGET_XY, self.MODE_JOG)
+        ] = self._linear_default
+        if (
+            self._active_feedrate_target == self.FEED_TARGET_XY
+            and self._control_mode == self.MODE_JOG
+        ):
+            self._set_linear_feedrate(self._linear_default, reissue_if_active=False)
         logger.info(
             "Joystick feedrate settings updated: linear=%s (default=%s)",
             self._linear_presets,
@@ -860,55 +1123,128 @@ class JoystickWindow(QWidget):
     def apply_needle_settings(self, feedrate_mm_min: float) -> None:
         self._set_needle_feedrate(feedrate_mm_min, emit_changed=False)
 
+    def set_axis_feedrate_limits(self, limits: dict[str, float]) -> None:
+        cleaned: dict[str, float] = {}
+        for axis, value in limits.items():
+            axis_name = str(axis).strip().upper()
+            if axis_name not in self.MANUAL_JOG_AXES:
+                continue
+            try:
+                feedrate = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(feedrate) and feedrate > 0.0:
+                cleaned[axis_name] = feedrate
+        self._axis_feedrate_limits = cleaned
+        self._update_linear_feedrate_slider_range()
+        self._set_needle_feedrate(
+            self._needle_feedrate_value,
+            emit_changed=False,
+        )
+        self._needle_step_feedrate_value = self._bounded_feedrate_setting(
+            self.FEED_TARGET_NEEDLES,
+            self._needle_step_feedrate_value,
+        )
+        self._feedrate_values[
+            self._feedrate_key(self.FEED_TARGET_NEEDLES, self.MODE_STEP)
+        ] = self._needle_step_feedrate_value
+        self._set_linear_feedrate(
+            self._linear_feedrate_value,
+            reissue_if_active=False,
+        )
+
     def apply_jog_settings(
         self,
         linear_distance_mm: float,
         rotary_distance_deg: float,
         motion_safety_disabled: bool = False,
-        show_axis_a_controls: bool = False,
-        show_axis_b_controls: bool = False,
-        manual_axis_controls_enabled: bool = False,
         manual_axis: str = "A",
         manual_axis_distance_mm: float = DEFAULT_MANUAL_AXIS_DISTANCE_MM,
         manual_axis_mode: str = DEFAULT_MANUAL_AXIS_MODE,
         manual_axis_feedrate_mm_min: float = DEFAULT_MANUAL_AXIS_FEEDRATE_MM_MIN,
+        focus_feedrate_mm_min: float = DEFAULT_FOCUS_FEEDRATE_MM_MIN,
+        turntable_feedrate_mm_min: float = DEFAULT_TURNTABLE_FEEDRATE_MM_MIN,
+        mode: str = MODE_JOG,
+        focus_step_feedrate_mm_min: float = DEFAULT_FOCUS_STEP_FEEDRATE_MM_MIN,
+        needle_step_feedrate_mm_min: float = DEFAULT_NEEDLE_STEP_FEEDRATE_MM_MIN,
+        turntable_step_feedrate_mm_min: float = (
+            DEFAULT_TURNTABLE_STEP_FEEDRATE_MM_MIN
+        ),
+        **_legacy_visibility_options: object,
     ) -> None:
         """Update the jog distance used for linear axes."""
 
         self._applying_jog_settings = True
         was_motion_safety_disabled = self._motion_safety_disabled
         self._linear_jog_distance_mm = max(0.001, float(linear_distance_mm))
+        self._rotary_jog_distance_deg = max(0.001, float(rotary_distance_deg))
         self._manual_axis_distance_mm = max(0.001, float(manual_axis_distance_mm))
-        self._manual_axis_feedrate_mm_min = min(
-            self.MAX_LINEAR_FEEDRATE,
-            max(self.MIN_LINEAR_FEEDRATE, float(manual_axis_feedrate_mm_min)),
+        self._manual_axis_feedrate_mm_min = self._bounded_feedrate_setting(
+            self.FEED_TARGET_XY,
+            float(manual_axis_feedrate_mm_min),
         )
+        self._focus_feedrate_value = self._bounded_feedrate_setting(
+            self.FEED_TARGET_FOCUS,
+            float(focus_feedrate_mm_min),
+        )
+        self._focus_step_feedrate_value = self._bounded_feedrate_setting(
+            self.FEED_TARGET_FOCUS,
+            float(focus_step_feedrate_mm_min),
+        )
+        self._needle_step_feedrate_value = self._bounded_feedrate_setting(
+            self.FEED_TARGET_NEEDLES,
+            float(needle_step_feedrate_mm_min),
+        )
+        self._turntable_feedrate_value = self._bounded_feedrate_setting(
+            self.FEED_TARGET_TURNTABLE,
+            float(turntable_feedrate_mm_min),
+        )
+        self._turntable_step_feedrate_value = self._bounded_feedrate_setting(
+            self.FEED_TARGET_TURNTABLE,
+            float(turntable_step_feedrate_mm_min),
+        )
+        self._feedrate_values[
+            self._feedrate_key(self.FEED_TARGET_XY, self.MODE_STEP)
+        ] = self._manual_axis_feedrate_mm_min
+        self._feedrate_values[
+            self._feedrate_key(self.FEED_TARGET_FOCUS, self.MODE_JOG)
+        ] = self._focus_feedrate_value
+        self._feedrate_values[
+            self._feedrate_key(self.FEED_TARGET_FOCUS, self.MODE_STEP)
+        ] = self._focus_step_feedrate_value
+        self._feedrate_values[
+            self._feedrate_key(self.FEED_TARGET_NEEDLES, self.MODE_STEP)
+        ] = self._needle_step_feedrate_value
+        self._feedrate_values[
+            self._feedrate_key(self.FEED_TARGET_TURNTABLE, self.MODE_JOG)
+        ] = self._turntable_feedrate_value
+        self._feedrate_values[
+            self._feedrate_key(self.FEED_TARGET_TURNTABLE, self.MODE_STEP)
+        ] = self._turntable_step_feedrate_value
         self._motion_safety_disabled = bool(motion_safety_disabled)
-        self._show_axis_a_controls = bool(show_axis_a_controls)
-        self._show_axis_b_controls = bool(show_axis_b_controls)
-        self._manual_axis_controls_enabled = bool(manual_axis_controls_enabled)
         axis = manual_axis.strip().upper() if isinstance(manual_axis, str) else "A"
         if axis not in self.MANUAL_JOG_AXES:
             axis = "A"
-        mode = (
+        manual_mode = (
             manual_axis_mode.strip().upper()
             if isinstance(manual_axis_mode, str)
             else self.DEFAULT_MANUAL_AXIS_MODE
         )
-        if mode not in self.MANUAL_AXIS_MODES:
-            mode = self.DEFAULT_MANUAL_AXIS_MODE
-        axis_index = self.manual_axis_combo.findText(axis)
-        if axis_index >= 0:
-            self.manual_axis_combo.setCurrentIndex(axis_index)
-        mode_index = self.manual_axis_mode_combo.findText(mode)
+        if manual_mode not in self.MANUAL_AXIS_MODES:
+            manual_mode = self.DEFAULT_MANUAL_AXIS_MODE
+        self._manual_axis_mode = manual_mode
+        self.step_distance_spin.setValue(self._manual_axis_distance_mm)
+        control_mode = str(mode).strip().lower()
+        if control_mode not in {self.MODE_JOG, self.MODE_STEP}:
+            control_mode = self.MODE_JOG
+        self._control_mode = control_mode
+        mode_index = self.jog_mode_combo.findData(control_mode)
         if mode_index >= 0:
-            self.manual_axis_mode_combo.setCurrentIndex(mode_index)
-        self._manual_axis_mode = mode
-        self.manual_axis_distance_spin.setValue(self._manual_axis_distance_mm)
-        self.manual_axis_feedrate_spin.blockSignals(True)
-        self.manual_axis_feedrate_spin.setValue(self._linear_feedrate_value)
-        self.manual_axis_feedrate_spin.blockSignals(False)
-        self._update_extra_axis_visibility()
+            self.jog_mode_combo.blockSignals(True)
+            self.jog_mode_combo.setCurrentIndex(mode_index)
+            self.jog_mode_combo.blockSignals(False)
+        self._update_mode_controls()
+        self._set_active_feedrate_target(self.FEED_TARGET_XY)
         self._applying_jog_settings = False
         if (
             was_motion_safety_disabled
@@ -923,16 +1259,19 @@ class JoystickWindow(QWidget):
             self._sync_physical_key_watchdog()
         self._update_enabled_state()
         logger.debug(
-            "Joystick jog settings updated: linear_distance_mm=%s safety_disabled=%s axis_a=%s axis_b=%s manual=%s manual_axis=%s manual_axis_distance_mm=%s manual_mode=%s manual_feedrate_mm_min=%s",
+            "Joystick jog settings updated: mode=%s linear_distance_mm=%s safety_disabled=%s manual_axis=%s step_distance_mm=%s manual_mode=%s xy_step_feedrate_mm_min=%s focus_jog_feedrate_mm_min=%s focus_step_feedrate_mm_min=%s needle_step_feedrate_mm_min=%s turntable_jog_feedrate_mm_min=%s turntable_step_feedrate_mm_min=%s",
+            self._control_mode,
             self._linear_jog_distance_mm,
             self._motion_safety_disabled,
-            self._show_axis_a_controls,
-            self._show_axis_b_controls,
-            self._manual_axis_controls_enabled,
             axis,
             self._manual_axis_distance_mm,
             self._manual_axis_mode,
             self._manual_axis_feedrate_mm_min,
+            self._focus_feedrate_value,
+            self._focus_step_feedrate_value,
+            self._needle_step_feedrate_value,
+            self._turntable_feedrate_value,
+            self._turntable_step_feedrate_value,
         )
 
     def _set_needle_feedrate(
@@ -942,19 +1281,31 @@ class JoystickWindow(QWidget):
         emit_changed: bool,
     ) -> None:
         bounded = min(
-            self.MAX_LINEAR_FEEDRATE,
+            self._feedrate_max_for_target(self.FEED_TARGET_NEEDLES),
             max(self.MIN_LINEAR_FEEDRATE, float(value)),
         )
         changed = abs(bounded - self._needle_feedrate_value) > 1e-9
         self._needle_feedrate_value = bounded
-        if self.needle_feedrate_spin.value() != bounded:
+        self._feedrate_values[
+            self._feedrate_key(self.FEED_TARGET_NEEDLES, self.MODE_JOG)
+        ] = bounded
+        if (
+            hasattr(self, "needle_feedrate_spin")
+            and self.needle_feedrate_spin.value() != bounded
+        ):
             self.needle_feedrate_spin.blockSignals(True)
             self.needle_feedrate_spin.setValue(bounded)
             self.needle_feedrate_spin.blockSignals(False)
+        if (
+            self._active_feedrate_target == self.FEED_TARGET_NEEDLES
+            and self._control_mode == self.MODE_JOG
+        ):
+            self._set_linear_feedrate(bounded, reissue_if_active=False)
         if changed and emit_changed:
             self.needle_feedrate_changed.emit(bounded)
 
     def _on_needle_feedrate_changed(self, value: float) -> None:
+        self._set_active_feedrate_target(self.FEED_TARGET_NEEDLES)
         self._set_needle_feedrate(value, emit_changed=True)
 
     def set_serial(self, serial_connection: Optional[serial.Serial]) -> None:
@@ -989,31 +1340,6 @@ class JoystickWindow(QWidget):
                 self._stop_homing_animation(axis)
         self._update_enabled_state()
 
-    def _update_extra_axis_visibility(self) -> None:
-        axis_controls_visible = self._show_axis_a_controls or self._show_axis_b_controls
-        self.rotate_label.setVisible(axis_controls_visible)
-        self.axis_a_negative_button.setVisible(self._show_axis_a_controls)
-        self.axis_a_positive_button.setVisible(self._show_axis_a_controls)
-        self.rotate_negative_button.setVisible(self._show_axis_b_controls)
-        self.rotate_positive_button.setVisible(self._show_axis_b_controls)
-        self.zero_b_button.setVisible(self._show_axis_b_controls)
-        for widget in (
-            self.manual_axis_label,
-            self.manual_axis_combo,
-            self.manual_axis_mode_label,
-            self.manual_axis_mode_combo,
-            self.manual_axis_distance_label,
-            self.manual_axis_distance_spin,
-            self.manual_axis_feedrate_label,
-            self.manual_axis_feedrate_spin,
-            self.manual_axis_negative_button,
-            self.manual_axis_positive_button,
-        ):
-            widget.setVisible(self._manual_axis_controls_enabled)
-        self.extra_axis_widget.setVisible(
-            axis_controls_visible or self._manual_axis_controls_enabled
-        )
-
     def _update_enabled_state(self) -> None:
         enabled = bool(self.serial_connection and self.serial_connection.is_open)
         motion_enabled = enabled and (self._axis_a_ready or self._motion_safety_disabled)
@@ -1024,6 +1350,9 @@ class JoystickWindow(QWidget):
             self._cancel_needle_contact_coordinate_edit()
         for widget in (
             self.linear_feedrate_slider,
+            self.linear_feedrate_spin,
+            self.jog_mode_combo,
+            self.step_distance_spin,
             self.home_all_button,
             self.needle_feedrate_spin,
             self.needles_raise_button,
@@ -1048,12 +1377,6 @@ class JoystickWindow(QWidget):
             self.rotate_negative_button,
             self.rotate_positive_button,
             self.zero_b_button,
-            self.manual_axis_combo,
-            self.manual_axis_mode_combo,
-            self.manual_axis_distance_spin,
-            self.manual_axis_feedrate_spin,
-            self.manual_axis_negative_button,
-            self.manual_axis_positive_button,
         ):
             widget.setEnabled(extra_controls_enabled)
         for button in self._homing_buttons.values():
@@ -1149,6 +1472,9 @@ class JoystickWindow(QWidget):
         logger.debug("TIMING start_jog_requested axis=%s direction=%s", axis, direction)
         if not self._move_safety_check():
             return
+        if self._control_mode == self.MODE_STEP:
+            self._manual_axis_step(axis, direction, mode="G91")
+            return
         self.motion_axis_requested.emit(axis.upper())
         self._apply_axes(((axis, direction),))
 
@@ -1172,6 +1498,9 @@ class JoystickWindow(QWidget):
             self._clear_pending_key_activations()
             if had_active_axes:
                 self.jog_stopped.emit()
+            return
+        if not had_active_axes:
+            self._pending_jog_axes = None
             return
         self._active_axes = None
         self._pending_jog_axes = None
@@ -1239,33 +1568,21 @@ class JoystickWindow(QWidget):
         logger.debug("TIMING jog_command_sent command=%s", command.strip())
 
     def _distance_for_axis(self, axis: str) -> float:
-        if axis.upper() not in self.LINEAR_AXES:
+        axis = axis.upper()
+        if axis == "B":
+            return self._rotary_jog_distance_deg
+        if axis == "A":
             return self._manual_axis_distance_mm
         return self._linear_jog_distance_mm
 
     def _feedrate_for_axes(
         self, axes: tuple[tuple[str, int], ...]
     ) -> Optional[float]:
-        has_linear = any(axis in self.LINEAR_AXES for axis, _ in axes)
-
-        if has_linear:
-            return self._linear_feedrate_value
-        if self._motion_safety_disabled:
-            return self._linear_feedrate_value
-
-        return None
-
-    def _selected_manual_axis(self) -> str:
-        axis = self.manual_axis_combo.currentText().strip().upper()
-        if axis not in self.MANUAL_JOG_AXES:
-            return "A"
-        return axis
-
-    def _selected_manual_axis_mode(self) -> str:
-        mode = self.manual_axis_mode_combo.currentText().strip().upper()
-        if mode not in self.MANUAL_AXIS_MODES:
-            return self.DEFAULT_MANUAL_AXIS_MODE
-        return mode
+        if not axes:
+            return None
+        target = self._feedrate_target_for_axis(axes[0][0])
+        self._set_active_feedrate_target(target)
+        return self._linear_feedrate_value
 
     def _manual_axis_step(
         self, axis: str, direction: int, *, mode: Optional[str] = None
@@ -1278,33 +1595,33 @@ class JoystickWindow(QWidget):
         axis = axis.strip().upper()
         if axis not in self.MANUAL_JOG_AXES:
             return
+        target = self._feedrate_target_for_axis(axis)
+        self._set_active_feedrate_target(target)
         distance = float(direction) * self._manual_axis_distance_mm
         self.motion_axis_requested.emit(axis)
         self.manual_axis_move_requested.emit(
             axis,
             distance,
-            mode or self._selected_manual_axis_mode(),
+            mode or self.DEFAULT_MANUAL_AXIS_MODE,
             self._linear_feedrate_value,
         )
-
-    def _on_manual_axis_feedrate_changed(self, value: float) -> None:
-        self._set_linear_feedrate(float(value), reissue_if_active=True)
-        self._emit_manual_axis_settings_changed()
 
     def _emit_manual_axis_settings_changed(self) -> None:
         if self._applying_jog_settings:
             return
         self._manual_axis_distance_mm = max(
             0.001,
-            float(self.manual_axis_distance_spin.value()),
+            float(self.step_distance_spin.value()),
         )
-        self._manual_axis_mode = self._selected_manual_axis_mode()
-        self._manual_axis_feedrate_mm_min = self._linear_feedrate_value
+        self._manual_axis_mode = self.DEFAULT_MANUAL_AXIS_MODE
         self.manual_axis_settings_changed.emit(
-            self._selected_manual_axis(),
+            "X",
             self._manual_axis_distance_mm,
             self._manual_axis_mode,
-            self._manual_axis_feedrate_mm_min,
+            self._feedrate_values.get(
+                self._feedrate_key(self.FEED_TARGET_XY, self.MODE_STEP),
+                self._manual_axis_feedrate_mm_min,
+            ),
         )
 
     def _compute_active_axes(self) -> tuple[tuple[str, int], ...]:
@@ -1514,9 +1831,13 @@ class JoystickWindow(QWidget):
             self._show_warning(message)
 
     def _raise_needles(self) -> None:
+        if hasattr(self, "linear_feedrate_slider"):
+            self._set_active_feedrate_target(self.FEED_TARGET_NEEDLES)
         self.needles_raise_requested.emit(self._needle_feedrate_value)
 
     def _lower_needles(self) -> None:
+        if hasattr(self, "linear_feedrate_slider"):
+            self._set_active_feedrate_target(self.FEED_TARGET_NEEDLES)
         self.needles_lower_requested.emit(self._needle_feedrate_value)
 
     def _needle_action_for_key(self, action: str) -> str | None:
@@ -2007,6 +2328,11 @@ class JoystickWindow(QWidget):
                 keyboard_modifiers_to_int(event.modifiers()),
                 mapping,
             )
+            if self._control_mode == self.MODE_STEP:
+                axis, direction = mapping
+                self._manual_axis_step(axis, direction, mode="G91")
+                event.accept()
+                return True
             self._register_pressed_mapping(identifier, mapping)
             event.accept()
             logger.debug(

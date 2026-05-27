@@ -212,33 +212,77 @@ class _FakeTimer:
 
 
 class JoystickFeedrateTest(unittest.TestCase):
+    def test_feed_target_labels_do_not_duplicate_selected_mode(self) -> None:
+        labels = [
+            JoystickWindow.FEED_TARGET_LABELS[target]
+            for target in JoystickWindow.FEED_TARGET_ORDER
+        ]
+
+        self.assertEqual(labels, ["XY", "Z Focus", "A Needles", "B Turntable"])
+        self.assertFalse(any("Jog" in label or "Step" in label for label in labels))
+
     def test_manual_axis_settings_do_not_override_linear_feedrate(self) -> None:
         widget = JoystickWindow.__new__(JoystickWindow)
         widget._linear_feedrate_value = 42.0
+        widget._linear_default = 42.0
         widget._linear_feedrate_bounds = None
         widget._manual_axis_feedrate_mm_min = 600.0
+        widget._focus_feedrate_value = 100.0
+        widget._focus_step_feedrate_value = 50.0
+        widget._needle_step_feedrate_value = 70.0
+        widget._turntable_feedrate_value = 360.0
+        widget._turntable_step_feedrate_value = 180.0
+        widget._feedrate_values = {
+            JoystickWindow._feedrate_key(
+                widget, JoystickWindow.FEED_TARGET_XY, JoystickWindow.MODE_JOG
+            ): 42.0,
+            JoystickWindow._feedrate_key(
+                widget, JoystickWindow.FEED_TARGET_XY, JoystickWindow.MODE_STEP
+            ): 600.0,
+            JoystickWindow._feedrate_key(
+                widget, JoystickWindow.FEED_TARGET_FOCUS, JoystickWindow.MODE_JOG
+            ): 100.0,
+            JoystickWindow._feedrate_key(
+                widget, JoystickWindow.FEED_TARGET_FOCUS, JoystickWindow.MODE_STEP
+            ): 50.0,
+            JoystickWindow._feedrate_key(
+                widget, JoystickWindow.FEED_TARGET_NEEDLES, JoystickWindow.MODE_JOG
+            ): 80.0,
+            JoystickWindow._feedrate_key(
+                widget, JoystickWindow.FEED_TARGET_NEEDLES, JoystickWindow.MODE_STEP
+            ): 70.0,
+            JoystickWindow._feedrate_key(
+                widget,
+                JoystickWindow.FEED_TARGET_TURNTABLE,
+                JoystickWindow.MODE_JOG,
+            ): 360.0,
+            JoystickWindow._feedrate_key(
+                widget,
+                JoystickWindow.FEED_TARGET_TURNTABLE,
+                JoystickWindow.MODE_STEP,
+            ): 180.0,
+        }
+        widget._active_feedrate_target = JoystickWindow.FEED_TARGET_XY
+        widget._axis_feedrate_limits = {}
+        widget._control_mode = JoystickWindow.MODE_JOG
         widget._motion_safety_disabled = False
-        widget._show_axis_a_controls = False
-        widget._show_axis_b_controls = False
-        widget._manual_axis_controls_enabled = False
         widget._applying_jog_settings = False
         widget._axis_a_ready = True
         widget._pending_jog_axes = None
         widget._key_stack = []
         widget._key_press_times = {}
-        widget.manual_axis_combo = types.SimpleNamespace(
-            findText=lambda _value: 0,
+        widget.step_distance_spin = types.SimpleNamespace(
+            setValue=lambda value: setattr(widget, "_step_spin_value", float(value))
+        )
+        widget.jog_mode_combo = types.SimpleNamespace(
+            findData=lambda _value: 0,
+            blockSignals=lambda _blocked: None,
             setCurrentIndex=lambda _index: None,
         )
-        widget.manual_axis_mode_combo = types.SimpleNamespace(
-            findText=lambda _value: 0,
-            setCurrentIndex=lambda _index: None,
+        widget._update_mode_controls = lambda: None
+        widget._set_active_feedrate_target = (
+            lambda target: setattr(widget, "_active_feedrate_target", target)
         )
-        widget.manual_axis_distance_spin = types.SimpleNamespace(
-            setValue=lambda _value: None
-        )
-        widget.manual_axis_feedrate_spin = _FakeSpin()
-        widget._update_extra_axis_visibility = lambda: None
         widget._update_enabled_state = lambda: None
         widget.stop_jog = lambda: None
         widget._clear_pending_key_activations = lambda: None
@@ -249,12 +293,65 @@ class JoystickFeedrateTest(unittest.TestCase):
             widget,
             1.0,
             1.0,
-            manual_axis_controls_enabled=True,
             manual_axis_feedrate_mm_min=123.4,
+            focus_feedrate_mm_min=55.0,
+            focus_step_feedrate_mm_min=44.0,
+            needle_step_feedrate_mm_min=33.0,
+            turntable_feedrate_mm_min=222.0,
+            turntable_step_feedrate_mm_min=111.0,
         )
 
         self.assertEqual(widget._linear_feedrate_value, 42.0)
-        self.assertEqual(widget.manual_axis_feedrate_spin.value(), 42.0)
+        self.assertEqual(
+            widget._feedrate_values[
+                JoystickWindow._feedrate_key(
+                    widget,
+                    JoystickWindow.FEED_TARGET_XY,
+                    JoystickWindow.MODE_JOG,
+                )
+            ],
+            42.0,
+        )
+        self.assertEqual(
+            widget._feedrate_values[
+                JoystickWindow._feedrate_key(
+                    widget,
+                    JoystickWindow.FEED_TARGET_XY,
+                    JoystickWindow.MODE_STEP,
+                )
+            ],
+            123.4,
+        )
+        self.assertEqual(
+            widget._feedrate_values[
+                JoystickWindow._feedrate_key(
+                    widget,
+                    JoystickWindow.FEED_TARGET_FOCUS,
+                    JoystickWindow.MODE_STEP,
+                )
+            ],
+            44.0,
+        )
+        self.assertEqual(
+            widget._feedrate_values[
+                JoystickWindow._feedrate_key(
+                    widget,
+                    JoystickWindow.FEED_TARGET_NEEDLES,
+                    JoystickWindow.MODE_STEP,
+                )
+            ],
+            33.0,
+        )
+        self.assertEqual(
+            widget._feedrate_values[
+                JoystickWindow._feedrate_key(
+                    widget,
+                    JoystickWindow.FEED_TARGET_TURNTABLE,
+                    JoystickWindow.MODE_STEP,
+                )
+            ],
+            111.0,
+        )
         self.assertEqual(widget.linear_feedrate_changed.values, [])
 
     def test_raise_click_only_emits_request(self) -> None:
@@ -268,6 +365,21 @@ class JoystickFeedrateTest(unittest.TestCase):
 
         self.assertEqual(widget.needles_raise_requested.values, [(77.5,)])
         self.assertEqual(animation_calls, [])
+
+    def test_stop_without_active_jog_does_not_send_cancel(self) -> None:
+        widget = JoystickWindow.__new__(JoystickWindow)
+        widget._active_axes = None
+        widget._pending_jog_axes = None
+        widget._key_stack = []
+        widget.serial_connection = types.SimpleNamespace(is_open=True)
+        sent: list[object] = []
+        widget.send_command = lambda command: sent.append(command) or True
+        widget.jog_stopped = _ArgsSignalRecorder()
+
+        JoystickWindow.stop_jog(widget)
+
+        self.assertEqual(sent, [])
+        self.assertEqual(widget.jog_stopped.values, [])
 
     def test_known_down_state_marks_lower_button_blue(self) -> None:
         widget = JoystickWindow.__new__(JoystickWindow)

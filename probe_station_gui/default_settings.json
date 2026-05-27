@@ -83,16 +83,19 @@
     "turns_per_sweep": 3.0
   },
   "jog": {
+    "mode": "jog",
     "linear_distance_mm": 25.0,
     "rotary_distance_deg": 5.0,
     "motion_safety_disabled": false,
-    "show_axis_a_controls": false,
-    "show_axis_b_controls": false,
-    "manual_axis_controls_enabled": false,
     "manual_axis": "A",
     "manual_axis_distance_mm": 1.0,
     "manual_axis_mode": "G91",
-    "manual_axis_feedrate_mm_min": 600.0
+    "manual_axis_feedrate_mm_min": 0.1,
+    "focus_feedrate_mm_min": 0.1,
+    "focus_step_feedrate_mm_min": 0.1,
+    "needles_step_feedrate_mm_min": 0.1,
+    "turntable_feedrate_mm_min": 0.1,
+    "turntable_step_feedrate_mm_min": 0.1
   },
   "needle_calibration": {
     "visa_resource": "COM4",
@@ -117,7 +120,8 @@
     "alc_enabled": false,
     "short_threshold_ohm": 10.0,
     "poll_interval_ms": 250,
-    "feedrate_mm_min": 600.0,
+    "feedrate_mm_min": 0.1,
+    "contact_zone_mm": 0.1,
     "raise_position_mm": 0.0,
     "raise_position_configured": false,
     "down_position_mm": 0.0,
@@ -238,6 +242,7 @@
   "feedrates": {
     "linear": {
       "presets": [
+        0.1,
         1.0,
         3.0,
         10.0,
@@ -245,10 +250,11 @@
         100.0,
         300.0
       ],
-      "default": 10.0
+      "default": 0.1
     },
     "rotary": {
       "presets": [
+        0.1,
         1.0,
         3.0,
         10.0,
@@ -256,7 +262,7 @@
         90.0,
         360.0
       ],
-      "default": 30.0
+      "default": 0.1
     }
   }
 }
