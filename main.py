@@ -459,6 +459,7 @@ class Main(QMainWindow):
         self._design_layout_window_action: QAction | None = None
         self._click_calibration_action: QAction | None = None
         self._click_calibration_dialog: ClickCalibrationDialog | None = None
+        self._camera_settings_dialog: QDialog | None = None
         self._objective_offset_reference: ObjectiveOffsetReference | None = None
         self._ruler_action: QAction | None = None
         self._rect_action: QAction | None = None
@@ -2103,6 +2104,10 @@ class Main(QMainWindow):
         )
         app_menu.addAction(api_settings_action)
 
+        camera_settings_action = QAction("Camera Settings", self)
+        camera_settings_action.triggered.connect(self._show_camera_settings_dialog)
+        app_menu.addAction(camera_settings_action)
+
         open_log_action = QAction("Open Status Log…", self)
         open_log_action.setText("Open Status Log")
         open_log_action.triggered.connect(self._open_status_log)
@@ -2400,6 +2405,18 @@ class Main(QMainWindow):
         if dialog.exec() != QDialog.Accepted:
             if not dialog.was_applied():
                 logger.debug("Settings dialog cancelled")
+
+    def _show_camera_settings_dialog(self) -> None:
+        if self._camera_settings_dialog is None:
+            from probe_station_gui.dialogs.camera_settings_dialog import (
+                CameraSettingsDialog,
+            )
+
+            self._camera_settings_dialog = CameraSettingsDialog(self.grabber, self)
+        self._camera_settings_dialog.show()
+        self._camera_settings_dialog.raise_()
+        self._camera_settings_dialog.activateWindow()
+        self._camera_settings_dialog.refresh()
 
     def _apply_settings_from_dialog(self, new_settings: object) -> None:
         if not isinstance(new_settings, Settings):
