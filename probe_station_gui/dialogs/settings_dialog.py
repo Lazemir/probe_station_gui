@@ -1245,7 +1245,7 @@ class SettingsDialog(QDialog):
         self._tabs.addTab(self._coordinate_system_tab, "Coordinates")
         self._tabs.addTab(self._objectives_tab, "Objectives")
         self._tabs.addTab(self._axis_calibration_tab, "Axis Calibration")
-        self._tabs.addTab(self._needle_calibration_tab, "Needles")
+        self._tabs.addTab(self._needle_calibration_tab, "Measurement")
         self._tabs.addTab(self._logging_tab, "Logging")
         if initial_tab:
             for index in range(self._tabs.count()):

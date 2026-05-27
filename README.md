@@ -120,7 +120,7 @@ How to use it:
 4. Press `Connect`.
 
 The same panel contains the `Instrument` block. Configure the instrument type
-and resource in `Application` -> `Settings` -> `Needles`, then press
+and resource in `Application` -> `Settings` -> `Measurement`, then press
 `Connect Instrument`.
 
 After connection:
@@ -368,7 +368,7 @@ Requirements:
 - a supported instrument.
 
 Typical workflow:
-1. Open needle settings.
+1. Open measurement settings.
 2. Configure the instrument type and resource.
 3. In `Connection`, press `Connect Instrument`.
 4. Open `Contact / Stone Calibration`.
@@ -450,7 +450,7 @@ Open settings through `Application -> Settings...`.
 Typical items:
 - `Controls`: key bindings;
 - `Jog`: manual jog parameters;
-- `Needles`: instrument connection, lowering direction, saved lower position;
+- `Measurement`: instrument connection, lowering direction, saved lower position;
 - `Coordinates`: coordinate mode;
 - `Logging`: log path and log level.
 
