@@ -452,7 +452,7 @@ Typical items:
 - `Controls`: key bindings;
 - `Jog`: manual jog parameters;
 - `Measurement`: instrument connection and live measurement defaults;
-- `Needles`: needle safety zone;
+- `Needles`: needle safety zone and chip contact machine position;
 - `Coordinates`: coordinate mode;
 - `Logging`: log path and log level.
 

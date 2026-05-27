@@ -859,6 +859,8 @@ class MeasurementSettingsWidget(QWidget):
 class NeedleSettingsWidget(QWidget):
     """Tab that exposes needle-only settings."""
 
+    COORDINATE_RANGE_MM = 1000000.0
+
     def __init__(
         self,
         calibration_settings: NeedleCalibrationSettings,
@@ -876,12 +878,81 @@ class NeedleSettingsWidget(QWidget):
         self._safety_zone_spin.setValue(calibration_settings.safety_zone_mm)
         layout.addRow(QLabel("Safety zone", self), self._safety_zone_spin)
 
+        self._chip_contact_configured_checkbox = QCheckBox("Configured", self)
+        self._chip_contact_configured_checkbox.setChecked(
+            calibration_settings.chip_position.configured
+        )
+        layout.addRow(
+            QLabel("Chip contact (machine)", self),
+            self._chip_contact_configured_checkbox,
+        )
+
+        chip_contact_widget = QWidget(self)
+        chip_contact_layout = QHBoxLayout(chip_contact_widget)
+        chip_contact_layout.setContentsMargins(0, 0, 0, 0)
+        self._chip_contact_x_spin = self._make_coordinate_spin(
+            calibration_settings.chip_position.x_mm
+        )
+        self._chip_contact_y_spin = self._make_coordinate_spin(
+            calibration_settings.chip_position.y_mm
+        )
+        self._chip_contact_z_spin = self._make_coordinate_spin(
+            calibration_settings.chip_position.z_mm
+        )
+        self._chip_contact_reset_button = QPushButton("Reset", self)
+        chip_contact_layout.addWidget(QLabel("X", chip_contact_widget))
+        chip_contact_layout.addWidget(self._chip_contact_x_spin, 1)
+        chip_contact_layout.addWidget(QLabel("Y", chip_contact_widget))
+        chip_contact_layout.addWidget(self._chip_contact_y_spin, 1)
+        chip_contact_layout.addWidget(QLabel("Z", chip_contact_widget))
+        chip_contact_layout.addWidget(self._chip_contact_z_spin, 1)
+        chip_contact_layout.addWidget(self._chip_contact_reset_button)
+        layout.addRow(QLabel("Contact point", self), chip_contact_widget)
+
+        self._chip_contact_configured_checkbox.toggled.connect(
+            self._update_chip_contact_state
+        )
+        self._chip_contact_reset_button.clicked.connect(self._reset_chip_contact)
+        self._update_chip_contact_state()
+
     def to_settings(self, settings: Settings) -> None:
         """Persist the widget state into the provided settings object."""
 
         needle_settings = settings.needle_calibration.clone()
         needle_settings.safety_zone_mm = self._safety_zone_spin.value()
+        chip_position = needle_settings.chip_position
+        chip_position.configured = self._chip_contact_configured_checkbox.isChecked()
+        if chip_position.configured:
+            chip_position.x_mm = self._chip_contact_x_spin.value()
+            chip_position.y_mm = self._chip_contact_y_spin.value()
+            chip_position.z_mm = self._chip_contact_z_spin.value()
+        else:
+            chip_position.x_mm = 0.0
+            chip_position.y_mm = 0.0
+            chip_position.z_mm = 0.0
         settings.needle_calibration = needle_settings
+
+    def _make_coordinate_spin(self, value: float) -> QDoubleSpinBox:
+        spin = QDoubleSpinBox(self)
+        spin.setLocale(QLocale.c())
+        spin.setDecimals(4)
+        spin.setRange(-self.COORDINATE_RANGE_MM, self.COORDINATE_RANGE_MM)
+        spin.setSingleStep(0.001)
+        spin.setSuffix(" mm")
+        spin.setValue(value)
+        return spin
+
+    def _update_chip_contact_state(self) -> None:
+        enabled = self._chip_contact_configured_checkbox.isChecked()
+        self._chip_contact_x_spin.setEnabled(enabled)
+        self._chip_contact_y_spin.setEnabled(enabled)
+        self._chip_contact_z_spin.setEnabled(enabled)
+
+    def _reset_chip_contact(self) -> None:
+        self._chip_contact_configured_checkbox.setChecked(False)
+        self._chip_contact_x_spin.setValue(0.0)
+        self._chip_contact_y_spin.setValue(0.0)
+        self._chip_contact_z_spin.setValue(0.0)
 
 
 class ObjectivesSettingsWidget(QWidget):
