@@ -167,6 +167,7 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                 needle_feedrate=None,
                 measurement_count=2,
                 contact_settle_s=0.0,
+                nplc_label="10",
             )
 
             success, message = runner.run()
@@ -175,6 +176,7 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
             with csv_path.open("r", encoding="utf-8", newline="") as handle:
                 rows = list(csv.DictReader(handle))
             self.assertEqual(rows[0]["n_measurements"], "2")
+            self.assertEqual(rows[0]["nplc"], "10")
             self.assertEqual(rows[0]["resistance_ohm"], "6")
             self.assertEqual(rows[0]["resistance_rms_ohm"], "1")
             self.assertEqual(rows[0]["relative_rms"], "0.166666666667")

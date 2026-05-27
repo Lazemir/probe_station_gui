@@ -50,9 +50,13 @@ from probe_station_gui.design_model import DesignDocument, DesignModelError
 from probe_station_gui.design_script import ScriptContext, load_measurement_plan
 from probe_station_gui.design_session import AlignmentPreparation, DesignSession
 from probe_station_gui.diagnostics import configure_crash_diagnostics
+from probe_station_gui.dialogs.route_measurement_dialog import (
+    RouteMeasurementDialog,
+    RouteMeasurementRunConfiguration,
+)
 from probe_station_gui.dialogs.settings_dialog import SettingsDialog
 from probe_station_gui.api_server import ProbeStationApiServer
-from probe_station_gui.lcr_meter import LCRMeterController
+from probe_station_gui.lcr_meter import LCRMeterController, RouteMeter
 from probe_station_gui.motion_prediction import interpolate_position, motion_progress
 from probe_station_gui.objective_offsets import (
     ObjectiveOffsetReference,
@@ -524,6 +528,7 @@ class Main(QMainWindow):
         self._controller_reboot_recovery_scheduled = False
         self._route_measurement_runner: RouteMeasurementRunner | None = None
         self._route_measurement_thread: threading.Thread | None = None
+        self._route_measurement_dialog: RouteMeasurementDialog | None = None
         self._design_session = DesignSession()
         self.statusBar()
         self._objective_widget = self._create_objective_widget()
@@ -4354,10 +4359,46 @@ class Main(QMainWindow):
         self._refresh_design_panel()
         self._show_status("Cleared route points.", 3000)
 
+    def _open_route_measurement_dialog(self) -> None:
+        route = self._design_session.route
+        if route is None or not route.points:
+            self._show_status("Create or load a probe route before running it.", 5000)
+            return
+        default_path = "probe_route_measurements.csv"
+        if route.path is not None:
+            default_path = str(
+                route.path.with_name(f"{route.path.stem}-measurements.csv")
+            )
+        elif self._design_session.document is not None:
+            default_path = str(
+                self._design_session.document.path.parent
+                / "probe_route_measurements.csv"
+            )
+        dialog = self._route_measurement_dialog
+        if dialog is None:
+            dialog = RouteMeasurementDialog(
+                route_name=route.name,
+                route_point_count=len(route.points),
+                default_csv_path=default_path,
+                parent=self,
+            )
+            dialog.run_requested.connect(self._start_route_measurement)
+            dialog.next_requested.connect(
+                lambda: self._submit_route_measurement_confirmation("next")
+            )
+            dialog.cancel_requested.connect(self._request_stop_route_measurement)
+            dialog.finished.connect(lambda _result: self._clear_route_measurement_dialog())
+            self._route_measurement_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _clear_route_measurement_dialog(self) -> None:
+        self._route_measurement_dialog = None
+
     def _start_route_measurement(
         self,
-        csv_path: str,
-        n_measurements: int = 1,
+        configuration: RouteMeasurementRunConfiguration,
     ) -> None:
         thread = self._route_measurement_thread
         if thread is not None and thread.is_alive():
@@ -4365,9 +4406,6 @@ class Main(QMainWindow):
             return
         if self.serial_connection is None or not self.serial_connection.is_open:
             self._show_status("Connect the stage controller before running a route.", 5000)
-            return
-        if not self.lcr_controller.is_connected():
-            self._show_status("Connect the LCR meter before running a route.", 5000)
             return
         route = self._design_session.route
         if route is None or not route.points:
@@ -4390,12 +4428,14 @@ class Main(QMainWindow):
             return
         runner = RouteMeasurementRunner(
             points=points,
-            csv_path=csv_path,
+            csv_path=configuration.csv_path,
             stage_controller=self.stage_controller,
-            lcr_controller=self.lcr_controller,
+            lcr_controller=RouteMeter(configuration.meter),
             needle_feedrate=self._current_needle_feedrate(),
-            measurement_count=n_measurements,
+            measurement_count=configuration.measurement_count,
             confirm_each_point=True,
+            contact_settle_s=configuration.contact_settle_s,
+            nplc_label=configuration.meter.nplc_label(),
             status_callback=self.route_measurement_status.emit,
             record_callback=self.route_measurement_recorded.emit,
         )
@@ -4410,6 +4450,11 @@ class Main(QMainWindow):
             self.design_navigator_panel.set_route_measurement_running(True)
             self.design_navigator_panel.set_route_measurement_waiting(False)
             self.design_navigator_panel.set_route_measurement_status(
+                f"Route measurement starting: {len(points)} points."
+            )
+        if self._route_measurement_dialog is not None:
+            self._route_measurement_dialog.set_running(True)
+            self._route_measurement_dialog.set_status(
                 f"Route measurement starting: {len(points)} points."
             )
         self._show_status(f"Route measurement starting: {len(points)} points.")
@@ -4473,6 +4518,11 @@ class Main(QMainWindow):
             self.design_navigator_panel.set_route_measurement_status(
                 "Route measurement will stop after the current action."
             )
+        if self._route_measurement_dialog is not None:
+            self._route_measurement_dialog.set_waiting(False)
+            self._route_measurement_dialog.set_status(
+                "Route measurement will stop after the current action."
+            )
 
     def _submit_route_measurement_confirmation(self, action: str) -> None:
         runner = self._route_measurement_runner
@@ -4482,6 +4532,8 @@ class Main(QMainWindow):
         runner.submit_confirmation(action)
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_route_measurement_waiting(False)
+        if self._route_measurement_dialog is not None:
+            self._route_measurement_dialog.set_waiting(False)
         action_label = "remeasure" if action == "remeasure" else "next"
         self._show_status(f"Route measurement: {action_label}.")
 
@@ -4489,6 +4541,8 @@ class Main(QMainWindow):
         self._show_status(message)
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_route_measurement_status(message)
+        if self._route_measurement_dialog is not None:
+            self._route_measurement_dialog.set_status(message)
 
     def _on_route_measurement_recorded(
         self,
@@ -4504,6 +4558,9 @@ class Main(QMainWindow):
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_route_measurement_waiting(True)
             self.design_navigator_panel.set_route_measurement_status(message)
+        if self._route_measurement_dialog is not None:
+            self._route_measurement_dialog.set_waiting(True)
+            self._route_measurement_dialog.set_status(message)
 
     def _on_route_measurement_finished(
         self,
@@ -4520,6 +4577,9 @@ class Main(QMainWindow):
             self.design_navigator_panel.set_route_measurement_running(False)
             self.design_navigator_panel.set_route_measurement_waiting(False)
             self.design_navigator_panel.set_route_measurement_status(message)
+        if self._route_measurement_dialog is not None:
+            self._route_measurement_dialog.set_running(False)
+            self._route_measurement_dialog.set_status(message)
         if success:
             self._show_status(f"{message} CSV: {csv_path}", 8000)
         else:
@@ -6031,7 +6091,7 @@ class Main(QMainWindow):
             self._add_route_array_points
         )
         self.design_navigator_panel.route_measurement_run_requested.connect(
-            self._start_route_measurement
+            self._open_route_measurement_dialog
         )
         self.design_navigator_panel.route_measurement_stop_requested.connect(
             self._request_stop_route_measurement

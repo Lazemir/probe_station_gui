@@ -1319,7 +1319,7 @@ class DesignNavigatorPanel(QWidget):
     route_remove_selected_requested = Signal()
     route_clear_requested = Signal()
     route_selected = Signal(int)
-    route_measurement_run_requested = Signal(str, int)
+    route_measurement_run_requested = Signal()
     route_measurement_stop_requested = Signal()
     route_measurement_confirmation_requested = Signal(str)
     route_offsets_changed = Signal(float, float, float, float)
@@ -1665,28 +1665,16 @@ class DesignNavigatorPanel(QWidget):
         route_layout.addLayout(route_edit_buttons)
 
         route_run_buttons = QHBoxLayout()
-        route_run_buttons.addWidget(QLabel("N", route_group))
-        self._route_measurement_count_spin = QSpinBox(route_group)
-        self._route_measurement_count_spin.setRange(1, 1000)
-        self._route_measurement_count_spin.setValue(1)
-        self._route_measurement_count_spin.setMaximumWidth(72)
-        self._route_measurement_count_spin.setToolTip(
-            "Number of LCR readings per route point."
-        )
-        route_run_buttons.addWidget(self._route_measurement_count_spin)
         self._route_run_button = QPushButton("Run Route", route_group)
-        self._route_stop_button = QPushButton("Stop", route_group)
+        self._route_stop_button = QPushButton("Cancel", route_group)
         self._route_stop_button.setEnabled(False)
         route_run_buttons.addWidget(self._route_run_button)
         route_run_buttons.addWidget(self._route_stop_button)
         route_layout.addLayout(route_run_buttons)
         route_confirm_buttons = QHBoxLayout()
         self._route_next_button = QPushButton("Next", route_group)
-        self._route_remeasure_button = QPushButton("Remeasure", route_group)
         self._route_next_button.setEnabled(False)
-        self._route_remeasure_button.setEnabled(False)
         route_confirm_buttons.addWidget(self._route_next_button)
-        route_confirm_buttons.addWidget(self._route_remeasure_button)
         route_layout.addLayout(route_confirm_buttons)
         self._route_run_status_label = QLabel("Route measurement idle.", route_group)
         self._route_run_status_label.setWordWrap(True)
@@ -1703,18 +1691,15 @@ class DesignNavigatorPanel(QWidget):
             self.route_remove_selected_requested.emit
         )
         self._route_clear_button.clicked.connect(self.route_clear_requested.emit)
-        self._route_run_button.clicked.connect(self._choose_route_measurement_csv)
+        self._route_run_button.clicked.connect(
+            self.route_measurement_run_requested.emit
+        )
         self._route_stop_button.clicked.connect(
             self.route_measurement_stop_requested.emit
         )
         self._route_next_button.clicked.connect(
             lambda _checked=False: self.route_measurement_confirmation_requested.emit(
                 "next"
-            )
-        )
-        self._route_remeasure_button.clicked.connect(
-            lambda _checked=False: self.route_measurement_confirmation_requested.emit(
-                "remeasure"
             )
         )
         self._select_tool_button.clicked.connect(
@@ -2095,12 +2080,8 @@ class DesignNavigatorPanel(QWidget):
         self._route_run_button.setEnabled(
             has_route and bool(self._route.points) and not route_running
         )
-        self._route_measurement_count_spin.setEnabled(
-            has_route and bool(self._route.points) and not route_running
-        )
         self._route_stop_button.setEnabled(route_running)
         self._route_next_button.setEnabled(self._route_measurement_waiting)
-        self._route_remeasure_button.setEnabled(self._route_measurement_waiting)
         for widget in (
             self._ruler_clear_button,
             self._ruler_cancel_button,
@@ -2750,32 +2731,6 @@ class DesignNavigatorPanel(QWidget):
         )
         if path:
             self.route_save_as_requested.emit(path)
-
-    def _choose_route_measurement_csv(self) -> None:  # pragma: no cover - UI interaction
-        if self._route is None or not self._route.points:
-            return
-        default_path = "probe_route_measurements.csv"
-        if self._route.path is not None:
-            default_path = str(
-                self._route.path.with_name(
-                    f"{self._route.path.stem}-measurements.csv"
-                )
-            )
-        elif self._document is not None:
-            default_path = str(
-                self._document.path.parent / "probe_route_measurements.csv"
-            )
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save Route Measurements",
-            default_path,
-            "CSV files (*.csv);;All files (*)",
-        )
-        if path:
-            self.route_measurement_run_requested.emit(
-                path,
-                int(self._route_measurement_count_spin.value()),
-            )
 
     def _on_top_cell_changed(self, cell_name: str) -> None:
         if self._document is None or not cell_name:

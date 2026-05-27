@@ -122,6 +122,7 @@ class RouteMeasurementRunner:
         measurement_count: int = 1,
         confirm_each_point: bool = False,
         contact_settle_s: float = DEFAULT_CONTACT_SETTLE_S,
+        nplc_label: str = "",
         status_callback: Callable[[str], None] | None = None,
         record_callback: Callable[[RouteMeasurementRecord, int, int], None] | None = None,
     ) -> None:
@@ -133,6 +134,7 @@ class RouteMeasurementRunner:
         self._measurement_count = max(1, int(measurement_count))
         self._confirm_each_point = bool(confirm_each_point)
         self._contact_settle_s = max(0.0, float(contact_settle_s))
+        self._nplc_label = str(nplc_label)
         self._status_callback = status_callback
         self._record_callback = record_callback
         self._stop_requested = threading.Event()
@@ -166,6 +168,9 @@ class RouteMeasurementRunner:
         try:
             if not self._points:
                 raise ValueError("Route has no enabled points.")
+            if hasattr(self._lcr_controller, "open"):
+                self._status("Route measurement: connecting meter.")
+                self._lcr_controller.open()
             self._csv_writer.write_header()
             self._stage_controller.begin_external_task("route measurement")
             task_started = True
@@ -232,7 +237,7 @@ class RouteMeasurementRunner:
                 if self._confirm_each_point:
                     self._status(
                         f"Route measurement: point {position}/{total} saved; "
-                        "choose Next or Remeasure."
+                        "choose Next or Cancel."
                     )
                     decision = self._wait_for_confirmation()
                     if decision == "stop":
@@ -263,6 +268,11 @@ class RouteMeasurementRunner:
                     message = f"{message} Needle raise failed: {exc}"
             if task_started:
                 self._stage_controller.finish_external_task()
+            if hasattr(self._lcr_controller, "close"):
+                try:
+                    self._lcr_controller.close()
+                except Exception as exc:
+                    message = f"{message} Meter close failed: {exc}"
         return success, message
 
     def _sleep_contact_settle(self) -> bool:
@@ -294,8 +304,8 @@ class RouteMeasurementRunner:
                 self._confirmation_condition.wait(timeout=0.2)
         return "stop"
 
-    @staticmethod
     def _record_for_point(
+        self,
         *,
         point: RouteMeasurementPoint,
         resistances_ohm: list[float],
@@ -324,7 +334,7 @@ class RouteMeasurementRunner:
         return RouteMeasurementRecord(
             timestamp=datetime.now().isoformat(timespec="seconds"),
             junction=_junction_for_point(point),
-            nplc="",
+            nplc=self._nplc_label,
             n_measurements=len(resistances_ohm),
             resistance_ohm=mean_resistance,
             resistance_rms_ohm=rms_resistance,

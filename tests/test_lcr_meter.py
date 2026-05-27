@@ -14,9 +14,47 @@ def _restore_real_imports() -> None:
                 del sys.modules[name]
 
 
-_restore_real_imports()
+def _install_pyside6_stubs_if_missing() -> None:
+    try:
+        __import__("PySide6.QtCore")
+        return
+    except ModuleNotFoundError:
+        pass
 
-from probe_station_gui.lcr_meter import LCRMeterController, _LCRSession
+    qtcore = types.ModuleType("PySide6.QtCore")
+
+    class QObject:
+        def __init__(self, *_args, **_kwargs) -> None:
+            super().__init__()
+
+    class Signal:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.emissions = []
+
+        def connect(self, *_args, **_kwargs) -> None:
+            return None
+
+        def emit(self, *args) -> None:
+            self.emissions.append(args)
+
+    qtcore.QObject = QObject
+    qtcore.Signal = Signal
+    pyside6 = types.ModuleType("PySide6")
+    sys.modules["PySide6"] = pyside6
+    sys.modules["PySide6.QtCore"] = qtcore
+
+
+_restore_real_imports()
+_install_pyside6_stubs_if_missing()
+
+from probe_station_gui.lcr_meter import (
+    KeithleyRouteMeterSettings,
+    LCRMeterController,
+    ROUTE_METER_KEITHLEY,
+    RouteMeterConfiguration,
+    _Keithley2400With2182ASession,
+    _LCRSession,
+)
 
 
 class _FakeInstrument:
@@ -46,6 +84,25 @@ class _FakeSession:
 
     def configure_measurement(self, **kwargs) -> None:
         self.configurations.append(dict(kwargs))
+
+
+class _FakeVisaHandle:
+    def __init__(self, responses: dict[str, list[str]]) -> None:
+        self.responses = {key: list(value) for key, value in responses.items()}
+        self.writes: list[str] = []
+        self.closed = False
+
+    def write(self, command: str) -> None:
+        self.writes.append(command)
+
+    def query(self, query: str) -> str:
+        values = self.responses.get(query, [])
+        if values:
+            return values.pop(0)
+        return ""
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class LCRMeterTest(unittest.TestCase):
@@ -107,6 +164,38 @@ class LCRMeterTest(unittest.TestCase):
         controller._configure_session(session)
 
         self.assertEqual(session.configurations[-1]["trigger_source"], "BUS")
+
+    def test_keithley_session_reads_four_wire_resistance_from_two_biases(self) -> None:
+        session = _Keithley2400With2182ASession.__new__(
+            _Keithley2400With2182ASession
+        )
+        source = _FakeVisaHandle(
+            {
+                "FETC?": ["-0.03,-0.001", "0.03,0.001"],
+                ":SENS:CURR:PROT:TRIP?": ["0"],
+            }
+        )
+        voltmeter = _FakeVisaHandle({"FETC?": ["-0.029", "0.031"]})
+        session._source = source
+        session._voltmeter = voltmeter
+        session._measurement_voltage_v = 0.03
+        session._trigger_delay_s = 0.0
+        session._compliance_current_a = 0.5
+
+        value = session.read_primary_value(trigger=True)
+
+        self.assertAlmostEqual(value, 30.0)
+        self.assertIn(":SOUR:VOLT -0.03", source.writes)
+        self.assertIn(":SOUR:VOLT 0.03", source.writes)
+        self.assertEqual(source.writes[-1], ":SOUR:VOLT 0")
+
+    def test_route_meter_configuration_reports_keithley_nplc_label(self) -> None:
+        config = RouteMeterConfiguration(
+            meter_type=ROUTE_METER_KEITHLEY,
+            keithley=KeithleyRouteMeterSettings(nplc=7.5),
+        )
+
+        self.assertEqual(config.nplc_label(), "7.5")
 
 
 if __name__ == "__main__":
