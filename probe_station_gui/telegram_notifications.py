@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from io import BytesIO
 import logging
 import os
 import re
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN_ENV = "PROBE_STATION_TELEGRAM_BOT_TOKEN"
 START_PAYLOAD_PREFIX = "probe_"
+TELEGRAM_PHOTO_CAPTION_LIMIT = 1024
 
 try:  # pragma: no cover - exercised when optional dependency is installed
     from telegram import Bot
@@ -154,14 +156,47 @@ async def send_telegram_message(
         )
 
 
+async def send_telegram_photo(
+    bot_token: str,
+    chat_id: str,
+    photo_bytes: bytes,
+    caption: str,
+    *,
+    photo_name: str = "microscope.jpg",
+    disable_notification: bool = False,
+) -> None:
+    """Send one Telegram photo with a short caption."""
+
+    _ensure_dependency()
+    token = str(bot_token or "").strip()
+    if not token:
+        raise TelegramNotificationError("Telegram bot token is empty.")
+    chat_id_text = str(chat_id or "").strip()
+    if not chat_id_text:
+        raise TelegramNotificationError("Telegram chat is not linked.")
+    if not photo_bytes:
+        raise TelegramNotificationError("Telegram photo is empty.")
+    photo = BytesIO(photo_bytes)
+    photo.name = str(photo_name or "microscope.jpg")
+    async with Bot(token=token) as bot:  # type: ignore[misc,operator]
+        await bot.send_photo(
+            chat_id=_telegram_chat_id_value(chat_id_text),
+            photo=photo,
+            caption=_telegram_photo_caption(caption),
+            disable_notification=disable_notification,
+        )
+
+
 def send_telegram_message_in_thread(
     *,
     bot_token: str,
     chat_id: str,
     text: str,
+    photo_bytes: bytes | None = None,
+    photo_name: str = "microscope.jpg",
     done_callback: Callable[[bool, str], None] | None = None,
 ) -> bool:
-    """Send a Telegram message on a short-lived daemon thread."""
+    """Send a Telegram message or photo on a short-lived daemon thread."""
 
     if not telegram_dependency_available():
         message = _missing_dependency_message()
@@ -172,7 +207,18 @@ def send_telegram_message_in_thread(
 
     def _worker() -> None:
         try:
-            asyncio.run(send_telegram_message(bot_token, chat_id, text))
+            if photo_bytes:
+                asyncio.run(
+                    send_telegram_photo(
+                        bot_token,
+                        chat_id,
+                        photo_bytes,
+                        text,
+                        photo_name=photo_name,
+                    )
+                )
+            else:
+                asyncio.run(send_telegram_message(bot_token, chat_id, text))
         except Exception as exc:  # pragma: no cover - network dependent
             logger.warning("Telegram notification failed: %s", exc)
             if done_callback is not None:
@@ -246,6 +292,13 @@ def _telegram_chat_id_value(chat_id: str) -> int | str:
     if re.fullmatch(r"-?\d+", chat_id_text):
         return int(chat_id_text)
     return chat_id_text
+
+
+def _telegram_photo_caption(text: str) -> str:
+    caption = str(text or "").strip()
+    if len(caption) <= TELEGRAM_PHOTO_CAPTION_LIMIT:
+        return caption
+    return caption[: TELEGRAM_PHOTO_CAPTION_LIMIT - 3].rstrip() + "..."
 
 
 def _ensure_dependency() -> None:

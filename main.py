@@ -13,7 +13,17 @@ from pathlib import Path
 import sys
 from typing import Any, Callable, TYPE_CHECKING
 
-from PySide6.QtCore import QObject, QLocale, QThread, QTimer, Qt, QUrl, Signal
+from PySide6.QtCore import (
+    QBuffer,
+    QIODevice,
+    QObject,
+    QLocale,
+    QThread,
+    QTimer,
+    Qt,
+    QUrl,
+    Signal,
+)
 from PySide6.QtGui import (
     QAction,
     QDesktopServices,
@@ -534,6 +544,7 @@ class Main(QMainWindow):
         self._design_snap_enabled = True
         self._last_reported_b_position: float | None = None
         self._last_camera_frame_ui_timestamp: float | None = None
+        self._latest_camera_frame_for_notifications: QImage | None = None
         self._stage_unhomed_display_origins: dict[str, float] = {}
         self._stage_axis_fields: dict[str, QLineEdit] = {}
         self._stage_axis_raw_values: dict[str, float] = {}
@@ -2016,6 +2027,7 @@ class Main(QMainWindow):
         self._send_telegram_alert(
             "camera_error",
             f"Probe station camera error:\n{message}",
+            attach_photo=True,
         )
 
     def _on_camera_frame(self, qimg: QImage) -> None:
@@ -2028,6 +2040,7 @@ class Main(QMainWindow):
                     frame_gap,
                 )
         self._last_camera_frame_ui_timestamp = now
+        self._latest_camera_frame_for_notifications = qimg
         self.view.set_frame(qimg)
 
     def _on_view_hover(
@@ -3263,7 +3276,13 @@ class Main(QMainWindow):
         self._apply_settings()
         logger.info("Settings updated from dialog")
 
-    def _send_telegram_alert(self, alert_key: str, message: str) -> None:
+    def _send_telegram_alert(
+        self,
+        alert_key: str,
+        message: str,
+        *,
+        attach_photo: bool = False,
+    ) -> None:
         telegram_settings = self.settings_manager.telegram_configuration()
         if not telegram_settings.enabled:
             return
@@ -3274,11 +3293,33 @@ class Main(QMainWindow):
         bot_token = resolved_bot_token(telegram_settings)
         if not bot_token:
             return
+        photo: tuple[bytes, str] | None = (
+            self._latest_camera_frame_photo() if attach_photo else None
+        )
         send_telegram_message_in_thread(
             bot_token=bot_token,
             chat_id=telegram_settings.chat_id,
             text=message,
+            photo_bytes=photo[0] if photo is not None else None,
+            photo_name=photo[1] if photo is not None else "microscope.jpg",
         )
+
+    def _latest_camera_frame_photo(self) -> tuple[bytes, str] | None:
+        frame = self._latest_camera_frame_for_notifications
+        if frame is None or frame.isNull():
+            return None
+        buffer = QBuffer()
+        if not buffer.open(QIODevice.OpenModeFlag.WriteOnly):
+            return None
+        if frame.save(buffer, "JPG", 88):
+            return bytes(buffer.data()), "microscope.jpg"
+        buffer.close()
+        buffer = QBuffer()
+        if not buffer.open(QIODevice.OpenModeFlag.WriteOnly):
+            return None
+        if frame.save(buffer, "PNG"):
+            return bytes(buffer.data()), "microscope.png"
+        return None
 
     @staticmethod
     def _route_attention_status(message: str) -> bool:
@@ -5594,6 +5635,7 @@ class Main(QMainWindow):
                 self._send_telegram_alert(
                     "route_failed",
                     f"Probe route could not start:\n{message}",
+                    attach_photo=True,
                 )
                 if self._route_measurement_dialog is not None:
                     self._route_measurement_dialog.set_running(False)
@@ -5822,6 +5864,7 @@ class Main(QMainWindow):
             self._send_telegram_alert(
                 "route_attention",
                 f"Probe route needs attention:\n{message}",
+                attach_photo=True,
             )
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_route_measurement_status(message)
@@ -5961,6 +6004,7 @@ class Main(QMainWindow):
             self._send_telegram_alert(
                 "route_failed",
                 f"Probe route stopped or failed:\n{message}\nCSV: {csv_path}",
+                attach_photo=True,
             )
 
     def _route_measurement_next_point_number(self, position: int) -> int | None:
@@ -7907,6 +7951,7 @@ class Main(QMainWindow):
             self._send_telegram_alert(
                 "contact_seek_failed",
                 f"Contact seek needs attention:\n{message}",
+                attach_photo=True,
             )
 
     def _display_a_for_needle_lowering(self, lowering_mm: float | None) -> float | None:
