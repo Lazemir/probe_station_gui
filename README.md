@@ -401,7 +401,7 @@ When the GUI starts, it also starts a local FastAPI server at:
 http://127.0.0.1:8765
 ```
 
-Opening the base URL redirects to Swagger docs at `/docs`.
+Opening the base URL shows links to Swagger UI at `/docs` and ReDoc at `/redoc`.
 
 The API uses the same coordinate basis and feedrate that the GUI currently shows unless a request explicitly provides `feedrate`. If settings are configured for machine coordinates, API targets are machine coordinates; if settings are configured for work coordinates, API targets are work coordinates. Coordinate move requests go through the same queue and status display as editing the coordinate fields in the status bar.
 

@@ -68,9 +68,10 @@ class ApiServerHttpTest(unittest.TestCase):
         )
 
         self.assertEqual(client.get("/health").json(), {"status": "ok"})
-        docs_redirect = client.get("/", follow_redirects=False)
-        self.assertEqual(docs_redirect.status_code, 307)
-        self.assertEqual(docs_redirect.headers["location"], "/docs")
+        docs_index = client.get("/")
+        self.assertEqual(docs_index.status_code, 200)
+        self.assertIn('href="/docs"', docs_index.text)
+        self.assertIn('href="/redoc"', docs_index.text)
 
         response = client.get("/api/v1/stage/status")
 

@@ -190,7 +190,7 @@ class ProbeStationApiServer:
 
     def _create_app(self):
         from fastapi import Body, FastAPI, HTTPException
-        from fastapi.responses import RedirectResponse
+        from fastapi.responses import HTMLResponse
         import uvicorn
 
         app = FastAPI(
@@ -205,8 +205,26 @@ class ProbeStationApiServer:
             return {"status": "ok"}
 
         @app.get("/", include_in_schema=False)
-        def docs_redirect() -> RedirectResponse:
-            return RedirectResponse(url="/docs")
+        def docs_index() -> HTMLResponse:
+            return HTMLResponse(
+                """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Probe Station API</title>
+  <style>
+    body { font: 16px/1.4 system-ui, sans-serif; margin: 2rem; }
+    a { display: block; margin: 0.5rem 0; }
+  </style>
+</head>
+<body>
+  <h1>Probe Station API</h1>
+  <a href="/docs">Swagger UI</a>
+  <a href="/redoc">ReDoc</a>
+</body>
+</html>
+"""
+            )
 
         @app.get("/api/v1/stage/status")
         def stage_status() -> dict[str, Any]:
