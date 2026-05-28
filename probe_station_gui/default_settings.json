@@ -79,6 +79,21 @@
     "host": "127.0.0.1",
     "port": 8765
   },
+  "telegram": {
+    "enabled": false,
+    "bot_token": "",
+    "bot_username": "",
+    "chat_id": "",
+    "chat_title": "",
+    "linked_at_utc": "",
+    "alerts": {
+      "route_attention": true,
+      "route_completed": true,
+      "route_failed": true,
+      "contact_seek_failed": true,
+      "camera_error": true
+    }
+  },
   "click_to_move": {
     "pending_timeout_s": 8.0
   },

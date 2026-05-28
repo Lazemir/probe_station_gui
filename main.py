@@ -94,6 +94,10 @@ from probe_station_gui.settings_manager import (
     normalize_objective_name,
     ordered_objective_names,
 )
+from probe_station_gui.telegram_notifications import (
+    resolved_bot_token,
+    send_telegram_message_in_thread,
+)
 from probe_station_gui.views.alignment_panel import AlignmentPanel
 from probe_station_gui.views.contact_oscillation_window import (
     ContactOscillationWindow,
@@ -557,6 +561,7 @@ class Main(QMainWindow):
         self._route_measurement_waiting = False
         self._route_measurement_point_numbers: list[int] = []
         self._route_measurement_current_point: int | None = None
+        self._last_telegram_attention_message = ""
         self._contact_seek_thread: threading.Thread | None = None
         self._contact_seek_stop_requested = threading.Event()
         self._design_session = DesignSession()
@@ -2008,6 +2013,10 @@ class Main(QMainWindow):
 
     def on_error(self, message: str) -> None:
         logger.error("Camera error: %s", message)
+        self._send_telegram_alert(
+            "camera_error",
+            f"Probe station camera error:\n{message}",
+        )
 
     def _on_camera_frame(self, qimg: QImage) -> None:
         now = time.monotonic()
@@ -2939,6 +2948,12 @@ class Main(QMainWindow):
         )
         app_menu.addAction(api_settings_action)
 
+        telegram_settings_action = QAction("Telegram Settings", self)
+        telegram_settings_action.triggered.connect(
+            lambda _checked=False: self._open_settings_dialog("Telegram")
+        )
+        app_menu.addAction(telegram_settings_action)
+
         open_log_action = QAction("Open Status Log…", self)
         open_log_action.setText("Open Status Log")
         open_log_action.triggered.connect(self._open_status_log)
@@ -3247,6 +3262,34 @@ class Main(QMainWindow):
         self.settings_manager.save()
         self._apply_settings()
         logger.info("Settings updated from dialog")
+
+    def _send_telegram_alert(self, alert_key: str, message: str) -> None:
+        telegram_settings = self.settings_manager.telegram_configuration()
+        if not telegram_settings.enabled:
+            return
+        if not telegram_settings.alert_enabled(alert_key):
+            return
+        if not telegram_settings.chat_id.strip():
+            return
+        bot_token = resolved_bot_token(telegram_settings)
+        if not bot_token:
+            return
+        send_telegram_message_in_thread(
+            bot_token=bot_token,
+            chat_id=telegram_settings.chat_id,
+            text=message,
+        )
+
+    @staticmethod
+    def _route_attention_status(message: str) -> bool:
+        text = str(message or "")
+        if not text.startswith("Route measurement: point "):
+            return False
+        return (
+            "correct contact" in text
+            or "interrupted" in text
+            or "Save Shift" in text
+        )
 
     def _sync_objective_combo(self, objective_name: str) -> None:
         combo = self._objective_combo
@@ -5548,6 +5591,10 @@ class Main(QMainWindow):
             except LCRMeterError as exc:
                 message = f"Route measurement instrument setup failed: {exc}"
                 self._show_status(message, 8000)
+                self._send_telegram_alert(
+                    "route_failed",
+                    f"Probe route could not start:\n{message}",
+                )
                 if self._route_measurement_dialog is not None:
                     self._route_measurement_dialog.set_running(False)
                     self._route_measurement_dialog.set_status(message)
@@ -5582,6 +5629,7 @@ class Main(QMainWindow):
         self._route_measurement_runner = runner
         self._route_measurement_waiting = False
         self._route_measurement_point_numbers = [int(point.index) for point in points]
+        self._last_telegram_attention_message = ""
         self._set_route_measurement_pending(True)
         self._route_measurement_thread = threading.Thread(
             target=self._run_route_measurement,
@@ -5766,6 +5814,15 @@ class Main(QMainWindow):
 
     def _on_route_measurement_status(self, message: str) -> None:
         self._show_status(message)
+        if (
+            self._route_attention_status(message)
+            and message != self._last_telegram_attention_message
+        ):
+            self._last_telegram_attention_message = message
+            self._send_telegram_alert(
+                "route_attention",
+                f"Probe route needs attention:\n{message}",
+            )
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_route_measurement_status(message)
         if self._route_measurement_dialog is not None:
@@ -5890,6 +5947,10 @@ class Main(QMainWindow):
             self._set_route_measurement_pending(False)
             self._route_measurement_point_numbers = []
             self._show_status(f"{message} CSV: {csv_path}", 8000)
+            self._send_telegram_alert(
+                "route_completed",
+                f"Probe route completed:\n{message}\nCSV: {csv_path}",
+            )
         else:
             if self._route_measurement_current_point is not None:
                 self._set_route_measurement_resume_point(
@@ -5897,6 +5958,10 @@ class Main(QMainWindow):
                 )
             self._set_route_measurement_pending(True)
             self._show_status(message, 8000)
+            self._send_telegram_alert(
+                "route_failed",
+                f"Probe route stopped or failed:\n{message}\nCSV: {csv_path}",
+            )
 
     def _route_measurement_next_point_number(self, position: int) -> int | None:
         try:
@@ -7838,6 +7903,11 @@ class Main(QMainWindow):
             self.contact_calibration_window.set_contact_seek_running(False)
             self.contact_calibration_window.set_contact_seek_result(message)
         self._show_status(message, 8000 if not success else 5000)
+        if not success:
+            self._send_telegram_alert(
+                "contact_seek_failed",
+                f"Contact seek needs attention:\n{message}",
+            )
 
     def _display_a_for_needle_lowering(self, lowering_mm: float | None) -> float | None:
         if lowering_mm is None:

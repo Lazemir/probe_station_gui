@@ -64,6 +64,8 @@ settings_manager = _load_module(
 )
 KeyBinding = settings_manager.KeyBinding
 ApiSettings = settings_manager.ApiSettings
+TelegramSettings = settings_manager.TelegramSettings
+TELEGRAM_ALERT_TYPES = settings_manager.TELEGRAM_ALERT_TYPES
 JogSettings = settings_manager.JogSettings
 ClickToMoveSettings = settings_manager.ClickToMoveSettings
 NeedleCalibrationSettings = settings_manager.NeedleCalibrationSettings
@@ -98,6 +100,40 @@ class KeyBindingRoundTripTest(unittest.TestCase):
             self.assertGreater(scan_code, 0)
         else:
             self.assertEqual(scan_code, 0)
+
+
+class TelegramSettingsTest(unittest.TestCase):
+    def test_telegram_settings_round_trip_preserves_alerts(self) -> None:
+        settings = TelegramSettings(
+            enabled=True,
+            bot_token="123:abc",
+            bot_username="probe_station_bot",
+            chat_id="456",
+            chat_title="Lab User",
+            linked_at_utc="2026-05-28T12:00:00+00:00",
+            alerts={
+                "route_attention": True,
+                "route_completed": False,
+                "route_failed": True,
+                "contact_seek_failed": False,
+                "camera_error": True,
+            },
+        )
+
+        restored = TelegramSettings(**settings.to_dict())
+
+        self.assertEqual(restored, settings)
+        self.assertFalse(restored.alert_enabled("route_completed"))
+        self.assertFalse(restored.alert_enabled("unknown"))
+
+    def test_default_telegram_alerts_cover_declared_types(self) -> None:
+        settings = TelegramSettings()
+
+        self.assertEqual(
+            set(settings.alerts),
+            {key for key, _label in TELEGRAM_ALERT_TYPES},
+        )
+        self.assertTrue(all(settings.alerts.values()))
 
 
 class NeedleCalibrationBookmarkTest(unittest.TestCase):
