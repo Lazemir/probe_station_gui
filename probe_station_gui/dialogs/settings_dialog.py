@@ -65,8 +65,10 @@ from probe_station_gui.telegram_notifications import (
     TELEGRAM_BOT_TOKEN_ENV,
     TelegramNotificationError,
     create_start_payload,
+    global_telegram_token_path,
+    load_global_bot_token,
     prepare_telegram_link,
-    resolved_bot_token,
+    save_global_bot_token,
     send_telegram_message_in_thread,
     telegram_dependency_available,
     wait_for_telegram_link,
@@ -370,6 +372,8 @@ class TelegramSettingsWidget(QWidget):
         self._thread: QThread | None = None
         self._worker: TelegramLinkWorker | None = None
         self._token_from_env = bool(os.environ.get(TELEGRAM_BOT_TOKEN_ENV, "").strip())
+        global_token = load_global_bot_token()
+        token_text = global_token or telegram_settings.bot_token
 
         root_layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -382,15 +386,20 @@ class TelegramSettingsWidget(QWidget):
 
         self._token_edit = QLineEdit(self)
         self._token_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._token_edit.setText(telegram_settings.bot_token)
+        self._token_edit.setText(token_text)
         if self._token_from_env:
             self._token_edit.setPlaceholderText(
                 f"Provided by {TELEGRAM_BOT_TOKEN_ENV}"
             )
             self._token_edit.setEnabled(False)
         else:
-            self._token_edit.setPlaceholderText("Bot token from BotFather")
+            self._token_edit.setPlaceholderText("Machine-wide bot token")
         form.addRow(QLabel("Bot token", self), self._token_edit)
+
+        self._token_path_label = QLabel(str(global_telegram_token_path()), self)
+        self._token_path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._token_path_label.setWordWrap(True)
+        form.addRow(QLabel("Token file", self), self._token_path_label)
 
         self._linked_label = QLabel(self._linked_text(telegram_settings), self)
         self._linked_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -437,8 +446,16 @@ class TelegramSettingsWidget(QWidget):
 
         telegram = settings.telegram.clone()
         telegram.enabled = self._enabled_checkbox.isChecked()
+        telegram.bot_token = ""
         if not self._token_from_env:
-            telegram.bot_token = self._token_edit.text().strip()
+            try:
+                save_global_bot_token(self._token_edit.text().strip())
+            except OSError as exc:
+                self._status_label.setText(
+                    f"Failed to save machine-wide bot token: {exc}"
+                )
+            else:
+                self._status_label.setText("Machine-wide bot token saved.")
         telegram.bot_username = self._bot_username.strip().lstrip("@")
         telegram.chat_id = self._linked_chat_id.strip()
         telegram.chat_title = self._linked_chat_title.strip()
@@ -538,8 +555,10 @@ class TelegramSettingsWidget(QWidget):
         return alerts
 
     def _current_bot_token(self) -> str:
-        temp = TelegramSettings(bot_token=self._token_edit.text().strip())
-        return resolved_bot_token(temp)
+        env_value = os.environ.get(TELEGRAM_BOT_TOKEN_ENV, "").strip()
+        if env_value:
+            return env_value
+        return self._token_edit.text().strip() or load_global_bot_token()
 
     def _update_enabled_state(self, enabled: bool) -> None:
         has_chat = bool(self._linked_chat_id.strip())

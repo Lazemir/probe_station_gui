@@ -14,6 +14,10 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
 from probe_station_gui.logging_config import configure_logging
+from probe_station_gui.telegram_notifications import (
+    load_global_bot_token,
+    save_global_bot_token,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -305,11 +309,10 @@ class TelegramSettings:
         )
 
     def to_dict(self) -> dict[str, bool | str | dict[str, bool]]:
-        """Serialize the Telegram notification preferences."""
+        """Serialize Telegram preferences without the machine-wide bot token."""
 
         return {
             "enabled": self.enabled,
-            "bot_token": self.bot_token,
             "bot_username": self.bot_username,
             "chat_id": self.chat_id,
             "chat_title": self.chat_title,
@@ -1287,6 +1290,7 @@ class SettingsManager:
             defaults = TelegramSettings().to_dict()
             for key, value in defaults.items():
                 telegram_section.setdefault(key, value)
+            telegram_section.pop("bot_token", None)
             alerts = telegram_section.get("alerts")
             if not isinstance(alerts, dict):
                 telegram_section["alerts"] = default_telegram_alerts()
@@ -1730,8 +1734,20 @@ class SettingsManager:
                 raw_telegram.get("enabled", settings.enabled),
                 default=settings.enabled,
             )
+            legacy_bot_token = ""
+            legacy_bot_token_raw = raw_telegram.get("bot_token", "")
+            if isinstance(legacy_bot_token_raw, (str, int)):
+                legacy_bot_token = str(legacy_bot_token_raw).strip()
+            if legacy_bot_token and not load_global_bot_token():
+                try:
+                    save_global_bot_token(legacy_bot_token)
+                except OSError as exc:
+                    self._logger.warning(
+                        "Failed to migrate Telegram bot token to global settings: %s",
+                        exc,
+                    )
+                    settings.bot_token = legacy_bot_token
             for attr in (
-                "bot_token",
                 "bot_username",
                 "chat_id",
                 "chat_title",

@@ -103,7 +103,7 @@ class KeyBindingRoundTripTest(unittest.TestCase):
 
 
 class TelegramSettingsTest(unittest.TestCase):
-    def test_telegram_settings_round_trip_preserves_alerts(self) -> None:
+    def test_telegram_settings_round_trip_preserves_alerts_without_token(self) -> None:
         settings = TelegramSettings(
             enabled=True,
             bot_token="123:abc",
@@ -120,9 +120,17 @@ class TelegramSettingsTest(unittest.TestCase):
             },
         )
 
-        restored = TelegramSettings(**settings.to_dict())
+        serialized = settings.to_dict()
+        restored = TelegramSettings(**serialized)
 
-        self.assertEqual(restored, settings)
+        self.assertNotIn("bot_token", serialized)
+        self.assertEqual(restored.bot_token, "")
+        self.assertEqual(restored.enabled, settings.enabled)
+        self.assertEqual(restored.bot_username, settings.bot_username)
+        self.assertEqual(restored.chat_id, settings.chat_id)
+        self.assertEqual(restored.chat_title, settings.chat_title)
+        self.assertEqual(restored.linked_at_utc, settings.linked_at_utc)
+        self.assertEqual(restored.alerts, settings.alerts)
         self.assertFalse(restored.alert_enabled("route_completed"))
         self.assertFalse(restored.alert_enabled("unknown"))
 

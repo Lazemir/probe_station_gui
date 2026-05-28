@@ -4,20 +4,24 @@ from __future__ import annotations
 
 import asyncio
 from io import BytesIO
+import json
 import logging
 import os
+import platform
 import re
 import secrets
 import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable
 
 
 logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN_ENV = "PROBE_STATION_TELEGRAM_BOT_TOKEN"
+GLOBAL_TELEGRAM_TOKEN_FILENAME = "telegram-bot.json"
 START_PAYLOAD_PREFIX = "probe_"
 TELEGRAM_PHOTO_CAPTION_LIMIT = 1024
 
@@ -47,12 +51,81 @@ def telegram_dependency_available() -> bool:
     return Bot is not None
 
 
-def resolved_bot_token(settings: object) -> str:
-    """Return the bot token, preferring the environment override."""
+def global_telegram_token_path() -> Path:
+    """Return the machine-wide Telegram bot token file path."""
+
+    system = platform.system()
+    if system == "Windows":
+        base = os.environ.get("PROGRAMDATA")
+        if base:
+            return Path(base) / "ProbeStationGUI" / GLOBAL_TELEGRAM_TOKEN_FILENAME
+        return (
+            Path.home()
+            / "AppData"
+            / "Local"
+            / "ProbeStationGUI"
+            / GLOBAL_TELEGRAM_TOKEN_FILENAME
+        )
+    if system == "Darwin":
+        return (
+            Path("/Library")
+            / "Application Support"
+            / "ProbeStationGUI"
+            / GLOBAL_TELEGRAM_TOKEN_FILENAME
+        )
+    return Path("/etc") / "probe-station-gui" / GLOBAL_TELEGRAM_TOKEN_FILENAME
+
+
+def load_global_bot_token() -> str:
+    """Load the machine-wide Telegram bot token if configured."""
+
+    path = global_telegram_token_path()
+    try:
+        with path.open("r", encoding="utf-8-sig") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if isinstance(data, dict):
+        return str(data.get("bot_token", "") or "").strip()
+    if isinstance(data, str):
+        return data.strip()
+    return ""
+
+
+def save_global_bot_token(bot_token: str) -> Path:
+    """Save or clear the machine-wide Telegram bot token."""
+
+    path = global_telegram_token_path()
+    token = str(bot_token or "").strip()
+    if not token:
+        clear_global_bot_token()
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump({"bot_token": token}, handle, indent=2, ensure_ascii=False)
+    return path
+
+
+def clear_global_bot_token() -> None:
+    """Remove the machine-wide Telegram bot token file if it exists."""
+
+    try:
+        global_telegram_token_path().unlink()
+    except FileNotFoundError:
+        return
+
+
+def resolved_bot_token(settings: object | None = None) -> str:
+    """Return the bot token, preferring env then machine-wide storage."""
 
     env_value = os.environ.get(TELEGRAM_BOT_TOKEN_ENV, "").strip()
     if env_value:
         return env_value
+    global_value = load_global_bot_token()
+    if global_value:
+        return global_value
+    if settings is None:
+        return ""
     return str(getattr(settings, "bot_token", "") or "").strip()
 
 

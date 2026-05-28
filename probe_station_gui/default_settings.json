@@ -81,7 +81,6 @@
   },
   "telegram": {
     "enabled": false,
-    "bot_token": "",
     "bot_username": "",
     "chat_id": "",
     "chat_title": "",
