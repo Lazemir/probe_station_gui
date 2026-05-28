@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import math
 import re
 import threading
@@ -62,6 +63,7 @@ from probe_station_gui.lcr_meter import (
     LCRMeterError,
     ROUTE_METER_GWINSTEK,
     ROUTE_METER_KEITHLEY,
+    RouteMeter,
     RouteMeterConfiguration,
 )
 from probe_station_gui.motion_prediction import interpolate_position, motion_progress
@@ -80,6 +82,8 @@ from probe_station_gui.route_measurement import (
     RouteMeasurementPoint,
     RouteMeasurementRecord,
     RouteMeasurementRunner,
+    route_measurement_sample_from_raw,
+    summarize_route_contact_quality,
 )
 from probe_station_gui.settings_manager import (
     ObjectiveCalibrationSettings,
@@ -371,10 +375,14 @@ class Main(QMainWindow):
     design_layout_module_ready: Signal = Signal(object, object)
     design_document_loaded: Signal = Signal(int, object, object)
     route_measurement_status: Signal = Signal(str)
+    route_measurement_progress: Signal = Signal(int, int, int)
     route_measurement_waiting_changed: Signal = Signal(bool)
     route_measurement_result: Signal = Signal(object, int, int, bool)
     route_measurement_recorded: Signal = Signal(object, int, int)
     route_measurement_finished: Signal = Signal(bool, str, str)
+    contact_seek_status: Signal = Signal(str)
+    contact_seek_calibration_found: Signal = Signal(float, str)
+    contact_seek_finished: Signal = Signal(bool, str)
 
     ALIGNMENT_CAPTURE_SHORTCUT = "Space"
     ALIGNMENT_TARGET_ANGLES = (-180.0, -90.0, 0.0, 90.0, 180.0)
@@ -418,6 +426,10 @@ class Main(QMainWindow):
     CAMERA_UI_FRAME_GAP_WARNING_S = 0.25
     CLICK_TO_MOVE_PENDING_RETRY_MS = 150
     CLICK_TARGET_ANIMATION_PADDING_S = 0.03
+    CONTACT_SEEK_STEP_MM = -0.001
+    CONTACT_SEEK_MAX_TOTAL_MM = 0.020
+    CONTACT_SEEK_QUICK_COUNT = 25
+    CONTACT_SEEK_CONFIRM_COUNT = 250
 
     def __init__(self) -> None:
         super().__init__()
@@ -542,6 +554,11 @@ class Main(QMainWindow):
         self._route_measurement_runner: RouteMeasurementRunner | None = None
         self._route_measurement_thread: threading.Thread | None = None
         self._route_measurement_dialog: RouteMeasurementDialog | None = None
+        self._route_measurement_waiting = False
+        self._route_measurement_point_numbers: list[int] = []
+        self._route_measurement_current_point: int | None = None
+        self._contact_seek_thread: threading.Thread | None = None
+        self._contact_seek_stop_requested = threading.Event()
         self._design_session = DesignSession()
         self.statusBar()
         self._objective_widget = self._create_objective_widget()
@@ -573,12 +590,18 @@ class Main(QMainWindow):
         self.design_layout_module_ready.connect(self._on_design_layout_module_ready)
         self.design_document_loaded.connect(self._on_design_document_loaded)
         self.route_measurement_status.connect(self._on_route_measurement_status)
+        self.route_measurement_progress.connect(self._on_route_measurement_progress)
         self.route_measurement_waiting_changed.connect(
             self._on_route_measurement_waiting_changed
         )
         self.route_measurement_result.connect(self._on_route_measurement_result)
         self.route_measurement_recorded.connect(self._on_route_measurement_recorded)
         self.route_measurement_finished.connect(self._on_route_measurement_finished)
+        self.contact_seek_status.connect(self._on_contact_seek_status)
+        self.contact_seek_calibration_found.connect(
+            self._on_contact_seek_calibration_found
+        )
+        self.contact_seek_finished.connect(self._on_contact_seek_finished)
 
         self.stage_controller = StageController()
         self.stage_controller.status_message.connect(self._show_status)
@@ -5066,7 +5089,12 @@ class Main(QMainWindow):
             else:
                 self._design_session.restore_persisted_state(document, restore_state)
             self._pending_alignment_preparation = None
-            self._last_selected_design_point = None
+            current_route_point = self._design_session.current_route_point()
+            self._last_selected_design_point = (
+                current_route_point.camera_center
+                if current_route_point is not None
+                else None
+            )
             self._set_design_snap_enabled(True)
             self.settings_manager.set_design_last_directory(document.path.parent)
             if self.design_navigator_panel is not None:
@@ -5085,6 +5113,7 @@ class Main(QMainWindow):
                 f"Loaded design '{document.path.name}' ({document.top_cell_name}).",
                 5000,
             )
+            self._restore_route_measurement_state_after_design_load()
         except DesignModelError as exc:
             self._show_status(str(exc), 6000)
             if restore_state is not None:
@@ -5246,6 +5275,7 @@ class Main(QMainWindow):
             f"Loaded route '{route.name}' with {len(route.points)} points.",
             5000,
         )
+        self._restore_route_measurement_state_after_design_load()
 
     def _save_measurement_route(self) -> None:
         route = self._design_session.route
@@ -5376,7 +5406,7 @@ class Main(QMainWindow):
     def _open_route_measurement_dialog(self) -> None:
         route = self._design_session.route
         if route is None or not route.points:
-            self._show_status("Create or load a probe route before running it.", 5000)
+            self._show_status("Create or load a probe route before measuring.", 5000)
             return
         default_path = "probe_route_measurements.csv"
         if route.path is not None:
@@ -5395,14 +5425,13 @@ class Main(QMainWindow):
                 route_point_count=len(route.points),
                 default_csv_path=default_path,
                 default_meter_type=self.lcr_controller.meter_type(),
-                default_short_threshold_ohm=self.lcr_controller.short_threshold_ohm(),
                 settings_path=(
                     self.settings_manager.config_dir()
                     / "route-measurement-settings.json"
                 ),
-                parent=self,
+                parent=None,
             )
-            dialog.run_requested.connect(self._start_route_measurement)
+            dialog.measure_requested.connect(self._start_route_measurement)
             dialog.next_requested.connect(
                 lambda: self._submit_route_measurement_confirmation("next")
             )
@@ -5416,8 +5445,11 @@ class Main(QMainWindow):
             dialog.interrupt_requested.connect(
                 self._request_route_measurement_point_correction
             )
+            dialog.pause_requested.connect(self._request_pause_route_measurement)
             dialog.jump_requested.connect(self._submit_route_measurement_jump)
-            dialog.cancel_requested.connect(self._request_stop_route_measurement)
+            dialog.current_point_changed.connect(
+                self._on_route_measurement_current_point_changed
+            )
             dialog.finished.connect(lambda _result: self._clear_route_measurement_dialog())
             self._route_measurement_dialog = dialog
         else:
@@ -5426,9 +5458,55 @@ class Main(QMainWindow):
                 route_point_count=len(route.points),
                 default_csv_path=default_path,
             )
+        if (
+            self._route_measurement_thread is not None
+            and self._route_measurement_thread.is_alive()
+        ):
+            dialog.set_running(True)
+            dialog.set_waiting(self._route_measurement_waiting)
+        elif dialog.measurement_pending():
+            dialog.set_status(
+                "Route measurement is pending; Measure continues from the current point."
+            )
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    def _restore_route_measurement_state_after_design_load(self) -> None:
+        route = self._design_session.route
+        if route is None or not route.points:
+            return
+        state = self._load_route_measurement_settings()
+        current_point = self._route_measurement_current_point_from_settings(state)
+        if current_point is not None:
+            self._set_route_measurement_resume_point(current_point)
+        pending = bool(state.get("measurement_pending", False))
+        if pending or (current_point is not None and current_point > 1):
+            QTimer.singleShot(0, self._open_route_measurement_dialog)
+
+    def _load_route_measurement_settings(self) -> dict[str, object]:
+        settings_path = (
+            self.settings_manager.config_dir() / "route-measurement-settings.json"
+        )
+        if not settings_path.exists():
+            return {}
+        try:
+            with settings_path.open("r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return dict(loaded) if isinstance(loaded, dict) else {}
+
+    @staticmethod
+    def _route_measurement_current_point_from_settings(
+        state: dict[str, object],
+    ) -> int | None:
+        value = state.get("current_point", state.get("start_point"))
+        try:
+            point_number = int(value)
+        except (TypeError, ValueError):
+            return None
+        return point_number if point_number >= 1 else None
 
     def _clear_route_measurement_dialog(self) -> None:
         self._route_measurement_dialog = None
@@ -5439,19 +5517,19 @@ class Main(QMainWindow):
     ) -> None:
         thread = self._route_measurement_thread
         if thread is not None and thread.is_alive():
-            self._show_status("Route measurement is already running.", 4000)
+            self._show_status("Route measurement is already active.", 4000)
             return
         if self.serial_connection is None or not self.serial_connection.is_open:
-            self._show_status("Connect the stage controller before running a route.", 5000)
+            self._show_status("Connect the stage controller before measuring a route.", 5000)
             return
         route = self._design_session.route
         if route is None or not route.points:
-            self._show_status("Create or load a probe route before running it.", 5000)
+            self._show_status("Create or load a probe route before measuring.", 5000)
             return
         registration = self._design_session.registration
         if registration is None or not registration.valid:
             self._show_status(
-                "Design registration is required before running a route.",
+                "Design registration is required before measuring a route.",
                 6000,
             )
             return
@@ -5463,40 +5541,48 @@ class Main(QMainWindow):
         if not points:
             self._show_status("Route has no enabled points.", 5000)
             return
-        if not self.lcr_controller.is_connected():
-            self._show_status(
-                "Connect the measurement instrument before running a route.",
-                5000,
-            )
-            return
-        try:
-            self.lcr_controller.apply_route_meter_configuration(configuration.meter)
-        except LCRMeterError as exc:
-            message = f"Route measurement instrument setup failed: {exc}"
-            self._show_status(message, 8000)
-            if self._route_measurement_dialog is not None:
-                self._route_measurement_dialog.set_running(False)
-                self._route_measurement_dialog.set_status(message)
-            return
+        route_lcr_controller: object
+        if self.lcr_controller.is_connected():
+            try:
+                self.lcr_controller.apply_route_meter_configuration(configuration.meter)
+            except LCRMeterError as exc:
+                message = f"Route measurement instrument setup failed: {exc}"
+                self._show_status(message, 8000)
+                if self._route_measurement_dialog is not None:
+                    self._route_measurement_dialog.set_running(False)
+                    self._route_measurement_dialog.set_status(message)
+                return
+            route_lcr_controller = self.lcr_controller
+        else:
+            route_lcr_controller = RouteMeter(configuration.meter)
         runner = RouteMeasurementRunner(
             points=points,
             csv_path=configuration.csv_path,
             stage_controller=self.stage_controller,
-            lcr_controller=self.lcr_controller,
+            lcr_controller=route_lcr_controller,
             needle_feedrate=self._current_needle_feedrate(),
             measurement_count=configuration.measurement_count,
+            initial_measurement_count=configuration.initial_measurement_count,
             start_point_number=configuration.start_point,
             max_relative_rms=configuration.max_relative_rms,
-            short_threshold_ohm=configuration.short_threshold_ohm,
             confirm_each_point=True,
+            auto_next_ok_or_short=True,
+            auto_contact_seek_on_bad_contact=True,
+            auto_contact_seek_step_mm=configuration.contact_seek_step_mm,
+            auto_contact_seek_max_total_mm=configuration.contact_seek_range_mm,
             contact_settle_s=configuration.contact_settle_s,
             nplc_label=configuration.meter.nplc_label(),
+            measurement_type=configuration.meter.measurement_type_label(),
             status_callback=self.route_measurement_status.emit,
+            progress_callback=self.route_measurement_progress.emit,
             record_callback=self.route_measurement_recorded.emit,
             result_callback=self.route_measurement_result.emit,
             waiting_callback=self.route_measurement_waiting_changed.emit,
         )
         self._route_measurement_runner = runner
+        self._route_measurement_waiting = False
+        self._route_measurement_point_numbers = [int(point.index) for point in points]
+        self._set_route_measurement_pending(True)
         self._route_measurement_thread = threading.Thread(
             target=self._run_route_measurement,
             args=(runner,),
@@ -5529,7 +5615,7 @@ class Main(QMainWindow):
             stage_xy = self._raw_stage_xy_from_design_xy(route_point.camera_center)
             if stage_xy is None:
                 raise DesignModelError(
-                    "Design registration is required before running a route."
+                    "Design registration is required before measuring a route."
                 )
             hits = route.needle_hits_for_point(route_point)
             needle_1_design = (
@@ -5589,7 +5675,9 @@ class Main(QMainWindow):
             self._show_status("No route measurement is running.", 3000)
             return
         runner.request_current_point_correction()
-        message = "Route measurement correction requested for the current point."
+        message = (
+            "Route measurement correction requested; waiting for current read chunk."
+        )
         self._show_status(message, 5000)
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_route_measurement_status(message)
@@ -5601,6 +5689,16 @@ class Main(QMainWindow):
         if runner is None:
             self._show_status("No route measurement is waiting.", 3000)
             return
+        if self._route_measurement_dialog is not None:
+            configuration = self._route_measurement_dialog.current_configuration()
+            runner.update_runtime_settings(
+                measurement_count=configuration.measurement_count,
+                initial_measurement_count=configuration.initial_measurement_count,
+                max_relative_rms=configuration.max_relative_rms,
+                auto_contact_seek_step_mm=configuration.contact_seek_step_mm,
+                auto_contact_seek_max_total_mm=configuration.contact_seek_range_mm,
+                contact_settle_s=configuration.contact_settle_s,
+            )
         if not runner.submit_confirmation(action):
             self._show_status("Unknown route measurement action.", 3000)
             return
@@ -5622,6 +5720,19 @@ class Main(QMainWindow):
 
     def _submit_route_measurement_jump(self, point_number: int) -> None:
         self._submit_route_measurement_confirmation(f"jump:{int(point_number)}")
+
+    def _request_pause_route_measurement(self) -> None:
+        runner = self._route_measurement_runner
+        if runner is None:
+            self._show_status("No route measurement is running.", 3000)
+            return
+        runner.request_pause_after_current_point()
+        message = "Route measurement pause requested; will pause after current point."
+        self._show_status(message, 5000)
+        if self.design_navigator_panel is not None:
+            self.design_navigator_panel.set_route_measurement_status(message)
+        if self._route_measurement_dialog is not None:
+            self._route_measurement_dialog.set_status(message)
 
     def _save_route_measurement_shift(self) -> None:
         runner = self._route_measurement_runner
@@ -5660,7 +5771,20 @@ class Main(QMainWindow):
         if self._route_measurement_dialog is not None:
             self._route_measurement_dialog.set_status(message)
 
+    def _on_route_measurement_progress(
+        self,
+        position: int,
+        total: int,
+        point_number: int,
+    ) -> None:
+        _ = position, total
+        self._set_route_measurement_resume_point(point_number)
+
+    def _on_route_measurement_current_point_changed(self, point_number: int) -> None:
+        self._set_route_measurement_resume_point(point_number)
+
     def _on_route_measurement_waiting_changed(self, waiting: bool) -> None:
+        self._route_measurement_waiting = bool(waiting)
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_route_measurement_waiting(waiting)
         if self._route_measurement_dialog is not None:
@@ -5707,11 +5831,12 @@ class Main(QMainWindow):
         )
         self._show_status(message)
         if self.design_navigator_panel is not None:
-            self.design_navigator_panel.set_route_measurement_waiting(True)
             self.design_navigator_panel.set_route_measurement_status(message)
         if self._route_measurement_dialog is not None:
-            self._route_measurement_dialog.set_waiting(True)
             self._route_measurement_dialog.set_status(message)
+        next_point_number = self._route_measurement_next_point_number(position)
+        if next_point_number is not None:
+            self._set_route_measurement_resume_point(next_point_number)
 
     @staticmethod
     def _format_route_measurement_record(
@@ -5724,12 +5849,20 @@ class Main(QMainWindow):
         prefix = "Measured" if saved else "Rejected"
         if saved and record.status == "short":
             prefix = "Short"
+        contact = record.contact_quality
+        contact_text = ""
+        if contact is not None and contact.assessed:
+            contact_text = (
+                f", contact={contact.status} "
+                f"(median={_format_route_ohm(contact.median_ohm)}, "
+                f"MAD={_format_route_ohm(contact.mad_sigma_ohm)})"
+            )
         return (
             f"{prefix} route point {position}/{total}: "
             f"R={_format_route_ohm(record.resistance_ohm)}, "
             f"RMS={_format_route_ohm(record.resistance_rms_ohm)}, "
             f"rel={_format_route_percent(record.relative_rms)}, "
-            f"status={record.status}."
+            f"status={record.status}{contact_text}."
         )
 
     def _on_route_measurement_finished(
@@ -5743,6 +5876,7 @@ class Main(QMainWindow):
             thread.join(timeout=0.1)
         self._route_measurement_thread = None
         self._route_measurement_runner = None
+        self._route_measurement_waiting = False
         self._update_stage_coordinate_apply_state()
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_route_measurement_running(False)
@@ -5752,9 +5886,106 @@ class Main(QMainWindow):
             self._route_measurement_dialog.set_running(False)
             self._route_measurement_dialog.set_status(message)
         if success:
+            self._set_route_measurement_resume_point(1)
+            self._set_route_measurement_pending(False)
+            self._route_measurement_point_numbers = []
             self._show_status(f"{message} CSV: {csv_path}", 8000)
         else:
+            if self._route_measurement_current_point is not None:
+                self._set_route_measurement_resume_point(
+                    self._route_measurement_current_point
+                )
+            self._set_route_measurement_pending(True)
             self._show_status(message, 8000)
+
+    def _route_measurement_next_point_number(self, position: int) -> int | None:
+        try:
+            ordinal = int(position)
+        except (TypeError, ValueError):
+            return None
+        index = ordinal
+        if index < 0 or index >= len(self._route_measurement_point_numbers):
+            return None
+        return int(self._route_measurement_point_numbers[index])
+
+    def _set_route_measurement_resume_point(self, point_number: int) -> None:
+        try:
+            value = int(point_number)
+        except (TypeError, ValueError):
+            return
+        if value < 1:
+            return
+        self._route_measurement_current_point = value
+        self._select_route_point_for_measurement(value)
+        if self._route_measurement_dialog is not None:
+            self._route_measurement_dialog.set_current_point(value)
+            return
+        self._save_route_measurement_current_point(value)
+
+    def _select_route_point_for_measurement(self, point_number: int) -> None:
+        route = self._design_session.route
+        if route is None or not route.points:
+            return
+        index = int(point_number) - 1
+        if not 0 <= index < len(route.points):
+            return
+        if self._design_session.selected_route_point_index == index:
+            return
+        point = self._design_session.select_route_point(index)
+        self._last_selected_design_point = (
+            point.camera_center if point is not None else None
+        )
+        self._refresh_design_panel()
+        self._persist_controller_state_if_available()
+
+    def _save_route_measurement_current_point(self, point_number: int) -> None:
+        settings_path = (
+            self.settings_manager.config_dir() / "route-measurement-settings.json"
+        )
+        data: dict[str, object] = {}
+        if settings_path.exists():
+            try:
+                with settings_path.open("r", encoding="utf-8") as handle:
+                    loaded = json.load(handle)
+                if isinstance(loaded, dict):
+                    data = dict(loaded)
+            except (OSError, json.JSONDecodeError):
+                data = {}
+        data["current_point"] = int(point_number)
+        data["start_point"] = int(point_number)
+        try:
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            with settings_path.open("w", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=2, ensure_ascii=False)
+        except OSError:
+            logger.exception("Failed to persist route measurement resume point.")
+
+    def _set_route_measurement_pending(self, pending: bool) -> None:
+        if self._route_measurement_dialog is not None:
+            self._route_measurement_dialog.set_measurement_pending(bool(pending))
+            return
+        self._save_route_measurement_pending(bool(pending))
+
+    def _save_route_measurement_pending(self, pending: bool) -> None:
+        settings_path = (
+            self.settings_manager.config_dir() / "route-measurement-settings.json"
+        )
+        data: dict[str, object] = {}
+        if settings_path.exists():
+            try:
+                with settings_path.open("r", encoding="utf-8") as handle:
+                    loaded = json.load(handle)
+                if isinstance(loaded, dict):
+                    data = dict(loaded)
+            except (OSError, json.JSONDecodeError):
+                data = {}
+        data["measurement_pending"] = bool(pending)
+        try:
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            with settings_path.open("w", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=2, ensure_ascii=False)
+        except OSError:
+            logger.exception("Failed to persist route measurement pending state.")
 
     def _select_route_point(self, index: int) -> None:
         point = self._design_session.select_route_point(index)
@@ -6991,15 +7222,20 @@ class Main(QMainWindow):
         self.stage_controller.request_stop_oscillation()
         self.stage_controller.shutdown()
         self.lcr_controller.shutdown()
+        self._close_auxiliary_windows()
+        if self.serial_connection_panel:
+            self.serial_connection_panel.shutdown()
+        event.accept()
+
+    def _close_auxiliary_windows(self) -> None:
+        if self._route_measurement_dialog is not None:
+            self._route_measurement_dialog.close()
         if self.design_layout_window is not None:
             self.design_layout_window.close()
         if self.contact_calibration_window is not None:
             self.contact_calibration_window.close()
         if self.surface_map_window is not None:
             self.surface_map_window.close()
-        if self.serial_connection_panel:
-            self.serial_connection_panel.shutdown()
-        event.accept()
 
     def _stop_jog_before_serial_close(self, reason: str) -> None:
         if self.serial_connection is None or not self.serial_connection.is_open:
@@ -7201,18 +7437,11 @@ class Main(QMainWindow):
         self.contact_calibration_window.move_to_surface_position_requested.connect(
             self._move_to_surface_position
         )
-        self.contact_calibration_window.save_current_needle_height_requested.connect(
-            self._save_current_needle_height
+        self.contact_calibration_window.contact_seek_requested.connect(
+            self._request_contact_seek
         )
-        self.contact_calibration_window.lower_needles_requested.connect(
-            lambda: self.stage_controller.request_needles_lower(
-                self._current_needle_feedrate()
-            )
-        )
-        self.contact_calibration_window.raise_needles_requested.connect(
-            lambda: self.stage_controller.request_needles_raise(
-                self._current_needle_feedrate()
-            )
+        self.contact_calibration_window.contact_seek_cancel_requested.connect(
+            self._cancel_contact_seek
         )
         self.lcr_controller.connection_changed.connect(
             self._on_lcr_connection_changed
@@ -7371,6 +7600,9 @@ class Main(QMainWindow):
         self.design_navigator_panel.route_measurement_stop_requested.connect(
             self._request_stop_route_measurement
         )
+        self.design_navigator_panel.route_measurement_pause_requested.connect(
+            self._request_pause_route_measurement
+        )
         self.design_navigator_panel.route_measurement_interrupt_requested.connect(
             self._request_route_measurement_point_correction
         )
@@ -7445,6 +7677,167 @@ class Main(QMainWindow):
     def _on_lcr_reading_updated(self, resistance_ohm: float, is_short: bool) -> None:
         if self.serial_connection_panel is not None:
             self.serial_connection_panel.set_lcr_reading(resistance_ohm, is_short)
+
+    def _request_contact_seek(self) -> None:
+        thread = self._contact_seek_thread
+        if thread is not None and thread.is_alive():
+            self._show_status("Contact seek is already running.")
+            return
+        if self._route_measurement_thread is not None and self._route_measurement_thread.is_alive():
+            self._show_status("Stop route measurement before contact seek.")
+            return
+        if not self.lcr_controller.is_connected():
+            self._show_status("Connect the measurement instrument before contact seek.")
+            if self.contact_calibration_window is not None:
+                self.contact_calibration_window.set_contact_seek_result(
+                    "Measurement instrument is not connected."
+                )
+            return
+        self._contact_seek_stop_requested.clear()
+        if self.contact_calibration_window is not None:
+            self.contact_calibration_window.set_contact_seek_running(True)
+            self.contact_calibration_window.set_contact_seek_result("Starting.")
+        thread = threading.Thread(target=self._run_contact_seek, daemon=True)
+        self._contact_seek_thread = thread
+        thread.start()
+
+    def _cancel_contact_seek(self) -> None:
+        self._contact_seek_stop_requested.set()
+        self.lcr_controller.abort_current_measurement()
+        self.stage_controller.cancel_active_motion("Contact seek cancel requested.")
+        self._show_status("Contact seek cancel requested.")
+
+    def _run_contact_seek(self) -> None:
+        stage_reserved = False
+        moved_mm = 0.0
+        try:
+            self.stage_controller.begin_external_task("contact seek")
+            stage_reserved = True
+            feedrate = self._current_needle_feedrate()
+            quick_quality = self._contact_seek_measure_quality(
+                self.CONTACT_SEEK_QUICK_COUNT
+            )
+            self.contact_seek_status.emit(
+                "Contact seek: current position "
+                f"{quick_quality.status}, median="
+                f"{_format_route_ohm(quick_quality.median_ohm)}."
+            )
+            if quick_quality.good is True:
+                if self._confirm_and_save_contact_seek("current position", moved_mm):
+                    return
+
+            max_steps = int(
+                math.ceil(
+                    self.CONTACT_SEEK_MAX_TOTAL_MM
+                    / abs(self.CONTACT_SEEK_STEP_MM)
+                )
+            )
+            for step_index in range(max_steps):
+                if self._contact_seek_stop_requested.is_set():
+                    self.contact_seek_finished.emit(False, "Contact seek cancelled.")
+                    return
+                self.contact_seek_status.emit(
+                    "Contact seek: lowering A "
+                    f"{step_index + 1}/{max_steps}."
+                )
+                self.stage_controller.run_external_needles_adjust(
+                    self.CONTACT_SEEK_STEP_MM,
+                    feedrate,
+                )
+                moved_mm += abs(self.CONTACT_SEEK_STEP_MM)
+                if self._contact_seek_stop_requested.is_set():
+                    self.contact_seek_finished.emit(False, "Contact seek cancelled.")
+                    return
+                quick_quality = self._contact_seek_measure_quality(
+                    self.CONTACT_SEEK_QUICK_COUNT
+                )
+                self.contact_seek_status.emit(
+                    "Contact seek: "
+                    f"{moved_mm:.4f} mm down, {quick_quality.status}, "
+                    f"median={_format_route_ohm(quick_quality.median_ohm)}, "
+                    f"MAD={_format_route_ohm(quick_quality.mad_sigma_ohm)}."
+                )
+                if quick_quality.good is True:
+                    if self._confirm_and_save_contact_seek(
+                        f"{moved_mm:.4f} mm down",
+                        moved_mm,
+                    ):
+                        return
+            self.contact_seek_finished.emit(
+                False,
+                "Contact seek did not find a stable contact within "
+                f"{self.CONTACT_SEEK_MAX_TOTAL_MM:.3f} mm.",
+            )
+        except Exception as exc:
+            logger.exception("Contact seek failed.")
+            self.contact_seek_finished.emit(False, f"Contact seek failed: {exc}")
+        finally:
+            if stage_reserved:
+                self.stage_controller.finish_external_task()
+
+    def _contact_seek_measure_quality(self, count: int):
+        raw_batch = self.lcr_controller.read_route_measurement_batch_now(int(count))
+        samples = tuple(
+            route_measurement_sample_from_raw(raw, index)
+            for index, raw in enumerate(raw_batch, start=1)
+        )
+        return summarize_route_contact_quality(samples)
+
+    def _confirm_and_save_contact_seek(self, label: str, moved_mm: float) -> bool:
+        self.contact_seek_status.emit(
+            "Contact seek: confirming stable contact with "
+            f"{self.CONTACT_SEEK_CONFIRM_COUNT} readings."
+        )
+        confirm_quality = self._contact_seek_measure_quality(
+            self.CONTACT_SEEK_CONFIRM_COUNT
+        )
+        if confirm_quality.good is not True:
+            self.contact_seek_status.emit(
+                "Contact seek: quick check was good, confirmation failed "
+                f"({confirm_quality.status})."
+            )
+            return False
+        lowering_mm = self.stage_controller.latest_axis_a_lowering()
+        if lowering_mm is None:
+            raise StageControllerError("Unable to read A lowering after contact seek.")
+        self.stage_controller.finish_external_task()
+        try:
+            self.stage_controller.set_current_axis_work_coordinate("A", 0.0)
+        except StageControllerError:
+            raise
+        detail = (
+            f"{label}; moved {moved_mm:.4f} mm; "
+            f"median={_format_route_ohm(confirm_quality.median_ohm)}, "
+            f"MAD={_format_route_ohm(confirm_quality.mad_sigma_ohm)}, "
+            f"p95 step={_format_route_ohm(confirm_quality.p95_abs_step_ohm)}."
+        )
+        self.contact_seek_calibration_found.emit(float(lowering_mm), detail)
+        self.contact_seek_finished.emit(True, f"Contact seek found stable contact: {detail}")
+        return True
+
+    def _on_contact_seek_status(self, message: str) -> None:
+        if self.contact_calibration_window is not None:
+            self.contact_calibration_window.set_contact_seek_result(message)
+        self._show_status(message, 5000)
+
+    def _on_contact_seek_calibration_found(
+        self,
+        lowering_mm: float,
+        detail: str,
+    ) -> None:
+        self._save_needle_down_position_from_lowering(float(lowering_mm))
+        if self.contact_calibration_window is not None:
+            self.contact_calibration_window.set_contact_seek_result(detail)
+
+    def _on_contact_seek_finished(self, success: bool, message: str) -> None:
+        thread = self._contact_seek_thread
+        if thread is not None and not thread.is_alive():
+            thread.join(timeout=0.1)
+        self._contact_seek_thread = None
+        if self.contact_calibration_window is not None:
+            self.contact_calibration_window.set_contact_seek_running(False)
+            self.contact_calibration_window.set_contact_seek_result(message)
+        self._show_status(message, 8000 if not success else 5000)
 
     def _display_a_for_needle_lowering(self, lowering_mm: float | None) -> float | None:
         if lowering_mm is None:

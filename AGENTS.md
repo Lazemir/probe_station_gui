@@ -30,6 +30,9 @@
 ## Settings and logging
 - Default settings file: `probe_station_gui/default_settings.json`.
 - User settings path is platform-dependent (see `SettingsManager._determine_config_dir`).
+- On Windows, user settings live in `%APPDATA%\ProbeStationGUI`; on this machine that is `C:\Users\Lazemir\AppData\Roaming\ProbeStationGUI`. Route measurement settings are in `route-measurement-settings.json` there.
+- Runtime logs default to `%LOCALAPPDATA%\ProbeStationGUI\Logs`; on this machine, inspect `C:\Users\Lazemir\AppData\Local\ProbeStationGUI\Logs\status-history.log` and `C:\Users\Lazemir\AppData\Local\ProbeStationGUI\Logs\probe-station-gui.log` first.
+- A `probe-station-gui.log` under `%APPDATA%\ProbeStationGUI` is a legacy/stale location unless the logging settings explicitly point there.
 - Logging writes to a file configured in settings via `probe_station_gui/logging_config.py`.
 
 ## Development guidelines

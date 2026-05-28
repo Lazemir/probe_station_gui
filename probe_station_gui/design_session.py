@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any, Optional
 
 from .design_model import (
@@ -87,9 +88,13 @@ class DesignSession:
         try:
             stat = self.document.path.stat()
         except OSError:
-            return state
-        state["document_mtime_ns"] = int(stat.st_mtime_ns)
-        state["document_size"] = int(stat.st_size)
+            pass
+        else:
+            state["document_mtime_ns"] = int(stat.st_mtime_ns)
+            state["document_size"] = int(stat.st_size)
+        route_state = self._export_persisted_route_state()
+        if route_state is not None:
+            state["route"] = route_state
         return state
 
     def restore_persisted_state(
@@ -112,6 +117,7 @@ class DesignSession:
         )
         self.check_design_marks = self._coerce_points(state.get("check_design_marks"))
         self.check_stage_marks = self._coerce_points(state.get("check_stage_marks"))
+        self._restore_persisted_route(document, state.get("route"))
         self.registration = None
         self.registration_status = str(
             state.get("registration_status") or "No design registration."
@@ -132,6 +138,52 @@ class DesignSession:
             )
             self.registration = self.registration.mark_stale(reason)
             self.registration_status = reason
+
+    def _export_persisted_route_state(self) -> dict[str, object] | None:
+        route = self.route
+        if route is None or route.path is None:
+            return None
+        route_path = Path(route.path).expanduser().resolve()
+        try:
+            route_path.stat()
+        except OSError:
+            return None
+        return {
+            "path": str(route_path),
+            "selected_route_point_index": int(self.selected_route_point_index),
+        }
+
+    def _restore_persisted_route(
+        self,
+        document: DesignDocument,
+        value: object,
+    ) -> None:
+        self.clear_route()
+        if not isinstance(value, dict):
+            return
+        path_text = str(value.get("path") or "").strip()
+        if not path_text:
+            return
+        route_path = Path(path_text).expanduser()
+        if not route_path.exists():
+            return
+        try:
+            route = MeasurementRoute.load(route_path)
+            route.validate_for_document(document)
+        except DesignModelError:
+            return
+        self.route = route
+        try:
+            selected_index = int(value.get("selected_route_point_index", 0))
+        except (TypeError, ValueError):
+            selected_index = 0
+        if route.points:
+            self.selected_route_point_index = min(
+                max(0, selected_index),
+                len(route.points) - 1,
+            )
+        else:
+            self.selected_route_point_index = -1
 
     def load_document(self, document: DesignDocument) -> None:
         """Attach a new design document and clear derived state."""
