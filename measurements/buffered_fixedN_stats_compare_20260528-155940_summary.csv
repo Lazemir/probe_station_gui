@@ -1,0 +1,1 @@
+nplc,pairs,elapsed_s,pairs_per_s,stats_query_s,raw_fetch_s,raw_mean_ohm,raw_std_ohm,raw_sem_ohm,stats_estimated_resistance_ohm,stats_mean_error_ohm,stats_mean_error_percent,voltmeter_mean_v,voltmeter_sdev_v,source_current_mean_a,source_current_sdev_a,post_errors_2182,post_errors_2400

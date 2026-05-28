@@ -1,0 +1,701 @@
+{
+  "initial_status": {
+    "accepted": true,
+    "connected": true,
+    "busy": false,
+    "state": "Idle",
+    "coordinate_display": "G54",
+    "homed_axes": [
+      "A",
+      "X",
+      "Y",
+      "Z"
+    ],
+    "position": {
+      "X": -5.305,
+      "Y": 2.483,
+      "Z": 4.011,
+      "A": 0.009,
+      "B": 2.411
+    },
+    "display_position": {
+      "X": -5.305,
+      "Y": 2.483,
+      "Z": 4.011,
+      "A": 0.009,
+      "B": 2.411
+    },
+    "pending_targets": {},
+    "active_coordinate_axis": null,
+    "active_coordinate_axes": [],
+    "current_feedrate_mm_min": 1.0,
+    "api_default_feedrate_mm_min": 10.0
+  },
+  "initial_a_mm": 0.009,
+  "axis": "A",
+  "step_mm": -0.001,
+  "max_total_mm": 0.02,
+  "quick_pairs": 25,
+  "confirm_pairs": 250,
+  "good_criteria": {
+    "max_abs_median_ohm": 50000.0,
+    "max_mad_sigma_ohm": 300.0,
+    "max_p95_abs_step_ohm": 1000.0,
+    "polarity_sign_mismatch_count": 0,
+    "compliance_hits": 0
+  },
+  "stopped_reason": "quick_good_confirmed",
+  "confirm_summary": {
+    "count": 250,
+    "elapsed_s": 40.24800409999989,
+    "median_ohm": 16802.510120459076,
+    "mean_ohm": 16806.156700543346,
+    "std_ohm": 55.394203054437725,
+    "sem_ohm": 3.5034370164375885,
+    "mad_sigma_ohm": 49.044757041179096,
+    "p95_abs_deviation_ohm": 124.04495066304152,
+    "p95_abs_step_ohm": 52.542207349153614,
+    "span_ohm": 313.69419864809606,
+    "outlier_fraction_gt_20ohm": 0.744,
+    "outlier_fraction_gt_50ohm": 0.236,
+    "outlier_fraction_gt_100ohm": 0.124,
+    "polarity_sign_mismatch_count": 0,
+    "compliance_hits": 0
+  },
+  "final_a_mm": 0.0,
+  "steps_completed": 9,
+  "rows": [
+    {
+      "step": 1,
+      "a_target_mm": 0.008,
+      "a_actual_mm": 0.008,
+      "moved_total_mm": 0.0009999999999999992,
+      "count": 25,
+      "elapsed_s": 5.622187299999496,
+      "median_ohm": 51011.59728579297,
+      "mean_ohm": 52967.63752886919,
+      "std_ohm": 6062.347157430764,
+      "sem_ohm": 1212.4694314861529,
+      "mad_sigma_ohm": 3506.5632591662747,
+      "p95_abs_deviation_ohm": 15015.563490712842,
+      "p95_abs_step_ohm": 5907.163229626545,
+      "span_ohm": 21889.610651544637,
+      "outlier_fraction_gt_20ohm": 0.92,
+      "outlier_fraction_gt_50ohm": 0.92,
+      "outlier_fraction_gt_100ohm": 0.88,
+      "polarity_sign_mismatch_count": 0,
+      "compliance_hits": 0,
+      "good_quick": false,
+      "move_response": {
+        "accepted": true,
+        "message": "API coordinate move accepted: A.",
+        "started_axes": [
+          "A"
+        ],
+        "queued_axes": [],
+        "mode": "G91",
+        "current_feedrate_mm_min": 1.0,
+        "coordinate_display": "G54",
+        "targets": {
+          "A": 0.008
+        }
+      },
+      "stage_status": {
+        "accepted": true,
+        "connected": true,
+        "busy": false,
+        "state": "Idle",
+        "coordinate_display": "G54",
+        "homed_axes": [
+          "A",
+          "X",
+          "Y",
+          "Z"
+        ],
+        "position": {
+          "X": -5.305,
+          "Y": 2.483,
+          "Z": 4.011,
+          "A": 0.009,
+          "B": 2.411
+        },
+        "display_position": {
+          "X": -5.305,
+          "Y": 2.483,
+          "Z": 4.011,
+          "A": 0.008,
+          "B": 2.411
+        },
+        "pending_targets": {},
+        "active_coordinate_axis": "A",
+        "active_coordinate_axes": [
+          "A"
+        ],
+        "current_feedrate_mm_min": 1.0,
+        "api_default_feedrate_mm_min": 10.0
+      }
+    },
+    {
+      "step": 2,
+      "a_target_mm": 0.007,
+      "a_actual_mm": 0.007,
+      "moved_total_mm": 0.001999999999999999,
+      "count": 25,
+      "elapsed_s": 5.339297700000316,
+      "median_ohm": 333341.15970909136,
+      "mean_ohm": 335024.6898243545,
+      "std_ohm": 12395.513161169685,
+      "sem_ohm": 2479.102632233937,
+      "mad_sigma_ohm": 15893.603839973961,
+      "p95_abs_deviation_ohm": 18820.126671960912,
+      "p95_abs_step_ohm": 21646.538442312507,
+      "span_ohm": 45492.6709442861,
+      "outlier_fraction_gt_20ohm": 0.96,
+      "outlier_fraction_gt_50ohm": 0.96,
+      "outlier_fraction_gt_100ohm": 0.96,
+      "polarity_sign_mismatch_count": 0,
+      "compliance_hits": 0,
+      "good_quick": false,
+      "move_response": {
+        "accepted": true,
+        "message": "API coordinate move accepted: A.",
+        "started_axes": [
+          "A"
+        ],
+        "queued_axes": [],
+        "mode": "G91",
+        "current_feedrate_mm_min": 1.0,
+        "coordinate_display": "G54",
+        "targets": {
+          "A": 0.007
+        }
+      },
+      "stage_status": {
+        "accepted": true,
+        "connected": true,
+        "busy": false,
+        "state": "Idle",
+        "coordinate_display": "G54",
+        "homed_axes": [
+          "A",
+          "X",
+          "Y",
+          "Z"
+        ],
+        "position": {
+          "X": -5.305,
+          "Y": 2.483,
+          "Z": 4.011,
+          "A": 0.007,
+          "B": 2.411
+        },
+        "display_position": {
+          "X": -5.305,
+          "Y": 2.483,
+          "Z": 4.011,
+          "A": 0.007,
+          "B": 2.411
+        },
+        "pending_targets": {},
+        "active_coordinate_axis": null,
+        "active_coordinate_axes": [],
+        "current_feedrate_mm_min": 1.0,
+        "api_default_feedrate_mm_min": 10.0
+      }
+    },
+    {
+      "step": 3,
+      "a_target_mm": 0.006,
+      "a_actual_mm": 0.006,
+      "moved_total_mm": 0.002999999999999999,
+      "count": 25,
+      "elapsed_s": 5.345405600000959,
+      "median_ohm": 472121.8734906419,
+      "mean_ohm": 470825.5655367495,
+      "std_ohm": 14977.696763734684,
+      "sem_ohm": 2995.539352746937,
+      "mad_sigma_ohm": 14245.244319261064,
+      "p95_abs_deviation_ohm": 27761.255928135113,
+      "p95_abs_step_ohm": 14230.436057027997,
+      "span_ohm": 61143.16208595451,
+      "outlier_fraction_gt_20ohm": 0.96,
+      "outlier_fraction_gt_50ohm": 0.96,
+      "outlier_fraction_gt_100ohm": 0.96,
+      "polarity_sign_mismatch_count": 0,
+      "compliance_hits": 0,
+      "good_quick": false,
+      "move_response": {
+        "accepted": true,
+        "message": "API coordinate move accepted: A.",
+        "started_axes": [
+          "A"
+        ],
+        "queued_axes": [],
+        "mode": "G91",
+        "current_feedrate_mm_min": 1.0,
+        "coordinate_display": "G54",
+        "targets": {
+          "A": 0.006
+        }
+      },
+      "stage_status": {
+        "accepted": true,
+        "connected": true,
+        "busy": false,
+        "state": "Idle",
+        "coordinate_display": "G54",
+        "homed_axes": [
+          "A",
+          "X",
+          "Y",
+          "Z"
+        ],
+        "position": {
+          "X": -5.305,
+          "Y": 2.483,
+          "Z": 4.011,
+          "A": 0.007,
+          "B": 2.411
+        },
+        "display_position": {
+          "X": -5.305,
+          "Y": 2.483,
+          "Z": 4.011,
+          "A": 0.006,
+          "B": 2.411
+        },
+        "pending_targets": {},
+        "active_coordinate_axis": "A",
+        "active_coordinate_axes": [
+          "A"
+        ],
+        "current_feedrate_mm_min": 1.0,
+        "api_default_feedrate_mm_min": 10.0
+      }
+    },
+    {
+      "step": 4,
+      "a_target_mm": 0.005,
+      "a_actual_mm": 0.005,
+      "moved_total_mm": 0.003999999999999999,
+      "count": 25,
+      "elapsed_s": 5.341320200001064,
+      "median_ohm": 313881.4046048977,
+      "mean_ohm": 305341.4860117142,
+      "std_ohm": 105186.20221799912,
+      "sem_ohm": 21037.240443599825,
+      "mad_sigma_ohm": 131152.03508679196,
+      "p95_abs_deviation_ohm": 196801.70208011946,
+      "p95_abs_step_ohm": 192449.4173942151,
+      "span_ohm": 408087.5280941865,
+      "outlier_fraction_gt_20ohm": 0.96,
+      "outlier_fraction_gt_50ohm": 0.96,
+      "outlier_fraction_gt_100ohm": 0.96,
+      "polarity_sign_mismatch_count": 0,
+      "compliance_hits": 0,
+      "good_quick": false,
+      "move_response": {
+        "accepted": true,
+        "message": "API coordinate move accepted: A.",
+        "started_axes": [
+          "A"
+        ],
+        "queued_axes": [],
+        "mode": "G91",
+        "current_feedrate_mm_min": 1.0,
+        "coordinate_display": "G54",
+        "targets": {
+          "A": 0.005
+        }
+      },
+      "stage_status": {
+        "accepted": true,
+        "connected": true,
+        "busy": false,
+        "state": "Idle",
+        "coordinate_display": "G54",
+        "homed_axes": [
+          "A",
+          "X",
+          "Y",
+          "Z"
+        ],
+        "position": {
+          "X": -5.305,
+          "Y": 2.483,
+          "Z": 4.011,
+          "A": 0.006,
+          "B": 2.411
+        },
+        "display_position": {
+          "X": -5.305,
+          "Y": 2.483,
+          "Z": 4.011,
+          "A": 0.005,
+          "B": 2.411
+        },
+        "pending_targets": {},
+        "active_coordinate_axis": "A",
+        "active_coordinate_axes": [
+          "A"
+        ],
+        "current_feedrate_mm_min": 1.0,
+        "api_default_feedrate_mm_min": 10.0
+      }
+    },
+    {
+      "step": 5,
+      "a_target_mm": 0.004,
+      "a_actual_mm": 0.004,
+      "moved_total_mm": 0.004999999999999999,
+      "count": 25,
+      "elapsed_s": 5.344088199999533,
+      "median_ohm": 88956.97944701175,
+      "mean_ohm": 95586.58160377992,
+      "std_ohm": 20346.93108382228,
+      "sem_ohm": 4069.386216764456,
+      "mad_sigma_ohm": 4557.283489000398,
+      "p95_abs_deviation_ohm": 44795.275305738796,
+      "p95_abs_step_ohm": 56508.76106741531,
+      "span_ohm": 96098.42420984698,
+      "outlier_fraction_gt_20ohm": 0.96,
+      "outlier_fraction_gt_50ohm": 0.96,
+      "outlier_fraction_gt_100ohm": 0.96,
+      "polarity_sign_mismatch_count": 0,
+      "compliance_hits": 0,
+      "good_quick": false,
+      "move_response": {
+        "accepted": true,
+        "message": "API coordinate move accepted: A.",
+        "started_axes": [
+          "A"
+        ],
+        "queued_axes": [],
+        "mode": "G91",
+        "current_feedrate_mm_min": 1.0,
+        "coordinate_display": "G54",
+        "targets": {
+          "A": 0.004
+        }
+      },
+      "stage_status": {
+        "accepted": true,
+        "connected": true,
+        "busy": false,
+        "state": "Idle",
+        "coordinate_display": "G54",
+        "homed_axes": [
+          "A",
+          "X",
+          "Y",
+          "Z"
+        ],
+        "position": {
+          "X": -5.305,
+          "Y": 2.483,
+          "Z": 4.011,
+          "A": 0.005,
+          "B": 2.411
+        },
+        "display_position": {
+          "X": -5.305,
+          "Y": 2.483,
+          "Z": 4.011,
+          "A": 0.004,
+          "B": 2.411
+        },
+        "pending_targets": {},
+        "active_coordinate_axis": "A",
+        "active_coordinate_axes": [
+          "A"
+        ],
+        "current_feedrate_mm_min": 1.0,
+        "api_default_feedrate_mm_min": 10.0
+      }
+    },
+    {
+      "step": 6,
+      "a_target_mm": 0.003,
+      "a_actual_mm": 0.003,
+      "moved_total_mm": 0.005999999999999999,
+      "count": 25,
+      "elapsed_s": 5.343982399999732,
+      "median_ohm": 33729.42394788938,
+      "mean_ohm": 378787.42001154204,
+      "std_ohm": 398813.20400673157,
+      "sem_ohm": 79762.64080134631,
+      "mad_sigma_ohm": 27015.12178627992,
+      "p95_abs_deviation_ohm": 881882.0950913149,
+      "p95_abs_step_ohm": 749186.3351815456,
+      "span_ohm": 905086.9798886175,
+      "outlier_fraction_gt_20ohm": 0.96,
+      "outlier_fraction_gt_50ohm": 0.96,
+      "outlier_fraction_gt_100ohm": 0.96,
+      "polarity_sign_mismatch_count": 7,
+      "compliance_hits": 0,
+      "good_quick": false,
+      "move_response": {
+        "accepted": true,
+        "message": "API coordinate move accepted: A.",
+        "started_axes": [
+          "A"
+        ],
+        "queued_axes": [],
+        "mode": "G91",
+        "current_feedrate_mm_min": 1.0,
+        "coordinate_display": "G54",
+        "targets": {
+          "A": 0.003
+        }
+      },
+      "stage_status": {
+        "accepted": true,
+        "connected": true,
+        "busy": false,
+        "state": "Idle",
+        "coordinate_display": "G54",
+        "homed_axes": [
+          "A",
+          "X",
+          "Y",
+          "Z"
+        ],
+        "position": {
+          "X": -5.305,
+          "Y": 2.483,
+          "Z": 4.011,
+          "A": 0.004,
+          "B": 2.411
+        },
+        "display_position": {
+          "X": -5.305,
+          "Y": 2.483,
+          "Z": 4.011,
+          "A": 0.003,
+          "B": 2.411
+        },
+        "pending_targets": {},
+        "active_coordinate_axis": "A",
+        "active_coordinate_axes": [
+          "A"
+        ],
+        "current_feedrate_mm_min": 1.0,
+        "api_default_feedrate_mm_min": 10.0
+      }
+    },
+    {
+      "step": 7,
+      "a_target_mm": 0.002,
+      "a_actual_mm": 0.002,
+      "moved_total_mm": 0.006999999999999999,
+      "count": 25,
+      "elapsed_s": 5.338816600000428,
+      "median_ohm": 273159.25370591163,
+      "mean_ohm": 358847.28953879094,
+      "std_ohm": 186808.26718403908,
+      "sem_ohm": 37361.653436807814,
+      "mad_sigma_ohm": 148450.61303814733,
+      "p95_abs_deviation_ohm": 432837.4482949552,
+      "p95_abs_step_ohm": 157387.20117033157,
+      "span_ohm": 608781.301452303,
+      "outlier_fraction_gt_20ohm": 0.96,
+      "outlier_fraction_gt_50ohm": 0.96,
+      "outlier_fraction_gt_100ohm": 0.96,
+      "polarity_sign_mismatch_count": 0,
+      "compliance_hits": 0,
+      "good_quick": false,
+      "move_response": {
+        "accepted": true,
+        "message": "API coordinate move accepted: A.",
+        "started_axes": [
+          "A"
+        ],
+        "queued_axes": [],
+        "mode": "G91",
+        "current_feedrate_mm_min": 1.0,
+        "coordinate_display": "G54",
+        "targets": {
+          "A": 0.002
+        }
+      },
+      "stage_status": {
+        "accepted": true,
+        "connected": true,
+        "busy": false,
+        "state": "Idle",
+        "coordinate_display": "G54",
+        "homed_axes": [
+          "A",
+          "X",
+          "Y",
+          "Z"
+        ],
+        "position": {
+          "X": -5.305,
+          "Y": 2.483,
+          "Z": 4.011,
+          "A": 0.003,
+          "B": 2.411
+        },
+        "display_position": {
+          "X": -5.305,
+          "Y": 2.483,
+          "Z": 4.011,
+          "A": 0.002,
+          "B": 2.411
+        },
+        "pending_targets": {},
+        "active_coordinate_axis": "A",
+        "active_coordinate_axes": [
+          "A"
+        ],
+        "current_feedrate_mm_min": 1.0,
+        "api_default_feedrate_mm_min": 10.0
+      }
+    },
+    {
+      "step": 8,
+      "a_target_mm": 0.001,
+      "a_actual_mm": 0.001,
+      "moved_total_mm": 0.008,
+      "count": 25,
+      "elapsed_s": 5.341586800001096,
+      "median_ohm": 567817.5885844887,
+      "mean_ohm": 554238.2722603059,
+      "std_ohm": 53233.724838357615,
+      "sem_ohm": 10646.744967671522,
+      "mad_sigma_ohm": 51738.09968098116,
+      "p95_abs_deviation_ohm": 96713.07549755924,
+      "p95_abs_step_ohm": 35762.58308457738,
+      "span_ohm": 178786.39982688084,
+      "outlier_fraction_gt_20ohm": 0.96,
+      "outlier_fraction_gt_50ohm": 0.96,
+      "outlier_fraction_gt_100ohm": 0.96,
+      "polarity_sign_mismatch_count": 0,
+      "compliance_hits": 0,
+      "good_quick": false,
+      "move_response": {
+        "accepted": true,
+        "message": "API coordinate move accepted: A.",
+        "started_axes": [
+          "A"
+        ],
+        "queued_axes": [],
+        "mode": "G91",
+        "current_feedrate_mm_min": 1.0,
+        "coordinate_display": "G54",
+        "targets": {
+          "A": 0.001
+        }
+      },
+      "stage_status": {
+        "accepted": true,
+        "connected": true,
+        "busy": false,
+        "state": "Idle",
+        "coordinate_display": "G54",
+        "homed_axes": [
+          "A",
+          "X",
+          "Y",
+          "Z"
+        ],
+        "position": {
+          "X": -5.305,
+          "Y": 2.483,
+          "Z": 4.011,
+          "A": 0.002,
+          "B": 2.411
+        },
+        "display_position": {
+          "X": -5.305,
+          "Y": 2.483,
+          "Z": 4.011,
+          "A": 0.001,
+          "B": 2.411
+        },
+        "pending_targets": {},
+        "active_coordinate_axis": "A",
+        "active_coordinate_axes": [
+          "A"
+        ],
+        "current_feedrate_mm_min": 1.0,
+        "api_default_feedrate_mm_min": 10.0
+      }
+    },
+    {
+      "step": 9,
+      "a_target_mm": 0.0,
+      "a_actual_mm": 0.0,
+      "moved_total_mm": 0.009,
+      "count": 25,
+      "elapsed_s": 5.340464199998678,
+      "median_ohm": 16990.07062774844,
+      "mean_ohm": 16978.9421032018,
+      "std_ohm": 66.80349070994787,
+      "sem_ohm": 13.360698141989573,
+      "mad_sigma_ohm": 59.44680864680106,
+      "p95_abs_deviation_ohm": 119.28538879360492,
+      "p95_abs_step_ohm": 73.49774288897345,
+      "span_ohm": 274.78676612246636,
+      "outlier_fraction_gt_20ohm": 0.76,
+      "outlier_fraction_gt_50ohm": 0.4,
+      "outlier_fraction_gt_100ohm": 0.16,
+      "polarity_sign_mismatch_count": 0,
+      "compliance_hits": 0,
+      "good_quick": true,
+      "move_response": {
+        "accepted": true,
+        "message": "API coordinate move accepted: A.",
+        "started_axes": [
+          "A"
+        ],
+        "queued_axes": [],
+        "mode": "G91",
+        "current_feedrate_mm_min": 1.0,
+        "coordinate_display": "G54",
+        "targets": {
+          "A": 0.0
+        }
+      },
+      "stage_status": {
+        "accepted": true,
+        "connected": true,
+        "busy": false,
+        "state": "Idle",
+        "coordinate_display": "G54",
+        "homed_axes": [
+          "A",
+          "X",
+          "Y",
+          "Z"
+        ],
+        "position": {
+          "X": -5.305,
+          "Y": 2.483,
+          "Z": 4.011,
+          "A": 0.001,
+          "B": 2.411
+        },
+        "display_position": {
+          "X": -5.305,
+          "Y": 2.483,
+          "Z": 4.011,
+          "A": 0.0,
+          "B": 2.411
+        },
+        "pending_targets": {},
+        "active_coordinate_axis": "A",
+        "active_coordinate_axes": [
+          "A"
+        ],
+        "current_feedrate_mm_min": 1.0,
+        "api_default_feedrate_mm_min": 10.0
+      }
+    }
+  ],
+  "confirm_trace_csv_path": "C:\\Users\\Public\\code\\probe_station_gui\\measurements\\a_axis_contact_seek_20260528-193703_confirm_trace.csv",
+  "csv_path": "C:\\Users\\Public\\code\\probe_station_gui\\measurements\\a_axis_contact_seek_20260528-193703.csv",
+  "json_path": "C:\\Users\\Public\\code\\probe_station_gui\\measurements\\a_axis_contact_seek_20260528-193703.json",
+  "png_path": "C:\\Users\\Public\\code\\probe_station_gui\\measurements\\a_axis_contact_seek_20260528-193703.png"
+}

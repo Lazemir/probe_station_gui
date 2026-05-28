@@ -1,0 +1,29 @@
+timestamp: 20260528-184535
+driver: probe_station_measure
+idn: 2400 KEITHLEY INSTRUMENTS INC.,MODEL 2400,4029921,C32   Oct  4 2010 14:20:11/A02  /T/K; 2182A KEITHLEY INSTRUMENTS INC.,MODEL 2182A,4500771,C08/B01
+source: GPIB0::1::INSTR
+voltmeter: GPIB0::2::INSTR
+config: KeithleyDeltaConfig(measurement_voltage_v=0.03, source_voltage_range_v=0.21, voltmeter_range_v=0.1, current_range_a=1e-05, compliance_current_a=1e-05, nplc=1.0, terminals='rear', trigger_delay_s=0.0, use_buffer=True, use_trigger_link=True)
+chunks: 5
+chunk_size: 50
+pairs: 250
+chunk_times_s: 9.138956, 9.152822, 9.141003, 9.142521, 9.149389
+elapsed_s: 45.724913
+pairs_per_s: 5.467479
+median_ohm: 15689.1090548
+mean_ohm: 15689.0926606
+std_ohm: 6.24072844822
+sem_ohm: 0.3946983231
+mad_sigma_ohm: 7.33190057944
+p95_abs_deviation_ohm: 10.9401337358
+p95_abs_step_ohm: 15.1800357726
+span_ohm: 30.2032823326
+outlier_fraction_gt_20ohm: 0
+outlier_fraction_gt_50ohm: 0
+outlier_fraction_gt_100ohm: 0
+polarity_sign_mismatch_count: 0
+compliance_hit_count: 0
+classification: good
+raw_csv: C:\Users\Public\code\probe_station_gui\measurements\contact_probe_station_measure_chunked_20260528-184535_raw.csv
+summary: C:\Users\Public\code\probe_station_gui\measurements\contact_probe_station_measure_chunked_20260528-184535_summary.txt
+plot: C:\Users\Public\code\probe_station_gui\measurements\contact_probe_station_measure_chunked_20260528-184535.png

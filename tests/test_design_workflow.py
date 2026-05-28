@@ -1,7 +1,5 @@
 import importlib.util
 import sys
-import tempfile
-import textwrap
 import types
 import unittest
 from pathlib import Path
@@ -35,9 +33,6 @@ def _load_module(module_name: str, relative_path: str):
 design_model = _load_module(
     "probe_station_gui.design_model", "probe_station_gui/design_model.py"
 )
-design_script = _load_module(
-    "probe_station_gui.design_script", "probe_station_gui/design_script.py"
-)
 design_session = _load_module(
     "probe_station_gui.design_session", "probe_station_gui/design_session.py"
 )
@@ -46,9 +41,6 @@ DesignDocument = design_model.DesignDocument
 DesignModelError = design_model.DesignModelError
 DesignRegistration = design_model.DesignRegistration
 MeasurementTarget = design_model.MeasurementTarget
-ScriptContext = design_script.ScriptContext
-DesignScriptError = design_script.DesignScriptError
-load_measurement_plan = design_script.load_measurement_plan
 AlignmentPreparation = design_session.AlignmentPreparation
 DesignSession = design_session.DesignSession
 
@@ -224,64 +216,6 @@ class DesignDocumentTest(unittest.TestCase):
         restored = rotated.with_rotation_delta(-1)
         self.assertEqual(restored.rotation_quarter_turns, 0)
         self.assertEqual(restored.bounds, document.bounds)
-
-
-class DesignScriptTest(unittest.TestCase):
-    def _make_document(self) -> DesignDocument:
-        return DesignDocument(
-            path=REPO_ROOT / "tests" / "fixtures" / "synthetic.gds",
-            library=object(),
-            top_cell=object(),
-            top_cell_name="TOP",
-            cell_names=("TOP",),
-            dbu=1e-6,
-            user_unit=1e-9,
-            bounds=(0.0, 0.0, 100.0, 200.0),
-            polygons_by_layer={(1, 0): (np.asarray([[0.0, 0.0], [1.0, 0.0]]),)},
-            visible_layers=frozenset({(1, 0)}),
-        )
-
-    def test_load_measurement_plan(self) -> None:
-        document = self._make_document()
-        context = ScriptContext(document)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            script_path = Path(tmpdir) / "plan.py"
-            script_path.write_text(
-                textwrap.dedent(
-                    """
-                    def build_plan(context):
-                        return [
-                            {
-                                "id": "t1",
-                                "label": "Target 1",
-                                "design_center": (10.0, 20.0),
-                                "group": "A",
-                            },
-                            {
-                                "id": "t2",
-                                "label": "Target 2",
-                                "design_center": (30.0, 40.0),
-                            },
-                        ]
-                    """
-                ),
-                encoding="utf-8",
-            )
-
-            module, targets = load_measurement_plan(script_path, context)
-
-        self.assertTrue(module.__name__.startswith("probe_station_plan_"))
-        self.assertEqual([target.id for target in targets], ["t1", "t2"])
-        self.assertEqual(targets[0].group, "A")
-
-    def test_load_measurement_plan_requires_entrypoint(self) -> None:
-        document = self._make_document()
-        context = ScriptContext(document)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            script_path = Path(tmpdir) / "bad_plan.py"
-            script_path.write_text("VALUE = 1\n", encoding="utf-8")
-            with self.assertRaises(DesignScriptError):
-                load_measurement_plan(script_path, context)
 
 
 class DesignSessionTest(unittest.TestCase):

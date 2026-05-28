@@ -36,7 +36,7 @@ class AlignmentPreparation:
 
 @dataclass
 class DesignSession:
-    """Track the loaded design, registration, and script-generated targets."""
+    """Track the loaded design, registration, and route navigation state."""
 
     document: Optional[DesignDocument] = None
     registration: Optional[DesignRegistration] = None
@@ -50,8 +50,6 @@ class DesignSession:
     check_stage_marks: list[Point2D] = field(default_factory=list)
     targets: list[MeasurementTarget] = field(default_factory=list)
     selected_target_index: int = -1
-    script_path: str | None = None
-    script_module_name: str | None = None
     route: MeasurementRoute | None = None
     selected_route_point_index: int = -1
     registration_status: str = "No design registration."
@@ -104,8 +102,6 @@ class DesignSession:
         self.document = document
         self.clear_targets()
         self.clear_route()
-        self.script_path = None
-        self.script_module_name = None
         self.source_design_marks = self._coerce_optional_points(
             state.get("source_design_marks"),
             expected_count=2,
@@ -152,8 +148,6 @@ class DesignSession:
         self.clear_targets()
         self.clear_route()
         self.clear_registration()
-        self.script_path = None
-        self.script_module_name = None
 
     def set_top_cell(self, top_cell_name: str) -> None:
         """Switch the active top cell and clear derived state."""
@@ -415,13 +409,13 @@ class DesignSession:
         self._rebuild_registration()
 
     def clear_targets(self) -> None:
-        """Remove the current measurement plan."""
+        """Remove optional navigation targets."""
 
         self.targets.clear()
         self.selected_target_index = -1
 
     def set_targets(self, targets: list[MeasurementTarget]) -> None:
-        """Replace the measurement plan with a new ordered target list."""
+        """Replace optional navigation targets with a new ordered list."""
 
         self.targets = list(targets)
         self.selected_target_index = 0 if self.targets else -1

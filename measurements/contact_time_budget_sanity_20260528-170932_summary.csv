@@ -1,0 +1,2 @@
+nplc,rounds,total_pairs,median_pairs_per_round,median_pairs_per_s,median_of_block_medians_ohm,span_of_block_medians_ohm,median_block_sem_ohm,median_block_mad_sigma_ohm,median_block_span_ohm,eff_sem_ohm_sqrt_s
+1.0,1,30,30.0,5.977477700870174,14740.797764463148,0.0,0.7194856670796671,4.4188850980400085,14.806547985765064,1.6118469129049016

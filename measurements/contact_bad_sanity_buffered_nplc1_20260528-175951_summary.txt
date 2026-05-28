@@ -1,0 +1,25 @@
+contact_bad_sanity_buffered_nplc1
+raw_csv=C:\Users\Public\code\probe_station_gui\measurements\contact_bad_sanity_buffered_nplc1_20260528-175951_raw.csv
+nplc=1
+pairs_requested=250
+pairs_recorded=250
+acquisition_s=33.119078
+fetch_s=4.391708
+total_s=37.510786
+pairs_per_s_acq=7.548519
+mean_ohm=35418.3646
+median_ohm=35424.0007
+std_ohm=504.331238
+sem_ohm=31.8967081
+mad_sigma_ohm=635.157998
+p95_abs_dev_ohm=835.690136
+p95_abs_step_ohm=711.005766
+span_ohm=2250.95278
+outlier_fraction_gt_20ohm=0.972
+outlier_fraction_gt_50ohm=0.944
+outlier_fraction_gt_100ohm=0.896
+min_abs_delta_i_a=1.6489153e-06
+polarity_sign_mismatch_pairs=0
+source_error=0,"No error"
+voltmeter_error=0,"No error"
+source_output_after=0

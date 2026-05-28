@@ -1,0 +1,20 @@
+{
+  "count": 250,
+  "elapsed_s": 40.49390080000012,
+  "pairs_per_s": 6.17376926057959,
+  "median_ohm": 238925.55693788925,
+  "mean_ohm": 238757.61550444548,
+  "std_ohm": 3972.8500387332742,
+  "sem_ohm": 251.2650984937063,
+  "mad_sigma_ohm": 3931.553617916698,
+  "p95_abs_deviation_ohm": 8214.102886082814,
+  "p95_abs_step_ohm": 6635.5728414975865,
+  "span_ohm": 21352.963145044225,
+  "outlier_fraction_gt_20ohm": 0.988,
+  "outlier_fraction_gt_50ohm": 0.984,
+  "outlier_fraction_gt_100ohm": 0.984,
+  "polarity_sign_mismatch_count": 0,
+  "compliance_hits": 0,
+  "png_path": "C:\\Users\\Public\\code\\probe_station_gui\\measurements\\contact_probe_station_measure_external_driver_20260528-193040.png",
+  "csv_path": "C:\\Users\\Public\\code\\probe_station_gui\\measurements\\contact_probe_station_measure_external_driver_20260528-193040.csv"
+}

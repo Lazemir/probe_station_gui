@@ -1,0 +1,12 @@
+raw=C:\Users\Public\code\probe_station_gui\measurements\buffered_contact_nplc3_clim10uA_20260528-154729_raw.csv
+elapsed_s=63.04379609999978
+pairs=120
+pairs_per_s=1.9034386795118832
+mean_ohm=15078.739622256546
+std_ohm=32.70710243808037
+sem_ohm=2.985736299328139
+mean_ohm_skip10=15077.522046876178
+std_ohm_skip10=30.868338100338022
+sem_ohm_skip10=2.943180557085666
+post_errors_2182=['0,"No error"']
+post_errors_2400=['0,"No error"']
