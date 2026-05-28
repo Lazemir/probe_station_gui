@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QSplitter,
     QSpinBox,
+    QStackedWidget,
     QTabWidget,
     QToolButton,
     QTreeWidget,
@@ -967,6 +968,20 @@ class CameraSettingsWidget(QWidget):
         self._status_label.setText(str(payload.get("message") or "Camera settings loaded."))
 
     def _add_camera_feature_tabs(self, nodes: list[NodePayload]) -> None:
+        container = QWidget(self)
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        group_row = QHBoxLayout()
+        group_combo = QComboBox(container)
+        group_row.addWidget(QLabel("Feature filter", container))
+        group_row.addWidget(group_combo)
+        group_row.addStretch(1)
+        layout.addLayout(group_row)
+
+        stack = QStackedWidget(container)
+        layout.addWidget(stack, 1)
+
         added = False
         for title, category_terms, feature_prefixes in self.CAMERA_FEATURE_TABS:
             group_nodes = self._camera_group_nodes(
@@ -978,12 +993,16 @@ class CameraSettingsWidget(QWidget):
                 continue
             page = self._create_page("camera", group_nodes)
             self._pages[f"camera:{title}"] = page
-            self._tabs.addTab(page, title)
+            group_combo.addItem(title)
+            stack.addWidget(page)
             added = True
 
         page = self._create_page("camera", nodes)
         self._pages["camera:Features"] = page
-        self._tabs.addTab(page, "Features" if added else "Camera")
+        group_combo.addItem("Features" if added else "All")
+        stack.addWidget(page)
+        group_combo.currentIndexChanged.connect(stack.setCurrentIndex)
+        self._tabs.addTab(container, "Camera")
 
     def _create_page(
         self,
