@@ -355,13 +355,7 @@ class Grabber(QObject):
             if info is None:
                 continue
             nodes.append(info)
-        return sorted(
-            nodes,
-            key=lambda item: (
-                str(item.get("display_name") or item.get("name") or "").lower(),
-                str(item.get("name") or "").lower(),
-            ),
-        )
+        return nodes
 
     def _read_node_info(
         self,
@@ -400,17 +394,21 @@ class Grabber(QObject):
             "maximum": self._safe_node_value(node, "get_max_value"),
             "increment": self._safe_node_value(node, "get_inc"),
             "entries": [],
+            "children": [],
         }
         if readable:
             info["value"] = self._safe_node_string(node, "get_node_value_as_str")
         if node_type == "enum":
             info["entries"] = self._enum_entries(node)
+        if node_type == "category":
+            info["children"] = self._category_children(node)
         return info
 
     def _node_type(self, node: object) -> str:
         class_name = type(node).__name__
         class_types = {
             "SpinBoolNode": "boolean",
+            "SpinCategoryNode": "category",
             "SpinCommandNode": "command",
             "SpinEnumNode": "enum",
             "SpinFloatNode": "float",
@@ -425,6 +423,8 @@ class Grabber(QObject):
         lowered = value.lower()
         if "boolean" in lowered:
             return "boolean"
+        if "category" in lowered:
+            return "category"
         if "command" in lowered:
             return "command"
         if "enumeration" in lowered or lowered == "enum":
@@ -454,6 +454,27 @@ class Grabber(QObject):
             if name:
                 entries.append(name)
         return entries
+
+    def _category_children(self, node: object) -> list[str]:
+        children: list[str] = []
+        for method_name in ("get_features", "get_children", "get_nodes"):
+            method = getattr(node, method_name, None)
+            if method is None:
+                continue
+            try:
+                child_nodes = method()
+            except Exception:
+                continue
+            for child in child_nodes:
+                if isinstance(child, str):
+                    name = child
+                else:
+                    name = self._safe_node_string(child, "get_name")
+                if name and name not in children:
+                    children.append(name)
+            if children:
+                break
+        return children
 
     def _apply_camera_setting(self, payload: dict[str, Any]) -> dict[str, Any]:
         map_key = str(payload.get("map_key", ""))
