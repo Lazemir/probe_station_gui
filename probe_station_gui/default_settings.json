@@ -61,6 +61,13 @@
         "modifiers": 0,
         "text": "e"
       }
+    ],
+    "toggle_jog_step": [
+      {
+        "qt_key": 74,
+        "modifiers": 0,
+        "text": "j"
+      }
     ]
   },
   "logging": {

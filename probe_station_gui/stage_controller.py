@@ -227,6 +227,7 @@ class StageController(QObject):
         r"^\[(?P<system>G5(?:4|5|6|7|8|9(?:\.[123])?)):(?P<coords>[^\]]+)\]$"
     )
     AXIS_INDEX = {"X": 0, "Y": 1, "Z": 2, "A": 3, "B": 4, "C": 5}
+    CONTROLLER_LIMIT_AXES = ("X", "Y", "Z", "A")
     WORK_COORDINATE_SYSTEMS = (
         "G54",
         "G55",
@@ -384,6 +385,14 @@ class StageController(QObject):
             "needles_up": bool(self._needles_up),
             "needles_known": bool(self._needles_known),
             "controller_session_marker": self._controller_session_marker,
+            "axis_limits": {
+                axis: [float(values[0]), float(values[1])]
+                for axis, values in self._axis_limits.items()
+            },
+            "axis_max_feedrates": {
+                axis: float(rate)
+                for axis, rate in self._axis_max_feedrates.items()
+            },
         }
 
     def import_cached_controller_state(self, data: dict[str, object]) -> None:
@@ -404,18 +413,39 @@ class StageController(QObject):
         needles_up = bool(data.get("needles_up", False))
         needles_known = bool(data.get("needles_known", False))
         marker = self._parse_cached_controller_session_marker(data)
+        axis_limits = self._parse_cached_axis_limits(data.get("axis_limits"))
+        axis_max_feedrates = self._parse_cached_axis_max_feedrates(
+            data.get("axis_max_feedrates")
+        )
+        coordinate_system = data.get("active_work_coordinate_system")
+        coordinate_offsets = self._parse_cached_coordinate_offsets(
+            data.get("controller_coordinate_offsets")
+        )
 
         self._controller_state_stale = True
         self._controller_session_marker = marker
+        if isinstance(coordinate_system, str):
+            normalized_system = coordinate_system.strip().upper()
+            if normalized_system in self.WORK_COORDINATE_SYSTEMS:
+                self._active_work_coordinate_system = normalized_system
+        if coordinate_offsets:
+            self._controller_coordinate_offsets = coordinate_offsets
+        if axis_limits:
+            self._axis_limits = axis_limits
+        if axis_max_feedrates:
+            self._axis_max_feedrates = axis_max_feedrates
         self._update_homing_status(homed_axes)
         self._set_needles_state(needles_up, known=needles_known)
         self._refresh_axis_a_ready_from_state()
         logger.info(
-            "Restored cached controller homing state pending live status: homed_axes=%s needles_up=%s needles_known=%s marker=%s",
+            "Restored cached controller state pending live status: homed_axes=%s needles_up=%s needles_known=%s marker=%s axis_limits=%s axis_max_feedrates=%s coordinate_system=%s",
             sorted(homed_axes),
             needles_up,
             needles_known,
             marker,
+            sorted(axis_limits),
+            sorted(axis_max_feedrates),
+            self._active_work_coordinate_system,
         )
 
     def cached_controller_session_is_current(self, data: dict[str, object]) -> bool:
@@ -467,6 +497,8 @@ class StageController(QObject):
         self._controller_session_marker = None
         self._active_work_coordinate_system = None
         self._controller_coordinate_offsets.clear()
+        self._axis_limits.clear()
+        self._axis_max_feedrates.clear()
         self._controller_state_stale = True
         self._update_homing_status(set())
         self._update_limit_axes(set())
@@ -2457,7 +2489,7 @@ class StageController(QObject):
             self._set_needles_state(True, known=True, zone="raise")
         self._move_safety_check()
 
-        self._ensure_axis_limits(serial_connection)
+        self._ensure_axis_limits(serial_connection, required_axes=("Z",))
         local_range = float(self._objective_autofocus_range_mm)
         fine_step = float(self._objective_autofocus_fine_step_mm)
         if fine_step <= 0:
@@ -2946,20 +2978,28 @@ class StageController(QObject):
 
             self.status_message.emit("Loading controller startup state...")
             with self._serial_session_lock:
-                try:
-                    axis_feedrates = self._query_axis_max_feedrates_locked(
-                        serial_connection
+                axis_feedrates = dict(self._axis_max_feedrates)
+                if axis_feedrates:
+                    logger.info(
+                        "Using cached controller axis max feedrates for unchanged controller session."
                     )
-                except StageControllerError as exc:
-                    axis_feedrates = {}
-                    logger.warning(
-                        "Unable to read axis max feedrates from controller: %s",
-                        exc,
-                    )
+                else:
+                    try:
+                        axis_feedrates = self._query_axis_max_feedrates_locked(
+                            serial_connection
+                        )
+                    except StageControllerError as exc:
+                        axis_feedrates = {}
+                        logger.warning(
+                            "Unable to read axis max feedrates from controller: %s",
+                            exc,
+                        )
                 if axis_feedrates:
                     self.apply_axis_max_feedrates(axis_feedrates)
                     self.axis_max_feedrates_changed.emit(dict(axis_feedrates))
-                self._ensure_axis_limits(serial_connection)
+                self._ensure_axis_limits(
+                    serial_connection, required_axes=self.CONTROLLER_LIMIT_AXES
+                )
                 self._refresh_coordinate_system_state(
                     serial_connection, apply_preference=True
                 )
@@ -3986,7 +4026,12 @@ class StageController(QObject):
         if not ignore_needle_safety:
             self._move_safety_check()
         if not self._motion_safety_disabled:
-            self._ensure_axis_limits(serial_connection)
+            self._ensure_axis_limits(
+                serial_connection,
+                required_axes=tuple(
+                    axis for axis, delta in move.items() if abs(delta) >= 1e-6
+                ),
+            )
             self._check_relative_move_limits(
                 serial_connection, move, allow_relative=allow_relative
             )
@@ -4057,7 +4102,9 @@ class StageController(QObject):
             self._move_safety_check()
         current_values: dict[str, float] = {}
         if not self._motion_safety_disabled:
-            self._ensure_axis_limits(serial_connection)
+            self._ensure_axis_limits(
+                serial_connection, required_axes=tuple(ordered_targets)
+            )
             status = self._query_status(serial_connection)
             if status is None:
                 raise StageControllerError("Unable to read position for absolute move.")
@@ -4739,6 +4786,72 @@ class StageController(QObject):
             return None
         return marker if marker > 0 else None
 
+    @classmethod
+    def _parse_cached_axis_limits(
+        cls, raw_limits: object
+    ) -> dict[str, tuple[float, float]]:
+        limits: dict[str, tuple[float, float]] = {}
+        if not isinstance(raw_limits, dict):
+            return limits
+        for raw_axis, raw_values in raw_limits.items():
+            axis = str(raw_axis).strip().upper()
+            if axis not in cls.AXIS_INDEX or axis == "B":
+                continue
+            if not isinstance(raw_values, (list, tuple)) or len(raw_values) < 2:
+                continue
+            try:
+                min_value = float(raw_values[0])
+                max_value = float(raw_values[1])
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(min_value) or not math.isfinite(max_value):
+                continue
+            if max_value < min_value:
+                continue
+            limits[axis] = (min_value, max_value)
+        return limits
+
+    @classmethod
+    def _parse_cached_axis_max_feedrates(
+        cls, raw_feedrates: object
+    ) -> dict[str, float]:
+        feedrates: dict[str, float] = {}
+        if not isinstance(raw_feedrates, dict):
+            return feedrates
+        for raw_axis, raw_rate in raw_feedrates.items():
+            axis = str(raw_axis).strip().upper()
+            if axis not in cls.AXIS_INDEX:
+                continue
+            try:
+                rate = float(raw_rate)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(rate) and rate > 0.0:
+                feedrates[axis] = max(cls.MIN_FEEDRATE, rate)
+        return feedrates
+
+    @classmethod
+    def _parse_cached_coordinate_offsets(
+        cls, raw_offsets: object
+    ) -> dict[str, tuple[float, ...]]:
+        offsets: dict[str, tuple[float, ...]] = {}
+        if not isinstance(raw_offsets, dict):
+            return offsets
+        for raw_system, raw_values in raw_offsets.items():
+            system = str(raw_system).strip().upper()
+            if system not in cls.WORK_COORDINATE_SYSTEMS:
+                continue
+            if not isinstance(raw_values, (list, tuple)):
+                continue
+            try:
+                values = tuple(float(value) for value in raw_values)
+            except (TypeError, ValueError):
+                continue
+            if len(values) < 3 or not all(math.isfinite(value) for value in values):
+                continue
+            offsets[system] = values
+        return offsets
+
     @staticmethod
     def _new_controller_session_marker() -> int:
         return 100 + (time.monotonic_ns() % 900)
@@ -4905,11 +5018,37 @@ class StageController(QObject):
             limits.pop("B", None)
             self._axis_limits.update(limits)
 
-    def _ensure_axis_limits(self, serial_connection: serial.Serial) -> None:
-        if not self._axis_limits:
+    def _ensure_axis_limits(
+        self,
+        serial_connection: serial.Serial,
+        *,
+        required_axes: tuple[str, ...] | list[str] | set[str] | None = None,
+    ) -> None:
+        normalized_required = [
+            str(axis).strip().upper()
+            for axis in (required_axes or ())
+            if str(axis).strip().upper() in self.CONTROLLER_LIMIT_AXES
+        ]
+        missing_axes = [
+            axis for axis in normalized_required if axis not in self._axis_limits
+        ]
+        if not self._axis_limits or missing_axes:
+            logger.info(
+                "Controller axis limits missing for %s; reading startup limits.",
+                ", ".join(missing_axes) if missing_axes else "all axes",
+            )
             self._read_startup_limits(serial_connection)
+            missing_axes = [
+                axis
+                for axis in normalized_required
+                if axis not in self._axis_limits
+            ]
         if not self._axis_limits:
             raise StageControllerError("Axis limits unavailable from startup message.")
+        if missing_axes:
+            raise StageControllerError(
+                "Axis limits unavailable for " + ", ".join(missing_axes) + "."
+            )
 
     @staticmethod
     def _parse_startup_limits(lines: list[str]) -> dict[str, tuple[float, float]]:

@@ -26,6 +26,9 @@ class ControlAction:
     axis: str
     direction: int
     label: str
+    default_qt_key: int = 0
+    default_text: str = ""
+    default_modifiers: int = 0
 
 
 CONTROL_ACTIONS: tuple[ControlAction, ...] = (
@@ -33,6 +36,7 @@ CONTROL_ACTIONS: tuple[ControlAction, ...] = (
     ControlAction("move_y_negative", "Y", -1, "Move Down"),
     ControlAction("move_x_negative", "X", -1, "Move Left"),
     ControlAction("move_x_positive", "X", 1, "Move Right"),
+    ControlAction("toggle_jog_step", "", 0, "Toggle Jog/Step", 74, "j"),
 )
 
 FLUIDNC_AXIS_NAMES: tuple[str, ...] = ("X", "Y", "Z", "A", "B", "C")
@@ -1020,7 +1024,7 @@ class SettingsManager:
 
         controls = {key: list(value) for key, value in self._settings.controls.items()}
         for action in CONTROL_ACTIONS:
-            controls.setdefault(action.key, [])
+            controls.setdefault(action.key, self._default_control_bindings(action))
         return controls
 
     def logging_level_name(self) -> str:
@@ -1553,8 +1557,14 @@ class SettingsManager:
                         if self._should_keep_control_binding(binding):
                             bindings.append(binding)
             controls[key] = bindings
+        raw_control_keys = set(controls_raw) if isinstance(controls_raw, dict) else set()
         for action in CONTROL_ACTIONS:
-            controls.setdefault(action.key, [])
+            if action.key not in controls:
+                controls[action.key] = (
+                    self._default_control_bindings(action)
+                    if action.key not in raw_control_keys
+                    else []
+                )
         logging_raw = raw.get("logging", {}) if isinstance(raw, dict) else {}
         logging_settings = self._parse_logging(logging_raw)
         if not logging_settings.file:
@@ -2600,6 +2610,18 @@ class SettingsManager:
         if not text:
             return True
         return cls.CYRILLIC_PATTERN.search(text) is None
+
+    @staticmethod
+    def _default_control_bindings(action: ControlAction) -> List[KeyBinding]:
+        if action.default_qt_key <= 0:
+            return []
+        return [
+            KeyBinding(
+                qt_key=int(action.default_qt_key),
+                modifiers=int(action.default_modifiers),
+                text=str(action.default_text),
+            )
+        ]
 
     def _parse_feedrate_groups(
         self,

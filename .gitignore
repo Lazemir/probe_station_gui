@@ -20,3 +20,6 @@ dist/
 
 # Generated calibration/raw measurement artifacts. Existing tracked files stay tracked.
 calibrations/*
+manuals/
+measurements/
+scripts/

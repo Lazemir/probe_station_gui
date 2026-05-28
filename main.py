@@ -364,6 +364,8 @@ class Main(QMainWindow):
     design_layout_module_ready: Signal = Signal(object, object)
     design_document_loaded: Signal = Signal(int, object, object)
     route_measurement_status: Signal = Signal(str)
+    route_measurement_waiting_changed: Signal = Signal(bool)
+    route_measurement_result: Signal = Signal(object, int, int, bool)
     route_measurement_recorded: Signal = Signal(object, int, int)
     route_measurement_finished: Signal = Signal(bool, str, str)
 
@@ -390,6 +392,7 @@ class Main(QMainWindow):
     TERMINAL_REFRESH_DELAYS_MS = (180, 500)
     TERMINAL_RESET_REFRESH_DELAYS_MS = (500, 1100, 1800)
     TERMINAL_RESUME_AFTER_JOG_MS = 180
+    CONTROLLER_ACTIVE_STATE_STALE_S = 2.0
     STAGE_AXIS_NAMES = ("X", "Y", "Z", "A", "B", "C")
     MIN_FEEDRATE_MM_MIN = 1.0
     STAGE_AXIS_DIMMED_BACKGROUNDS = {
@@ -563,6 +566,10 @@ class Main(QMainWindow):
         self.design_layout_module_ready.connect(self._on_design_layout_module_ready)
         self.design_document_loaded.connect(self._on_design_document_loaded)
         self.route_measurement_status.connect(self._on_route_measurement_status)
+        self.route_measurement_waiting_changed.connect(
+            self._on_route_measurement_waiting_changed
+        )
+        self.route_measurement_result.connect(self._on_route_measurement_result)
         self.route_measurement_recorded.connect(self._on_route_measurement_recorded)
         self.route_measurement_finished.connect(self._on_route_measurement_finished)
 
@@ -946,7 +953,7 @@ class Main(QMainWindow):
                 "accepted": False,
                 "message": "Stage is busy. Ignoring surface-map target.",
             }
-        feedrate = max(self.MIN_FEEDRATE_MM_MIN, float(self._current_linear_feedrate()))
+        feedrate = self._coordinate_feedrate_for_axes(("X", "Y"))
         targets: dict[str, tuple[float, float]] = {}
         for axis, display_target in (("X", x_mm), ("Y", y_mm)):
             try:
@@ -1579,7 +1586,49 @@ class Main(QMainWindow):
         if not hasattr(self, "stage_controller"):
             return False
         state = (self.stage_controller.latest_stage_state() or "").strip().lower()
-        return state in {"run", "jog"}
+        if state not in {"run", "jog"}:
+            return False
+        if self._controller_latest_state_is_stale():
+            logger.debug(
+                "Ignoring stale controller active state %r after %.3f s.",
+                state,
+                self._controller_latest_state_age_s() or 0.0,
+            )
+            return False
+        return True
+
+    def _controller_latest_state_blocks_motion(self) -> bool:
+        if not hasattr(self, "stage_controller"):
+            return False
+        state = (self.stage_controller.latest_stage_state() or "").strip().lower()
+        if state in {"", "idle"}:
+            return False
+        if state in {"run", "jog"}:
+            return self._controller_reports_active_motion()
+        return True
+
+    def _controller_latest_state_age_s(self) -> float | None:
+        timestamp_getter = getattr(
+            getattr(self, "stage_controller", None),
+            "last_status_timestamp",
+            None,
+        )
+        if not callable(timestamp_getter):
+            return None
+        timestamp = timestamp_getter()
+        if timestamp is None:
+            return None
+        try:
+            return max(0.0, time.monotonic() - float(timestamp))
+        except (TypeError, ValueError):
+            return None
+
+    def _controller_latest_state_is_stale(self) -> bool:
+        age_s = self._controller_latest_state_age_s()
+        return (
+            age_s is not None
+            and age_s > self.CONTROLLER_ACTIVE_STATE_STALE_S
+        )
 
     def _schedule_cancel_state_refresh(self) -> None:
         for delay_ms in (0, 100, 300, 1000, 2500):
@@ -1938,6 +1987,7 @@ class Main(QMainWindow):
         )
         self._prepare_persisted_design_restore(cached_state)
         self.stage_controller.import_cached_controller_state(cached_state)
+        self._apply_axis_feedrate_limits(self._current_axis_feedrate_limits())
         self._show_status("Restored cached homing state; reading live coordinates.")
 
     def _persist_controller_state(self, *_args) -> None:
@@ -2280,36 +2330,7 @@ class Main(QMainWindow):
         self.stage_controller.apply_axis_z_calibration(
             self.settings_manager.axis_z_calibration_configuration()
         )
-        self.stage_controller.apply_needle_calibration(
-            raise_position_mm=(
-                needle_settings.raise_position_mm
-                if needle_settings.raise_position_configured
-                else None
-            ),
-            down_position_mm=(
-                needle_settings.down_position_mm
-                if needle_settings.down_position_configured
-                else None
-            ),
-            contact_zone_mm=needle_settings.contact_zone_mm,
-        )
-        if self.joystick_panel is not None:
-            self.joystick_panel.set_needle_contact_coordinate(
-                "raise",
-                self._display_a_for_needle_lowering(
-                    needle_settings.raise_position_mm
-                    if needle_settings.raise_position_configured
-                    else None
-                ),
-            )
-            self.joystick_panel.set_needle_contact_coordinate(
-                "lower",
-                self._display_a_for_needle_lowering(
-                    needle_settings.down_position_mm
-                    if needle_settings.down_position_configured
-                    else None
-                ),
-            )
+        self._apply_needle_calibration_runtime(needle_settings)
         coordinate_settings = self.settings_manager.coordinate_system_configuration()
         self.stage_controller.apply_coordinate_system_configuration(
             position_mode=coordinate_settings.position_mode,
@@ -2355,6 +2376,51 @@ class Main(QMainWindow):
             self.serial_connection_panel.set_lcr_resource(
                 self.lcr_controller.connection_label()
             )
+        if self.oscillation_panel:
+            self.oscillation_panel.apply_configuration(
+                mode=oscillation_settings.mode,
+                amplitude_mm=oscillation_settings.amplitude_mm,
+                feedrate_mm_min=oscillation_settings.feedrate_mm_min,
+                turns_per_sweep=oscillation_settings.turns_per_sweep,
+            )
+        if self.serial_connection and self.serial_connection.is_open:
+            self.stage_controller.request_startup_sync(auto_home_a=False)
+            self._schedule_cancel_state_refresh()
+        if self._api_bridge is not None:
+            self._configure_api_server_from_settings(start_if_enabled=True)
+        self._update_coordinate_display(cursor_xy=None)
+
+    def _apply_needle_calibration_runtime(self, needle_settings: object) -> None:
+        self.stage_controller.apply_needle_calibration(
+            raise_position_mm=(
+                needle_settings.raise_position_mm
+                if needle_settings.raise_position_configured
+                else None
+            ),
+            down_position_mm=(
+                needle_settings.down_position_mm
+                if needle_settings.down_position_configured
+                else None
+            ),
+            contact_zone_mm=needle_settings.contact_zone_mm,
+        )
+        if self.joystick_panel is not None:
+            self.joystick_panel.set_needle_contact_coordinate(
+                "raise",
+                self._display_a_for_needle_lowering(
+                    needle_settings.raise_position_mm
+                    if needle_settings.raise_position_configured
+                    else None
+                ),
+            )
+            self.joystick_panel.set_needle_contact_coordinate(
+                "lower",
+                self._display_a_for_needle_lowering(
+                    needle_settings.down_position_mm
+                    if needle_settings.down_position_configured
+                    else None
+                ),
+            )
         if self.contact_calibration_window is not None:
             self.contact_calibration_window.set_saved_needle_height(
                 needle_settings.down_position_mm
@@ -2369,19 +2435,6 @@ class Main(QMainWindow):
                 "stone",
                 needle_settings.stone_position,
             )
-        if self.oscillation_panel:
-            self.oscillation_panel.apply_configuration(
-                mode=oscillation_settings.mode,
-                amplitude_mm=oscillation_settings.amplitude_mm,
-                feedrate_mm_min=oscillation_settings.feedrate_mm_min,
-                turns_per_sweep=oscillation_settings.turns_per_sweep,
-            )
-        if self.serial_connection and self.serial_connection.is_open:
-            self.stage_controller.request_startup_sync(auto_home_a=False)
-            self._schedule_cancel_state_refresh()
-        if self._api_bridge is not None:
-            self._configure_api_server_from_settings(start_if_enabled=True)
-        self._update_coordinate_display(cursor_xy=None)
 
     def _open_settings_dialog(self, initial_tab: object = None) -> None:
         tab_name = initial_tab if isinstance(initial_tab, str) else None
@@ -3777,6 +3830,23 @@ class Main(QMainWindow):
             return self.joystick_panel.current_linear_feedrate()
         return float(self.settings_manager.feedrate_configuration().linear.default)
 
+    def _coordinate_feedrate_for_axes(self, axes: object) -> float:
+        axes_tuple = tuple(str(axis).strip().upper() for axis in axes)
+        selector = getattr(
+            self.joystick_panel,
+            "select_coordinate_feedrate_for_axes",
+            None,
+        )
+        if callable(selector):
+            try:
+                return max(
+                    self.MIN_FEEDRATE_MM_MIN,
+                    float(selector(axes_tuple)),
+                )
+            except (TypeError, ValueError):
+                logger.exception("Invalid coordinate feedrate selected for %s.", axes_tuple)
+        return max(self.MIN_FEEDRATE_MM_MIN, float(self._current_linear_feedrate()))
+
     def _current_needle_feedrate(self) -> float:
         if self.joystick_panel is not None:
             return self.joystick_panel.current_needle_feedrate()
@@ -4583,15 +4653,37 @@ class Main(QMainWindow):
                 route_point_count=len(route.points),
                 default_csv_path=default_path,
                 default_meter_type=self.lcr_controller.meter_type(),
+                default_short_threshold_ohm=self.lcr_controller.short_threshold_ohm(),
+                settings_path=(
+                    self.settings_manager.config_dir()
+                    / "route-measurement-settings.json"
+                ),
                 parent=self,
             )
             dialog.run_requested.connect(self._start_route_measurement)
             dialog.next_requested.connect(
                 lambda: self._submit_route_measurement_confirmation("next")
             )
+            dialog.remeasure_requested.connect(
+                lambda: self._submit_route_measurement_confirmation("remeasure")
+            )
+            dialog.skip_requested.connect(
+                lambda: self._submit_route_measurement_confirmation("skip")
+            )
+            dialog.save_shift_requested.connect(self._save_route_measurement_shift)
+            dialog.interrupt_requested.connect(
+                self._request_route_measurement_point_correction
+            )
+            dialog.jump_requested.connect(self._submit_route_measurement_jump)
             dialog.cancel_requested.connect(self._request_stop_route_measurement)
             dialog.finished.connect(lambda _result: self._clear_route_measurement_dialog())
             self._route_measurement_dialog = dialog
+        else:
+            dialog.set_route(
+                route_name=route.name,
+                route_point_count=len(route.points),
+                default_csv_path=default_path,
+            )
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -4651,11 +4743,16 @@ class Main(QMainWindow):
             lcr_controller=self.lcr_controller,
             needle_feedrate=self._current_needle_feedrate(),
             measurement_count=configuration.measurement_count,
+            start_point_number=configuration.start_point,
+            max_relative_rms=configuration.max_relative_rms,
+            short_threshold_ohm=configuration.short_threshold_ohm,
             confirm_each_point=True,
             contact_settle_s=configuration.contact_settle_s,
             nplc_label=configuration.meter.nplc_label(),
             status_callback=self.route_measurement_status.emit,
             record_callback=self.route_measurement_recorded.emit,
+            result_callback=self.route_measurement_result.emit,
+            waiting_callback=self.route_measurement_waiting_changed.emit,
         )
         self._route_measurement_runner = runner
         self._route_measurement_thread = threading.Thread(
@@ -4744,18 +4841,75 @@ class Main(QMainWindow):
                 "Route measurement will stop after the current action."
             )
 
+    def _request_route_measurement_point_correction(self) -> None:
+        runner = self._route_measurement_runner
+        if runner is None:
+            self._show_status("No route measurement is running.", 3000)
+            return
+        runner.request_current_point_correction()
+        message = "Route measurement correction requested for the current point."
+        self._show_status(message, 5000)
+        if self.design_navigator_panel is not None:
+            self.design_navigator_panel.set_route_measurement_status(message)
+        if self._route_measurement_dialog is not None:
+            self._route_measurement_dialog.set_status(message)
+
     def _submit_route_measurement_confirmation(self, action: str) -> None:
         runner = self._route_measurement_runner
         if runner is None:
             self._show_status("No route measurement is waiting.", 3000)
             return
-        runner.submit_confirmation(action)
+        if not runner.submit_confirmation(action):
+            self._show_status("Unknown route measurement action.", 3000)
+            return
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_route_measurement_waiting(False)
         if self._route_measurement_dialog is not None:
             self._route_measurement_dialog.set_waiting(False)
-        action_label = "remeasure" if action == "remeasure" else "next"
+        action_key = str(action).strip().lower()
+        if action_key == "remeasure":
+            action_label = "remeasure"
+        elif action_key == "skip":
+            action_label = "skip"
+        elif action_key.startswith("jump:") or action_key.isdigit():
+            point_number = action_key.split(":", 1)[-1]
+            action_label = f"go to point {point_number}"
+        else:
+            action_label = "next"
         self._show_status(f"Route measurement: {action_label}.")
+
+    def _submit_route_measurement_jump(self, point_number: int) -> None:
+        self._submit_route_measurement_confirmation(f"jump:{int(point_number)}")
+
+    def _save_route_measurement_shift(self) -> None:
+        runner = self._route_measurement_runner
+        if runner is None:
+            self._show_status("No route measurement is waiting.", 3000)
+            return
+        try:
+            position = self.stage_controller.current_stage_position()
+        except StageControllerError as exc:
+            latest = self.stage_controller.latest_stage_position()
+            if self.stage_controller.is_busy() or latest is None:
+                message = str(exc)
+                self._show_status(message, 6000)
+                if self._route_measurement_dialog is not None:
+                    self._route_measurement_dialog.set_status(message)
+                return
+            position = latest
+        stage_xy = self._stage_xy_from_position(position)
+        if stage_xy is None:
+            message = "Current stage X/Y position is unavailable."
+            self._show_status(message, 5000)
+            if self._route_measurement_dialog is not None:
+                self._route_measurement_dialog.set_status(message)
+            return
+        saved, message = runner.save_current_position_adjustment(stage_xy)
+        self._show_status(message, 5000)
+        if self.design_navigator_panel is not None:
+            self.design_navigator_panel.set_route_measurement_status(message)
+        if self._route_measurement_dialog is not None:
+            self._route_measurement_dialog.set_status(message)
 
     def _on_route_measurement_status(self, message: str) -> None:
         self._show_status(message)
@@ -4764,15 +4918,50 @@ class Main(QMainWindow):
         if self._route_measurement_dialog is not None:
             self._route_measurement_dialog.set_status(message)
 
+    def _on_route_measurement_waiting_changed(self, waiting: bool) -> None:
+        if self.design_navigator_panel is not None:
+            self.design_navigator_panel.set_route_measurement_waiting(waiting)
+        if self._route_measurement_dialog is not None:
+            self._route_measurement_dialog.set_waiting(waiting)
+
+    def _on_route_measurement_result(
+        self,
+        record: RouteMeasurementRecord,
+        position: int,
+        total: int,
+        saved: bool,
+    ) -> None:
+        if self._route_measurement_dialog is not None:
+            self._route_measurement_dialog.set_result(
+                record,
+                position,
+                total,
+                saved,
+            )
+        if not saved:
+            message = self._format_route_measurement_record(
+                record,
+                position,
+                total,
+                saved=saved,
+            )
+            self._show_status(message, 8000)
+            if self.design_navigator_panel is not None:
+                self.design_navigator_panel.set_route_measurement_status(message)
+            if self._route_measurement_dialog is not None:
+                self._route_measurement_dialog.set_status(message)
+
     def _on_route_measurement_recorded(
         self,
         record: RouteMeasurementRecord,
         position: int,
         total: int,
     ) -> None:
-        message = (
-            f"Measured route point {position}/{total}: "
-            f"{record.resistance_ohm:g} ohm."
+        message = self._format_route_measurement_record(
+            record,
+            position,
+            total,
+            saved=True,
         )
         self._show_status(message)
         if self.design_navigator_panel is not None:
@@ -4781,6 +4970,25 @@ class Main(QMainWindow):
         if self._route_measurement_dialog is not None:
             self._route_measurement_dialog.set_waiting(True)
             self._route_measurement_dialog.set_status(message)
+
+    @staticmethod
+    def _format_route_measurement_record(
+        record: RouteMeasurementRecord,
+        position: int,
+        total: int,
+        *,
+        saved: bool,
+    ) -> str:
+        prefix = "Measured" if saved else "Rejected"
+        if saved and record.status == "short":
+            prefix = "Short"
+        return (
+            f"{prefix} route point {position}/{total}: "
+            f"R={_format_route_ohm(record.resistance_ohm)}, "
+            f"RMS={_format_route_ohm(record.resistance_rms_ohm)}, "
+            f"rel={_format_route_percent(record.relative_rms)}, "
+            f"status={record.status}."
+        )
 
     def _on_route_measurement_finished(
         self,
@@ -5298,9 +5506,10 @@ class Main(QMainWindow):
             return
         targets = dict(self._pending_stage_axis_targets)
         self.view.setFocus(Qt.OtherFocusReason)
+        feedrate = self._coordinate_feedrate_for_axes(targets)
         self._start_coordinate_targets_move(
             targets,
-            feedrate_mm_min=self._current_linear_feedrate(),
+            feedrate_mm_min=feedrate,
             source_label="coordinate fields",
         )
         self._update_stage_coordinate_apply_state()
@@ -5335,7 +5544,7 @@ class Main(QMainWindow):
         return self._start_coordinate_targets_move(
             {axis: (raw_target, display_target)},
             feedrate_mm_min=(
-                self._current_linear_feedrate()
+                self._coordinate_feedrate_for_axes((axis,))
                 if feedrate_mm_min is None
                 else feedrate_mm_min
             ),
@@ -5439,7 +5648,8 @@ class Main(QMainWindow):
     ) -> None:
         if self.joystick_panel is None:
             return
-        if len(set(axes)) <= 1:
+        axis_set = {str(axis).strip().upper() for axis in axes}
+        if len(axis_set) <= 1 or axis_set <= {"X", "Y"}:
             if hasattr(self.joystick_panel, "clear_common_feedrate_target"):
                 self.joystick_panel.clear_common_feedrate_target()
             return
@@ -5901,17 +6111,6 @@ class Main(QMainWindow):
         self._queue_or_start_homing_axes([axis_name])
 
     def _request_home_all_from_ui(self) -> None:
-        if self._coordinate_move_axis is not None:
-            self.stage_controller.status_message.emit(
-                "Stage is busy. Ignoring home request."
-            )
-            return
-        latest_state = (self.stage_controller.latest_stage_state() or "").lower()
-        if latest_state not in {"", "idle"}:
-            self.stage_controller.status_message.emit(
-                "Stage is busy. Ignoring home request."
-            )
-            return
         if self.stage_controller.request_home_all():
             self._pending_homing_axes.clear()
             self._refresh_pending_homing_ui()
@@ -5929,11 +6128,10 @@ class Main(QMainWindow):
             normalized.append(axis_name)
         if not normalized:
             return
-        latest_state = (self.stage_controller.latest_stage_state() or "").lower()
         if (
             self._homing_active_key is None
             and not self.stage_controller.is_busy()
-            and latest_state in {"", "idle"}
+            and not self._controller_latest_state_blocks_motion()
             and self._coordinate_move_axis is None
         ):
             first_axis = normalized.pop(0)
@@ -5951,8 +6149,7 @@ class Main(QMainWindow):
         if self.stage_controller.is_busy() or self._coordinate_move_axis is not None:
             QTimer.singleShot(200, self._start_next_pending_homing_action)
             return
-        latest_state = (self.stage_controller.latest_stage_state() or "").lower()
-        if latest_state not in {"", "idle"}:
+        if self._controller_latest_state_blocks_motion():
             QTimer.singleShot(200, self._start_next_pending_homing_action)
             return
         axis = self._pending_homing_axes.pop(0)
@@ -6439,8 +6636,17 @@ class Main(QMainWindow):
         self.design_navigator_panel.route_measurement_stop_requested.connect(
             self._request_stop_route_measurement
         )
+        self.design_navigator_panel.route_measurement_interrupt_requested.connect(
+            self._request_route_measurement_point_correction
+        )
+        self.design_navigator_panel.route_measurement_save_shift_requested.connect(
+            self._save_route_measurement_shift
+        )
         self.design_navigator_panel.route_measurement_confirmation_requested.connect(
             self._submit_route_measurement_confirmation
+        )
+        self.design_navigator_panel.route_measurement_jump_requested.connect(
+            self._submit_route_measurement_jump
         )
         self.design_navigator_panel.move_to_target_requested.connect(
             self._move_to_design_target
@@ -6594,7 +6800,7 @@ class Main(QMainWindow):
         settings.needle_calibration.down_position_configured = True
         self.settings_manager.replace(settings)
         self.settings_manager.save()
-        self._apply_settings()
+        self._apply_needle_calibration_runtime(settings.needle_calibration)
         self._show_status(
             "Saved needle down target and set current A position to A0."
         )
@@ -6628,7 +6834,7 @@ class Main(QMainWindow):
             settings.needle_calibration.down_position_configured = True
         self.settings_manager.replace(settings)
         self.settings_manager.save()
-        self._apply_settings()
+        self._apply_needle_calibration_runtime(settings.needle_calibration)
         target_display_a = self._display_a_for_needle_lowering(lowering_mm)
         self._show_status(
             f"Saved needle {action_key} target "
@@ -6660,7 +6866,7 @@ class Main(QMainWindow):
         saved_position.configured = True
         self.settings_manager.replace(settings)
         self.settings_manager.save()
-        self._apply_settings()
+        self._apply_needle_calibration_runtime(settings.needle_calibration)
         self._show_status(
             f"Saved {target_key} focus at "
             f"X={saved_position.x_mm:.4f}, "
@@ -6713,6 +6919,29 @@ class Main(QMainWindow):
         settings.oscillation.turns_per_sweep = float(turns_per_sweep)
         self.settings_manager.replace(settings)
         self.settings_manager.save()
+
+
+def _format_route_ohm(value: float) -> str:
+    if not math.isfinite(value):
+        return "nan Ohm"
+    abs_value = abs(value)
+    for scale, unit in (
+        (1e9, "GOhm"),
+        (1e6, "MOhm"),
+        (1e3, "kOhm"),
+        (1.0, "Ohm"),
+        (1e-3, "mOhm"),
+        (1e-6, "uOhm"),
+    ):
+        if abs_value >= scale:
+            return f"{value / scale:.3g} {unit}"
+    return f"{value:.3g} Ohm"
+
+
+def _format_route_percent(value: float) -> str:
+    if not math.isfinite(value):
+        return "nan%"
+    return f"{value * 100.0:.3g}%"
 
 
 def _screen_available_geometry(window: QMainWindow):
