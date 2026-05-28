@@ -51,17 +51,41 @@ from probe_station_gui.settings_manager import (
 )
 
 
+ROUTE_MEASUREMENT_PROFILE_VERSION = 3
+DEFAULT_ROUTE_INITIAL_MEASUREMENT_COUNT = 10
+DEFAULT_ROUTE_FOLLOWUP_MEASUREMENT_COUNT = 240
+DEFAULT_KEITHLEY_MEASUREMENT_VOLTAGE_V = 0.03
+DEFAULT_KEITHLEY_SOURCE_RANGE_V = 0.21
+DEFAULT_KEITHLEY_VOLTMETER_RANGE_V = 0.1
+DEFAULT_KEITHLEY_CURRENT_RANGE_A = 10e-6
+DEFAULT_KEITHLEY_COMPLIANCE_CURRENT_A = 10e-6
+DEFAULT_KEITHLEY_NPLC = 1.0
+DEFAULT_KEITHLEY_TRIGGER_DELAY_S = 0.0
+DEFAULT_KEITHLEY_USE_BUFFER = True
+DEFAULT_KEITHLEY_USE_TRIGGER_LINK = True
+
+
 @dataclass(frozen=True)
 class RouteMeasurementRunConfiguration:
     """Complete per-run route measurement configuration from the dialog."""
 
     csv_path: str
-    measurement_count: int
+    initial_measurement_count: int
+    followup_measurement_count: int
     start_point: int
     max_relative_rms: float
     short_threshold_ohm: float
     contact_settle_s: float
     meter: RouteMeterConfiguration
+
+    @property
+    def measurement_count(self) -> int:
+        """Maximum readings per point after both measurement phases."""
+
+        return max(1, int(self.initial_measurement_count)) + max(
+            0,
+            int(self.followup_measurement_count),
+        )
 
 
 class RouteMeasurementDialog(QDialog):
@@ -115,12 +139,30 @@ class RouteMeasurementDialog(QDialog):
         csv_row.addWidget(self._csv_browse_button)
         common_layout.addRow(QLabel("CSV", common_group), csv_row)
 
-        self._measurement_count_spin = QSpinBox(common_group)
-        self._measurement_count_spin.setRange(1, 1000)
-        self._measurement_count_spin.setValue(250)
+        self._initial_measurement_count_spin = QSpinBox(common_group)
+        self._initial_measurement_count_spin.setRange(1, 1000)
+        self._initial_measurement_count_spin.setValue(
+            DEFAULT_ROUTE_INITIAL_MEASUREMENT_COUNT
+        )
         common_layout.addRow(
-            QLabel("Readings per point", common_group),
-            self._measurement_count_spin,
+            QLabel("Initial samples", common_group),
+            self._initial_measurement_count_spin,
+        )
+
+        self._followup_measurement_count_spin = QSpinBox(common_group)
+        self._followup_measurement_count_spin.setRange(0, 1000)
+        self._followup_measurement_count_spin.setValue(
+            DEFAULT_ROUTE_FOLLOWUP_MEASUREMENT_COUNT
+        )
+        common_layout.addRow(
+            QLabel("Follow-up samples", common_group),
+            self._followup_measurement_count_spin,
+        )
+
+        self._measurement_total_label = QLabel(common_group)
+        common_layout.addRow(
+            QLabel("Max samples", common_group),
+            self._measurement_total_label,
         )
 
         self._max_relative_rms_spin = QDoubleSpinBox(common_group)
@@ -265,6 +307,12 @@ class RouteMeasurementDialog(QDialog):
             lambda _index: self._update_histogram_mode()
         )
         self._raw_data_button.clicked.connect(self._show_raw_data)
+        self._initial_measurement_count_spin.valueChanged.connect(
+            lambda _value: self._update_measurement_total_label()
+        )
+        self._followup_measurement_count_spin.valueChanged.connect(
+            lambda _value: self._update_measurement_total_label()
+        )
         self._interrupt_button.clicked.connect(self.interrupt_requested.emit)
         self._save_shift_button.clicked.connect(self.save_shift_requested.emit)
         self._remeasure_button.clicked.connect(self.remeasure_requested.emit)
@@ -279,6 +327,7 @@ class RouteMeasurementDialog(QDialog):
         self._close_button.clicked.connect(self.close)
         self._load_settings_file()
         self._update_meter_page()
+        self._update_measurement_total_label()
         self.set_running(False)
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
@@ -351,7 +400,8 @@ class RouteMeasurementDialog(QDialog):
             self._route_combo,
             self._csv_path_edit,
             self._csv_browse_button,
-            self._measurement_count_spin,
+            self._initial_measurement_count_spin,
+            self._followup_measurement_count_spin,
             self._max_relative_rms_spin,
             self._short_threshold_spin,
             self._start_point_spin,
@@ -488,7 +538,7 @@ class RouteMeasurementDialog(QDialog):
         self._keithley_voltage_spin.setRange(0.000001, 10.0)
         self._keithley_voltage_spin.setSingleStep(0.001)
         self._keithley_voltage_spin.setSuffix(" V")
-        self._keithley_voltage_spin.setValue(0.03)
+        self._keithley_voltage_spin.setValue(DEFAULT_KEITHLEY_MEASUREMENT_VOLTAGE_V)
         layout.addRow(QLabel("+/- voltage", page), self._keithley_voltage_spin)
 
         self._keithley_range_spin = QDoubleSpinBox(page)
@@ -497,7 +547,7 @@ class RouteMeasurementDialog(QDialog):
         self._keithley_range_spin.setRange(0.000001, 210.0)
         self._keithley_range_spin.setSingleStep(0.01)
         self._keithley_range_spin.setSuffix(" V")
-        self._keithley_range_spin.setValue(0.21)
+        self._keithley_range_spin.setValue(DEFAULT_KEITHLEY_SOURCE_RANGE_V)
         layout.addRow(QLabel("Source range", page), self._keithley_range_spin)
 
         self._keithley_compliance_spin = QDoubleSpinBox(page)
@@ -506,7 +556,9 @@ class RouteMeasurementDialog(QDialog):
         self._keithley_compliance_spin.setRange(0.000000001, 1.0)
         self._keithley_compliance_spin.setSingleStep(0.000001)
         self._keithley_compliance_spin.setSuffix(" A")
-        self._keithley_compliance_spin.setValue(10e-6)
+        self._keithley_compliance_spin.setValue(
+            DEFAULT_KEITHLEY_COMPLIANCE_CURRENT_A
+        )
         layout.addRow(
             QLabel("Compliance current", page), self._keithley_compliance_spin
         )
@@ -517,7 +569,7 @@ class RouteMeasurementDialog(QDialog):
         self._keithley_current_range_spin.setRange(0.000000001, 1.0)
         self._keithley_current_range_spin.setSingleStep(0.000001)
         self._keithley_current_range_spin.setSuffix(" A")
-        self._keithley_current_range_spin.setValue(10e-6)
+        self._keithley_current_range_spin.setValue(DEFAULT_KEITHLEY_CURRENT_RANGE_A)
         layout.addRow(QLabel("Current range", page), self._keithley_current_range_spin)
 
         self._keithley_voltmeter_range_spin = QDoubleSpinBox(page)
@@ -526,7 +578,9 @@ class RouteMeasurementDialog(QDialog):
         self._keithley_voltmeter_range_spin.setRange(0.000001, 1000.0)
         self._keithley_voltmeter_range_spin.setSingleStep(0.01)
         self._keithley_voltmeter_range_spin.setSuffix(" V")
-        self._keithley_voltmeter_range_spin.setValue(0.1)
+        self._keithley_voltmeter_range_spin.setValue(
+            DEFAULT_KEITHLEY_VOLTMETER_RANGE_V
+        )
         layout.addRow(
             QLabel("Voltmeter range", page),
             self._keithley_voltmeter_range_spin,
@@ -537,7 +591,7 @@ class RouteMeasurementDialog(QDialog):
         self._keithley_nplc_spin.setDecimals(2)
         self._keithley_nplc_spin.setRange(0.01, 50.0)
         self._keithley_nplc_spin.setSingleStep(1.0)
-        self._keithley_nplc_spin.setValue(1.0)
+        self._keithley_nplc_spin.setValue(DEFAULT_KEITHLEY_NPLC)
         layout.addRow(QLabel("NPLC", page), self._keithley_nplc_spin)
 
         self._keithley_terminals_combo = QComboBox(page)
@@ -551,15 +605,17 @@ class RouteMeasurementDialog(QDialog):
         self._keithley_delay_spin.setRange(0.0, 10.0)
         self._keithley_delay_spin.setSingleStep(0.01)
         self._keithley_delay_spin.setSuffix(" s")
-        self._keithley_delay_spin.setValue(0.0)
+        self._keithley_delay_spin.setValue(DEFAULT_KEITHLEY_TRIGGER_DELAY_S)
         layout.addRow(QLabel("Trigger delay", page), self._keithley_delay_spin)
 
         self._keithley_buffer_checkbox = QCheckBox("Use buffer", page)
-        self._keithley_buffer_checkbox.setChecked(True)
+        self._keithley_buffer_checkbox.setChecked(DEFAULT_KEITHLEY_USE_BUFFER)
         layout.addRow(self._keithley_buffer_checkbox)
 
         self._keithley_trigger_link_checkbox = QCheckBox("Use Trigger Link", page)
-        self._keithley_trigger_link_checkbox.setChecked(True)
+        self._keithley_trigger_link_checkbox.setChecked(
+            DEFAULT_KEITHLEY_USE_TRIGGER_LINK
+        )
         layout.addRow(self._keithley_trigger_link_checkbox)
 
         return page
@@ -648,6 +704,9 @@ class RouteMeasurementDialog(QDialog):
         mode = str(self._histogram_mode_combo.currentData() or "differential")
         self._histogram_widget.set_mode(mode)
 
+    def _update_measurement_total_label(self) -> None:
+        self._measurement_total_label.setText(str(self._total_measurement_count()))
+
     def _show_raw_data(self) -> None:
         if not self._last_raw_samples:
             self.set_status("No raw measurement data yet.")
@@ -664,7 +723,12 @@ class RouteMeasurementDialog(QDialog):
         self.run_requested.emit(
             RouteMeasurementRunConfiguration(
                 csv_path=csv_path,
-                measurement_count=int(self._measurement_count_spin.value()),
+                initial_measurement_count=int(
+                    self._initial_measurement_count_spin.value()
+                ),
+                followup_measurement_count=int(
+                    self._followup_measurement_count_spin.value()
+                ),
                 start_point=int(self._start_point_spin.value()),
                 max_relative_rms=float(self._max_relative_rms_spin.value()) / 100.0,
                 short_threshold_ohm=float(self._short_threshold_spin.value()),
@@ -687,7 +751,9 @@ class RouteMeasurementDialog(QDialog):
         try:
             with self._settings_path.open("r", encoding="utf-8") as handle:
                 data = json.load(handle)
-            self._apply_profile_data(data)
+            migrated = self._apply_profile_data(data)
+            if migrated:
+                self._save_settings_file()
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             return
 
@@ -707,9 +773,15 @@ class RouteMeasurementDialog(QDialog):
     def _profile_data(self) -> dict[str, Any]:
         meter = self._meter_configuration()
         return {
-            "version": 1,
+            "version": ROUTE_MEASUREMENT_PROFILE_VERSION,
             "csv_path": self._csv_path_edit.text().strip(),
-            "measurement_count": int(self._measurement_count_spin.value()),
+            "measurement_count": self._total_measurement_count(),
+            "initial_measurement_count": int(
+                self._initial_measurement_count_spin.value()
+            ),
+            "followup_measurement_count": int(
+                self._followup_measurement_count_spin.value()
+            ),
             "start_point": int(self._start_point_spin.value()),
             "max_relative_rms": float(self._max_relative_rms_spin.value()) / 100.0,
             "short_threshold_ohm": float(self._short_threshold_spin.value()),
@@ -721,16 +793,14 @@ class RouteMeasurementDialog(QDialog):
             },
         }
 
-    def _apply_profile_data(self, data: object) -> None:
+    def _apply_profile_data(self, data: object) -> bool:
         if not isinstance(data, dict):
             raise ValueError("Profile JSON root must be an object.")
+        migrate_keithley_defaults = self._should_migrate_keithley_defaults(data)
         csv_path = data.get("csv_path")
         if isinstance(csv_path, str) and csv_path.strip():
             self._csv_path_edit.setText(csv_path.strip())
-        self._set_spinbox_value(
-            self._measurement_count_spin,
-            data.get("measurement_count"),
-        )
+        self._apply_measurement_count_profile(data)
         self._set_spinbox_value(self._start_point_spin, data.get("start_point"))
         max_relative_rms = data.get("max_relative_rms")
         try:
@@ -751,8 +821,66 @@ class RouteMeasurementDialog(QDialog):
                 self._set_combo_data(self._meter_combo, meter_type)
             self._apply_gwinstek_profile(meter.get("gwinstek"))
             self._apply_keithley_profile(meter.get("keithley"))
+        if migrate_keithley_defaults:
+            self._apply_default_keithley_route_settings()
+        self._update_measurement_total_label()
         self._update_meter_page()
         self._update_gwinstek_state()
+        return migrate_keithley_defaults
+
+    def _should_migrate_keithley_defaults(self, data: dict[str, Any]) -> bool:
+        try:
+            version = int(data.get("version", 0))
+        except (TypeError, ValueError):
+            version = 0
+        if version >= ROUTE_MEASUREMENT_PROFILE_VERSION:
+            return False
+        meter = data.get("meter")
+        if not isinstance(meter, dict):
+            return False
+        return meter.get("meter_type") == ROUTE_METER_KEITHLEY
+
+    def _apply_default_keithley_route_settings(self) -> None:
+        self._initial_measurement_count_spin.setValue(
+            DEFAULT_ROUTE_INITIAL_MEASUREMENT_COUNT
+        )
+        self._followup_measurement_count_spin.setValue(
+            DEFAULT_ROUTE_FOLLOWUP_MEASUREMENT_COUNT
+        )
+        self._keithley_voltage_spin.setValue(DEFAULT_KEITHLEY_MEASUREMENT_VOLTAGE_V)
+        self._keithley_range_spin.setValue(DEFAULT_KEITHLEY_SOURCE_RANGE_V)
+        self._keithley_voltmeter_range_spin.setValue(
+            DEFAULT_KEITHLEY_VOLTMETER_RANGE_V
+        )
+        self._keithley_current_range_spin.setValue(DEFAULT_KEITHLEY_CURRENT_RANGE_A)
+        self._keithley_compliance_spin.setValue(
+            DEFAULT_KEITHLEY_COMPLIANCE_CURRENT_A
+        )
+        self._keithley_nplc_spin.setValue(DEFAULT_KEITHLEY_NPLC)
+        self._keithley_delay_spin.setValue(DEFAULT_KEITHLEY_TRIGGER_DELAY_S)
+        self._keithley_buffer_checkbox.setChecked(DEFAULT_KEITHLEY_USE_BUFFER)
+        self._keithley_trigger_link_checkbox.setChecked(
+            DEFAULT_KEITHLEY_USE_TRIGGER_LINK
+        )
+
+    def _apply_measurement_count_profile(self, data: dict[str, Any]) -> None:
+        initial = self._positive_int_or_none(data.get("initial_measurement_count"))
+        followup = self._nonnegative_int_or_none(
+            data.get("followup_measurement_count")
+        )
+        total = self._positive_int_or_none(data.get("measurement_count"))
+        if initial is None and followup is None and total is not None:
+            initial = min(total, DEFAULT_ROUTE_INITIAL_MEASUREMENT_COUNT)
+            followup = max(0, total - initial)
+        if initial is not None:
+            self._initial_measurement_count_spin.setValue(initial)
+        if followup is not None:
+            self._followup_measurement_count_spin.setValue(followup)
+
+    def _total_measurement_count(self) -> int:
+        return int(self._initial_measurement_count_spin.value()) + int(
+            self._followup_measurement_count_spin.value()
+        )
 
     def _apply_gwinstek_profile(self, data: object) -> None:
         if not isinstance(data, dict):
@@ -826,6 +954,22 @@ class RouteMeasurementDialog(QDialog):
                 spinbox.setValue(int(round(numeric)))
             else:
                 spinbox.setValue(numeric)
+
+    @staticmethod
+    def _positive_int_or_none(value: object) -> int | None:
+        try:
+            numeric = int(round(float(value)))
+        except (TypeError, ValueError):
+            return None
+        return numeric if numeric > 0 else None
+
+    @staticmethod
+    def _nonnegative_int_or_none(value: object) -> int | None:
+        try:
+            numeric = int(round(float(value)))
+        except (TypeError, ValueError):
+            return None
+        return numeric if numeric >= 0 else None
 
     @staticmethod
     def _set_combo_data(combo: QComboBox, value: object) -> None:

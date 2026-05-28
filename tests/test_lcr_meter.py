@@ -127,6 +127,21 @@ class _FakeKeithleySession:
 
 
 class LCRMeterTest(unittest.TestCase):
+    def test_route_meter_configuration_describes_keithley_voltage_sweep(self) -> None:
+        configuration = RouteMeterConfiguration(
+            meter_type=ROUTE_METER_KEITHLEY,
+            keithley=KeithleyRouteMeterSettings(
+                measurement_voltage_v=0.03,
+                nplc=1.0,
+            ),
+        )
+
+        self.assertEqual(configuration.nplc_label(), "1")
+        self.assertEqual(
+            configuration.measurement_type_label(),
+            "Keithley voltage sweep +/-0.03 V",
+        )
+
     def test_session_trigger_read_uses_completed_trigger_fetch(self) -> None:
         session = _LCRSession.__new__(_LCRSession)
         instrument = _FakeInstrument()

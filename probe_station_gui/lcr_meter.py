@@ -93,6 +93,17 @@ class RouteMeterConfiguration:
             return f"{float(self.keithley.nplc):g}"
         return ""
 
+    def measurement_type_label(self) -> str:
+        """Return a concise CSV label for the route measurement mode."""
+
+        if self.meter_type == ROUTE_METER_KEITHLEY:
+            voltage = float(self.keithley.measurement_voltage_v)
+            return f"Keithley voltage sweep +/-{voltage:g} V"
+        function = str(self.gwinstek.measurement_function or "").strip()
+        if function.upper() == "DCR":
+            return "GW Instek DCR"
+        return f"GW Instek {function or 'measurement'}"
+
 
 class LCRMeterError(RuntimeError):
     """Raised when the LCR meter backend cannot complete the request."""

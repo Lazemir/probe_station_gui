@@ -58,6 +58,7 @@ class RouteMeasurementRecord:
     timestamp: str
     structure_number: int
     nplc: str
+    measurement_type: str
     n_measurements: int
     resistance_ohm: float
     resistance_rms_ohm: float
@@ -88,6 +89,7 @@ CSV_FIELDS = [
     "timestamp",
     "structure_number",
     "nplc",
+    "measurement_type",
     "n_measurements",
     "resistance_ohm",
     "resistance_rms_ohm",
@@ -159,6 +161,7 @@ class RouteMeasurementRunner:
     """Run a saved probe route using direct stage and LCR controller methods."""
 
     DEFAULT_CONTACT_SETTLE_S = 0.2
+    SHORT_CHECK_SAMPLE_COUNT = 10
 
     def __init__(
         self,
@@ -169,12 +172,14 @@ class RouteMeasurementRunner:
         lcr_controller: Any,
         needle_feedrate: float | None,
         measurement_count: int = 1,
+        initial_measurement_count: int | None = None,
         start_point_number: int = 1,
         max_relative_rms: float | None = None,
         short_threshold_ohm: float | None = None,
         confirm_each_point: bool = False,
         contact_settle_s: float = DEFAULT_CONTACT_SETTLE_S,
         nplc_label: str = "",
+        measurement_type: str = "",
         status_callback: Callable[[str], None] | None = None,
         record_callback: Callable[[RouteMeasurementRecord, int, int], None] | None = None,
         result_callback: Callable[[RouteMeasurementRecord, int, int, bool], None]
@@ -187,6 +192,11 @@ class RouteMeasurementRunner:
         self._lcr_controller = lcr_controller
         self._needle_feedrate = needle_feedrate
         self._measurement_count = max(1, int(measurement_count))
+        if initial_measurement_count is None:
+            initial_count = self.SHORT_CHECK_SAMPLE_COUNT
+        else:
+            initial_count = int(initial_measurement_count)
+        self._initial_measurement_count_value = max(1, initial_count)
         self._start_point_number = max(1, int(start_point_number))
         try:
             max_relative_rms_value = float(max_relative_rms)
@@ -211,6 +221,7 @@ class RouteMeasurementRunner:
         self._confirm_each_point = bool(confirm_each_point)
         self._contact_settle_s = max(0.0, float(contact_settle_s))
         self._nplc_label = str(nplc_label)
+        self._measurement_type = str(measurement_type)
         self._status_callback = status_callback
         self._record_callback = record_callback
         self._result_callback = result_callback
@@ -360,49 +371,22 @@ class RouteMeasurementRunner:
                                 message = "Route measurement stopped by user."
                                 break
                     if not point_interrupted:
-                        short_sample: RouteMeasurementSample | None = None
-                        if self._short_threshold_ohm is not None:
-                            self._status(
-                                f"Route measurement: point {position}/{total} "
-                                "short check."
-                            )
-                            short_sample = self._read_measurement_sample(1)
-                            if (
-                                self._stop_requested.is_set()
-                                or self._point_interrupt_requested.is_set()
-                            ):
-                                if self._point_interrupt_requested.is_set():
-                                    point_interrupted = True
-                                else:
-                                    message = "Route measurement stopped by user."
-                                    break
-                        if (
-                            not point_interrupted
-                            and short_sample is not None
-                            and self._is_short_sample(short_sample)
-                        ):
-                            record = self._record_for_short_point(
+                        self._status(
+                            f"Route measurement: point {position}/{total} "
+                            "measuring."
+                        )
+                        samples = self._measure_samples()
+                        if samples is None:
+                            if self._point_interrupt_requested.is_set():
+                                point_interrupted = True
+                            else:
+                                message = "Route measurement stopped by user."
+                                break
+                        if not point_interrupted:
+                            record = self._record_for_point(
                                 point=point,
-                                sample=short_sample,
+                                samples=samples,
                             )
-                            self._status(
-                                f"Route measurement: point {position}/{total} "
-                                f"short detected at "
-                                f"{_format_ohm(record.resistance_ohm)}."
-                            )
-                        elif not point_interrupted:
-                            samples = self._measure_samples()
-                            if samples is None:
-                                if self._point_interrupt_requested.is_set():
-                                    point_interrupted = True
-                                else:
-                                    message = "Route measurement stopped by user."
-                                    break
-                            if not point_interrupted:
-                                record = self._record_for_point(
-                                    point=point,
-                                    samples=samples,
-                                )
                     if not point_interrupted and record is not None:
                         if (
                             self._confirm_each_point
@@ -584,21 +568,54 @@ class RouteMeasurementRunner:
             self._result_callback(record, position, total, saved)
 
     def _measure_samples(self) -> list[RouteMeasurementSample] | None:
+        initial_count = self._initial_measurement_count()
+        samples = self._read_measurement_samples(initial_count, start_index=1)
+        if samples is None:
+            return None
+        remaining_count = self._measurement_count - len(samples)
+        if (
+            remaining_count <= 0
+            or self._samples_are_short(samples)
+            or self._samples_have_bad_contact(samples)
+        ):
+            return samples
+        extra_samples = self._read_measurement_samples(
+            remaining_count,
+            start_index=len(samples) + 1,
+        )
+        if extra_samples is None:
+            return None
+        return samples + extra_samples
+
+    def _initial_measurement_count(self) -> int:
+        if self._short_threshold_ohm is None:
+            return self._measurement_count
+        return min(self._measurement_count, self._initial_measurement_count_value)
+
+    def _read_measurement_samples(
+        self,
+        count: int,
+        *,
+        start_index: int,
+    ) -> list[RouteMeasurementSample] | None:
+        count = max(0, int(count))
+        if count <= 0:
+            return []
         batch_reader = getattr(
             self._lcr_controller,
             "read_route_measurement_batch_now",
             None,
         )
-        if callable(batch_reader) and self._measurement_count > 1:
+        if callable(batch_reader) and count > 1:
             if (
                 self._stop_requested.is_set()
                 or self._point_interrupt_requested.is_set()
             ):
                 return None
-            raw_batch = batch_reader(self._measurement_count)
+            raw_batch = batch_reader(count)
             samples = [
                 _measurement_sample_from_raw(raw, index)
-                for index, raw in enumerate(raw_batch, start=1)
+                for index, raw in enumerate(raw_batch, start=start_index)
             ]
             if (
                 self._stop_requested.is_set()
@@ -607,7 +624,7 @@ class RouteMeasurementRunner:
                 return None
             return samples
         samples: list[RouteMeasurementSample] = []
-        for index in range(1, self._measurement_count + 1):
+        for index in range(start_index, start_index + count):
             if (
                 self._stop_requested.is_set()
                 or self._point_interrupt_requested.is_set()
@@ -628,15 +645,6 @@ class RouteMeasurementRunner:
         else:
             raw = self._lcr_controller.read_primary_value_now()
         return _measurement_sample_from_raw(raw, sample_index)
-
-    def _is_short_sample(self, sample: RouteMeasurementSample) -> bool:
-        if sample.compliance_hit:
-            return True
-        threshold = self._short_threshold_ohm
-        if threshold is None:
-            return False
-        resistance = float(sample.differential_resistance_ohm)
-        return math.isfinite(resistance) and abs(resistance) <= threshold
 
     def _wait_after_interrupted_point(
         self,
@@ -763,11 +771,12 @@ class RouteMeasurementRunner:
                 else math.nan
             )
             contact_quality = _contact_quality_from_samples(samples)
-            status = (
-                "bad_contact"
-                if contact_quality.good is False
-                else "ok"
-            )
+            if contact_quality.good is False:
+                status = "bad_contact"
+            elif self._samples_are_short(samples):
+                status = "short"
+            else:
+                status = "ok"
         else:
             mean_resistance = math.inf
             rms_resistance = math.nan
@@ -778,6 +787,7 @@ class RouteMeasurementRunner:
             timestamp=datetime.now().isoformat(timespec="seconds"),
             structure_number=_structure_number_for_point(point),
             nplc=self._nplc_label,
+            measurement_type=self._measurement_type,
             n_measurements=len(resistances_ohm),
             resistance_ohm=mean_resistance,
             resistance_rms_ohm=rms_resistance,
@@ -787,36 +797,40 @@ class RouteMeasurementRunner:
             raw_samples=tuple(samples),
         )
 
-    def _record_for_short_point(
-        self,
-        *,
-        point: RouteMeasurementPoint,
-        sample: RouteMeasurementSample,
-    ) -> RouteMeasurementRecord:
-        resistance = float(sample.differential_resistance_ohm)
-        return RouteMeasurementRecord(
-            timestamp=datetime.now().isoformat(timespec="seconds"),
-            structure_number=_structure_number_for_point(point),
-            nplc=self._nplc_label,
-            n_measurements=1,
-            resistance_ohm=resistance,
-            resistance_rms_ohm=0.0 if math.isfinite(resistance) else math.nan,
-            relative_rms=0.0 if math.isfinite(resistance) else math.nan,
-            status="short",
-            contact_quality=None,
-            raw_samples=(sample,),
-        )
-
     def _record_exceeds_quality_limit(self, record: RouteMeasurementRecord) -> bool:
         contact_quality = record.contact_quality
         if contact_quality is not None and contact_quality.good is False:
             return True
-        if self._max_relative_rms is None or record.status != "ok":
+        if self._max_relative_rms is None or record.status not in {"ok", "short"}:
             return False
         return (
             math.isfinite(record.relative_rms)
             and record.relative_rms > self._max_relative_rms
         )
+
+    def _samples_are_short(
+        self,
+        samples: list[RouteMeasurementSample] | tuple[RouteMeasurementSample, ...],
+    ) -> bool:
+        if any(sample.compliance_hit for sample in samples):
+            return True
+        threshold = self._short_threshold_ohm
+        if threshold is None:
+            return False
+        finite_abs_values = sorted(
+            abs(float(sample.differential_resistance_ohm))
+            for sample in samples
+            if math.isfinite(float(sample.differential_resistance_ohm))
+        )
+        if not finite_abs_values:
+            return False
+        return _percentile(finite_abs_values, 50.0) <= threshold
+
+    @staticmethod
+    def _samples_have_bad_contact(
+        samples: list[RouteMeasurementSample] | tuple[RouteMeasurementSample, ...],
+    ) -> bool:
+        return _contact_quality_from_samples(samples).good is False
 
 
 __all__ = [
@@ -912,8 +926,6 @@ def _contact_quality_from_samples(
         reasons.append("mad_sigma_too_high")
     if p95_abs_step > CONTACT_MAX_P95_ABS_STEP_OHM:
         reasons.append("step_noise_too_high")
-    if compliance_hits:
-        reasons.append("compliance_hit")
     if polarity_mismatches:
         reasons.append("polarity_sign_mismatch")
 
@@ -1101,6 +1113,7 @@ def _record_to_csv_row(record: RouteMeasurementRecord) -> dict[str, str]:
         "timestamp": record.timestamp,
         "structure_number": str(record.structure_number),
         "nplc": str(record.nplc),
+        "measurement_type": str(record.measurement_type),
         "n_measurements": str(record.n_measurements),
         "resistance_ohm": _format_float(record.resistance_ohm),
         "resistance_rms_ohm": _format_float(record.resistance_rms_ohm),
