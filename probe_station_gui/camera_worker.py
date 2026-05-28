@@ -291,37 +291,41 @@ class Grabber(QObject):
 
         maps: list[dict[str, Any]] = []
         total_nodes = 0
-        for map_key, title in (
-            ("camera", "Camera"),
-            ("transport_device", "Transport Device"),
-            ("transport_stream", "Transport Stream"),
-        ):
-            try:
-                node_map = self._node_map(map_key)
-                nodes = self._read_node_map(map_key, node_map)
-                maps.append(
-                    {
-                        "key": map_key,
-                        "title": title,
-                        "nodes": nodes,
-                        "error": "",
-                    }
-                )
-                total_nodes += len(nodes)
-            except Exception as exc:  # pragma: no cover - hardware dependent
-                maps.append(
-                    {
-                        "key": map_key,
-                        "title": title,
-                        "nodes": [],
-                        "error": str(exc),
-                    }
-                )
+        paused = self._pause_acquisition()
+        try:
+            for map_key, title in (
+                ("camera", "Camera"),
+                ("transport_device", "Transport Device"),
+                ("transport_stream", "Transport Stream"),
+            ):
+                try:
+                    node_map = self._node_map(map_key)
+                    nodes = self._read_node_map(map_key, node_map)
+                    maps.append(
+                        {
+                            "key": map_key,
+                            "title": title,
+                            "nodes": nodes,
+                            "error": "",
+                        }
+                    )
+                    total_nodes += len(nodes)
+                except Exception as exc:  # pragma: no cover - hardware dependent
+                    maps.append(
+                        {
+                            "key": map_key,
+                            "title": title,
+                            "nodes": [],
+                            "error": str(exc),
+                        }
+                    )
+        finally:
+            self._resume_acquisition(paused)
         return {
             "ok": True,
             "message": f"Loaded {total_nodes} camera settings.",
             "maps": maps,
-            "streaming": self._acquiring,
+            "streaming": paused,
         }
 
     def _node_map(self, map_key: str) -> object:
@@ -481,18 +485,18 @@ class Grabber(QObject):
         node_name = str(payload.get("node_name", ""))
         value = payload.get("value")
         try:
-            node = self._node_by_name(map_key, node_name)
-            info = self._read_node_info(map_key, node)
-            if info is None:
-                raise RuntimeError("Camera setting is unavailable.")
-            if not info["writable"]:
-                raise RuntimeError("Camera setting is read-only.")
             paused = self._pause_acquisition()
             try:
+                node = self._node_by_name(map_key, node_name)
+                info = self._read_node_info(map_key, node)
+                if info is None:
+                    raise RuntimeError("Camera setting is unavailable.")
+                if not info["writable"]:
+                    raise RuntimeError("Camera setting is read-only.")
                 self._set_node_value(node, str(info["type"]), value)
+                updated = self._read_node_info(map_key, node) or info
             finally:
                 self._resume_acquisition(paused)
-            updated = self._read_node_info(map_key, node) or info
         except Exception as exc:  # pragma: no cover - hardware dependent
             return {
                 "ok": False,
@@ -512,15 +516,16 @@ class Grabber(QObject):
         map_key = str(payload.get("map_key", ""))
         node_name = str(payload.get("node_name", ""))
         try:
-            node = self._node_by_name(map_key, node_name)
-            info = self._read_node_info(map_key, node)
-            if info is None:
-                raise RuntimeError("Camera command is unavailable.")
-            if not info["writable"]:
-                raise RuntimeError("Camera command is not writable.")
             paused = self._pause_acquisition()
             try:
+                node = self._node_by_name(map_key, node_name)
+                info = self._read_node_info(map_key, node)
+                if info is None:
+                    raise RuntimeError("Camera command is unavailable.")
+                if not info["writable"]:
+                    raise RuntimeError("Camera command is not writable.")
                 self._execute_command_node(node)
+                updated = self._read_node_info(map_key, node) or info
             finally:
                 self._resume_acquisition(paused)
         except Exception as exc:  # pragma: no cover - hardware dependent
@@ -535,7 +540,7 @@ class Grabber(QObject):
             "message": f"{info['display_name']} executed.",
             "map_key": map_key,
             "node_name": node_name,
-            "node": self._read_node_info(map_key, node) or info,
+            "node": updated,
         }
 
     def _pause_acquisition(self) -> bool:

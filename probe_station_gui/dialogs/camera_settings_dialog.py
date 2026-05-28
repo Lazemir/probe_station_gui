@@ -807,6 +807,82 @@ class _NodeMapPage(QWidget):
 class CameraSettingsWidget(QWidget):
     """Widget that exposes every implemented GenICam node reported by rotpy."""
 
+    CAMERA_FEATURE_TABS = (
+        (
+            "Settings",
+            (
+                "AcquisitionControl",
+                "AnalogControl",
+                "DeviceControl",
+                "ChunkDataControl",
+            ),
+            (
+                "Acquisition",
+                "Exposure",
+                "Trigger",
+                "Gain",
+                "Gamma",
+                "Balance",
+                "Device",
+                "Chunk",
+            ),
+        ),
+        (
+            "Image Format",
+            ("ImageFormatControl",),
+            (
+                "Width",
+                "Height",
+                "Offset",
+                "PixelFormat",
+                "Binning",
+                "Decimation",
+                "Reverse",
+                "TestPattern",
+            ),
+        ),
+        (
+            "Processing",
+            (
+                "ColorTransformationControl",
+                "LUTControl",
+                "SharpeningControl",
+                "DefectCorrectionControl",
+            ),
+            (
+                "Color",
+                "BalanceWhite",
+                "BalanceRatio",
+                "Gamma",
+                "LUT",
+                "Sharpening",
+                "Defect",
+            ),
+        ),
+        (
+            "GPIO",
+            (
+                "DigitalIOControl",
+                "CounterAndTimerControl",
+                "EventControl",
+            ),
+            ("Line", "UserOutput", "Counter", "Timer", "Event"),
+        ),
+        ("Sequencer", ("SequencerControl",), ("Sequencer",)),
+        ("File Access", ("FileAccessControl",), ("File",)),
+        (
+            "Information",
+            ("DeviceInformation",),
+            (
+                "DeviceModel",
+                "DeviceVendor",
+                "DeviceSerial",
+                "DeviceVersion",
+                "DeviceTemperature",
+            ),
+        ),
+    )
+
     def __init__(self, grabber: object, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._grabber = grabber
@@ -873,9 +949,8 @@ class CameraSettingsWidget(QWidget):
         )
         if camera_map is not None:
             nodes = camera_map.get("nodes")
-            page = self._create_page("camera", nodes if isinstance(nodes, list) else [])
-            self._pages["camera"] = page
-            self._tabs.addTab(page, "Camera")
+            camera_nodes = nodes if isinstance(nodes, list) else []
+            self._add_camera_feature_tabs(camera_nodes)
 
         for map_payload in payload.get("maps") or []:
             if not isinstance(map_payload, dict):
@@ -891,6 +966,25 @@ class CameraSettingsWidget(QWidget):
             self._tabs.addTab(page, f"{title} (error)" if error else title)
         self._status_label.setText(str(payload.get("message") or "Camera settings loaded."))
 
+    def _add_camera_feature_tabs(self, nodes: list[NodePayload]) -> None:
+        added = False
+        for title, category_terms, feature_prefixes in self.CAMERA_FEATURE_TABS:
+            group_nodes = self._camera_group_nodes(
+                nodes,
+                category_terms,
+                feature_prefixes,
+            )
+            if not self._has_visible_features(group_nodes):
+                continue
+            page = self._create_page("camera", group_nodes)
+            self._pages[f"camera:{title}"] = page
+            self._tabs.addTab(page, title)
+            added = True
+
+        page = self._create_page("camera", nodes)
+        self._pages["camera:Features"] = page
+        self._tabs.addTab(page, "Features" if added else "Camera")
+
     def _create_page(
         self,
         map_key: str,
@@ -904,6 +998,83 @@ class CameraSettingsWidget(QWidget):
         )
         page.set_nodes(nodes)
         return page
+
+    def _camera_group_nodes(
+        self,
+        nodes: list[NodePayload],
+        category_terms: tuple[str, ...],
+        feature_prefixes: tuple[str, ...],
+    ) -> list[NodePayload]:
+        categories = [node for node in nodes if self._is_category(node)]
+        category_names = {
+            self._node_name(node)
+            for node in categories
+            if self._node_matches(node, category_terms)
+        }
+        category_names.update(self._category_descendants(nodes, category_names))
+
+        result: list[NodePayload] = []
+        for node in nodes:
+            if self._is_category(node):
+                result.append(node)
+                continue
+            name = self._node_name(node)
+            if name in category_names or self._node_matches(node, feature_prefixes):
+                result.append(node)
+        return result
+
+    def _category_descendants(
+        self,
+        nodes: list[NodePayload],
+        category_names: set[str],
+    ) -> set[str]:
+        nodes_by_name = {
+            self._node_name(node): node
+            for node in nodes
+            if self._node_name(node)
+        }
+        pending = list(category_names)
+        descendants: set[str] = set()
+        while pending:
+            name = pending.pop()
+            node = nodes_by_name.get(name)
+            if node is None:
+                continue
+            for child in node.get("children") or []:
+                child_name = str(child)
+                if child_name in descendants:
+                    continue
+                descendants.add(child_name)
+                child_node = nodes_by_name.get(child_name)
+                if child_node is not None and self._is_category(child_node):
+                    pending.append(child_name)
+        return descendants
+
+    def _has_visible_features(self, nodes: list[NodePayload]) -> bool:
+        return any(not self._is_category(node) for node in nodes)
+
+    @staticmethod
+    def _is_category(node: NodePayload) -> bool:
+        return str(node.get("type") or "") == "category"
+
+    @staticmethod
+    def _node_name(node: NodePayload) -> str:
+        return str(node.get("name") or "")
+
+    @classmethod
+    def _node_matches(
+        cls,
+        node: NodePayload,
+        terms: tuple[str, ...],
+    ) -> bool:
+        text = cls._normalise(
+            f"{node.get('name') or ''} {node.get('display_name') or ''}"
+        )
+        return any(cls._normalise(term) in text for term in terms)
+
+    @staticmethod
+    def _normalise(value: object) -> str:
+        return "".join(ch for ch in str(value).lower() if ch.isalnum())
 
     def _on_setting_changed(self, payload: object) -> None:
         self._refresh_button.setEnabled(True)
