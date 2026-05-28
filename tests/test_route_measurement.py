@@ -718,6 +718,111 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
         self.assertLess(retry_lower_index, final_lift_index)
         self.assertEqual([call for call in stage.calls if call[0] == "adjust"], [])
 
+    def test_auto_contact_seek_presses_deeper_when_full_batch_turns_bad(self) -> None:
+        point = _point(1)
+        stage = _FakeStage()
+        lcr = _FakeBatchRouteLCR(
+            [
+                {"differential_resistance_ohm": value}
+                for value in (
+                    200000.0,
+                    210000.0,
+                    220000.0,
+                    230000.0,
+                    1000.0,
+                    1001.0,
+                    1000.0,
+                    5000.0,
+                    1000.0,
+                    1001.0,
+                    1002.0,
+                    1003.0,
+                )
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "route.csv"
+            runner = RouteMeasurementRunner(
+                points=[point],
+                csv_path=csv_path,
+                stage_controller=stage,
+                lcr_controller=lcr,
+                needle_feedrate=None,
+                measurement_count=4,
+                initial_measurement_count=2,
+                auto_contact_seek_on_bad_contact=True,
+                auto_contact_seek_step_mm=0.001,
+                auto_contact_seek_max_total_mm=0.002,
+                contact_settle_s=0.0,
+            )
+
+            success, message = runner.run()
+
+            self.assertTrue(success, message)
+            self.assertEqual(lcr.batch_counts, [2, 2, 2, 2, 2, 2])
+            with csv_path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[0]["status"], "ok")
+            self.assertEqual(rows[0]["n_measurements"], "4")
+
+        self.assertEqual(
+            [call for call in stage.calls if call[0] == "lower_to_depth"],
+            [
+                ("lower_to_depth", 0.001, None),
+                ("lower_to_depth", 0.002, None),
+            ],
+        )
+
+    def test_auto_contact_seek_starts_deeper_after_initial_full_batch_fails(self) -> None:
+        point = _point(1)
+        stage = _FakeStage()
+        lcr = _FakeBatchRouteLCR(
+            [
+                {"differential_resistance_ohm": value}
+                for value in (
+                    1000.0,
+                    1001.0,
+                    1000.0,
+                    5000.0,
+                    1000.0,
+                    1001.0,
+                    1002.0,
+                    1003.0,
+                )
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "route.csv"
+            runner = RouteMeasurementRunner(
+                points=[point],
+                csv_path=csv_path,
+                stage_controller=stage,
+                lcr_controller=lcr,
+                needle_feedrate=None,
+                measurement_count=4,
+                initial_measurement_count=2,
+                auto_contact_seek_on_bad_contact=True,
+                auto_contact_seek_step_mm=0.001,
+                auto_contact_seek_max_total_mm=0.002,
+                contact_settle_s=0.0,
+            )
+
+            success, message = runner.run()
+
+            self.assertTrue(success, message)
+            self.assertEqual(lcr.batch_counts, [2, 2, 2, 2])
+            with csv_path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[0]["status"], "ok")
+            self.assertEqual(rows[0]["n_measurements"], "4")
+
+        self.assertEqual(
+            [call for call in stage.calls if call[0] == "lower_to_depth"],
+            [("lower_to_depth", 0.001, None)],
+        )
+
     def test_auto_contact_seek_stops_at_configured_depth(self) -> None:
         point = _point(1)
         stage = _FakeStage()
