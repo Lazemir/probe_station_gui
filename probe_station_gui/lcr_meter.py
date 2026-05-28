@@ -30,6 +30,7 @@ ROUTE_METER_LABELS: dict[str, str] = {
     ROUTE_METER_GWINSTEK: "GW Instek LCR-76200",
     ROUTE_METER_KEITHLEY: "Keithley 2400 + 2182A",
 }
+DEFAULT_METER_TIMEOUT_MS = 10000
 
 
 @dataclass(frozen=True)
@@ -440,7 +441,7 @@ class RouteMeter:
     def __init__(
         self,
         configuration: RouteMeterConfiguration,
-        timeout_ms: int = 10000,
+        timeout_ms: int = DEFAULT_METER_TIMEOUT_MS,
     ) -> None:
         self._configuration = configuration
         self._timeout_ms = int(timeout_ms)
@@ -587,7 +588,7 @@ class LCRMeterController(QObject):
     reading_updated: Signal = Signal(float, bool)
     status_message: Signal = Signal(str)
 
-    DEFAULT_TIMEOUT_MS = 10000
+    DEFAULT_TIMEOUT_MS = DEFAULT_METER_TIMEOUT_MS
 
     def __init__(self) -> None:
         super().__init__()

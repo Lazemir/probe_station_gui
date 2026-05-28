@@ -17,7 +17,6 @@ from typing import Any, Callable
 Point2D = tuple[float, float]
 
 
-CONTACT_MAX_ABS_MEDIAN_OHM = 50_000.0
 CONTACT_MAX_MAD_SIGMA_OHM = 300.0
 CONTACT_MAX_P95_ABS_STEP_OHM = 1_000.0
 
@@ -122,39 +121,12 @@ class RouteMeasurementCsvWriter:
             os.fsync(handle.fileno())
 
     def append(self, record: RouteMeasurementRecord) -> None:
-        rows = self._read_rows()
-        rows[record.structure_number] = _record_to_csv_row(record)
-        self._write_rows(rows)
-
-    def _read_rows(self) -> dict[int, dict[str, str]]:
-        if not self.path.exists():
-            return {}
-        rows: dict[int, dict[str, str]] = {}
-        with self.path.open("r", encoding="utf-8", newline="") as handle:
-            for row in csv.DictReader(handle):
-                try:
-                    structure_number = int(row.get("structure_number", ""))
-                except (TypeError, ValueError):
-                    continue
-                values = {field: str(row.get(field, "")) for field in CSV_FIELDS}
-                rows[structure_number] = values
-        return rows
-
-    def _write_rows(self, rows: dict[int, dict[str, str]]) -> None:
-        tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
-        with tmp_path.open("w", encoding="utf-8", newline="") as handle:
+        self.write_header()
+        with self.path.open("a", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
-            writer.writeheader()
-            for structure_number in sorted(rows):
-                writer.writerow(
-                    {
-                        field: rows[structure_number].get(field, "")
-                        for field in CSV_FIELDS
-                    }
-                )
+            writer.writerow(_record_to_csv_row(record))
             handle.flush()
             os.fsync(handle.fileno())
-        tmp_path.replace(self.path)
 
 
 class RouteMeasurementRunner:
@@ -162,6 +134,8 @@ class RouteMeasurementRunner:
 
     DEFAULT_CONTACT_SETTLE_S = 0.2
     SHORT_CHECK_SAMPLE_COUNT = 10
+    AUTO_CONTACT_SEEK_STEP_MM = -0.001
+    AUTO_CONTACT_SEEK_MAX_TOTAL_MM = 0.010
 
     def __init__(
         self,
@@ -177,10 +151,15 @@ class RouteMeasurementRunner:
         max_relative_rms: float | None = None,
         short_threshold_ohm: float | None = None,
         confirm_each_point: bool = False,
+        auto_next_ok_or_short: bool = False,
+        auto_contact_seek_on_bad_contact: bool = False,
+        auto_contact_seek_step_mm: float = AUTO_CONTACT_SEEK_STEP_MM,
+        auto_contact_seek_max_total_mm: float = AUTO_CONTACT_SEEK_MAX_TOTAL_MM,
         contact_settle_s: float = DEFAULT_CONTACT_SETTLE_S,
         nplc_label: str = "",
         measurement_type: str = "",
         status_callback: Callable[[str], None] | None = None,
+        progress_callback: Callable[[int, int, int], None] | None = None,
         record_callback: Callable[[RouteMeasurementRecord, int, int], None] | None = None,
         result_callback: Callable[[RouteMeasurementRecord, int, int, bool], None]
         | None = None,
@@ -208,26 +187,30 @@ class RouteMeasurementRunner:
             and max_relative_rms_value > 0.0
             else None
         )
-        try:
-            short_threshold_value = float(short_threshold_ohm)
-        except (TypeError, ValueError):
-            short_threshold_value = math.nan
-        self._short_threshold_ohm = (
-            short_threshold_value
-            if math.isfinite(short_threshold_value)
-            and short_threshold_value >= 0.0
-            else None
-        )
+        _ = short_threshold_ohm
         self._confirm_each_point = bool(confirm_each_point)
+        self._auto_next_lock = threading.Lock()
+        self._auto_next_ok_or_short = bool(auto_next_ok_or_short)
+        self._auto_contact_seek_on_bad_contact = bool(
+            auto_contact_seek_on_bad_contact
+        )
+        self._auto_contact_seek_step_mm = self._normalized_contact_seek_step(
+            auto_contact_seek_step_mm
+        )
+        self._auto_contact_seek_max_total_mm = self._normalized_contact_seek_limit(
+            auto_contact_seek_max_total_mm
+        )
         self._contact_settle_s = max(0.0, float(contact_settle_s))
         self._nplc_label = str(nplc_label)
         self._measurement_type = str(measurement_type)
         self._status_callback = status_callback
+        self._progress_callback = progress_callback
         self._record_callback = record_callback
         self._result_callback = result_callback
         self._waiting_callback = waiting_callback
         self._stop_requested = threading.Event()
         self._point_interrupt_requested = threading.Event()
+        self._pause_requested = threading.Event()
         self._confirmation_condition = threading.Condition()
         self._pending_confirmation: str | None = None
         self._stage_task_active = False
@@ -265,14 +248,15 @@ class RouteMeasurementRunner:
 
     def request_current_point_correction(self) -> None:
         self._point_interrupt_requested.set()
-        abort = getattr(self._lcr_controller, "abort_current_measurement", None)
-        if callable(abort):
-            try:
-                abort()
-            except Exception:
-                pass
         with self._confirmation_condition:
             self._confirmation_condition.notify_all()
+
+    def request_pause_after_current_point(self) -> None:
+        self._pause_requested.set()
+
+    def set_auto_next_ok_or_short(self, enabled: bool) -> None:
+        with self._auto_next_lock:
+            self._auto_next_ok_or_short = bool(enabled)
 
     def save_current_position_adjustment(
         self,
@@ -339,6 +323,7 @@ class RouteMeasurementRunner:
                 self._point_interrupt_requested.clear()
                 position = position_index + 1
                 point = self._points[position_index]
+                self._emit_progress(position, total, int(point.index))
                 self._status(
                     f"Route measurement: point {position}/{total} "
                     f"{point.label}."
@@ -355,6 +340,7 @@ class RouteMeasurementRunner:
                 record: RouteMeasurementRecord | None = None
                 record_saved = False
                 quality_rejected = False
+                result_emitted = False
                 point_interrupted = self._point_interrupt_requested.is_set()
                 try:
                     if not point_interrupted:
@@ -375,7 +361,7 @@ class RouteMeasurementRunner:
                             f"Route measurement: point {position}/{total} "
                             "measuring."
                         )
-                        samples = self._measure_samples()
+                        samples = self._measure_samples(position=position, total=total)
                         if samples is None:
                             if self._point_interrupt_requested.is_set():
                                 point_interrupted = True
@@ -402,6 +388,8 @@ class RouteMeasurementRunner:
                             self._csv_writer.append(record)
                             measurements_saved += 1
                             record_saved = True
+                        self._emit_result(record, position, total, record_saved)
+                        result_emitted = True
                 finally:
                     if needles_lowered:
                         self._stage_controller.run_external_needles_action(
@@ -431,11 +419,13 @@ class RouteMeasurementRunner:
                 if record is None:
                     continue
                 if quality_rejected:
+                    self._consume_pause_request()
                     decision = self._wait_after_rejected_result(
                         point=point,
                         record=record,
                         position=position,
                         total=total,
+                        emit_result=not result_emitted,
                     )
                     if decision == "stop":
                         message = "Route measurement stopped by user."
@@ -449,14 +439,24 @@ class RouteMeasurementRunner:
                         position_index += 1
                         continue
                     continue
+                auto_next = (
+                    self._confirm_each_point
+                    and record_saved
+                    and record.status in {"ok", "short"}
+                    and self._auto_next_ok_or_short_enabled()
+                )
                 if self._confirm_each_point:
                     with self._confirmation_condition:
                         self._pending_confirmation = None
                     with self._route_offset_lock:
                         self._last_recorded_point = point
-                    self._finish_stage_task()
-                    self._set_waiting(True)
-                self._emit_result(record, position, total, record_saved)
+                    pause_after_point = self._consume_pause_request()
+                    auto_next = auto_next and not pause_after_point
+                    if not auto_next:
+                        self._finish_stage_task()
+                        self._set_waiting(True)
+                if not result_emitted:
+                    self._emit_result(record, position, total, record_saved)
                 if self._record_callback is not None:
                     self._record_callback(record, position, total)
                 if self._confirm_each_point:
@@ -465,23 +465,34 @@ class RouteMeasurementRunner:
                         if record.status == "short"
                         else "saved"
                     )
-                    self._status(
-                        f"Route measurement: point {position}/{total} "
-                        f"{status_detail}; "
-                        "choose Next, Remeasure, Skip, Go To, or Cancel."
-                    )
-                    decision = self._wait_for_valid_confirmation()
-                    self._set_waiting(False)
-                    if decision == "stop":
-                        message = "Route measurement stopped by user."
-                        break
-                    self._begin_stage_task()
-                    jump_index = self._jump_target_index(decision)
-                    if jump_index is not None:
-                        position_index = jump_index
-                        continue
-                    if decision == "remeasure":
-                        continue
+                    if auto_next:
+                        self._status(
+                            f"Route measurement: point {position}/{total} "
+                            f"{status_detail}; continuing."
+                        )
+                    else:
+                        action_text = (
+                            "paused"
+                            if pause_after_point
+                            else status_detail
+                        )
+                        self._status(
+                            f"Route measurement: point {position}/{total} "
+                            f"{action_text}; "
+                            "choose Next, Remeasure, Skip, or Go To."
+                        )
+                        decision = self._wait_for_valid_confirmation()
+                        self._set_waiting(False)
+                        if decision == "stop":
+                            message = "Route measurement stopped by user."
+                            break
+                        self._begin_stage_task()
+                        jump_index = self._jump_target_index(decision)
+                        if jump_index is not None:
+                            position_index = jump_index
+                            continue
+                        if decision == "remeasure":
+                            continue
                 position_index += 1
             if position_index >= total:
                 success = True
@@ -553,9 +564,32 @@ class RouteMeasurementRunner:
         if self._status_callback is not None:
             self._status_callback(message)
 
+    def _emit_progress(
+        self,
+        position: int,
+        total: int,
+        point_number: int,
+    ) -> None:
+        if self._progress_callback is not None:
+            self._progress_callback(
+                int(position),
+                int(total),
+                int(point_number),
+            )
+
     def _set_waiting(self, waiting: bool) -> None:
         if self._waiting_callback is not None:
             self._waiting_callback(bool(waiting))
+
+    def _auto_next_ok_or_short_enabled(self) -> bool:
+        with self._auto_next_lock:
+            return bool(self._auto_next_ok_or_short)
+
+    def _consume_pause_request(self) -> bool:
+        requested = self._pause_requested.is_set()
+        if requested:
+            self._pause_requested.clear()
+        return requested
 
     def _emit_result(
         self,
@@ -567,11 +601,54 @@ class RouteMeasurementRunner:
         if self._result_callback is not None:
             self._result_callback(record, position, total, saved)
 
-    def _measure_samples(self) -> list[RouteMeasurementSample] | None:
+    @staticmethod
+    def _normalized_contact_seek_step(value: object) -> float:
+        try:
+            step = float(value)
+        except (TypeError, ValueError):
+            step = RouteMeasurementRunner.AUTO_CONTACT_SEEK_STEP_MM
+        if not math.isfinite(step) or step == 0.0:
+            step = RouteMeasurementRunner.AUTO_CONTACT_SEEK_STEP_MM
+        return -abs(step)
+
+    @staticmethod
+    def _normalized_contact_seek_limit(value: object) -> float:
+        try:
+            limit = float(value)
+        except (TypeError, ValueError):
+            limit = RouteMeasurementRunner.AUTO_CONTACT_SEEK_MAX_TOTAL_MM
+        if not math.isfinite(limit) or limit < 0.0:
+            return 0.0
+        return limit
+
+    def _measure_samples(
+        self,
+        *,
+        position: int,
+        total: int,
+    ) -> list[RouteMeasurementSample] | None:
         initial_count = self._initial_measurement_count()
         samples = self._read_measurement_samples(initial_count, start_index=1)
         if samples is None:
             return None
+        if (
+            self._auto_contact_seek_on_bad_contact
+            and not self._samples_are_short(samples)
+            and self._samples_have_bad_contact(samples)
+        ):
+            samples = self._seek_contact_from_current_position(
+                initial_samples=samples,
+                position=position,
+                total=total,
+            )
+            if samples is None:
+                return None
+        return self._complete_measurement_samples(samples)
+
+    def _complete_measurement_samples(
+        self,
+        samples: list[RouteMeasurementSample],
+    ) -> list[RouteMeasurementSample] | None:
         remaining_count = self._measurement_count - len(samples)
         if (
             remaining_count <= 0
@@ -587,9 +664,113 @@ class RouteMeasurementRunner:
             return None
         return samples + extra_samples
 
+    def _seek_contact_from_current_position(
+        self,
+        *,
+        initial_samples: list[RouteMeasurementSample],
+        position: int,
+        total: int,
+    ) -> list[RouteMeasurementSample] | None:
+        if self._auto_contact_seek_max_total_mm <= 0.0:
+            return initial_samples
+        needle_action = getattr(self._stage_controller, "run_external_needles_action", None)
+        if not callable(needle_action):
+            return initial_samples
+        lower_to_depth = getattr(
+            self._stage_controller,
+            "run_external_needles_lower_to_depth_below_down",
+            None,
+        )
+        adjust = getattr(self._stage_controller, "run_external_needles_adjust", None)
+        if not callable(lower_to_depth) and not callable(adjust):
+            return initial_samples
+        initial_quality = _contact_quality_from_samples(initial_samples)
+        self._status(
+            f"Route measurement: point {position}/{total} contact check "
+            f"{initial_quality.status}, "
+            f"median={_format_ohm(initial_quality.median_ohm)}, "
+            f"MAD={_format_ohm(initial_quality.mad_sigma_ohm)}; "
+            "seeking contact up to "
+            f"{self._auto_contact_seek_max_total_mm:.3f} mm."
+        )
+        step_mm = self._auto_contact_seek_step_mm
+        max_depth_steps = int(
+            math.ceil(self._auto_contact_seek_max_total_mm / abs(step_mm))
+        )
+        samples = initial_samples
+        depths_mm = [0.0] + [
+            min((step_index + 1) * abs(step_mm), self._auto_contact_seek_max_total_mm)
+            for step_index in range(max_depth_steps)
+        ]
+        for attempt_index, depth_mm in enumerate(depths_mm):
+            if (
+                self._stop_requested.is_set()
+                or self._point_interrupt_requested.is_set()
+            ):
+                return None
+            if depth_mm <= 0.0:
+                self._status(
+                    f"Route measurement: point {position}/{total} "
+                    "retrying lift/lower."
+                )
+            else:
+                self._status(
+                    f"Route measurement: point {position}/{total} "
+                    f"lift/lower retry {attempt_index}/{max_depth_steps}, "
+                    f"{depth_mm:.4f} mm below down."
+                )
+            needle_action("lift", self._needle_feedrate)
+            if (
+                self._stop_requested.is_set()
+                or self._point_interrupt_requested.is_set()
+            ):
+                return None
+            if depth_mm > 0.0 and callable(lower_to_depth):
+                lower_to_depth(depth_mm, self._needle_feedrate)
+            else:
+                needle_action("lower", self._needle_feedrate)
+                if depth_mm > 0.0:
+                    adjust(math.copysign(depth_mm, step_mm), self._needle_feedrate)
+            if (
+                self._stop_requested.is_set()
+                or self._point_interrupt_requested.is_set()
+            ):
+                return None
+            if not self._sleep_contact_settle():
+                return None
+            samples = self._read_measurement_samples(
+                self._initial_measurement_count(),
+                start_index=1,
+            )
+            if samples is None:
+                return None
+            depth_label = (
+                "after lift/lower"
+                if depth_mm <= 0.0
+                else f"{depth_mm:.4f} mm below down"
+            )
+            if self._samples_are_short(samples):
+                self._status(
+                    f"Route measurement: point {position}/{total} "
+                    f"{depth_label}, short-circuit detected."
+                )
+                return samples
+            quality = _contact_quality_from_samples(samples)
+            self._status(
+                f"Route measurement: point {position}/{total} "
+                f"{depth_label}, {quality.status}, "
+                f"median={_format_ohm(quality.median_ohm)}, "
+                f"MAD={_format_ohm(quality.mad_sigma_ohm)}."
+            )
+            if quality.good is not False:
+                return samples
+        self._status(
+            f"Route measurement: point {position}/{total} contact seek did not "
+            f"find stable contact within {self._auto_contact_seek_max_total_mm:.3f} mm."
+        )
+        return samples
+
     def _initial_measurement_count(self) -> int:
-        if self._short_threshold_ohm is None:
-            return self._measurement_count
         return min(self._measurement_count, self._initial_measurement_count_value)
 
     def _read_measurement_samples(
@@ -612,7 +793,7 @@ class RouteMeasurementRunner:
                 or self._point_interrupt_requested.is_set()
             ):
                 return None
-            raw_batch = batch_reader(count)
+            raw_batch = list(batch_reader(count))
             samples = [
                 _measurement_sample_from_raw(raw, index)
                 for index, raw in enumerate(raw_batch, start=start_index)
@@ -653,6 +834,7 @@ class RouteMeasurementRunner:
         position: int,
         total: int,
     ) -> str:
+        self._consume_pause_request()
         with self._confirmation_condition:
             self._pending_confirmation = None
         with self._route_offset_lock:
@@ -662,7 +844,7 @@ class RouteMeasurementRunner:
         self._status(
             f"Route measurement: point {position}/{total} interrupted; "
             "correct position, Save Shift if needed, then Remeasure, Skip, "
-            "Go To, or Cancel."
+            "or Go To."
         )
         decision = self._wait_for_valid_confirmation()
         self._set_waiting(False)
@@ -675,6 +857,7 @@ class RouteMeasurementRunner:
         record: RouteMeasurementRecord,
         position: int,
         total: int,
+        emit_result: bool = True,
     ) -> str:
         with self._confirmation_condition:
             self._pending_confirmation = None
@@ -682,20 +865,21 @@ class RouteMeasurementRunner:
             self._last_recorded_point = point
         self._finish_stage_task()
         self._set_waiting(True)
-        self._emit_result(record, position, total, False)
+        if emit_result:
+            self._emit_result(record, position, total, False)
         contact_quality = record.contact_quality
         if contact_quality is not None and contact_quality.good is False:
             self._status(
                 f"Route measurement: point {position}/{total} contact check failed "
                 f"({contact_quality.status}); correct contact, then Remeasure, "
-                "Skip, Go To, or Cancel."
+                "Skip, or Go To."
             )
         else:
             self._status(
                 f"Route measurement: point {position}/{total} relative RMS "
                 f"{_format_percent(record.relative_rms)} exceeds "
                 f"{_format_percent(self._max_relative_rms or math.nan)}; "
-                "correct contact, then Remeasure, Skip, Go To, or Cancel."
+                "correct contact, then Remeasure, Skip, or Go To."
             )
         decision = self._wait_for_valid_confirmation()
         self._set_waiting(False)
@@ -771,10 +955,10 @@ class RouteMeasurementRunner:
                 else math.nan
             )
             contact_quality = _contact_quality_from_samples(samples)
-            if contact_quality.good is False:
-                status = "bad_contact"
-            elif self._samples_are_short(samples):
+            if self._samples_are_short(samples):
                 status = "short"
+            elif contact_quality.good is False:
+                status = "bad_contact"
             else:
                 status = "ok"
         else:
@@ -798,10 +982,12 @@ class RouteMeasurementRunner:
         )
 
     def _record_exceeds_quality_limit(self, record: RouteMeasurementRecord) -> bool:
+        if record.status == "short":
+            return False
         contact_quality = record.contact_quality
         if contact_quality is not None and contact_quality.good is False:
             return True
-        if self._max_relative_rms is None or record.status not in {"ok", "short"}:
+        if self._max_relative_rms is None or record.status != "ok":
             return False
         return (
             math.isfinite(record.relative_rms)
@@ -812,19 +998,7 @@ class RouteMeasurementRunner:
         self,
         samples: list[RouteMeasurementSample] | tuple[RouteMeasurementSample, ...],
     ) -> bool:
-        if any(sample.compliance_hit for sample in samples):
-            return True
-        threshold = self._short_threshold_ohm
-        if threshold is None:
-            return False
-        finite_abs_values = sorted(
-            abs(float(sample.differential_resistance_ohm))
-            for sample in samples
-            if math.isfinite(float(sample.differential_resistance_ohm))
-        )
-        if not finite_abs_values:
-            return False
-        return _percentile(finite_abs_values, 50.0) <= threshold
+        return any(sample.compliance_hit for sample in samples)
 
     @staticmethod
     def _samples_have_bad_contact(
@@ -920,8 +1094,6 @@ def _contact_quality_from_samples(
     span = max(finite_values) - min(finite_values)
 
     reasons: list[str] = []
-    if abs(median) > CONTACT_MAX_ABS_MEDIAN_OHM:
-        reasons.append("median_out_of_range")
     if mad_sigma > CONTACT_MAX_MAD_SIGMA_OHM:
         reasons.append("mad_sigma_too_high")
     if p95_abs_step > CONTACT_MAX_P95_ABS_STEP_OHM:

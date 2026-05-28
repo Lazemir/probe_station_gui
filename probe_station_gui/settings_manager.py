@@ -461,7 +461,7 @@ class NeedleCalibrationSettings:
     short_threshold_ohm: float = 10.0
     poll_interval_ms: int = 250
     feedrate_mm_min: float = 1.0
-    contact_zone_mm: float = 0.1
+    contact_zone_mm: float = 0.05
     raise_position_mm: float = 0.0
     raise_position_configured: bool = False
     down_position_mm: float = 0.0
@@ -952,7 +952,7 @@ class SettingsManager:
     DEFAULT_SHORT_THRESHOLD_OHM: float = 10.0
     DEFAULT_LCR_POLL_INTERVAL_MS: int = 250
     DEFAULT_NEEDLE_FEEDRATE_MM_MIN: float = 1.0
-    DEFAULT_NEEDLE_CONTACT_ZONE_MM: float = 0.1
+    DEFAULT_NEEDLE_CONTACT_ZONE_MM: float = 0.05
     DEFAULT_AXIS_A_CALIBRATION_MODEL: str = "cosine_displacement"
     DEFAULT_AXIS_A_CALIBRATION_STEPS_PER_MM: float = 2600.0
     DEFAULT_AXIS_A_CALIBRATION_MIN_MM: float = 0.0

@@ -494,8 +494,11 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
         ]
 
         controller._move_safety_check = lambda: None
+        refresh_calls = []
         controller._refresh_coordinate_system_state = (
-            lambda _serial, apply_preference=True: None
+            lambda _serial, apply_preference=True: refresh_calls.append(
+                apply_preference
+            )
         )
         controller._wait_for_idle = lambda _serial: None
         controller._query_status = lambda _serial: statuses.pop(0)
@@ -525,6 +528,45 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
         self.assertAlmostEqual(sent_moves[0].y, 22.984)
         self.assertEqual(started_moves, [(29.887, 26.689, 600.0)])
         self.assertEqual(movement_results[-1][0], True)
+        self.assertEqual(refresh_calls, [])
+
+    def test_modal_state_query_waits_for_payload_when_ok_arrives_first(self) -> None:
+        controller = StageController()
+        serial_connection = _LineFakeSerial(
+            [
+                b"ok\n",
+                b"[GC:G1 G54 G17 G21 G90]\n",
+            ]
+        )
+
+        tokens = controller._query_modal_state_tokens(
+            serial_connection,
+            timeout=0.2,
+        )
+
+        self.assertIn("G54", tokens)
+        self.assertEqual(serial_connection.writes, [b"$G\n"])
+
+    def test_work_offset_query_ignores_stale_modal_response(self) -> None:
+        controller = StageController()
+        serial_connection = _LineFakeSerial(
+            [
+                b"[GC:G1 G54 G17 G21 G90]\n",
+                b"ok\n",
+                b"[G54:32.000,32.000,0.000,-2.908,0.000]\n",
+                b"[G55:0.000,0.000,0.000,0.000,0.000]\n",
+                b"ok\n",
+            ]
+        )
+
+        offsets = controller._query_work_coordinate_offsets(
+            serial_connection,
+            timeout=0.5,
+        )
+
+        self.assertEqual(serial_connection.writes, [b"$#\n"])
+        self.assertIn("G54", offsets)
+        self.assertEqual(offsets["G54"], (32.0, 32.0, 0.0, -2.908, 0.0))
 
     def test_set_current_a_work_coordinate_zeroes_active_wcs(self) -> None:
         controller = StageController()
@@ -1830,7 +1872,7 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
             controller._run_needles_action("lower", feedrate=80.0)
 
             self.assertEqual(observed[0][0], "A")
-            self.assertAlmostEqual(observed[0][1], -0.9)
+            self.assertAlmostEqual(observed[0][1], -0.95)
             self.assertEqual(observed[0][2:], (500.0, None, None))
             self.assertEqual(observed[1][0], "A")
             self.assertAlmostEqual(observed[1][1], -1.0)
@@ -1890,7 +1932,7 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
             controller._run_needles_action("raise", feedrate=70.0)
 
             self.assertEqual(observed[0][0], "A")
-            self.assertAlmostEqual(observed[0][1], -0.9)
+            self.assertAlmostEqual(observed[0][1], -0.95)
             self.assertEqual(observed[0][2:], (70.0, "raise", 70.0))
             self.assertEqual(observed[1][0], "A")
             self.assertAlmostEqual(observed[1][1], 0.0)
@@ -2060,11 +2102,60 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
             controller._run_needles_action("lower", feedrate=80.0)
 
             self.assertEqual(observed[0][0], "A")
-            self.assertAlmostEqual(observed[0][1], 0.1)
+            self.assertAlmostEqual(observed[0][1], 0.05)
             self.assertEqual(observed[0][2], 500.0)
             self.assertEqual(observed[1][0], "A")
             self.assertAlmostEqual(observed[1][1], 0.0)
             self.assertEqual(observed[1][2], 80.0)
+        finally:
+            controller.shutdown()
+
+    def test_needles_lower_to_depth_below_down_goes_directly_to_target(self) -> None:
+        controller = StageController()
+        try:
+            controller._serial = _FakeSerial()
+            controller._position_reporting_mode = "machine"
+            controller.apply_axis_max_feedrates({"A": 500.0})
+            controller.apply_needle_calibration(down_position_mm=1.0)
+            controller._query_status = lambda _serial: types.SimpleNamespace(
+                state="Idle",
+                position=(0.0, 0.0, 0.0, -0.95),
+                work_position=(0.0, 0.0, 0.0, -0.95),
+                display_position=(0.0, 0.0, 0.0, -0.95),
+                homed_axes={"A"},
+            )
+            observed = []
+
+            def _send_absolute_axis_move(_serial, axis, value, **kwargs) -> None:
+                observed.append((axis, value, kwargs.get("feedrate")))
+
+            controller._send_absolute_axis_move = _send_absolute_axis_move
+            controller.needles_action_started = types.SimpleNamespace(
+                emit=lambda *_args, **_kwargs: None
+            )
+            controller.needles_action_finished = types.SimpleNamespace(
+                emit=lambda *_args, **_kwargs: None
+            )
+            controller.needle_height_changed = types.SimpleNamespace(
+                emit=lambda *_args, **_kwargs: None
+            )
+            controller.needles_state_changed = types.SimpleNamespace(
+                emit=lambda *_args, **_kwargs: None
+            )
+            controller.axis_a_ready_changed = types.SimpleNamespace(
+                emit=lambda *_args, **_kwargs: None
+            )
+
+            message = controller.run_external_needles_lower_to_depth_below_down(
+                0.001,
+                feedrate=80.0,
+            )
+
+            self.assertEqual(message, "Needles lowered to 0.0010 mm below saved down.")
+            self.assertEqual(len(observed), 1)
+            self.assertEqual(observed[0][0], "A")
+            self.assertAlmostEqual(observed[0][1], -1.001)
+            self.assertEqual(observed[0][2], 80.0)
         finally:
             controller.shutdown()
 
@@ -2437,8 +2528,8 @@ class StageControllerNeedlesStateTest(unittest.TestCase):
             types.SimpleNamespace(
                 state="Idle",
                 position=None,
-                display_position=(0.0, 0.0, 0.0, -0.95),
-                work_position=(0.0, 0.0, 0.0, -0.95),
+                display_position=(0.0, 0.0, 0.0, -0.975),
+                work_position=(0.0, 0.0, 0.0, -0.975),
                 homed_axes={"A"},
             )
         )

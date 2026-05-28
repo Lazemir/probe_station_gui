@@ -76,6 +76,8 @@ class _DesignPlotPane(QWidget):
     HOVER_SNAP_SLOW_MS = 8.0
     SNAP_RADIUS_PX = 14.0
     CURRENT_CROSSHAIR_HALF_SIZE_PX = 8.0
+    PROBE_ROUTE_DETAIL_POINT_LIMIT = 300
+    PROBE_ROUTE_LABEL_POINT_LIMIT = 150
 
     def __init__(self, *, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -725,13 +727,18 @@ class _DesignPlotPane(QWidget):
         else:
             self._probe_route_selected_item.setData([], [])
 
+        draw_details = len(points) <= self.PROBE_ROUTE_DETAIL_POINT_LIMIT
         needle_1_x: list[float] = []
         needle_1_y: list[float] = []
         needle_2_x: list[float] = []
         needle_2_y: list[float] = []
         connector_x: list[float] = []
         connector_y: list[float] = []
-        for point in points:
+        for route_index, point in enumerate(self._probe_route.points):
+            if not point.enabled:
+                continue
+            if not draw_details and route_index != self._selected_route_point_index:
+                continue
             center = point.camera_center
             hits = self._probe_route.needle_hits_for_point(point)
             for offset_index, (_offset, hit) in enumerate(hits[:2]):
@@ -1079,8 +1086,12 @@ class _DesignPlotPane(QWidget):
         self._clear_probe_route_numbers()
         if self._probe_route is None:
             return
+        enabled_points = [point for point in self._probe_route.points if point.enabled]
+        draw_labels = len(enabled_points) <= self.PROBE_ROUTE_LABEL_POINT_LIMIT
         for route_index, route_point in enumerate(self._probe_route.points):
             if not route_point.enabled:
+                continue
+            if not draw_labels and route_index != self._selected_route_point_index:
                 continue
             item = pg.TextItem(
                 text=str(route_index + 1),
@@ -1322,6 +1333,7 @@ class DesignNavigatorPanel(QWidget):
     route_measurement_run_requested = Signal()
     route_measurement_stop_requested = Signal()
     route_measurement_interrupt_requested = Signal()
+    route_measurement_pause_requested = Signal()
     route_measurement_save_shift_requested = Signal()
     route_measurement_confirmation_requested = Signal(str)
     route_measurement_jump_requested = Signal(int)
@@ -1668,12 +1680,15 @@ class DesignNavigatorPanel(QWidget):
         route_layout.addLayout(route_edit_buttons)
 
         route_run_buttons = QHBoxLayout()
-        self._route_run_button = QPushButton("Run Route", route_group)
+        self._route_run_button = QPushButton("Measure Route", route_group)
+        self._route_pause_button = QPushButton("Pause", route_group)
+        self._route_pause_button.setEnabled(False)
         self._route_interrupt_button = QPushButton("Interrupt", route_group)
         self._route_interrupt_button.setEnabled(False)
-        self._route_stop_button = QPushButton("Cancel", route_group)
+        self._route_stop_button = QPushButton("Stop", route_group)
         self._route_stop_button.setEnabled(False)
         route_run_buttons.addWidget(self._route_run_button)
+        route_run_buttons.addWidget(self._route_pause_button)
         route_run_buttons.addWidget(self._route_interrupt_button)
         route_run_buttons.addWidget(self._route_stop_button)
         route_layout.addLayout(route_run_buttons)
@@ -1711,6 +1726,9 @@ class DesignNavigatorPanel(QWidget):
         self._route_clear_button.clicked.connect(self.route_clear_requested.emit)
         self._route_run_button.clicked.connect(
             self.route_measurement_run_requested.emit
+        )
+        self._route_pause_button.clicked.connect(
+            self.route_measurement_pause_requested.emit
         )
         self._route_stop_button.clicked.connect(
             self.route_measurement_stop_requested.emit
@@ -2118,6 +2136,9 @@ class DesignNavigatorPanel(QWidget):
             has_route and bool(self._route.points) and not route_running
         )
         self._route_stop_button.setEnabled(route_running)
+        self._route_pause_button.setEnabled(
+            route_running and not self._route_measurement_waiting
+        )
         self._route_interrupt_button.setEnabled(
             route_running and not self._route_measurement_waiting
         )

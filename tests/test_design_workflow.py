@@ -51,6 +51,7 @@ DesignScriptError = design_script.DesignScriptError
 load_measurement_plan = design_script.load_measurement_plan
 AlignmentPreparation = design_session.AlignmentPreparation
 DesignSession = design_session.DesignSession
+MeasurementRoute = design_session.MeasurementRoute
 
 
 class _FakeCell:
@@ -357,6 +358,49 @@ class DesignSessionTest(unittest.TestCase):
         self.assertFalse(restored.registration.valid)
         self.assertEqual(restored.registration.stale_reason, "Controller reset.")
         self.assertEqual(restored.registration_status, "Controller reset.")
+
+    def test_persisted_state_restores_saved_route(self) -> None:
+        document = self._make_document()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            route = MeasurementRoute.default_for_document(document, name="Array A")
+            route.add_point((10.0, 20.0))
+            route.add_point((30.0, 40.0))
+            route_path = Path(tmpdir) / "array-a.probe-route.json"
+            route.save(route_path)
+            session = DesignSession()
+            session.load_document(document)
+            session.set_route(route)
+            session.selected_route_point_index = 1
+
+            state = session.export_persisted_state()
+            assert state is not None
+            restored = DesignSession()
+            restored.restore_persisted_state(document, state)
+
+        assert restored.route is not None
+        self.assertEqual(restored.route.name, "Array A")
+        self.assertEqual(len(restored.route.points), 2)
+        self.assertEqual(restored.selected_route_point_index, 1)
+        self.assertEqual(restored.current_route_point().camera_center, (30.0, 40.0))
+
+    def test_persisted_state_ignores_missing_route_file(self) -> None:
+        document = self._make_document()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            route = MeasurementRoute.default_for_document(document, name="Array A")
+            route.add_point((10.0, 20.0))
+            route_path = Path(tmpdir) / "array-a.probe-route.json"
+            route.save(route_path)
+            session = DesignSession()
+            session.load_document(document)
+            session.set_route(route)
+            state = session.export_persisted_state()
+            assert state is not None
+            route_path.unlink()
+            restored = DesignSession()
+            restored.restore_persisted_state(document, state)
+
+        self.assertIs(restored.document, document)
+        self.assertIsNone(restored.route)
 
     def test_target_navigation(self) -> None:
         session = DesignSession()

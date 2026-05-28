@@ -331,6 +331,61 @@ class LCRMeterTest(unittest.TestCase):
         self.assertEqual(session.configurations[-1]["keithley_nplc"], 1.0)
         self.assertEqual(session.configurations[-1]["keithley_use_buffer"], True)
 
+    def test_controller_opens_keithley_with_default_timeout(self) -> None:
+        created: list[tuple[str, str, int]] = []
+        session = _FakeKeithleySession()
+
+        def fake_open(source: str, voltmeter: str, timeout_ms: int):
+            created.append((source, voltmeter, timeout_ms))
+            return session
+
+        controller = LCRMeterController()
+        controller.apply_configuration(
+            meter_type=ROUTE_METER_KEITHLEY,
+            resource_name="COM4",
+            keithley_source_resource="GPIB0::1::INSTR",
+            keithley_voltmeter_resource="GPIB0::2::INSTR",
+            measurement_function="DCR",
+            range_mode="AUTO",
+            auto_range_enabled=True,
+            impedance_range=3,
+            dcr_range=4,
+            frequency_hz=50.0,
+            level_mode="VOLTAGE",
+            voltage_level_v=0.01,
+            current_level_a=0.0001,
+            source_resistance_ohm=100,
+            aperture_rate="SLOW",
+            aperture_averages=1,
+            trigger_source="INT",
+            trigger_delay_s=0.0,
+            bias_enabled=False,
+            bias_level_v=0.0,
+            monitor1="OFF",
+            monitor2="OFF",
+            alc_enabled=False,
+            short_threshold_ohm=10.0,
+            poll_interval_ms=250,
+        )
+        original = lcr_module._open_keithley_session
+        lcr_module._open_keithley_session = fake_open
+        try:
+            opened = controller._open_configured_session()
+        finally:
+            lcr_module._open_keithley_session = original
+
+        self.assertIs(opened, session)
+        self.assertEqual(
+            created,
+            [
+                (
+                    "GPIB0::1::INSTR",
+                    "GPIB0::2::INSTR",
+                    LCRMeterController.DEFAULT_TIMEOUT_MS,
+                )
+            ],
+        )
+
     def test_controller_rejects_route_meter_type_mismatch(self) -> None:
         controller = LCRMeterController()
         controller.apply_configuration(
