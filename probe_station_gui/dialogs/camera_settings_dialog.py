@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFormLayout,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -20,9 +21,11 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QDoubleSpinBox,
+    QScrollArea,
     QSplitter,
     QSpinBox,
     QStackedWidget,
+    QSlider,
     QTabWidget,
     QToolButton,
     QTreeWidget,
@@ -815,6 +818,372 @@ class _NodeMapPage(QWidget):
         )
 
 
+class _FeatureListPage(QWidget):
+    SLIDER_STEPS = 10000
+
+    def __init__(
+        self,
+        map_key: str,
+        apply_callback: Callable[[str, str, object], None],
+        execute_callback: Callable[[str, str], None],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._map_key = map_key
+        self._apply_callback = apply_callback
+        self._execute_callback = execute_callback
+        self._nodes: list[NodePayload] = []
+        self._nodes_by_name: dict[str, NodePayload] = {}
+        self._editors_by_name: dict[str, QWidget] = {}
+        self._updating = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._scroll_area = QScrollArea(self)
+        self._scroll_area.setWidgetResizable(True)
+        layout.addWidget(self._scroll_area, 1)
+
+        self._content = QWidget(self)
+        self._grid = QGridLayout(self._content)
+        self._grid.setContentsMargins(8, 8, 8, 8)
+        self._grid.setHorizontalSpacing(10)
+        self._grid.setVerticalSpacing(6)
+        self._grid.setColumnStretch(1, 1)
+        self._scroll_area.setWidget(self._content)
+
+    def map_key(self) -> str:
+        return self._map_key
+
+    def set_nodes(self, nodes: list[NodePayload]) -> None:
+        self._nodes = [
+            node for node in nodes if str(node.get("type") or "") != "category"
+        ]
+        self._nodes_by_name = {
+            str(node.get("name") or ""): node
+            for node in self._nodes
+            if str(node.get("name") or "")
+        }
+        self._rebuild()
+
+    def update_node(self, node: NodePayload) -> bool:
+        node_name = str(node.get("name") or "")
+        if not node_name:
+            return False
+        for index, existing in enumerate(self._nodes):
+            if str(existing.get("name") or "") != node_name:
+                continue
+            merged = dict(existing)
+            merged.update(node)
+            self._nodes[index] = merged
+            self._nodes_by_name[node_name] = merged
+            self._update_editor(merged)
+            return True
+        return False
+
+    def queue_current_editor_value(self) -> None:
+        focused = QApplication.focusWidget()
+        for node_name, editor in self._editors_by_name.items():
+            if focused is editor:
+                self._queue_editor_value(node_name, editor)
+                return
+
+    def has_edit_focus(self) -> bool:
+        focused = QApplication.focusWidget()
+        return any(focused is editor for editor in self._editors_by_name.values())
+
+    def _rebuild(self) -> None:
+        while self._grid.count():
+            item = self._grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._editors_by_name.clear()
+
+        for row, node in enumerate(self._nodes):
+            label = QLabel(self._display_name(node), self._content)
+            label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            label.setToolTip(str(node.get("description") or node.get("tooltip") or ""))
+            self._grid.addWidget(label, row, 0)
+            editor, span = self._editor_for_node(node)
+            self._grid.addWidget(editor, row, 1, 1, span)
+            node_name = str(node.get("name") or "")
+            if node_name and not self._read_only_display(node):
+                self._editors_by_name[node_name] = editor
+            access = QLabel("" if bool(node.get("writable")) else "RO", self._content)
+            access.setToolTip(self._access_text(node))
+            self._grid.addWidget(access, row, 3)
+        self._grid.setRowStretch(len(self._nodes), 1)
+
+    def _editor_for_node(self, node: NodePayload) -> tuple[QWidget, int]:
+        node_type = str(node.get("type") or "")
+        writable = bool(node.get("available")) and bool(node.get("writable"))
+        if node_type == "enum":
+            return self._enum_editor(node, writable), 2
+        if node_type == "integer":
+            return self._numeric_editor(node, writable, integer=True), 2
+        if node_type == "float":
+            return self._numeric_editor(node, writable, integer=False), 2
+        if node_type == "boolean":
+            return self._boolean_editor(node, writable), 1
+        if node_type == "command":
+            return self._command_editor(node, writable), 2
+        return self._text_editor(node, writable), 2
+
+    def _enum_editor(self, node: NodePayload, writable: bool) -> QWidget:
+        editor = QComboBox(self._content)
+        value = self._value_text(node)
+        entries = [str(entry) for entry in node.get("entries") or []]
+        if value and value not in entries:
+            entries.insert(0, value)
+        editor.addItems(entries)
+        if value:
+            editor.setCurrentText(value)
+        editor.setEnabled(writable)
+        node_name = str(node.get("name") or "")
+        editor.currentTextChanged.connect(
+            lambda _value, name=node_name, combo=editor: self._queue_editor_value(
+                name, combo
+            )
+        )
+        return editor
+
+    def _numeric_editor(
+        self,
+        node: NodePayload,
+        writable: bool,
+        *,
+        integer: bool,
+    ) -> QWidget:
+        container = QWidget(self._content)
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        slider = QSlider(Qt.Horizontal, container)
+        edit = QLineEdit(container)
+        edit.setClearButtonEnabled(True)
+        edit.setFixedWidth(96)
+        edit.setText(self._value_text(node))
+        minimum = self._numeric_value(node.get("minimum"))
+        maximum = self._numeric_value(node.get("maximum"))
+        value = self._numeric_value(node.get("value"))
+        has_range = minimum is not None and maximum is not None and maximum > minimum
+        if has_range:
+            steps = self._slider_steps(node, minimum, maximum)
+            slider.setRange(0, steps)
+            if value is not None:
+                slider.setValue(self._value_to_slider(value, minimum, maximum, steps))
+        else:
+            slider.setRange(0, 0)
+        slider.setEnabled(writable and has_range)
+        edit.setEnabled(writable)
+        if integer:
+            edit.setPlaceholderText("Integer value")
+        else:
+            edit.setPlaceholderText("Float value")
+            validator = QDoubleValidator(edit)
+            if minimum is not None:
+                validator.setBottom(minimum)
+            if maximum is not None:
+                validator.setTop(maximum)
+            validator.setNotation(QDoubleValidator.StandardNotation)
+            edit.setValidator(validator)
+        unit = str(node.get("unit") or "")
+        layout.addWidget(slider, 1)
+        layout.addWidget(edit)
+        if unit:
+            layout.addWidget(QLabel(unit, container))
+
+        node_name = str(node.get("name") or "")
+
+        def sync_edit(slider_value: int) -> None:
+            if self._updating or not has_range:
+                return
+            self._updating = True
+            value_from_slider = self._slider_to_value(
+                slider_value,
+                minimum,
+                maximum,
+                slider.maximum(),
+                integer=integer,
+            )
+            edit.setText(str(value_from_slider))
+            self._updating = False
+
+        slider.valueChanged.connect(sync_edit)
+        slider.sliderReleased.connect(
+            lambda name=node_name, field=edit: self._queue_editor_value(name, field)
+        )
+        edit.editingFinished.connect(
+            lambda name=node_name, field=edit, slide=slider, lo=minimum, hi=maximum: (
+                self._sync_slider_from_edit(field, slide, lo, hi),
+                self._queue_editor_value(name, field),
+            )
+        )
+        container.setEnabled(bool(node.get("available")))
+        return container
+
+    def _boolean_editor(self, node: NodePayload, writable: bool) -> QWidget:
+        editor = QCheckBox(self._content)
+        editor.setChecked(self._bool_value(node.get("value")))
+        editor.setEnabled(writable)
+        node_name = str(node.get("name") or "")
+        editor.toggled.connect(
+            lambda _checked, name=node_name, checkbox=editor: self._queue_editor_value(
+                name, checkbox
+            )
+        )
+        return editor
+
+    def _command_editor(self, node: NodePayload, writable: bool) -> QWidget:
+        button = QPushButton("Execute", self._content)
+        button.setEnabled(writable)
+        node_name = str(node.get("name") or "")
+        button.clicked.connect(lambda _checked=False, name=node_name: self._execute_callback(self._map_key, name))
+        return button
+
+    def _text_editor(self, node: NodePayload, writable: bool) -> QWidget:
+        if self._read_only_display(node):
+            label = QLabel(self._value_text(node), self._content)
+            label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            return label
+        editor = QLineEdit(self._content)
+        editor.setText(self._value_text(node))
+        editor.setEnabled(writable)
+        node_name = str(node.get("name") or "")
+        editor.editingFinished.connect(
+            lambda name=node_name, field=editor: self._queue_editor_value(name, field)
+        )
+        return editor
+
+    def _update_editor(self, node: NodePayload) -> None:
+        editor = self._editors_by_name.get(str(node.get("name") or ""))
+        if editor is None or self.has_edit_focus():
+            return
+        self._updating = True
+        try:
+            if isinstance(editor, QComboBox):
+                value = self._value_text(node)
+                if value and editor.findText(value) < 0:
+                    editor.addItem(value)
+                editor.setCurrentText(value)
+            elif isinstance(editor, QCheckBox):
+                editor.setChecked(self._bool_value(node.get("value")))
+            elif isinstance(editor, QLineEdit):
+                editor.setText(self._value_text(node))
+            else:
+                for line_edit in editor.findChildren(QLineEdit):
+                    line_edit.setText(self._value_text(node))
+                    break
+        finally:
+            self._updating = False
+
+    def _queue_editor_value(self, node_name: str, editor: QWidget) -> None:
+        if self._updating or not node_name:
+            return
+        value = self._editor_value(editor)
+        if value is None:
+            return
+        self._apply_callback(self._map_key, node_name, value)
+
+    def _editor_value(self, editor: QWidget) -> object | None:
+        if isinstance(editor, QComboBox):
+            return editor.currentText()
+        if isinstance(editor, QCheckBox):
+            return editor.isChecked()
+        if isinstance(editor, QLineEdit):
+            if editor.validator() is not None and not editor.hasAcceptableInput():
+                return None
+            return editor.text()
+        for line_edit in editor.findChildren(QLineEdit):
+            if line_edit.validator() is not None and not line_edit.hasAcceptableInput():
+                return None
+            return line_edit.text()
+        return None
+
+    @classmethod
+    def _slider_steps(cls, node: NodePayload, minimum: float, maximum: float) -> int:
+        increment = cls._numeric_value(node.get("increment"))
+        if increment is not None and increment > 0:
+            return max(1, min(cls.SLIDER_STEPS, int(round((maximum - minimum) / increment))))
+        return cls.SLIDER_STEPS
+
+    @staticmethod
+    def _value_to_slider(value: float, minimum: float, maximum: float, steps: int) -> int:
+        if maximum <= minimum:
+            return 0
+        ratio = (value - minimum) / (maximum - minimum)
+        return max(0, min(steps, int(round(ratio * steps))))
+
+    @staticmethod
+    def _slider_to_value(
+        slider_value: int,
+        minimum: float | None,
+        maximum: float | None,
+        steps: int,
+        *,
+        integer: bool,
+    ) -> object:
+        if minimum is None or maximum is None or steps <= 0:
+            return int(slider_value) if integer else float(slider_value)
+        value = minimum + (maximum - minimum) * (slider_value / steps)
+        return int(round(value)) if integer else round(value, 6)
+
+    def _sync_slider_from_edit(
+        self,
+        edit: QLineEdit,
+        slider: QSlider,
+        minimum: float | None,
+        maximum: float | None,
+    ) -> None:
+        if minimum is None or maximum is None or maximum <= minimum:
+            return
+        value = self._numeric_value(edit.text())
+        if value is None:
+            return
+        self._updating = True
+        slider.setValue(
+            self._value_to_slider(value, minimum, maximum, slider.maximum())
+        )
+        self._updating = False
+
+    @staticmethod
+    def _read_only_display(node: NodePayload) -> bool:
+        return not bool(node.get("available")) or not bool(node.get("writable"))
+
+    @staticmethod
+    def _display_name(node: NodePayload) -> str:
+        return str(node.get("display_name") or node.get("name") or "")
+
+    @staticmethod
+    def _value_text(node: NodePayload) -> str:
+        value = node.get("value")
+        if value is None:
+            return ""
+        return str(value)
+
+    @staticmethod
+    def _access_text(node: NodePayload) -> str:
+        if not bool(node.get("available")):
+            return "Unavailable"
+        if bool(node.get("writable")):
+            return "Writable"
+        return "Read only"
+
+    @staticmethod
+    def _bool_value(value: object) -> bool:
+        return str(value).strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
+    @staticmethod
+    def _numeric_value(value: object, default: float | None = None) -> float | None:
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+
 class CameraSettingsWidget(QWidget):
     """Widget that exposes every implemented GenICam node reported by rotpy."""
 
@@ -899,7 +1268,7 @@ class CameraSettingsWidget(QWidget):
     def __init__(self, grabber: object, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._grabber = grabber
-        self._pages: dict[str, _NodeMapPage] = {}
+        self._pages: dict[str, _NodeMapPage | _FeatureListPage] = {}
         self._pending_settings: dict[tuple[str, str], object] = {}
         self._applying_settings: dict[tuple[str, str], object] = {}
         self._snapshot_pending = False
@@ -960,19 +1329,22 @@ class CameraSettingsWidget(QWidget):
     def _has_edit_focus(self) -> bool:
         return any(page.has_edit_focus() for page in self._current_pages())
 
-    def _current_pages(self) -> list[_NodeMapPage]:
+    def _current_pages(self) -> list[_NodeMapPage | _FeatureListPage]:
         current_widget = self._tabs.currentWidget()
-        if isinstance(current_widget, _NodeMapPage):
+        if isinstance(current_widget, (_NodeMapPage, _FeatureListPage)):
             return [current_widget]
         if current_widget is self._camera_container and self._camera_group_stack is not None:
             camera_page = self._camera_group_stack.currentWidget()
-            if isinstance(camera_page, _NodeMapPage):
+            if isinstance(camera_page, (_NodeMapPage, _FeatureListPage)):
                 return [camera_page]
         return []
 
     def _on_snapshot(self, payload: object) -> None:
         self._snapshot_pending = False
         self._refresh_button.setEnabled(True)
+        if self._pending_settings or self._applying_settings:
+            self._set_pending_status()
+            return
         if not isinstance(payload, dict):
             self._status_label.setText("Camera settings response was invalid.")
             return
@@ -1087,7 +1459,10 @@ class CameraSettingsWidget(QWidget):
         page_key = f"camera:{title}"
         page = self._pages.get(page_key)
         if page is None:
-            page = self._create_page("camera", nodes)
+            if title in {"Features", "All"}:
+                page = self._create_page("camera", nodes)
+            else:
+                page = self._create_feature_page("camera", nodes)
             self._pages[page_key] = page
             group_combo.addItem(title)
             stack.addWidget(page)
@@ -1100,6 +1475,20 @@ class CameraSettingsWidget(QWidget):
         nodes: list[NodePayload],
     ) -> _NodeMapPage:
         page = _NodeMapPage(
+            map_key,
+            self._queue_setting,
+            self._execute_command,
+            self,
+        )
+        page.set_nodes(nodes)
+        return page
+
+    def _create_feature_page(
+        self,
+        map_key: str,
+        nodes: list[NodePayload],
+    ) -> _FeatureListPage:
+        page = _FeatureListPage(
             map_key,
             self._queue_setting,
             self._execute_command,
@@ -1204,12 +1593,15 @@ class CameraSettingsWidget(QWidget):
                 self._pending_settings.pop(key, None)
             if self._pending_settings:
                 self._set_pending_status()
+        else:
+            self._pending_settings.pop(key, None)
 
     def _queue_setting(self, map_key: str, node_name: str, value: object) -> None:
         if not node_name:
             return
         self._pending_settings[(map_key, node_name)] = value
         self._set_pending_status()
+        self._write_pending_settings()
 
     def _set_pending_status(self) -> None:
         pending_count = len(self._pending_settings)
@@ -1221,6 +1613,9 @@ class CameraSettingsWidget(QWidget):
     def apply_pending_settings(self) -> bool:
         for page in self._current_pages():
             page.queue_current_editor_value()
+        return self._write_pending_settings()
+
+    def _write_pending_settings(self) -> bool:
         if not self._pending_settings:
             return False
         pending_items = [
