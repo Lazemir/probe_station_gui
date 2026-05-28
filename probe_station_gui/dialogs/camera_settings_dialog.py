@@ -93,6 +93,7 @@ class _NodeMapPage(QWidget):
         self._nodes_by_name: dict[str, NodePayload] = {}
         self._current_node: NodePayload | None = None
         self._editor: QWidget | None = None
+        self._tree_dirty = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -182,7 +183,8 @@ class _NodeMapPage(QWidget):
             for node in self._nodes
             if str(node.get("name") or "")
         }
-        self._refresh_tree()
+        self._tree_dirty = True
+        self._refresh_tree_if_visible()
 
     def update_node(self, node: NodePayload) -> bool:
         node_name = str(node.get("name") or "")
@@ -207,13 +209,28 @@ class _NodeMapPage(QWidget):
             and str(self._current_node.get("name") or "") == node_name
         ):
             self._current_node = updated_node
-        self._refresh_tree()
+        self._tree_dirty = True
+        self._refresh_tree_if_visible()
         return True
 
     def map_key(self) -> str:
         return self._map_key
 
+    def showEvent(self, event: object) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._refresh_tree_if_visible()
+
+    def _refresh_tree_if_visible(self) -> None:
+        if not self.isVisible():
+            return
+        if self._tree_dirty:
+            self._refresh_tree()
+
     def _refresh_tree(self) -> None:
+        if not self.isVisible():
+            self._tree_dirty = True
+            return
+        self._tree_dirty = False
         selected_name = None
         if self._current_node is not None:
             selected_name = str(self._current_node.get("name") or "")
@@ -837,6 +854,7 @@ class _FeatureListPage(QWidget):
         self._widgets_by_name: dict[str, QWidget] = {}
         self._editors_by_name: dict[str, QWidget] = {}
         self._updating = False
+        self._layout_dirty = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -854,6 +872,10 @@ class _FeatureListPage(QWidget):
 
     def map_key(self) -> str:
         return self._map_key
+
+    def showEvent(self, event: object) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._sync_layout_if_visible()
 
     def node_names(self) -> list[str]:
         return [
@@ -874,11 +896,16 @@ class _FeatureListPage(QWidget):
             for node in self._nodes
             if str(node.get("name") or "")
         }
+        if not self.isVisible():
+            self._layout_dirty = True
+            return
         if self._widgets_by_name and old_signature == new_signature:
             for node in self._nodes:
                 self._update_editor(node)
+            self._layout_dirty = False
             return
         self._rebuild()
+        self._layout_dirty = False
 
     def update_node(self, node: NodePayload) -> bool:
         node_name = str(node.get("name") or "")
@@ -896,7 +923,10 @@ class _FeatureListPage(QWidget):
                 return True
             self._nodes[index] = merged
             self._nodes_by_name[node_name] = merged
-            self._update_editor(merged)
+            if self.isVisible():
+                self._update_editor(merged)
+            else:
+                self._layout_dirty = True
             return True
         return False
 
@@ -915,6 +945,9 @@ class _FeatureListPage(QWidget):
         )
 
     def _rebuild(self) -> None:
+        if not self.isVisible():
+            self._layout_dirty = True
+            return
         while self._grid.count():
             item = self._grid.takeAt(0)
             widget = item.widget()
@@ -939,6 +972,13 @@ class _FeatureListPage(QWidget):
             access.setToolTip(self._access_text(node))
             self._grid.addWidget(access, row, 3)
         self._grid.setRowStretch(len(self._nodes), 1)
+        self._layout_dirty = False
+
+    def _sync_layout_if_visible(self) -> None:
+        if not self.isVisible():
+            return
+        if self._layout_dirty or not self._widgets_by_name:
+            self._rebuild()
 
     def _editor_for_node(self, node: NodePayload) -> tuple[QWidget, int]:
         node_type = str(node.get("type") or "")
