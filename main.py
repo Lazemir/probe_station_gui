@@ -73,6 +73,8 @@ from probe_station_gui.route_measurement import (
     RouteMeasurementPoint,
     RouteMeasurementRecord,
     RouteMeasurementRunner,
+    route_measurement_sample_from_raw,
+    summarize_route_contact_quality,
 )
 from probe_station_gui.settings_manager import (
     ObjectiveCalibrationSettings,
@@ -368,6 +370,9 @@ class Main(QMainWindow):
     route_measurement_result: Signal = Signal(object, int, int, bool)
     route_measurement_recorded: Signal = Signal(object, int, int)
     route_measurement_finished: Signal = Signal(bool, str, str)
+    contact_seek_status: Signal = Signal(str)
+    contact_seek_calibration_found: Signal = Signal(float, str)
+    contact_seek_finished: Signal = Signal(bool, str)
 
     ALIGNMENT_CAPTURE_SHORTCUT = "Space"
     ALIGNMENT_TARGET_ANGLES = (-180.0, -90.0, 0.0, 90.0, 180.0)
@@ -411,6 +416,10 @@ class Main(QMainWindow):
     CAMERA_UI_FRAME_GAP_WARNING_S = 0.25
     CLICK_TO_MOVE_PENDING_RETRY_MS = 150
     CLICK_TARGET_ANIMATION_PADDING_S = 0.03
+    CONTACT_SEEK_STEP_MM = -0.001
+    CONTACT_SEEK_MAX_TOTAL_MM = 0.020
+    CONTACT_SEEK_QUICK_COUNT = 25
+    CONTACT_SEEK_CONFIRM_COUNT = 250
 
     def __init__(self) -> None:
         super().__init__()
@@ -535,6 +544,8 @@ class Main(QMainWindow):
         self._route_measurement_runner: RouteMeasurementRunner | None = None
         self._route_measurement_thread: threading.Thread | None = None
         self._route_measurement_dialog: RouteMeasurementDialog | None = None
+        self._contact_seek_thread: threading.Thread | None = None
+        self._contact_seek_stop_requested = threading.Event()
         self._design_session = DesignSession()
         self.statusBar()
         self._objective_widget = self._create_objective_widget()
@@ -572,6 +583,11 @@ class Main(QMainWindow):
         self.route_measurement_result.connect(self._on_route_measurement_result)
         self.route_measurement_recorded.connect(self._on_route_measurement_recorded)
         self.route_measurement_finished.connect(self._on_route_measurement_finished)
+        self.contact_seek_status.connect(self._on_contact_seek_status)
+        self.contact_seek_calibration_found.connect(
+            self._on_contact_seek_calibration_found
+        )
+        self.contact_seek_finished.connect(self._on_contact_seek_finished)
 
         self.stage_controller = StageController()
         self.stage_controller.status_message.connect(self._show_status)
@@ -4987,12 +5003,20 @@ class Main(QMainWindow):
         prefix = "Measured" if saved else "Rejected"
         if saved and record.status == "short":
             prefix = "Short"
+        contact = record.contact_quality
+        contact_text = ""
+        if contact is not None and contact.assessed:
+            contact_text = (
+                f", contact={contact.status} "
+                f"(median={_format_route_ohm(contact.median_ohm)}, "
+                f"MAD={_format_route_ohm(contact.mad_sigma_ohm)})"
+            )
         return (
             f"{prefix} route point {position}/{total}: "
             f"R={_format_route_ohm(record.resistance_ohm)}, "
             f"RMS={_format_route_ohm(record.resistance_rms_ohm)}, "
             f"rel={_format_route_percent(record.relative_rms)}, "
-            f"status={record.status}."
+            f"status={record.status}{contact_text}."
         )
 
     def _on_route_measurement_finished(
@@ -6465,18 +6489,11 @@ class Main(QMainWindow):
         self.contact_calibration_window.move_to_surface_position_requested.connect(
             self._move_to_surface_position
         )
-        self.contact_calibration_window.save_current_needle_height_requested.connect(
-            self._save_current_needle_height
+        self.contact_calibration_window.contact_seek_requested.connect(
+            self._request_contact_seek
         )
-        self.contact_calibration_window.lower_needles_requested.connect(
-            lambda: self.stage_controller.request_needles_lower(
-                self._current_needle_feedrate()
-            )
-        )
-        self.contact_calibration_window.raise_needles_requested.connect(
-            lambda: self.stage_controller.request_needles_raise(
-                self._current_needle_feedrate()
-            )
+        self.contact_calibration_window.contact_seek_cancel_requested.connect(
+            self._cancel_contact_seek
         )
         self.lcr_controller.connection_changed.connect(
             self._on_lcr_connection_changed
@@ -6715,6 +6732,167 @@ class Main(QMainWindow):
     def _on_lcr_reading_updated(self, resistance_ohm: float, is_short: bool) -> None:
         if self.serial_connection_panel is not None:
             self.serial_connection_panel.set_lcr_reading(resistance_ohm, is_short)
+
+    def _request_contact_seek(self) -> None:
+        thread = self._contact_seek_thread
+        if thread is not None and thread.is_alive():
+            self._show_status("Contact seek is already running.")
+            return
+        if self._route_measurement_thread is not None and self._route_measurement_thread.is_alive():
+            self._show_status("Stop route measurement before contact seek.")
+            return
+        if not self.lcr_controller.is_connected():
+            self._show_status("Connect the measurement instrument before contact seek.")
+            if self.contact_calibration_window is not None:
+                self.contact_calibration_window.set_contact_seek_result(
+                    "Measurement instrument is not connected."
+                )
+            return
+        self._contact_seek_stop_requested.clear()
+        if self.contact_calibration_window is not None:
+            self.contact_calibration_window.set_contact_seek_running(True)
+            self.contact_calibration_window.set_contact_seek_result("Starting.")
+        thread = threading.Thread(target=self._run_contact_seek, daemon=True)
+        self._contact_seek_thread = thread
+        thread.start()
+
+    def _cancel_contact_seek(self) -> None:
+        self._contact_seek_stop_requested.set()
+        self.lcr_controller.abort_current_measurement()
+        self.stage_controller.cancel_active_motion("Contact seek cancel requested.")
+        self._show_status("Contact seek cancel requested.")
+
+    def _run_contact_seek(self) -> None:
+        stage_reserved = False
+        moved_mm = 0.0
+        try:
+            self.stage_controller.begin_external_task("contact seek")
+            stage_reserved = True
+            feedrate = self._current_needle_feedrate()
+            quick_quality = self._contact_seek_measure_quality(
+                self.CONTACT_SEEK_QUICK_COUNT
+            )
+            self.contact_seek_status.emit(
+                "Contact seek: current position "
+                f"{quick_quality.status}, median="
+                f"{_format_route_ohm(quick_quality.median_ohm)}."
+            )
+            if quick_quality.good is True:
+                if self._confirm_and_save_contact_seek("current position", moved_mm):
+                    return
+
+            max_steps = int(
+                math.ceil(
+                    self.CONTACT_SEEK_MAX_TOTAL_MM
+                    / abs(self.CONTACT_SEEK_STEP_MM)
+                )
+            )
+            for step_index in range(max_steps):
+                if self._contact_seek_stop_requested.is_set():
+                    self.contact_seek_finished.emit(False, "Contact seek cancelled.")
+                    return
+                self.contact_seek_status.emit(
+                    "Contact seek: lowering A "
+                    f"{step_index + 1}/{max_steps}."
+                )
+                self.stage_controller.run_external_needles_adjust(
+                    self.CONTACT_SEEK_STEP_MM,
+                    feedrate,
+                )
+                moved_mm += abs(self.CONTACT_SEEK_STEP_MM)
+                if self._contact_seek_stop_requested.is_set():
+                    self.contact_seek_finished.emit(False, "Contact seek cancelled.")
+                    return
+                quick_quality = self._contact_seek_measure_quality(
+                    self.CONTACT_SEEK_QUICK_COUNT
+                )
+                self.contact_seek_status.emit(
+                    "Contact seek: "
+                    f"{moved_mm:.4f} mm down, {quick_quality.status}, "
+                    f"median={_format_route_ohm(quick_quality.median_ohm)}, "
+                    f"MAD={_format_route_ohm(quick_quality.mad_sigma_ohm)}."
+                )
+                if quick_quality.good is True:
+                    if self._confirm_and_save_contact_seek(
+                        f"{moved_mm:.4f} mm down",
+                        moved_mm,
+                    ):
+                        return
+            self.contact_seek_finished.emit(
+                False,
+                "Contact seek did not find a stable contact within "
+                f"{self.CONTACT_SEEK_MAX_TOTAL_MM:.3f} mm.",
+            )
+        except Exception as exc:
+            logger.exception("Contact seek failed.")
+            self.contact_seek_finished.emit(False, f"Contact seek failed: {exc}")
+        finally:
+            if stage_reserved:
+                self.stage_controller.finish_external_task()
+
+    def _contact_seek_measure_quality(self, count: int):
+        raw_batch = self.lcr_controller.read_route_measurement_batch_now(int(count))
+        samples = tuple(
+            route_measurement_sample_from_raw(raw, index)
+            for index, raw in enumerate(raw_batch, start=1)
+        )
+        return summarize_route_contact_quality(samples)
+
+    def _confirm_and_save_contact_seek(self, label: str, moved_mm: float) -> bool:
+        self.contact_seek_status.emit(
+            "Contact seek: confirming stable contact with "
+            f"{self.CONTACT_SEEK_CONFIRM_COUNT} readings."
+        )
+        confirm_quality = self._contact_seek_measure_quality(
+            self.CONTACT_SEEK_CONFIRM_COUNT
+        )
+        if confirm_quality.good is not True:
+            self.contact_seek_status.emit(
+                "Contact seek: quick check was good, confirmation failed "
+                f"({confirm_quality.status})."
+            )
+            return False
+        lowering_mm = self.stage_controller.latest_axis_a_lowering()
+        if lowering_mm is None:
+            raise StageControllerError("Unable to read A lowering after contact seek.")
+        self.stage_controller.finish_external_task()
+        try:
+            self.stage_controller.set_current_axis_work_coordinate("A", 0.0)
+        except StageControllerError:
+            raise
+        detail = (
+            f"{label}; moved {moved_mm:.4f} mm; "
+            f"median={_format_route_ohm(confirm_quality.median_ohm)}, "
+            f"MAD={_format_route_ohm(confirm_quality.mad_sigma_ohm)}, "
+            f"p95 step={_format_route_ohm(confirm_quality.p95_abs_step_ohm)}."
+        )
+        self.contact_seek_calibration_found.emit(float(lowering_mm), detail)
+        self.contact_seek_finished.emit(True, f"Contact seek found stable contact: {detail}")
+        return True
+
+    def _on_contact_seek_status(self, message: str) -> None:
+        if self.contact_calibration_window is not None:
+            self.contact_calibration_window.set_contact_seek_result(message)
+        self._show_status(message, 5000)
+
+    def _on_contact_seek_calibration_found(
+        self,
+        lowering_mm: float,
+        detail: str,
+    ) -> None:
+        self._save_needle_down_position_from_lowering(float(lowering_mm))
+        if self.contact_calibration_window is not None:
+            self.contact_calibration_window.set_contact_seek_result(detail)
+
+    def _on_contact_seek_finished(self, success: bool, message: str) -> None:
+        thread = self._contact_seek_thread
+        if thread is not None and not thread.is_alive():
+            thread.join(timeout=0.1)
+        self._contact_seek_thread = None
+        if self.contact_calibration_window is not None:
+            self.contact_calibration_window.set_contact_seek_running(False)
+            self.contact_calibration_window.set_contact_seek_result(message)
+        self._show_status(message, 8000 if not success else 5000)
 
     def _display_a_for_needle_lowering(self, lowering_mm: float | None) -> float | None:
         if lowering_mm is None:

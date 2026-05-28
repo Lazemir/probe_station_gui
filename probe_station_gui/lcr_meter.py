@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import math
-import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -61,14 +60,18 @@ class GWInstekRouteMeterSettings:
 class KeithleyRouteMeterSettings:
     """Per-run four-wire resistance settings for a Keithley 2400 and 2182A."""
 
-    source_resource: str = "GPIB2::1::INSTR"
-    voltmeter_resource: str = "GPIB2::2::INSTR"
+    source_resource: str = "GPIB0::1::INSTR"
+    voltmeter_resource: str = "GPIB0::2::INSTR"
     measurement_voltage_v: float = 0.03
     source_voltage_range_v: float = 0.21
-    compliance_current_a: float = 500e-6
-    nplc: float = 10.0
+    voltmeter_range_v: float = 0.1
+    current_range_a: float = 10e-6
+    compliance_current_a: float = 10e-6
+    nplc: float = 1.0
     terminals: str = "rear"
-    trigger_delay_s: float = 0.01
+    trigger_delay_s: float = 0.0
+    use_buffer: bool = True
+    use_trigger_link: bool = True
 
 
 @dataclass(frozen=True)
@@ -95,10 +98,31 @@ class LCRMeterError(RuntimeError):
     """Raised when the LCR meter backend cannot complete the request."""
 
 
-def _resistance_from_voltage_current(voltage: float, current: float) -> float:
-    if current == 0:
-        return math.inf
-    return float(voltage / current)
+def _open_keithley_session(
+    source_resource: str,
+    voltmeter_resource: str,
+    timeout_ms: int,
+) -> object:
+    try:
+        from probe_station_measure import Keithley2400With2182A
+    except ImportError as exc:
+        raise LCRMeterError(
+            "Keithley route measurements require optional dependency "
+            "'probe-station-measure'. Install with `pip install .[lcr]`."
+        ) from exc
+    source = normalize_resource_name(source_resource)
+    voltmeter = normalize_resource_name(voltmeter_resource)
+    try:
+        return Keithley2400With2182A(
+            source,
+            voltmeter,
+            timeout_ms=timeout_ms,
+        )
+    except Exception as exc:  # pragma: no cover - backend specific failures
+        raise LCRMeterError(
+            "Unable to open Keithley resources "
+            f"{source_resource!r}, {voltmeter_resource!r}: {exc}"
+        ) from exc
 
 
 class _LCRSession:
@@ -399,378 +423,6 @@ class _LCRSession:
         self._instrument.close()
 
 
-class _Keithley2400With2182ASession:
-    """Direct PyVISA driver for the two-Keithley four-wire route setup."""
-
-    backend_name = "pyvisa-keithley"
-    OVERLOAD_RESISTANCE_OHM = 9.9e19
-
-    def __init__(
-        self,
-        source_address: str,
-        voltmeter_address: str,
-        timeout_ms: int,
-    ) -> None:
-        try:
-            import pyvisa
-        except ImportError as exc:
-            raise LCRMeterError(
-                "Keithley route measurements require optional dependency "
-                "'pyvisa'. Install with `pip install .[lcr]`."
-            ) from exc
-
-        self._resource_manager = pyvisa.ResourceManager()
-        self._source = None
-        self._voltmeter = None
-        self._measurement_voltage_v = 0.03
-        self._trigger_delay_s = 0.01
-        self._compliance_current_a = 500e-6
-        try:
-            self._source = self._open_resource(source_address, timeout_ms)
-            self._voltmeter = self._open_resource(voltmeter_address, timeout_ms)
-        except Exception as exc:  # pragma: no cover - backend specific failures
-            self.close()
-            raise LCRMeterError(
-                "Unable to open Keithley resources "
-                f"{source_address!r}, {voltmeter_address!r}: {exc}"
-            ) from exc
-
-    def _open_resource(self, address: str, timeout_ms: int):
-        normalized_address = normalize_resource_name(address)
-        handle = self._resource_manager.open_resource(normalized_address)
-        handle.timeout = int(timeout_ms)
-        for attribute, value in (
-            ("read_termination", "\n"),
-            ("write_termination", "\n"),
-        ):
-            try:
-                setattr(handle, attribute, value)
-            except Exception:
-                logger.debug(
-                    "Keithley VISA handle does not accept %s=%r",
-                    attribute,
-                    value,
-                    exc_info=True,
-                )
-        return handle
-
-    def identify(self) -> str:
-        source_id = self._safe_query(self._source, "*IDN?")
-        voltmeter_id = self._safe_query(self._voltmeter, "*IDN?")
-        parts = []
-        if source_id:
-            parts.append(f"2400 {source_id}")
-        if voltmeter_id:
-            parts.append(f"2182A {voltmeter_id}")
-        return "; ".join(parts)
-
-    def configure_measurement(
-        self,
-        *,
-        keithley_measurement_voltage_v: float = 0.03,
-        keithley_source_voltage_range_v: float = 0.21,
-        keithley_compliance_current_a: float = 500e-6,
-        keithley_nplc: float = 10.0,
-        keithley_terminals: str = "rear",
-        keithley_trigger_delay_s: float = 0.01,
-        **_ignored: object,
-    ) -> None:
-        try:
-            measurement_voltage_v = abs(float(keithley_measurement_voltage_v))
-            if not math.isfinite(measurement_voltage_v) or measurement_voltage_v <= 0:
-                measurement_voltage_v = 0.03
-            source_voltage_range_v = abs(float(keithley_source_voltage_range_v))
-            if (
-                not math.isfinite(source_voltage_range_v)
-                or source_voltage_range_v < measurement_voltage_v
-            ):
-                source_voltage_range_v = max(0.21, measurement_voltage_v)
-            compliance_current_a = abs(float(keithley_compliance_current_a))
-            if not math.isfinite(compliance_current_a) or compliance_current_a <= 0:
-                compliance_current_a = 500e-6
-            nplc = float(keithley_nplc)
-            if not math.isfinite(nplc):
-                nplc = 10.0
-            nplc = max(0.01, min(50.0, nplc))
-            terminal_value = str(keithley_terminals).strip().lower()
-            terminal_scpi = "FRON" if terminal_value == "front" else "REAR"
-            trigger_delay_s = max(0.0, float(keithley_trigger_delay_s))
-            if not math.isfinite(trigger_delay_s):
-                trigger_delay_s = 0.01
-
-            source = self._require_source()
-            voltmeter = self._require_voltmeter()
-            self._measurement_voltage_v = measurement_voltage_v
-            self._trigger_delay_s = trigger_delay_s
-            self._compliance_current_a = compliance_current_a
-
-            self._write(source, "*CLS")
-            self._write(voltmeter, "*CLS")
-            self._try_write(source, ":ABOR")
-            self._try_write(source, ":INIT:CONT OFF")
-            self._try_write(voltmeter, "ABOR")
-            self._try_write(voltmeter, "INIT:CONT OFF")
-            self._write(voltmeter, "CONF:VOLT")
-            self._write(voltmeter, "SENS:CHAN 1")
-            self._try_write(voltmeter, f"SENS:VOLT:NPLC {nplc:.12g}")
-            self._try_write(voltmeter, "SENS:VOLT:DFIL:STAT ON")
-            self._try_write(voltmeter, "SENS:VOLT:DFIL:COUNT 1")
-            self._try_write(voltmeter, "TRIG:SOUR IMM")
-            self._try_write(voltmeter, "TRIG:COUN 1")
-            self._try_write(voltmeter, "SAMP:COUN 1")
-            self._try_write(voltmeter, "TRAC:CLE")
-
-            self._try_write(source, f":ROUT:TERM {terminal_scpi}")
-            self._try_write(source, ":SENS:RES:MODE MAN")
-            self._write(source, ":SOUR:FUNC VOLT")
-            self._try_write(source, ":SOUR:VOLT:MODE FIX")
-            self._write(source, f":SOUR:VOLT:RANG {source_voltage_range_v:.12g}")
-            self._write(source, f":SENS:CURR:PROT {compliance_current_a:.12g}")
-            self._try_write(source, f":SENS:VOLT:NPLC {nplc:.12g}")
-            self._try_write(source, f":SENS:CURR:NPLC {nplc:.12g}")
-            self._try_write(source, ":FORM:ELEM VOLT,CURR")
-            self._write(source, ":SOUR:VOLT 0")
-            self._write(source, ":OUTP ON")
-            logger.info(
-                "Configured Keithley route meter: source=%s voltmeter=%s bias=+-%s V range=%s V compliance=%s A nplc=%s terminals=%s",
-                self._safe_query(source, "*IDN?") or "unknown",
-                self._safe_query(voltmeter, "*IDN?") or "unknown",
-                measurement_voltage_v,
-                source_voltage_range_v,
-                compliance_current_a,
-                nplc,
-                terminal_value or "rear",
-            )
-            self._log_scpi_errors(source, "2400 source", "configuration")
-            self._log_scpi_errors(voltmeter, "2182A voltmeter", "configuration")
-        except Exception as exc:  # pragma: no cover - backend specific failures
-            raise LCRMeterError(
-                f"Unable to configure Keithley route measurement: {exc}"
-            ) from exc
-
-    def read_primary_value(self, *, trigger: bool = False) -> float:
-        measurement = self.read_route_measurement(trigger=trigger)
-        return float(measurement["differential_resistance_ohm"])
-
-    def read_route_measurement(self, *, trigger: bool = False) -> dict[str, object]:
-        _ = trigger
-        source = self._require_source()
-        voltmeter = self._require_voltmeter()
-        measured_voltage: list[float] = []
-        measured_current: list[float] = []
-        polarities: list[dict[str, float | str]] = []
-        compliance_hit = False
-        read_error: Exception | None = None
-        scpi_errors: list[str] = []
-        try:
-            for polarity, voltage in (
-                ("negative", -self._measurement_voltage_v),
-                ("positive", self._measurement_voltage_v),
-            ):
-                self._write(source, f":SOUR:VOLT {voltage:.12g}")
-                self._write(source, "INIT")
-                if self._trigger_delay_s > 0:
-                    time.sleep(self._trigger_delay_s)
-                voltage_reading = float(self._ask(voltmeter, "READ?"))
-                source_values = self._parse_source_fetch(self._ask(source, "FETC?"))
-                current_reading = source_values[1]
-                measured_voltage.append(voltage_reading)
-                measured_current.append(current_reading)
-                polarities.append(
-                    {
-                        "polarity": polarity,
-                        "source_voltage_v": float(voltage),
-                        "measured_voltage_v": voltage_reading,
-                        "current_a": current_reading,
-                        "resistance_ohm": _resistance_from_voltage_current(
-                            voltage_reading,
-                            current_reading,
-                        ),
-                    }
-                )
-            resistance = self._resistance_from_two_points(
-                measured_voltage,
-                measured_current,
-            )
-            compliance_hit = self._compliance_tripped(measured_current)
-            if compliance_hit:
-                logger.warning(
-                    "Keithley current compliance was reached during route measurement"
-                )
-        except Exception as exc:  # pragma: no cover - backend specific failures
-            read_error = exc
-        finally:
-            self._try_write(source, ":SOUR:VOLT 0")
-            scpi_errors.extend(
-                self._log_scpi_errors(source, "2400 source", "resistance read")
-            )
-            scpi_errors.extend(
-                self._log_scpi_errors(
-                    voltmeter,
-                    "2182A voltmeter",
-                    "resistance read",
-                )
-            )
-        if scpi_errors:
-            details = "; ".join(scpi_errors)
-        else:
-            details = ""
-        if read_error is not None:
-            message = f"Keithley fetch failed: {read_error}"
-            if details:
-                message = f"{message}. SCPI errors: {details}"
-            raise LCRMeterError(message) from read_error
-        if details:
-            raise LCRMeterError(
-                "Keithley instrument reported SCPI error after resistance read: "
-                f"{details}"
-            )
-        if (
-            not math.isfinite(resistance)
-            or abs(resistance) >= self.OVERLOAD_RESISTANCE_OHM
-        ):
-            resistance = math.inf
-        return {
-            "differential_resistance_ohm": resistance,
-            "compliance_hit": compliance_hit,
-            "negative": polarities[0] if len(polarities) > 0 else {},
-            "positive": polarities[1] if len(polarities) > 1 else {},
-        }
-
-    def read_resistance_ohm(self) -> float:
-        return self.read_primary_value(trigger=True)
-
-    def abort_measurement(self) -> None:
-        source = self._source
-        voltmeter = self._voltmeter
-        if voltmeter is not None:
-            self._try_write(voltmeter, "ABOR")
-        if source is not None:
-            self._try_write(source, ":ABOR")
-            self._try_write(source, ":SOUR:VOLT 0")
-
-    def close(self) -> None:
-        source = self._source
-        voltmeter = self._voltmeter
-        self._source = None
-        self._voltmeter = None
-        if source is not None:
-            self._try_write(source, ":SOUR:VOLT 0")
-            self._try_write(source, ":OUTP OFF")
-            self._log_scpi_errors(source, "2400 source", "close")
-            self._close_handle(source)
-        if voltmeter is not None:
-            self._log_scpi_errors(voltmeter, "2182A voltmeter", "close")
-            self._close_handle(voltmeter)
-        resource_manager = getattr(self, "_resource_manager", None)
-        if resource_manager is not None:
-            try:
-                resource_manager.close()
-            except Exception:
-                logger.debug("Failed to close VISA resource manager", exc_info=True)
-
-    def _require_source(self):
-        if self._source is None:
-            raise LCRMeterError("Keithley 2400 source is not open.")
-        return self._source
-
-    def _require_voltmeter(self):
-        if self._voltmeter is None:
-            raise LCRMeterError("Keithley 2182A voltmeter is not open.")
-        return self._voltmeter
-
-    @staticmethod
-    def _write(handle, command: str) -> None:
-        handle.write(command)
-
-    @staticmethod
-    def _ask(handle, query: str) -> str:
-        if hasattr(handle, "query"):
-            return str(handle.query(query)).strip()
-        return str(handle.ask(query)).strip()
-
-    def _try_write(self, handle, command: str) -> None:
-        try:
-            self._write(handle, command)
-        except Exception:
-            logger.debug("Keithley command failed: %s", command, exc_info=True)
-
-    def _safe_query(self, handle, query: str) -> str:
-        if handle is None:
-            return ""
-        try:
-            return self._ask(handle, query).strip()
-        except Exception:
-            logger.debug("Keithley query failed: %s", query, exc_info=True)
-            return ""
-
-    def _log_scpi_errors(self, handle, label: str, context: str) -> list[str]:
-        errors: list[str] = []
-        for _index in range(8):
-            response = self._safe_query(handle, "SYST:ERR?")
-            if not response:
-                break
-            code = self._scpi_error_code(response)
-            if code == 0:
-                break
-            errors.append(response)
-        if errors:
-            logger.warning(
-                "Keithley %s SCPI error after %s: %s",
-                label,
-                context,
-                "; ".join(errors),
-            )
-        return [f"{label}: {error}" for error in errors]
-
-    @staticmethod
-    def _scpi_error_code(response: str) -> int | None:
-        match = re.match(r"\s*([+-]?\d+)", str(response))
-        if match is None:
-            return None
-        try:
-            return int(match.group(1))
-        except ValueError:
-            return None
-
-    @staticmethod
-    def _close_handle(handle) -> None:
-        try:
-            handle.close()
-        except Exception:
-            logger.debug("Failed to close VISA handle", exc_info=True)
-
-    @staticmethod
-    def _parse_source_fetch(response: str) -> tuple[float, float]:
-        values = [part.strip() for part in str(response).split(",")]
-        if len(values) < 2:
-            raise ValueError(f"Keithley 2400 FETC? returned {response!r}")
-        return float(values[0]), float(values[1])
-
-    @staticmethod
-    def _resistance_from_two_points(
-        measured_voltage: list[float],
-        measured_current: list[float],
-    ) -> float:
-        if len(measured_voltage) != 2 or len(measured_current) != 2:
-            raise ValueError("Keithley resistance measurement needs two bias points.")
-        delta_v = measured_voltage[1] - measured_voltage[0]
-        delta_i = measured_current[1] - measured_current[0]
-        if delta_i == 0:
-            return math.inf
-        return float(delta_v / delta_i)
-
-    def _compliance_tripped(self, measured_current: list[float]) -> bool:
-        threshold = abs(self._compliance_current_a) * 0.99
-        by_current = any(abs(value) >= threshold for value in measured_current)
-        trip_response = self._safe_query(self._source, ":SENS:CURR:PROT:TRIP?")
-        try:
-            by_trip = bool(int(float(trip_response))) if trip_response else False
-        except ValueError:
-            by_trip = False
-        return by_current or by_trip
-
-
 class RouteMeter:
     """Open, configure, and read one per-run route measurement backend."""
 
@@ -781,13 +433,13 @@ class RouteMeter:
     ) -> None:
         self._configuration = configuration
         self._timeout_ms = int(timeout_ms)
-        self._session: _LCRSession | _Keithley2400With2182ASession | None = None
+        self._session: object | None = None
 
     @property
     def backend_name(self) -> str:
         session = self._session
         if session is not None:
-            return session.backend_name
+            return str(getattr(session, "backend_name", session.__class__.__name__))
         return ROUTE_METER_LABELS.get(
             self._configuration.meter_type, self._configuration.meter_type
         )
@@ -827,23 +479,32 @@ class RouteMeter:
             return
         if self._configuration.meter_type == ROUTE_METER_KEITHLEY:
             settings = self._configuration.keithley
-            session = _Keithley2400With2182ASession(
+            session = _open_keithley_session(
                 settings.source_resource,
                 settings.voltmeter_resource,
                 self._timeout_ms,
             )
             try:
-                session.identify()
-                session.configure_measurement(
+                identify = getattr(session, "identify", None)
+                configure = getattr(session, "configure_measurement")
+                if callable(identify):
+                    identify()
+                configure(
                     keithley_measurement_voltage_v=settings.measurement_voltage_v,
                     keithley_source_voltage_range_v=settings.source_voltage_range_v,
+                    keithley_voltmeter_range_v=settings.voltmeter_range_v,
+                    keithley_current_range_a=settings.current_range_a,
                     keithley_compliance_current_a=settings.compliance_current_a,
                     keithley_nplc=settings.nplc,
                     keithley_terminals=settings.terminals,
                     keithley_trigger_delay_s=settings.trigger_delay_s,
+                    keithley_use_buffer=settings.use_buffer,
+                    keithley_use_trigger_link=settings.use_trigger_link,
                 )
             except Exception:
-                session.close()
+                closer = getattr(session, "close", None)
+                if callable(closer):
+                    closer()
                 raise
             self._session = session
             return
@@ -856,7 +517,10 @@ class RouteMeter:
             self.open()
         if self._session is None:
             raise LCRMeterError("Route measurement instrument is not open.")
-        return self._session.read_primary_value(trigger=True)
+        reader = getattr(self._session, "read_primary_value", None)
+        if not callable(reader):
+            raise LCRMeterError("Route measurement instrument cannot read values.")
+        return float(reader(trigger=True))
 
     def read_route_measurement_now(self, *, restart_polling: bool = False) -> dict[str, object]:
         _ = restart_polling
@@ -867,8 +531,28 @@ class RouteMeter:
         reader = getattr(self._session, "read_route_measurement", None)
         if callable(reader):
             return dict(reader(trigger=True))
-        value = self._session.read_primary_value(trigger=True)
+        primary_reader = getattr(self._session, "read_primary_value", None)
+        if not callable(primary_reader):
+            raise LCRMeterError("Route measurement instrument cannot read values.")
+        value = primary_reader(trigger=True)
         return {"differential_resistance_ohm": value}
+
+    def read_route_measurement_batch_now(
+        self,
+        count: int,
+        *,
+        restart_polling: bool = False,
+    ) -> list[dict[str, object]]:
+        _ = restart_polling
+        if self._session is None:
+            self.open()
+        if self._session is None:
+            raise LCRMeterError("Route measurement instrument is not open.")
+        count = max(1, int(count))
+        batch_reader = getattr(self._session, "read_route_measurements", None)
+        if callable(batch_reader):
+            return [dict(item) for item in batch_reader(count, trigger=True)]
+        return [self.read_route_measurement_now() for _index in range(count)]
 
     def abort_current_measurement(self) -> None:
         session = self._session
@@ -880,7 +564,9 @@ class RouteMeter:
         session = self._session
         self._session = None
         if session is not None:
-            session.close()
+            closer = getattr(session, "close", None)
+            if callable(closer):
+                closer()
 
 
 class LCRMeterController(QObject):
@@ -920,7 +606,7 @@ class LCRMeterController(QObject):
         self._alc_enabled = False
         self._short_threshold_ohm = 10.0
         self._poll_interval_ms = 250
-        self._session: Optional[_LCRSession | _Keithley2400With2182ASession] = None
+        self._session: Optional[object] = None
         self._task_lock = threading.Lock()
         self._active_thread: Optional[threading.Thread] = None
         self._poll_thread: Optional[threading.Thread] = None
@@ -1052,16 +738,23 @@ class LCRMeterController(QObject):
             )
             return
         if configuration.meter_type == ROUTE_METER_KEITHLEY:
-            if not isinstance(session, _Keithley2400With2182ASession):
+            if isinstance(session, _LCRSession):
                 raise LCRMeterError("Connected instrument is not a Keithley pair.")
             settings = configuration.keithley
-            session.configure_measurement(
+            configure = getattr(session, "configure_measurement", None)
+            if not callable(configure):
+                raise LCRMeterError("Connected instrument is not a Keithley pair.")
+            configure(
                 keithley_measurement_voltage_v=settings.measurement_voltage_v,
                 keithley_source_voltage_range_v=settings.source_voltage_range_v,
+                keithley_voltmeter_range_v=settings.voltmeter_range_v,
+                keithley_current_range_a=settings.current_range_a,
                 keithley_compliance_current_a=settings.compliance_current_a,
                 keithley_nplc=settings.nplc,
                 keithley_terminals=settings.terminals,
                 keithley_trigger_delay_s=settings.trigger_delay_s,
+                keithley_use_buffer=settings.use_buffer,
+                keithley_use_trigger_link=settings.use_trigger_link,
             )
 
     def is_short_reading(self, primary_value: float) -> bool:
@@ -1099,7 +792,12 @@ class LCRMeterController(QObject):
             if callable(reader):
                 measurement = dict(reader(trigger=True))
             else:
-                primary_value = session.read_primary_value(trigger=True)
+                primary_reader = getattr(session, "read_primary_value", None)
+                if not callable(primary_reader):
+                    raise LCRMeterError(
+                        "Measurement instrument cannot read route values."
+                    )
+                primary_value = primary_reader(trigger=True)
                 measurement = {"differential_resistance_ohm": primary_value}
         except LCRMeterError:
             self._disconnect_session()
@@ -1115,6 +813,55 @@ class LCRMeterController(QObject):
             self._is_short_reading(primary_value),
         )
         return measurement
+
+    def read_route_measurement_batch_now(
+        self,
+        count: int,
+        *,
+        restart_polling: bool = False,
+    ) -> list[dict[str, object]]:
+        """Synchronously run a batch of route measurements when supported."""
+
+        count = max(1, int(count))
+        with self._task_lock:
+            if self._active_thread and self._active_thread.is_alive():
+                raise LCRMeterError("Measurement instrument task already running.")
+            session = self._session
+        if session is None:
+            raise LCRMeterError("Measurement instrument is not connected.")
+        self._stop_polling_session()
+        try:
+            batch_reader = getattr(session, "read_route_measurements", None)
+            if callable(batch_reader):
+                measurements = [dict(item) for item in batch_reader(count, trigger=True)]
+            else:
+                measurements = [
+                    self.read_route_measurement_now()
+                    for _index in range(count)
+                ]
+        except LCRMeterError:
+            self._disconnect_session()
+            self.connection_changed.emit(False, "", "Instrument read failed.")
+            raise
+        finally:
+            if restart_polling and self._session is session:
+                self._stop_polling.clear()
+                self._start_polling_thread()
+        finite_values: list[float] = []
+        for item in measurements:
+            try:
+                value = float(item.get("differential_resistance_ohm", math.nan))
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(value):
+                finite_values.append(value)
+        if finite_values:
+            primary_value = sum(finite_values) / len(finite_values)
+            self.reading_updated.emit(
+                primary_value,
+                self._is_short_reading(primary_value),
+            )
+        return measurements
 
     def abort_current_measurement(self) -> None:
         """Best-effort cancellation for a blocking route measurement read."""
@@ -1176,7 +923,9 @@ class LCRMeterController(QObject):
         self._session = None
         if session is not None:
             try:
-                session.close()
+                closer = getattr(session, "close", None)
+                if callable(closer):
+                    closer()
             except Exception:  # pragma: no cover - best effort shutdown
                 logger.exception(
                     "Failed to close measurement instrument session during shutdown"
@@ -1197,7 +946,11 @@ class LCRMeterController(QObject):
                     )
             self._disconnect_session()
             session = self._open_configured_session()
-            instrument_id = session.identify()
+            identify = getattr(session, "identify", None)
+            instrument_id = str(identify()) if callable(identify) else ""
+            backend_name = str(
+                getattr(session, "backend_name", session.__class__.__name__)
+            )
             logger.info(
                 "Connected to measurement instrument %s (%s)",
                 self.connection_label(),
@@ -1209,10 +962,10 @@ class LCRMeterController(QObject):
             self._connected_resource_name = self._connection_key()
             self._stop_polling.clear()
             self.connection_changed.emit(
-                True, session.backend_name, self.connection_label()
+                True, backend_name, self.connection_label()
             )
             self.status_message.emit(
-                f"Measurement instrument connected via {session.backend_name}."
+                f"Measurement instrument connected via {backend_name}."
             )
         except LCRMeterError as exc:
             self._disconnect_session()
@@ -1239,7 +992,8 @@ class LCRMeterController(QObject):
                 )
                 self._disconnect_session()
                 replacement = self._open_configured_session()
-                instrument_id = replacement.identify()
+                identify = getattr(replacement, "identify", None)
+                instrument_id = str(identify()) if callable(identify) else ""
                 logger.info(
                     "Reconnected to measurement instrument %s (%s)",
                     self.connection_label(),
@@ -1248,8 +1002,11 @@ class LCRMeterController(QObject):
                 session = replacement
                 self._session = session
                 self._connected_resource_name = desired_resource
+                backend_name = str(
+                    getattr(session, "backend_name", session.__class__.__name__)
+                )
                 self.connection_changed.emit(
-                    True, session.backend_name, self.connection_label()
+                    True, backend_name, self.connection_label()
                 )
             else:
                 self._stop_polling_session()
@@ -1301,9 +1058,9 @@ class LCRMeterController(QObject):
             alc_enabled=self._alc_enabled,
         )
 
-    def _open_configured_session(self) -> _LCRSession | _Keithley2400With2182ASession:
+    def _open_configured_session(self) -> object:
         if self._meter_type == ROUTE_METER_KEITHLEY:
-            return _Keithley2400With2182ASession(
+            return _open_keithley_session(
                 self._keithley_source_resource,
                 self._keithley_voltmeter_resource,
                 self.DEFAULT_TIMEOUT_MS,
@@ -1350,7 +1107,9 @@ class LCRMeterController(QObject):
         self._connected_resource_name = ""
         if session is not None:
             try:
-                session.close()
+                closer = getattr(session, "close", None)
+                if callable(closer):
+                    closer()
             except Exception:  # pragma: no cover - best effort cleanup
                 logger.exception(
                     "Failed to close measurement instrument session cleanly"
@@ -1369,7 +1128,12 @@ class LCRMeterController(QObject):
             if session is None:
                 return
             try:
-                primary_value = session.read_primary_value(trigger=True)
+                reader = getattr(session, "read_primary_value", None)
+                if not callable(reader):
+                    raise LCRMeterError(
+                        "Measurement instrument cannot read values."
+                    )
+                primary_value = float(reader(trigger=True))
             except LCRMeterError as exc:
                 self.status_message.emit(f"Instrument read failed: {exc}")
                 self.connection_changed.emit(False, "", str(exc))

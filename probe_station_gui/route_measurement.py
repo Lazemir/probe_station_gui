@@ -17,6 +17,11 @@ from typing import Any, Callable
 Point2D = tuple[float, float]
 
 
+CONTACT_MAX_ABS_MEDIAN_OHM = 50_000.0
+CONTACT_MAX_MAD_SIGMA_OHM = 300.0
+CONTACT_MAX_P95_ABS_STEP_OHM = 1_000.0
+
+
 @dataclass(frozen=True)
 class RouteMeasurementPoint:
     """One route point resolved into stage coordinates before a run starts."""
@@ -31,6 +36,22 @@ class RouteMeasurementPoint:
 
 
 @dataclass(frozen=True)
+class RouteContactQuality:
+    """Contact quality metrics calculated from repeated route samples."""
+
+    assessed: bool
+    good: bool | None
+    status: str
+    median_ohm: float = math.nan
+    mad_sigma_ohm: float = math.nan
+    p95_abs_step_ohm: float = math.nan
+    span_ohm: float = math.nan
+    compliance_hits: int = 0
+    polarity_sign_mismatch_count: int = 0
+    reasons: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class RouteMeasurementRecord:
     """One completed measurement row written to CSV."""
 
@@ -42,6 +63,7 @@ class RouteMeasurementRecord:
     resistance_rms_ohm: float
     relative_rms: float
     status: str
+    contact_quality: RouteContactQuality | None = None
     raw_samples: tuple["RouteMeasurementSample", ...] = ()
 
 
@@ -71,6 +93,13 @@ CSV_FIELDS = [
     "resistance_rms_ohm",
     "relative_rms",
     "status",
+    "contact_quality",
+    "contact_median_ohm",
+    "contact_mad_sigma_ohm",
+    "contact_p95_abs_step_ohm",
+    "contact_span_ohm",
+    "contact_compliance_hits",
+    "contact_polarity_sign_mismatches",
 ]
 
 
@@ -379,7 +408,11 @@ class RouteMeasurementRunner:
                             self._confirm_each_point
                             and self._record_exceeds_quality_limit(record)
                         ):
-                            record = replace(record, status="unstable")
+                            if not (
+                                record.contact_quality is not None
+                                and record.contact_quality.good is False
+                            ):
+                                record = replace(record, status="unstable")
                             quality_rejected = True
                         else:
                             self._csv_writer.append(record)
@@ -551,6 +584,28 @@ class RouteMeasurementRunner:
             self._result_callback(record, position, total, saved)
 
     def _measure_samples(self) -> list[RouteMeasurementSample] | None:
+        batch_reader = getattr(
+            self._lcr_controller,
+            "read_route_measurement_batch_now",
+            None,
+        )
+        if callable(batch_reader) and self._measurement_count > 1:
+            if (
+                self._stop_requested.is_set()
+                or self._point_interrupt_requested.is_set()
+            ):
+                return None
+            raw_batch = batch_reader(self._measurement_count)
+            samples = [
+                _measurement_sample_from_raw(raw, index)
+                for index, raw in enumerate(raw_batch, start=1)
+            ]
+            if (
+                self._stop_requested.is_set()
+                or self._point_interrupt_requested.is_set()
+            ):
+                return None
+            return samples
         samples: list[RouteMeasurementSample] = []
         for index in range(1, self._measurement_count + 1):
             if (
@@ -620,12 +675,20 @@ class RouteMeasurementRunner:
         self._finish_stage_task()
         self._set_waiting(True)
         self._emit_result(record, position, total, False)
-        self._status(
-            f"Route measurement: point {position}/{total} relative RMS "
-            f"{_format_percent(record.relative_rms)} exceeds "
-            f"{_format_percent(self._max_relative_rms or math.nan)}; "
-            "correct contact, then Remeasure, Skip, Go To, or Cancel."
-        )
+        contact_quality = record.contact_quality
+        if contact_quality is not None and contact_quality.good is False:
+            self._status(
+                f"Route measurement: point {position}/{total} contact check failed "
+                f"({contact_quality.status}); correct contact, then Remeasure, "
+                "Skip, Go To, or Cancel."
+            )
+        else:
+            self._status(
+                f"Route measurement: point {position}/{total} relative RMS "
+                f"{_format_percent(record.relative_rms)} exceeds "
+                f"{_format_percent(self._max_relative_rms or math.nan)}; "
+                "correct contact, then Remeasure, Skip, Go To, or Cancel."
+            )
         decision = self._wait_for_valid_confirmation()
         self._set_waiting(False)
         return decision
@@ -699,12 +762,18 @@ class RouteMeasurementRunner:
                 if mean_resistance
                 else math.nan
             )
-            status = "ok"
+            contact_quality = _contact_quality_from_samples(samples)
+            status = (
+                "bad_contact"
+                if contact_quality.good is False
+                else "ok"
+            )
         else:
             mean_resistance = math.inf
             rms_resistance = math.nan
             relative_rms = math.nan
             status = "overload"
+            contact_quality = None
         return RouteMeasurementRecord(
             timestamp=datetime.now().isoformat(timespec="seconds"),
             structure_number=_structure_number_for_point(point),
@@ -714,6 +783,7 @@ class RouteMeasurementRunner:
             resistance_rms_ohm=rms_resistance,
             relative_rms=relative_rms,
             status=status,
+            contact_quality=contact_quality,
             raw_samples=tuple(samples),
         )
 
@@ -733,10 +803,14 @@ class RouteMeasurementRunner:
             resistance_rms_ohm=0.0 if math.isfinite(resistance) else math.nan,
             relative_rms=0.0 if math.isfinite(resistance) else math.nan,
             status="short",
+            contact_quality=None,
             raw_samples=(sample,),
         )
 
     def _record_exceeds_quality_limit(self, record: RouteMeasurementRecord) -> bool:
+        contact_quality = record.contact_quality
+        if contact_quality is not None and contact_quality.good is False:
+            return True
         if self._max_relative_rms is None or record.status != "ok":
             return False
         return (
@@ -748,10 +822,13 @@ class RouteMeasurementRunner:
 __all__ = [
     "RouteMeasurementCsvWriter",
     "CSV_FIELDS",
+    "RouteContactQuality",
     "RouteMeasurementPoint",
     "RouteMeasurementRecord",
     "RouteMeasurementSample",
     "RouteMeasurementRunner",
+    "route_measurement_sample_from_raw",
+    "summarize_route_contact_quality",
 ]
 
 
@@ -793,6 +870,94 @@ def _format_ohm(value: float) -> str:
         if abs_value >= scale:
             return f"{value / scale:.3g} {unit}"
     return f"{value:.3g} Ohm"
+
+
+def _contact_quality_from_samples(
+    samples: list[RouteMeasurementSample] | tuple[RouteMeasurementSample, ...],
+) -> RouteContactQuality:
+    finite_values = [
+        float(sample.differential_resistance_ohm)
+        for sample in samples
+        if math.isfinite(float(sample.differential_resistance_ohm))
+    ]
+    compliance_hits = sum(1 for sample in samples if sample.compliance_hit)
+    polarity_mismatches = sum(
+        1 for sample in samples if _sample_has_polarity_sign_mismatch(sample)
+    )
+    if len(finite_values) < 2:
+        return RouteContactQuality(
+            assessed=False,
+            good=None,
+            status="unchecked",
+            compliance_hits=compliance_hits,
+            polarity_sign_mismatch_count=polarity_mismatches,
+            reasons=("too_few_readings",),
+        )
+
+    sorted_values = sorted(finite_values)
+    median = _percentile(sorted_values, 50.0)
+    abs_deviations = sorted(abs(value - median) for value in finite_values)
+    mad_sigma = 1.4826 * _percentile(abs_deviations, 50.0)
+    abs_steps = sorted(
+        abs(finite_values[index] - finite_values[index - 1])
+        for index in range(1, len(finite_values))
+    )
+    p95_abs_step = _percentile(abs_steps, 95.0) if abs_steps else 0.0
+    span = max(finite_values) - min(finite_values)
+
+    reasons: list[str] = []
+    if abs(median) > CONTACT_MAX_ABS_MEDIAN_OHM:
+        reasons.append("median_out_of_range")
+    if mad_sigma > CONTACT_MAX_MAD_SIGMA_OHM:
+        reasons.append("mad_sigma_too_high")
+    if p95_abs_step > CONTACT_MAX_P95_ABS_STEP_OHM:
+        reasons.append("step_noise_too_high")
+    if compliance_hits:
+        reasons.append("compliance_hit")
+    if polarity_mismatches:
+        reasons.append("polarity_sign_mismatch")
+
+    good = not reasons
+    return RouteContactQuality(
+        assessed=True,
+        good=good,
+        status="good" if good else "bad_contact",
+        median_ohm=median,
+        mad_sigma_ohm=mad_sigma,
+        p95_abs_step_ohm=p95_abs_step,
+        span_ohm=span,
+        compliance_hits=compliance_hits,
+        polarity_sign_mismatch_count=polarity_mismatches,
+        reasons=tuple(reasons),
+    )
+
+
+def _sample_has_polarity_sign_mismatch(sample: RouteMeasurementSample) -> bool:
+    negative_current = sample.negative_current_a
+    positive_current = sample.positive_current_a
+    if negative_current is None or positive_current is None:
+        return False
+    if not math.isfinite(negative_current) or not math.isfinite(positive_current):
+        return False
+    return negative_current * positive_current >= 0.0
+
+
+def _percentile(sorted_values: list[float], percentile: float) -> float:
+    if not sorted_values:
+        return math.nan
+    if len(sorted_values) == 1:
+        return float(sorted_values[0])
+    bounded = max(0.0, min(100.0, float(percentile)))
+    position = (len(sorted_values) - 1) * bounded / 100.0
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return float(sorted_values[lower])
+    fraction = position - lower
+    return float(
+        sorted_values[lower]
+        + (sorted_values[upper] - sorted_values[lower]) * fraction
+    )
 
 
 def _measurement_sample_from_raw(
@@ -868,6 +1033,23 @@ def _measurement_sample_from_raw(
     )
 
 
+def route_measurement_sample_from_raw(
+    raw: object,
+    sample_index: int,
+) -> RouteMeasurementSample:
+    """Convert one backend measurement payload into a route sample."""
+
+    return _measurement_sample_from_raw(raw, sample_index)
+
+
+def summarize_route_contact_quality(
+    samples: list[RouteMeasurementSample] | tuple[RouteMeasurementSample, ...],
+) -> RouteContactQuality:
+    """Evaluate the contact-quality metrics used by route workflows."""
+
+    return _contact_quality_from_samples(samples)
+
+
 def _raw_bool(
     data: dict[str, object],
     *keys: str,
@@ -914,6 +1096,7 @@ def _raw_float_or_none(data: dict[str, object], *keys: str) -> float | None:
 
 
 def _record_to_csv_row(record: RouteMeasurementRecord) -> dict[str, str]:
+    contact = record.contact_quality
     return {
         "timestamp": record.timestamp,
         "structure_number": str(record.structure_number),
@@ -923,4 +1106,23 @@ def _record_to_csv_row(record: RouteMeasurementRecord) -> dict[str, str]:
         "resistance_rms_ohm": _format_float(record.resistance_rms_ohm),
         "relative_rms": _format_float(record.relative_rms),
         "status": record.status,
+        "contact_quality": "" if contact is None else contact.status,
+        "contact_median_ohm": ""
+        if contact is None
+        else _format_float(contact.median_ohm),
+        "contact_mad_sigma_ohm": ""
+        if contact is None
+        else _format_float(contact.mad_sigma_ohm),
+        "contact_p95_abs_step_ohm": ""
+        if contact is None
+        else _format_float(contact.p95_abs_step_ohm),
+        "contact_span_ohm": ""
+        if contact is None
+        else _format_float(contact.span_ohm),
+        "contact_compliance_hits": ""
+        if contact is None
+        else str(contact.compliance_hits),
+        "contact_polarity_sign_mismatches": ""
+        if contact is None
+        else str(contact.polarity_sign_mismatch_count),
     }

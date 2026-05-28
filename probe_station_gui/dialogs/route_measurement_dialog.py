@@ -117,7 +117,7 @@ class RouteMeasurementDialog(QDialog):
 
         self._measurement_count_spin = QSpinBox(common_group)
         self._measurement_count_spin.setRange(1, 1000)
-        self._measurement_count_spin.setValue(5)
+        self._measurement_count_spin.setValue(250)
         common_layout.addRow(
             QLabel("Readings per point", common_group),
             self._measurement_count_spin,
@@ -304,12 +304,20 @@ class RouteMeasurementDialog(QDialog):
         relative_rms = getattr(record, "relative_rms", math.nan)
         status = str(getattr(record, "status", ""))
         prefix = "Saved" if saved else "Not saved"
+        contact = getattr(record, "contact_quality", None)
+        contact_text = ""
+        if contact is not None and bool(getattr(contact, "assessed", False)):
+            contact_text = (
+                f", contact={getattr(contact, 'status', 'unknown')} "
+                f"(median={_format_ohm(float(getattr(contact, 'median_ohm', math.nan)))}, "
+                f"MAD={_format_ohm(float(getattr(contact, 'mad_sigma_ohm', math.nan)))})"
+            )
         self._result_label.setText(
             f"{prefix} point {position}/{total}: "
             f"R={_format_ohm(float(resistance))}, "
             f"RMS={_format_ohm(float(rms))}, "
             f"rel={_format_percent(float(relative_rms))}, "
-            f"status={status or 'unknown'}."
+            f"status={status or 'unknown'}{contact_text}."
         )
         self._last_raw_samples = tuple(getattr(record, "raw_samples", ()) or ())
         self._histogram_widget.set_samples(self._last_raw_samples)
@@ -498,9 +506,30 @@ class RouteMeasurementDialog(QDialog):
         self._keithley_compliance_spin.setRange(0.000000001, 1.0)
         self._keithley_compliance_spin.setSingleStep(0.000001)
         self._keithley_compliance_spin.setSuffix(" A")
-        self._keithley_compliance_spin.setValue(500e-6)
+        self._keithley_compliance_spin.setValue(10e-6)
         layout.addRow(
             QLabel("Compliance current", page), self._keithley_compliance_spin
+        )
+
+        self._keithley_current_range_spin = QDoubleSpinBox(page)
+        self._keithley_current_range_spin.setLocale(QLocale.c())
+        self._keithley_current_range_spin.setDecimals(9)
+        self._keithley_current_range_spin.setRange(0.000000001, 1.0)
+        self._keithley_current_range_spin.setSingleStep(0.000001)
+        self._keithley_current_range_spin.setSuffix(" A")
+        self._keithley_current_range_spin.setValue(10e-6)
+        layout.addRow(QLabel("Current range", page), self._keithley_current_range_spin)
+
+        self._keithley_voltmeter_range_spin = QDoubleSpinBox(page)
+        self._keithley_voltmeter_range_spin.setLocale(QLocale.c())
+        self._keithley_voltmeter_range_spin.setDecimals(6)
+        self._keithley_voltmeter_range_spin.setRange(0.000001, 1000.0)
+        self._keithley_voltmeter_range_spin.setSingleStep(0.01)
+        self._keithley_voltmeter_range_spin.setSuffix(" V")
+        self._keithley_voltmeter_range_spin.setValue(0.1)
+        layout.addRow(
+            QLabel("Voltmeter range", page),
+            self._keithley_voltmeter_range_spin,
         )
 
         self._keithley_nplc_spin = QDoubleSpinBox(page)
@@ -508,7 +537,7 @@ class RouteMeasurementDialog(QDialog):
         self._keithley_nplc_spin.setDecimals(2)
         self._keithley_nplc_spin.setRange(0.01, 50.0)
         self._keithley_nplc_spin.setSingleStep(1.0)
-        self._keithley_nplc_spin.setValue(10.0)
+        self._keithley_nplc_spin.setValue(1.0)
         layout.addRow(QLabel("NPLC", page), self._keithley_nplc_spin)
 
         self._keithley_terminals_combo = QComboBox(page)
@@ -522,8 +551,16 @@ class RouteMeasurementDialog(QDialog):
         self._keithley_delay_spin.setRange(0.0, 10.0)
         self._keithley_delay_spin.setSingleStep(0.01)
         self._keithley_delay_spin.setSuffix(" s")
-        self._keithley_delay_spin.setValue(0.01)
+        self._keithley_delay_spin.setValue(0.0)
         layout.addRow(QLabel("Trigger delay", page), self._keithley_delay_spin)
+
+        self._keithley_buffer_checkbox = QCheckBox("Use buffer", page)
+        self._keithley_buffer_checkbox.setChecked(True)
+        layout.addRow(self._keithley_buffer_checkbox)
+
+        self._keithley_trigger_link_checkbox = QCheckBox("Use Trigger Link", page)
+        self._keithley_trigger_link_checkbox.setChecked(True)
+        layout.addRow(self._keithley_trigger_link_checkbox)
 
         return page
 
@@ -754,6 +791,14 @@ class RouteMeasurementDialog(QDialog):
             data.get("source_voltage_range_v"),
         )
         self._set_spinbox_value(
+            self._keithley_voltmeter_range_spin,
+            data.get("voltmeter_range_v"),
+        )
+        self._set_spinbox_value(
+            self._keithley_current_range_spin,
+            data.get("current_range_a"),
+        )
+        self._set_spinbox_value(
             self._keithley_compliance_spin,
             data.get("compliance_current_a"),
         )
@@ -763,6 +808,12 @@ class RouteMeasurementDialog(QDialog):
             self._keithley_delay_spin,
             data.get("trigger_delay_s"),
         )
+        use_buffer = data.get("use_buffer")
+        if isinstance(use_buffer, bool):
+            self._keithley_buffer_checkbox.setChecked(use_buffer)
+        use_trigger_link = data.get("use_trigger_link")
+        if isinstance(use_trigger_link, bool):
+            self._keithley_trigger_link_checkbox.setChecked(use_trigger_link)
 
     @staticmethod
     def _set_spinbox_value(spinbox, value: object) -> None:
@@ -815,10 +866,16 @@ class RouteMeasurementDialog(QDialog):
             keithley=KeithleyRouteMeterSettings(
                 measurement_voltage_v=float(self._keithley_voltage_spin.value()),
                 source_voltage_range_v=float(self._keithley_range_spin.value()),
+                voltmeter_range_v=float(
+                    self._keithley_voltmeter_range_spin.value()
+                ),
+                current_range_a=float(self._keithley_current_range_spin.value()),
                 compliance_current_a=float(self._keithley_compliance_spin.value()),
                 nplc=float(self._keithley_nplc_spin.value()),
                 terminals=str(self._keithley_terminals_combo.currentData() or "rear"),
                 trigger_delay_s=float(self._keithley_delay_spin.value()),
+                use_buffer=self._keithley_buffer_checkbox.isChecked(),
+                use_trigger_link=self._keithley_trigger_link_checkbox.isChecked(),
             ),
         )
 

@@ -86,6 +86,18 @@ class _FakeRouteLCR:
         return dict(self.measurements.pop(0))
 
 
+class _FakeBatchRouteLCR:
+    def __init__(self, measurements: list[dict[str, object]]) -> None:
+        self.measurements = list(measurements)
+        self.batch_counts: list[int] = []
+
+    def read_route_measurement_batch_now(self, count: int) -> list[dict[str, object]]:
+        self.batch_counts.append(int(count))
+        batch = self.measurements[:count]
+        del self.measurements[:count]
+        return [dict(item) for item in batch]
+
+
 def _point(index: int) -> RouteMeasurementPoint:
     return RouteMeasurementPoint(
         index=index,
@@ -335,6 +347,44 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
             self.assertEqual(rows[0]["resistance_rms_ohm"], "1")
             self.assertEqual(rows[0]["relative_rms"], "0.166666666667")
 
+    def test_runner_uses_batch_route_reader_when_available(self) -> None:
+        point = _point(3)
+        lcr = _FakeBatchRouteLCR(
+            [
+                {"differential_resistance_ohm": 5.0},
+                {"differential_resistance_ohm": 6.0},
+                {"differential_resistance_ohm": 7.0},
+            ]
+        )
+        records = []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "route.csv"
+            runner = RouteMeasurementRunner(
+                points=[point],
+                csv_path=csv_path,
+                stage_controller=_FakeStage(),
+                lcr_controller=lcr,
+                needle_feedrate=None,
+                measurement_count=3,
+                contact_settle_s=0.0,
+                record_callback=lambda record, _position, _total: records.append(record),
+            )
+
+            success, message = runner.run()
+
+            self.assertTrue(success, message)
+            self.assertEqual(lcr.batch_counts, [3])
+            self.assertEqual(lcr.measurements, [])
+            self.assertEqual(
+                [sample.differential_resistance_ohm for sample in records[0].raw_samples],
+                [5.0, 6.0, 7.0],
+            )
+            with csv_path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[0]["n_measurements"], "3")
+            self.assertEqual(rows[0]["resistance_ohm"], "6")
+
     def test_short_check_saves_one_reading_and_skips_batch(self) -> None:
         point = _point(1)
         lcr = _FakeLCR([0.5])
@@ -502,6 +552,47 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["structure_number"], "1")
             self.assertEqual(rows[0]["resistance_ohm"], "10")
+
+    def test_contact_quality_marks_noisy_open_contact(self) -> None:
+        point = _point(1)
+        lcr = _FakeBatchRouteLCR(
+            [
+                {
+                    "differential_resistance_ohm": value,
+                    "negative": {"current_a": -0.001},
+                    "positive": {"current_a": 0.001},
+                }
+                for value in (520000.0, 610000.0, 480000.0, 570000.0)
+            ]
+        )
+        records = []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "route.csv"
+            runner = RouteMeasurementRunner(
+                points=[point],
+                csv_path=csv_path,
+                stage_controller=_FakeStage(),
+                lcr_controller=lcr,
+                needle_feedrate=None,
+                measurement_count=4,
+                contact_settle_s=0.0,
+                record_callback=lambda record, _position, _total: records.append(record),
+            )
+
+            success, message = runner.run()
+
+            self.assertTrue(success, message)
+            self.assertEqual(records[0].status, "bad_contact")
+            self.assertIsNotNone(records[0].contact_quality)
+            self.assertFalse(records[0].contact_quality.good)
+            self.assertIn("median_out_of_range", records[0].contact_quality.reasons)
+            self.assertIn("mad_sigma_too_high", records[0].contact_quality.reasons)
+            with csv_path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[0]["status"], "bad_contact")
+            self.assertEqual(rows[0]["contact_quality"], "bad_contact")
+            self.assertEqual(rows[0]["contact_polarity_sign_mismatches"], "0")
 
     def test_runner_starts_from_configured_point_number(self) -> None:
         points = [_point(1), _point(2), _point(3)]

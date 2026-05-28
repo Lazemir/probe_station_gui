@@ -23,6 +23,7 @@ dependencies = [
 
 [project.optional-dependencies]
 lcr = [
+    "probe-station-measure @ file:///C:/Users/Public/code/probe_station_measure",
     "pyvisa",
     "qcodes",
 ]

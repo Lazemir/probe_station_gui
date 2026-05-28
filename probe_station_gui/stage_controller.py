@@ -1492,6 +1492,24 @@ class StageController(QObject):
             self.needles_action_finished.emit(False, str(exc), action_key)
             raise
 
+    def run_external_needles_adjust(
+        self,
+        step_mm: float,
+        feedrate: float | None = None,
+    ) -> str:
+        """Run a blocking A-axis needle adjustment inside an external reservation."""
+
+        action = "adjust"
+        self.needles_action_started.emit(action)
+        try:
+            self._check_cancelled()
+            message = self._perform_needles_adjust(float(step_mm), feedrate)
+            self.needles_action_finished.emit(True, message, action)
+            return message
+        except StageControllerError as exc:
+            self.needles_action_finished.emit(False, str(exc), action)
+            raise
+
     def current_stage_position(self) -> tuple[float, ...]:
         """Return the latest controller position in the active GUI coordinate space."""
 
@@ -3829,51 +3847,10 @@ class StageController(QObject):
     ) -> None:
         action = "adjust"
         try:
-            serial_connection = self._serial
-            if serial_connection is None or not serial_connection.is_open:
-                raise StageControllerError("Serial connection is not available.")
-            if abs(step_mm) < 1e-6:
-                self.needles_action_finished.emit(True, "Needle position unchanged.", action)
-                return
-            with self._serial_session_lock:
-                status = self._query_status(serial_connection)
-                if status is None or self._axis_value_for_configured_mode(status, "A") is None:
-                    raise StageControllerError("Unable to read A position for needles.")
-                self._require_homed_axes(status, {"A"})
-                current_a = self._axis_value_for_configured_mode(status, "A")
-                if current_a is None:
-                    raise StageControllerError("Unable to read A position for needles.")
-                target_a = self._axis_a_gcode_coordinate_for_lowering_step(
-                    current_a,
-                    step_mm,
-                )
-                if abs(target_a - current_a) < 1e-6:
-                    self.needles_action_finished.emit(
-                        True, "Needle position unchanged.", action
-                    )
-                    return
-                programmed_feedrate = self._begin_needles_feedrate_control(
-                    action,
-                    feedrate,
-                )
-                try:
-                    self._send_absolute_axis_move(
-                        serial_connection,
-                        "A",
-                        target_a,
-                        ignore_needle_safety=True,
-                        feedrate=programmed_feedrate,
-                    )
-                finally:
-                    self._end_needles_feedrate_control()
-                current_a = self._read_current_a_position(serial_connection)
-                if current_a is None:
-                    raise StageControllerError("Unable to confirm A position after move.")
-                self._update_needles_from_a_position(current_a)
-            direction = "lowered" if step_mm < 0 else "raised"
+            message = self._perform_needles_adjust(step_mm, feedrate)
             self.needles_action_finished.emit(
                 True,
-                f"Needles {direction} by {abs(step_mm):.3f} mm.",
+                message,
                 action,
             )
         except StageControllerError as exc:
@@ -3882,6 +3859,54 @@ class StageController(QObject):
             with self._task_lock:
                 self._active_thread = None
             self._start_next_queued_needles_action()
+
+    def _perform_needles_adjust(
+        self,
+        step_mm: float,
+        feedrate: float | None = None,
+    ) -> str:
+        serial_connection = self._serial
+        if serial_connection is None or not serial_connection.is_open:
+            raise StageControllerError("Serial connection is not available.")
+        if abs(step_mm) < 1e-6:
+            return "Needle position unchanged."
+        with self._serial_session_lock:
+            status = self._query_status(serial_connection)
+            if (
+                status is None
+                or self._axis_value_for_configured_mode(status, "A") is None
+            ):
+                raise StageControllerError("Unable to read A position for needles.")
+            self._require_homed_axes(status, {"A"})
+            current_a = self._axis_value_for_configured_mode(status, "A")
+            if current_a is None:
+                raise StageControllerError("Unable to read A position for needles.")
+            target_a = self._axis_a_gcode_coordinate_for_lowering_step(
+                current_a,
+                step_mm,
+            )
+            if abs(target_a - current_a) < 1e-6:
+                return "Needle position unchanged."
+            programmed_feedrate = self._begin_needles_feedrate_control(
+                "adjust",
+                feedrate,
+            )
+            try:
+                self._send_absolute_axis_move(
+                    serial_connection,
+                    "A",
+                    target_a,
+                    ignore_needle_safety=True,
+                    feedrate=programmed_feedrate,
+                )
+            finally:
+                self._end_needles_feedrate_control()
+            current_a = self._read_current_a_position(serial_connection)
+            if current_a is None:
+                raise StageControllerError("Unable to confirm A position after move.")
+            self._update_needles_from_a_position(current_a)
+        direction = "lowered" if step_mm < 0 else "raised"
+        return f"Needles {direction} by {abs(step_mm):.3f} mm."
 
     def _run_oscillation(
         self, mode: str, amplitude_mm: float, feedrate: float, turns_per_sweep: float

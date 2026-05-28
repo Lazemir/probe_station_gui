@@ -47,6 +47,7 @@ def _install_pyside6_stubs_if_missing() -> None:
 _restore_real_imports()
 _install_pyside6_stubs_if_missing()
 
+import probe_station_gui.lcr_meter as lcr_module
 from probe_station_gui.lcr_meter import (
     GWInstekRouteMeterSettings,
     KeithleyRouteMeterSettings,
@@ -54,8 +55,8 @@ from probe_station_gui.lcr_meter import (
     LCRMeterController,
     ROUTE_METER_GWINSTEK,
     ROUTE_METER_KEITHLEY,
+    RouteMeter,
     RouteMeterConfiguration,
-    _Keithley2400With2182ASession,
     _LCRSession,
 )
 
@@ -106,33 +107,20 @@ class _FakeLCRSession(_LCRSession):
         self.configurations.append(dict(kwargs))
 
 
-class _FakeKeithleySession(_Keithley2400With2182ASession):
+class _FakeKeithleySession:
     backend_name = "fake-keithley"
 
     def __init__(self) -> None:
         self.configurations: list[dict] = []
+        self.read_triggers: list[bool] = []
+        self.closed = False
 
     def read_primary_value(self, *, trigger: bool = False) -> float:
+        self.read_triggers.append(bool(trigger))
         return 42.0
 
     def configure_measurement(self, **kwargs) -> None:
         self.configurations.append(dict(kwargs))
-
-
-class _FakeVisaHandle:
-    def __init__(self, responses: dict[str, list[str]]) -> None:
-        self.responses = {key: list(value) for key, value in responses.items()}
-        self.writes: list[str] = []
-        self.closed = False
-
-    def write(self, command: str) -> None:
-        self.writes.append(command)
-
-    def query(self, query: str) -> str:
-        values = self.responses.get(query, [])
-        if values:
-            return values.pop(0)
-        return ""
 
     def close(self) -> None:
         self.closed = True
@@ -289,6 +277,44 @@ class LCRMeterTest(unittest.TestCase):
             0.03,
         )
         self.assertEqual(session.configurations[-1]["keithley_nplc"], 7.5)
+        self.assertEqual(session.configurations[-1]["keithley_current_range_a"], 10e-6)
+        self.assertEqual(session.configurations[-1]["keithley_use_buffer"], True)
+        self.assertEqual(session.configurations[-1]["keithley_use_trigger_link"], True)
+
+    def test_route_meter_opens_keithley_through_external_driver_factory(self) -> None:
+        created: list[tuple[str, str, int]] = []
+        session = _FakeKeithleySession()
+
+        def fake_open(source: str, voltmeter: str, timeout_ms: int):
+            created.append((source, voltmeter, timeout_ms))
+            return session
+
+        original = lcr_module._open_keithley_session
+        lcr_module._open_keithley_session = fake_open
+        try:
+            meter = RouteMeter(
+                RouteMeterConfiguration(
+                    meter_type=ROUTE_METER_KEITHLEY,
+                    keithley=KeithleyRouteMeterSettings(
+                        source_resource="GPIB0::1::INSTR",
+                        voltmeter_resource="GPIB0::2::INSTR",
+                        nplc=1.0,
+                        use_buffer=True,
+                        use_trigger_link=True,
+                    ),
+                ),
+                timeout_ms=1234,
+            )
+
+            value = meter.read_primary_value_now()
+        finally:
+            lcr_module._open_keithley_session = original
+
+        self.assertEqual(value, 42.0)
+        self.assertEqual(created, [("GPIB0::1::INSTR", "GPIB0::2::INSTR", 1234)])
+        self.assertEqual(session.read_triggers, [True])
+        self.assertEqual(session.configurations[-1]["keithley_nplc"], 1.0)
+        self.assertEqual(session.configurations[-1]["keithley_use_buffer"], True)
 
     def test_controller_rejects_route_meter_type_mismatch(self) -> None:
         controller = LCRMeterController()
@@ -326,92 +352,6 @@ class LCRMeterTest(unittest.TestCase):
                     gwinstek=GWInstekRouteMeterSettings(),
                 )
             )
-
-    def test_keithley_session_reads_four_wire_resistance_from_two_biases(self) -> None:
-        session = _Keithley2400With2182ASession.__new__(
-            _Keithley2400With2182ASession
-        )
-        source = _FakeVisaHandle(
-            {
-                "FETC?": ["-0.03,-0.001", "0.03,0.001"],
-                ":SENS:CURR:PROT:TRIP?": ["0"],
-            }
-        )
-        voltmeter = _FakeVisaHandle({"READ?": ["-0.029", "0.031"]})
-        session._source = source
-        session._voltmeter = voltmeter
-        session._measurement_voltage_v = 0.03
-        session._trigger_delay_s = 0.0
-        session._compliance_current_a = 0.5
-
-        value = session.read_primary_value(trigger=True)
-
-        self.assertAlmostEqual(value, 30.0)
-        self.assertIn(":SOUR:VOLT -0.03", source.writes)
-        self.assertIn(":SOUR:VOLT 0.03", source.writes)
-        self.assertEqual(source.writes[-1], ":SOUR:VOLT 0")
-        self.assertNotIn("INIT", voltmeter.writes)
-
-    def test_keithley_route_measurement_exposes_raw_polarities(self) -> None:
-        session = _Keithley2400With2182ASession.__new__(
-            _Keithley2400With2182ASession
-        )
-        source = _FakeVisaHandle(
-            {
-                "FETC?": ["-0.03,-0.001", "0.03,0.001"],
-                ":SENS:CURR:PROT:TRIP?": ["1"],
-                "SYST:ERR?": ['0,"No error"'],
-            }
-        )
-        voltmeter = _FakeVisaHandle(
-            {
-                "READ?": ["-0.029", "0.031"],
-                "SYST:ERR?": ['0,"No error"'],
-            }
-        )
-        session._source = source
-        session._voltmeter = voltmeter
-        session._measurement_voltage_v = 0.03
-        session._trigger_delay_s = 0.0
-        session._compliance_current_a = 0.5
-
-        measurement = session.read_route_measurement(trigger=True)
-
-        self.assertAlmostEqual(measurement["differential_resistance_ohm"], 30.0)
-        self.assertEqual(measurement["compliance_hit"], True)
-        self.assertAlmostEqual(measurement["negative"]["resistance_ohm"], 29.0)
-        self.assertAlmostEqual(measurement["positive"]["resistance_ohm"], 31.0)
-
-    def test_keithley_session_surfaces_voltmeter_scpi_errors(self) -> None:
-        session = _Keithley2400With2182ASession.__new__(
-            _Keithley2400With2182ASession
-        )
-        source = _FakeVisaHandle(
-            {
-                "FETC?": ["-0.03,-0.001", "0.03,0.001"],
-                ":SENS:CURR:PROT:TRIP?": ["0"],
-                "SYST:ERR?": ['0,"No error"'],
-            }
-        )
-        voltmeter = _FakeVisaHandle(
-            {
-                "READ?": ["-0.029", "0.031"],
-                "SYST:ERR?": ['+213,"Init ignored"', '0,"No error"'],
-            }
-        )
-        session._source = source
-        session._voltmeter = voltmeter
-        session._measurement_voltage_v = 0.03
-        session._trigger_delay_s = 0.0
-        session._compliance_current_a = 0.5
-
-        with self.assertLogs("probe_station_gui.lcr_meter", level="WARNING") as logs:
-            with self.assertRaises(LCRMeterError) as context:
-                session.read_primary_value(trigger=True)
-
-        self.assertIn("+213", str(context.exception))
-        self.assertIn("2182A voltmeter", str(context.exception))
-        self.assertTrue(any("+213" in message for message in logs.output))
 
     def test_route_meter_configuration_reports_keithley_nplc_label(self) -> None:
         config = RouteMeterConfiguration(
