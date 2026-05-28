@@ -637,6 +637,99 @@ class _Keithley2400With2182ASession:
             "positive": polarities[1] if len(polarities) > 1 else {},
         }
 
+    def read_voltage_sweep(
+        self,
+        voltages_v: list[float] | tuple[float, ...],
+        *,
+        trigger: bool = False,
+    ) -> dict[str, object]:
+        """Source arbitrary voltages and return raw measured V/I points."""
+
+        _ = trigger
+        source = self._require_source()
+        voltmeter = self._require_voltmeter()
+        source_voltages: list[float] = []
+        measured_voltage: list[float] = []
+        measured_current: list[float] = []
+        points: list[dict[str, float | int]] = []
+        compliance_hit = False
+        read_error: Exception | None = None
+        scpi_errors: list[str] = []
+        try:
+            for index, raw_voltage in enumerate(voltages_v):
+                voltage = float(raw_voltage)
+                if not math.isfinite(voltage):
+                    raise ValueError(f"Voltage at index {index} must be finite.")
+                self._write(source, f":SOUR:VOLT {voltage:.12g}")
+                self._write(source, "INIT")
+                if self._trigger_delay_s > 0:
+                    time.sleep(self._trigger_delay_s)
+                voltage_reading = float(self._ask(voltmeter, "READ?"))
+                source_values = self._parse_source_fetch(self._ask(source, "FETC?"))
+                current_reading = source_values[1]
+                source_voltages.append(voltage)
+                measured_voltage.append(voltage_reading)
+                measured_current.append(current_reading)
+                points.append(
+                    {
+                        "index": int(index),
+                        "source_voltage_v": voltage,
+                        "measured_voltage_v": voltage_reading,
+                        "current_a": current_reading,
+                        "resistance_ohm": _resistance_from_voltage_current(
+                            voltage_reading,
+                            current_reading,
+                        ),
+                    }
+                )
+            resistance = self._differential_resistance_from_sweep(
+                measured_voltage,
+                measured_current,
+            )
+            compliance_hit = self._compliance_tripped(measured_current)
+            if compliance_hit:
+                logger.warning(
+                    "Keithley current compliance was reached during voltage sweep"
+                )
+        except Exception as exc:  # pragma: no cover - backend specific failures
+            read_error = exc
+            resistance = math.nan
+        finally:
+            self._try_write(source, ":SOUR:VOLT 0")
+            scpi_errors.extend(
+                self._log_scpi_errors(source, "2400 source", "voltage sweep")
+            )
+            scpi_errors.extend(
+                self._log_scpi_errors(
+                    voltmeter,
+                    "2182A voltmeter",
+                    "voltage sweep",
+                )
+            )
+        details = "; ".join(scpi_errors)
+        if read_error is not None:
+            message = f"Keithley voltage sweep failed: {read_error}"
+            if details:
+                message = f"{message}. SCPI errors: {details}"
+            raise LCRMeterError(message) from read_error
+        if details:
+            raise LCRMeterError(
+                "Keithley instrument reported SCPI error after voltage sweep: "
+                f"{details}"
+            )
+        if (
+            not math.isfinite(resistance)
+            or abs(resistance) >= self.OVERLOAD_RESISTANCE_OHM
+        ):
+            resistance = math.inf
+        return {
+            "measurement_kind": "voltage_sweep",
+            "differential_resistance_ohm": resistance,
+            "compliance_hit": compliance_hit,
+            "points": points,
+            "source_voltages_v": source_voltages,
+        }
+
     def read_resistance_ohm(self) -> float:
         return self.read_primary_value(trigger=True)
 
@@ -759,6 +852,34 @@ class _Keithley2400With2182ASession:
         if delta_i == 0:
             return math.inf
         return float(delta_v / delta_i)
+
+    @staticmethod
+    def _differential_resistance_from_sweep(
+        measured_voltage: list[float],
+        measured_current: list[float],
+    ) -> float:
+        if len(measured_voltage) != len(measured_current) or not measured_voltage:
+            raise ValueError("Keithley voltage sweep did not produce V/I points.")
+        finite_indices = [
+            index
+            for index, (voltage, current) in enumerate(
+                zip(measured_voltage, measured_current)
+            )
+            if math.isfinite(voltage) and math.isfinite(current)
+        ]
+        if len(finite_indices) >= 2:
+            first = finite_indices[0]
+            last = finite_indices[-1]
+            delta_v = measured_voltage[last] - measured_voltage[first]
+            delta_i = measured_current[last] - measured_current[first]
+            if delta_i == 0:
+                return math.inf
+            return float(delta_v / delta_i)
+        index = finite_indices[0] if finite_indices else 0
+        return _resistance_from_voltage_current(
+            measured_voltage[index],
+            measured_current[index],
+        )
 
     def _compliance_tripped(self, measured_current: list[float]) -> bool:
         threshold = abs(self._compliance_current_a) * 0.99
@@ -1110,6 +1231,43 @@ class LCRMeterController(QObject):
                 self._stop_polling.clear()
                 self._start_polling_thread()
         primary_value = float(measurement["differential_resistance_ohm"])
+        self.reading_updated.emit(
+            primary_value,
+            self._is_short_reading(primary_value),
+        )
+        return measurement
+
+    def read_voltage_sweep_now(
+        self,
+        voltages_v: list[float] | tuple[float, ...],
+        *,
+        restart_polling: bool = False,
+    ) -> dict[str, object]:
+        """Synchronously run a raw source-voltage sweep and return V/I points."""
+
+        with self._task_lock:
+            if self._active_thread and self._active_thread.is_alive():
+                raise LCRMeterError("Measurement instrument task already running.")
+            session = self._session
+        if session is None:
+            raise LCRMeterError("Measurement instrument is not connected.")
+        reader = getattr(session, "read_voltage_sweep", None)
+        if not callable(reader):
+            raise LCRMeterError(
+                "Raw voltage sweeps require a Keithley 2400 + 2182A instrument."
+            )
+        self._stop_polling_session()
+        try:
+            measurement = dict(reader(voltages_v, trigger=True))
+        except LCRMeterError:
+            self._disconnect_session()
+            self.connection_changed.emit(False, "", "Instrument read failed.")
+            raise
+        finally:
+            if restart_polling and self._session is session:
+                self._stop_polling.clear()
+                self._start_polling_thread()
+        primary_value = float(measurement.get("differential_resistance_ohm", math.nan))
         self.reading_updated.emit(
             primary_value,
             self._is_short_reading(primary_value),

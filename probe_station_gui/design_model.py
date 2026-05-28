@@ -33,7 +33,7 @@ class DesignModelError(RuntimeError):
 
 @dataclass(frozen=True)
 class MeasurementTarget:
-    """A design-space target produced by a measurement plan script."""
+    """A design-space target for optional navigation overlays."""
 
     id: str
     label: str
@@ -43,7 +43,7 @@ class MeasurementTarget:
 
     @classmethod
     def from_object(cls, value: Any) -> "MeasurementTarget":
-        """Coerce a script-produced object into a measurement target."""
+        """Coerce a mapping-like object into a measurement target."""
 
         if isinstance(value, cls):
             return value

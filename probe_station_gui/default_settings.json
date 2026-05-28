@@ -77,8 +77,7 @@
   "api": {
     "enabled": true,
     "host": "127.0.0.1",
-    "port": 8765,
-    "default_feedrate_mm_min": 10.0
+    "port": 8765
   },
   "click_to_move": {
     "pending_timeout_s": 8.0

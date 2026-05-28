@@ -382,6 +382,40 @@ class LCRMeterTest(unittest.TestCase):
         self.assertAlmostEqual(measurement["negative"]["resistance_ohm"], 29.0)
         self.assertAlmostEqual(measurement["positive"]["resistance_ohm"], 31.0)
 
+    def test_keithley_voltage_sweep_exposes_requested_vi_points(self) -> None:
+        session = _Keithley2400With2182ASession.__new__(
+            _Keithley2400With2182ASession
+        )
+        source = _FakeVisaHandle(
+            {
+                "FETC?": ["-0.1,-0.002", "0,0", "0.1,0.002"],
+                ":SENS:CURR:PROT:TRIP?": ["0"],
+                "SYST:ERR?": ['0,"No error"'],
+            }
+        )
+        voltmeter = _FakeVisaHandle(
+            {
+                "READ?": ["-0.098", "0.0001", "0.101"],
+                "SYST:ERR?": ['0,"No error"'],
+            }
+        )
+        session._source = source
+        session._voltmeter = voltmeter
+        session._trigger_delay_s = 0.0
+        session._compliance_current_a = 0.5
+
+        measurement = session.read_voltage_sweep([-0.1, 0.0, 0.1], trigger=True)
+
+        self.assertEqual(measurement["measurement_kind"], "voltage_sweep")
+        self.assertAlmostEqual(measurement["differential_resistance_ohm"], 49.75)
+        self.assertEqual(len(measurement["points"]), 3)
+        self.assertEqual(
+            [point["source_voltage_v"] for point in measurement["points"]],
+            [-0.1, 0.0, 0.1],
+        )
+        self.assertAlmostEqual(measurement["points"][2]["current_a"], 0.002)
+        self.assertEqual(source.writes[-1], ":SOUR:VOLT 0")
+
     def test_keithley_session_surfaces_voltmeter_scpi_errors(self) -> None:
         session = _Keithley2400With2182ASession.__new__(
             _Keithley2400With2182ASession

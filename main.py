@@ -7,7 +7,7 @@ import math
 import re
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
 from typing import Any, Callable, TYPE_CHECKING
@@ -47,7 +47,6 @@ from probe_station_gui import (
     SerialTerminalWindow,
 )
 from probe_station_gui.design_model import DesignDocument, DesignModelError
-from probe_station_gui.design_script import ScriptContext, load_measurement_plan
 from probe_station_gui.design_session import AlignmentPreparation, DesignSession
 from probe_station_gui.diagnostics import configure_crash_diagnostics
 from probe_station_gui.dialogs.route_measurement_dialog import (
@@ -56,7 +55,15 @@ from probe_station_gui.dialogs.route_measurement_dialog import (
 )
 from probe_station_gui.dialogs.settings_dialog import SettingsDialog
 from probe_station_gui.api_server import ProbeStationApiServer
-from probe_station_gui.lcr_meter import LCRMeterController, LCRMeterError
+from probe_station_gui.lcr_meter import (
+    GWInstekRouteMeterSettings,
+    KeithleyRouteMeterSettings,
+    LCRMeterController,
+    LCRMeterError,
+    ROUTE_METER_GWINSTEK,
+    ROUTE_METER_KEITHLEY,
+    RouteMeterConfiguration,
+)
 from probe_station_gui.motion_prediction import interpolate_position, motion_progress
 from probe_station_gui.stage_controller import StageControllerError
 from probe_station_gui.objective_offsets import (
@@ -684,6 +691,7 @@ class Main(QMainWindow):
         self._api_server = ProbeStationApiServer(
             move_callback=self._submit_api_move_request,
             status_callback=self._submit_api_status_request,
+            command_callback=self._submit_api_command_request,
             host=api_settings.host,
             port=api_settings.port,
         )
@@ -717,6 +725,27 @@ class Main(QMainWindow):
                 "message": "GUI API bridge is not ready.",
             }
         return self._api_bridge.submit({"action": "status"})
+
+    def _submit_api_command_request(self, command_request: dict[str, Any]) -> dict[str, Any]:
+        action = str(command_request.get("action", "")).strip().lower()
+        payload = command_request.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        if action == "list_contacts":
+            return self._api_list_contacts()
+        if action == "move_to_contact":
+            return self._api_move_to_contact(payload)
+        if action == "contact_needles":
+            return self._api_contact_needles(payload)
+        if action == "configure_meter":
+            return self._api_configure_meter(payload)
+        if action == "raw_voltage_sweep":
+            return self._api_raw_voltage_sweep(payload)
+        return {
+            "accepted": False,
+            "status_code": 400,
+            "message": f"Unsupported API command: {action}",
+        }
 
     def _handle_api_request(self, request: dict[str, Any]) -> dict[str, Any]:
         action = str(request.get("action", "")).strip().lower()
@@ -904,9 +933,6 @@ class Main(QMainWindow):
             "active_coordinate_axis": self._coordinate_move_axis,
             "active_coordinate_axes": sorted(self._coordinate_move_axes),
             "current_feedrate_mm_min": self._current_linear_feedrate(),
-            "api_default_feedrate_mm_min": (
-                self.settings_manager.api_configuration().default_feedrate_mm_min
-            ),
         }
 
     def _surface_map_stage_status(self) -> dict[str, Any]:
@@ -1018,7 +1044,7 @@ class Main(QMainWindow):
 
     def _api_move_feedrate(self, feedrate: object) -> float | None:
         if feedrate is None:
-            return self.settings_manager.api_configuration().default_feedrate_mm_min
+            return max(self.MIN_FEEDRATE_MM_MIN, float(self._current_linear_feedrate()))
         try:
             value = float(feedrate)
         except (TypeError, ValueError):
@@ -1026,6 +1052,743 @@ class Main(QMainWindow):
         if not math.isfinite(value) or value <= 0.0:
             return None
         return max(self.MIN_FEEDRATE_MM_MIN, value)
+
+    def _api_list_contacts(self) -> dict[str, Any]:
+        route = self._design_session.route
+        if route is None:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "No probe route is loaded.",
+            }
+        registration_valid = (
+            self._design_session.registration is not None
+            and self._design_session.registration.valid
+        )
+        contacts = [
+            self._api_route_point_payload(
+                route_index=index,
+                route_point=route_point,
+                include_stage_xy=registration_valid,
+            )
+            for index, route_point in enumerate(route.points, start=1)
+        ]
+        return {
+            "accepted": True,
+            "route_name": route.name,
+            "route_path": str(route.path) if route.path is not None else None,
+            "registration_valid": registration_valid,
+            "contacts": contacts,
+        }
+
+    def _api_move_to_contact(self, payload: dict[str, Any]) -> dict[str, Any]:
+        contact_number = self._api_contact_number(payload)
+        if contact_number is None:
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": "Provide a positive contact_number.",
+            }
+        context_result = self._api_contact_context(contact_number)
+        if not context_result.get("accepted", False):
+            return context_result
+        point = context_result["point"]
+        contact = context_result["contact"]
+        lower_needles = self._api_bool(
+            payload,
+            "lower_needles",
+            "lower",
+            default=False,
+        )
+        lift_before_move = self._api_bool(
+            payload,
+            "lift_before_move",
+            default=True,
+        )
+        lift_after = self._api_bool(payload, "lift_after", default=False)
+        contact_settle_s = self._api_float(
+            payload,
+            "contact_settle_s",
+            "settle_s",
+            default=0.2,
+            minimum=0.0,
+        )
+        needle_feedrate = self._api_needle_feedrate(payload)
+        active_stage_task = False
+        needles_lowered = False
+        try:
+            self.stage_controller.begin_external_task("API contact move")
+            active_stage_task = True
+            if lift_before_move:
+                self.stage_controller.run_external_needles_action(
+                    "lift",
+                    needle_feedrate,
+                )
+            self.stage_controller.run_external_move_to_xy(
+                point.stage_xy[0],
+                point.stage_xy[1],
+            )
+            if lower_needles:
+                self.stage_controller.run_external_needles_action(
+                    "lower",
+                    needle_feedrate,
+                )
+                needles_lowered = True
+                if contact_settle_s > 0.0:
+                    time.sleep(contact_settle_s)
+            return {
+                "accepted": True,
+                "message": (
+                    f"Moved to contact {contact['contact_number']}"
+                    + (" and lowered needles." if lower_needles else ".")
+                ),
+                "timestamp_utc": self._api_timestamp_utc(),
+                "contact": contact,
+                "needles_lowered": lower_needles,
+                "lifted_before_move": lift_before_move,
+                "lifted_after": lift_after and needles_lowered,
+                "needle_feedrate_mm_min": needle_feedrate,
+            }
+        except StageControllerError as exc:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": str(exc),
+                "contact": contact,
+            }
+        finally:
+            if active_stage_task:
+                if lift_after and needles_lowered:
+                    try:
+                        self.stage_controller.run_external_needles_action(
+                            "lift",
+                            needle_feedrate,
+                        )
+                    except StageControllerError:
+                        logger.exception("API contact move failed to lift needles.")
+                self.stage_controller.finish_external_task()
+
+    def _api_contact_needles(self, payload: dict[str, Any]) -> dict[str, Any]:
+        contact_number = self._api_contact_number(payload)
+        if contact_number is None:
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": "Provide a positive contact_number.",
+            }
+        context_result = self._api_contact_context(contact_number)
+        if not context_result.get("accepted", False):
+            return context_result
+        contact = context_result["contact"]
+        action = str(payload.get("action", "lower")).strip().lower()
+        if action == "raise":
+            action = "raise"
+        elif action in {"lift", "up"}:
+            action = "lift"
+        elif action in {"lower", "down"}:
+            action = "lower"
+        else:
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": "Needle action must be lower, lift, or raise.",
+            }
+        needle_feedrate = self._api_needle_feedrate(payload)
+        active_stage_task = False
+        try:
+            self.stage_controller.begin_external_task("API needle action")
+            active_stage_task = True
+            self.stage_controller.run_external_needles_action(action, needle_feedrate)
+            return {
+                "accepted": True,
+                "message": f"Needle action '{action}' completed.",
+                "timestamp_utc": self._api_timestamp_utc(),
+                "contact": contact,
+                "needle_action": action,
+                "needle_feedrate_mm_min": needle_feedrate,
+            }
+        except StageControllerError as exc:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": str(exc),
+                "contact": contact,
+            }
+        finally:
+            if active_stage_task:
+                self.stage_controller.finish_external_task()
+
+    def _api_configure_meter(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.lcr_controller.is_connected():
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Measurement instrument is not connected.",
+            }
+        try:
+            configuration = self._api_route_meter_configuration(
+                payload,
+                voltages_v=None,
+            )
+            self.lcr_controller.apply_route_meter_configuration(configuration)
+        except (ValueError, LCRMeterError) as exc:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": str(exc),
+            }
+        return {
+            "accepted": True,
+            "message": "Measurement instrument configured.",
+            "timestamp_utc": self._api_timestamp_utc(),
+            "meter_type": configuration.meter_type,
+            "nplc": configuration.nplc_label(),
+        }
+
+    def _api_raw_voltage_sweep(self, payload: dict[str, Any]) -> dict[str, Any]:
+        voltages = payload.get("voltages_v")
+        if not isinstance(voltages, list) or not voltages:
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": "Provide voltages_v as a non-empty array.",
+            }
+        if not self.lcr_controller.is_connected():
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Measurement instrument is not connected.",
+            }
+        try:
+            voltage_values = [float(value) for value in voltages]
+            configuration = self._api_route_meter_configuration(
+                payload.get("meter", payload.get("meter_configuration", {})),
+                voltages_v=voltage_values,
+            )
+            self.lcr_controller.apply_route_meter_configuration(configuration)
+        except (TypeError, ValueError, LCRMeterError) as exc:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": str(exc),
+            }
+
+        contact_number = self._api_contact_number(payload, required=False)
+        move_to_contact = self._api_bool(
+            payload,
+            "move_to_contact",
+            "move",
+            default=contact_number is not None,
+        )
+        lower_needles = self._api_bool(
+            payload,
+            "lower_needles",
+            "lower",
+            default=contact_number is not None,
+        )
+        lift_after = self._api_bool(payload, "lift_after", default=lower_needles)
+        lift_before_move = self._api_bool(
+            payload,
+            "lift_before_move",
+            default=move_to_contact,
+        )
+        contact_settle_s = self._api_float(
+            payload,
+            "contact_settle_s",
+            "settle_s",
+            default=0.2,
+            minimum=0.0,
+        )
+        point: RouteMeasurementPoint | None = None
+        contact: dict[str, Any] | None = None
+        if contact_number is not None:
+            context_result = self._api_contact_context(contact_number)
+            if not context_result.get("accepted", False):
+                return context_result
+            point = context_result["point"]
+            contact = context_result["contact"]
+        if move_to_contact and point is None:
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": "move_to_contact requires contact_number.",
+            }
+
+        needle_feedrate = self._api_needle_feedrate(payload)
+        active_stage_task = False
+        needles_lowered = False
+        started_at = time.monotonic()
+        timestamp_utc = self._api_timestamp_utc()
+        try:
+            if move_to_contact or lower_needles or lift_after:
+                self.stage_controller.begin_external_task("API raw voltage sweep")
+                active_stage_task = True
+            if active_stage_task and lift_before_move:
+                self.stage_controller.run_external_needles_action(
+                    "lift",
+                    needle_feedrate,
+                )
+            if move_to_contact and point is not None:
+                self.stage_controller.run_external_move_to_xy(
+                    point.stage_xy[0],
+                    point.stage_xy[1],
+                )
+            if active_stage_task and lower_needles:
+                self.stage_controller.run_external_needles_action(
+                    "lower",
+                    needle_feedrate,
+                )
+                needles_lowered = True
+                if contact_settle_s > 0.0:
+                    time.sleep(contact_settle_s)
+            raw_measurement = self.lcr_controller.read_voltage_sweep_now(voltage_values)
+            elapsed_s = time.monotonic() - started_at
+            result = self._api_json_ready(raw_measurement)
+            points = result.get("points", [])
+            if isinstance(points, list):
+                iv_pairs = [
+                    {
+                        "voltage_v": item.get("measured_voltage_v"),
+                        "current_a": item.get("current_a"),
+                    }
+                    for item in points
+                    if isinstance(item, dict)
+                ]
+            else:
+                iv_pairs = []
+            return {
+                "accepted": True,
+                "message": f"Raw voltage sweep complete: {len(voltage_values)} points.",
+                "timestamp_utc": timestamp_utc,
+                "elapsed_s": elapsed_s,
+                "contact": contact,
+                "meter_type": configuration.meter_type,
+                "measurement_kind": "voltage_sweep",
+                "voltages_v": voltage_values,
+                "iv_pairs": iv_pairs,
+                "result": result,
+                "needles_lowered": lower_needles,
+                "lifted_after": lift_after and needles_lowered,
+            }
+        except (StageControllerError, LCRMeterError) as exc:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": str(exc),
+                "contact": contact,
+            }
+        finally:
+            if active_stage_task:
+                if lift_after and needles_lowered:
+                    try:
+                        self.stage_controller.run_external_needles_action(
+                            "lift",
+                            needle_feedrate,
+                        )
+                    except StageControllerError:
+                        logger.exception("API raw voltage sweep failed to lift needles.")
+                self.stage_controller.finish_external_task()
+
+    def _api_contact_context(self, contact_number: int) -> dict[str, Any]:
+        if self.serial_connection is None or not self.serial_connection.is_open:
+            return {
+                "accepted": False,
+                "status_code": 503,
+                "message": "Serial connection is not available.",
+            }
+        route = self._design_session.route
+        if route is None or not route.points:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Create or load a probe route before using contacts.",
+            }
+        registration = self._design_session.registration
+        if registration is None or not registration.valid:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Design registration is required before using contacts.",
+            }
+        try:
+            points = self._route_measurement_points(route)
+        except DesignModelError as exc:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": str(exc),
+            }
+        point = self._api_find_contact_point(points, contact_number)
+        if point is None:
+            return {
+                "accepted": False,
+                "status_code": 404,
+                "message": f"Contact {contact_number} is not enabled or not found.",
+            }
+        return {
+            "accepted": True,
+            "point": point,
+            "contact": self._api_measurement_point_payload(
+                point,
+                requested_contact_number=contact_number,
+            ),
+        }
+
+    def _api_find_contact_point(
+        self,
+        points: list[RouteMeasurementPoint],
+        contact_number: int,
+    ) -> RouteMeasurementPoint | None:
+        for point in points:
+            if int(point.index) == int(contact_number):
+                return point
+        for point in points:
+            if self._api_structure_number_for_measurement_point(point) == int(contact_number):
+                return point
+        return None
+
+    def _api_route_point_payload(
+        self,
+        *,
+        route_index: int,
+        route_point: object,
+        include_stage_xy: bool,
+    ) -> dict[str, Any]:
+        design_center = tuple(getattr(route_point, "camera_center", (0.0, 0.0)))
+        stage_xy = None
+        if include_stage_xy:
+            try:
+                resolved = self._raw_stage_xy_from_design_xy(
+                    (float(design_center[0]), float(design_center[1]))
+                )
+            except (TypeError, ValueError, IndexError):
+                resolved = None
+            if resolved is not None:
+                stage_xy = {"x_mm": float(resolved[0]), "y_mm": float(resolved[1])}
+        return {
+            "contact_number": int(route_index),
+            "structure_number": self._api_structure_number_for_route_point(
+                route_index,
+                route_point,
+            ),
+            "point_id": str(getattr(route_point, "id", "")),
+            "label": str(getattr(route_point, "label", "")),
+            "enabled": bool(getattr(route_point, "enabled", True)),
+            "design_center": {
+                "x": float(design_center[0]),
+                "y": float(design_center[1]),
+            },
+            "stage_xy": stage_xy,
+        }
+
+    def _api_measurement_point_payload(
+        self,
+        point: RouteMeasurementPoint,
+        *,
+        requested_contact_number: int,
+    ) -> dict[str, Any]:
+        return {
+            "contact_number": int(requested_contact_number),
+            "route_index": int(point.index),
+            "structure_number": self._api_structure_number_for_measurement_point(point),
+            "point_id": point.point_id,
+            "label": point.label,
+            "design_center": {
+                "x": float(point.design_center[0]),
+                "y": float(point.design_center[1]),
+            },
+            "stage_xy": {
+                "x_mm": float(point.stage_xy[0]),
+                "y_mm": float(point.stage_xy[1]),
+            },
+            "needle_contacts": [
+                {
+                    "needle": 1,
+                    "design": {
+                        "x": float(point.needle_1_design[0]),
+                        "y": float(point.needle_1_design[1]),
+                    },
+                },
+                {
+                    "needle": 2,
+                    "design": {
+                        "x": float(point.needle_2_design[0]),
+                        "y": float(point.needle_2_design[1]),
+                    },
+                },
+            ],
+        }
+
+    def _api_route_meter_configuration(
+        self,
+        payload: object,
+        *,
+        voltages_v: list[float] | None,
+    ) -> RouteMeterConfiguration:
+        meter_payload = payload if isinstance(payload, dict) else {}
+        meter_type = self._api_meter_type(meter_payload.get("meter_type", meter_payload.get("type")))
+        if meter_type is None:
+            meter_type = self.lcr_controller.meter_type()
+        if meter_type == ROUTE_METER_KEITHLEY:
+            keithley_payload = meter_payload.get("keithley")
+            if not isinstance(keithley_payload, dict):
+                keithley_payload = meter_payload
+            max_voltage = (
+                max(abs(float(value)) for value in voltages_v)
+                if voltages_v
+                else KeithleyRouteMeterSettings().measurement_voltage_v
+            )
+            settings = KeithleyRouteMeterSettings(
+                measurement_voltage_v=self._api_float(
+                    keithley_payload,
+                    "measurement_voltage_v",
+                    "voltage_v",
+                    default=max(max_voltage, 1e-12),
+                    minimum=1e-12,
+                ),
+                source_voltage_range_v=self._api_float(
+                    keithley_payload,
+                    "source_voltage_range_v",
+                    "voltage_range_v",
+                    default=max(0.21, max_voltage),
+                    minimum=1e-12,
+                ),
+                compliance_current_a=self._api_float(
+                    keithley_payload,
+                    "compliance_current_a",
+                    "current_limit_a",
+                    default=KeithleyRouteMeterSettings().compliance_current_a,
+                    minimum=1e-12,
+                ),
+                nplc=self._api_float(
+                    keithley_payload,
+                    "nplc",
+                    default=KeithleyRouteMeterSettings().nplc,
+                    minimum=0.01,
+                ),
+                terminals=str(
+                    keithley_payload.get(
+                        "terminals",
+                        KeithleyRouteMeterSettings().terminals,
+                    )
+                ),
+                trigger_delay_s=self._api_float(
+                    keithley_payload,
+                    "trigger_delay_s",
+                    "delay_s",
+                    default=KeithleyRouteMeterSettings().trigger_delay_s,
+                    minimum=0.0,
+                ),
+            )
+            return RouteMeterConfiguration(
+                meter_type=ROUTE_METER_KEITHLEY,
+                keithley=settings,
+            )
+        if meter_type == ROUTE_METER_GWINSTEK:
+            gw_payload = meter_payload.get("gwinstek")
+            if not isinstance(gw_payload, dict):
+                gw_payload = meter_payload
+            defaults = GWInstekRouteMeterSettings(
+                resource_name=self.settings_manager.needle_calibration_configuration().visa_resource
+            )
+            settings = GWInstekRouteMeterSettings(
+                resource_name=str(gw_payload.get("resource_name", defaults.resource_name)),
+                measurement_function=str(
+                    gw_payload.get("measurement_function", defaults.measurement_function)
+                ),
+                range_mode=str(gw_payload.get("range_mode", defaults.range_mode)),
+                impedance_range=int(
+                    self._api_float(
+                        gw_payload,
+                        "impedance_range",
+                        default=defaults.impedance_range,
+                    )
+                ),
+                dcr_range=int(
+                    self._api_float(gw_payload, "dcr_range", default=defaults.dcr_range)
+                ),
+                frequency_hz=self._api_float(
+                    gw_payload,
+                    "frequency_hz",
+                    default=defaults.frequency_hz,
+                    minimum=10.0,
+                ),
+                level_mode=str(gw_payload.get("level_mode", defaults.level_mode)),
+                voltage_level_v=self._api_float(
+                    gw_payload,
+                    "voltage_level_v",
+                    default=defaults.voltage_level_v,
+                    minimum=0.0,
+                ),
+                current_level_a=self._api_float(
+                    gw_payload,
+                    "current_level_a",
+                    default=defaults.current_level_a,
+                    minimum=0.0,
+                ),
+                source_resistance_ohm=int(
+                    self._api_float(
+                        gw_payload,
+                        "source_resistance_ohm",
+                        default=defaults.source_resistance_ohm,
+                    )
+                ),
+                aperture_rate=str(gw_payload.get("aperture_rate", defaults.aperture_rate)),
+                aperture_averages=int(
+                    self._api_float(
+                        gw_payload,
+                        "aperture_averages",
+                        default=defaults.aperture_averages,
+                        minimum=1.0,
+                    )
+                ),
+                trigger_delay_s=self._api_float(
+                    gw_payload,
+                    "trigger_delay_s",
+                    default=defaults.trigger_delay_s,
+                    minimum=0.0,
+                ),
+                bias_enabled=self._api_bool(gw_payload, "bias_enabled", default=defaults.bias_enabled),
+                bias_level_v=self._api_float(
+                    gw_payload,
+                    "bias_level_v",
+                    default=defaults.bias_level_v,
+                ),
+                monitor1=str(gw_payload.get("monitor1", defaults.monitor1)),
+                monitor2=str(gw_payload.get("monitor2", defaults.monitor2)),
+                alc_enabled=self._api_bool(gw_payload, "alc_enabled", default=defaults.alc_enabled),
+            )
+            return RouteMeterConfiguration(
+                meter_type=ROUTE_METER_GWINSTEK,
+                gwinstek=settings,
+            )
+        raise ValueError(f"Unsupported meter_type: {meter_type!r}")
+
+    def _api_meter_type(self, value: object) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip().lower()
+        if text in {"", "current", "configured"}:
+            return None
+        if text in {"keithley", "keithley_2400_2182a", "2400_2182a"}:
+            return ROUTE_METER_KEITHLEY
+        if text in {"gwinstek", "lcr", "gwinstek_lcr_76200"}:
+            return ROUTE_METER_GWINSTEK
+        return text
+
+    def _api_contact_number(
+        self,
+        payload: dict[str, Any],
+        *,
+        required: bool = True,
+    ) -> int | None:
+        for key in ("contact_number", "contact", "point_number", "structure_number"):
+            if key not in payload:
+                continue
+            try:
+                value = int(payload[key])
+            except (TypeError, ValueError):
+                return None
+            return value if value > 0 else None
+        return None if not required else None
+
+    def _api_needle_feedrate(self, payload: dict[str, Any]) -> float | None:
+        for key in ("needle_feedrate_mm_min", "feedrate_mm_min", "feedrate"):
+            if key not in payload or payload.get(key) is None:
+                continue
+            value = self._api_float(payload, key, default=math.nan, minimum=0.0)
+            return max(self.MIN_FEEDRATE_MM_MIN, value)
+        return float(
+            self.settings_manager.needle_calibration_configuration().feedrate_mm_min
+        )
+
+    @staticmethod
+    def _api_bool(
+        payload: dict[str, Any],
+        *keys: str,
+        default: bool,
+    ) -> bool:
+        for key in keys:
+            if key not in payload:
+                continue
+            value = payload.get(key)
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)):
+                return bool(value)
+            if isinstance(value, str):
+                text = value.strip().lower()
+                if text in {"1", "true", "yes", "y", "on"}:
+                    return True
+                if text in {"0", "false", "no", "n", "off"}:
+                    return False
+        return default
+
+    @staticmethod
+    def _api_float(
+        payload: dict[str, Any],
+        *keys: str,
+        default: float,
+        minimum: float | None = None,
+    ) -> float:
+        value: object = default
+        for key in keys:
+            if key in payload and payload.get(key) is not None:
+                value = payload.get(key)
+                break
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid numeric value for {keys[0]}.") from exc
+        if not math.isfinite(parsed):
+            raise ValueError(f"Invalid numeric value for {keys[0]}.")
+        if minimum is not None and parsed < minimum:
+            raise ValueError(f"{keys[0]} must be at least {minimum}.")
+        return parsed
+
+    @staticmethod
+    def _api_structure_number_for_measurement_point(
+        point: RouteMeasurementPoint,
+    ) -> int:
+        for value in (point.label, point.point_id):
+            match = re.search(r"(\d+)\s*$", str(value).strip())
+            if match is not None:
+                try:
+                    return int(match.group(1))
+                except ValueError:
+                    pass
+        return int(point.index)
+
+    @staticmethod
+    def _api_structure_number_for_route_point(
+        route_index: int,
+        route_point: object,
+    ) -> int:
+        for value in (
+            getattr(route_point, "label", ""),
+            getattr(route_point, "id", ""),
+        ):
+            match = re.search(r"(\d+)\s*$", str(value).strip())
+            if match is not None:
+                try:
+                    return int(match.group(1))
+                except ValueError:
+                    pass
+        return int(route_index)
+
+    @staticmethod
+    def _api_timestamp_utc() -> str:
+        return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+    @classmethod
+    def _api_json_ready(cls, value: object) -> Any:
+        if isinstance(value, dict):
+            return {str(key): cls._api_json_ready(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [cls._api_json_ready(item) for item in value]
+        if isinstance(value, float):
+            return value if math.isfinite(value) else None
+        return value
 
     def _preload_design_layout_window(self) -> None:
         if (
@@ -4453,32 +5216,6 @@ class Main(QMainWindow):
             4000,
         )
 
-    def _load_measurement_script(self, script_path: str) -> None:
-        document = self._design_session.document
-        if document is None:
-            self._show_status("Load a design before loading a measurement plan.", 5000)
-            return
-        try:
-            module, targets = load_measurement_plan(script_path, ScriptContext(document))
-        except DesignModelError as exc:
-            self._show_status(str(exc), 7000)
-            return
-        self._design_session.script_path = script_path
-        self._design_session.script_module_name = module.__name__
-        self._design_session.set_targets(targets)
-        self._refresh_design_panel()
-        self._show_status(
-            f"Loaded measurement plan '{Path(script_path).name}' with {len(targets)} targets.",
-            5000,
-        )
-
-    def _reload_measurement_script(self) -> None:
-        script_path = self._design_session.script_path
-        if not script_path:
-            self._show_status("No measurement script is loaded.", 5000)
-            return
-        self._load_measurement_script(script_path)
-
     def _create_measurement_route(self) -> None:
         try:
             route = self._design_session.create_route()
@@ -5199,7 +5936,6 @@ class Main(QMainWindow):
         if panel is not None:
             panel.set_document(self._design_session.document)
             panel.set_design_registration_active(registration_valid)
-            panel.set_script_path(self._design_session.script_path)
             panel.set_targets(
                 self._design_session.targets,
                 selected_target_id=selected_target_id,
@@ -6595,12 +7331,6 @@ class Main(QMainWindow):
         )
         self.design_navigator_panel.design_rotate_requested.connect(
             self._rotate_design_document
-        )
-        self.design_navigator_panel.load_script_requested.connect(
-            self._load_measurement_script
-        )
-        self.design_navigator_panel.reload_script_requested.connect(
-            self._reload_measurement_script
         )
         self.design_navigator_panel.route_new_requested.connect(
             self._create_measurement_route

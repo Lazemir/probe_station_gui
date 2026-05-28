@@ -434,7 +434,6 @@ class ApiSettingsTest(unittest.TestCase):
             enabled=False,
             host="0.0.0.0",
             port=9876,
-            default_feedrate_mm_min=42.5,
         )
 
         restored = ApiSettings(**settings.to_dict())
@@ -449,14 +448,12 @@ class ApiSettingsTest(unittest.TestCase):
                 "enabled": True,
                 "host": " 127.0.0.1 ",
                 "port": "8766",
-                "default_feedrate_mm_min": "55.5",
             }
         )
 
         self.assertTrue(parsed.enabled)
         self.assertEqual(parsed.host, "127.0.0.1")
         self.assertEqual(parsed.port, 8766)
-        self.assertEqual(parsed.default_feedrate_mm_min, 55.5)
 
 
 class AxisACalibrationSettingsTest(unittest.TestCase):

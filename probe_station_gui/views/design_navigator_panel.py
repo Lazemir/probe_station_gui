@@ -1304,8 +1304,6 @@ class DesignNavigatorPanel(QWidget):
     top_cell_changed = Signal(str)
     layer_visibility_changed = Signal(int, int, bool)
     design_rotate_requested = Signal(int)
-    load_script_requested = Signal(str)
-    reload_script_requested = Signal()
     move_to_target_requested = Signal(str)
     next_target_requested = Signal()
     previous_target_requested = Signal()
@@ -1439,39 +1437,6 @@ class DesignNavigatorPanel(QWidget):
         self._registration_status_label.setWordWrap(True)
         registration_layout.addWidget(self._registration_status_label)
         root_layout.addWidget(registration_group)
-
-        script_group = QGroupBox("Measurement Plan", self)
-        script_layout = QVBoxLayout(script_group)
-        script_buttons = QHBoxLayout()
-        self._load_script_button = QPushButton("Load Script...", script_group)
-        self._reload_script_button = QPushButton("Reload Script", script_group)
-        script_buttons.addWidget(self._load_script_button)
-        script_buttons.addWidget(self._reload_script_button)
-        script_layout.addLayout(script_buttons)
-        self._script_label = QLabel("No script loaded.", script_group)
-        self._script_label.setWordWrap(True)
-        script_layout.addWidget(self._script_label)
-        self._target_table = QTableWidget(0, 4, script_group)
-        self._target_table.setHorizontalHeaderLabels(["ID", "Label", "Group", "Design center"])
-        self._target_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self._target_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self._target_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self._target_table.itemSelectionChanged.connect(self._on_target_selection_changed)
-        script_layout.addWidget(self._target_table)
-        nav_buttons = QHBoxLayout()
-        self._previous_button = QPushButton("Previous", script_group)
-        self._move_button = QPushButton("Move To", script_group)
-        self._next_button = QPushButton("Next", script_group)
-        nav_buttons.addWidget(self._previous_button)
-        nav_buttons.addWidget(self._move_button)
-        nav_buttons.addWidget(self._next_button)
-        script_layout.addLayout(nav_buttons)
-        self._load_script_button.clicked.connect(self._choose_script_file)
-        self._reload_script_button.clicked.connect(self.reload_script_requested.emit)
-        self._previous_button.clicked.connect(self.previous_target_requested.emit)
-        self._next_button.clicked.connect(self.next_target_requested.emit)
-        self._move_button.clicked.connect(self._emit_move_to_selected_target)
-        root_layout.addWidget(script_group)
 
         route_group = QGroupBox("Probe Route", self)
         route_layout = QVBoxLayout(route_group)
@@ -1843,12 +1808,6 @@ class DesignNavigatorPanel(QWidget):
         self._update_mark_labels()
         self._update_enabled_state()
 
-    def set_script_path(self, script_path: str | None) -> None:
-        if not script_path:
-            self._script_label.setText("No script loaded.")
-            return
-        self._script_label.setText(str(Path(script_path)))
-
     def set_targets(
         self,
         targets: list[MeasurementTarget],
@@ -1857,23 +1816,6 @@ class DesignNavigatorPanel(QWidget):
     ) -> None:
         self._targets = list(targets)
         self._selected_target_id = selected_target_id
-        self._target_table.blockSignals(True)
-        self._target_table.clearSelection()
-        self._target_table.setRowCount(len(targets))
-        for row, target in enumerate(targets):
-            self._target_table.setItem(row, 0, QTableWidgetItem(target.id))
-            self._target_table.setItem(row, 1, QTableWidgetItem(target.label))
-            self._target_table.setItem(row, 2, QTableWidgetItem(target.group or ""))
-            self._target_table.setItem(
-                row,
-                3,
-                QTableWidgetItem(
-                    f"X={target.design_center[0]:.3f}, Y={target.design_center[1]:.3f}"
-                ),
-            )
-            if target.id == selected_target_id:
-                self._target_table.selectRow(row)
-        self._target_table.blockSignals(False)
         self._update_enabled_state()
 
     def set_route(
@@ -2065,15 +2007,6 @@ class DesignNavigatorPanel(QWidget):
         self._top_cell_combo.setEnabled(has_document)
         self._layer_list.setEnabled(has_document)
         self._snap_checkbox.setEnabled(has_document)
-        self._load_script_button.setEnabled(has_document)
-        self._reload_script_button.setEnabled(
-            has_document and self._script_label.text() != "No script loaded."
-        )
-        has_targets = bool(self._targets)
-        has_selection = self._selected_target_id is not None
-        self._previous_button.setEnabled(has_targets)
-        self._next_button.setEnabled(has_targets)
-        self._move_button.setEnabled(has_targets and has_selection)
         has_route = self._route is not None
         route_running = self._route_measurement_running
         has_route_selection = (
@@ -2736,16 +2669,6 @@ class DesignNavigatorPanel(QWidget):
         if path:
             self.load_design_requested.emit(path)
 
-    def _choose_script_file(self) -> None:  # pragma: no cover - UI interaction
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Open Measurement Plan",
-            "",
-            "Python files (*.py);;All files (*)",
-        )
-        if path:
-            self.load_script_requested.emit(path)
-
     def _choose_route_file(self) -> None:  # pragma: no cover - UI interaction
         start_directory = ""
         if self._route is not None and self._route.path is not None:
@@ -2809,20 +2732,6 @@ class DesignNavigatorPanel(QWidget):
             item.checkState() == Qt.Checked,
         )
 
-    def _on_target_selection_changed(self) -> None:
-        selected_rows = self._target_table.selectionModel().selectedRows()
-        if not selected_rows:
-            self._selected_target_id = None
-            self._update_enabled_state()
-            return
-        row = selected_rows[0].row()
-        if row < 0 or row >= len(self._targets):
-            return
-        target = self._targets[row]
-        self._selected_target_id = target.id
-        self.target_selected.emit(target.id)
-        self._update_enabled_state()
-
     def _on_route_selection_changed(self) -> None:
         selected_rows = self._route_table.selectionModel().selectedRows()
         if not selected_rows:
@@ -2834,11 +2743,6 @@ class DesignNavigatorPanel(QWidget):
         self._selected_route_point_index = row
         self.route_selected.emit(row)
         self._update_enabled_state()
-
-    def _emit_move_to_selected_target(self) -> None:
-        if self._selected_target_id is None:
-            return
-        self.move_to_target_requested.emit(self._selected_target_id)
 
     def _emit_route_measurement_jump_to_selected(self) -> None:
         if self._selected_route_point_index < 0:
@@ -2989,9 +2893,6 @@ class DesignLayoutWindow(QWidget):
 
     def set_stage_registration_marks(self, source_stage_marks: list[Point2D | None]) -> None:
         self.navigator_panel.set_stage_registration_marks(source_stage_marks)
-
-    def set_script_path(self, script_path: str | None) -> None:
-        self.navigator_panel.set_script_path(script_path)
 
     def set_calibration_prompt(self, text: str) -> None:
         self.navigator_panel.set_calibration_prompt(text)

@@ -382,6 +382,11 @@ class MainCoordinateFeedrateTest(unittest.TestCase):
         self.assertTrue(accepted)
         self.assertEqual(joystick.common_targets, [(120.0, 100.0)])
 
+    def test_api_move_without_feedrate_uses_current_gui_feedrate(self) -> None:
+        window, _stage_controller, _joystick, _timer, _statuses = _make_main(77.0)
+
+        self.assertEqual(Main._api_move_feedrate(window, None), 77.0)
+
     def test_single_axis_coordinate_move_does_not_show_common_feedrate(self) -> None:
         window, _stage_controller, joystick, _timer, _statuses = _make_main(120.0)
 

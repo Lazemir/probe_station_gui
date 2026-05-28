@@ -245,7 +245,6 @@ class ApiSettings:
     enabled: bool = True
     host: str = "127.0.0.1"
     port: int = 8765
-    default_feedrate_mm_min: float = 10.0
 
     def clone(self) -> "ApiSettings":
         """Return a copy of the API preferences."""
@@ -254,7 +253,6 @@ class ApiSettings:
             enabled=self.enabled,
             host=self.host,
             port=self.port,
-            default_feedrate_mm_min=self.default_feedrate_mm_min,
         )
 
     def to_dict(self) -> dict[str, bool | int | float | str]:
@@ -264,7 +262,6 @@ class ApiSettings:
             "enabled": self.enabled,
             "host": self.host,
             "port": self.port,
-            "default_feedrate_mm_min": self.default_feedrate_mm_min,
         }
 
 
@@ -886,7 +883,6 @@ class SettingsManager:
     DEFAULT_API_ENABLED: bool = True
     DEFAULT_API_HOST: str = "127.0.0.1"
     DEFAULT_API_PORT: int = 8765
-    DEFAULT_API_FEEDRATE_MM_MIN: float = 10.0
     MIN_FEEDRATE_MM_MIN: float = 1.0
     DEFAULT_LINEAR_FEEDRATE_PRESETS: tuple[float, ...] = (
         1.0,
@@ -1645,20 +1641,6 @@ class SettingsManager:
                 port = settings.port
             if 0 < port <= 65535:
                 settings.port = port
-            try:
-                feedrate = float(
-                    raw_api.get(
-                        "default_feedrate_mm_min",
-                        settings.default_feedrate_mm_min,
-                    )
-                )
-            except (TypeError, ValueError):
-                feedrate = settings.default_feedrate_mm_min
-            if math.isfinite(feedrate) and feedrate > 0.0:
-                settings.default_feedrate_mm_min = max(
-                    self.MIN_FEEDRATE_MM_MIN,
-                    feedrate,
-                )
         return settings
 
     def _parse_feedrates(self, raw_feedrates, legacy_presets) -> FeedrateSettings:

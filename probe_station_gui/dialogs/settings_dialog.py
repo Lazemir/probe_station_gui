@@ -290,15 +290,6 @@ class ApiSettingsWidget(QWidget):
         self._port_spin.setValue(int(api_settings.port))
         layout.addRow(QLabel("Port", self), self._port_spin)
 
-        self._feedrate_spin = QDoubleSpinBox(self)
-        self._feedrate_spin.setLocale(QLocale.c())
-        self._feedrate_spin.setDecimals(1)
-        self._feedrate_spin.setRange(1.0, 5000.0)
-        self._feedrate_spin.setSingleStep(10.0)
-        self._feedrate_spin.setSuffix(" mm/min")
-        self._feedrate_spin.setValue(float(api_settings.default_feedrate_mm_min))
-        layout.addRow(QLabel("Default feedrate", self), self._feedrate_spin)
-
         self._enabled_checkbox.toggled.connect(self._update_enabled_state)
         self._update_enabled_state(self._enabled_checkbox.isChecked())
 
@@ -310,13 +301,11 @@ class ApiSettingsWidget(QWidget):
             enabled=self._enabled_checkbox.isChecked(),
             host=host,
             port=int(self._port_spin.value()),
-            default_feedrate_mm_min=float(self._feedrate_spin.value()),
         )
 
     def _update_enabled_state(self, enabled: bool) -> None:
         self._host_edit.setEnabled(enabled)
         self._port_spin.setEnabled(enabled)
-        self._feedrate_spin.setEnabled(enabled)
 
 
 class FeedrateGroupEditor(QWidget):
