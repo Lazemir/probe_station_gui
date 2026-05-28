@@ -66,8 +66,12 @@ class Grabber(QObject):
         self._last_frame_log_timestamp = 0.0
         self._camera_commands: queue.Queue[_CameraCommand] = queue.Queue()
 
-    def request_camera_settings_snapshot(self) -> None:
-        """Request a full GenICam node snapshot from the live camera."""
+    def request_camera_settings_snapshot(
+        self,
+        map_key: str | None = None,
+        node_names: list[str] | None = None,
+    ) -> None:
+        """Request a GenICam node snapshot from the live camera."""
 
         if self._camera is None:
             self.camera_settings_snapshot_ready.emit(
@@ -78,7 +82,11 @@ class Grabber(QObject):
                 }
             )
             return
-        self._camera_commands.put(_CameraCommand("snapshot", {}))
+        payload: dict[str, Any] = {}
+        if map_key and node_names:
+            payload["map_key"] = str(map_key)
+            payload["node_names"] = [str(name) for name in node_names if str(name)]
+        self._camera_commands.put(_CameraCommand("snapshot", payload))
 
     def request_camera_setting_update(
         self,
@@ -273,7 +281,7 @@ class Grabber(QObject):
                 return
             if command.action == "snapshot":
                 self.camera_settings_snapshot_ready.emit(
-                    self._camera_settings_snapshot()
+                    self._camera_settings_snapshot(command.payload)
                 )
             elif command.action == "set":
                 self.camera_setting_changed.emit(
@@ -284,10 +292,20 @@ class Grabber(QObject):
                     self._execute_camera_command(command.payload)
                 )
 
-    def _camera_settings_snapshot(self) -> dict[str, Any]:
+    def _camera_settings_snapshot(
+        self,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         cam = self._camera
         if cam is None:
             return {"ok": False, "message": "Camera is not ready.", "maps": []}
+        payload = payload or {}
+        target_map_key = str(payload.get("map_key") or "")
+        node_names = [
+            str(name) for name in payload.get("node_names") or [] if str(name)
+        ]
+        if target_map_key and node_names:
+            return self._camera_settings_partial_snapshot(target_map_key, node_names)
 
         maps: list[dict[str, Any]] = []
         total_nodes = 0
@@ -327,6 +345,49 @@ class Grabber(QObject):
             "maps": maps,
             "streaming": paused,
         }
+
+    def _camera_settings_partial_snapshot(
+        self,
+        map_key: str,
+        node_names: list[str],
+    ) -> dict[str, Any]:
+        nodes: list[dict[str, Any]] = []
+        errors: list[str] = []
+        paused = self._pause_acquisition()
+        try:
+            for node_name in node_names:
+                try:
+                    node = self._node_by_name(map_key, node_name)
+                    info = self._read_node_info(map_key, node)
+                    if info is not None:
+                        nodes.append(info)
+                except Exception as exc:  # pragma: no cover - hardware dependent
+                    errors.append(f"{node_name}: {exc}")
+        finally:
+            self._resume_acquisition(paused)
+
+        return {
+            "ok": True,
+            "partial": True,
+            "message": f"Updated {len(nodes)} camera settings.",
+            "maps": [
+                {
+                    "key": map_key,
+                    "title": self._node_map_title(map_key),
+                    "nodes": nodes,
+                    "error": "; ".join(errors),
+                }
+            ],
+            "streaming": paused,
+        }
+
+    @staticmethod
+    def _node_map_title(map_key: str) -> str:
+        return {
+            "camera": "Camera",
+            "transport_device": "Transport Device",
+            "transport_stream": "Transport Stream",
+        }.get(map_key, map_key or "Node Map")
 
     def _node_map(self, map_key: str) -> object:
         cam = self._camera

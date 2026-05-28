@@ -834,6 +834,7 @@ class _FeatureListPage(QWidget):
         self._execute_callback = execute_callback
         self._nodes: list[NodePayload] = []
         self._nodes_by_name: dict[str, NodePayload] = {}
+        self._widgets_by_name: dict[str, QWidget] = {}
         self._editors_by_name: dict[str, QWidget] = {}
         self._updating = False
 
@@ -854,15 +855,29 @@ class _FeatureListPage(QWidget):
     def map_key(self) -> str:
         return self._map_key
 
+    def node_names(self) -> list[str]:
+        return [
+            str(node.get("name") or "")
+            for node in self._nodes
+            if str(node.get("name") or "")
+        ]
+
     def set_nodes(self, nodes: list[NodePayload]) -> None:
-        self._nodes = [
+        old_signature = self._layout_signature(self._nodes)
+        new_nodes = [
             node for node in nodes if str(node.get("type") or "") != "category"
         ]
+        new_signature = self._layout_signature(new_nodes)
+        self._nodes = new_nodes
         self._nodes_by_name = {
             str(node.get("name") or ""): node
             for node in self._nodes
             if str(node.get("name") or "")
         }
+        if self._widgets_by_name and old_signature == new_signature:
+            for node in self._nodes:
+                self._update_editor(node)
+            return
         self._rebuild()
 
     def update_node(self, node: NodePayload) -> bool:
@@ -874,6 +889,11 @@ class _FeatureListPage(QWidget):
                 continue
             merged = dict(existing)
             merged.update(node)
+            if self._layout_signature([existing]) != self._layout_signature([merged]):
+                updated_nodes = list(self._nodes)
+                updated_nodes[index] = merged
+                self.set_nodes(updated_nodes)
+                return True
             self._nodes[index] = merged
             self._nodes_by_name[node_name] = merged
             self._update_editor(merged)
@@ -883,13 +903,16 @@ class _FeatureListPage(QWidget):
     def queue_current_editor_value(self) -> None:
         focused = QApplication.focusWidget()
         for node_name, editor in self._editors_by_name.items():
-            if focused is editor:
+            if self._editor_has_focus(editor, focused):
                 self._queue_editor_value(node_name, editor)
                 return
 
     def has_edit_focus(self) -> bool:
         focused = QApplication.focusWidget()
-        return any(focused is editor for editor in self._editors_by_name.values())
+        return any(
+            self._editor_has_focus(editor, focused)
+            for editor in self._editors_by_name.values()
+        )
 
     def _rebuild(self) -> None:
         while self._grid.count():
@@ -897,6 +920,7 @@ class _FeatureListPage(QWidget):
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
+        self._widgets_by_name.clear()
         self._editors_by_name.clear()
 
         for row, node in enumerate(self._nodes):
@@ -907,6 +931,8 @@ class _FeatureListPage(QWidget):
             editor, span = self._editor_for_node(node)
             self._grid.addWidget(editor, row, 1, 1, span)
             node_name = str(node.get("name") or "")
+            if node_name:
+                self._widgets_by_name[node_name] = editor
             if node_name and not self._read_only_display(node):
                 self._editors_by_name[node_name] = editor
             access = QLabel("" if bool(node.get("writable")) else "RO", self._content)
@@ -1039,7 +1065,12 @@ class _FeatureListPage(QWidget):
         button = QPushButton("Execute", self._content)
         button.setEnabled(writable)
         node_name = str(node.get("name") or "")
-        button.clicked.connect(lambda _checked=False, name=node_name: self._execute_callback(self._map_key, name))
+        button.clicked.connect(
+            lambda _checked=False, name=node_name: self._execute_callback(
+                self._map_key,
+                name,
+            )
+        )
         return button
 
     def _text_editor(self, node: NodePayload, writable: bool) -> QWidget:
@@ -1057,24 +1088,44 @@ class _FeatureListPage(QWidget):
         return editor
 
     def _update_editor(self, node: NodePayload) -> None:
-        editor = self._editors_by_name.get(str(node.get("name") or ""))
-        if editor is None or self.has_edit_focus():
+        editor = self._widgets_by_name.get(str(node.get("name") or ""))
+        focused = QApplication.focusWidget()
+        if editor is None or self._editor_has_focus(editor, focused):
             return
+        writable = bool(node.get("available")) and bool(node.get("writable"))
+        available = bool(node.get("available"))
         self._updating = True
         try:
             if isinstance(editor, QComboBox):
+                entries = [str(entry) for entry in node.get("entries") or []]
+                current_entries = [
+                    editor.itemText(index) for index in range(editor.count())
+                ]
+                if entries and current_entries != entries:
+                    editor.clear()
+                    editor.addItems(entries)
                 value = self._value_text(node)
                 if value and editor.findText(value) < 0:
                     editor.addItem(value)
                 editor.setCurrentText(value)
+                editor.setEnabled(writable)
             elif isinstance(editor, QCheckBox):
                 editor.setChecked(self._bool_value(node.get("value")))
+                editor.setEnabled(writable)
+            elif isinstance(editor, QPushButton):
+                editor.setEnabled(writable)
             elif isinstance(editor, QLineEdit):
                 editor.setText(self._value_text(node))
+                editor.setEnabled(writable)
+            elif isinstance(editor, QLabel):
+                editor.setText(self._value_text(node))
             else:
+                editor.setEnabled(available)
                 for line_edit in editor.findChildren(QLineEdit):
                     line_edit.setText(self._value_text(node))
-                    break
+                    line_edit.setEnabled(writable)
+                for slider in editor.findChildren(QSlider):
+                    self._update_numeric_slider(slider, node, writable)
         finally:
             self._updating = False
 
@@ -1105,7 +1156,10 @@ class _FeatureListPage(QWidget):
     def _slider_steps(cls, node: NodePayload, minimum: float, maximum: float) -> int:
         increment = cls._numeric_value(node.get("increment"))
         if increment is not None and increment > 0:
-            return max(1, min(cls.SLIDER_STEPS, int(round((maximum - minimum) / increment))))
+            return max(
+                1,
+                min(cls.SLIDER_STEPS, int(round((maximum - minimum) / increment))),
+            )
         return cls.SLIDER_STEPS
 
     @staticmethod
@@ -1146,6 +1200,48 @@ class _FeatureListPage(QWidget):
             self._value_to_slider(value, minimum, maximum, slider.maximum())
         )
         self._updating = False
+
+    def _update_numeric_slider(
+        self,
+        slider: QSlider,
+        node: NodePayload,
+        writable: bool,
+    ) -> None:
+        minimum = self._numeric_value(node.get("minimum"))
+        maximum = self._numeric_value(node.get("maximum"))
+        value = self._numeric_value(node.get("value"))
+        has_range = minimum is not None and maximum is not None and maximum > minimum
+        if has_range:
+            steps = self._slider_steps(node, minimum, maximum)
+            slider.setRange(0, steps)
+            if value is not None:
+                slider.setValue(self._value_to_slider(value, minimum, maximum, steps))
+        else:
+            slider.setRange(0, 0)
+        slider.setEnabled(writable and has_range)
+
+    @staticmethod
+    def _editor_has_focus(editor: QWidget, focused: QWidget | None) -> bool:
+        return focused is editor or (
+            focused is not None and editor.isAncestorOf(focused)
+        )
+
+    @staticmethod
+    def _layout_signature(nodes: list[NodePayload]) -> tuple[tuple[object, ...], ...]:
+        return tuple(
+            (
+                str(node.get("name") or ""),
+                str(node.get("type") or ""),
+                bool(node.get("available")),
+                bool(node.get("writable")),
+                str(node.get("unit") or ""),
+                node.get("minimum"),
+                node.get("maximum"),
+                node.get("increment"),
+                tuple(str(entry) for entry in node.get("entries") or []),
+            )
+            for node in nodes
+        )
 
     @staticmethod
     def _read_only_display(node: NodePayload) -> bool:
@@ -1315,16 +1411,38 @@ class CameraSettingsWidget(QWidget):
             return
         if self._has_edit_focus():
             return
-        self._request_snapshot(show_status=False)
+        pages = self._current_pages()
+        if not pages:
+            return
+        page = pages[0]
+        if not isinstance(page, _FeatureListPage):
+            return
+        node_names = page.node_names()
+        if not node_names:
+            return
+        self._request_snapshot(
+            show_status=False,
+            map_key=page.map_key(),
+            node_names=node_names,
+        )
 
-    def _request_snapshot(self, *, show_status: bool) -> None:
+    def _request_snapshot(
+        self,
+        *,
+        show_status: bool,
+        map_key: str | None = None,
+        node_names: list[str] | None = None,
+    ) -> None:
         if self._snapshot_pending:
             return
         self._snapshot_pending = True
         if show_status:
             self._status_label.setText("Loading camera settings.")
         self._refresh_button.setEnabled(False)
-        self._grabber.request_camera_settings_snapshot()
+        self._grabber.request_camera_settings_snapshot(
+            map_key=map_key,
+            node_names=node_names,
+        )
 
     def _has_edit_focus(self) -> bool:
         return any(page.has_edit_focus() for page in self._current_pages())
@@ -1361,6 +1479,17 @@ class CameraSettingsWidget(QWidget):
             for map_payload in payload.get("maps") or []
             if isinstance(map_payload, dict)
         ]
+        if payload.get("partial", False):
+            for map_payload in maps:
+                map_key = str(map_payload.get("key") or "")
+                nodes = map_payload.get("nodes")
+                if not isinstance(nodes, list):
+                    continue
+                for node in nodes:
+                    if isinstance(node, dict):
+                        self._update_pages_for_node(map_key, node)
+            return
+
         camera_map = next(
             (
                 map_payload

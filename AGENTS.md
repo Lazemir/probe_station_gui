@@ -36,6 +36,7 @@
 - Avoid running hardware-dependent code in automation unless explicitly requested.
 - Use the local virtual environment for Python commands: `.venv\Scripts\python.exe -m pytest tests`, `.venv\Scripts\python.exe main.py`, etc. Do not rely on bare `python`, which may resolve to the Windows Store alias.
 - Keep startup lightweight: `main.py` should create the main window and show the GUI first. Do not instantiate heavy optional panels, web engines, hardware clients, long scans, network clients, or calibration workers synchronously during startup; initialize them lazily when opened or after startup via timers/background threads.
+- Keep the GUI thread for Qt widget updates only. Hardware I/O, camera/GenICam node scans, serial polling, calibration, file parsing, image processing, and any large periodic refresh must run in worker threads or be sliced into tiny queued UI updates. Never implement periodic full-widget rebuilds or blocking hardware reads in the GUI thread.
 - Do not route in-process GUI features through the app's own localhost API. Use direct controller methods, Qt signals, or narrow callbacks inside the process; reserve the FastAPI server for external clients.
 - Do not use ellipses in menu item labels.
 - Keep GUI menus and primary controls laconic. Do not put live measurements, matrices, diagnostics, or implementation detail in top-level menu item text; put details inside dialogs, status panels, tooltips, or logs.
