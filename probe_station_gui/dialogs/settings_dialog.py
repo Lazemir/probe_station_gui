@@ -276,9 +276,9 @@ class ApiSettingsWidget(QWidget):
         layout = QFormLayout(self)
         layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
-        self._enabled_checkbox = QCheckBox("Start local FastAPI control API", self)
+        self._enabled_checkbox = QCheckBox("Start with app", self)
         self._enabled_checkbox.setChecked(api_settings.enabled)
-        layout.addRow(QLabel("Enabled", self), self._enabled_checkbox)
+        layout.addRow(QLabel("API server", self), self._enabled_checkbox)
 
         self._host_edit = QLineEdit(self)
         self._host_edit.setText(api_settings.host)
