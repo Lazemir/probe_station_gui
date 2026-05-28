@@ -1,4 +1,5 @@
 import sys
+import time
 import unittest
 
 
@@ -50,14 +51,31 @@ class _FakeView:
         self.focus_count += 1
 
 
+class _FakeSignal:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    def emit(self, message: str) -> None:
+        self.messages.append(str(message))
+
+
 class _FakeJoystick:
     def __init__(self, current_feedrate: float) -> None:
         self._current_feedrate = float(current_feedrate)
+        self.coordinate_feedrate: float | None = None
+        self.coordinate_axes: list[tuple[str, ...]] = []
         self.common_targets: list[tuple[float, float]] = []
         self.common_cleared = 0
         self.needle_contacts: list[tuple[str, float | None]] = []
 
     def current_linear_feedrate(self) -> float:
+        return self._current_feedrate
+
+    def select_coordinate_feedrate_for_axes(self, axes: object) -> float:
+        normalized = tuple(str(axis).strip().upper() for axis in axes)
+        self.coordinate_axes.append(normalized)
+        if self.coordinate_feedrate is not None:
+            return float(self.coordinate_feedrate)
         return self._current_feedrate
 
     def set_common_feedrate_target(self, feedrate: float, max_feedrate: float) -> None:
@@ -87,9 +105,13 @@ class _FakeStageController:
         self.next_absolute_jog_accept = True
         self.busy = False
         self.latest_state = "Idle"
+        self.last_status_time: float | None = time.monotonic()
         self.cancelled_tasks: list[str] = []
         self.cancelled_motions: list[str] = []
         self.needle_calibrations: list[dict[str, float | None]] = []
+        self.home_all_requests = 0
+        self.home_axis_requests: list[str] = []
+        self.status_message = _FakeSignal()
 
     def request_absolute_axis_targets_move(
         self,
@@ -123,6 +145,17 @@ class _FakeStageController:
 
     def latest_stage_state(self) -> str:
         return self.latest_state
+
+    def last_status_timestamp(self) -> float | None:
+        return self.last_status_time
+
+    def request_home_all(self) -> bool:
+        self.home_all_requests += 1
+        return True
+
+    def request_home_axis(self, axis: str) -> bool:
+        self.home_axis_requests.append(str(axis).upper())
+        return True
 
     def axis_max_feedrates(self) -> dict[str, float]:
         return {"X": 100.0, "Y": 150.0, "Z": 80.0, "A": 70.0, "B": 60.0}
@@ -190,6 +223,7 @@ def _make_main(current_feedrate: float = 120.0) -> tuple[
     window.stage_controller = stage_controller
     window.joystick_panel = joystick
     window._pending_stage_axis_targets = {}
+    window._stage_axis_fields = {}
     window._coordinate_move_axis = None
     window._coordinate_move_axes = set()
     window._coordinate_move_origin_position = None
@@ -211,6 +245,7 @@ def _make_main(current_feedrate: float = 120.0) -> tuple[
         0.0,
     )
     window._stage_axis_target_limit_error = lambda _axis, _target: None
+    window.view = _FakeView()
 
     def position_with_axis_values(
         raw_targets: dict[str, float],
@@ -331,7 +366,21 @@ class MainCoordinateFeedrateTest(unittest.TestCase):
         self.assertEqual(window._coordinate_move_programmed_feedrate, 120.0)
         self.assertEqual(window._coordinate_move_effective_feedrate, 120.0)
         self.assertTrue(timer.started)
-        self.assertEqual(_joystick.common_targets, [(120.0, 150.0)])
+        self.assertEqual(_joystick.common_targets, [])
+        self.assertEqual(_joystick.common_cleared, 1)
+
+    def test_mixed_axis_coordinate_move_shows_common_feedrate(self) -> None:
+        window, _stage_controller, joystick, _timer, _statuses = _make_main(120.0)
+
+        accepted = Main._start_coordinate_targets_move(
+            window,
+            {"X": (5.0, 5.0), "Z": (-2.0, -2.0)},
+            feedrate_mm_min=120.0,
+            source_label="coordinate fields",
+        )
+
+        self.assertTrue(accepted)
+        self.assertEqual(joystick.common_targets, [(120.0, 100.0)])
 
     def test_single_axis_coordinate_move_does_not_show_common_feedrate(self) -> None:
         window, _stage_controller, joystick, _timer, _statuses = _make_main(120.0)
@@ -346,6 +395,23 @@ class MainCoordinateFeedrateTest(unittest.TestCase):
         self.assertTrue(accepted)
         self.assertEqual(joystick.common_targets, [])
         self.assertEqual(joystick.common_cleared, 1)
+
+    def test_pending_xy_coordinate_move_uses_xy_feedrate(self) -> None:
+        window, stage_controller, joystick, _timer, _statuses = _make_main(999.0)
+        joystick.coordinate_feedrate = 42.0
+        window._pending_stage_axis_targets = {
+            "X": (5.0, 5.0),
+            "Y": (-2.0, -2.0),
+        }
+
+        Main._apply_pending_stage_coordinate_targets(window)
+
+        self.assertEqual(joystick.coordinate_axes, [("X", "Y")])
+        self.assertEqual(
+            stage_controller.requests,
+            [({"X": 5.0, "Y": -2.0}, 42.0)],
+        )
+        self.assertEqual(joystick.common_targets, [])
 
     def test_coordinate_move_feedrate_change_reissues_absolute_jog(self) -> None:
         window, stage_controller, _joystick, _timer, statuses = _make_main(120.0)
@@ -446,6 +512,17 @@ class MainCoordinateFeedrateTest(unittest.TestCase):
 
         self.assertTrue(cancel_button.enabled)
 
+    def test_stale_reported_controller_motion_does_not_enable_cancel(self) -> None:
+        window, stage_controller, cancel_button, _statuses = _make_cancel_main()
+        stage_controller.latest_state = "Jog"
+        stage_controller.last_status_time = (
+            time.monotonic() - Main.CONTROLLER_ACTIVE_STATE_STALE_S - 0.5
+        )
+
+        Main._update_stage_coordinate_apply_state(window)
+
+        self.assertFalse(cancel_button.enabled)
+
     def test_cancel_button_cancels_generic_busy_stage_task(self) -> None:
         window, stage_controller, _cancel_button, statuses = _make_cancel_main()
         stage_controller.busy = True
@@ -491,6 +568,44 @@ class MainCoordinateFeedrateTest(unittest.TestCase):
         )
         self.assertEqual(stage_controller.cancelled_tasks, [])
         self.assertIn("Cancel requested.", statuses)
+
+    def test_home_all_ignores_stale_jog_state_after_cancel(self) -> None:
+        window, stage_controller, _cancel_button, _statuses = _make_cancel_main()
+        stage_controller.latest_state = "Jog"
+        stage_controller.last_status_time = (
+            time.monotonic() - Main.CONTROLLER_ACTIVE_STATE_STALE_S - 0.5
+        )
+        window._refresh_pending_homing_ui = lambda: None
+
+        Main._request_home_all_from_ui(window)
+
+        self.assertEqual(stage_controller.home_all_requests, 1)
+        self.assertEqual(stage_controller.status_message.messages, [])
+
+    def test_home_all_sends_all_home_during_fresh_jog_state(self) -> None:
+        window, stage_controller, _cancel_button, _statuses = _make_cancel_main()
+        stage_controller.latest_state = "Jog"
+        stage_controller.last_status_time = time.monotonic()
+        window._refresh_pending_homing_ui = lambda: None
+
+        Main._request_home_all_from_ui(window)
+
+        self.assertEqual(stage_controller.home_all_requests, 1)
+        self.assertEqual(stage_controller.home_axis_requests, [])
+        self.assertEqual(window._pending_homing_axes, [])
+        self.assertEqual(stage_controller.status_message.messages, [])
+
+    def test_manual_axis_home_queues_second_axis_while_first_is_active(self) -> None:
+        window, stage_controller, _cancel_button, _statuses = _make_cancel_main()
+        window._refresh_pending_homing_ui = lambda: None
+
+        Main._request_home_axis_from_ui(window, "X")
+        window._homing_active_key = "X"
+        Main._request_home_axis_from_ui(window, "Z")
+
+        self.assertEqual(stage_controller.home_all_requests, 0)
+        self.assertEqual(stage_controller.home_axis_requests, ["X"])
+        self.assertEqual(window._pending_homing_axes, ["Z"])
 
     def test_idle_status_before_motion_does_not_clear_coordinate_tracking(self) -> None:
         window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)

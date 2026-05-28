@@ -392,6 +392,7 @@ class Main(QMainWindow):
     TERMINAL_REFRESH_DELAYS_MS = (180, 500)
     TERMINAL_RESET_REFRESH_DELAYS_MS = (500, 1100, 1800)
     TERMINAL_RESUME_AFTER_JOG_MS = 180
+    CONTROLLER_ACTIVE_STATE_STALE_S = 2.0
     STAGE_AXIS_NAMES = ("X", "Y", "Z", "A", "B", "C")
     MIN_FEEDRATE_MM_MIN = 1.0
     STAGE_AXIS_DIMMED_BACKGROUNDS = {
@@ -952,7 +953,7 @@ class Main(QMainWindow):
                 "accepted": False,
                 "message": "Stage is busy. Ignoring surface-map target.",
             }
-        feedrate = max(self.MIN_FEEDRATE_MM_MIN, float(self._current_linear_feedrate()))
+        feedrate = self._coordinate_feedrate_for_axes(("X", "Y"))
         targets: dict[str, tuple[float, float]] = {}
         for axis, display_target in (("X", x_mm), ("Y", y_mm)):
             try:
@@ -1585,7 +1586,49 @@ class Main(QMainWindow):
         if not hasattr(self, "stage_controller"):
             return False
         state = (self.stage_controller.latest_stage_state() or "").strip().lower()
-        return state in {"run", "jog"}
+        if state not in {"run", "jog"}:
+            return False
+        if self._controller_latest_state_is_stale():
+            logger.debug(
+                "Ignoring stale controller active state %r after %.3f s.",
+                state,
+                self._controller_latest_state_age_s() or 0.0,
+            )
+            return False
+        return True
+
+    def _controller_latest_state_blocks_motion(self) -> bool:
+        if not hasattr(self, "stage_controller"):
+            return False
+        state = (self.stage_controller.latest_stage_state() or "").strip().lower()
+        if state in {"", "idle"}:
+            return False
+        if state in {"run", "jog"}:
+            return self._controller_reports_active_motion()
+        return True
+
+    def _controller_latest_state_age_s(self) -> float | None:
+        timestamp_getter = getattr(
+            getattr(self, "stage_controller", None),
+            "last_status_timestamp",
+            None,
+        )
+        if not callable(timestamp_getter):
+            return None
+        timestamp = timestamp_getter()
+        if timestamp is None:
+            return None
+        try:
+            return max(0.0, time.monotonic() - float(timestamp))
+        except (TypeError, ValueError):
+            return None
+
+    def _controller_latest_state_is_stale(self) -> bool:
+        age_s = self._controller_latest_state_age_s()
+        return (
+            age_s is not None
+            and age_s > self.CONTROLLER_ACTIVE_STATE_STALE_S
+        )
 
     def _schedule_cancel_state_refresh(self) -> None:
         for delay_ms in (0, 100, 300, 1000, 2500):
@@ -1944,6 +1987,7 @@ class Main(QMainWindow):
         )
         self._prepare_persisted_design_restore(cached_state)
         self.stage_controller.import_cached_controller_state(cached_state)
+        self._apply_axis_feedrate_limits(self._current_axis_feedrate_limits())
         self._show_status("Restored cached homing state; reading live coordinates.")
 
     def _persist_controller_state(self, *_args) -> None:
@@ -3791,6 +3835,23 @@ class Main(QMainWindow):
             return self.joystick_panel.current_linear_feedrate()
         return float(self.settings_manager.feedrate_configuration().linear.default)
 
+    def _coordinate_feedrate_for_axes(self, axes: object) -> float:
+        axes_tuple = tuple(str(axis).strip().upper() for axis in axes)
+        selector = getattr(
+            self.joystick_panel,
+            "select_coordinate_feedrate_for_axes",
+            None,
+        )
+        if callable(selector):
+            try:
+                return max(
+                    self.MIN_FEEDRATE_MM_MIN,
+                    float(selector(axes_tuple)),
+                )
+            except (TypeError, ValueError):
+                logger.exception("Invalid coordinate feedrate selected for %s.", axes_tuple)
+        return max(self.MIN_FEEDRATE_MM_MIN, float(self._current_linear_feedrate()))
+
     def _current_needle_feedrate(self) -> float:
         if self.joystick_panel is not None:
             return self.joystick_panel.current_needle_feedrate()
@@ -5450,9 +5511,10 @@ class Main(QMainWindow):
             return
         targets = dict(self._pending_stage_axis_targets)
         self.view.setFocus(Qt.OtherFocusReason)
+        feedrate = self._coordinate_feedrate_for_axes(targets)
         self._start_coordinate_targets_move(
             targets,
-            feedrate_mm_min=self._current_linear_feedrate(),
+            feedrate_mm_min=feedrate,
             source_label="coordinate fields",
         )
         self._update_stage_coordinate_apply_state()
@@ -5487,7 +5549,7 @@ class Main(QMainWindow):
         return self._start_coordinate_targets_move(
             {axis: (raw_target, display_target)},
             feedrate_mm_min=(
-                self._current_linear_feedrate()
+                self._coordinate_feedrate_for_axes((axis,))
                 if feedrate_mm_min is None
                 else feedrate_mm_min
             ),
@@ -5591,7 +5653,8 @@ class Main(QMainWindow):
     ) -> None:
         if self.joystick_panel is None:
             return
-        if len(set(axes)) <= 1:
+        axis_set = {str(axis).strip().upper() for axis in axes}
+        if len(axis_set) <= 1 or axis_set <= {"X", "Y"}:
             if hasattr(self.joystick_panel, "clear_common_feedrate_target"):
                 self.joystick_panel.clear_common_feedrate_target()
             return
@@ -6053,17 +6116,6 @@ class Main(QMainWindow):
         self._queue_or_start_homing_axes([axis_name])
 
     def _request_home_all_from_ui(self) -> None:
-        if self._coordinate_move_axis is not None:
-            self.stage_controller.status_message.emit(
-                "Stage is busy. Ignoring home request."
-            )
-            return
-        latest_state = (self.stage_controller.latest_stage_state() or "").lower()
-        if latest_state not in {"", "idle"}:
-            self.stage_controller.status_message.emit(
-                "Stage is busy. Ignoring home request."
-            )
-            return
         if self.stage_controller.request_home_all():
             self._pending_homing_axes.clear()
             self._refresh_pending_homing_ui()
@@ -6081,11 +6133,10 @@ class Main(QMainWindow):
             normalized.append(axis_name)
         if not normalized:
             return
-        latest_state = (self.stage_controller.latest_stage_state() or "").lower()
         if (
             self._homing_active_key is None
             and not self.stage_controller.is_busy()
-            and latest_state in {"", "idle"}
+            and not self._controller_latest_state_blocks_motion()
             and self._coordinate_move_axis is None
         ):
             first_axis = normalized.pop(0)
@@ -6103,8 +6154,7 @@ class Main(QMainWindow):
         if self.stage_controller.is_busy() or self._coordinate_move_axis is not None:
             QTimer.singleShot(200, self._start_next_pending_homing_action)
             return
-        latest_state = (self.stage_controller.latest_stage_state() or "").lower()
-        if latest_state not in {"", "idle"}:
+        if self._controller_latest_state_blocks_motion():
             QTimer.singleShot(200, self._start_next_pending_homing_action)
             return
         axis = self._pending_homing_axes.pop(0)

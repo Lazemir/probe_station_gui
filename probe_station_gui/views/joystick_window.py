@@ -320,6 +320,7 @@ class JoystickWindow(QWidget):
     MAX_LINEAR_FEEDRATE = 1000.0
     MODE_JOG = "jog"
     MODE_STEP = "step"
+    ACTION_TOGGLE_JOG_STEP = "__toggle_jog_step__"
     FEED_TARGET_XY = "xy"
     FEED_TARGET_FOCUS = "focus"
     FEED_TARGET_NEEDLES = "needles"
@@ -650,7 +651,7 @@ class JoystickWindow(QWidget):
             lambda _index: self._on_feedrate_target_changed()
         )
         self.step_distance_spin.valueChanged.connect(
-            lambda _value: self._emit_manual_axis_settings_changed()
+            lambda _value: self._on_step_distance_spin_changed()
         )
         self._update_mode_controls()
 
@@ -1162,16 +1163,40 @@ class JoystickWindow(QWidget):
         self._set_active_feedrate_target(self._selected_feedrate_target())
 
     def _on_jog_mode_changed(self) -> None:
-        mode = self._selected_control_mode()
+        self._set_control_mode(self._selected_control_mode(), emit_changed=True)
+
+    def _set_control_mode(self, mode: str, *, emit_changed: bool) -> bool:
+        mode = str(mode).strip().lower()
+        if mode not in {self.MODE_JOG, self.MODE_STEP}:
+            mode = self.MODE_JOG
         if mode == self._control_mode:
-            return
+            return False
         if self._active_axes is not None:
             self.stop_jog()
         previous_target = self._active_feedrate_target
         self._control_mode = mode
+        if hasattr(self, "jog_mode_combo"):
+            index = self.jog_mode_combo.findData(mode)
+            current_index = (
+                self.jog_mode_combo.currentIndex()
+                if hasattr(self.jog_mode_combo, "currentIndex")
+                else None
+            )
+            if index >= 0 and current_index != index:
+                self.jog_mode_combo.blockSignals(True)
+                self.jog_mode_combo.setCurrentIndex(index)
+                self.jog_mode_combo.blockSignals(False)
         self._update_mode_controls()
         self._set_active_feedrate_target(previous_target)
-        self.control_mode_changed.emit(mode)
+        if emit_changed:
+            self.control_mode_changed.emit(mode)
+        return True
+
+    def _toggle_control_mode(self) -> bool:
+        next_mode = (
+            self.MODE_STEP if self._control_mode == self.MODE_JOG else self.MODE_JOG
+        )
+        return self._set_control_mode(next_mode, emit_changed=True)
 
     def _selected_control_mode(self) -> str:
         data = self.jog_mode_combo.currentData()
@@ -1236,6 +1261,25 @@ class JoystickWindow(QWidget):
     def current_linear_feedrate(self) -> float:
         return float(self._linear_feedrate_value)
 
+    def select_coordinate_feedrate_for_axes(self, axes: object) -> float:
+        targets: set[str] = set()
+        try:
+            iterator = iter(axes)  # type: ignore[arg-type]
+        except TypeError:
+            iterator = iter(())
+        for axis in iterator:
+            axis_name = str(axis).strip().upper()
+            if axis_name not in self.MANUAL_JOG_AXES:
+                continue
+            targets.add(self._feedrate_target_for_axis(axis_name))
+        if not targets:
+            return self.current_linear_feedrate()
+        if len(targets) == 1:
+            self.clear_common_feedrate_target()
+            self._set_active_feedrate_target(next(iter(targets)))
+            return self.current_linear_feedrate()
+        return self.current_linear_feedrate()
+
     def current_needle_feedrate(self) -> float:
         return float(self._needle_feedrate_value)
 
@@ -1297,7 +1341,7 @@ class JoystickWindow(QWidget):
         was_motion_safety_disabled = self._motion_safety_disabled
         self._linear_jog_distance_mm = max(0.001, float(linear_distance_mm))
         self._rotary_jog_distance_deg = max(0.001, float(rotary_distance_deg))
-        self._manual_axis_distance_mm = max(0.001, float(manual_axis_distance_mm))
+        self._set_step_distance(float(manual_axis_distance_mm), emit_changed=False)
         self._manual_axis_feedrate_mm_min = self._bounded_feedrate_setting(
             self.FEED_TARGET_XY,
             float(manual_axis_feedrate_mm_min),
@@ -1352,7 +1396,6 @@ class JoystickWindow(QWidget):
         if manual_mode not in self.MANUAL_AXIS_MODES:
             manual_mode = self.DEFAULT_MANUAL_AXIS_MODE
         self._manual_axis_mode = manual_mode
-        self.step_distance_spin.setValue(self._manual_axis_distance_mm)
         control_mode = str(mode).strip().lower()
         if control_mode not in {self.MODE_JOG, self.MODE_STEP}:
             control_mode = self.MODE_JOG
@@ -1747,13 +1790,41 @@ class JoystickWindow(QWidget):
             self._linear_feedrate_value,
         )
 
+    def _on_step_distance_spin_changed(self) -> None:
+        self._set_step_distance(float(self.step_distance_spin.value()), emit_changed=True)
+
+    def _set_step_distance(self, value: float, *, emit_changed: bool) -> bool:
+        try:
+            bounded = float(value)
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(bounded):
+            return False
+        bounded = min(1000.0, max(0.001, bounded))
+        previous_value = getattr(self, "_manual_axis_distance_mm", bounded)
+        changed = abs(bounded - previous_value) > 1e-9
+        self._manual_axis_distance_mm = bounded
+        spin = getattr(self, "step_distance_spin", None)
+        if spin is not None and hasattr(spin, "setValue"):
+            current_value: float | None = None
+            if hasattr(spin, "value"):
+                try:
+                    current_value = float(spin.value())
+                except (TypeError, ValueError):
+                    current_value = None
+            if current_value is None or abs(current_value - bounded) > 1e-9:
+                if hasattr(spin, "blockSignals"):
+                    spin.blockSignals(True)
+                spin.setValue(bounded)
+                if hasattr(spin, "blockSignals"):
+                    spin.blockSignals(False)
+        if emit_changed and changed:
+            self._emit_manual_axis_settings_changed()
+        return changed
+
     def _emit_manual_axis_settings_changed(self) -> None:
         if self._applying_jog_settings:
             return
-        self._manual_axis_distance_mm = max(
-            0.001,
-            float(self.step_distance_spin.value()),
-        )
         self._manual_axis_mode = self.DEFAULT_MANUAL_AXIS_MODE
         self.manual_axis_settings_changed.emit(
             "X",
@@ -2304,10 +2375,22 @@ class JoystickWindow(QWidget):
         dt = now - self._last_feedrate_wheel_at if self._last_feedrate_wheel_at else 1.0
         self._last_feedrate_wheel_at = now
         notch_units = abs(delta_y) / 120.0
+        speed_multiplier = self._wheel_speed_multiplier(dt)
+        if self._control_mode == self.MODE_STEP:
+            current_step = max(0.001, float(self._manual_axis_distance_mm))
+            base_step = max(0.001, current_step * 0.1)
+            step_delta = base_step * notch_units * speed_multiplier
+            if delta_y < 0:
+                step_delta = -step_delta
+            self._set_step_distance(current_step + step_delta, emit_changed=True)
+            logger.debug(
+                "Step wheel applied: delta=%s step=%s value=%s",
+                delta_y,
+                step_delta,
+                self._manual_axis_distance_mm,
+            )
+            return True
         base_step = max(0.2, self._linear_feedrate_value * 0.03)
-        speed_multiplier = 1.0
-        if dt < 0.25:
-            speed_multiplier += min(5.0, (0.25 - dt) * 12.0)
         step = base_step * notch_units * speed_multiplier
         if delta_y < 0:
             step = -step
@@ -2323,6 +2406,13 @@ class JoystickWindow(QWidget):
             self._active_axes,
         )
         return True
+
+    @staticmethod
+    def _wheel_speed_multiplier(dt: float) -> float:
+        multiplier = 1.0
+        if dt < 0.25:
+            multiplier += min(5.0, (0.25 - dt) * 12.0)
+        return multiplier
 
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
         if self._handle_key_press_event(event):
@@ -2397,16 +2487,31 @@ class JoystickWindow(QWidget):
                 source_name,
             )
         if event.type() == QEvent.ShortcutOverride:
+            if self._should_process_global_event(
+                obj, require_motion_ready=False
+            ) and self._is_control_mode_toggle_event(event):
+                event.accept()
+                return True
             if self._should_process_global_event(obj):
                 identifier, mapping = self._mapping_from_event(event)
                 if identifier and mapping:
                     event.accept()
                     return True
         elif event.type() == QEvent.KeyPress:
+            if self._should_process_global_event(
+                obj, require_motion_ready=False
+            ) and self._handle_control_mode_toggle_press(event):
+                event.accept()
+                return True
             if self._should_process_global_event(obj) and self._handle_key_press_event(event):
                 event.accept()
                 return True
         elif event.type() == QEvent.KeyRelease:
+            if self._should_process_global_event(
+                obj, require_motion_ready=False
+            ) and self._handle_control_mode_toggle_release(event):
+                event.accept()
+                return True
             if self._should_process_global_event(obj) and self._handle_key_release_event(event):
                 event.accept()
                 return True
@@ -2416,7 +2521,7 @@ class JoystickWindow(QWidget):
                 return True
         return super().eventFilter(obj, event)
 
-    def _should_process_global_event(self, obj) -> bool:
+    def _should_process_global_event(self, obj, *, require_motion_ready: bool = True) -> bool:
         if not self.isVisible():
             logger.debug("Ignoring global key event because joystick is hidden")
             return False
@@ -2442,7 +2547,9 @@ class JoystickWindow(QWidget):
         if not window.isActiveWindow() and active_window is not window:
             logger.debug("Ignoring global key event because joystick host window is not active")
             return False
-        if not (self._axis_a_ready or self._motion_safety_disabled):
+        if require_motion_ready and not (
+            self._axis_a_ready or self._motion_safety_disabled
+        ):
             logger.debug("Ignoring global key event because A axis is not homed/zero")
             return False
         focus_widget = app.focusWidget() if app else None
@@ -2457,7 +2564,44 @@ class JoystickWindow(QWidget):
             return False
         return True
 
+    def _is_control_mode_toggle_mapping(
+        self, mapping: tuple[str, int] | None
+    ) -> bool:
+        return bool(mapping and mapping[0] == self.ACTION_TOGGLE_JOG_STEP)
+
+    def _is_control_mode_toggle_event(self, event) -> bool:
+        _identifier, mapping = self._mapping_from_event(event)
+        return self._is_control_mode_toggle_mapping(mapping)
+
+    def _handle_control_mode_toggle_press(self, event) -> bool:
+        identifier, mapping = self._mapping_from_event(event)
+        if not identifier or not self._is_control_mode_toggle_mapping(mapping):
+            return False
+        if event.isAutoRepeat():
+            event.ignore()
+            return True
+        self._toggle_control_mode()
+        event.accept()
+        logger.debug(
+            "Toggled joystick control mode from key: key=%s scan=%s text=%s modifiers=%s mode=%s",
+            event.key(),
+            self._event_scan_code(event),
+            event.text(),
+            keyboard_modifiers_to_int(event.modifiers()),
+            self._control_mode,
+        )
+        return True
+
+    def _handle_control_mode_toggle_release(self, event) -> bool:
+        identifier, mapping = self._mapping_from_event(event)
+        if not identifier or not self._is_control_mode_toggle_mapping(mapping):
+            return False
+        event.accept()
+        return True
+
     def _handle_key_press_event(self, event) -> bool:
+        if self._handle_control_mode_toggle_press(event):
+            return True
         if not self._key_stack:
             if not self._move_safety_check():
                 event.ignore()
@@ -2508,6 +2652,8 @@ class JoystickWindow(QWidget):
         return False
 
     def _handle_key_release_event(self, event) -> bool:
+        if self._handle_control_mode_toggle_release(event):
+            return True
         if event.isAutoRepeat():
             event.ignore()
             logger.debug(
@@ -2809,19 +2955,18 @@ class JoystickWindow(QWidget):
 
         mapping: Dict[tuple, tuple[str, int]] = {}
         for action in CONTROL_ACTIONS:
+            action_mapping = (
+                (action.axis, action.direction)
+                if action.axis
+                else (self.ACTION_TOGGLE_JOG_STEP, 0)
+            )
             for binding in bindings.get(action.key, []):
                 scan_code = int(binding.native_scan_code or 0)
                 if not scan_code:
                     scan_code = derive_native_scan_code_from_qt_key(binding.qt_key)
                 if scan_code:
-                    mapping[("scan", scan_code, binding.modifiers)] = (
-                        action.axis,
-                        action.direction,
-                    )
-                mapping[("key", binding.qt_key, binding.modifiers)] = (
-                    action.axis,
-                    action.direction,
-                )
+                    mapping[("scan", scan_code, binding.modifiers)] = action_mapping
+                mapping[("key", binding.qt_key, binding.modifiers)] = action_mapping
         self._key_bindings = mapping
         self._key_stack = [
             identifier

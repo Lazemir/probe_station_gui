@@ -220,7 +220,7 @@ class StageControllerStartupLimitsTest(unittest.TestCase):
         controller._serial = _FakeSerial()
         controller._position_reporting_mode = "machine"
         controller._axis_limits = {"Z": (0.0, 20.0), "X": (0.0, 64.0)}
-        controller._ensure_axis_limits = lambda _serial: None
+        controller._ensure_axis_limits = lambda _serial, **_kwargs: None
         controller._query_status = lambda _serial: types.SimpleNamespace(
             state="Idle",
             position=(0.0, 0.0, 1.0),
@@ -385,7 +385,7 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
         callback_writes: list[list[bytes]] = []
 
         controller._move_safety_check = lambda: None
-        controller._ensure_axis_limits = lambda _serial: None
+        controller._ensure_axis_limits = lambda _serial, **_kwargs: None
         controller._check_relative_move_limits = lambda *_args, **_kwargs: None
         controller._reset_feed_override_for_serial = lambda _serial: None
 
@@ -591,6 +591,27 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
         rates = controller.query_axis_max_feedrates()
 
         self.assertEqual(rates, {"X": 500.0, "Z": 100.0, "A": 80.0})
+
+    def test_ensure_axis_limits_refreshes_partial_cache(self) -> None:
+        controller = StageController()
+        controller._axis_limits = {"X": (0.0, 64.0)}
+        serial_connection = _LineFakeSerial(
+            [
+                b"[MSG:INFO: Axis X (0.000,64.000)]\n",
+                b"[MSG:INFO: Axis Y (0.000,64.000)]\n",
+                b"[MSG:INFO: Axis Z (0.000,23.000)]\n",
+                b"[MSG:INFO: Axis A (-5.500,0.000)]\n",
+                b"ok\n",
+            ]
+        )
+
+        controller._ensure_axis_limits(
+            serial_connection, required_axes=controller.CONTROLLER_LIMIT_AXES
+        )
+
+        self.assertEqual(controller._axis_limits["Z"], (0.0, 23.0))
+        self.assertEqual(controller._axis_limits["A"], (-5.5, 0.0))
+        self.assertEqual(serial_connection.writes, [b"$Startup/Show\n"])
 
     def test_absolute_xy_move_requires_serial(self) -> None:
         controller = StageController()
@@ -1423,7 +1444,7 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
         controller._axis_limits = {"X": (0.0, 64.0), "Y": (0.0, 64.0)}
         controller._active_work_coordinate_system = "G54"
         commands = []
-        controller._ensure_axis_limits = lambda _serial: None
+        controller._ensure_axis_limits = lambda _serial, **_kwargs: None
         controller._query_status = lambda _serial: types.SimpleNamespace(
             state="Idle",
             position=None,
@@ -1507,7 +1528,7 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
         controller._needles_up = True
         controller._axis_limits = {"X": (0.0, 64.0), "Y": (0.0, 64.0)}
         controller._position_reporting_mode = "work"
-        controller._ensure_axis_limits = lambda _serial: None
+        controller._ensure_axis_limits = lambda _serial, **_kwargs: None
         controller._query_status = lambda _serial: types.SimpleNamespace(
             state="Idle",
             position=None,
@@ -1533,7 +1554,7 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
         controller._axis_limits = {"X": (0.0, 64.0)}
         commands = []
         controller._position_reporting_mode = "work"
-        controller._ensure_axis_limits = lambda _serial: None
+        controller._ensure_axis_limits = lambda _serial, **_kwargs: None
         controller._query_status = lambda _serial: types.SimpleNamespace(
             state="Idle",
             position=None,
@@ -1611,7 +1632,7 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
             emit=lambda *_args, **_kwargs: None
         )
         commands = []
-        controller._ensure_axis_limits = lambda _serial: None
+        controller._ensure_axis_limits = lambda _serial, **_kwargs: None
         controller._query_status = lambda _serial: types.SimpleNamespace(
             state="Idle",
             position=(1.0, 0.0, 0.0),
@@ -2596,7 +2617,7 @@ class StageControllerStartupSyncTest(unittest.TestCase):
         controller._refresh_coordinate_system_state = (
             lambda _serial, apply_preference=True: None
         )
-        controller._ensure_axis_limits = lambda _serial: None
+        controller._ensure_axis_limits = lambda _serial, **_kwargs: None
         controller._ensure_controller_session_marker = lambda _serial: None
         controller._query_status = lambda _serial: types.SimpleNamespace(
             state="Idle",
@@ -2633,7 +2654,7 @@ class StageControllerStartupSyncTest(unittest.TestCase):
         controller._refresh_coordinate_system_state = (
             lambda _serial, apply_preference=True: None
         )
-        controller._ensure_axis_limits = lambda _serial: None
+        controller._ensure_axis_limits = lambda _serial, **_kwargs: None
         controller._ensure_controller_session_marker = lambda _serial: None
         controller._query_status = lambda _serial: types.SimpleNamespace(
             state="Idle",
@@ -2671,7 +2692,7 @@ class StageControllerStartupSyncTest(unittest.TestCase):
         controller._refresh_coordinate_system_state = (
             lambda _serial, apply_preference=True: None
         )
-        controller._ensure_axis_limits = lambda _serial: None
+        controller._ensure_axis_limits = lambda _serial, **_kwargs: None
         controller._ensure_controller_session_marker = lambda _serial: None
         controller._query_status = lambda _serial: types.SimpleNamespace(
             state="Idle",
@@ -2704,6 +2725,44 @@ class StageControllerStartupSyncTest(unittest.TestCase):
         controller._run_startup_sync(auto_home_a=True)
 
         self.assertEqual(performed, [])
+
+    def test_startup_sync_uses_cached_axis_feedrates_without_config_dump(self) -> None:
+        controller = StageController()
+        controller._serial = _FakeSerial()
+        controller._axis_max_feedrates = {"X": 500.0, "Z": 100.0, "A": 80.0}
+        controller._refresh_coordinate_system_state = (
+            lambda _serial, apply_preference=True: None
+        )
+        controller._ensure_axis_limits = lambda _serial, **_kwargs: None
+        controller._ensure_controller_session_marker = lambda _serial: None
+        controller._query_axis_max_feedrates_locked = (
+            lambda _serial: (_ for _ in ()).throw(AssertionError("$CD should be skipped"))
+        )
+        controller._query_status = lambda _serial: types.SimpleNamespace(
+            state="Idle",
+            position=(1.0, 2.0, 3.0, 0.0),
+            work_position=(1.0, 2.0, 3.0, 0.0),
+            display_position=(1.0, 2.0, 3.0, 0.0),
+            homed_axes={"X", "Y", "Z", "A"},
+            coordinate_system="G54",
+        )
+        emitted_feedrates = []
+        controller.status_message = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        controller.axis_max_feedrates_changed = types.SimpleNamespace(
+            emit=lambda rates: emitted_feedrates.append(dict(rates))
+        )
+        controller.stage_position_changed = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+
+        controller._run_startup_sync(auto_home_a=True)
+
+        self.assertEqual(
+            emitted_feedrates,
+            [{"X": 500.0, "Z": 100.0, "A": 80.0}],
+        )
 
 
 class StageControllerReconnectStateTest(unittest.TestCase):
@@ -2805,10 +2864,21 @@ class StageControllerReconnectStateTest(unittest.TestCase):
             {
                 "last_stage_position": [1.0, 2.0, 3.0, 0.0],
                 "last_stage_state": "Idle",
+                "active_work_coordinate_system": "G54",
+                "controller_coordinate_offsets": {
+                    "G54": [32.0, 32.0, 0.0, -2.885, 0.0],
+                },
                 "homed_axes": ["X", "Y", "A"],
                 "needles_up": True,
                 "needles_known": True,
                 "controller_session_marker": 321,
+                "axis_limits": {
+                    "X": [0.0, 64.0],
+                    "Y": [0.0, 64.0],
+                    "Z": [0.0, 23.0],
+                    "A": [-5.5, 0.0],
+                },
+                "axis_max_feedrates": {"X": 500.0, "Z": 100.0, "A": 80.0},
             }
         )
 
@@ -2820,6 +2890,13 @@ class StageControllerReconnectStateTest(unittest.TestCase):
         self.assertTrue(controller._controller_state_stale)
         self.assertFalse(controller._axis_a_ready)
         self.assertEqual(positions, [])
+        self.assertEqual(controller._axis_limits["Z"], (0.0, 23.0))
+        self.assertEqual(controller._axis_max_feedrates["X"], 500.0)
+        self.assertEqual(controller._active_work_coordinate_system, "G54")
+        self.assertEqual(
+            controller._controller_coordinate_offsets["G54"],
+            (32.0, 32.0, 0.0, -2.885, 0.0),
+        )
 
     def test_status_reader_detects_live_controller_reboot_and_clears_homing(self) -> None:
         controller = StageController()
@@ -2829,6 +2906,8 @@ class StageControllerReconnectStateTest(unittest.TestCase):
         controller._controller_state_stale = False
         controller._controller_session_marker = 321
         controller._last_stage_position = (1.0, 2.0, 3.0, 0.0)
+        controller._axis_limits = {"Z": (0.0, 23.0)}
+        controller._axis_max_feedrates = {"Z": 100.0}
         positions = []
         reboot_events = []
         controller.stage_position_changed = types.SimpleNamespace(
@@ -2849,6 +2928,8 @@ class StageControllerReconnectStateTest(unittest.TestCase):
         self.assertFalse(controller._needles_known)
         self.assertTrue(controller._controller_state_stale)
         self.assertIsNone(controller._controller_session_marker)
+        self.assertEqual(controller._axis_limits, {})
+        self.assertEqual(controller._axis_max_feedrates, {})
         self.assertEqual(positions[-1], None)
         self.assertEqual(reboot_events, [True])
 

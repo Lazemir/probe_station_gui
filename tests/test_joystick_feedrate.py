@@ -339,6 +339,48 @@ class JoystickFeedrateTest(unittest.TestCase):
             [widget._linear_feedrate_value],
         )
 
+    def test_wheel_changes_step_distance_in_step_mode(self) -> None:
+        widget = JoystickWindow.__new__(JoystickWindow)
+        widget._control_mode = JoystickWindow.MODE_STEP
+        widget._manual_axis_distance_mm = 1.0
+        widget._manual_axis_mode = JoystickWindow.DEFAULT_MANUAL_AXIS_MODE
+        widget._manual_axis_feedrate_mm_min = 7.0
+        widget._feedrate_values = {
+            JoystickWindow._feedrate_key(
+                widget,
+                JoystickWindow.FEED_TARGET_XY,
+                JoystickWindow.MODE_STEP,
+            ): 7.0
+        }
+        widget.step_distance_spin = _FakeSpin()
+        widget.step_distance_spin.setValue(1.0)
+        widget._applying_jog_settings = False
+        widget._last_feedrate_wheel_at = 0.0
+        widget._linear_feedrate_value = 42.0
+        widget.manual_axis_settings_changed = _ArgsSignalRecorder()
+        widget.linear_feedrate_changed = _SignalRecorder()
+
+        changed = JoystickWindow._apply_wheel_delta(widget, 120)
+
+        self.assertTrue(changed)
+        self.assertGreater(widget._manual_axis_distance_mm, 1.0)
+        self.assertEqual(
+            widget.step_distance_spin.value(),
+            widget._manual_axis_distance_mm,
+        )
+        self.assertEqual(widget.linear_feedrate_changed.values, [])
+        self.assertEqual(
+            widget.manual_axis_settings_changed.values,
+            [
+                (
+                    "X",
+                    widget._manual_axis_distance_mm,
+                    JoystickWindow.DEFAULT_MANUAL_AXIS_MODE,
+                    7.0,
+                )
+            ],
+        )
+
     def test_manual_axis_settings_do_not_override_linear_feedrate(self) -> None:
         widget = JoystickWindow.__new__(JoystickWindow)
         widget._linear_feedrate_value = 42.0

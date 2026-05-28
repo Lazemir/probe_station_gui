@@ -587,6 +587,10 @@ class SettingsLoadTest(unittest.TestCase):
             loaded = manager._load()
 
             self.assertIsInstance(loaded, settings_manager.Settings)
+            bindings = loaded.controls.get("toggle_jog_step", [])
+            self.assertEqual(len(bindings), 1)
+            self.assertEqual(bindings[0].qt_key, 74)
+            self.assertEqual(bindings[0].text, "j")
 
 
 if __name__ == "__main__":
