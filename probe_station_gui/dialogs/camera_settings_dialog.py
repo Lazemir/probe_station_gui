@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QBrush, QColor, QFont
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtGui import QAction, QBrush, QColor, QDoubleValidator, QFont
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -608,6 +608,9 @@ class _NodeMapPage(QWidget):
         editor.setEnabled(writable)
         self._editor = editor
         self._editor_layout.addWidget(editor, 1)
+        unit = str(node.get("unit") or "")
+        if unit and not isinstance(editor, QDoubleSpinBox):
+            self._editor_layout.addWidget(QLabel(unit, self))
         self._connect_editor_changed(editor)
 
     def _integer_editor(self, node: NodePayload) -> QWidget:
@@ -637,22 +640,19 @@ class _NodeMapPage(QWidget):
 
     def _float_editor(self, node: NodePayload) -> QWidget:
         value = self._value_text(node)
-        editor = QDoubleSpinBox(self)
-        editor.setDecimals(6)
-        editor.setRange(
-            self._numeric_value(node.get("minimum"), -1e12),
-            self._numeric_value(node.get("maximum"), 1e12),
-        )
-        increment = self._numeric_value(node.get("increment"))
-        if increment is not None and increment > 0:
-            editor.setSingleStep(float(increment))
-        try:
-            editor.setValue(float(value))
-        except ValueError:
-            pass
-        suffix = str(node.get("unit") or "")
-        if suffix:
-            editor.setSuffix(f" {suffix}")
+        editor = QLineEdit(self)
+        editor.setText(value)
+        editor.setPlaceholderText("Float value")
+        editor.setClearButtonEnabled(True)
+        validator = QDoubleValidator(editor)
+        minimum = self._numeric_value(node.get("minimum"))
+        maximum = self._numeric_value(node.get("maximum"))
+        if minimum is not None:
+            validator.setBottom(minimum)
+        if maximum is not None:
+            validator.setTop(maximum)
+        validator.setNotation(QDoubleValidator.StandardNotation)
+        editor.setValidator(validator)
         return editor
 
     def _clear_editor(self) -> None:
@@ -673,7 +673,7 @@ class _NodeMapPage(QWidget):
         elif isinstance(editor, QDoubleSpinBox):
             editor.valueChanged.connect(self._queue_current_value)
         elif isinstance(editor, QLineEdit):
-            editor.textEdited.connect(self._queue_current_value)
+            editor.editingFinished.connect(self._queue_current_value)
 
     def _queue_current_value(self, *_args: object) -> None:
         node = self._current_node
@@ -691,10 +691,20 @@ class _NodeMapPage(QWidget):
         elif isinstance(editor, QDoubleSpinBox):
             value = editor.value()
         elif isinstance(editor, QLineEdit):
+            if editor.validator() is not None and not editor.hasAcceptableInput():
+                return
             value = editor.text()
         else:
             return
         self._apply_callback(self._map_key, str(node.get("name") or ""), value)
+
+    def queue_current_editor_value(self) -> None:
+        self._queue_current_value()
+
+    def has_edit_focus(self) -> bool:
+        if self._filter_edit.hasFocus():
+            return True
+        return self._editor is not None and self._editor.hasFocus()
 
     def _execute_current(self) -> None:
         node = self._current_node
@@ -808,6 +818,8 @@ class _NodeMapPage(QWidget):
 class CameraSettingsWidget(QWidget):
     """Widget that exposes every implemented GenICam node reported by rotpy."""
 
+    LIVE_REFRESH_INTERVAL_MS = 1500
+
     CAMERA_FEATURE_TABS = (
         (
             "Settings",
@@ -890,7 +902,11 @@ class CameraSettingsWidget(QWidget):
         self._pages: dict[str, _NodeMapPage] = {}
         self._pending_settings: dict[tuple[str, str], object] = {}
         self._applying_settings: dict[tuple[str, str], object] = {}
+        self._snapshot_pending = False
         self._loaded_once = False
+        self._camera_group_combo: QComboBox | None = None
+        self._camera_group_stack: QStackedWidget | None = None
+        self._camera_container: QWidget | None = None
 
         layout = QVBoxLayout(self)
         status_row = QHBoxLayout()
@@ -908,15 +924,54 @@ class CameraSettingsWidget(QWidget):
         grabber.camera_settings_snapshot_ready.connect(self._on_snapshot)
         grabber.camera_setting_changed.connect(self._on_setting_changed)
 
+        self._live_refresh_timer = QTimer(self)
+        self._live_refresh_timer.setInterval(self.LIVE_REFRESH_INTERVAL_MS)
+        self._live_refresh_timer.timeout.connect(self._refresh_live_snapshot)
+
     def has_loaded(self) -> bool:
         return self._loaded_once
 
     def refresh(self) -> None:
-        self._status_label.setText("Loading camera settings.")
+        if self._pending_settings or self._applying_settings:
+            self._status_label.setText("Apply pending camera settings before refreshing.")
+            return
+        self._request_snapshot(show_status=True)
+
+    def _refresh_live_snapshot(self) -> None:
+        if not self._loaded_once:
+            return
+        if not self.isVisible():
+            return
+        if self._pending_settings or self._applying_settings:
+            return
+        if self._has_edit_focus():
+            return
+        self._request_snapshot(show_status=False)
+
+    def _request_snapshot(self, *, show_status: bool) -> None:
+        if self._snapshot_pending:
+            return
+        self._snapshot_pending = True
+        if show_status:
+            self._status_label.setText("Loading camera settings.")
         self._refresh_button.setEnabled(False)
         self._grabber.request_camera_settings_snapshot()
 
+    def _has_edit_focus(self) -> bool:
+        return any(page.has_edit_focus() for page in self._current_pages())
+
+    def _current_pages(self) -> list[_NodeMapPage]:
+        current_widget = self._tabs.currentWidget()
+        if isinstance(current_widget, _NodeMapPage):
+            return [current_widget]
+        if current_widget is self._camera_container and self._camera_group_stack is not None:
+            camera_page = self._camera_group_stack.currentWidget()
+            if isinstance(camera_page, _NodeMapPage):
+                return [camera_page]
+        return []
+
     def _on_snapshot(self, payload: object) -> None:
+        self._snapshot_pending = False
         self._refresh_button.setEnabled(True)
         if not isinstance(payload, dict):
             self._status_label.setText("Camera settings response was invalid.")
@@ -926,14 +981,8 @@ class CameraSettingsWidget(QWidget):
             return
 
         self._loaded_once = True
-        self._pending_settings.clear()
-        self._applying_settings.clear()
-        while self._tabs.count():
-            widget = self._tabs.widget(0)
-            self._tabs.removeTab(0)
-            if widget is not None:
-                widget.deleteLater()
-        self._pages.clear()
+        if not self._live_refresh_timer.isActive():
+            self._live_refresh_timer.start()
 
         maps = [
             map_payload
@@ -961,13 +1010,50 @@ class CameraSettingsWidget(QWidget):
                 continue
             nodes = map_payload.get("nodes")
             title = str(map_payload.get("title") or map_key or "Node Map")
-            page = self._create_page(map_key, nodes if isinstance(nodes, list) else [])
-            self._pages[map_key] = page
+            page_nodes = nodes if isinstance(nodes, list) else []
+            page = self._pages.get(map_key)
+            if page is None:
+                page = self._create_page(map_key, page_nodes)
+                self._pages[map_key] = page
+            else:
+                page.set_nodes(page_nodes)
             error = str(map_payload.get("error") or "")
-            self._tabs.addTab(page, f"{title} (error)" if error else title)
+            tab_title = f"{title} (error)" if error else title
+            tab_index = self._tabs.indexOf(page)
+            if tab_index < 0:
+                self._tabs.addTab(page, tab_title)
+            else:
+                self._tabs.setTabText(tab_index, tab_title)
         self._status_label.setText(str(payload.get("message") or "Camera settings loaded."))
 
     def _add_camera_feature_tabs(self, nodes: list[NodePayload]) -> None:
+        self._ensure_camera_container()
+        group_combo = self._camera_group_combo
+        stack = self._camera_group_stack
+        if group_combo is None or stack is None:
+            return
+
+        added = False
+        for title, category_terms, feature_prefixes in self.CAMERA_FEATURE_TABS:
+            group_nodes = self._camera_group_nodes(
+                nodes,
+                category_terms,
+                feature_prefixes,
+            )
+            if not self._has_visible_features(group_nodes):
+                continue
+            self._set_camera_group_page(title, group_nodes)
+            added = True
+
+        self._set_camera_group_page("Features" if added else "All", nodes)
+
+    def _ensure_camera_container(self) -> None:
+        if (
+            self._camera_container is not None
+            and self._camera_group_combo is not None
+            and self._camera_group_stack is not None
+        ):
+            return
         container = QWidget(self)
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -982,27 +1068,31 @@ class CameraSettingsWidget(QWidget):
         stack = QStackedWidget(container)
         layout.addWidget(stack, 1)
 
-        added = False
-        for title, category_terms, feature_prefixes in self.CAMERA_FEATURE_TABS:
-            group_nodes = self._camera_group_nodes(
-                nodes,
-                category_terms,
-                feature_prefixes,
-            )
-            if not self._has_visible_features(group_nodes):
-                continue
-            page = self._create_page("camera", group_nodes)
-            self._pages[f"camera:{title}"] = page
+        group_combo.currentIndexChanged.connect(stack.setCurrentIndex)
+        self._camera_container = container
+        self._camera_group_combo = group_combo
+        self._camera_group_stack = stack
+        self._tabs.addTab(container, "Camera")
+
+    def _set_camera_group_page(
+        self,
+        title: str,
+        nodes: list[NodePayload],
+    ) -> None:
+        group_combo = self._camera_group_combo
+        stack = self._camera_group_stack
+        if group_combo is None or stack is None:
+            return
+
+        page_key = f"camera:{title}"
+        page = self._pages.get(page_key)
+        if page is None:
+            page = self._create_page("camera", nodes)
+            self._pages[page_key] = page
             group_combo.addItem(title)
             stack.addWidget(page)
-            added = True
-
-        page = self._create_page("camera", nodes)
-        self._pages["camera:Features"] = page
-        group_combo.addItem("Features" if added else "All")
-        stack.addWidget(page)
-        group_combo.currentIndexChanged.connect(stack.setCurrentIndex)
-        self._tabs.addTab(container, "Camera")
+            return
+        page.set_nodes(nodes)
 
     def _create_page(
         self,
@@ -1129,6 +1219,8 @@ class CameraSettingsWidget(QWidget):
             self._status_label.setText(f"{pending_count} camera settings pending.")
 
     def apply_pending_settings(self) -> bool:
+        for page in self._current_pages():
+            page.queue_current_editor_value()
         if not self._pending_settings:
             return False
         pending_items = [
