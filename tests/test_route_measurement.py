@@ -775,6 +775,102 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
         first_depth_index = stage.calls.index(("lower_to_depth", 0.0005, None))
         self.assertEqual(stage.calls[first_depth_index - 1], ("needles", "lift", None))
 
+    def test_runtime_settings_update_applies_to_remeasure(self) -> None:
+        point = _point(1)
+        stage = _FakeStage()
+        lcr = _FakeBatchRouteLCR(
+            [
+                {"differential_resistance_ohm": value}
+                for value in (
+                    200000.0,
+                    210000.0,
+                    220000.0,
+                    230000.0,
+                    240000.0,
+                    250000.0,
+                    260000.0,
+                    270000.0,
+                    280000.0,
+                    290000.0,
+                    300000.0,
+                    310000.0,
+                    1000.0,
+                    1001.0,
+                )
+            ]
+        )
+        results = []
+        results_changed = threading.Condition()
+
+        def on_result(record, _position, _total, saved) -> None:
+            with results_changed:
+                results.append((record, saved))
+                results_changed.notify_all()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "route.csv"
+            runner = RouteMeasurementRunner(
+                points=[point],
+                csv_path=csv_path,
+                stage_controller=stage,
+                lcr_controller=lcr,
+                needle_feedrate=None,
+                measurement_count=2,
+                initial_measurement_count=2,
+                confirm_each_point=True,
+                auto_contact_seek_on_bad_contact=True,
+                auto_contact_seek_step_mm=0.001,
+                auto_contact_seek_max_total_mm=0.001,
+                contact_settle_s=0.0,
+                result_callback=on_result,
+            )
+            result = []
+            thread = threading.Thread(
+                target=lambda: result.append(runner.run()),
+                daemon=True,
+            )
+
+            thread.start()
+            with results_changed:
+                self.assertTrue(
+                    results_changed.wait_for(
+                        lambda: len(results) >= 1,
+                        timeout=2.0,
+                    )
+                )
+            self.assertEqual(results[0][0].status, "bad_contact")
+            self.assertFalse(results[0][1])
+
+            runner.update_runtime_settings(
+                measurement_count=2,
+                initial_measurement_count=2,
+                max_relative_rms=0.01,
+                auto_contact_seek_step_mm=0.001,
+                auto_contact_seek_max_total_mm=0.002,
+                contact_settle_s=0.0,
+            )
+            runner.submit_confirmation("remeasure")
+            with results_changed:
+                self.assertTrue(
+                    results_changed.wait_for(
+                        lambda: len(results) >= 2,
+                        timeout=2.0,
+                    )
+                )
+            self.assertEqual(results[1][0].status, "ok")
+            self.assertTrue(results[1][1])
+            runner.submit_confirmation("next")
+            thread.join(timeout=2.0)
+
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(result[0][0], True, result[0][1])
+            with csv_path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["status"], "ok")
+
+        self.assertIn(("lower_to_depth", 0.002, None), stage.calls)
+
     def test_auto_contact_seek_compliance_short_is_saved_without_followup(self) -> None:
         point = _point(1)
         stage = _FakeStage()

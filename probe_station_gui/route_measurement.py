@@ -258,6 +258,41 @@ class RouteMeasurementRunner:
         with self._auto_next_lock:
             self._auto_next_ok_or_short = bool(enabled)
 
+    def update_runtime_settings(
+        self,
+        *,
+        measurement_count: int,
+        initial_measurement_count: int,
+        max_relative_rms: float | None,
+        auto_contact_seek_step_mm: float,
+        auto_contact_seek_max_total_mm: float,
+        contact_settle_s: float,
+    ) -> None:
+        """Update settings that are safe to change while waiting for confirmation."""
+
+        self._measurement_count = max(1, int(measurement_count))
+        self._initial_measurement_count_value = max(
+            1,
+            int(initial_measurement_count),
+        )
+        try:
+            max_relative_rms_value = float(max_relative_rms)
+        except (TypeError, ValueError):
+            max_relative_rms_value = math.nan
+        self._max_relative_rms = (
+            max_relative_rms_value
+            if math.isfinite(max_relative_rms_value)
+            and max_relative_rms_value > 0.0
+            else None
+        )
+        self._auto_contact_seek_step_mm = self._normalized_contact_seek_step(
+            auto_contact_seek_step_mm
+        )
+        self._auto_contact_seek_max_total_mm = self._normalized_contact_seek_limit(
+            auto_contact_seek_max_total_mm
+        )
+        self._contact_settle_s = max(0.0, float(contact_settle_s))
+
     def save_current_position_adjustment(
         self,
         current_stage_xy: Point2D,

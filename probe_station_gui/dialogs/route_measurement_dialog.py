@@ -588,13 +588,7 @@ class RouteMeasurementDialog(QDialog):
             self._route_combo,
             self._csv_path_edit,
             self._csv_browse_button,
-            self._initial_measurement_count_spin,
-            self._followup_measurement_count_spin,
-            self._max_relative_rms_spin,
             self._current_point_spin,
-            self._contact_settle_spin,
-            self._contact_seek_range_spin,
-            self._contact_seek_step_spin,
             self._meter_combo,
             self._gwinstek_page,
             self._keithley_page,
@@ -602,6 +596,7 @@ class RouteMeasurementDialog(QDialog):
             self._save_profile_button,
         ):
             widget.setEnabled(not self._running)
+        self._set_runtime_settings_enabled(not self._running)
         self._measure_button.setEnabled(not self._running)
         self._pause_button.setEnabled(self._running and not self._waiting)
         self._close_button.setEnabled(True)
@@ -618,6 +613,18 @@ class RouteMeasurementDialog(QDialog):
         self._next_button.setEnabled(can_confirm)
         self._jump_point_spin.setEnabled((not self._running) or can_confirm)
         self._jump_button.setEnabled(can_confirm)
+        self._set_runtime_settings_enabled((not self._running) or can_confirm)
+
+    def _set_runtime_settings_enabled(self, enabled: bool) -> None:
+        for widget in (
+            self._initial_measurement_count_spin,
+            self._followup_measurement_count_spin,
+            self._max_relative_rms_spin,
+            self._contact_settle_spin,
+            self._contact_seek_range_spin,
+            self._contact_seek_step_spin,
+        ):
+            widget.setEnabled(bool(enabled))
 
     def _build_gwinstek_page(self) -> QWidget:
         page = QWidget(self)
@@ -907,23 +914,26 @@ class RouteMeasurementDialog(QDialog):
         if not csv_path:
             self.set_status("Choose a CSV path before measuring.")
             return
+        self.measure_requested.emit(self.current_configuration())
+
+    def current_configuration(self) -> RouteMeasurementRunConfiguration:
+        """Return the current dialog configuration without changing UI state."""
+
         self._save_settings_file()
-        self.measure_requested.emit(
-            RouteMeasurementRunConfiguration(
-                csv_path=csv_path,
-                initial_measurement_count=int(
-                    self._initial_measurement_count_spin.value()
-                ),
-                followup_measurement_count=int(
-                    self._followup_measurement_count_spin.value()
-                ),
-                current_point=int(self._current_point_spin.value()),
-                max_relative_rms=float(self._max_relative_rms_spin.value()) / 100.0,
-                contact_settle_s=float(self._contact_settle_spin.value()),
-                contact_seek_range_mm=float(self._contact_seek_range_spin.value()),
-                contact_seek_step_mm=float(self._contact_seek_step_spin.value()),
-                meter=self._meter_configuration(),
-            )
+        return RouteMeasurementRunConfiguration(
+            csv_path=self._csv_path_edit.text().strip(),
+            initial_measurement_count=int(
+                self._initial_measurement_count_spin.value()
+            ),
+            followup_measurement_count=int(
+                self._followup_measurement_count_spin.value()
+            ),
+            current_point=int(self._current_point_spin.value()),
+            max_relative_rms=float(self._max_relative_rms_spin.value()) / 100.0,
+            contact_settle_s=float(self._contact_settle_spin.value()),
+            contact_seek_range_mm=float(self._contact_seek_range_spin.value()),
+            contact_seek_step_mm=float(self._contact_seek_step_spin.value()),
+            meter=self._meter_configuration(),
         )
 
     def _emit_pause_requested(self) -> None:

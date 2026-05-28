@@ -4951,6 +4951,16 @@ class Main(QMainWindow):
         if runner is None:
             self._show_status("No route measurement is waiting.", 3000)
             return
+        if self._route_measurement_dialog is not None:
+            configuration = self._route_measurement_dialog.current_configuration()
+            runner.update_runtime_settings(
+                measurement_count=configuration.measurement_count,
+                initial_measurement_count=configuration.initial_measurement_count,
+                max_relative_rms=configuration.max_relative_rms,
+                auto_contact_seek_step_mm=configuration.contact_seek_step_mm,
+                auto_contact_seek_max_total_mm=configuration.contact_seek_range_mm,
+                contact_settle_s=configuration.contact_settle_s,
+            )
         if not runner.submit_confirmation(action):
             self._show_status("Unknown route measurement action.", 3000)
             return
