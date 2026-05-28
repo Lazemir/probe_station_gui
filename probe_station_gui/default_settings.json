@@ -87,6 +87,7 @@
     "linked_at_utc": "",
     "alerts": {
       "route_attention": true,
+      "route_started": true,
       "route_completed": true,
       "route_failed": true,
       "contact_seek_failed": true,

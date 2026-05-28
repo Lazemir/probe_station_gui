@@ -260,6 +260,36 @@ async def send_telegram_photo(
         )
 
 
+async def send_telegram_document(
+    bot_token: str,
+    chat_id: str,
+    document_path: str | Path,
+    caption: str,
+    *,
+    disable_notification: bool = False,
+) -> None:
+    """Send one Telegram document with a short caption."""
+
+    _ensure_dependency()
+    token = str(bot_token or "").strip()
+    if not token:
+        raise TelegramNotificationError("Telegram bot token is empty.")
+    chat_id_text = str(chat_id or "").strip()
+    if not chat_id_text:
+        raise TelegramNotificationError("Telegram chat is not linked.")
+    path = Path(document_path).expanduser()
+    if not path.exists() or not path.is_file():
+        raise TelegramNotificationError(f"Telegram document does not exist: {path}")
+    with path.open("rb") as document:
+        async with Bot(token=token) as bot:  # type: ignore[misc,operator]
+            await bot.send_document(
+                chat_id=_telegram_chat_id_value(chat_id_text),
+                document=document,
+                caption=_telegram_photo_caption(caption),
+                disable_notification=disable_notification,
+            )
+
+
 def send_telegram_message_in_thread(
     *,
     bot_token: str,
@@ -267,9 +297,10 @@ def send_telegram_message_in_thread(
     text: str,
     photo_bytes: bytes | None = None,
     photo_name: str = "microscope.jpg",
+    document_path: str | Path | None = None,
     done_callback: Callable[[bool, str], None] | None = None,
 ) -> bool:
-    """Send a Telegram message or photo on a short-lived daemon thread."""
+    """Send a Telegram message, photo, or document on a short-lived daemon thread."""
 
     if not telegram_dependency_available():
         message = _missing_dependency_message()
@@ -280,7 +311,16 @@ def send_telegram_message_in_thread(
 
     def _worker() -> None:
         try:
-            if photo_bytes:
+            if document_path is not None:
+                asyncio.run(
+                    send_telegram_document(
+                        bot_token,
+                        chat_id,
+                        document_path,
+                        text,
+                    )
+                )
+            elif photo_bytes:
                 asyncio.run(
                     send_telegram_photo(
                         bot_token,

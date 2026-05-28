@@ -113,6 +113,7 @@ class TelegramSettingsTest(unittest.TestCase):
             linked_at_utc="2026-05-28T12:00:00+00:00",
             alerts={
                 "route_attention": True,
+                "route_started": True,
                 "route_completed": False,
                 "route_failed": True,
                 "contact_seek_failed": False,

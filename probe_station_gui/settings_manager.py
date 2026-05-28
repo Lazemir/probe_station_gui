@@ -194,6 +194,7 @@ LCR_METER_TYPE_LABELS: dict[str, str] = {
 
 TELEGRAM_ALERT_TYPES: tuple[tuple[str, str], ...] = (
     ("route_attention", "Route needs attention"),
+    ("route_started", "Route measurement started"),
     ("route_completed", "Route measurement complete"),
     ("route_failed", "Route measurement stopped or failed"),
     ("contact_seek_failed", "Contact seek failed"),

@@ -3282,6 +3282,7 @@ class Main(QMainWindow):
         message: str,
         *,
         attach_photo: bool = False,
+        document_path: str | Path | None = None,
     ) -> None:
         telegram_settings = self.settings_manager.telegram_configuration()
         if not telegram_settings.enabled:
@@ -3296,12 +3297,16 @@ class Main(QMainWindow):
         photo: tuple[bytes, str] | None = (
             self._latest_camera_frame_photo() if attach_photo else None
         )
+        document = Path(document_path).expanduser() if document_path is not None else None
+        if document is not None and (not document.exists() or not document.is_file()):
+            document = None
         send_telegram_message_in_thread(
             bot_token=bot_token,
             chat_id=telegram_settings.chat_id,
             text=message,
             photo_bytes=photo[0] if photo is not None else None,
             photo_name=photo[1] if photo is not None else "microscope.jpg",
+            document_path=document,
         )
 
     def _latest_camera_frame_photo(self) -> tuple[bytes, str] | None:
@@ -5690,7 +5695,12 @@ class Main(QMainWindow):
             self._route_measurement_dialog.set_status(
                 f"Route measurement starting: {len(points)} points."
             )
-        self._show_status(f"Route measurement starting: {len(points)} points.")
+        start_message = f"Route measurement starting: {len(points)} points."
+        self._show_status(start_message)
+        self._send_telegram_alert(
+            "route_started",
+            f"Probe route started:\n{start_message}\nCSV: {configuration.csv_path}",
+        )
         self._route_measurement_thread.start()
         self._update_stage_coordinate_apply_state()
 
@@ -5993,6 +6003,7 @@ class Main(QMainWindow):
             self._send_telegram_alert(
                 "route_completed",
                 f"Probe route completed:\n{message}\nCSV: {csv_path}",
+                document_path=Path(csv_path),
             )
         else:
             if self._route_measurement_current_point is not None:
