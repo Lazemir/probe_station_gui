@@ -13,6 +13,52 @@ from pathlib import Path
 import sys
 from typing import Any, Callable, TYPE_CHECKING
 
+_STARTUP_T0 = time.perf_counter()
+_STARTUP_LAST_ELAPSED_MS = 0.0
+_STARTUP_EVENTS: list[tuple[float, float, str]] = []
+_STARTUP_FLUSHED = False
+
+
+def _startup_trace(label: str) -> None:
+    """Record startup timing before the normal logger is ready."""
+
+    global _STARTUP_LAST_ELAPSED_MS
+
+    elapsed_ms = (time.perf_counter() - _STARTUP_T0) * 1000.0
+    delta_ms = elapsed_ms - _STARTUP_LAST_ELAPSED_MS
+    _STARTUP_LAST_ELAPSED_MS = elapsed_ms
+    if _STARTUP_FLUSHED:
+        logging.getLogger(__name__).info(
+            "STARTUP TRACE +%.1fms (+%.1fms) %s",
+            elapsed_ms,
+            delta_ms,
+            label,
+        )
+        return
+    _STARTUP_EVENTS.append((elapsed_ms, delta_ms, label))
+
+
+def _flush_startup_trace() -> None:
+    """Write buffered startup timing into the configured application log."""
+
+    global _STARTUP_FLUSHED
+
+    if _STARTUP_FLUSHED:
+        return
+    log = logging.getLogger(__name__)
+    for elapsed_ms, delta_ms, label in _STARTUP_EVENTS:
+        log.info(
+            "STARTUP TRACE +%.1fms (+%.1fms) %s",
+            elapsed_ms,
+            delta_ms,
+            label,
+        )
+    _STARTUP_EVENTS.clear()
+    _STARTUP_FLUSHED = True
+
+
+_startup_trace("stdlib imports done")
+
 from PySide6.QtCore import (
     QBuffer,
     QIODevice,
@@ -49,6 +95,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+_startup_trace("PySide imports done")
 
 from probe_station_gui import (
     Grabber,
@@ -115,6 +163,8 @@ from probe_station_gui.views.contact_oscillation_window import (
 from probe_station_gui.views.dock_widgets import CollapsibleDockWidget
 from probe_station_gui.views.oscillation_panel import OscillationPanel
 from probe_station_gui.views.serial_connection_panel import SerialConnectionPanel
+
+_startup_trace("application imports done")
 
 
 logger = logging.getLogger(__name__)
@@ -446,6 +496,7 @@ class Main(QMainWindow):
     CONTACT_SEEK_CONFIRM_COUNT = 250
 
     def __init__(self) -> None:
+        _startup_trace("Main.__init__ entered")
         super().__init__()
         self.setWindowTitle("Microscope control")
         self.menuBar().setNativeMenuBar(False)
@@ -463,6 +514,8 @@ class Main(QMainWindow):
         self.serial_port_name: str | None = None
         self.serial_baud_rate: int | None = None
         self.settings_manager: SettingsManager = SettingsManager()
+        _startup_trace("SettingsManager created; logging configured")
+        _flush_startup_trace()
         self._api_bridge: _ApiRequestBridge | None = None
         self._api_server: ProbeStationApiServer | None = None
         self._api_settings_signature: tuple[bool, str, int] | None = None
@@ -681,11 +734,15 @@ class Main(QMainWindow):
         )
 
         self._create_dock_widgets()
+        _startup_trace("dock widgets created")
 
         self._setup_menus()
+        _startup_trace("menus created")
         self._apply_settings()
+        _startup_trace("settings applied")
         self._api_bridge = _ApiRequestBridge(self._handle_api_request, self)
         self._configure_api_server_from_settings(start_if_enabled=False)
+        _startup_trace("API server configured")
 
         QTimer.singleShot(0, self._start_api_server)
         QTimer.singleShot(0, self._auto_connect_if_possible)
@@ -698,6 +755,7 @@ class Main(QMainWindow):
             QMainWindow::separator { width: 8px; height: 8px; background: palette(window); }
             """
         )
+        _startup_trace("Main.__init__ finished")
 
     def _start_camera_thread(self) -> None:
         if not self.thread.isRunning():
@@ -8256,13 +8314,20 @@ def _fit_window_to_screen(window: QMainWindow) -> None:
 
 
 def main() -> int:
+    _startup_trace("main() entered")
     diagnostics_path = configure_crash_diagnostics()
+    _startup_trace("crash diagnostics configured")
     logger.debug("Crash diagnostics enabled: %s", diagnostics_path)
     app = QApplication(sys.argv)
+    _startup_trace("QApplication created")
     window = Main()
+    _startup_trace("Main created")
     _set_initial_window_geometry(window)
+    _startup_trace("initial window geometry set")
     window.show()
+    _startup_trace("window.show() called")
     QTimer.singleShot(0, lambda: _fit_window_to_screen(window))
+    _startup_trace("screen fit scheduled")
     return app.exec()
 
 
