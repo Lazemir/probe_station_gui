@@ -15,7 +15,63 @@ from pathlib import Path
 import sys
 from typing import Any, Callable, TYPE_CHECKING
 
-from PySide6.QtCore import QObject, QLocale, QThread, QTimer, Qt, QUrl, Signal
+_STARTUP_T0 = time.perf_counter()
+_STARTUP_LAST_ELAPSED_MS = 0.0
+_STARTUP_EVENTS: list[tuple[float, float, str]] = []
+_STARTUP_FLUSHED = False
+
+
+def _startup_trace(label: str) -> None:
+    """Record startup timing before the normal logger is ready."""
+
+    global _STARTUP_LAST_ELAPSED_MS
+
+    elapsed_ms = (time.perf_counter() - _STARTUP_T0) * 1000.0
+    delta_ms = elapsed_ms - _STARTUP_LAST_ELAPSED_MS
+    _STARTUP_LAST_ELAPSED_MS = elapsed_ms
+    if _STARTUP_FLUSHED:
+        logging.getLogger(__name__).info(
+            "STARTUP TRACE +%.1fms (+%.1fms) %s",
+            elapsed_ms,
+            delta_ms,
+            label,
+        )
+        return
+    _STARTUP_EVENTS.append((elapsed_ms, delta_ms, label))
+
+
+def _flush_startup_trace() -> None:
+    """Write buffered startup timing into the configured application log."""
+
+    global _STARTUP_FLUSHED
+
+    if _STARTUP_FLUSHED:
+        return
+    log = logging.getLogger(__name__)
+    for elapsed_ms, delta_ms, label in _STARTUP_EVENTS:
+        log.info(
+            "STARTUP TRACE +%.1fms (+%.1fms) %s",
+            elapsed_ms,
+            delta_ms,
+            label,
+        )
+    _STARTUP_EVENTS.clear()
+    _STARTUP_FLUSHED = True
+
+
+_startup_trace("stdlib imports done")
+
+from PySide6.QtCore import (
+    QBuffer,
+    QIODevice,
+    QObject,
+    QLocale,
+    QThread,
+    QTimer,
+    Qt,
+    QUrl,
+    Signal,
+)
 from PySide6.QtGui import (
     QAction,
     QDesktopServices,
@@ -41,6 +97,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+_startup_trace("PySide imports done")
 
 from probe_station_gui import (
     Grabber,
@@ -118,6 +176,10 @@ from probe_station_gui.settings_manager import (
     normalize_objective_name,
     ordered_objective_names,
 )
+from probe_station_gui.telegram_notifications import (
+    resolved_bot_token,
+    send_telegram_message_in_thread,
+)
 from probe_station_gui.views.alignment_panel import AlignmentPanel
 from probe_station_gui.views.contact_oscillation_window import (
     ContactOscillationWindow,
@@ -125,6 +187,8 @@ from probe_station_gui.views.contact_oscillation_window import (
 from probe_station_gui.views.dock_widgets import CollapsibleDockWidget
 from probe_station_gui.views.oscillation_panel import OscillationPanel
 from probe_station_gui.views.serial_connection_panel import SerialConnectionPanel
+
+_startup_trace("application imports done")
 
 
 logger = logging.getLogger(__name__)
@@ -458,6 +522,7 @@ class Main(QMainWindow):
     CONTACT_SEEK_CONFIRM_COUNT = 250
 
     def __init__(self) -> None:
+        _startup_trace("Main.__init__ entered")
         super().__init__()
         self.setWindowTitle("Microscope control")
         self.menuBar().setNativeMenuBar(False)
@@ -475,6 +540,8 @@ class Main(QMainWindow):
         self.serial_port_name: str | None = None
         self.serial_baud_rate: int | None = None
         self.settings_manager: SettingsManager = SettingsManager()
+        _startup_trace("SettingsManager created; logging configured")
+        _flush_startup_trace()
         self._api_bridge: _ApiRequestBridge | None = None
         self._api_server: ProbeStationApiServer | None = None
         self._api_settings_signature: tuple[bool, str, int] | None = None
@@ -561,6 +628,7 @@ class Main(QMainWindow):
         self._latest_camera_frame: QImage | None = None
         self._latest_camera_frame_counter = 0
         self._latest_camera_frame_condition = threading.Condition()
+        self._latest_camera_frame_for_notifications: QImage | None = None
         self._stage_unhomed_display_origins: dict[str, float] = {}
         self._stage_axis_fields: dict[str, QLineEdit] = {}
         self._stage_axis_raw_values: dict[str, float] = {}
@@ -590,6 +658,7 @@ class Main(QMainWindow):
         self._route_measurement_current_point: int | None = None
         self._microscope_scan_thread: threading.Thread | None = None
         self._microscope_scan_stop_requested = threading.Event()
+        self._last_telegram_attention_message = ""
         self._contact_seek_thread: threading.Thread | None = None
         self._contact_seek_stop_requested = threading.Event()
         self._design_session = DesignSession()
@@ -700,11 +769,15 @@ class Main(QMainWindow):
         )
 
         self._create_dock_widgets()
+        _startup_trace("dock widgets created")
 
         self._setup_menus()
+        _startup_trace("menus created")
         self._apply_settings()
+        _startup_trace("settings applied")
         self._api_bridge = _ApiRequestBridge(self._handle_api_request, self)
         self._configure_api_server_from_settings(start_if_enabled=False)
+        _startup_trace("API server configured")
 
         QTimer.singleShot(0, self._start_api_server)
         QTimer.singleShot(0, self._auto_connect_if_possible)
@@ -717,6 +790,7 @@ class Main(QMainWindow):
             QMainWindow::separator { width: 8px; height: 8px; background: palette(window); }
             """
         )
+        _startup_trace("Main.__init__ finished")
 
     def _start_camera_thread(self) -> None:
         if not self.thread.isRunning():
@@ -2043,6 +2117,11 @@ class Main(QMainWindow):
 
     def on_error(self, message: str) -> None:
         logger.error("Camera error: %s", message)
+        self._send_telegram_alert(
+            "camera_error",
+            f"Probe station camera error:\n{message}",
+            attach_photo=True,
+        )
 
     def _on_camera_frame(self, qimg: QImage) -> None:
         now = time.monotonic()
@@ -2058,6 +2137,7 @@ class Main(QMainWindow):
             self._latest_camera_frame = qimg.copy()
             self._latest_camera_frame_counter += 1
             self._latest_camera_frame_condition.notify_all()
+        self._latest_camera_frame_for_notifications = qimg
         self.view.set_frame(qimg)
 
     def _latest_camera_counter(self) -> int:
@@ -3042,6 +3122,12 @@ class Main(QMainWindow):
         )
         app_menu.addAction(api_settings_action)
 
+        telegram_settings_action = QAction("Telegram Settings", self)
+        telegram_settings_action.triggered.connect(
+            lambda _checked=False: self._open_settings_dialog("Telegram")
+        )
+        app_menu.addAction(telegram_settings_action)
+
         open_log_action = QAction("Open Status Log…", self)
         open_log_action.setText("Open Status Log")
         open_log_action.triggered.connect(self._open_status_log)
@@ -3354,6 +3440,77 @@ class Main(QMainWindow):
         self.settings_manager.save()
         self._apply_settings()
         logger.info("Settings updated from dialog")
+
+    def _send_telegram_alert(
+        self,
+        alert_key: str,
+        message: str,
+        *,
+        attach_photo: bool = False,
+        document_path: str | Path | None = None,
+    ) -> None:
+        telegram_settings = self.settings_manager.telegram_configuration()
+        if not telegram_settings.enabled:
+            logger.debug("Telegram alert skipped: disabled alert=%s", alert_key)
+            return
+        if not telegram_settings.alert_enabled(alert_key):
+            logger.debug("Telegram alert skipped: alert=%s is disabled", alert_key)
+            return
+        if not telegram_settings.chat_id.strip():
+            logger.warning(
+                "Telegram alert skipped: chat is not linked alert=%s",
+                alert_key,
+            )
+            return
+        bot_token = resolved_bot_token(telegram_settings)
+        if not bot_token:
+            logger.warning(
+                "Telegram alert skipped: bot token is not configured alert=%s",
+                alert_key,
+            )
+            return
+        photo: tuple[bytes, str] | None = (
+            self._latest_camera_frame_photo() if attach_photo else None
+        )
+        document = Path(document_path).expanduser() if document_path is not None else None
+        if document is not None and (not document.exists() or not document.is_file()):
+            document = None
+        send_telegram_message_in_thread(
+            bot_token=bot_token,
+            chat_id=telegram_settings.chat_id,
+            text=message,
+            photo_bytes=photo[0] if photo is not None else None,
+            photo_name=photo[1] if photo is not None else "microscope.jpg",
+            document_path=document,
+        )
+
+    def _latest_camera_frame_photo(self) -> tuple[bytes, str] | None:
+        frame = self._latest_camera_frame_for_notifications
+        if frame is None or frame.isNull():
+            return None
+        buffer = QBuffer()
+        if not buffer.open(QIODevice.OpenModeFlag.WriteOnly):
+            return None
+        if frame.save(buffer, "JPG", 88):
+            return bytes(buffer.data()), "microscope.jpg"
+        buffer.close()
+        buffer = QBuffer()
+        if not buffer.open(QIODevice.OpenModeFlag.WriteOnly):
+            return None
+        if frame.save(buffer, "PNG"):
+            return bytes(buffer.data()), "microscope.png"
+        return None
+
+    @staticmethod
+    def _route_attention_status(message: str) -> bool:
+        text = str(message or "")
+        if not text.startswith("Route measurement: point "):
+            return False
+        return (
+            "correct contact" in text
+            or "interrupted" in text
+            or "Save Shift" in text
+        )
 
     def _sync_objective_combo(self, objective_name: str) -> None:
         combo = self._objective_combo
@@ -5678,6 +5835,11 @@ class Main(QMainWindow):
             if frame is None:
                 message = "Camera frame is unavailable; cannot capture route photos."
                 self._show_status(message, 8000)
+                self._send_telegram_alert(
+                    "route_failed",
+                    f"Probe route could not start:\n{message}",
+                    attach_photo=True,
+                )
                 if self._route_measurement_dialog is not None:
                     self._route_measurement_dialog.set_status(message)
                 return
@@ -5744,6 +5906,7 @@ class Main(QMainWindow):
         self._route_measurement_runner = runner
         self._route_measurement_waiting = False
         self._route_measurement_point_numbers = [int(point.index) for point in points]
+        self._last_telegram_attention_message = ""
         self._set_route_measurement_pending(True)
         self._route_measurement_thread = threading.Thread(
             target=self._run_route_measurement,
@@ -5762,7 +5925,12 @@ class Main(QMainWindow):
             self._route_measurement_dialog.set_status(
                 f"Route measurement starting: {len(points)} points."
             )
-        self._show_status(f"Route measurement starting: {len(points)} points.")
+        start_message = f"Route measurement starting: {len(points)} points."
+        self._show_status(start_message)
+        self._send_telegram_alert(
+            "route_started",
+            f"Probe route started:\n{start_message}\nCSV: {configuration.csv_path}",
+        )
         self._route_measurement_thread.start()
         self._update_stage_coordinate_apply_state()
 
@@ -6131,6 +6299,16 @@ class Main(QMainWindow):
 
     def _on_route_measurement_status(self, message: str) -> None:
         self._show_status(message)
+        if (
+            self._route_attention_status(message)
+            and message != self._last_telegram_attention_message
+        ):
+            self._last_telegram_attention_message = message
+            self._send_telegram_alert(
+                "route_attention",
+                f"Probe route needs attention:\n{message}",
+                attach_photo=True,
+            )
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_route_measurement_status(message)
         if self._route_measurement_dialog is not None:
@@ -6262,6 +6440,14 @@ class Main(QMainWindow):
                 else ""
             )
             self._show_status(f"{message}{suffix}", 8000)
+            completion_message = f"Probe route completed:\n{message}"
+            if csv_path:
+                completion_message = f"{completion_message}\nCSV: {csv_path}"
+            self._send_telegram_alert(
+                "route_completed",
+                completion_message,
+                document_path=Path(csv_path) if csv_path else None,
+            )
         else:
             if self._route_measurement_current_point is not None:
                 self._set_route_measurement_resume_point(
@@ -6269,6 +6455,11 @@ class Main(QMainWindow):
                 )
             self._set_route_measurement_pending(True)
             self._show_status(message, 8000)
+            self._send_telegram_alert(
+                "route_failed",
+                f"Probe route stopped or failed:\n{message}\nCSV: {csv_path}",
+                attach_photo=True,
+            )
 
     def _route_measurement_next_point_number(self, position: int) -> int | None:
         try:
@@ -8555,6 +8746,12 @@ class Main(QMainWindow):
             self.contact_calibration_window.set_contact_seek_running(False)
             self.contact_calibration_window.set_contact_seek_result(message)
         self._show_status(message, 8000 if not success else 5000)
+        if not success:
+            self._send_telegram_alert(
+                "contact_seek_failed",
+                f"Contact seek needs attention:\n{message}",
+                attach_photo=True,
+            )
 
     def _display_a_for_needle_lowering(self, lowering_mm: float | None) -> float | None:
         if lowering_mm is None:
@@ -8837,13 +9034,20 @@ def _fit_window_to_screen(window: QMainWindow) -> None:
 
 
 def main() -> int:
+    _startup_trace("main() entered")
     diagnostics_path = configure_crash_diagnostics()
+    _startup_trace("crash diagnostics configured")
     logger.debug("Crash diagnostics enabled: %s", diagnostics_path)
     app = QApplication(sys.argv)
+    _startup_trace("QApplication created")
     window = Main()
+    _startup_trace("Main created")
     _set_initial_window_geometry(window)
+    _startup_trace("initial window geometry set")
     window.show()
+    _startup_trace("window.show() called")
     QTimer.singleShot(0, lambda: _fit_window_to_screen(window))
+    _startup_trace("screen fit scheduled")
     return app.exec()
 
 

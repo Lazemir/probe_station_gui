@@ -5,10 +5,12 @@ from __future__ import annotations
 import atexit
 import logging
 import queue
+import re
 from logging.handlers import QueueHandler, QueueListener
 from pathlib import Path
 
 _HANDLER_FLAG = "_probe_station_gui_managed"
+_FILTER_FLAG = "_probe_station_gui_sensitive_filter"
 _LISTENER: QueueListener | None = None
 _LISTENER_HANDLER: logging.Handler | None = None
 _LISTENER_PATH: Path | None = None
@@ -16,6 +18,12 @@ _NOISY_EXTERNAL_LOGGERS = (
     "pyvisa",
     "qcodes",
 )
+_TOKEN_BEARING_EXTERNAL_LOGGERS = (
+    "telegram",
+    "httpx",
+    "httpcore",
+)
+_BOT_API_TOKEN_RE = re.compile(r"bot(\d{5,}:[A-Za-z0-9_-]+)")
 
 
 def configure_logging(log_path: Path, level_name: str) -> None:
@@ -37,11 +45,13 @@ def configure_logging(log_path: Path, level_name: str) -> None:
         handler = _ensure_handler_destination(handler, log_path, root_logger)
 
     handler.setLevel(numeric_level)
+    _ensure_sensitive_filter(handler)
     handler.setFormatter(
         logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     )
     if _LISTENER_HANDLER is not None:
         _LISTENER_HANDLER.setLevel(numeric_level)
+        _ensure_sensitive_filter(_LISTENER_HANDLER)
         _LISTENER_HANDLER.setFormatter(logging.Formatter("%(message)s"))
 
     for existing in root_logger.handlers:
@@ -59,6 +69,40 @@ def _cap_noisy_external_loggers(root_level: int) -> None:
     external_level = max(root_level, logging.INFO)
     for logger_name in _NOISY_EXTERNAL_LOGGERS:
         logging.getLogger(logger_name).setLevel(external_level)
+    token_bearing_level = max(root_level, logging.WARNING)
+    for logger_name in _TOKEN_BEARING_EXTERNAL_LOGGERS:
+        logging.getLogger(logger_name).setLevel(token_bearing_level)
+
+
+class _SensitiveLogFilter(logging.Filter):
+    """Redact secrets that may appear in third-party debug messages."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = self._redact_value(record.msg)
+        if isinstance(record.args, dict):
+            record.args = {
+                key: self._redact_value(value) for key, value in record.args.items()
+            }
+        elif isinstance(record.args, tuple):
+            record.args = tuple(self._redact_value(value) for value in record.args)
+        return True
+
+    @staticmethod
+    def _redact_value(value: object) -> object:
+        if isinstance(value, str):
+            return _BOT_API_TOKEN_RE.sub("bot<redacted-token>", value)
+        return value
+
+
+def _ensure_sensitive_filter(handler: logging.Handler) -> None:
+    """Attach the secret-redacting filter once to the handler."""
+
+    for existing in handler.filters:
+        if getattr(existing, _FILTER_FLAG, False):
+            return
+    log_filter = _SensitiveLogFilter()
+    setattr(log_filter, _FILTER_FLAG, True)
+    handler.addFilter(log_filter)
 
 
 def _create_queue_handler(log_path: Path) -> logging.Handler:

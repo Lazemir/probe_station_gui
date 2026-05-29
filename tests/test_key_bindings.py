@@ -8,6 +8,9 @@ import types
 import unittest
 from pathlib import Path
 
+_ORIGINAL_PROBE_STATION_GUI = sys.modules.get("probe_station_gui")
+_ORIGINAL_LOGGING_CONFIG = sys.modules.get("probe_station_gui.logging_config")
+
 
 def _install_pyside6_stubs() -> None:
     qtcore = types.ModuleType("PySide6.QtCore")
@@ -46,6 +49,18 @@ def _install_probe_station_stubs() -> None:
     sys.modules["probe_station_gui.logging_config"] = logging_config
 
 
+def _restore_probe_station_modules() -> None:
+    if _ORIGINAL_PROBE_STATION_GUI is None:
+        sys.modules.pop("probe_station_gui", None)
+    else:
+        sys.modules["probe_station_gui"] = _ORIGINAL_PROBE_STATION_GUI
+
+    if _ORIGINAL_LOGGING_CONFIG is None:
+        sys.modules.pop("probe_station_gui.logging_config", None)
+    else:
+        sys.modules["probe_station_gui.logging_config"] = _ORIGINAL_LOGGING_CONFIG
+
+
 def _load_module(module_name: str, relative_path: str):
     module_path = Path(__file__).resolve().parents[1] / relative_path
     spec = importlib.util.spec_from_file_location(module_name, module_path)
@@ -62,8 +77,11 @@ qt_compat = _load_module("qt_compat_test", "probe_station_gui/qt_compat.py")
 settings_manager = _load_module(
     "settings_manager_test", "probe_station_gui/settings_manager.py"
 )
+_restore_probe_station_modules()
 KeyBinding = settings_manager.KeyBinding
 ApiSettings = settings_manager.ApiSettings
+TelegramSettings = settings_manager.TelegramSettings
+TELEGRAM_ALERT_TYPES = settings_manager.TELEGRAM_ALERT_TYPES
 JogSettings = settings_manager.JogSettings
 ClickToMoveSettings = settings_manager.ClickToMoveSettings
 NeedleCalibrationSettings = settings_manager.NeedleCalibrationSettings
@@ -98,6 +116,49 @@ class KeyBindingRoundTripTest(unittest.TestCase):
             self.assertGreater(scan_code, 0)
         else:
             self.assertEqual(scan_code, 0)
+
+
+class TelegramSettingsTest(unittest.TestCase):
+    def test_telegram_settings_round_trip_preserves_alerts_without_token(self) -> None:
+        settings = TelegramSettings(
+            enabled=True,
+            bot_token="123:abc",
+            bot_username="probe_station_bot",
+            chat_id="456",
+            chat_title="Lab User",
+            linked_at_utc="2026-05-28T12:00:00+00:00",
+            alerts={
+                "route_attention": True,
+                "route_started": True,
+                "route_completed": False,
+                "route_failed": True,
+                "contact_seek_failed": False,
+                "camera_error": True,
+            },
+        )
+
+        serialized = settings.to_dict()
+        restored = TelegramSettings(**serialized)
+
+        self.assertNotIn("bot_token", serialized)
+        self.assertEqual(restored.bot_token, "")
+        self.assertEqual(restored.enabled, settings.enabled)
+        self.assertEqual(restored.bot_username, settings.bot_username)
+        self.assertEqual(restored.chat_id, settings.chat_id)
+        self.assertEqual(restored.chat_title, settings.chat_title)
+        self.assertEqual(restored.linked_at_utc, settings.linked_at_utc)
+        self.assertEqual(restored.alerts, settings.alerts)
+        self.assertFalse(restored.alert_enabled("route_completed"))
+        self.assertFalse(restored.alert_enabled("unknown"))
+
+    def test_default_telegram_alerts_cover_declared_types(self) -> None:
+        settings = TelegramSettings()
+
+        self.assertEqual(
+            set(settings.alerts),
+            {key for key, _label in TELEGRAM_ALERT_TYPES},
+        )
+        self.assertTrue(all(settings.alerts.values()))
 
 
 class NeedleCalibrationBookmarkTest(unittest.TestCase):
