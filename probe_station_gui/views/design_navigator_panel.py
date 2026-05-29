@@ -110,6 +110,7 @@ class _DesignPlotPane(QWidget):
         self._plot = None
         self._status_label: QLabel | None = None
         self._route_geometry_redraw_timer: QTimer | None = None
+        self._route_geometry_deferred = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -334,9 +335,9 @@ class _DesignPlotPane(QWidget):
         self._plot.hide()
 
     def _on_view_range_changed(self) -> None:
+        self._schedule_route_geometry_redraw()
         self._redraw_axis_triad()
         self._redraw_current_position_overlay()
-        self._schedule_route_geometry_redraw()
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
@@ -349,15 +350,36 @@ class _DesignPlotPane(QWidget):
     def _schedule_route_geometry_redraw(self) -> None:
         if self._route_geometry_redraw_timer is None:
             return
+        if self._route_geometry_deferred and self._route_geometry_redraw_timer.isActive():
+            return
+        self._route_geometry_deferred = True
         if not self._route_geometry_redraw_timer.isActive():
             self._route_geometry_redraw_timer.start()
+        self._clear_route_arrows()
 
     def _redraw_route_geometry(self) -> None:
         if self._plot is None:
             return
+        if self._probe_route is None and not self._probe_route_preview_points:
+            self._route_geometry_deferred = False
+            self._clear_route_arrows()
+            return
+        if self._route_geometry_pixel_size() is None:
+            self._route_geometry_deferred = True
+            self._clear_route_arrows()
+            if self.isVisible() and self._route_geometry_redraw_timer is not None:
+                self._route_geometry_redraw_timer.start(16)
+            return
+        self._route_geometry_deferred = False
         self._redraw_probe_route()
         self._redraw_route_preview()
         self._plot.update()
+
+    def _clear_route_arrows(self) -> None:
+        if self._plot is None:
+            return
+        self._probe_route_arrow_item.setData([], [])
+        self._probe_route_preview_arrow_item.setData([], [])
 
     def set_document(self, document: DesignDocument | None) -> None:
         same_document = document is self._document
@@ -405,8 +427,8 @@ class _DesignPlotPane(QWidget):
     ) -> None:
         self._probe_route = route
         self._selected_route_point_index = selected_route_point_index
-        self._redraw_overlays()
         self._schedule_route_geometry_redraw()
+        self._redraw_overlays()
 
     def set_probe_route_preview(self, preview: object) -> None:
         if (
@@ -428,8 +450,8 @@ class _DesignPlotPane(QWidget):
         else:
             self._probe_route_preview_points = []
             self._probe_route_preview_offsets = []
-        self._redraw_overlays()
         self._schedule_route_geometry_redraw()
+        self._redraw_overlays()
 
     def set_tool_measure_points(self, points: object) -> None:
         if isinstance(points, list):
@@ -1010,7 +1032,11 @@ class _DesignPlotPane(QWidget):
     ) -> tuple[list[float], list[float]]:
         if len(centers) < 2:
             return [], []
-        pixel_size = self._data_units_per_screen_pixel() or 1.0
+        if self._route_geometry_deferred:
+            return [], []
+        pixel_size = self._route_geometry_pixel_size()
+        if pixel_size is None:
+            return [], []
         reference_length = self._first_segment_length(centers)
         if reference_length <= 1e-12:
             return [], []
@@ -1231,6 +1257,18 @@ class _DesignPlotPane(QWidget):
         if snap_result.distance > snap_threshold:
             return SnapResult(point=raw_point, mode="free", distance=0.0)
         return snap_result
+
+    def _route_geometry_pixel_size(self) -> float | None:
+        if self._plot is None or not self._plot.isVisible():
+            return None
+        view_box = self._plot.getViewBox()
+        scene_rect = view_box.sceneBoundingRect()
+        if scene_rect.width() <= 0.0 or scene_rect.height() <= 0.0:
+            return None
+        pixel_size = self._data_units_per_screen_pixel()
+        if pixel_size is None or not math.isfinite(pixel_size) or pixel_size <= 0.0:
+            return None
+        return pixel_size
 
     def _snap_distance_threshold(self) -> float | None:
         pixel_size = self._data_units_per_screen_pixel()
