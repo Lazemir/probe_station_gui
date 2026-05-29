@@ -64,6 +64,7 @@ from probe_station_gui.telegram_notifications import (
     LinkedTelegramChat,
     TELEGRAM_BOT_TOKEN_ENV,
     TelegramNotificationError,
+    can_manage_global_bot_token,
     create_start_payload,
     global_telegram_token_path,
     load_global_bot_token,
@@ -372,6 +373,7 @@ class TelegramSettingsWidget(QWidget):
         self._thread: QThread | None = None
         self._worker: TelegramLinkWorker | None = None
         self._token_from_env = bool(os.environ.get(TELEGRAM_BOT_TOKEN_ENV, "").strip())
+        self._can_manage_global_token = can_manage_global_bot_token()
         global_token = load_global_bot_token()
         token_text = global_token or telegram_settings.bot_token
 
@@ -391,6 +393,9 @@ class TelegramSettingsWidget(QWidget):
             self._token_edit.setPlaceholderText(
                 f"Provided by {TELEGRAM_BOT_TOKEN_ENV}"
             )
+            self._token_edit.setEnabled(False)
+        elif not self._can_manage_global_token:
+            self._token_edit.setPlaceholderText("Managed by administrator")
             self._token_edit.setEnabled(False)
         else:
             self._token_edit.setPlaceholderText("Machine-wide bot token")
@@ -428,6 +433,10 @@ class TelegramSettingsWidget(QWidget):
         self._status_label = QLabel("", self)
         self._status_label.setWordWrap(True)
         root_layout.addWidget(self._status_label)
+        if not self._token_from_env and not self._can_manage_global_token:
+            self._status_label.setText(
+                "Machine-wide bot token can be changed only by an administrator."
+            )
 
         self._linked_chat_id = telegram_settings.chat_id
         self._linked_chat_title = telegram_settings.chat_title
@@ -447,7 +456,7 @@ class TelegramSettingsWidget(QWidget):
         telegram = settings.telegram.clone()
         telegram.enabled = self._enabled_checkbox.isChecked()
         telegram.bot_token = ""
-        if not self._token_from_env:
+        if not self._token_from_env and self._can_manage_global_token:
             try:
                 save_global_bot_token(self._token_edit.text().strip())
             except OSError as exc:

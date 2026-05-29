@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 from io import BytesIO
 import json
 import logging
@@ -10,6 +11,7 @@ import os
 import platform
 import re
 import secrets
+import subprocess
 import threading
 import time
 from dataclasses import dataclass
@@ -92,9 +94,30 @@ def load_global_bot_token() -> str:
     return ""
 
 
+def can_manage_global_bot_token() -> bool:
+    """Return whether the current process may change the machine-wide token."""
+
+    system = platform.system()
+    if system == "Windows":
+        try:
+            return bool(
+                ctypes.windll.shell32.IsUserAnAdmin()  # type: ignore[attr-defined]
+            )
+        except Exception:
+            return False
+    geteuid = getattr(os, "geteuid", None)
+    if callable(geteuid):
+        return geteuid() == 0
+    return False
+
+
 def save_global_bot_token(bot_token: str) -> Path:
     """Save or clear the machine-wide Telegram bot token."""
 
+    if not can_manage_global_bot_token():
+        raise PermissionError(
+            "Machine-wide Telegram bot token can be changed only by an administrator."
+        )
     path = global_telegram_token_path()
     token = str(bot_token or "").strip()
     if not token:
@@ -103,16 +126,45 @@ def save_global_bot_token(bot_token: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         json.dump({"bot_token": token}, handle, indent=2, ensure_ascii=False)
+    _harden_global_bot_token_permissions(path)
     return path
 
 
 def clear_global_bot_token() -> None:
     """Remove the machine-wide Telegram bot token file if it exists."""
 
+    if not can_manage_global_bot_token():
+        raise PermissionError(
+            "Machine-wide Telegram bot token can be changed only by an administrator."
+        )
     try:
         global_telegram_token_path().unlink()
     except FileNotFoundError:
         return
+
+
+def _harden_global_bot_token_permissions(path: Path) -> None:
+    """Best-effort Windows ACL hardening for the machine-wide token file."""
+
+    if platform.system() != "Windows":
+        return
+    try:
+        subprocess.run(
+            [
+                "icacls",
+                str(path),
+                "/inheritance:r",
+                "/grant:r",
+                "*S-1-5-32-544:F",
+                "*S-1-5-18:F",
+                "*S-1-5-11:R",
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        logger.warning("Failed to harden Telegram bot token ACL: %s", exc)
 
 
 def resolved_bot_token(settings: object | None = None) -> str:
