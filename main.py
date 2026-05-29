@@ -7557,7 +7557,9 @@ class Main(QMainWindow):
             self._on_needles_action_finished
         )
         self.joystick_panel.reset_requested.connect(
-            self.stage_controller.cancel_active_task
+            lambda: self.stage_controller.reset_controller(
+                source="joystick_reset_button"
+            )
         )
         self.stage_controller.stage_position_changed.connect(self._persist_controller_state)
         self.joystick_dock = CollapsibleDockWidget("Joystick", self)

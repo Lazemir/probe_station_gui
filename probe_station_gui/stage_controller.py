@@ -1408,7 +1408,38 @@ class StageController(QObject):
         self._set_needles_state(False, known=False)
 
     def cancel_active_task(self, reason: str = "Operation cancelled.") -> None:
-        """Signal any active task to stop as soon as possible."""
+        """Signal any active task to stop without forcing a controller reset."""
+
+        self._cancel_event.set()
+        with self._task_lock:
+            had_needles_action = (
+                self._active_needles_action is not None
+                or bool(self._queued_needles_actions)
+                or bool(self._oscillation_needles_actions)
+            )
+            self._queued_needles_actions.clear()
+            self._oscillation_needles_actions.clear()
+            self._active_needles_action = None
+            self._active_needles_programmed_feedrate = None
+        self.status_message.emit(reason)
+        self.queue_jog_stop()
+        if had_needles_action:
+            self._set_needles_state(False, known=False)
+
+    def cancel_active_motion(self, reason: str = "Motion cancel requested.") -> None:
+        """Cancel a jog-backed motion without resetting controller state."""
+
+        self._cancel_event.set()
+        self.queue_jog_stop()
+        self.status_message.emit(reason)
+
+    def reset_controller(
+        self,
+        *,
+        source: str = "unknown",
+        reason: str = "Controller reset requested.",
+    ) -> None:
+        """Abort current work and request a FluidNC soft reset."""
 
         self._cancel_event.set()
         with self._task_lock:
@@ -1417,16 +1448,7 @@ class StageController(QObject):
             self._active_needles_action = None
             self._active_needles_programmed_feedrate = None
         self.status_message.emit(reason)
-        self._update_homing_status(set())
-        self._set_needles_state(False, known=False)
-        self.queue_soft_reset(source="cancel_active_task")
-
-    def cancel_active_motion(self, reason: str = "Motion cancel requested.") -> None:
-        """Cancel a jog-backed motion without resetting controller state."""
-
-        self._cancel_event.set()
-        self.queue_jog_stop()
-        self.status_message.emit(reason)
+        self.queue_soft_reset(source=source)
 
     def is_busy(self) -> bool:
         """Return True when a background movement task is currently running."""
@@ -2338,6 +2360,7 @@ class StageController(QObject):
             self._send_relative_move(
                 serial_connection,
                 move,
+                as_jog=True,
                 motion_started_callback=lambda _move, feedrate: (
                     self.absolute_xy_move_started.emit(
                         float(target_x_mm),
@@ -2390,6 +2413,7 @@ class StageController(QObject):
                 self._send_relative_move(
                     serial_connection,
                     MoveVector(z=transit_z - current_z),
+                    as_jog=True,
                 )
                 current_z = transit_z
                 moved = True
@@ -2401,7 +2425,7 @@ class StageController(QObject):
                 self.status_message.emit(
                     f"Moving to {label} X={target_x_mm:.3f} mm, Y={target_y_mm:.3f} mm"
                 )
-                self._send_relative_move(serial_connection, xy_move)
+                self._send_relative_move(serial_connection, xy_move, as_jog=True)
                 current_x = float(target_position[0])
                 current_y = float(target_position[1])
                 moved = True
@@ -2414,6 +2438,7 @@ class StageController(QObject):
                 self._send_relative_move(
                     serial_connection,
                     MoveVector(z=delta_z),
+                    as_jog=True,
                 )
                 moved = True
 
@@ -2489,6 +2514,7 @@ class StageController(QObject):
             self._send_relative_move(
                 serial_connection,
                 move,
+                as_jog=True,
                 motion_started_callback=self._emit_click_move_started,
             )
             return before_counter
@@ -2509,6 +2535,7 @@ class StageController(QObject):
                     serial_connection,
                     MoveVector(b=delta_deg),
                     allow_relative=True,
+                    as_jog=True,
                 )
             self.movement_finished.emit(
                 True,
@@ -2657,6 +2684,7 @@ class StageController(QObject):
                 serial_connection,
                 MoveVector(z=lower_z - current_z),
                 allow_relative=True,
+                as_jog=True,
             )
 
         with self._frame_condition:
@@ -2673,6 +2701,7 @@ class StageController(QObject):
             MoveVector(z=upper_z - lower_z),
             allow_relative=True,
             feedrate=feedrate,
+            as_jog=True,
         )
         actual_ended_at = time.monotonic()
         samples = self._frame_samples(
@@ -2960,6 +2989,7 @@ class StageController(QObject):
                 serial_connection,
                 MoveVector(z=approach_z - current_z),
                 allow_relative=True,
+                as_jog=True,
             )
             current_z = approach_z
         if abs(target - current_z) >= 1e-5:
@@ -2967,6 +2997,7 @@ class StageController(QObject):
                 serial_connection,
                 MoveVector(z=target - current_z),
                 allow_relative=True,
+                as_jog=True,
             )
 
     def _frame_samples(
@@ -3484,6 +3515,7 @@ class StageController(QObject):
         self._send_relative_move(
             serial_connection,
             move,
+            as_jog=True,
             motion_started_callback=self._emit_click_move_started,
         )
         return (True, before_counter)
@@ -3696,6 +3728,7 @@ class StageController(QObject):
                         segment_target_a,
                         ignore_needle_safety=True,
                         feedrate=programmed_feedrate,
+                        as_jog=True,
                     )
                 finally:
                     self._end_needles_feedrate_control()
@@ -3706,6 +3739,7 @@ class StageController(QObject):
                     segment_target_a,
                     ignore_needle_safety=True,
                     feedrate=segment_feedrate,
+                    as_jog=True,
                 )
             current_a = segment_target_a
         self._update_needles_from_a_position(target_a)
@@ -3845,6 +3879,7 @@ class StageController(QObject):
                     feedrate=feedrate,
                     wait_for_completion=False,
                     allow_unhomed=allow_unhomed or mode == "G91",
+                    as_jog=True,
                 )
             self.movement_finished.emit(
                 True,
@@ -4004,6 +4039,7 @@ class StageController(QObject):
                     target_a,
                     ignore_needle_safety=True,
                     feedrate=programmed_feedrate,
+                    as_jog=True,
                 )
             finally:
                 self._end_needles_feedrate_control()
@@ -4151,6 +4187,7 @@ class StageController(QObject):
         feedrate: Optional[float] = None,
         wait_for_completion: bool = True,
         motion_started_callback: Optional[Callable[[MoveVector, float], None]] = None,
+        as_jog: bool = False,
     ) -> None:
         if move.is_zero():
             return
@@ -4166,10 +4203,6 @@ class StageController(QObject):
             self._check_relative_move_limits(
                 serial_connection, move, allow_relative=allow_relative
             )
-        self._write_command(serial_connection, "G21")
-        self._wait_for_ok(serial_connection)
-        self._write_command(serial_connection, "G91")
-        self._wait_for_ok(serial_connection)
         move_parts: list[str] = [
             f"{axis}{value:.4f}"
             for axis, value in move.items()
@@ -4187,6 +4220,28 @@ class StageController(QObject):
             + f" F{self._format_gcode_value(effective_feedrate)}"
         )
         self._reset_feed_override_for_serial(serial_connection)
+        if as_jog:
+            command = (
+                "$J=G91 G21 "
+                + " ".join(move_parts)
+                + f" F{self._format_gcode_value(effective_feedrate)}"
+            )
+            self._write_command(serial_connection, command)
+            self._wait_for_ok(serial_connection)
+            if motion_started_callback is not None:
+                motion_started_callback(move, effective_feedrate)
+            if wait_for_completion:
+                self._wait_for_idle(
+                    serial_connection,
+                    timeout=self._idle_timeout_for_distance(
+                        move_distance, effective_feedrate
+                    ),
+                )
+            return
+        self._write_command(serial_connection, "G21")
+        self._wait_for_ok(serial_connection)
+        self._write_command(serial_connection, "G91")
+        self._wait_for_ok(serial_connection)
         self._write_command(serial_connection, command)
         self._wait_for_ok(serial_connection)
         if motion_started_callback is not None:
@@ -4317,6 +4372,7 @@ class StageController(QObject):
         feedrate: Optional[float] = None,
         wait_for_completion: bool = True,
         allow_unhomed: bool = False,
+        as_jog: bool = False,
     ) -> None:
         axis = axis.upper().strip()
         self._send_absolute_axis_targets_move(
@@ -4326,6 +4382,7 @@ class StageController(QObject):
             feedrate=feedrate,
             wait_for_completion=wait_for_completion,
             allow_unhomed=allow_unhomed,
+            as_jog=as_jog,
         )
 
     def _absolute_axis_targets_jog_command(
