@@ -3286,13 +3286,23 @@ class Main(QMainWindow):
     ) -> None:
         telegram_settings = self.settings_manager.telegram_configuration()
         if not telegram_settings.enabled:
+            logger.debug("Telegram alert skipped: disabled alert=%s", alert_key)
             return
         if not telegram_settings.alert_enabled(alert_key):
+            logger.debug("Telegram alert skipped: alert=%s is disabled", alert_key)
             return
         if not telegram_settings.chat_id.strip():
+            logger.warning(
+                "Telegram alert skipped: chat is not linked alert=%s",
+                alert_key,
+            )
             return
         bot_token = resolved_bot_token(telegram_settings)
         if not bot_token:
+            logger.warning(
+                "Telegram alert skipped: bot token is not configured alert=%s",
+                alert_key,
+            )
             return
         photo: tuple[bytes, str] | None = (
             self._latest_camera_frame_photo() if attach_photo else None
