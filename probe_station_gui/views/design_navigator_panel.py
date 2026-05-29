@@ -109,6 +109,7 @@ class _DesignPlotPane(QWidget):
         self._snap_generation = 0
         self._plot = None
         self._status_label: QLabel | None = None
+        self._route_geometry_redraw_timer: QTimer | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -299,6 +300,10 @@ class _DesignPlotPane(QWidget):
         self._hover_timer.setSingleShot(True)
         self._hover_timer.setInterval(16)
         self._hover_timer.timeout.connect(self._flush_hover_snap)
+        self._route_geometry_redraw_timer = QTimer(self)
+        self._route_geometry_redraw_timer.setSingleShot(True)
+        self._route_geometry_redraw_timer.setInterval(0)
+        self._route_geometry_redraw_timer.timeout.connect(self._redraw_route_geometry)
         self.snap_geometry_ready.connect(self._on_snap_geometry_ready)
         self._plot.addItem(self._hover_item)
         self._plot.addItem(self._target_item)
@@ -331,6 +336,28 @@ class _DesignPlotPane(QWidget):
     def _on_view_range_changed(self) -> None:
         self._redraw_axis_triad()
         self._redraw_current_position_overlay()
+        self._schedule_route_geometry_redraw()
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._schedule_route_geometry_redraw()
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._schedule_route_geometry_redraw()
+
+    def _schedule_route_geometry_redraw(self) -> None:
+        if self._route_geometry_redraw_timer is None:
+            return
+        if not self._route_geometry_redraw_timer.isActive():
+            self._route_geometry_redraw_timer.start()
+
+    def _redraw_route_geometry(self) -> None:
+        if self._plot is None:
+            return
+        self._redraw_probe_route()
+        self._redraw_route_preview()
+        self._plot.update()
 
     def set_document(self, document: DesignDocument | None) -> None:
         same_document = document is self._document
@@ -379,6 +406,7 @@ class _DesignPlotPane(QWidget):
         self._probe_route = route
         self._selected_route_point_index = selected_route_point_index
         self._redraw_overlays()
+        self._schedule_route_geometry_redraw()
 
     def set_probe_route_preview(self, preview: object) -> None:
         if (
@@ -401,6 +429,7 @@ class _DesignPlotPane(QWidget):
             self._probe_route_preview_points = []
             self._probe_route_preview_offsets = []
         self._redraw_overlays()
+        self._schedule_route_geometry_redraw()
 
     def set_tool_measure_points(self, points: object) -> None:
         if isinstance(points, list):
@@ -547,6 +576,7 @@ class _DesignPlotPane(QWidget):
             self._layer_items.append(line)
             point_count += len(x_data)
         self.focus_bounds()
+        self._schedule_route_geometry_redraw()
         logger.debug(
             "DESIGN RENDER full items=%d points=%d elapsed_ms=%.2f",
             len(self._layer_items),
