@@ -251,7 +251,7 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
         lcr = _OpeningLCR([5.0])
         photos: list[tuple[int, int, int]] = []
 
-        def capture(point, position, total) -> str:
+        def capture(point, position, total, _focus_result) -> str:
             photos.append((point.index, position, total))
             return f"photo-{point.index}.png"
 
@@ -289,7 +289,7 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
         point = _point(1)
         stage = _FakeStage()
 
-        def capture(_point, _position, _total) -> str:
+        def capture(_point, _position, _total, _focus_result) -> str:
             stage.calls.append(("photo", _point.index))
             return "photo.png"
 
@@ -316,12 +316,18 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
     def test_photo_focus_runs_after_raise_and_before_capture(self) -> None:
         point = _point(1)
         stage = _FakeStage()
+        records = []
 
-        def focus(_point, _position, _total) -> str:
+        def focus(_point, _position, _total) -> dict[str, object]:
             stage.calls.append(("focus", _point.index))
-            return "focused"
+            return {
+                "focus_start_z_mm": 1.0,
+                "focus_best_z_mm": 1.02,
+                "focus_delta_um": 20.0,
+            }
 
-        def capture(_point, _position, _total) -> str:
+        def capture(_point, _position, _total, focus_result) -> str:
+            stage.calls.append(("focus_result", focus_result))
             stage.calls.append(("photo", _point.index))
             return "photo.png"
 
@@ -335,6 +341,9 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                 operation_mode=ROUTE_OPERATION_PHOTO,
                 photo_callback=capture,
                 photo_focus_callback=focus,
+                photo_record_callback=lambda record, _position, _total: records.append(
+                    record
+                ),
                 photo_focus_enabled=True,
                 photo_settle_s=0.0,
             )
@@ -347,6 +356,9 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
         photo_index = stage.calls.index(("photo", 1))
         self.assertLess(raise_index, focus_index)
         self.assertLess(focus_index, photo_index)
+        self.assertEqual(records[0].focus["focus_best_z_mm"], 1.02)
+        self.assertEqual(records[0].design_center, point.design_center)
+        self.assertEqual(records[0].stage_xy, point.stage_xy)
 
     def test_runner_reports_progress_with_route_point_number(self) -> None:
         points = [

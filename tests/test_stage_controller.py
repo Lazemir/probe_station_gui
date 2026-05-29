@@ -1076,9 +1076,12 @@ class StageControllerAutofocusTest(unittest.TestCase):
         controller._run_static_focus_refinement_locked = _static
         controller._approach_z_from_below_locked = _approach
 
-        message = controller.run_external_local_autofocus(range_mm=0.030)
+        result = controller.run_external_local_autofocus(range_mm=0.030)
 
-        self.assertIn("local complete", message)
+        self.assertIn("local complete", result.summary())
+        self.assertAlmostEqual(result.best_z_mm, 10.012)
+        self.assertAlmostEqual(result.delta_um, 12.0)
+        self.assertEqual(result.to_dict()["focus_best_z_mm"], 10.012)
         self.assertEqual(finished[-1][0], True)
         self.assertEqual(
             calls,

@@ -1,7 +1,11 @@
 import sys
+import csv
 import threading
 import time
+import tempfile
+import types
 import unittest
+from pathlib import Path
 
 
 def _restore_real_imports_for_main() -> None:
@@ -22,6 +26,7 @@ def _restore_real_imports_for_main() -> None:
 
 _restore_real_imports_for_main()
 from main import Main
+from probe_station_gui.route_measurement import RoutePhotoRecord
 from probe_station_gui.settings_manager import Settings
 
 
@@ -339,6 +344,51 @@ class MainCoordinateFeedrateTest(unittest.TestCase):
         self.assertIsNotNone(frame)
         self.assertEqual(frame.name, "old")
         self.assertEqual(counter, 7)
+
+    def test_record_route_photo_writes_focus_map_csv(self) -> None:
+        window = Main.__new__(Main)
+        window._design_session = types.SimpleNamespace(
+            route=types.SimpleNamespace(name="route-a")
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            photo_path = Path(tmpdir) / "photos" / "point-001.png"
+            record = RoutePhotoRecord(
+                timestamp="2026-05-29T12:00:00+03:00",
+                path=str(photo_path),
+                structure_number=1,
+                point_index=1,
+                point_id="p001",
+                label="P001",
+                design_center=(10.0, 20.0),
+                stage_xy=(1.0, 2.0),
+                focus={
+                    "objective_name": "X20",
+                    "focus_start_z_mm": 9.98,
+                    "focus_best_z_mm": 10.0,
+                    "focus_delta_um": 20.0,
+                    "focus_score": 12.5,
+                    "focus_sample_count": 7,
+                    "focus_edge_peak": False,
+                    "autofocus_range_mm": 0.03,
+                    "autofocus_fine_step_mm": 0.005,
+                    "autofocus_lower_z_mm": 9.95,
+                    "autofocus_upper_z_mm": 10.01,
+                },
+            )
+
+            Main._record_route_photo(window, record, 1, 3)
+
+            focus_map_path = photo_path.parent / "route-photo-focus-map.csv"
+            with focus_map_path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["route_name"], "route-a")
+        self.assertEqual(rows[0]["photo_path"], str(photo_path))
+        self.assertEqual(rows[0]["design_x"], "10.0")
+        self.assertEqual(rows[0]["stage_y"], "2.0")
+        self.assertEqual(rows[0]["focus_best_z_mm"], "10.0")
+        self.assertEqual(rows[0]["focus_delta_um"], "20.0")
 
     def test_saving_needle_down_target_does_not_reapply_full_settings(self) -> None:
         window = Main.__new__(Main)

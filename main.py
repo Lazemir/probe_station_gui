@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import csv
 import json
 import math
+import os
 import re
 import threading
 import time
@@ -87,6 +89,7 @@ from probe_station_gui.route_measurement import (
     ROUTE_OPERATION_PHOTO,
     ROUTE_OPERATION_PHOTO_THEN_MEASURE,
     RouteMeasurementPoint,
+    RoutePhotoRecord,
     RouteMeasurementRecord,
     RouteMeasurementRunner,
     route_measurement_sample_from_raw,
@@ -5718,11 +5721,12 @@ class Main(QMainWindow):
             status_callback=self.route_measurement_status.emit,
             progress_callback=self.route_measurement_progress.emit,
             record_callback=self.route_measurement_recorded.emit,
-            photo_callback=lambda point, position, total: self._capture_route_photo(
+            photo_callback=lambda point, position, total, focus_result: self._capture_route_photo(
                 point,
                 position,
                 total,
                 configuration=configuration,
+                focus_result=focus_result,
             ),
             photo_focus_callback=lambda point, position, total: self._route_photo_autofocus(
                 point,
@@ -5730,6 +5734,7 @@ class Main(QMainWindow):
                 total,
                 configuration=configuration,
             ),
+            photo_record_callback=self._record_route_photo,
             result_callback=self.route_measurement_result.emit,
             waiting_callback=self.route_measurement_waiting_changed.emit,
             operation_mode=configuration.operation_mode,
@@ -5810,6 +5815,7 @@ class Main(QMainWindow):
         total: int,
         *,
         configuration: RouteMeasurementRunConfiguration,
+        focus_result: object | None = None,
     ) -> str:
         scale = self._active_microscope_scale()
         if scale is None:
@@ -5834,6 +5840,7 @@ class Main(QMainWindow):
         stage_position = self._stage_position_for_image_metadata(
             stage_xy=point.stage_xy
         )
+        focus_data = self._route_photo_focus_payload(focus_result)
         metadata = MicroscopeImageMetadata(
             title="Probe Station Microscope",
             mode="route photo"
@@ -5868,6 +5875,7 @@ class Main(QMainWindow):
                 "photo_autofocus_range_mm": float(
                     configuration.photo_autofocus_range_mm
                 ),
+                "autofocus": focus_data,
             },
         )
         result = save_microscope_image(
@@ -5886,7 +5894,7 @@ class Main(QMainWindow):
         total: int,
         *,
         configuration: RouteMeasurementRunConfiguration,
-    ) -> str:
+    ) -> object:
         _ = point
         self._show_status(
             f"Route photo autofocus: point {position}/{total}, "
@@ -5895,6 +5903,112 @@ class Main(QMainWindow):
         return self.stage_controller.run_external_local_autofocus(
             range_mm=configuration.photo_autofocus_range_mm,
         )
+
+    @staticmethod
+    def _route_photo_focus_payload(focus_result: object | None) -> dict[str, object] | None:
+        if focus_result is None:
+            return None
+        if isinstance(focus_result, dict):
+            return dict(focus_result)
+        to_dict = getattr(focus_result, "to_dict", None)
+        if callable(to_dict):
+            data = to_dict()
+            return dict(data) if isinstance(data, dict) else None
+        return None
+
+    def _record_route_photo(
+        self,
+        record: RoutePhotoRecord,
+        position: int,
+        total: int,
+    ) -> None:
+        if not record.focus:
+            return
+        try:
+            path = self._route_photo_focus_map_path(record)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            exists = path.exists() and path.stat().st_size > 0
+            with path.open("a", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=self._ROUTE_PHOTO_FOCUS_MAP_FIELDS,
+                )
+                if not exists:
+                    writer.writeheader()
+                writer.writerow(
+                    self._route_photo_focus_map_row(record, position, total)
+                )
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as exc:
+            logger.warning("Unable to write route photo focus map: %s", exc)
+
+    _ROUTE_PHOTO_FOCUS_MAP_FIELDS = (
+        "timestamp",
+        "route_name",
+        "route_position",
+        "route_total",
+        "structure_number",
+        "point_index",
+        "point_id",
+        "label",
+        "design_x",
+        "design_y",
+        "stage_x",
+        "stage_y",
+        "photo_path",
+        "objective_name",
+        "focus_start_z_mm",
+        "focus_best_z_mm",
+        "focus_delta_um",
+        "focus_score",
+        "focus_sample_count",
+        "focus_edge_peak",
+        "autofocus_range_mm",
+        "autofocus_fine_step_mm",
+        "autofocus_lower_z_mm",
+        "autofocus_upper_z_mm",
+    )
+
+    @staticmethod
+    def _route_photo_focus_map_path(record: RoutePhotoRecord) -> Path:
+        return Path(record.path).expanduser().resolve().parent / "route-photo-focus-map.csv"
+
+    def _route_photo_focus_map_row(
+        self,
+        record: RoutePhotoRecord,
+        position: int,
+        total: int,
+    ) -> dict[str, object]:
+        route = self._design_session.route
+        route_name = route.name if route is not None else ""
+        focus = record.focus or {}
+        return {
+            "timestamp": record.timestamp,
+            "route_name": route_name,
+            "route_position": int(position),
+            "route_total": int(total),
+            "structure_number": int(record.structure_number),
+            "point_index": int(record.point_index),
+            "point_id": record.point_id,
+            "label": record.label,
+            "design_x": float(record.design_center[0]),
+            "design_y": float(record.design_center[1]),
+            "stage_x": float(record.stage_xy[0]),
+            "stage_y": float(record.stage_xy[1]),
+            "photo_path": record.path,
+            "objective_name": focus.get("objective_name", ""),
+            "focus_start_z_mm": focus.get("focus_start_z_mm", ""),
+            "focus_best_z_mm": focus.get("focus_best_z_mm", ""),
+            "focus_delta_um": focus.get("focus_delta_um", ""),
+            "focus_score": focus.get("focus_score", ""),
+            "focus_sample_count": focus.get("focus_sample_count", ""),
+            "focus_edge_peak": focus.get("focus_edge_peak", ""),
+            "autofocus_range_mm": focus.get("autofocus_range_mm", ""),
+            "autofocus_fine_step_mm": focus.get("autofocus_fine_step_mm", ""),
+            "autofocus_lower_z_mm": focus.get("autofocus_lower_z_mm", ""),
+            "autofocus_upper_z_mm": focus.get("autofocus_upper_z_mm", ""),
+        }
 
     def _run_route_measurement(self, runner: RouteMeasurementRunner) -> None:
         success, message = runner.run()

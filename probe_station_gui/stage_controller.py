@@ -117,6 +117,56 @@ class _FocusSweepResult:
 
 
 @dataclass(frozen=True)
+class AutofocusResult:
+    """Structured autofocus result suitable for logs and height maps."""
+
+    objective_name: str
+    mode: str
+    start_z_mm: float
+    best_z_mm: float
+    best_score: float
+    sample_count: int
+    edge_peak: bool
+    range_mm: float
+    fine_step_mm: float
+    lower_z_mm: float
+    upper_z_mm: float
+
+    @property
+    def delta_um(self) -> float:
+        return (float(self.best_z_mm) - float(self.start_z_mm)) * 1000.0
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "objective_name": self.objective_name,
+            "mode": self.mode,
+            "focus_start_z_mm": float(self.start_z_mm),
+            "focus_best_z_mm": float(self.best_z_mm),
+            "focus_delta_um": float(self.delta_um),
+            "focus_score": float(self.best_score),
+            "focus_sample_count": int(self.sample_count),
+            "focus_edge_peak": bool(self.edge_peak),
+            "autofocus_range_mm": float(self.range_mm),
+            "autofocus_fine_step_mm": float(self.fine_step_mm),
+            "autofocus_lower_z_mm": float(self.lower_z_mm),
+            "autofocus_upper_z_mm": float(self.upper_z_mm),
+        }
+
+    def summary(self) -> str:
+        message = (
+            f"Autofocus {self.objective_name} {self.mode} complete. "
+            f"Best score {self.best_score:.2f} at Z={self.best_z_mm:.4f} mm "
+            f"(dZ={self.delta_um:+.1f} um) from {self.sample_count} frames."
+        )
+        if self.edge_peak:
+            message += " Peak was near the search edge."
+        return message
+
+    def __str__(self) -> str:
+        return self.summary()
+
+
+@dataclass(frozen=True)
 class _AutofocusContext:
     objective_name: str
     start_z: float
@@ -1548,7 +1598,7 @@ class StageController(QObject):
         *,
         range_mm: float,
         step_mm: float | None = None,
-    ) -> str:
+    ) -> AutofocusResult:
         """Run a fast local Z autofocus inside an external reservation."""
 
         self.movement_started.emit()
@@ -1558,14 +1608,15 @@ class StageController(QObject):
             if serial_connection is None or not serial_connection.is_open:
                 raise StageControllerError("Serial connection is not available.")
             with self._serial_session_lock:
-                message = self._run_local_autofocus_locked(
+                result = self._run_local_autofocus_locked(
                     serial_connection,
                     range_mm=range_mm,
                     step_mm=step_mm,
                 )
+            message = result.summary()
             self.autofocus_finished.emit(True, message)
             self.movement_finished.emit(True, message)
-            return message
+            return result
         except StageControllerError as exc:
             message = str(exc)
             self.autofocus_finished.emit(False, message)
@@ -2655,7 +2706,7 @@ class StageController(QObject):
         *,
         range_mm: float,
         step_mm: float | None = None,
-    ) -> str:
+    ) -> AutofocusResult:
         context = self._prepare_autofocus_context_locked(
             serial_connection,
             range_mm=range_mm,
@@ -2679,14 +2730,19 @@ class StageController(QObject):
             min_z=context.min_z,
             fine_step_mm=context.fine_step_mm,
         )
-        message = (
-            f"Autofocus {context.objective_name} local complete. "
-            f"Best score {best.best_score:.2f} at Z={best.best_z:.4f} mm "
-            f"from {best.sample_count} frames."
+        return AutofocusResult(
+            objective_name=context.objective_name,
+            mode="local",
+            start_z_mm=float(context.start_z),
+            best_z_mm=float(best.best_z),
+            best_score=float(best.best_score),
+            sample_count=int(best.sample_count),
+            edge_peak=bool(best.edge_peak),
+            range_mm=float(context.local_range_mm),
+            fine_step_mm=float(context.fine_step_mm),
+            lower_z_mm=float(context.lower_z),
+            upper_z_mm=float(context.upper_z),
         )
-        if best.edge_peak:
-            message += " Peak was near the local search edge."
-        return message
 
     def _prepare_autofocus_context_locked(
         self,

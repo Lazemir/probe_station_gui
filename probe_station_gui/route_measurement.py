@@ -85,6 +85,9 @@ class RoutePhotoRecord:
     point_index: int
     point_id: str
     label: str
+    design_center: Point2D
+    stage_xy: Point2D
+    focus: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -181,9 +184,12 @@ class RouteMeasurementRunner:
         status_callback: Callable[[str], None] | None = None,
         progress_callback: Callable[[int, int, int], None] | None = None,
         record_callback: Callable[[RouteMeasurementRecord, int, int], None] | None = None,
-        photo_callback: Callable[[RouteMeasurementPoint, int, int], str | Path]
+        photo_callback: Callable[
+            [RouteMeasurementPoint, int, int, object | None],
+            str | Path,
+        ]
         | None = None,
-        photo_focus_callback: Callable[[RouteMeasurementPoint, int, int], str | None]
+        photo_focus_callback: Callable[[RouteMeasurementPoint, int, int], object | None]
         | None = None,
         photo_record_callback: Callable[[RoutePhotoRecord, int, int], None]
         | None = None,
@@ -433,6 +439,7 @@ class RouteMeasurementRunner:
                     message = "Route measurement stopped by user."
                     break
                 if self._photo_enabled:
+                    focus_result: object | None = None
                     self._status(
                         f"Route measurement: point {position}/{total} "
                         "raising needles for photo."
@@ -446,8 +453,9 @@ class RouteMeasurementRunner:
                             f"Route measurement: point {position}/{total} "
                             "local autofocus."
                         )
-                        focus_message = self._run_photo_focus(point, position, total)
-                        if focus_message:
+                        focus_result = self._run_photo_focus(point, position, total)
+                        focus_message = str(focus_result or "")
+                        if focus_message.strip():
                             self._status(
                                 f"Route measurement: point {position}/{total} "
                                 f"{focus_message}"
@@ -458,7 +466,12 @@ class RouteMeasurementRunner:
                     if not self._sleep_photo_settle():
                         message = "Route measurement stopped by user."
                         break
-                    photo_path = self._capture_photo(point, position, total)
+                    photo_path = self._capture_photo(
+                        point,
+                        position,
+                        total,
+                        focus_result=focus_result,
+                    )
                     photos_saved += 1
                     self._status(
                         f"Route measurement: point {position}/{total} "
@@ -770,10 +783,14 @@ class RouteMeasurementRunner:
         point: RouteMeasurementPoint,
         position: int,
         total: int,
+        *,
+        focus_result: object | None = None,
     ) -> Path:
         if self._photo_callback is None:
             raise ValueError("Route photo capture is not configured.")
-        result = Path(self._photo_callback(point, position, total)).expanduser()
+        result = Path(
+            self._photo_callback(point, position, total, focus_result)
+        ).expanduser()
         record = RoutePhotoRecord(
             timestamp=datetime.now().isoformat(timespec="seconds"),
             path=str(result),
@@ -781,6 +798,9 @@ class RouteMeasurementRunner:
             point_index=int(point.index),
             point_id=point.point_id,
             label=point.label,
+            design_center=point.design_center,
+            stage_xy=point.stage_xy,
+            focus=_focus_result_to_dict(focus_result),
         )
         if self._photo_record_callback is not None:
             self._photo_record_callback(record, position, total)
@@ -791,11 +811,10 @@ class RouteMeasurementRunner:
         point: RouteMeasurementPoint,
         position: int,
         total: int,
-    ) -> str:
+    ) -> object | None:
         if self._photo_focus_callback is None:
             raise ValueError("Route photo autofocus is not configured.")
-        result = self._photo_focus_callback(point, position, total)
-        return "" if result is None else str(result)
+        return self._photo_focus_callback(point, position, total)
 
     @staticmethod
     def _normalized_contact_seek_step(value: object) -> float:
@@ -1248,6 +1267,35 @@ def _structure_number_for_point(point: RouteMeasurementPoint) -> int:
             except ValueError:
                 pass
     return int(point.index)
+
+
+def _focus_result_to_dict(result: object | None) -> dict[str, object] | None:
+    if result is None:
+        return None
+    if isinstance(result, dict):
+        return dict(result)
+    to_dict = getattr(result, "to_dict", None)
+    if callable(to_dict):
+        data = to_dict()
+        return dict(data) if isinstance(data, dict) else None
+    data: dict[str, object] = {}
+    for source_name, target_name in (
+        ("objective_name", "objective_name"),
+        ("mode", "mode"),
+        ("start_z_mm", "focus_start_z_mm"),
+        ("best_z_mm", "focus_best_z_mm"),
+        ("delta_um", "focus_delta_um"),
+        ("best_score", "focus_score"),
+        ("sample_count", "focus_sample_count"),
+        ("edge_peak", "focus_edge_peak"),
+        ("range_mm", "autofocus_range_mm"),
+        ("fine_step_mm", "autofocus_fine_step_mm"),
+        ("lower_z_mm", "autofocus_lower_z_mm"),
+        ("upper_z_mm", "autofocus_upper_z_mm"),
+    ):
+        if hasattr(result, source_name):
+            data[target_name] = getattr(result, source_name)
+    return data or None
 
 
 def _format_float(value: float) -> str:
