@@ -1266,6 +1266,7 @@ class ObjectivesSettingsWidget(QWidget):
 
         self._xy_configured_checkbox = QCheckBox("Use X/Y offset", self)
         self._z_configured_checkbox = QCheckBox("Use Z offset", self)
+        self._magnification_spin = self._positive_spin(" x", decimals=2)
         self._x_offset_spin = self._offset_spin(" mm")
         self._y_offset_spin = self._offset_spin(" mm")
         self._z_offset_spin = self._offset_spin(" mm")
@@ -1274,6 +1275,7 @@ class ObjectivesSettingsWidget(QWidget):
         self._xy_calibration_status = QLineEdit(self)
         self._xy_calibration_status.setReadOnly(True)
 
+        layout.addRow(QLabel("Magnification", self), self._magnification_spin)
         layout.addRow(self._xy_configured_checkbox)
         layout.addRow(QLabel("X correction", self), self._x_offset_spin)
         layout.addRow(QLabel("Y correction", self), self._y_offset_spin)
@@ -1313,6 +1315,7 @@ class ObjectivesSettingsWidget(QWidget):
             self._objectives.objectives[name] = profile
         self._xy_configured_checkbox.setChecked(profile.xy_offset_configured)
         self._z_configured_checkbox.setChecked(profile.z_offset_configured)
+        self._magnification_spin.setValue(profile.magnification)
         self._x_offset_spin.setValue(profile.xy_offset_x_mm)
         self._y_offset_spin.setValue(profile.xy_offset_y_mm)
         self._z_offset_spin.setValue(profile.z_offset_mm)
@@ -1328,6 +1331,7 @@ class ObjectivesSettingsWidget(QWidget):
             profile = ObjectiveCalibrationSettings(name=name)
         updated = profile.clone()
         updated.name = name
+        updated.magnification = self._magnification_spin.value()
         updated.xy_offset_configured = self._xy_configured_checkbox.isChecked()
         updated.z_offset_configured = self._z_configured_checkbox.isChecked()
         updated.xy_offset_x_mm = self._x_offset_spin.value()

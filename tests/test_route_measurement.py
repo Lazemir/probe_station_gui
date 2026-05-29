@@ -7,6 +7,8 @@ from pathlib import Path
 
 from probe_station_gui.route_measurement import (
     CSV_FIELDS,
+    ROUTE_OPERATION_PHOTO,
+    ROUTE_OPERATION_PHOTO_THEN_MEASURE,
     RouteMeasurementPoint,
     RouteMeasurementRunner,
 )
@@ -49,6 +51,10 @@ class _FakeStage:
     ) -> str:
         self.calls.append(("lower_to_depth", depth_mm, feedrate))
         return "lowered to depth"
+
+    def run_external_local_autofocus(self, *, range_mm: float, step_mm=None) -> str:
+        self.calls.append(("autofocus", range_mm, step_mm))
+        return "local autofocus done"
 
 
 class _NotifyingStage(_FakeStage):
@@ -112,6 +118,19 @@ class _FakeBatchRouteLCR:
         batch = self.measurements[:count]
         del self.measurements[:count]
         return [dict(item) for item in batch]
+
+
+class _OpeningLCR(_FakeLCR):
+    def __init__(self, values: list[float]) -> None:
+        super().__init__(values)
+        self.opened = False
+        self.closed = False
+
+    def open(self) -> None:
+        self.opened = True
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def _point(index: int) -> RouteMeasurementPoint:
@@ -225,6 +244,121 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
         ]
         self.assertEqual(len(lift_calls), 3)
         self.assertNotIn(("needles", "raise", 75.0), stage.calls)
+
+    def test_photo_only_route_raises_needles_and_skips_meter_and_csv(self) -> None:
+        points = [_point(1), _point(2)]
+        stage = _FakeStage()
+        lcr = _OpeningLCR([5.0])
+        photos: list[tuple[int, int, int]] = []
+
+        def capture(point, position, total, _focus_result) -> str:
+            photos.append((point.index, position, total))
+            return f"photo-{point.index}.png"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "route.csv"
+            runner = RouteMeasurementRunner(
+                points=points,
+                csv_path=csv_path,
+                stage_controller=stage,
+                lcr_controller=lcr,
+                needle_feedrate=75.0,
+                operation_mode=ROUTE_OPERATION_PHOTO,
+                photo_callback=capture,
+                photo_settle_s=0.0,
+            )
+
+            success, message = runner.run()
+
+            self.assertTrue(success, message)
+            self.assertIn("2 photos", message)
+            self.assertFalse(csv_path.exists())
+
+        self.assertFalse(lcr.opened)
+        self.assertFalse(lcr.closed)
+        self.assertEqual(photos, [(1, 1, 2), (2, 2, 2)])
+        self.assertEqual(stage.calls[0], ("begin", "route photo capture"))
+        self.assertEqual(stage.calls[-1], ("finish",))
+        self.assertNotIn(("needles", "lower", 75.0), stage.calls)
+        self.assertGreaterEqual(
+            len([call for call in stage.calls if call == ("needles", "raise", 75.0)]),
+            3,
+        )
+
+    def test_photo_then_measure_captures_before_lowering_needles(self) -> None:
+        point = _point(1)
+        stage = _FakeStage()
+
+        def capture(_point, _position, _total, _focus_result) -> str:
+            stage.calls.append(("photo", _point.index))
+            return "photo.png"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = RouteMeasurementRunner(
+                points=[point],
+                csv_path=Path(tmpdir) / "route.csv",
+                stage_controller=stage,
+                lcr_controller=_FakeLCR([5.0]),
+                needle_feedrate=75.0,
+                operation_mode=ROUTE_OPERATION_PHOTO_THEN_MEASURE,
+                photo_callback=capture,
+                photo_settle_s=0.0,
+                contact_settle_s=0.0,
+            )
+
+            success, message = runner.run()
+
+        self.assertTrue(success, message)
+        photo_index = stage.calls.index(("photo", 1))
+        lower_index = stage.calls.index(("needles", "lower", 75.0))
+        self.assertLess(photo_index, lower_index)
+
+    def test_photo_focus_runs_after_raise_and_before_capture(self) -> None:
+        point = _point(1)
+        stage = _FakeStage()
+        records = []
+
+        def focus(_point, _position, _total) -> dict[str, object]:
+            stage.calls.append(("focus", _point.index))
+            return {
+                "focus_start_z_mm": 1.0,
+                "focus_best_z_mm": 1.02,
+                "focus_delta_um": 20.0,
+            }
+
+        def capture(_point, _position, _total, focus_result) -> str:
+            stage.calls.append(("focus_result", focus_result))
+            stage.calls.append(("photo", _point.index))
+            return "photo.png"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = RouteMeasurementRunner(
+                points=[point],
+                csv_path=Path(tmpdir) / "route.csv",
+                stage_controller=stage,
+                lcr_controller=_OpeningLCR([5.0]),
+                needle_feedrate=75.0,
+                operation_mode=ROUTE_OPERATION_PHOTO,
+                photo_callback=capture,
+                photo_focus_callback=focus,
+                photo_record_callback=lambda record, _position, _total: records.append(
+                    record
+                ),
+                photo_focus_enabled=True,
+                photo_settle_s=0.0,
+            )
+
+            success, message = runner.run()
+
+        self.assertTrue(success, message)
+        raise_index = stage.calls.index(("needles", "raise", 75.0), 2)
+        focus_index = stage.calls.index(("focus", 1))
+        photo_index = stage.calls.index(("photo", 1))
+        self.assertLess(raise_index, focus_index)
+        self.assertLess(focus_index, photo_index)
+        self.assertEqual(records[0].focus["focus_best_z_mm"], 1.02)
+        self.assertEqual(records[0].design_center, point.design_center)
+        self.assertEqual(records[0].stage_xy, point.stage_xy)
 
     def test_runner_reports_progress_with_route_point_number(self) -> None:
         points = [

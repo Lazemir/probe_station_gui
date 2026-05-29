@@ -43,6 +43,11 @@ from probe_station_gui.lcr_meter import (
     ROUTE_METER_TYPES,
     RouteMeterConfiguration,
 )
+from probe_station_gui.route_measurement import (
+    ROUTE_OPERATION_MEASURE,
+    ROUTE_OPERATION_PHOTO,
+    ROUTE_OPERATION_PHOTO_THEN_MEASURE,
+)
 from probe_station_gui.settings_manager import (
     LCR_APERTURE_RATES,
     LCR_LEVEL_MODES,
@@ -52,9 +57,10 @@ from probe_station_gui.settings_manager import (
 )
 
 
-ROUTE_MEASUREMENT_PROFILE_VERSION = 4
+ROUTE_MEASUREMENT_PROFILE_VERSION = 6
 DEFAULT_ROUTE_INITIAL_MEASUREMENT_COUNT = 10
 DEFAULT_ROUTE_FOLLOWUP_MEASUREMENT_COUNT = 240
+DEFAULT_ROUTE_PHOTO_AUTOFOCUS_RANGE_MM = 0.030
 DEFAULT_KEITHLEY_MEASUREMENT_VOLTAGE_V = 0.03
 DEFAULT_KEITHLEY_SOURCE_RANGE_V = 0.21
 DEFAULT_KEITHLEY_VOLTMETER_RANGE_V = 0.1
@@ -95,6 +101,11 @@ class RouteMeasurementRunConfiguration:
     """Complete per-run route measurement configuration from the dialog."""
 
     csv_path: str
+    operation_mode: str
+    photo_output_dir: str
+    photo_settle_s: float
+    photo_autofocus_enabled: bool
+    photo_autofocus_range_mm: float
     initial_measurement_count: int
     followup_measurement_count: int
     current_point: int
@@ -262,6 +273,7 @@ class RouteMeasurementDialog(QDialog):
         route_name: str,
         route_point_count: int,
         default_csv_path: str,
+        default_photo_dir: str | None = None,
         default_meter_type: str = ROUTE_METER_KEITHLEY,
         settings_path: str | Path | None = None,
         parent: QWidget | None = None,
@@ -273,6 +285,11 @@ class RouteMeasurementDialog(QDialog):
         self._waiting = False
         self._route_point_count = max(1, int(route_point_count))
         self._default_csv_path = default_csv_path
+        self._default_photo_dir = (
+            default_photo_dir
+            if default_photo_dir is not None
+            else str(Path(default_csv_path).with_suffix("")) + "-photos"
+        )
         self._settings_path = Path(settings_path).expanduser() if settings_path else None
         self._last_raw_samples: tuple[object, ...] = ()
         self._measurement_pending = False
@@ -301,6 +318,56 @@ class RouteMeasurementDialog(QDialog):
         csv_row.addWidget(self._csv_path_edit, 1)
         csv_row.addWidget(self._csv_browse_button)
         common_layout.addRow(QLabel("CSV", common_group), csv_row)
+
+        self._operation_combo = QComboBox(common_group)
+        self._operation_combo.addItem("Measure only", ROUTE_OPERATION_MEASURE)
+        self._operation_combo.addItem("Photo only", ROUTE_OPERATION_PHOTO)
+        self._operation_combo.addItem(
+            "Photo then measure",
+            ROUTE_OPERATION_PHOTO_THEN_MEASURE,
+        )
+        common_layout.addRow(QLabel("Route mode", common_group), self._operation_combo)
+
+        photo_row = QHBoxLayout()
+        self._photo_dir_edit = QLineEdit(common_group)
+        self._photo_dir_edit.setText(self._default_photo_dir)
+        self._photo_dir_edit.setPlaceholderText("route photo output directory")
+        self._photo_browse_button = QPushButton("Browse", common_group)
+        photo_row.addWidget(self._photo_dir_edit, 1)
+        photo_row.addWidget(self._photo_browse_button)
+        common_layout.addRow(QLabel("Photos", common_group), photo_row)
+
+        self._photo_settle_spin = QDoubleSpinBox(common_group)
+        self._photo_settle_spin.setLocale(QLocale.c())
+        self._photo_settle_spin.setDecimals(3)
+        self._photo_settle_spin.setRange(0.0, 10.0)
+        self._photo_settle_spin.setSingleStep(0.05)
+        self._photo_settle_spin.setSuffix(" s")
+        self._photo_settle_spin.setValue(0.2)
+        common_layout.addRow(
+            QLabel("Photo settle", common_group),
+            self._photo_settle_spin,
+        )
+
+        self._photo_autofocus_checkbox = QCheckBox(
+            "Autofocus before each photo",
+            common_group,
+        )
+        common_layout.addRow(QLabel("Photo focus", common_group), self._photo_autofocus_checkbox)
+
+        self._photo_autofocus_range_spin = QDoubleSpinBox(common_group)
+        self._photo_autofocus_range_spin.setLocale(QLocale.c())
+        self._photo_autofocus_range_spin.setDecimals(4)
+        self._photo_autofocus_range_spin.setRange(0.001, 0.200)
+        self._photo_autofocus_range_spin.setSingleStep(0.005)
+        self._photo_autofocus_range_spin.setSuffix(" mm")
+        self._photo_autofocus_range_spin.setValue(
+            DEFAULT_ROUTE_PHOTO_AUTOFOCUS_RANGE_MM
+        )
+        common_layout.addRow(
+            QLabel("AF range", common_group),
+            self._photo_autofocus_range_spin,
+        )
 
         self._initial_measurement_count_spin = QSpinBox(common_group)
         self._initial_measurement_count_spin.setRange(1, 1000)
@@ -456,6 +523,13 @@ class RouteMeasurementDialog(QDialog):
         outer_layout.addLayout(button_row)
 
         self._csv_browse_button.clicked.connect(self._choose_csv_path)
+        self._photo_browse_button.clicked.connect(self._choose_photo_dir)
+        self._operation_combo.currentIndexChanged.connect(
+            lambda _index: self._update_operation_state()
+        )
+        self._photo_autofocus_checkbox.toggled.connect(
+            lambda _checked: self._update_operation_state()
+        )
         self._meter_combo.currentIndexChanged.connect(self._update_meter_page)
         self._gw_function_combo.currentTextChanged.connect(
             lambda _text: self._update_gwinstek_state()
@@ -488,6 +562,7 @@ class RouteMeasurementDialog(QDialog):
         self._close_button.clicked.connect(self.close)
         self._load_settings_file()
         self._update_meter_page()
+        self._update_operation_state()
         self.set_running(False)
         self._resize_to_available_screen()
 
@@ -566,6 +641,7 @@ class RouteMeasurementDialog(QDialog):
         route_name: str,
         route_point_count: int,
         default_csv_path: str,
+        default_photo_dir: str | None = None,
     ) -> None:
         self._route_point_count = max(1, int(route_point_count))
         self._route_combo.setItemText(
@@ -581,6 +657,11 @@ class RouteMeasurementDialog(QDialog):
             if not current_csv or current_csv == self._default_csv_path:
                 self._csv_path_edit.setText(default_csv_path)
             self._default_csv_path = default_csv_path
+            if default_photo_dir is not None:
+                current_photo_dir = self._photo_dir_edit.text().strip()
+                if not current_photo_dir or current_photo_dir == self._default_photo_dir:
+                    self._photo_dir_edit.setText(default_photo_dir)
+                self._default_photo_dir = default_photo_dir
 
     def set_running(self, running: bool) -> None:
         self._running = bool(running)
@@ -588,6 +669,11 @@ class RouteMeasurementDialog(QDialog):
             self._route_combo,
             self._csv_path_edit,
             self._csv_browse_button,
+            self._operation_combo,
+            self._photo_dir_edit,
+            self._photo_browse_button,
+            self._photo_autofocus_checkbox,
+            self._photo_autofocus_range_spin,
             self._current_point_spin,
             self._meter_combo,
             self._gwinstek_page,
@@ -623,8 +709,10 @@ class RouteMeasurementDialog(QDialog):
             self._contact_settle_spin,
             self._contact_seek_range_spin,
             self._contact_seek_step_spin,
+            self._photo_settle_spin,
         ):
             widget.setEnabled(bool(enabled))
+        self._update_operation_state()
 
     def _build_gwinstek_page(self) -> QWidget:
         page = QWidget(self)
@@ -831,6 +919,53 @@ class RouteMeasurementDialog(QDialog):
             self._csv_path_edit.setText(path)
             self._save_settings_file()
 
+    def _choose_photo_dir(self) -> None:
+        current = self._photo_dir_edit.text().strip()
+        start = current or self._default_photo_dir or str(Path.cwd())
+        path = QFileDialog.getExistingDirectory(
+            self,
+            "Route Photo Directory",
+            start,
+        )
+        if path:
+            self._photo_dir_edit.setText(path)
+            self._save_settings_file()
+
+    def _update_operation_state(self) -> None:
+        mode = str(self._operation_combo.currentData() or ROUTE_OPERATION_MEASURE)
+        photo_enabled = mode in {
+            ROUTE_OPERATION_PHOTO,
+            ROUTE_OPERATION_PHOTO_THEN_MEASURE,
+        }
+        measure_enabled = mode in {
+            ROUTE_OPERATION_MEASURE,
+            ROUTE_OPERATION_PHOTO_THEN_MEASURE,
+        }
+        can_edit = not self._running or self._waiting
+        self._photo_dir_edit.setEnabled(photo_enabled and not self._running)
+        self._photo_browse_button.setEnabled(photo_enabled and not self._running)
+        self._photo_settle_spin.setEnabled(photo_enabled and can_edit)
+        self._photo_autofocus_checkbox.setEnabled(photo_enabled and not self._running)
+        self._photo_autofocus_range_spin.setEnabled(
+            photo_enabled
+            and self._photo_autofocus_checkbox.isChecked()
+            and not self._running
+        )
+        self._csv_path_edit.setEnabled(measure_enabled and not self._running)
+        self._csv_browse_button.setEnabled(measure_enabled and not self._running)
+        self._meter_combo.setEnabled(measure_enabled and not self._running)
+        self._gwinstek_page.setEnabled(measure_enabled and not self._running)
+        self._keithley_page.setEnabled(measure_enabled and not self._running)
+        for widget in (
+            self._initial_measurement_count_spin,
+            self._followup_measurement_count_spin,
+            self._max_relative_rms_spin,
+            self._contact_settle_spin,
+            self._contact_seek_range_spin,
+            self._contact_seek_step_spin,
+        ):
+            widget.setEnabled(measure_enabled and can_edit)
+
     def _load_profile(self) -> None:
         start = str(self._profile_start_directory() / "route-measurement-profile.json")
         path, _ = QFileDialog.getOpenFileName(
@@ -910,9 +1045,14 @@ class RouteMeasurementDialog(QDialog):
         dialog.exec()
 
     def _emit_measure_requested(self) -> None:
+        mode = str(self._operation_combo.currentData() or ROUTE_OPERATION_MEASURE)
         csv_path = self._csv_path_edit.text().strip()
-        if not csv_path:
+        if mode in {ROUTE_OPERATION_MEASURE, ROUTE_OPERATION_PHOTO_THEN_MEASURE} and not csv_path:
             self.set_status("Choose a CSV path before measuring.")
+            return
+        photo_dir = self._photo_dir_edit.text().strip()
+        if mode in {ROUTE_OPERATION_PHOTO, ROUTE_OPERATION_PHOTO_THEN_MEASURE} and not photo_dir:
+            self.set_status("Choose a photo directory before capturing.")
             return
         self.measure_requested.emit(self.current_configuration())
 
@@ -922,6 +1062,13 @@ class RouteMeasurementDialog(QDialog):
         self._save_settings_file()
         return RouteMeasurementRunConfiguration(
             csv_path=self._csv_path_edit.text().strip(),
+            operation_mode=str(
+                self._operation_combo.currentData() or ROUTE_OPERATION_MEASURE
+            ),
+            photo_output_dir=self._photo_dir_edit.text().strip(),
+            photo_settle_s=float(self._photo_settle_spin.value()),
+            photo_autofocus_enabled=bool(self._photo_autofocus_checkbox.isChecked()),
+            photo_autofocus_range_mm=float(self._photo_autofocus_range_spin.value()),
             initial_measurement_count=int(
                 self._initial_measurement_count_spin.value()
             ),
@@ -986,6 +1133,17 @@ class RouteMeasurementDialog(QDialog):
         return {
             "version": ROUTE_MEASUREMENT_PROFILE_VERSION,
             "csv_path": self._csv_path_edit.text().strip(),
+            "operation_mode": str(
+                self._operation_combo.currentData() or ROUTE_OPERATION_MEASURE
+            ),
+            "photo_output_dir": self._photo_dir_edit.text().strip(),
+            "photo_settle_s": float(self._photo_settle_spin.value()),
+            "photo_autofocus_enabled": bool(
+                self._photo_autofocus_checkbox.isChecked()
+            ),
+            "photo_autofocus_range_mm": float(
+                self._photo_autofocus_range_spin.value()
+            ),
             "measurement_count": self._total_measurement_count(),
             "initial_measurement_count": int(
                 self._initial_measurement_count_spin.value()
@@ -1013,6 +1171,20 @@ class RouteMeasurementDialog(QDialog):
         csv_path = data.get("csv_path")
         if isinstance(csv_path, str) and csv_path.strip():
             self._csv_path_edit.setText(csv_path.strip())
+        operation_mode = data.get("operation_mode")
+        if isinstance(operation_mode, str):
+            self._set_combo_data(self._operation_combo, operation_mode)
+        photo_output_dir = data.get("photo_output_dir")
+        if isinstance(photo_output_dir, str) and photo_output_dir.strip():
+            self._photo_dir_edit.setText(photo_output_dir.strip())
+        self._set_spinbox_value(self._photo_settle_spin, data.get("photo_settle_s"))
+        self._photo_autofocus_checkbox.setChecked(
+            bool(data.get("photo_autofocus_enabled", False))
+        )
+        self._set_spinbox_value(
+            self._photo_autofocus_range_spin,
+            data.get("photo_autofocus_range_mm"),
+        )
         self._apply_measurement_count_profile(data)
         self._measurement_pending = bool(data.get("measurement_pending", False))
         current_point = data.get("current_point", data.get("start_point"))
@@ -1044,6 +1216,7 @@ class RouteMeasurementDialog(QDialog):
             self._apply_default_keithley_route_settings()
         self._update_meter_page()
         self._update_gwinstek_state()
+        self._update_operation_state()
         return migrate_keithley_defaults
 
     def _should_migrate_keithley_defaults(self, data: dict[str, Any]) -> bool:

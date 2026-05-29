@@ -8,6 +8,9 @@ import types
 import unittest
 from pathlib import Path
 
+_ORIGINAL_PROBE_STATION_GUI = sys.modules.get("probe_station_gui")
+_ORIGINAL_LOGGING_CONFIG = sys.modules.get("probe_station_gui.logging_config")
+
 
 def _install_pyside6_stubs() -> None:
     qtcore = types.ModuleType("PySide6.QtCore")
@@ -46,6 +49,18 @@ def _install_probe_station_stubs() -> None:
     sys.modules["probe_station_gui.logging_config"] = logging_config
 
 
+def _restore_probe_station_modules() -> None:
+    if _ORIGINAL_PROBE_STATION_GUI is None:
+        sys.modules.pop("probe_station_gui", None)
+    else:
+        sys.modules["probe_station_gui"] = _ORIGINAL_PROBE_STATION_GUI
+
+    if _ORIGINAL_LOGGING_CONFIG is None:
+        sys.modules.pop("probe_station_gui.logging_config", None)
+    else:
+        sys.modules["probe_station_gui.logging_config"] = _ORIGINAL_LOGGING_CONFIG
+
+
 def _load_module(module_name: str, relative_path: str):
     module_path = Path(__file__).resolve().parents[1] / relative_path
     spec = importlib.util.spec_from_file_location(module_name, module_path)
@@ -62,6 +77,7 @@ qt_compat = _load_module("qt_compat_test", "probe_station_gui/qt_compat.py")
 settings_manager = _load_module(
     "settings_manager_test", "probe_station_gui/settings_manager.py"
 )
+_restore_probe_station_modules()
 KeyBinding = settings_manager.KeyBinding
 ApiSettings = settings_manager.ApiSettings
 TelegramSettings = settings_manager.TelegramSettings

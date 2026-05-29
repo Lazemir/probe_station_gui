@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import csv
 import json
 import math
+import os
 import re
 import threading
 import time
@@ -12,6 +14,52 @@ from datetime import datetime, timezone
 from pathlib import Path
 import sys
 from typing import Any, Callable, TYPE_CHECKING
+
+_STARTUP_T0 = time.perf_counter()
+_STARTUP_LAST_ELAPSED_MS = 0.0
+_STARTUP_EVENTS: list[tuple[float, float, str]] = []
+_STARTUP_FLUSHED = False
+
+
+def _startup_trace(label: str) -> None:
+    """Record startup timing before the normal logger is ready."""
+
+    global _STARTUP_LAST_ELAPSED_MS
+
+    elapsed_ms = (time.perf_counter() - _STARTUP_T0) * 1000.0
+    delta_ms = elapsed_ms - _STARTUP_LAST_ELAPSED_MS
+    _STARTUP_LAST_ELAPSED_MS = elapsed_ms
+    if _STARTUP_FLUSHED:
+        logging.getLogger(__name__).info(
+            "STARTUP TRACE +%.1fms (+%.1fms) %s",
+            elapsed_ms,
+            delta_ms,
+            label,
+        )
+        return
+    _STARTUP_EVENTS.append((elapsed_ms, delta_ms, label))
+
+
+def _flush_startup_trace() -> None:
+    """Write buffered startup timing into the configured application log."""
+
+    global _STARTUP_FLUSHED
+
+    if _STARTUP_FLUSHED:
+        return
+    log = logging.getLogger(__name__)
+    for elapsed_ms, delta_ms, label in _STARTUP_EVENTS:
+        log.info(
+            "STARTUP TRACE +%.1fms (+%.1fms) %s",
+            elapsed_ms,
+            delta_ms,
+            label,
+        )
+    _STARTUP_EVENTS.clear()
+    _STARTUP_FLUSHED = True
+
+
+_startup_trace("stdlib imports done")
 
 from PySide6.QtCore import (
     QBuffer,
@@ -50,6 +98,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+_startup_trace("PySide imports done")
+
 from probe_station_gui import (
     Grabber,
     JoystickWindow,
@@ -63,6 +113,10 @@ from probe_station_gui.diagnostics import configure_crash_diagnostics
 from probe_station_gui.dialogs.route_measurement_dialog import (
     RouteMeasurementDialog,
     RouteMeasurementRunConfiguration,
+)
+from probe_station_gui.dialogs.microscope_scan_dialog import (
+    MicroscopeScanConfiguration,
+    MicroscopeScanDialog,
 )
 from probe_station_gui.dialogs.settings_dialog import SettingsDialog
 from probe_station_gui.api_server import ProbeStationApiServer
@@ -89,11 +143,29 @@ from probe_station_gui.objective_offsets import (
 )
 from probe_station_gui.route_model import MeasurementRoute
 from probe_station_gui.route_measurement import (
+    ROUTE_OPERATION_MEASURE,
+    ROUTE_OPERATION_PHOTO,
+    ROUTE_OPERATION_PHOTO_THEN_MEASURE,
     RouteMeasurementPoint,
+    RoutePhotoRecord,
     RouteMeasurementRecord,
     RouteMeasurementRunner,
     route_measurement_sample_from_raw,
     summarize_route_contact_quality,
+)
+from probe_station_gui.microscope_imaging import (
+    MicroscopeCaptureResult,
+    MicroscopeImageMetadata,
+    MicroscopeScanPlan,
+    MicroscopeScanTile,
+    build_design_scan_plan,
+    objective_scale_calibration,
+    route_photo_filename,
+    save_microscope_image,
+    scan_tile_filename,
+    stage_bounds_from_design_bounds,
+    stitch_scan_tiles,
+    utc_timestamp,
 )
 from probe_station_gui.settings_manager import (
     ObjectiveCalibrationSettings,
@@ -115,6 +187,8 @@ from probe_station_gui.views.contact_oscillation_window import (
 from probe_station_gui.views.dock_widgets import CollapsibleDockWidget
 from probe_station_gui.views.oscillation_panel import OscillationPanel
 from probe_station_gui.views.serial_connection_panel import SerialConnectionPanel
+
+_startup_trace("application imports done")
 
 
 logger = logging.getLogger(__name__)
@@ -394,6 +468,8 @@ class Main(QMainWindow):
     route_measurement_result: Signal = Signal(object, int, int, bool)
     route_measurement_recorded: Signal = Signal(object, int, int)
     route_measurement_finished: Signal = Signal(bool, str, str)
+    microscope_scan_status: Signal = Signal(str)
+    microscope_scan_finished: Signal = Signal(bool, str)
     contact_seek_status: Signal = Signal(str)
     contact_seek_calibration_found: Signal = Signal(float, str)
     contact_seek_finished: Signal = Signal(bool, str)
@@ -446,6 +522,7 @@ class Main(QMainWindow):
     CONTACT_SEEK_CONFIRM_COUNT = 250
 
     def __init__(self) -> None:
+        _startup_trace("Main.__init__ entered")
         super().__init__()
         self.setWindowTitle("Microscope control")
         self.menuBar().setNativeMenuBar(False)
@@ -463,6 +540,8 @@ class Main(QMainWindow):
         self.serial_port_name: str | None = None
         self.serial_baud_rate: int | None = None
         self.settings_manager: SettingsManager = SettingsManager()
+        _startup_trace("SettingsManager created; logging configured")
+        _flush_startup_trace()
         self._api_bridge: _ApiRequestBridge | None = None
         self._api_server: ProbeStationApiServer | None = None
         self._api_settings_signature: tuple[bool, str, int] | None = None
@@ -471,6 +550,7 @@ class Main(QMainWindow):
         self.serial_connection_panel: SerialConnectionPanel | None = None
         self.oscillation_panel: OscillationPanel | None = None
         self.surface_map_window: SurfaceMapWindow | None = None
+        self.microscope_scan_dialog: MicroscopeScanDialog | None = None
         self.contact_calibration_window: ContactOscillationWindow | None = None
         self.alignment_panel: AlignmentPanel | None = None
         self.design_navigator_panel: DesignNavigatorPanel | None = None
@@ -492,6 +572,7 @@ class Main(QMainWindow):
         self._alignment_exit_action: QAction | None = None
         self._contact_calibration_window_action: QAction | None = None
         self._surface_map_window_action: QAction | None = None
+        self._microscope_scan_action: QAction | None = None
         self._design_layout_window_action: QAction | None = None
         self._click_calibration_action: QAction | None = None
         self._click_calibration_dialog: ClickCalibrationDialog | None = None
@@ -544,6 +625,9 @@ class Main(QMainWindow):
         self._design_snap_enabled = True
         self._last_reported_b_position: float | None = None
         self._last_camera_frame_ui_timestamp: float | None = None
+        self._latest_camera_frame: QImage | None = None
+        self._latest_camera_frame_counter = 0
+        self._latest_camera_frame_condition = threading.Condition()
         self._latest_camera_frame_for_notifications: QImage | None = None
         self._stage_unhomed_display_origins: dict[str, float] = {}
         self._stage_axis_fields: dict[str, QLineEdit] = {}
@@ -572,6 +656,8 @@ class Main(QMainWindow):
         self._route_measurement_waiting = False
         self._route_measurement_point_numbers: list[int] = []
         self._route_measurement_current_point: int | None = None
+        self._microscope_scan_thread: threading.Thread | None = None
+        self._microscope_scan_stop_requested = threading.Event()
         self._last_telegram_attention_message = ""
         self._contact_seek_thread: threading.Thread | None = None
         self._contact_seek_stop_requested = threading.Event()
@@ -613,6 +699,8 @@ class Main(QMainWindow):
         self.route_measurement_result.connect(self._on_route_measurement_result)
         self.route_measurement_recorded.connect(self._on_route_measurement_recorded)
         self.route_measurement_finished.connect(self._on_route_measurement_finished)
+        self.microscope_scan_status.connect(self._on_microscope_scan_status)
+        self.microscope_scan_finished.connect(self._on_microscope_scan_finished)
         self.contact_seek_status.connect(self._on_contact_seek_status)
         self.contact_seek_calibration_found.connect(
             self._on_contact_seek_calibration_found
@@ -681,11 +769,15 @@ class Main(QMainWindow):
         )
 
         self._create_dock_widgets()
+        _startup_trace("dock widgets created")
 
         self._setup_menus()
+        _startup_trace("menus created")
         self._apply_settings()
+        _startup_trace("settings applied")
         self._api_bridge = _ApiRequestBridge(self._handle_api_request, self)
         self._configure_api_server_from_settings(start_if_enabled=False)
+        _startup_trace("API server configured")
 
         QTimer.singleShot(0, self._start_api_server)
         QTimer.singleShot(0, self._auto_connect_if_possible)
@@ -698,6 +790,7 @@ class Main(QMainWindow):
             QMainWindow::separator { width: 8px; height: 8px; background: palette(window); }
             """
         )
+        _startup_trace("Main.__init__ finished")
 
     def _start_camera_thread(self) -> None:
         if not self.thread.isRunning():
@@ -2040,8 +2133,64 @@ class Main(QMainWindow):
                     frame_gap,
                 )
         self._last_camera_frame_ui_timestamp = now
+        with self._latest_camera_frame_condition:
+            self._latest_camera_frame = qimg.copy()
+            self._latest_camera_frame_counter += 1
+            self._latest_camera_frame_condition.notify_all()
         self._latest_camera_frame_for_notifications = qimg
         self.view.set_frame(qimg)
+
+    def _latest_camera_counter(self) -> int:
+        with self._latest_camera_frame_condition:
+            return int(self._latest_camera_frame_counter)
+
+    def _wait_for_camera_frame(
+        self,
+        *,
+        after_counter: int | None = None,
+        timeout_s: float = 2.0,
+    ) -> tuple[QImage | None, int]:
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        with self._latest_camera_frame_condition:
+            while True:
+                frame = self._latest_camera_frame
+                counter = int(self._latest_camera_frame_counter)
+                fresh_enough = after_counter is None or counter > int(after_counter)
+                if frame is not None and fresh_enough:
+                    return frame.copy(), counter
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    if frame is not None and after_counter is None:
+                        return frame.copy(), counter
+                    return None, counter
+                self._latest_camera_frame_condition.wait(min(remaining, 0.1))
+
+    def _active_microscope_scale(self):
+        objective = self.settings_manager.active_objective_configuration()
+        return objective_scale_calibration(objective)
+
+    def _active_objective_metadata(self) -> tuple[str, float | None]:
+        objective = self.settings_manager.active_objective_configuration()
+        name = str(getattr(objective, "name", "") or "")
+        try:
+            magnification = float(getattr(objective, "magnification"))
+        except (TypeError, ValueError):
+            magnification = None
+        if magnification is not None and not math.isfinite(magnification):
+            magnification = None
+        return name, magnification
+
+    def _stage_position_for_image_metadata(
+        self,
+        *,
+        stage_xy: tuple[float, float] | None = None,
+    ) -> tuple[float, ...] | None:
+        latest = self.stage_controller.latest_stage_position()
+        if latest is not None:
+            return latest
+        if stage_xy is not None:
+            return (float(stage_xy[0]), float(stage_xy[1]))
+        return None
 
     def _on_view_hover(
         self, dx: float, dy: float, _rel_x: float, _rel_y: float
@@ -2372,6 +2521,10 @@ class Main(QMainWindow):
         except Exception:
             return False
 
+    def _microscope_scan_running(self) -> bool:
+        thread = getattr(self, "_microscope_scan_thread", None)
+        return thread is not None and thread.is_alive()
+
     def _has_cancelable_operation(self) -> bool:
         controller_busy = (
             hasattr(self, "stage_controller") and self.stage_controller.is_busy()
@@ -2382,6 +2535,7 @@ class Main(QMainWindow):
             or self._controller_reports_active_motion()
             or self._route_measurement_runner is not None
             or self._surface_map_capture_running()
+            or self._microscope_scan_running()
             or self._manual_alignment_pick_slot is not None
             or self._pending_click_to_move is not None
             or bool(self._pending_homing_axes)
@@ -2503,6 +2657,13 @@ class Main(QMainWindow):
                 self.surface_map_window.stop_capture()
             except Exception:
                 logger.exception("Failed to stop surface map capture from Cancel.")
+            cancelled_any = True
+        if self._microscope_scan_running():
+            self._microscope_scan_stop_requested.set()
+            if self.microscope_scan_dialog is not None:
+                self.microscope_scan_dialog.set_status(
+                    "Microscope scan stop requested."
+                )
             cancelled_any = True
         if self._coordinate_move_axis is not None:
             self.stage_controller.cancel_active_motion(
@@ -2991,6 +3152,10 @@ class Main(QMainWindow):
         self._surface_map_window_action = QAction("Surface Map", self)
         self._surface_map_window_action.triggered.connect(self._show_surface_map_window)
         calibration_menu.addAction(self._surface_map_window_action)
+
+        self._microscope_scan_action = QAction("Microscope Scan", self)
+        self._microscope_scan_action.triggered.connect(self._show_microscope_scan_dialog)
+        calibration_menu.addAction(self._microscope_scan_action)
 
         self._click_calibration_action = QAction(
             self._click_calibration_action_text(),
@@ -5508,14 +5673,19 @@ class Main(QMainWindow):
             self._show_status("Create or load a probe route before measuring.", 5000)
             return
         default_path = "probe_route_measurements.csv"
+        default_photo_dir = "probe_route_photos"
         if route.path is not None:
             default_path = str(
                 route.path.with_name(f"{route.path.stem}-measurements.csv")
             )
+            default_photo_dir = str(route.path.with_name(f"{route.path.stem}-photos"))
         elif self._design_session.document is not None:
             default_path = str(
                 self._design_session.document.path.parent
                 / "probe_route_measurements.csv"
+            )
+            default_photo_dir = str(
+                self._design_session.document.path.parent / "probe_route_photos"
             )
         dialog = self._route_measurement_dialog
         if dialog is None:
@@ -5523,6 +5693,7 @@ class Main(QMainWindow):
                 route_name=route.name,
                 route_point_count=len(route.points),
                 default_csv_path=default_path,
+                default_photo_dir=default_photo_dir,
                 default_meter_type=self.lcr_controller.meter_type(),
                 settings_path=(
                     self.settings_manager.config_dir()
@@ -5556,6 +5727,7 @@ class Main(QMainWindow):
                 route_name=route.name,
                 route_point_count=len(route.points),
                 default_csv_path=default_path,
+                default_photo_dir=default_photo_dir,
             )
         if (
             self._route_measurement_thread is not None
@@ -5640,12 +5812,28 @@ class Main(QMainWindow):
         if not points:
             self._show_status("Route has no enabled points.", 5000)
             return
-        route_lcr_controller: object
-        if self.lcr_controller.is_connected():
-            try:
-                self.lcr_controller.apply_route_meter_configuration(configuration.meter)
-            except LCRMeterError as exc:
-                message = f"Route measurement instrument setup failed: {exc}"
+        photo_enabled = configuration.operation_mode in {
+            ROUTE_OPERATION_PHOTO,
+            ROUTE_OPERATION_PHOTO_THEN_MEASURE,
+        }
+        measure_enabled = configuration.operation_mode in {
+            ROUTE_OPERATION_MEASURE,
+            ROUTE_OPERATION_PHOTO_THEN_MEASURE,
+        }
+        scale = self._active_microscope_scale()
+        if photo_enabled and scale is None:
+            message = (
+                "Calibrate click-to-move for the active objective before saving "
+                "microscope photos with a scale bar."
+            )
+            self._show_status(message, 8000)
+            if self._route_measurement_dialog is not None:
+                self._route_measurement_dialog.set_status(message)
+            return
+        if photo_enabled:
+            frame, _counter = self._wait_for_camera_frame(timeout_s=0.1)
+            if frame is None:
+                message = "Camera frame is unavailable; cannot capture route photos."
                 self._show_status(message, 8000)
                 self._send_telegram_alert(
                     "route_failed",
@@ -5653,12 +5841,27 @@ class Main(QMainWindow):
                     attach_photo=True,
                 )
                 if self._route_measurement_dialog is not None:
-                    self._route_measurement_dialog.set_running(False)
                     self._route_measurement_dialog.set_status(message)
                 return
-            route_lcr_controller = self.lcr_controller
+        route_lcr_controller: object
+        if measure_enabled:
+            if self.lcr_controller.is_connected():
+                try:
+                    self.lcr_controller.apply_route_meter_configuration(
+                        configuration.meter
+                    )
+                except LCRMeterError as exc:
+                    message = f"Route measurement instrument setup failed: {exc}"
+                    self._show_status(message, 8000)
+                    if self._route_measurement_dialog is not None:
+                        self._route_measurement_dialog.set_running(False)
+                        self._route_measurement_dialog.set_status(message)
+                    return
+                route_lcr_controller = self.lcr_controller
+            else:
+                route_lcr_controller = RouteMeter(configuration.meter)
         else:
-            route_lcr_controller = RouteMeter(configuration.meter)
+            route_lcr_controller = object()
         runner = RouteMeasurementRunner(
             points=points,
             csv_path=configuration.csv_path,
@@ -5680,8 +5883,25 @@ class Main(QMainWindow):
             status_callback=self.route_measurement_status.emit,
             progress_callback=self.route_measurement_progress.emit,
             record_callback=self.route_measurement_recorded.emit,
+            photo_callback=lambda point, position, total, focus_result: self._capture_route_photo(
+                point,
+                position,
+                total,
+                configuration=configuration,
+                focus_result=focus_result,
+            ),
+            photo_focus_callback=lambda point, position, total: self._route_photo_autofocus(
+                point,
+                position,
+                total,
+                configuration=configuration,
+            ),
+            photo_record_callback=self._record_route_photo,
             result_callback=self.route_measurement_result.emit,
             waiting_callback=self.route_measurement_waiting_changed.emit,
+            operation_mode=configuration.operation_mode,
+            photo_settle_s=configuration.photo_settle_s,
+            photo_focus_enabled=configuration.photo_autofocus_enabled,
         )
         self._route_measurement_runner = runner
         self._route_measurement_waiting = False
@@ -5756,6 +5976,208 @@ class Main(QMainWindow):
             )
         return points
 
+    def _capture_route_photo(
+        self,
+        point: RouteMeasurementPoint,
+        position: int,
+        total: int,
+        *,
+        configuration: RouteMeasurementRunConfiguration,
+        focus_result: object | None = None,
+    ) -> str:
+        scale = self._active_microscope_scale()
+        if scale is None:
+            raise RuntimeError("Active objective has no calibrated microscope scale.")
+        before_counter = self._latest_camera_counter()
+        frame, _counter = self._wait_for_camera_frame(
+            after_counter=before_counter,
+            timeout_s=2.0,
+        )
+        if frame is None:
+            raise RuntimeError("Camera frame is unavailable.")
+        captured_at = utc_timestamp()
+        objective_name, magnification = self._active_objective_metadata()
+        route = self._design_session.route
+        route_name = route.name if route is not None else "route"
+        filename = route_photo_filename(
+            route_name=route_name,
+            point_index=int(point.index),
+            point_label=point.label,
+            captured_at=captured_at,
+        )
+        stage_position = self._stage_position_for_image_metadata(
+            stage_xy=point.stage_xy
+        )
+        focus_data = self._route_photo_focus_payload(focus_result)
+        metadata = MicroscopeImageMetadata(
+            title="Probe Station Microscope",
+            mode="route photo"
+            if configuration.operation_mode == ROUTE_OPERATION_PHOTO
+            else "route photo before measurement",
+            captured_at=captured_at,
+            objective_name=objective_name,
+            magnification=magnification,
+            route_name=route_name,
+            route_point_index=int(point.index),
+            route_point_label=point.label,
+            route_position=int(position),
+            route_total=int(total),
+            design_xy=point.design_center,
+            stage_position=stage_position,
+            stage_xy=point.stage_xy,
+            notes=(
+                "needles raised before capture",
+                *(
+                    ("local autofocus before capture",)
+                    if configuration.photo_autofocus_enabled
+                    else ()
+                ),
+            ),
+            extra={
+                "point_id": point.point_id,
+                "needle_1_design": list(point.needle_1_design),
+                "needle_2_design": list(point.needle_2_design),
+                "photo_autofocus_enabled": bool(
+                    configuration.photo_autofocus_enabled
+                ),
+                "photo_autofocus_range_mm": float(
+                    configuration.photo_autofocus_range_mm
+                ),
+                "autofocus": focus_data,
+            },
+        )
+        result = save_microscope_image(
+            frame=frame,
+            output_dir=configuration.photo_output_dir,
+            filename_stem=filename,
+            metadata=metadata,
+            scale=scale,
+        )
+        return str(result.image_path)
+
+    def _route_photo_autofocus(
+        self,
+        point: RouteMeasurementPoint,
+        position: int,
+        total: int,
+        *,
+        configuration: RouteMeasurementRunConfiguration,
+    ) -> object:
+        _ = point
+        self._show_status(
+            f"Route photo autofocus: point {position}/{total}, "
+            f"+/-{configuration.photo_autofocus_range_mm:.3f} mm."
+        )
+        return self.stage_controller.run_external_local_autofocus(
+            range_mm=configuration.photo_autofocus_range_mm,
+        )
+
+    @staticmethod
+    def _route_photo_focus_payload(focus_result: object | None) -> dict[str, object] | None:
+        if focus_result is None:
+            return None
+        if isinstance(focus_result, dict):
+            return dict(focus_result)
+        to_dict = getattr(focus_result, "to_dict", None)
+        if callable(to_dict):
+            data = to_dict()
+            return dict(data) if isinstance(data, dict) else None
+        return None
+
+    def _record_route_photo(
+        self,
+        record: RoutePhotoRecord,
+        position: int,
+        total: int,
+    ) -> None:
+        if not record.focus:
+            return
+        try:
+            path = self._route_photo_focus_map_path(record)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            exists = path.exists() and path.stat().st_size > 0
+            with path.open("a", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=self._ROUTE_PHOTO_FOCUS_MAP_FIELDS,
+                )
+                if not exists:
+                    writer.writeheader()
+                writer.writerow(
+                    self._route_photo_focus_map_row(record, position, total)
+                )
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as exc:
+            logger.warning("Unable to write route photo focus map: %s", exc)
+
+    _ROUTE_PHOTO_FOCUS_MAP_FIELDS = (
+        "timestamp",
+        "route_name",
+        "route_position",
+        "route_total",
+        "structure_number",
+        "point_index",
+        "point_id",
+        "label",
+        "design_x",
+        "design_y",
+        "stage_x",
+        "stage_y",
+        "photo_path",
+        "objective_name",
+        "focus_start_z_mm",
+        "focus_best_z_mm",
+        "focus_delta_um",
+        "focus_score",
+        "focus_sample_count",
+        "focus_edge_peak",
+        "autofocus_range_mm",
+        "autofocus_fine_step_mm",
+        "autofocus_lower_z_mm",
+        "autofocus_upper_z_mm",
+    )
+
+    @staticmethod
+    def _route_photo_focus_map_path(record: RoutePhotoRecord) -> Path:
+        return Path(record.path).expanduser().resolve().parent / "route-photo-focus-map.csv"
+
+    def _route_photo_focus_map_row(
+        self,
+        record: RoutePhotoRecord,
+        position: int,
+        total: int,
+    ) -> dict[str, object]:
+        route = self._design_session.route
+        route_name = route.name if route is not None else ""
+        focus = record.focus or {}
+        return {
+            "timestamp": record.timestamp,
+            "route_name": route_name,
+            "route_position": int(position),
+            "route_total": int(total),
+            "structure_number": int(record.structure_number),
+            "point_index": int(record.point_index),
+            "point_id": record.point_id,
+            "label": record.label,
+            "design_x": float(record.design_center[0]),
+            "design_y": float(record.design_center[1]),
+            "stage_x": float(record.stage_xy[0]),
+            "stage_y": float(record.stage_xy[1]),
+            "photo_path": record.path,
+            "objective_name": focus.get("objective_name", ""),
+            "focus_start_z_mm": focus.get("focus_start_z_mm", ""),
+            "focus_best_z_mm": focus.get("focus_best_z_mm", ""),
+            "focus_delta_um": focus.get("focus_delta_um", ""),
+            "focus_score": focus.get("focus_score", ""),
+            "focus_sample_count": focus.get("focus_sample_count", ""),
+            "focus_edge_peak": focus.get("focus_edge_peak", ""),
+            "autofocus_range_mm": focus.get("autofocus_range_mm", ""),
+            "autofocus_fine_step_mm": focus.get("autofocus_fine_step_mm", ""),
+            "autofocus_lower_z_mm": focus.get("autofocus_lower_z_mm", ""),
+            "autofocus_upper_z_mm": focus.get("autofocus_upper_z_mm", ""),
+        }
+
     def _run_route_measurement(self, runner: RouteMeasurementRunner) -> None:
         success, message = runner.run()
         self.route_measurement_finished.emit(success, message, str(runner.csv_path))
@@ -5808,6 +6230,7 @@ class Main(QMainWindow):
                 auto_contact_seek_step_mm=configuration.contact_seek_step_mm,
                 auto_contact_seek_max_total_mm=configuration.contact_seek_range_mm,
                 contact_settle_s=configuration.contact_settle_s,
+                photo_settle_s=configuration.photo_settle_s,
             )
         if not runner.submit_confirmation(action):
             self._show_status("Unknown route measurement action.", 3000)
@@ -6009,11 +6432,21 @@ class Main(QMainWindow):
             self._set_route_measurement_resume_point(1)
             self._set_route_measurement_pending(False)
             self._route_measurement_point_numbers = []
-            self._show_status(f"{message} CSV: {csv_path}", 8000)
+            suffix = (
+                f" CSV: {csv_path}"
+                if "CSV:" not in message
+                and not message.startswith("Route photo capture")
+                and csv_path
+                else ""
+            )
+            self._show_status(f"{message}{suffix}", 8000)
+            completion_message = f"Probe route completed:\n{message}"
+            if csv_path:
+                completion_message = f"{completion_message}\nCSV: {csv_path}"
             self._send_telegram_alert(
                 "route_completed",
-                f"Probe route completed:\n{message}\nCSV: {csv_path}",
-                document_path=Path(csv_path),
+                completion_message,
+                document_path=Path(csv_path) if csv_path else None,
             )
         else:
             if self._route_measurement_current_point is not None:
@@ -7356,6 +7789,13 @@ class Main(QMainWindow):
             and self._route_measurement_thread.is_alive()
         ):
             self._route_measurement_thread.join(timeout=2.0)
+        if self._microscope_scan_thread is not None:
+            self._microscope_scan_stop_requested.set()
+        if (
+            self._microscope_scan_thread is not None
+            and self._microscope_scan_thread.is_alive()
+        ):
+            self._microscope_scan_thread.join(timeout=2.0)
         self._stop_jog_before_serial_close("application shutdown")
         self.grabber.stop()
         self.thread.quit()
@@ -7383,6 +7823,8 @@ class Main(QMainWindow):
             self.contact_calibration_window.close()
         if self.surface_map_window is not None:
             self.surface_map_window.close()
+        if self.microscope_scan_dialog is not None:
+            self.microscope_scan_dialog.close()
 
     def _stop_jog_before_serial_close(self, reason: str) -> None:
         if self.serial_connection is None or not self.serial_connection.is_open:
@@ -7681,6 +8123,342 @@ class Main(QMainWindow):
             )
         self.surface_map_window.showNormal()
         self.surface_map_window.raise_()
+
+    def _show_microscope_scan_dialog(self) -> None:
+        default_dir = self._default_microscope_scan_output_dir()
+        if self.microscope_scan_dialog is None:
+            dialog = MicroscopeScanDialog(
+                default_output_dir=default_dir,
+                parent=None,
+            )
+            dialog.scan_requested.connect(self._start_microscope_scan)
+            dialog.stop_requested.connect(self._request_stop_microscope_scan)
+            dialog.finished.connect(lambda _result: self._clear_microscope_scan_dialog())
+            self.microscope_scan_dialog = dialog
+        self.microscope_scan_dialog.show()
+        self.microscope_scan_dialog.raise_()
+        self.microscope_scan_dialog.activateWindow()
+
+    def _default_microscope_scan_output_dir(self) -> str:
+        document = self._design_session.document
+        if document is not None:
+            return str(document.path.with_name(f"{document.path.stem}-microscope-scan"))
+        return str(Path.cwd() / "microscope-scan")
+
+    def _clear_microscope_scan_dialog(self) -> None:
+        self.microscope_scan_dialog = None
+
+    def _request_stop_microscope_scan(self) -> None:
+        if not self._microscope_scan_running():
+            self._show_status("No microscope scan is running.", 3000)
+            return
+        self._microscope_scan_stop_requested.set()
+        message = "Microscope scan stop requested."
+        self._show_status(message, 5000)
+        if self.microscope_scan_dialog is not None:
+            self.microscope_scan_dialog.set_status(message)
+
+    def _start_microscope_scan(
+        self,
+        configuration: MicroscopeScanConfiguration,
+    ) -> None:
+        if self._microscope_scan_running():
+            self._show_status("Microscope scan is already running.", 4000)
+            return
+        if self.serial_connection is None or not self.serial_connection.is_open:
+            self._show_status("Connect the stage controller before scanning.", 5000)
+            return
+        document = self._design_session.document
+        if document is None:
+            self._show_status("Load a design before scanning.", 5000)
+            return
+        registration = self._design_session.registration
+        if registration is None or not registration.valid:
+            self._show_status(
+                "Design registration is required before scanning.",
+                6000,
+            )
+            return
+        scale = self._active_microscope_scale()
+        if scale is None:
+            self._show_status(
+                "Calibrate click-to-move for the active objective before scanning.",
+                8000,
+            )
+            return
+        frame, _counter = self._wait_for_camera_frame(timeout_s=0.1)
+        if frame is None:
+            self._show_status("Camera frame is unavailable; cannot scan.", 8000)
+            return
+        fov_size_mm = (
+            frame.width() * scale.pixel_size_x_mm,
+            frame.height() * scale.pixel_size_y_mm,
+        )
+        try:
+            stage_bounds = stage_bounds_from_design_bounds(
+                document.bounds,
+                self._raw_stage_xy_from_design_xy,
+            )
+            plan = build_design_scan_plan(
+                stage_bounds=stage_bounds,
+                fov_size_mm=fov_size_mm,
+                overlap_fraction=configuration.overlap_fraction,
+            )
+        except (ValueError, DesignModelError) as exc:
+            self._show_status(str(exc), 8000)
+            return
+        if not plan.tiles:
+            self._show_status("Microscope scan plan has no tiles.", 5000)
+            return
+        self._microscope_scan_stop_requested.clear()
+        if self.microscope_scan_dialog is not None:
+            self.microscope_scan_dialog.set_running(True)
+            self.microscope_scan_dialog.set_status(
+                f"Microscope scan starting: {len(plan.tiles)} tiles."
+            )
+        self._microscope_scan_thread = threading.Thread(
+            target=self._run_microscope_scan,
+            args=(configuration, plan),
+            name="MicroscopeDesignScan",
+            daemon=True,
+        )
+        self._microscope_scan_thread.start()
+        self._update_stage_coordinate_apply_state()
+
+    def _run_microscope_scan(
+        self,
+        configuration: MicroscopeScanConfiguration,
+        plan: MicroscopeScanPlan,
+    ) -> None:
+        success = False
+        message = "Microscope scan stopped."
+        output_dir = Path(configuration.output_dir).expanduser().resolve()
+        scale = self._active_microscope_scale()
+        if scale is None:
+            self.microscope_scan_finished.emit(
+                False,
+                "Active objective has no calibrated microscope scale.",
+            )
+            return
+        captured_tiles: list[tuple[MicroscopeScanTile, QImage]] = []
+        tile_results: list[MicroscopeCaptureResult] = []
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            self.stage_controller.begin_external_task("microscope design scan")
+            self.microscope_scan_status.emit("Microscope scan: raising needles.")
+            self.stage_controller.run_external_needles_action(
+                "raise",
+                self._current_needle_feedrate(),
+            )
+            for tile in plan.tiles:
+                if self._microscope_scan_stop_requested.is_set():
+                    message = "Microscope scan stopped by user."
+                    break
+                total = len(plan.tiles)
+                self.microscope_scan_status.emit(
+                    f"Microscope scan: tile {tile.index}/{total}."
+                )
+                self.stage_controller.run_external_move_to_xy(
+                    tile.stage_xy[0],
+                    tile.stage_xy[1],
+                )
+                if not self._sleep_microscope_scan_settle(configuration.settle_s):
+                    message = "Microscope scan stopped by user."
+                    break
+                result = self._capture_microscope_scan_tile(
+                    tile,
+                    plan,
+                    output_dir=output_dir,
+                    scale=scale,
+                )
+                tile_results.append(result)
+                captured_tiles.append((tile, result.raw_image))
+            else:
+                mosaic = stitch_scan_tiles(
+                    plan=plan,
+                    tile_images=captured_tiles,
+                    scale=scale,
+                )
+                mosaic_result = self._save_microscope_scan_mosaic(
+                    mosaic,
+                    plan,
+                    output_dir=output_dir,
+                    scale=scale,
+                )
+                manifest_path = self._write_microscope_scan_manifest(
+                    output_dir=output_dir,
+                    plan=plan,
+                    tile_results=tile_results,
+                    mosaic_result=mosaic_result,
+                )
+                success = True
+                message = (
+                    f"Microscope scan complete: {len(tile_results)} tiles, "
+                    f"mosaic {mosaic_result.image_path}, manifest {manifest_path}."
+                )
+        except Exception as exc:
+            logger.exception("Microscope scan failed")
+            message = f"Microscope scan failed: {exc}"
+        finally:
+            self.stage_controller.finish_external_task()
+            self.microscope_scan_finished.emit(success, message)
+
+    def _sleep_microscope_scan_settle(self, settle_s: float) -> bool:
+        deadline = time.monotonic() + max(0.0, float(settle_s))
+        while True:
+            if self._microscope_scan_stop_requested.is_set():
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                return True
+            time.sleep(min(remaining, 0.05))
+
+    def _capture_microscope_scan_tile(
+        self,
+        tile: MicroscopeScanTile,
+        plan: MicroscopeScanPlan,
+        *,
+        output_dir: Path,
+        scale,
+    ) -> MicroscopeCaptureResult:
+        before_counter = self._latest_camera_counter()
+        frame, _counter = self._wait_for_camera_frame(
+            after_counter=before_counter,
+            timeout_s=2.0,
+        )
+        if frame is None:
+            raise RuntimeError("Camera frame is unavailable.")
+        captured_at = utc_timestamp()
+        objective_name, magnification = self._active_objective_metadata()
+        document = self._design_session.document
+        scan_name = document.path.stem if document is not None else "design_scan"
+        design_xy = self._design_xy_from_raw_stage_xy(tile.stage_xy)
+        metadata = MicroscopeImageMetadata(
+            title="Probe Station Design Scan",
+            mode="design scan tile",
+            captured_at=captured_at,
+            objective_name=objective_name,
+            magnification=magnification,
+            scan_tile_index=tile.index,
+            scan_tile_total=len(plan.tiles),
+            scan_row=tile.row,
+            scan_column=tile.column,
+            design_xy=design_xy,
+            stage_position=self._stage_position_for_image_metadata(
+                stage_xy=tile.stage_xy
+            ),
+            stage_xy=tile.stage_xy,
+            notes=("needles raised before scan",),
+            extra={
+                "overlap_fraction": plan.overlap_fraction,
+                "row_count": plan.row_count,
+                "column_count": plan.column_count,
+            },
+        )
+        return save_microscope_image(
+            frame=frame,
+            output_dir=output_dir / "tiles",
+            filename_stem=scan_tile_filename(
+                scan_name=scan_name,
+                tile=tile,
+                captured_at=captured_at,
+            ),
+            metadata=metadata,
+            scale=scale,
+        )
+
+    def _save_microscope_scan_mosaic(
+        self,
+        mosaic: QImage,
+        plan: MicroscopeScanPlan,
+        *,
+        output_dir: Path,
+        scale,
+    ) -> MicroscopeCaptureResult:
+        captured_at = utc_timestamp()
+        objective_name, magnification = self._active_objective_metadata()
+        document = self._design_session.document
+        scan_name = document.path.stem if document is not None else "design_scan"
+        metadata = MicroscopeImageMetadata(
+            title="Probe Station Design Scan Mosaic",
+            mode="design scan mosaic",
+            captured_at=captured_at,
+            objective_name=objective_name,
+            magnification=magnification,
+            scan_tile_total=len(plan.tiles),
+            notes=("stage-coordinate tile mosaic",),
+            extra={
+                "overlap_fraction": plan.overlap_fraction,
+                "row_count": plan.row_count,
+                "column_count": plan.column_count,
+                "stage_bounds": list(plan.stage_bounds),
+                "covered_stage_bounds": list(plan.covered_stage_bounds),
+                "fov_size_mm": list(plan.fov_size_mm),
+            },
+        )
+        return save_microscope_image(
+            frame=mosaic,
+            output_dir=output_dir,
+            filename_stem=f"{scan_name}_mosaic_{captured_at}",
+            metadata=metadata,
+            scale=scale,
+        )
+
+    def _write_microscope_scan_manifest(
+        self,
+        *,
+        output_dir: Path,
+        plan: MicroscopeScanPlan,
+        tile_results: list[MicroscopeCaptureResult],
+        mosaic_result: MicroscopeCaptureResult,
+    ) -> Path:
+        manifest_path = output_dir / "microscope-scan-manifest.json"
+        data = {
+            "version": 1,
+            "created_at": utc_timestamp(),
+            "tile_count": len(tile_results),
+            "row_count": plan.row_count,
+            "column_count": plan.column_count,
+            "overlap_fraction": plan.overlap_fraction,
+            "stage_bounds": list(plan.stage_bounds),
+            "covered_stage_bounds": list(plan.covered_stage_bounds),
+            "fov_size_mm": list(plan.fov_size_mm),
+            "mosaic": {
+                "image": str(mosaic_result.image_path),
+                "metadata": str(mosaic_result.metadata_path),
+            },
+            "tiles": [
+                {
+                    "index": tile.index,
+                    "row": tile.row,
+                    "column": tile.column,
+                    "stage_xy": list(tile.stage_xy),
+                    "image": str(result.image_path),
+                    "metadata": str(result.metadata_path),
+                }
+                for tile, result in zip(plan.tiles, tile_results)
+            ],
+        }
+        with manifest_path.open("w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2, ensure_ascii=False)
+        return manifest_path
+
+    def _on_microscope_scan_status(self, message: str) -> None:
+        self._show_status(message)
+        if self.microscope_scan_dialog is not None:
+            self.microscope_scan_dialog.set_status(message)
+
+    def _on_microscope_scan_finished(self, success: bool, message: str) -> None:
+        thread = self._microscope_scan_thread
+        if thread is not None and not thread.is_alive():
+            thread.join(timeout=0.1)
+        self._microscope_scan_thread = None
+        self._microscope_scan_stop_requested.clear()
+        self._update_stage_coordinate_apply_state()
+        if self.microscope_scan_dialog is not None:
+            self.microscope_scan_dialog.set_running(False)
+            self.microscope_scan_dialog.set_status(message)
+        self._show_status(message, 10000 if success else 8000)
 
     def _create_design_layout_window(
         self,
@@ -8275,13 +9053,20 @@ def _fit_window_to_screen(window: QMainWindow) -> None:
 
 
 def main() -> int:
+    _startup_trace("main() entered")
     diagnostics_path = configure_crash_diagnostics()
+    _startup_trace("crash diagnostics configured")
     logger.debug("Crash diagnostics enabled: %s", diagnostics_path)
     app = QApplication(sys.argv)
+    _startup_trace("QApplication created")
     window = Main()
+    _startup_trace("Main created")
     _set_initial_window_geometry(window)
+    _startup_trace("initial window geometry set")
     window.show()
+    _startup_trace("window.show() called")
     QTimer.singleShot(0, lambda: _fit_window_to_screen(window))
+    _startup_trace("screen fit scheduled")
     return app.exec()
 
 
