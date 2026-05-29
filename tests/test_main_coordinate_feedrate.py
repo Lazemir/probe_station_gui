@@ -64,16 +64,25 @@ class _FakeJoystick:
         self._current_feedrate = float(current_feedrate)
         self.coordinate_feedrate: float | None = None
         self.coordinate_axes: list[tuple[str, ...]] = []
+        self.coordinate_modes: list[str] = []
         self.common_targets: list[tuple[float, float]] = []
         self.common_cleared = 0
         self.needle_contacts: list[tuple[str, float | None]] = []
+        self.mode = "jog"
+        self.mode_changes: list[tuple[str, bool]] = []
 
     def current_linear_feedrate(self) -> float:
         return self._current_feedrate
 
+    def set_control_mode(self, mode: str, *, emit_changed: bool = True) -> bool:
+        self.mode = str(mode).strip().lower()
+        self.mode_changes.append((self.mode, bool(emit_changed)))
+        return True
+
     def select_coordinate_feedrate_for_axes(self, axes: object) -> float:
         normalized = tuple(str(axis).strip().upper() for axis in axes)
         self.coordinate_axes.append(normalized)
+        self.coordinate_modes.append(self.mode)
         if self.coordinate_feedrate is not None:
             return float(self.coordinate_feedrate)
         return self._current_feedrate
@@ -417,6 +426,17 @@ class MainCoordinateFeedrateTest(unittest.TestCase):
             [({"X": 5.0, "Y": -2.0}, 42.0)],
         )
         self.assertEqual(joystick.common_targets, [])
+
+    def test_coordinate_apply_switches_step_mode_to_jog_before_feedrate(self) -> None:
+        window, stage_controller, joystick, _timer, _statuses = _make_main(99.0)
+        joystick.mode = "step"
+        window._pending_stage_axis_targets = {"X": (5.0, 5.0)}
+
+        Main._apply_pending_stage_coordinate_targets(window)
+
+        self.assertEqual(joystick.mode_changes, [("jog", True)])
+        self.assertEqual(joystick.coordinate_modes, ["jog"])
+        self.assertEqual(stage_controller.requests, [({"X": 5.0}, 99.0)])
 
     def test_coordinate_move_feedrate_change_reissues_absolute_jog(self) -> None:
         window, stage_controller, _joystick, _timer, statuses = _make_main(120.0)

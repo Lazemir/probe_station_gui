@@ -6478,6 +6478,7 @@ class Main(QMainWindow):
             return
         targets = dict(self._pending_stage_axis_targets)
         self.view.setFocus(Qt.OtherFocusReason)
+        self._set_joystick_control_mode_for_coordinate_apply()
         feedrate = self._coordinate_feedrate_for_axes(targets)
         self._start_coordinate_targets_move(
             targets,
@@ -6485,6 +6486,22 @@ class Main(QMainWindow):
             source_label="coordinate fields",
         )
         self._update_stage_coordinate_apply_state()
+
+    def _set_joystick_control_mode_for_coordinate_apply(self) -> None:
+        joystick = self.joystick_panel
+        if joystick is None:
+            return
+        setter = getattr(joystick, "set_control_mode", None)
+        if callable(setter):
+            try:
+                setter("jog", emit_changed=True)
+                return
+            except TypeError:
+                setter("jog")
+                return
+        private_setter = getattr(joystick, "_set_control_mode", None)
+        if callable(private_setter):
+            private_setter("jog", emit_changed=True)
 
     def _set_pending_stage_axis_target(
         self, axis_name: str, raw_target: float, display_target: float
