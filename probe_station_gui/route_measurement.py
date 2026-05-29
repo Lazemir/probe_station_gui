@@ -19,6 +19,14 @@ Point2D = tuple[float, float]
 
 CONTACT_MAX_MAD_SIGMA_OHM = 300.0
 CONTACT_MAX_P95_ABS_STEP_OHM = 1_000.0
+ROUTE_OPERATION_MEASURE = "measure"
+ROUTE_OPERATION_PHOTO = "photo"
+ROUTE_OPERATION_PHOTO_THEN_MEASURE = "photo_then_measure"
+ROUTE_OPERATION_MODES = (
+    ROUTE_OPERATION_MEASURE,
+    ROUTE_OPERATION_PHOTO,
+    ROUTE_OPERATION_PHOTO_THEN_MEASURE,
+)
 
 
 @dataclass(frozen=True)
@@ -65,6 +73,18 @@ class RouteMeasurementRecord:
     status: str
     contact_quality: RouteContactQuality | None = None
     raw_samples: tuple["RouteMeasurementSample", ...] = ()
+
+
+@dataclass(frozen=True)
+class RoutePhotoRecord:
+    """One completed route microscope image."""
+
+    timestamp: str
+    path: str
+    structure_number: int
+    point_index: int
+    point_id: str
+    label: str
 
 
 @dataclass(frozen=True)
@@ -161,9 +181,18 @@ class RouteMeasurementRunner:
         status_callback: Callable[[str], None] | None = None,
         progress_callback: Callable[[int, int, int], None] | None = None,
         record_callback: Callable[[RouteMeasurementRecord, int, int], None] | None = None,
+        photo_callback: Callable[[RouteMeasurementPoint, int, int], str | Path]
+        | None = None,
+        photo_focus_callback: Callable[[RouteMeasurementPoint, int, int], str | None]
+        | None = None,
+        photo_record_callback: Callable[[RoutePhotoRecord, int, int], None]
+        | None = None,
         result_callback: Callable[[RouteMeasurementRecord, int, int, bool], None]
         | None = None,
         waiting_callback: Callable[[bool], None] | None = None,
+        operation_mode: str = ROUTE_OPERATION_MEASURE,
+        photo_settle_s: float = 0.2,
+        photo_focus_enabled: bool = False,
     ) -> None:
         self._points = list(points)
         self._csv_writer = RouteMeasurementCsvWriter(csv_path)
@@ -206,8 +235,22 @@ class RouteMeasurementRunner:
         self._status_callback = status_callback
         self._progress_callback = progress_callback
         self._record_callback = record_callback
+        self._photo_callback = photo_callback
+        self._photo_focus_callback = photo_focus_callback
+        self._photo_record_callback = photo_record_callback
         self._result_callback = result_callback
         self._waiting_callback = waiting_callback
+        self._operation_mode = _normalize_operation_mode(operation_mode)
+        self._measure_enabled = self._operation_mode in {
+            ROUTE_OPERATION_MEASURE,
+            ROUTE_OPERATION_PHOTO_THEN_MEASURE,
+        }
+        self._photo_enabled = self._operation_mode in {
+            ROUTE_OPERATION_PHOTO,
+            ROUTE_OPERATION_PHOTO_THEN_MEASURE,
+        }
+        self._photo_settle_s = max(0.0, float(photo_settle_s))
+        self._photo_focus_enabled = bool(photo_focus_enabled)
         self._stop_requested = threading.Event()
         self._point_interrupt_requested = threading.Event()
         self._pause_requested = threading.Event()
@@ -267,6 +310,7 @@ class RouteMeasurementRunner:
         auto_contact_seek_step_mm: float,
         auto_contact_seek_max_total_mm: float,
         contact_settle_s: float,
+        photo_settle_s: float | None = None,
     ) -> None:
         """Update settings that are safe to change while waiting for confirmation."""
 
@@ -292,6 +336,8 @@ class RouteMeasurementRunner:
             auto_contact_seek_max_total_mm
         )
         self._contact_settle_s = max(0.0, float(contact_settle_s))
+        if photo_settle_s is not None:
+            self._photo_settle_s = max(0.0, float(photo_settle_s))
 
     def save_current_position_adjustment(
         self,
@@ -320,22 +366,37 @@ class RouteMeasurementRunner:
     def run(self) -> tuple[bool, str]:
         needs_final_lift = False
         measurements_saved = 0
+        photos_saved = 0
         success = False
         message = "Route measurement stopped."
         try:
             if not self._points:
                 raise ValueError("Route has no enabled points.")
-            if hasattr(self._lcr_controller, "open"):
+            if self._photo_enabled and self._photo_callback is None:
+                raise ValueError("Route photo capture is not configured.")
+            if (
+                self._photo_enabled
+                and self._photo_focus_enabled
+                and self._photo_focus_callback is None
+            ):
+                raise ValueError("Route photo autofocus is not configured.")
+            if self._measure_enabled and hasattr(self._lcr_controller, "open"):
                 self._status("Route measurement: connecting meter.")
                 self._lcr_controller.open()
-            self._csv_writer.write_header()
+            if self._measure_enabled:
+                self._csv_writer.write_header()
             self._begin_stage_task()
             if self._stop_requested.is_set():
                 message = "Route measurement stopped by user."
                 return success, message
-            self._status("Route measurement: lifting needles.")
+            initial_needle_action = "raise" if self._photo_enabled else "lift"
+            self._status(
+                "Route measurement: raising needles."
+                if initial_needle_action == "raise"
+                else "Route measurement: lifting needles."
+            )
             self._stage_controller.run_external_needles_action(
-                "lift",
+                initial_needle_action,
                 self._needle_feedrate,
             )
             if self._stop_requested.is_set():
@@ -371,6 +432,44 @@ class RouteMeasurementRunner:
                 if self._stop_requested.is_set():
                     message = "Route measurement stopped by user."
                     break
+                if self._photo_enabled:
+                    self._status(
+                        f"Route measurement: point {position}/{total} "
+                        "raising needles for photo."
+                    )
+                    self._stage_controller.run_external_needles_action(
+                        "raise",
+                        self._needle_feedrate,
+                    )
+                    if self._photo_focus_enabled:
+                        self._status(
+                            f"Route measurement: point {position}/{total} "
+                            "local autofocus."
+                        )
+                        focus_message = self._run_photo_focus(point, position, total)
+                        if focus_message:
+                            self._status(
+                                f"Route measurement: point {position}/{total} "
+                                f"{focus_message}"
+                            )
+                        if self._stop_requested.is_set():
+                            message = "Route measurement stopped by user."
+                            break
+                    if not self._sleep_photo_settle():
+                        message = "Route measurement stopped by user."
+                        break
+                    photo_path = self._capture_photo(point, position, total)
+                    photos_saved += 1
+                    self._status(
+                        f"Route measurement: point {position}/{total} "
+                        f"photo saved to {photo_path}."
+                    )
+                    if self._stop_requested.is_set():
+                        message = "Route measurement stopped by user."
+                        break
+                if not self._measure_enabled:
+                    position_index += 1
+                    continue
                 needles_lowered = False
                 record: RouteMeasurementRecord | None = None
                 record_saved = False
@@ -531,10 +630,22 @@ class RouteMeasurementRunner:
                 position_index += 1
             if position_index >= total:
                 success = True
-                message = (
-                    "Route measurement complete: "
-                    f"{measurements_saved} measurements saved to {self.csv_path}."
-                )
+                if self._measure_enabled and self._photo_enabled:
+                    message = (
+                        "Route measurement complete: "
+                        f"{photos_saved} photos and {measurements_saved} "
+                        f"measurements saved. CSV: {self.csv_path}."
+                    )
+                elif self._photo_enabled:
+                    message = (
+                        "Route photo capture complete: "
+                        f"{photos_saved} photos saved."
+                    )
+                else:
+                    message = (
+                        "Route measurement complete: "
+                        f"{measurements_saved} measurements saved to {self.csv_path}."
+                    )
         except Exception as exc:
             message = str(exc)
             self._status(f"Route measurement failed: {message}")
@@ -548,7 +659,7 @@ class RouteMeasurementRunner:
                 except Exception as exc:
                     message = f"{message} Needle lift failed: {exc}"
             self._finish_stage_task()
-            if hasattr(self._lcr_controller, "close"):
+            if self._measure_enabled and hasattr(self._lcr_controller, "close"):
                 try:
                     self._lcr_controller.close()
                 except Exception as exc:
@@ -559,7 +670,12 @@ class RouteMeasurementRunner:
     def _begin_stage_task(self) -> None:
         if self._stage_task_active:
             return
-        self._stage_controller.begin_external_task("route measurement")
+        label = (
+            "route photo capture"
+            if self._photo_enabled and not self._measure_enabled
+            else "route measurement"
+        )
+        self._stage_controller.begin_external_task(label)
         self._stage_task_active = True
 
     def _finish_stage_task(self) -> None:
@@ -588,6 +704,19 @@ class RouteMeasurementRunner:
                 self._stop_requested.is_set()
                 or self._point_interrupt_requested.is_set()
             ):
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                return True
+            if self._stop_requested.wait(min(remaining, 0.05)):
+                return False
+
+    def _sleep_photo_settle(self) -> bool:
+        if self._photo_settle_s <= 0.0:
+            return not self._stop_requested.is_set()
+        deadline = time.monotonic() + self._photo_settle_s
+        while True:
+            if self._stop_requested.is_set():
                 return False
             remaining = deadline - time.monotonic()
             if remaining <= 0.0:
@@ -635,6 +764,38 @@ class RouteMeasurementRunner:
     ) -> None:
         if self._result_callback is not None:
             self._result_callback(record, position, total, saved)
+
+    def _capture_photo(
+        self,
+        point: RouteMeasurementPoint,
+        position: int,
+        total: int,
+    ) -> Path:
+        if self._photo_callback is None:
+            raise ValueError("Route photo capture is not configured.")
+        result = Path(self._photo_callback(point, position, total)).expanduser()
+        record = RoutePhotoRecord(
+            timestamp=datetime.now().isoformat(timespec="seconds"),
+            path=str(result),
+            structure_number=_structure_number_for_point(point),
+            point_index=int(point.index),
+            point_id=point.point_id,
+            label=point.label,
+        )
+        if self._photo_record_callback is not None:
+            self._photo_record_callback(record, position, total)
+        return result
+
+    def _run_photo_focus(
+        self,
+        point: RouteMeasurementPoint,
+        position: int,
+        total: int,
+    ) -> str:
+        if self._photo_focus_callback is None:
+            raise ValueError("Route photo autofocus is not configured.")
+        result = self._photo_focus_callback(point, position, total)
+        return "" if result is None else str(result)
 
     @staticmethod
     def _normalized_contact_seek_step(value: object) -> float:
@@ -1047,12 +1208,35 @@ __all__ = [
     "CSV_FIELDS",
     "RouteContactQuality",
     "RouteMeasurementPoint",
+    "RoutePhotoRecord",
     "RouteMeasurementRecord",
     "RouteMeasurementSample",
     "RouteMeasurementRunner",
+    "ROUTE_OPERATION_MEASURE",
+    "ROUTE_OPERATION_PHOTO",
+    "ROUTE_OPERATION_PHOTO_THEN_MEASURE",
+    "ROUTE_OPERATION_MODES",
     "route_measurement_sample_from_raw",
     "summarize_route_contact_quality",
 ]
+
+
+def _normalize_operation_mode(value: object) -> str:
+    text = str(value or "").strip().lower()
+    aliases = {
+        "measurement": ROUTE_OPERATION_MEASURE,
+        "measure_only": ROUTE_OPERATION_MEASURE,
+        "photo_only": ROUTE_OPERATION_PHOTO,
+        "image": ROUTE_OPERATION_PHOTO,
+        "capture": ROUTE_OPERATION_PHOTO,
+        "photo_measure": ROUTE_OPERATION_PHOTO_THEN_MEASURE,
+        "photo+measure": ROUTE_OPERATION_PHOTO_THEN_MEASURE,
+        "photo_then_measure": ROUTE_OPERATION_PHOTO_THEN_MEASURE,
+    }
+    normalized = aliases.get(text, text)
+    if normalized in ROUTE_OPERATION_MODES:
+        return normalized
+    return ROUTE_OPERATION_MEASURE
 
 
 def _structure_number_for_point(point: RouteMeasurementPoint) -> int:

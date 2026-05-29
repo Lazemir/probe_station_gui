@@ -96,6 +96,7 @@ MoveVector = _stage_controller_module.MoveVector
 AxisACalibrationSettings = _settings_manager_module.AxisACalibrationSettings
 AxisZCalibrationSettings = _settings_manager_module.AxisZCalibrationSettings
 FocusSweepResult = _stage_controller_module._FocusSweepResult
+AutofocusContext = _stage_controller_module._AutofocusContext
 
 
 class StageControllerStartupLimitsTest(unittest.TestCase):
@@ -1035,6 +1036,58 @@ class StageControllerAutofocusTest(unittest.TestCase):
             controller.AUTOFOCUS_STATIC_REFINEMENT_POINTS,
         )
         self.assertFalse(result.edge_peak)
+
+    def test_external_local_autofocus_uses_static_refinement_window(self) -> None:
+        controller = StageController()
+        serial_connection = _FakeSerial()
+        controller._serial = serial_connection
+        calls: list[tuple[object, ...]] = []
+        finished: list[tuple[bool, str]] = []
+        controller.autofocus_finished = types.SimpleNamespace(
+            emit=lambda success, message: finished.append((success, message))
+        )
+
+        def _prepare(_serial, *, range_mm, step_mm):
+            calls.append(("prepare", range_mm, step_mm))
+            return AutofocusContext(
+                objective_name="X20",
+                start_z=10.000,
+                min_z=0.0,
+                max_z=20.0,
+                lower_z=9.970,
+                upper_z=10.030,
+                local_range_mm=0.030,
+                fine_step_mm=0.010,
+            )
+
+        def _static(_serial, center_z, *, min_z, max_z, step_mm):
+            calls.append(("static", center_z, min_z, max_z, step_mm))
+            return FocusSweepResult(
+                best_z=10.012,
+                best_score=2.5,
+                sample_count=5,
+                edge_peak=False,
+            )
+
+        def _approach(_serial, target_z, *, min_z, fine_step_mm):
+            calls.append(("approach", target_z, min_z, fine_step_mm))
+
+        controller._prepare_autofocus_context_locked = _prepare
+        controller._run_static_focus_refinement_locked = _static
+        controller._approach_z_from_below_locked = _approach
+
+        message = controller.run_external_local_autofocus(range_mm=0.030)
+
+        self.assertIn("local complete", message)
+        self.assertEqual(finished[-1][0], True)
+        self.assertEqual(
+            calls,
+            [
+                ("prepare", 0.030, None),
+                ("static", 10.000, 9.970, 10.030, 0.010),
+                ("approach", 10.012, 0.0, 0.010),
+            ],
+        )
 
 
 class StageControllerObjectiveTest(unittest.TestCase):

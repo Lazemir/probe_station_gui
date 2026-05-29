@@ -1,4 +1,5 @@
 import sys
+import threading
 import time
 import unittest
 
@@ -57,6 +58,14 @@ class _FakeSignal:
 
     def emit(self, message: str) -> None:
         self.messages.append(str(message))
+
+
+class _FakeFrame:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def copy(self) -> "_FakeFrame":
+        return _FakeFrame(self.name)
 
 
 class _FakeJoystick:
@@ -310,6 +319,27 @@ def _make_cancel_main() -> tuple[Main, _FakeStageController, _FakeButton, list[s
 
 
 class MainCoordinateFeedrateTest(unittest.TestCase):
+    def test_wait_for_camera_frame_requires_fresh_counter_after_marker(self) -> None:
+        window = Main.__new__(Main)
+        window._latest_camera_frame_condition = threading.Condition()
+        window._latest_camera_frame = _FakeFrame("old")
+        window._latest_camera_frame_counter = 7
+
+        frame, counter = Main._wait_for_camera_frame(
+            window,
+            after_counter=7,
+            timeout_s=0.0,
+        )
+
+        self.assertIsNone(frame)
+        self.assertEqual(counter, 7)
+
+        frame, counter = Main._wait_for_camera_frame(window, timeout_s=0.0)
+
+        self.assertIsNotNone(frame)
+        self.assertEqual(frame.name, "old")
+        self.assertEqual(counter, 7)
+
     def test_saving_needle_down_target_does_not_reapply_full_settings(self) -> None:
         window = Main.__new__(Main)
         stage_controller = _FakeStageController()

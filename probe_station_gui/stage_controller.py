@@ -116,6 +116,18 @@ class _FocusSweepResult:
     edge_peak: bool
 
 
+@dataclass(frozen=True)
+class _AutofocusContext:
+    objective_name: str
+    start_z: float
+    min_z: float
+    max_z: float
+    lower_z: float
+    upper_z: float
+    local_range_mm: float
+    fine_step_mm: float
+
+
 class StageController(QObject):
     """Translate mouse clicks into stage movements via serial commands."""
 
@@ -1531,6 +1543,35 @@ class StageController(QObject):
             self.needles_action_finished.emit(False, str(exc), action)
             raise
 
+    def run_external_local_autofocus(
+        self,
+        *,
+        range_mm: float,
+        step_mm: float | None = None,
+    ) -> str:
+        """Run a fast local Z autofocus inside an external reservation."""
+
+        self.movement_started.emit()
+        try:
+            self._check_cancelled()
+            serial_connection = self._serial
+            if serial_connection is None or not serial_connection.is_open:
+                raise StageControllerError("Serial connection is not available.")
+            with self._serial_session_lock:
+                message = self._run_local_autofocus_locked(
+                    serial_connection,
+                    range_mm=range_mm,
+                    step_mm=step_mm,
+                )
+            self.autofocus_finished.emit(True, message)
+            self.movement_finished.emit(True, message)
+            return message
+        except StageControllerError as exc:
+            message = str(exc)
+            self.autofocus_finished.emit(False, message)
+            self.movement_finished.emit(False, message)
+            raise
+
     def current_stage_position(self) -> tuple[float, ...]:
         """Return the latest controller position in the active GUI coordinate space."""
 
@@ -2537,47 +2578,21 @@ class StageController(QObject):
     def _run_autofocus_locked(self, serial_connection: serial.Serial) -> None:
         """Run autofocus while the caller owns serial access."""
 
-        self._relative_warning_emitted = False
-        objective_name = str(self._active_objective_name)
-        if not self._needles_up:
-            self.status_message.emit("Autofocus: homing A axis.")
-            self._write_command(serial_connection, "$HA")
-            self._wait_for_ok(serial_connection, timeout=30.0)
-            self._wait_for_idle(serial_connection, timeout=30.0)
-            self._set_needles_state(True, known=True, zone="raise")
-        self._move_safety_check()
-
-        self._ensure_axis_limits(serial_connection, required_axes=("Z",))
-        local_range = float(self._objective_autofocus_range_mm)
-        fine_step = float(self._objective_autofocus_fine_step_mm)
-        if fine_step <= 0:
-            raise StageControllerError("Autofocus parameters are invalid.")
+        context = self._prepare_autofocus_context_locked(
+            serial_connection,
+            range_mm=self._objective_autofocus_range_mm,
+            step_mm=self._objective_autofocus_fine_step_mm,
+        )
+        objective_name = context.objective_name
+        local_range = context.local_range_mm
+        fine_step = context.fine_step_mm
         sweep_feedrate = self._autofocus_sweep_feedrate_mm_min(fine_step)
-
-        status = self._query_synced_status_for_absolute_motion(serial_connection)
-        position = self._position_for_configured_mode(status)
-        if status is None or position is None or len(position) < 3:
-            raise StageControllerError("Unable to read Z position for autofocus.")
-        self._require_homed_axes(status, {"Z"}, allow_relative=True)
-        start_z = float(position[2])
-        z_limits = self._axis_limits_for_configured_mode("Z", status)
-        if not z_limits:
-            raise StageControllerError("Z axis limits unavailable.")
-        min_z, max_z = z_limits
-        if start_z < min_z or start_z > max_z:
-            raise StageControllerError(
-                f"Current Z position {start_z:.3f} is outside limits ({min_z:.3f}, {max_z:.3f})."
-            )
-        lower_limit = max(min_z - start_z, -local_range)
-        upper_limit = min(max_z - start_z, local_range)
-        if upper_limit <= lower_limit:
-            raise StageControllerError("Z axis range near current position is empty.")
 
         logger.debug(
             "Autofocus %s parameters start_z=%.6f range=%.6f fine_step=%.6f "
             "sweep_feedrate=%.6f",
             objective_name,
-            start_z,
+            context.start_z,
             local_range,
             fine_step,
             sweep_feedrate,
@@ -2587,16 +2602,16 @@ class StageController(QObject):
         )
         coarse = self._run_focus_sweep_locked(
             serial_connection,
-            start_z + lower_limit,
-            start_z + upper_limit,
+            context.lower_z,
+            context.upper_z,
             feedrate=sweep_feedrate,
         )
         fine_half_range = min(
             max(fine_step * 6.0, local_range * 0.15),
             local_range,
         )
-        fine_lower = max(min_z, coarse.best_z - fine_half_range)
-        fine_upper = min(max_z, coarse.best_z + fine_half_range)
+        fine_lower = max(context.min_z, coarse.best_z - fine_half_range)
+        fine_upper = min(context.max_z, coarse.best_z + fine_half_range)
         best = coarse
         if fine_upper - fine_lower >= fine_step * 2.0:
             self.status_message.emit(
@@ -2615,14 +2630,14 @@ class StageController(QObject):
         best = self._run_static_focus_refinement_locked(
             serial_connection,
             best.best_z,
-            min_z=min_z,
-            max_z=max_z,
+            min_z=context.min_z,
+            max_z=context.max_z,
             step_mm=fine_step,
         )
         self._approach_z_from_below_locked(
             serial_connection,
             best.best_z,
-            min_z=min_z,
+            min_z=context.min_z,
             fine_step_mm=fine_step,
         )
         message = (
@@ -2633,6 +2648,105 @@ class StageController(QObject):
         if best.edge_peak:
             message += " Peak was near a search edge; consider increasing range."
         self.autofocus_finished.emit(True, message)
+
+    def _run_local_autofocus_locked(
+        self,
+        serial_connection: serial.Serial,
+        *,
+        range_mm: float,
+        step_mm: float | None = None,
+    ) -> str:
+        context = self._prepare_autofocus_context_locked(
+            serial_connection,
+            range_mm=range_mm,
+            step_mm=step_mm,
+        )
+        self.status_message.emit(
+            "Autofocus "
+            f"{context.objective_name}: local search within "
+            f"+/-{context.local_range_mm:.3f} mm."
+        )
+        best = self._run_static_focus_refinement_locked(
+            serial_connection,
+            context.start_z,
+            min_z=context.lower_z,
+            max_z=context.upper_z,
+            step_mm=context.fine_step_mm,
+        )
+        self._approach_z_from_below_locked(
+            serial_connection,
+            best.best_z,
+            min_z=context.min_z,
+            fine_step_mm=context.fine_step_mm,
+        )
+        message = (
+            f"Autofocus {context.objective_name} local complete. "
+            f"Best score {best.best_score:.2f} at Z={best.best_z:.4f} mm "
+            f"from {best.sample_count} frames."
+        )
+        if best.edge_peak:
+            message += " Peak was near the local search edge."
+        return message
+
+    def _prepare_autofocus_context_locked(
+        self,
+        serial_connection: serial.Serial,
+        *,
+        range_mm: float,
+        step_mm: float | None,
+    ) -> _AutofocusContext:
+        self._relative_warning_emitted = False
+        objective_name = str(self._active_objective_name)
+        if not self._needles_up:
+            self.status_message.emit("Autofocus: homing A axis.")
+            self._write_command(serial_connection, "$HA")
+            self._wait_for_ok(serial_connection, timeout=30.0)
+            self._wait_for_idle(serial_connection, timeout=30.0)
+            self._set_needles_state(True, known=True, zone="raise")
+        self._move_safety_check()
+
+        self._ensure_axis_limits(serial_connection, required_axes=("Z",))
+        local_range = self._positive_profile_value(
+            range_mm,
+            self._objective_autofocus_range_mm,
+        )
+        fine_step = self._positive_profile_value(
+            self._objective_autofocus_fine_step_mm
+            if step_mm is None
+            else step_mm,
+            self._objective_autofocus_fine_step_mm,
+        )
+        if fine_step <= 0:
+            raise StageControllerError("Autofocus parameters are invalid.")
+
+        status = self._query_synced_status_for_absolute_motion(serial_connection)
+        position = self._position_for_configured_mode(status)
+        if status is None or position is None or len(position) < 3:
+            raise StageControllerError("Unable to read Z position for autofocus.")
+        self._require_homed_axes(status, {"Z"}, allow_relative=True)
+        start_z = float(position[2])
+        z_limits = self._axis_limits_for_configured_mode("Z", status)
+        if not z_limits:
+            raise StageControllerError("Z axis limits unavailable.")
+        min_z, max_z = z_limits
+        if start_z < min_z or start_z > max_z:
+            raise StageControllerError(
+                f"Current Z position {start_z:.3f} is outside limits ({min_z:.3f}, {max_z:.3f})."
+            )
+        lower_z = max(min_z, start_z - local_range)
+        upper_z = min(max_z, start_z + local_range)
+        if upper_z <= lower_z:
+            raise StageControllerError("Z axis range near current position is empty.")
+        return _AutofocusContext(
+            objective_name=objective_name,
+            start_z=start_z,
+            min_z=float(min_z),
+            max_z=float(max_z),
+            lower_z=float(lower_z),
+            upper_z=float(upper_z),
+            local_range_mm=float(local_range),
+            fine_step_mm=float(fine_step),
+        )
 
     def _run_focus_sweep_locked(
         self,
