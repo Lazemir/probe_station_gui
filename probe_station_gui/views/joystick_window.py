@@ -1192,6 +1192,11 @@ class JoystickWindow(QWidget):
             self.control_mode_changed.emit(mode)
         return True
 
+    def set_control_mode(self, mode: str, *, emit_changed: bool = True) -> bool:
+        """Set jog/step mode from other GUI panels."""
+
+        return self._set_control_mode(mode, emit_changed=emit_changed)
+
     def _toggle_control_mode(self) -> bool:
         next_mode = (
             self.MODE_STEP if self._control_mode == self.MODE_JOG else self.MODE_JOG
