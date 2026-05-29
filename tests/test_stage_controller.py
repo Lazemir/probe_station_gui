@@ -694,7 +694,9 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
         controller._move_safety_check = lambda: None
         controller._wait_for_idle = lambda _serial: None
         controller._query_status = lambda _serial: statuses.pop(0)
-        controller._send_relative_move = lambda _serial, move: sent_moves.append(move)
+        controller._send_relative_move = (
+            lambda _serial, move, **_kwargs: sent_moves.append(move)
+        )
         controller.movement_started = types.SimpleNamespace(emit=lambda *args, **kwargs: None)
         controller.status_message = types.SimpleNamespace(emit=lambda *args, **kwargs: None)
         movement_results = []
@@ -1652,9 +1654,7 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
 
         controller._run_manual_axis_move("A", -0.02, "G91", 1.0)
 
-        self.assertIn("G90", commands)
-        self.assertNotIn("G91", commands)
-        self.assertIn("G1 A-0.1200 F1", commands)
+        self.assertEqual(commands, ["$J=G90 G21 A-0.1200 F1"])
         self.assertEqual(movement_results[-1][0], True)
         self.assertIn("accepted", movement_results[-1][1])
 
@@ -1690,9 +1690,7 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
 
         controller._run_manual_axis_move("X", 0.25, "G91", 10.0)
 
-        self.assertIn("G90", commands)
-        self.assertNotIn("G91", commands)
-        self.assertIn("G1 X1.2500 F10", commands)
+        self.assertEqual(commands, ["$J=G90 G21 X1.2500 F10"])
         self.assertEqual(movement_results[-1][0], True)
 
     def test_absolute_manual_axis_zero_target_is_sent(self) -> None:
@@ -1721,8 +1719,7 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
 
         controller._run_manual_axis_move("A", 0.0, "G90", 5.0)
 
-        self.assertIn("G90", commands)
-        self.assertIn("G1 A0.0000 F5", commands)
+        self.assertEqual(commands, ["$J=G90 G21 A0.0000 F5"])
         self.assertEqual(movement_results[-1][0], True)
         self.assertIn("accepted", movement_results[-1][1])
 
@@ -2626,7 +2623,7 @@ class StageControllerPriorityNeedlesActionTest(unittest.TestCase):
         self.assertTrue(controller._needles_known)
         self.assertEqual(messages[-1], "Coordinate move cancel requested.")
 
-    def test_cancel_active_task_soft_resets_and_clears_needle_feedrate_control(self) -> None:
+    def test_cancel_active_task_preserves_homing_without_soft_reset(self) -> None:
         controller = StageController()
         controller._serial = _WritableFakeSerial()
         controller._homed_axes = {"X", "Y", "A"}
@@ -2645,8 +2642,9 @@ class StageControllerPriorityNeedlesActionTest(unittest.TestCase):
             controller._async_write_queue.join()
 
             self.assertTrue(controller._cancel_event.is_set())
-            self.assertIn(b"\x18", controller._serial.writes)
-            self.assertEqual(controller._homed_axes, set())
+            self.assertIn(b"\x85", controller._serial.writes)
+            self.assertNotIn(b"\x18", controller._serial.writes)
+            self.assertEqual(controller._homed_axes, {"X", "Y", "A"})
             self.assertFalse(controller._needles_known)
             self.assertIsNone(controller._active_needles_action)
             self.assertIsNone(controller._active_needles_programmed_feedrate)
@@ -2655,6 +2653,69 @@ class StageControllerPriorityNeedlesActionTest(unittest.TestCase):
             self.assertEqual(messages[0], "Needle move cancel requested.")
         finally:
             controller.shutdown()
+
+    def test_cancel_active_task_without_needles_preserves_needle_state(self) -> None:
+        controller = StageController()
+        controller._serial = _WritableFakeSerial()
+        controller._homed_axes = {"X", "Y", "Z", "A"}
+        controller._needles_up = True
+        controller._needles_known = True
+        messages = []
+        controller.status_message = types.SimpleNamespace(
+            emit=lambda message: messages.append(message)
+        )
+        try:
+            controller.cancel_active_task("Autofocus cancel requested.")
+            controller._async_write_queue.join()
+
+            self.assertTrue(controller._cancel_event.is_set())
+            self.assertEqual(controller._serial.writes, [b"\x85"])
+            self.assertEqual(controller._homed_axes, {"X", "Y", "Z", "A"})
+            self.assertTrue(controller._needles_up)
+            self.assertTrue(controller._needles_known)
+            self.assertEqual(messages[-1], "Autofocus cancel requested.")
+        finally:
+            controller.shutdown()
+
+    def test_reset_controller_soft_resets_and_clears_unverified_state(self) -> None:
+        controller = StageController()
+        controller._serial = _WritableFakeSerial()
+        controller._homed_axes = {"X", "Y", "A"}
+        controller._needles_up = True
+        controller._needles_known = True
+        messages = []
+        controller.status_message = types.SimpleNamespace(
+            emit=lambda message: messages.append(message)
+        )
+        try:
+            controller.reset_controller(source="test", reason="Reset requested.")
+            controller._async_write_queue.join()
+
+            self.assertTrue(controller._cancel_event.is_set())
+            self.assertIn(b"\x18", controller._serial.writes)
+            self.assertEqual(controller._homed_axes, set())
+            self.assertFalse(controller._needles_known)
+            self.assertEqual(messages[0], "Reset requested.")
+        finally:
+            controller.shutdown()
+
+    def test_relative_move_can_be_sent_as_cancelable_jog(self) -> None:
+        controller = StageController()
+        serial_connection = _LineFakeSerial([b"ok\n"])
+        controller.set_motion_safety_disabled(True)
+        controller._wait_for_idle = lambda *_args, **_kwargs: None
+
+        controller._send_relative_move(
+            serial_connection,
+            MoveVector(x=0.5, z=-0.1),
+            feedrate=12.3,
+            as_jog=True,
+        )
+
+        self.assertEqual(
+            serial_connection.writes,
+            [b"\x90", b"$J=G91 G21 X0.5000 Z-0.1000 F12.3\n"],
+        )
 
     def test_needles_lower_queues_during_oscillation(self) -> None:
         controller = StageController()
