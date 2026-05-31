@@ -46,6 +46,7 @@ class RouteMeasurementPoint:
     stage_xy: Point2D
     needle_1_design: Point2D
     needle_2_design: Point2D
+    photo_stage_xy: Point2D | None = None
 
 
 @dataclass(frozen=True)
@@ -513,7 +514,11 @@ class RouteMeasurementRunner:
                     if self._stop_requested.is_set():
                         message = "Route measurement stopped by user."
                         break
-                target_xy = self._adjusted_stage_xy(point)
+                target_xy = (
+                    self._adjusted_photo_stage_xy(point)
+                    if self._photo_enabled
+                    else self._adjusted_stage_xy(point)
+                )
                 self._stage_controller.run_external_move_to_xy(
                     target_xy[0],
                     target_xy[1],
@@ -555,6 +560,20 @@ class RouteMeasurementRunner:
                     if self._stop_requested.is_set():
                         message = "Route measurement stopped by user."
                         break
+                    if self._measure_enabled:
+                        contact_xy = self._adjusted_stage_xy(point)
+                        if not self._same_stage_xy(target_xy, contact_xy):
+                            self._status(
+                                f"Route measurement: point {position}/{total} "
+                                "moving to contact position."
+                            )
+                            self._stage_controller.run_external_move_to_xy(
+                                contact_xy[0],
+                                contact_xy[1],
+                            )
+                            if self._stop_requested.is_set():
+                                message = "Route measurement stopped by user."
+                                break
                 if not self._measure_enabled:
                     position_index += 1
                     continue
@@ -805,6 +824,26 @@ class RouteMeasurementRunner:
             float(point.stage_xy[1]) + offset_y,
         )
 
+    def _adjusted_photo_stage_xy(self, point: RouteMeasurementPoint) -> Point2D:
+        photo_xy = (
+            point.photo_stage_xy
+            if point.photo_stage_xy is not None
+            else point.stage_xy
+        )
+        with self._route_offset_lock:
+            offset_x, offset_y = self._route_offset_xy
+        return (
+            float(photo_xy[0]) + offset_x,
+            float(photo_xy[1]) + offset_y,
+        )
+
+    @staticmethod
+    def _same_stage_xy(first: Point2D, second: Point2D) -> bool:
+        return (
+            abs(float(first[0]) - float(second[0])) <= 1e-9
+            and abs(float(first[1]) - float(second[1])) <= 1e-9
+        )
+
     def _sleep_contact_settle(self) -> bool:
         if self._contact_settle_s <= 0.0:
             return (
@@ -942,6 +981,7 @@ class RouteMeasurementRunner:
     ) -> Path:
         if self._photo_callback is None:
             raise ValueError("Route photo capture is not configured.")
+        photo_stage_xy = self._adjusted_photo_stage_xy(point)
         result = Path(
             self._photo_callback(point, position, total, focus_result)
         ).expanduser()
@@ -953,7 +993,7 @@ class RouteMeasurementRunner:
             point_id=point.point_id,
             label=point.label,
             design_center=point.design_center,
-            stage_xy=point.stage_xy,
+            stage_xy=photo_stage_xy,
             focus=_focus_result_to_dict(focus_result),
         )
         if self._photo_record_callback is not None:

@@ -6315,14 +6315,30 @@ class Main(QMainWindow):
         route: MeasurementRoute,
     ) -> list[RouteMeasurementPoint]:
         points: list[RouteMeasurementPoint] = []
+        objective_settings = self.settings_manager.objectives_configuration()
+        objective_profiles = objective_settings.objectives
+        base_objective = base_objective_name(objective_profiles)
+        active_objective = objective_settings.active_name
+        base_offset = objective_xy_offset(objective_profiles, base_objective)
+        active_offset = objective_xy_offset(objective_profiles, active_objective)
         for route_index, route_point in enumerate(route.points, start=1):
             if not route_point.enabled:
                 continue
-            stage_xy = self._raw_stage_xy_from_design_xy(route_point.camera_center)
-            if stage_xy is None:
+            camera_stage_xy = self._design_session.stage_from_design(
+                route_point.camera_center
+            )
+            if camera_stage_xy is None:
                 raise DesignModelError(
                     "Design registration is required before measuring a route."
                 )
+            contact_stage_xy = camera_stage_to_raw_stage(
+                (float(camera_stage_xy[0]), float(camera_stage_xy[1])),
+                base_offset,
+            )
+            photo_stage_xy = camera_stage_to_raw_stage(
+                (float(camera_stage_xy[0]), float(camera_stage_xy[1])),
+                active_offset,
+            )
             hits = route.needle_hits_for_point(route_point)
             needle_1_design = (
                 hits[0][1] if len(hits) > 0 else route_point.camera_center
@@ -6339,7 +6355,10 @@ class Main(QMainWindow):
                         float(route_point.camera_center[0]),
                         float(route_point.camera_center[1]),
                     ),
-                    stage_xy=(float(stage_xy[0]), float(stage_xy[1])),
+                    stage_xy=(
+                        float(contact_stage_xy[0]),
+                        float(contact_stage_xy[1]),
+                    ),
                     needle_1_design=(
                         float(needle_1_design[0]),
                         float(needle_1_design[1]),
@@ -6347,6 +6366,10 @@ class Main(QMainWindow):
                     needle_2_design=(
                         float(needle_2_design[0]),
                         float(needle_2_design[1]),
+                    ),
+                    photo_stage_xy=(
+                        float(photo_stage_xy[0]),
+                        float(photo_stage_xy[1]),
                     ),
                 )
             )
@@ -6381,8 +6404,13 @@ class Main(QMainWindow):
             point_label=point.label,
             captured_at=captured_at,
         )
+        photo_stage_xy = (
+            point.photo_stage_xy
+            if point.photo_stage_xy is not None
+            else point.stage_xy
+        )
         stage_position = self._stage_position_for_image_metadata(
-            stage_xy=point.stage_xy
+            stage_xy=photo_stage_xy
         )
         focus_data = self._route_photo_focus_payload(focus_result)
         metadata = MicroscopeImageMetadata(
@@ -6400,7 +6428,7 @@ class Main(QMainWindow):
             route_total=int(total),
             design_xy=point.design_center,
             stage_position=stage_position,
-            stage_xy=point.stage_xy,
+            stage_xy=photo_stage_xy,
             notes=(
                 "needles raised before capture",
                 *(

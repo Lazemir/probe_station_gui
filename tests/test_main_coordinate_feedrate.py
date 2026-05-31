@@ -35,7 +35,7 @@ from probe_station_gui.route_measurement import (
     RouteContactSeekResult,
     RoutePhotoRecord,
 )
-from probe_station_gui.settings_manager import Settings
+from probe_station_gui.settings_manager import ObjectiveCalibrationSettings, Settings
 
 
 class _FakeTimer:
@@ -579,6 +579,46 @@ assert image.height() == 4
         self.assertEqual(rows[0]["stage_y"], "2.0")
         self.assertEqual(rows[0]["focus_best_z_mm"], "10.0")
         self.assertEqual(rows[0]["focus_delta_um"], "20.0")
+
+    def test_route_points_keep_contact_xy_separate_from_photo_objective_xy(self) -> None:
+        window = Main.__new__(Main)
+        settings = Settings()
+        settings.objectives.active_name = "X50"
+        settings.objectives.objectives = {
+            "X5": ObjectiveCalibrationSettings(
+                name="X5",
+                magnification=5.0,
+                xy_offset_configured=True,
+            ),
+            "X50": ObjectiveCalibrationSettings(
+                name="X50",
+                magnification=50.0,
+                xy_offset_x_mm=0.25,
+                xy_offset_y_mm=-0.25,
+                xy_offset_configured=True,
+            ),
+        }
+        window.settings_manager = types.SimpleNamespace(
+            objectives_configuration=lambda: settings.objectives
+        )
+        window._design_session = types.SimpleNamespace(
+            stage_from_design=lambda _design_xy: (1.0, 2.0)
+        )
+        route_point = types.SimpleNamespace(
+            enabled=True,
+            camera_center=(10.0, 20.0),
+            id="p001",
+            label="P001",
+        )
+        route = types.SimpleNamespace(
+            points=[route_point],
+            needle_hits_for_point=lambda _point: [],
+        )
+
+        point = Main._route_measurement_points(window, route)[0]
+
+        self.assertEqual(point.stage_xy, (1.0, 2.0))
+        self.assertEqual(point.photo_stage_xy, (1.25, 1.75))
 
     def test_record_route_contact_height_writes_height_map_csv(self) -> None:
         window = Main.__new__(Main)
