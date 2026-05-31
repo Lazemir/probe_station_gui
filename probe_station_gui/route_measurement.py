@@ -318,6 +318,7 @@ class RouteMeasurementRunner:
         self._photo_focus_enabled = bool(photo_focus_enabled)
         self._stop_requested = threading.Event()
         self._point_interrupt_requested = threading.Event()
+        self._contact_seek_active = threading.Event()
         self._pause_requested = threading.Event()
         self._confirmation_condition = threading.Condition()
         self._pending_confirmation: str | None = None
@@ -362,6 +363,10 @@ class RouteMeasurementRunner:
 
     def request_pause_after_current_point(self) -> None:
         self._pause_requested.set()
+        if self._contact_seek_active.is_set():
+            self._point_interrupt_requested.set()
+            with self._confirmation_condition:
+                self._confirmation_condition.notify_all()
 
     def set_auto_next_ok_or_short(self, enabled: bool) -> None:
         with self._auto_next_lock:
@@ -1038,6 +1043,33 @@ class RouteMeasurementRunner:
                 "seeking contact up to "
                 f"{self._auto_contact_seek_max_total_mm:.3f} mm."
             )
+        self._contact_seek_active.set()
+        try:
+            return self._run_contact_seek_attempts(
+                initial_samples=initial_samples,
+                initial_quality=initial_quality,
+                position=position,
+                total=total,
+                skip_current_depth=skip_current_depth,
+                needle_action=needle_action,
+                lower_to_depth=lower_to_depth,
+                adjust=adjust,
+            )
+        finally:
+            self._contact_seek_active.clear()
+
+    def _run_contact_seek_attempts(
+        self,
+        *,
+        initial_samples: list[RouteMeasurementSample],
+        initial_quality: RouteContactQuality,
+        position: int,
+        total: int,
+        skip_current_depth: bool,
+        needle_action: Callable[..., object],
+        lower_to_depth: Callable[..., object] | None,
+        adjust: Callable[..., object],
+    ) -> list[RouteMeasurementSample] | None:
         step_mm = self._auto_contact_seek_step_mm
         max_depth_steps = int(
             math.ceil(self._auto_contact_seek_max_total_mm / abs(step_mm))

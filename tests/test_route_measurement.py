@@ -131,6 +131,17 @@ class _FakeBatchRouteLCR:
         return [dict(item) for item in batch]
 
 
+class _PausingBatchRouteLCR(_FakeBatchRouteLCR):
+    def __init__(self, measurements: list[dict[str, object]], pause_on_batch) -> None:
+        super().__init__(measurements)
+        self.pause_on_batch = pause_on_batch
+
+    def read_route_measurement_batch_now(self, count: int) -> list[dict[str, object]]:
+        batch = super().read_route_measurement_batch_now(count)
+        self.pause_on_batch(len(self.batch_counts))
+        return batch
+
+
 class _OpeningLCR(_FakeLCR):
     def __init__(self, values: list[float]) -> None:
         super().__init__(values)
@@ -1113,6 +1124,96 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
 
         first_depth_index = stage.calls.index(("lower_to_depth", 0.0005, None))
         self.assertEqual(stage.calls[first_depth_index - 1], ("needles", "lift", None))
+
+    def test_pause_during_auto_contact_seek_interrupts_point_and_lifts(self) -> None:
+        point = _point(1)
+        stage = _FakeStage()
+        waiting_values: list[bool] = []
+        waiting_changed = threading.Condition()
+        statuses: list[str] = []
+        statuses_changed = threading.Condition()
+        runner_holder: dict[str, RouteMeasurementRunner] = {}
+
+        def maybe_pause(batch_number: int) -> None:
+            if batch_number == 2:
+                runner_holder["runner"].request_pause_after_current_point()
+
+        def on_waiting(waiting: bool) -> None:
+            with waiting_changed:
+                waiting_values.append(bool(waiting))
+                waiting_changed.notify_all()
+
+        def on_status(status: str) -> None:
+            with statuses_changed:
+                statuses.append(status)
+                statuses_changed.notify_all()
+
+        lcr = _PausingBatchRouteLCR(
+            [
+                {"differential_resistance_ohm": value}
+                for value in (
+                    200000.0,
+                    210000.0,
+                    1000.0,
+                    1001.0,
+                )
+            ],
+            maybe_pause,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = RouteMeasurementRunner(
+                points=[point],
+                csv_path=Path(tmpdir) / "route.csv",
+                stage_controller=stage,
+                lcr_controller=lcr,
+                needle_feedrate=75.0,
+                measurement_count=2,
+                initial_measurement_count=2,
+                confirm_each_point=True,
+                auto_contact_seek_on_bad_contact=True,
+                auto_contact_seek_step_mm=0.001,
+                auto_contact_seek_max_total_mm=0.003,
+                contact_settle_s=0.0,
+                status_callback=on_status,
+                waiting_callback=on_waiting,
+            )
+            runner_holder["runner"] = runner
+            result = []
+            thread = threading.Thread(
+                target=lambda: result.append(runner.run()),
+                daemon=True,
+            )
+
+            thread.start()
+            with waiting_changed:
+                self.assertTrue(
+                    waiting_changed.wait_for(
+                        lambda: waiting_values and waiting_values[-1],
+                        timeout=2.0,
+                    )
+                )
+            with statuses_changed:
+                self.assertTrue(
+                    statuses_changed.wait_for(
+                        lambda: any("interrupted" in status for status in statuses),
+                        timeout=2.0,
+                    )
+                )
+
+            self.assertTrue(thread.is_alive())
+            self.assertEqual(lcr.batch_counts, [2, 2])
+            self.assertNotIn(("lower_to_depth", 0.001, 75.0), stage.calls)
+            self.assertGreaterEqual(
+                len([call for call in stage.calls if call == ("needles", "lift", 75.0)]),
+                2,
+            )
+
+            runner.submit_confirmation("skip")
+            thread.join(timeout=2.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result[0][0], True, result[0][1])
 
     def test_runtime_settings_update_applies_to_remeasure(self) -> None:
         point = _point(1)
