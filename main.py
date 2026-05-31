@@ -3439,18 +3439,6 @@ class Main(QMainWindow):
         settings_action.triggered.connect(self._open_settings_dialog)
         app_menu.addAction(settings_action)
 
-        api_settings_action = QAction("API Settings", self)
-        api_settings_action.triggered.connect(
-            lambda _checked=False: self._open_settings_dialog("API")
-        )
-        app_menu.addAction(api_settings_action)
-
-        telegram_settings_action = QAction("Telegram Settings", self)
-        telegram_settings_action.triggered.connect(
-            lambda _checked=False: self._open_settings_dialog("Telegram")
-        )
-        app_menu.addAction(telegram_settings_action)
-
         open_log_action = QAction("Open Status Log…", self)
         open_log_action.setText("Open Status Log")
         open_log_action.triggered.connect(self._open_status_log)
