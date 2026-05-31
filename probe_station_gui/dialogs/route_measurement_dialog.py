@@ -258,6 +258,8 @@ class RouteMeasurementDialog(QDialog):
     """Non-modal route measurement setup and control window."""
 
     measure_requested = Signal(object)
+    start_session_requested = Signal()
+    cancel_session_requested = Signal()
     next_requested = Signal()
     remeasure_requested = Signal()
     skip_requested = Signal()
@@ -293,6 +295,7 @@ class RouteMeasurementDialog(QDialog):
         self._settings_path = Path(settings_path).expanduser() if settings_path else None
         self._last_raw_samples: tuple[object, ...] = ()
         self._measurement_pending = False
+        self._measurement_session_active = False
 
         outer_layout = QVBoxLayout(self)
         scroll_area = QScrollArea(self)
@@ -503,6 +506,8 @@ class RouteMeasurementDialog(QDialog):
         layout.addLayout(jump_row)
 
         button_row = QHBoxLayout()
+        self._start_session_button = QPushButton("Start Session", self)
+        self._cancel_session_button = QPushButton("Cancel Session", self)
         self._measure_button = QPushButton("Measure", self)
         self._pause_button = QPushButton("Pause", self)
         self._interrupt_button = QPushButton("Interrupt", self)
@@ -511,6 +516,8 @@ class RouteMeasurementDialog(QDialog):
         self._skip_button = QPushButton("Skip", self)
         self._next_button = QPushButton("Next", self)
         self._close_button = QPushButton("Close", self)
+        button_row.addWidget(self._start_session_button)
+        button_row.addWidget(self._cancel_session_button)
         button_row.addWidget(self._measure_button)
         button_row.addWidget(self._pause_button)
         button_row.addWidget(self._interrupt_button)
@@ -541,6 +548,8 @@ class RouteMeasurementDialog(QDialog):
             lambda _checked: self._update_gwinstek_state()
         )
         self._current_point_spin.valueChanged.connect(self._on_current_point_changed)
+        self._start_session_button.clicked.connect(self.start_session_requested.emit)
+        self._cancel_session_button.clicked.connect(self.cancel_session_requested.emit)
         self._measure_button.clicked.connect(self._emit_measure_requested)
         self._load_profile_button.clicked.connect(self._load_profile)
         self._save_profile_button.clicked.connect(self._save_profile)
@@ -628,12 +637,25 @@ class RouteMeasurementDialog(QDialog):
         self.set_current_point(point_number, save=save)
 
     def set_measurement_pending(self, pending: bool, *, save: bool = True) -> None:
-        self._measurement_pending = bool(pending)
+        self.set_measurement_session_active(pending, save=save)
+
+    def set_measurement_session_active(
+        self,
+        active: bool,
+        *,
+        save: bool = True,
+    ) -> None:
+        self._measurement_session_active = bool(active)
+        self._measurement_pending = bool(active)
+        self._update_session_buttons()
         if save:
             self._save_settings_file()
 
     def measurement_pending(self) -> bool:
-        return bool(self._measurement_pending)
+        return bool(self._measurement_session_active)
+
+    def measurement_session_active(self) -> bool:
+        return bool(self._measurement_session_active)
 
     def set_route(
         self,
@@ -687,6 +709,7 @@ class RouteMeasurementDialog(QDialog):
         self._pause_button.setEnabled(self._running and not self._waiting)
         self._close_button.setEnabled(True)
         self.set_waiting(False)
+        self._update_session_buttons()
 
     def set_waiting(self, waiting: bool) -> None:
         self._waiting = bool(waiting)
@@ -700,6 +723,19 @@ class RouteMeasurementDialog(QDialog):
         self._jump_point_spin.setEnabled((not self._running) or can_confirm)
         self._jump_button.setEnabled(can_confirm)
         self._set_runtime_settings_enabled((not self._running) or can_confirm)
+        self._update_session_buttons()
+
+    def _update_session_buttons(self) -> None:
+        can_change_session = not self._running
+        self._start_session_button.setEnabled(
+            can_change_session and not self._measurement_session_active
+        )
+        self._cancel_session_button.setEnabled(
+            can_change_session and self._measurement_session_active
+        )
+        self._measure_button.setEnabled(
+            (not self._running) and self._measurement_session_active
+        )
 
     def _set_runtime_settings_enabled(self, enabled: bool) -> None:
         for widget in (
@@ -1045,6 +1081,9 @@ class RouteMeasurementDialog(QDialog):
         dialog.exec()
 
     def _emit_measure_requested(self) -> None:
+        if not self._measurement_session_active:
+            self.set_status("Start a measurement session before measuring.")
+            return
         mode = str(self._operation_combo.currentData() or ROUTE_OPERATION_MEASURE)
         csv_path = self._csv_path_edit.text().strip()
         if mode in {ROUTE_OPERATION_MEASURE, ROUTE_OPERATION_PHOTO_THEN_MEASURE} and not csv_path:
@@ -1152,6 +1191,7 @@ class RouteMeasurementDialog(QDialog):
                 self._followup_measurement_count_spin.value()
             ),
             "current_point": int(self._current_point_spin.value()),
+            "measurement_session_active": bool(self._measurement_session_active),
             "measurement_pending": bool(self._measurement_pending),
             "max_relative_rms": float(self._max_relative_rms_spin.value()) / 100.0,
             "contact_settle_s": float(self._contact_settle_spin.value()),
@@ -1186,7 +1226,12 @@ class RouteMeasurementDialog(QDialog):
             data.get("photo_autofocus_range_mm"),
         )
         self._apply_measurement_count_profile(data)
-        self._measurement_pending = bool(data.get("measurement_pending", False))
+        session_active = data.get(
+            "measurement_session_active",
+            data.get("measurement_pending", False),
+        )
+        self._measurement_session_active = bool(session_active)
+        self._measurement_pending = bool(session_active)
         current_point = data.get("current_point", data.get("start_point"))
         self._set_spinbox_value(self._current_point_spin, current_point)
         max_relative_rms = data.get("max_relative_rms")

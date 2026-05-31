@@ -1,5 +1,6 @@
 import sys
 import csv
+import json
 import subprocess
 import struct
 import threading
@@ -619,6 +620,128 @@ assert image.height() == 4
 
         self.assertEqual(point.stage_xy, (1.0, 2.0))
         self.assertEqual(point.photo_stage_xy, (1.25, 1.75))
+
+    def test_route_session_active_reads_new_and_legacy_settings(self) -> None:
+        self.assertTrue(
+            Main._route_measurement_session_active_from_settings(
+                {"measurement_session_active": True}
+            )
+        )
+        self.assertTrue(
+            Main._route_measurement_session_active_from_settings(
+                {"measurement_pending": True}
+            )
+        )
+        self.assertFalse(
+            Main._route_measurement_session_active_from_settings(
+                {
+                    "measurement_session_active": False,
+                    "measurement_pending": True,
+                }
+            )
+        )
+
+    def test_route_completion_telegram_reports_csv_session_total(self) -> None:
+        window = Main.__new__(Main)
+        alerts: list[tuple[str, str, dict[str, object]]] = []
+        statuses: list[str] = []
+        pending: list[bool] = []
+        resumed: list[int] = []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "route.csv"
+            with csv_path.open("w", encoding="utf-8", newline="") as handle:
+                handle.write("timestamp,point_index,status\n")
+                handle.write("2026-05-31T20:00:00+03:00,1,ok\n")
+                handle.write("2026-05-31T20:01:00+03:00,2,ok\n")
+
+            window._route_measurement_thread = None
+            window._route_measurement_runner = object()
+            window._route_measurement_waiting = True
+            window._route_measurement_photo_enabled = False
+            window._route_measurement_measure_enabled = True
+            window._route_measurement_point_numbers = [1, 2]
+            window._route_measurement_current_point = 2
+            window._telegram_photo_lock = threading.Lock()
+            window._telegram_route_photo_requested = True
+            window._telegram_contact_photo_requested = True
+            window._telegram_pending_contact_before_photo = (b"before", "before.jpg", "")
+            window._telegram_pending_contact_photo = (b"after", "after.jpg", "")
+            window._last_route_pre_contact_photo = (1, 2, b"pre", "pre.jpg", "")
+            window.design_navigator_panel = None
+            window._route_measurement_dialog = None
+            window._update_stage_coordinate_apply_state = lambda: None
+            window._set_route_measurement_resume_point = resumed.append
+            window._set_route_measurement_pending = pending.append
+            window._show_status = (
+                lambda message, _timeout_ms=None: statuses.append(str(message))
+            )
+            window._send_telegram_alert = (
+                lambda key, text, **kwargs: alerts.append((key, text, kwargs))
+            )
+
+            Main._on_route_measurement_finished(
+                window,
+                True,
+                "Route measurement complete: 1 measurements saved to route.csv.",
+                str(csv_path),
+            )
+
+        self.assertEqual(resumed, [1])
+        self.assertEqual(pending, [False])
+        self.assertEqual(len(alerts), 1)
+        key, text, kwargs = alerts[0]
+        self.assertEqual(key, "route_completed")
+        self.assertIn("Session total: 2 measurements in CSV.", text)
+        self.assertEqual(kwargs["document_path"], csv_path)
+
+    def test_cancel_route_measurement_session_clears_persisted_state(self) -> None:
+        window = Main.__new__(Main)
+        statuses: list[str] = []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            route_point = types.SimpleNamespace(camera_center=(10.0, 20.0))
+            route = types.SimpleNamespace(points=[route_point])
+            selected: list[int] = []
+
+            def select_route_point(index: int) -> object:
+                selected.append(index)
+                return route_point
+
+            window._route_measurement_thread = None
+            window._route_measurement_runner = None
+            window._route_measurement_dialog = None
+            window._route_measurement_session_active = True
+            window._route_measurement_current_point = 5
+            window.settings_manager = types.SimpleNamespace(
+                config_dir=lambda: config_dir
+            )
+            window._design_session = types.SimpleNamespace(
+                route=route,
+                selected_route_point_index=-1,
+                select_route_point=select_route_point,
+            )
+            window._last_selected_design_point = None
+            window._refresh_design_panel = lambda: None
+            window._persist_controller_state_if_available = lambda: None
+            window._show_status = (
+                lambda message, _timeout_ms=None: statuses.append(str(message))
+            )
+
+            Main._cancel_route_measurement_session(window)
+
+            settings_path = config_dir / "route-measurement-settings.json"
+            with settings_path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+
+        self.assertFalse(window._route_measurement_session_active)
+        self.assertEqual(window._route_measurement_current_point, 1)
+        self.assertEqual(selected, [0])
+        self.assertFalse(data["measurement_session_active"])
+        self.assertFalse(data["measurement_pending"])
+        self.assertEqual(data["current_point"], 1)
+        self.assertIn("Route measurement session cancelled.", statuses)
 
     def test_record_route_contact_height_writes_height_map_csv(self) -> None:
         window = Main.__new__(Main)

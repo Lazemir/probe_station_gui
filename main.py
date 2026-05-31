@@ -668,6 +668,7 @@ class Main(QMainWindow):
         self._route_measurement_measure_enabled = False
         self._route_measurement_point_numbers: list[int] = []
         self._route_measurement_current_point: int | None = None
+        self._route_measurement_session_active = False
         self._microscope_scan_thread: threading.Thread | None = None
         self._microscope_scan_stop_requested = threading.Event()
         self._last_telegram_attention_message = ""
@@ -1117,6 +1118,12 @@ class Main(QMainWindow):
         route_state = "idle"
         if route_active:
             route_state = "waiting" if self._route_measurement_waiting else "running"
+            if self._route_measurement_current_point is not None:
+                route_state = (
+                    f"{route_state}, point {self._route_measurement_current_point}"
+                )
+        elif self._route_measurement_session_active:
+            route_state = "session active"
             if self._route_measurement_current_point is not None:
                 route_state = (
                     f"{route_state}, point {self._route_measurement_current_point}"
@@ -6054,6 +6061,12 @@ class Main(QMainWindow):
                 parent=None,
             )
             dialog.measure_requested.connect(self._start_route_measurement)
+            dialog.start_session_requested.connect(
+                self._start_route_measurement_session
+            )
+            dialog.cancel_session_requested.connect(
+                self._cancel_route_measurement_session
+            )
             dialog.next_requested.connect(
                 lambda: self._submit_route_measurement_confirmation("next")
             )
@@ -6081,15 +6094,24 @@ class Main(QMainWindow):
                 default_csv_path=default_path,
                 default_photo_dir=default_photo_dir,
             )
+        dialog.set_measurement_session_active(
+            self._route_measurement_session_active,
+            save=False,
+        )
+        if self._route_measurement_current_point is not None:
+            dialog.set_current_point(
+                self._route_measurement_current_point,
+                save=False,
+            )
         if (
             self._route_measurement_thread is not None
             and self._route_measurement_thread.is_alive()
         ):
             dialog.set_running(True)
             dialog.set_waiting(self._route_measurement_waiting)
-        elif dialog.measurement_pending():
+        elif dialog.measurement_session_active():
             dialog.set_status(
-                "Route measurement is pending; Measure continues from the current point."
+                "Route measurement session is active; Measure continues from the current point."
             )
         dialog.show()
         dialog.raise_()
@@ -6101,10 +6123,16 @@ class Main(QMainWindow):
             return
         state = self._load_route_measurement_settings()
         current_point = self._route_measurement_current_point_from_settings(state)
-        if current_point is not None:
+        session_active = self._route_measurement_session_active_from_settings(state)
+        if session_active and not self._route_measurement_settings_match_route(
+            state,
+            route,
+        ):
+            session_active = False
+        self._route_measurement_session_active = session_active
+        if session_active and current_point is not None:
             self._set_route_measurement_resume_point(current_point)
-        pending = bool(state.get("measurement_pending", False))
-        if pending or (current_point is not None and current_point > 1):
+        if session_active:
             QTimer.singleShot(0, self._open_route_measurement_dialog)
 
     def _load_route_measurement_settings(self) -> dict[str, object]:
@@ -6131,8 +6159,81 @@ class Main(QMainWindow):
             return None
         return point_number if point_number >= 1 else None
 
+    @staticmethod
+    def _route_measurement_session_active_from_settings(
+        state: dict[str, object],
+    ) -> bool:
+        return bool(
+            state.get(
+                "measurement_session_active",
+                state.get("measurement_pending", False),
+            )
+        )
+
+    def _route_measurement_settings_match_route(
+        self,
+        state: dict[str, object],
+        route: MeasurementRoute,
+    ) -> bool:
+        stored_count = state.get("session_route_point_count")
+        try:
+            if stored_count is not None and int(stored_count) != len(route.points):
+                return False
+        except (TypeError, ValueError):
+            return False
+        stored_path = state.get("session_route_path")
+        if isinstance(stored_path, str) and stored_path.strip() and route.path is not None:
+            try:
+                return Path(stored_path).expanduser().resolve() == route.path.resolve()
+            except OSError:
+                return str(stored_path).strip() == str(route.path)
+        stored_name = state.get("session_route_name")
+        if isinstance(stored_name, str) and stored_name.strip():
+            return stored_name.strip() == route.name
+        return True
+
     def _clear_route_measurement_dialog(self) -> None:
         self._route_measurement_dialog = None
+
+    def _start_route_measurement_session(self) -> None:
+        thread = self._route_measurement_thread
+        if thread is not None and thread.is_alive():
+            self._show_status("Route measurement is already active.", 4000)
+            return
+        configuration = (
+            self._route_measurement_dialog.current_configuration()
+            if self._route_measurement_dialog is not None
+            else None
+        )
+        point_number = (
+            int(configuration.current_point)
+            if configuration is not None
+            else int(self._route_measurement_current_point or 1)
+        )
+        self._route_measurement_session_active = True
+        self._set_route_measurement_resume_point(point_number)
+        self._set_route_measurement_pending(True)
+        self._save_route_measurement_session_metadata(configuration)
+        message = (
+            "Route measurement session started; Measure continues from "
+            f"point {point_number}."
+        )
+        self._show_status(message, 5000)
+        if self._route_measurement_dialog is not None:
+            self._route_measurement_dialog.set_status(message)
+
+    def _cancel_route_measurement_session(self) -> None:
+        thread = self._route_measurement_thread
+        if thread is not None and thread.is_alive():
+            self._show_status("Stop route measurement before canceling the session.", 5000)
+            return
+        self._route_measurement_session_active = False
+        self._set_route_measurement_resume_point(1)
+        self._set_route_measurement_pending(False)
+        message = "Route measurement session cancelled."
+        self._show_status(message, 5000)
+        if self._route_measurement_dialog is not None:
+            self._route_measurement_dialog.set_status(message)
 
     def _start_route_measurement(
         self,
@@ -6164,6 +6265,10 @@ class Main(QMainWindow):
         if not points:
             self._show_status("Route has no enabled points.", 5000)
             return
+        if not self._route_measurement_session_active:
+            self._route_measurement_session_active = True
+            self._set_route_measurement_pending(True)
+        self._save_route_measurement_session_metadata(configuration)
         photo_enabled = configuration.operation_mode in {
             ROUTE_OPERATION_PHOTO,
             ROUTE_OPERATION_PHOTO_THEN_MEASURE,
@@ -7238,6 +7343,7 @@ class Main(QMainWindow):
         message: str,
         csv_path: str,
     ) -> None:
+        measure_enabled = self._route_measurement_measure_enabled
         thread = self._route_measurement_thread
         if thread is not None and not thread.is_alive():
             thread.join(timeout=0.1)
@@ -7261,6 +7367,11 @@ class Main(QMainWindow):
             self._route_measurement_dialog.set_running(False)
             self._route_measurement_dialog.set_status(message)
         if success:
+            session_measurement_count = (
+                self._route_measurement_csv_record_count(csv_path)
+                if measure_enabled and csv_path
+                else None
+            )
             self._set_route_measurement_resume_point(1)
             self._set_route_measurement_pending(False)
             self._route_measurement_point_numbers = []
@@ -7273,6 +7384,11 @@ class Main(QMainWindow):
             )
             self._show_status(f"{message}{suffix}", 8000)
             completion_message = f"Probe route completed:\n{message}"
+            if session_measurement_count is not None:
+                completion_message = (
+                    f"{completion_message}\n"
+                    f"Session total: {session_measurement_count} measurements in CSV."
+                )
             if csv_path:
                 completion_message = f"{completion_message}\nCSV: {csv_path}"
             self._send_telegram_alert(
@@ -7292,6 +7408,22 @@ class Main(QMainWindow):
                 f"Probe route stopped or failed:\n{message}\nCSV: {csv_path}",
                 attach_photo=True,
             )
+
+    @staticmethod
+    def _route_measurement_csv_record_count(csv_path: str | Path) -> int | None:
+        try:
+            path = Path(csv_path).expanduser()
+        except TypeError:
+            return None
+        if not path.exists():
+            return 0
+        try:
+            with path.open("r", encoding="utf-8", newline="") as handle:
+                reader = csv.DictReader(handle)
+                return sum(1 for row in reader if row)
+        except OSError:
+            logger.exception("Failed to count route measurement CSV records.")
+            return None
 
     def _route_measurement_next_point_number(self, position: int) -> int | None:
         try:
@@ -7348,6 +7480,10 @@ class Main(QMainWindow):
                 data = {}
         data["current_point"] = int(point_number)
         data["start_point"] = int(point_number)
+        data["measurement_session_active"] = bool(
+            self._route_measurement_session_active
+        )
+        data["measurement_pending"] = bool(self._route_measurement_session_active)
         try:
             settings_path.parent.mkdir(parents=True, exist_ok=True)
             with settings_path.open("w", encoding="utf-8") as handle:
@@ -7356,8 +7492,9 @@ class Main(QMainWindow):
             logger.exception("Failed to persist route measurement resume point.")
 
     def _set_route_measurement_pending(self, pending: bool) -> None:
+        self._route_measurement_session_active = bool(pending)
         if self._route_measurement_dialog is not None:
-            self._route_measurement_dialog.set_measurement_pending(bool(pending))
+            self._route_measurement_dialog.set_measurement_session_active(bool(pending))
             return
         self._save_route_measurement_pending(bool(pending))
 
@@ -7374,6 +7511,7 @@ class Main(QMainWindow):
                     data = dict(loaded)
             except (OSError, json.JSONDecodeError):
                 data = {}
+        data["measurement_session_active"] = bool(pending)
         data["measurement_pending"] = bool(pending)
         try:
             settings_path.parent.mkdir(parents=True, exist_ok=True)
@@ -7381,6 +7519,37 @@ class Main(QMainWindow):
                 json.dump(data, handle, indent=2, ensure_ascii=False)
         except OSError:
             logger.exception("Failed to persist route measurement pending state.")
+
+    def _save_route_measurement_session_metadata(
+        self,
+        configuration: RouteMeasurementRunConfiguration | None,
+    ) -> None:
+        settings_path = (
+            self.settings_manager.config_dir() / "route-measurement-settings.json"
+        )
+        data = self._load_route_measurement_settings()
+        route = self._design_session.route
+        if route is not None:
+            data["session_route_name"] = route.name
+            data["session_route_point_count"] = len(route.points)
+            if route.path is not None:
+                data["session_route_path"] = str(route.path)
+        if configuration is not None:
+            data["csv_path"] = configuration.csv_path
+            data["operation_mode"] = configuration.operation_mode
+            data["photo_output_dir"] = configuration.photo_output_dir
+            data["current_point"] = int(configuration.current_point)
+            data["start_point"] = int(configuration.current_point)
+        data["measurement_session_active"] = bool(
+            self._route_measurement_session_active
+        )
+        data["measurement_pending"] = bool(self._route_measurement_session_active)
+        try:
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            with settings_path.open("w", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=2, ensure_ascii=False)
+        except OSError:
+            logger.exception("Failed to persist route measurement session metadata.")
 
     def _select_route_point(self, index: int) -> None:
         point = self._design_session.select_route_point(index)
