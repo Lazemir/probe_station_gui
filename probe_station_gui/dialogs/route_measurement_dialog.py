@@ -101,6 +101,7 @@ class RouteMeasurementRunConfiguration:
     """Complete per-run route measurement configuration from the dialog."""
 
     csv_path: str
+    previous_csv_path: str
     operation_mode: str
     photo_output_dir: str
     photo_settle_s: float
@@ -113,6 +114,7 @@ class RouteMeasurementRunConfiguration:
     contact_settle_s: float
     contact_seek_range_mm: float
     contact_seek_step_mm: float
+    previous_ok_only: bool
     meter: RouteMeterConfiguration
 
     @property
@@ -322,6 +324,27 @@ class RouteMeasurementDialog(QDialog):
         csv_row.addWidget(self._csv_browse_button)
         common_layout.addRow(QLabel("CSV", common_group), csv_row)
 
+        previous_csv_row = QHBoxLayout()
+        self._previous_csv_path_edit = QLineEdit(common_group)
+        self._previous_csv_path_edit.setText(default_csv_path)
+        self._previous_csv_path_edit.setPlaceholderText("previous measurement CSV")
+        self._previous_csv_browse_button = QPushButton("Browse", common_group)
+        previous_csv_row.addWidget(self._previous_csv_path_edit, 1)
+        previous_csv_row.addWidget(self._previous_csv_browse_button)
+        common_layout.addRow(QLabel("Previous CSV", common_group), previous_csv_row)
+
+        self._previous_ok_only_checkbox = QCheckBox(
+            "Only previous OK",
+            common_group,
+        )
+        self._previous_ok_only_checkbox.setToolTip(
+            "Use the latest row for each structure in the previous CSV."
+        )
+        common_layout.addRow(
+            QLabel("Point filter", common_group),
+            self._previous_ok_only_checkbox,
+        )
+
         self._operation_combo = QComboBox(common_group)
         self._operation_combo.addItem("Measure only", ROUTE_OPERATION_MEASURE)
         self._operation_combo.addItem("Photo only", ROUTE_OPERATION_PHOTO)
@@ -353,10 +376,10 @@ class RouteMeasurementDialog(QDialog):
         )
 
         self._photo_autofocus_checkbox = QCheckBox(
-            "Autofocus before each photo",
+            "Autofocus before each point",
             common_group,
         )
-        common_layout.addRow(QLabel("Photo focus", common_group), self._photo_autofocus_checkbox)
+        common_layout.addRow(QLabel("Autofocus", common_group), self._photo_autofocus_checkbox)
 
         self._photo_autofocus_range_spin = QDoubleSpinBox(common_group)
         self._photo_autofocus_range_spin.setLocale(QLocale.c())
@@ -530,11 +553,17 @@ class RouteMeasurementDialog(QDialog):
         outer_layout.addLayout(button_row)
 
         self._csv_browse_button.clicked.connect(self._choose_csv_path)
+        self._previous_csv_browse_button.clicked.connect(
+            self._choose_previous_csv_path
+        )
         self._photo_browse_button.clicked.connect(self._choose_photo_dir)
         self._operation_combo.currentIndexChanged.connect(
             lambda _index: self._update_operation_state()
         )
         self._photo_autofocus_checkbox.toggled.connect(
+            lambda _checked: self._update_operation_state()
+        )
+        self._previous_ok_only_checkbox.toggled.connect(
             lambda _checked: self._update_operation_state()
         )
         self._meter_combo.currentIndexChanged.connect(self._update_meter_page)
@@ -678,6 +707,12 @@ class RouteMeasurementDialog(QDialog):
             current_csv = self._csv_path_edit.text().strip()
             if not current_csv or current_csv == self._default_csv_path:
                 self._csv_path_edit.setText(default_csv_path)
+            current_previous_csv = self._previous_csv_path_edit.text().strip()
+            if (
+                not current_previous_csv
+                or current_previous_csv == self._default_csv_path
+            ):
+                self._previous_csv_path_edit.setText(default_csv_path)
             self._default_csv_path = default_csv_path
             if default_photo_dir is not None:
                 current_photo_dir = self._photo_dir_edit.text().strip()
@@ -691,6 +726,9 @@ class RouteMeasurementDialog(QDialog):
             self._route_combo,
             self._csv_path_edit,
             self._csv_browse_button,
+            self._previous_csv_path_edit,
+            self._previous_csv_browse_button,
+            self._previous_ok_only_checkbox,
             self._operation_combo,
             self._photo_dir_edit,
             self._photo_browse_button,
@@ -955,6 +993,21 @@ class RouteMeasurementDialog(QDialog):
             self._csv_path_edit.setText(path)
             self._save_settings_file()
 
+    def _choose_previous_csv_path(self) -> None:
+        current = self._previous_csv_path_edit.text().strip()
+        start = current or self._csv_path_edit.text().strip()
+        if not start:
+            start = str(Path.cwd() / "probe_route_measurements.csv")
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Previous Route Measurement CSV",
+            start,
+            "CSV files (*.csv);;All files (*)",
+        )
+        if path:
+            self._previous_csv_path_edit.setText(path)
+            self._save_settings_file()
+
     def _choose_photo_dir(self) -> None:
         current = self._photo_dir_edit.text().strip()
         start = current or self._default_photo_dir or str(Path.cwd())
@@ -977,18 +1030,32 @@ class RouteMeasurementDialog(QDialog):
             ROUTE_OPERATION_MEASURE,
             ROUTE_OPERATION_PHOTO_THEN_MEASURE,
         }
+        route_active = photo_enabled or measure_enabled
         can_edit = not self._running or self._waiting
         self._photo_dir_edit.setEnabled(photo_enabled and not self._running)
         self._photo_browse_button.setEnabled(photo_enabled and not self._running)
         self._photo_settle_spin.setEnabled(photo_enabled and can_edit)
-        self._photo_autofocus_checkbox.setEnabled(photo_enabled and not self._running)
+        self._photo_autofocus_checkbox.setEnabled(route_active and not self._running)
         self._photo_autofocus_range_spin.setEnabled(
-            photo_enabled
+            route_active
             and self._photo_autofocus_checkbox.isChecked()
             and not self._running
         )
         self._csv_path_edit.setEnabled(measure_enabled and not self._running)
         self._csv_browse_button.setEnabled(measure_enabled and not self._running)
+        self._previous_csv_path_edit.setEnabled(
+            measure_enabled
+            and self._previous_ok_only_checkbox.isChecked()
+            and not self._running
+        )
+        self._previous_csv_browse_button.setEnabled(
+            measure_enabled
+            and self._previous_ok_only_checkbox.isChecked()
+            and not self._running
+        )
+        self._previous_ok_only_checkbox.setEnabled(
+            measure_enabled and not self._running
+        )
         self._meter_combo.setEnabled(measure_enabled and not self._running)
         self._gwinstek_page.setEnabled(measure_enabled and not self._running)
         self._keithley_page.setEnabled(measure_enabled and not self._running)
@@ -1089,6 +1156,13 @@ class RouteMeasurementDialog(QDialog):
         if mode in {ROUTE_OPERATION_MEASURE, ROUTE_OPERATION_PHOTO_THEN_MEASURE} and not csv_path:
             self.set_status("Choose a CSV path before measuring.")
             return
+        if (
+            mode in {ROUTE_OPERATION_MEASURE, ROUTE_OPERATION_PHOTO_THEN_MEASURE}
+            and self._previous_ok_only_checkbox.isChecked()
+            and not self._previous_csv_path_edit.text().strip()
+        ):
+            self.set_status("Choose a previous CSV before filtering.")
+            return
         photo_dir = self._photo_dir_edit.text().strip()
         if mode in {ROUTE_OPERATION_PHOTO, ROUTE_OPERATION_PHOTO_THEN_MEASURE} and not photo_dir:
             self.set_status("Choose a photo directory before capturing.")
@@ -1099,11 +1173,13 @@ class RouteMeasurementDialog(QDialog):
         """Return the current dialog configuration without changing UI state."""
 
         self._save_settings_file()
+        operation_mode = str(
+            self._operation_combo.currentData() or ROUTE_OPERATION_MEASURE
+        )
         return RouteMeasurementRunConfiguration(
             csv_path=self._csv_path_edit.text().strip(),
-            operation_mode=str(
-                self._operation_combo.currentData() or ROUTE_OPERATION_MEASURE
-            ),
+            previous_csv_path=self._previous_csv_path_edit.text().strip(),
+            operation_mode=operation_mode,
             photo_output_dir=self._photo_dir_edit.text().strip(),
             photo_settle_s=float(self._photo_settle_spin.value()),
             photo_autofocus_enabled=bool(self._photo_autofocus_checkbox.isChecked()),
@@ -1119,6 +1195,14 @@ class RouteMeasurementDialog(QDialog):
             contact_settle_s=float(self._contact_settle_spin.value()),
             contact_seek_range_mm=float(self._contact_seek_range_spin.value()),
             contact_seek_step_mm=float(self._contact_seek_step_spin.value()),
+            previous_ok_only=(
+                bool(self._previous_ok_only_checkbox.isChecked())
+                and operation_mode
+                in {
+                    ROUTE_OPERATION_MEASURE,
+                    ROUTE_OPERATION_PHOTO_THEN_MEASURE,
+                }
+            ),
             meter=self._meter_configuration(),
         )
 
@@ -1172,6 +1256,7 @@ class RouteMeasurementDialog(QDialog):
         return {
             "version": ROUTE_MEASUREMENT_PROFILE_VERSION,
             "csv_path": self._csv_path_edit.text().strip(),
+            "previous_csv_path": self._previous_csv_path_edit.text().strip(),
             "operation_mode": str(
                 self._operation_combo.currentData() or ROUTE_OPERATION_MEASURE
             ),
@@ -1197,6 +1282,7 @@ class RouteMeasurementDialog(QDialog):
             "contact_settle_s": float(self._contact_settle_spin.value()),
             "contact_seek_range_mm": float(self._contact_seek_range_spin.value()),
             "contact_seek_step_mm": float(self._contact_seek_step_spin.value()),
+            "previous_ok_only": bool(self._previous_ok_only_checkbox.isChecked()),
             "meter": {
                 "meter_type": meter.meter_type,
                 "gwinstek": asdict(meter.gwinstek),
@@ -1211,6 +1297,11 @@ class RouteMeasurementDialog(QDialog):
         csv_path = data.get("csv_path")
         if isinstance(csv_path, str) and csv_path.strip():
             self._csv_path_edit.setText(csv_path.strip())
+        previous_csv_path = data.get("previous_csv_path")
+        if isinstance(previous_csv_path, str) and previous_csv_path.strip():
+            self._previous_csv_path_edit.setText(previous_csv_path.strip())
+        elif isinstance(csv_path, str) and csv_path.strip():
+            self._previous_csv_path_edit.setText(csv_path.strip())
         operation_mode = data.get("operation_mode")
         if isinstance(operation_mode, str):
             self._set_combo_data(self._operation_combo, operation_mode)
@@ -1241,6 +1332,9 @@ class RouteMeasurementDialog(QDialog):
             max_relative_rms_percent = math.nan
         if math.isfinite(max_relative_rms_percent):
             self._max_relative_rms_spin.setValue(max_relative_rms_percent)
+        self._previous_ok_only_checkbox.setChecked(
+            bool(data.get("previous_ok_only", False))
+        )
         self._set_spinbox_value(self._contact_settle_spin, data.get("contact_settle_s"))
         self._set_spinbox_value(
             self._contact_seek_range_spin,

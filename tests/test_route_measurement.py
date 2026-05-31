@@ -7,10 +7,13 @@ from pathlib import Path
 
 from probe_station_gui.route_measurement import (
     CSV_FIELDS,
+    ROUTE_OPERATION_MEASURE,
     ROUTE_OPERATION_PHOTO,
     ROUTE_OPERATION_PHOTO_THEN_MEASURE,
     RouteMeasurementPoint,
     RouteMeasurementRunner,
+    filter_route_points_by_previous_status,
+    latest_route_measurement_statuses,
 )
 
 
@@ -168,6 +171,41 @@ def _point(index: int) -> RouteMeasurementPoint:
 
 
 class RouteMeasurementRunnerTest(unittest.TestCase):
+    def test_latest_statuses_use_last_csv_row_per_structure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "route.csv"
+            with csv_path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
+                writer.writeheader()
+                writer.writerow({"structure_number": "1", "status": "open"})
+                writer.writerow({"structure_number": "2", "status": "short"})
+                writer.writerow({"structure_number": "1", "status": "ok"})
+                writer.writerow({"structure_number": "3", "status": "OK"})
+
+            statuses = latest_route_measurement_statuses(csv_path)
+
+        self.assertEqual(statuses, {1: "ok", 2: "short", 3: "ok"})
+
+    def test_filter_route_points_by_previous_ok_status(self) -> None:
+        points = [_point(1), _point(2), _point(3), _point(4)]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "route.csv"
+            with csv_path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
+                writer.writeheader()
+                writer.writerow({"structure_number": "1", "status": "ok"})
+                writer.writerow({"structure_number": "2", "status": "short"})
+                writer.writerow({"structure_number": "3", "status": "ok"})
+                writer.writerow({"structure_number": "3", "status": "open"})
+
+            filtered = filter_route_points_by_previous_status(
+                points,
+                csv_path,
+                allowed_statuses={"ok"},
+            )
+
+        self.assertEqual([point.index for point in filtered], [1])
+
     def test_stop_before_run_does_not_raise_needles(self) -> None:
         points = [
             RouteMeasurementPoint(
@@ -457,6 +495,49 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
         self.assertEqual(records[0].focus["focus_best_z_mm"], 1.02)
         self.assertEqual(records[0].design_center, point.design_center)
         self.assertEqual(records[0].stage_xy, point.stage_xy)
+
+    def test_measure_only_focus_raises_needles_before_focus_and_then_moves_to_contact(self) -> None:
+        point = RouteMeasurementPoint(
+            index=1,
+            point_id="p001",
+            label="P001",
+            design_center=(100.0, 200.0),
+            stage_xy=(1.0, 2.0),
+            needle_1_design=(101.0, 201.0),
+            needle_2_design=(99.0, 199.0),
+            photo_stage_xy=(1.25, 1.75),
+        )
+        stage = _FakeStage()
+
+        def focus(_point, _position, _total) -> str:
+            stage.calls.append(("focus", _point.index))
+            return "focused"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = RouteMeasurementRunner(
+                points=[point],
+                csv_path=Path(tmpdir) / "route.csv",
+                stage_controller=stage,
+                lcr_controller=_FakeLCR([5.0]),
+                needle_feedrate=75.0,
+                operation_mode=ROUTE_OPERATION_MEASURE,
+                photo_focus_callback=focus,
+                photo_focus_enabled=True,
+                contact_settle_s=0.0,
+            )
+
+            success, message = runner.run()
+
+        self.assertTrue(success, message)
+        raise_index = stage.calls.index(("needles", "raise", 75.0), 2)
+        focus_move_index = stage.calls.index(("move", 1.25, 1.75))
+        focus_index = stage.calls.index(("focus", 1))
+        contact_move_index = stage.calls.index(("move", 1.0, 2.0))
+        lower_index = stage.calls.index(("needles", "lower", 75.0))
+        self.assertLess(raise_index, focus_move_index)
+        self.assertLess(focus_move_index, focus_index)
+        self.assertLess(focus_index, contact_move_index)
+        self.assertLess(contact_move_index, lower_index)
 
     def test_runner_reports_progress_with_route_point_number(self) -> None:
         points = [

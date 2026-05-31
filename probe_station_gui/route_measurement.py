@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Collection
 
 from tqdm import tqdm
 
@@ -449,12 +449,8 @@ class RouteMeasurementRunner:
                 raise ValueError("Route has no enabled points.")
             if self._photo_enabled and self._photo_callback is None:
                 raise ValueError("Route photo capture is not configured.")
-            if (
-                self._photo_enabled
-                and self._photo_focus_enabled
-                and self._photo_focus_callback is None
-            ):
-                raise ValueError("Route photo autofocus is not configured.")
+            if self._photo_focus_enabled and self._photo_focus_callback is None:
+                raise ValueError("Route autofocus is not configured.")
             if self._measure_enabled and hasattr(self._lcr_controller, "open"):
                 self._status("Route measurement: connecting meter.")
                 self._lcr_controller.open()
@@ -464,7 +460,11 @@ class RouteMeasurementRunner:
             if self._stop_requested.is_set():
                 message = "Route measurement stopped by user."
                 return success, message
-            initial_needle_action = "raise" if self._photo_enabled else "lift"
+            initial_needle_action = (
+                "raise"
+                if self._photo_enabled or self._photo_focus_enabled
+                else "lift"
+            )
             self._status(
                 "Route measurement: raising needles."
                 if initial_needle_action == "raise"
@@ -502,7 +502,7 @@ class RouteMeasurementRunner:
                     f"{point.label}."
                     f"{(' ' + progress_text) if progress_text else ''}"
                 )
-                if self._photo_enabled:
+                if self._photo_enabled or self._photo_focus_enabled:
                     self._status(
                         f"Route measurement: point {position}/{total} "
                         "raising needles before move."
@@ -516,7 +516,7 @@ class RouteMeasurementRunner:
                         break
                 target_xy = (
                     self._adjusted_photo_stage_xy(point)
-                    if self._photo_enabled
+                    if self._photo_enabled or self._photo_focus_enabled
                     else self._adjusted_stage_xy(point)
                 )
                 self._stage_controller.run_external_move_to_xy(
@@ -526,23 +526,23 @@ class RouteMeasurementRunner:
                 if self._stop_requested.is_set():
                     message = "Route measurement stopped by user."
                     break
-                if self._photo_enabled:
-                    focus_result: object | None = None
-                    if self._photo_focus_enabled:
+                focus_result: object | None = None
+                if self._photo_focus_enabled:
+                    self._status(
+                        f"Route measurement: point {position}/{total} "
+                        "local autofocus."
+                    )
+                    focus_result = self._run_photo_focus(point, position, total)
+                    focus_message = str(focus_result or "")
+                    if focus_message.strip():
                         self._status(
                             f"Route measurement: point {position}/{total} "
-                            "local autofocus."
+                            f"{focus_message}"
                         )
-                        focus_result = self._run_photo_focus(point, position, total)
-                        focus_message = str(focus_result or "")
-                        if focus_message.strip():
-                            self._status(
-                                f"Route measurement: point {position}/{total} "
-                                f"{focus_message}"
-                            )
-                        if self._stop_requested.is_set():
-                            message = "Route measurement stopped by user."
-                            break
+                    if self._stop_requested.is_set():
+                        message = "Route measurement stopped by user."
+                        break
+                if self._photo_enabled:
                     if not self._sleep_photo_settle():
                         message = "Route measurement stopped by user."
                         break
@@ -560,20 +560,20 @@ class RouteMeasurementRunner:
                     if self._stop_requested.is_set():
                         message = "Route measurement stopped by user."
                         break
-                    if self._measure_enabled:
-                        contact_xy = self._adjusted_stage_xy(point)
-                        if not self._same_stage_xy(target_xy, contact_xy):
-                            self._status(
-                                f"Route measurement: point {position}/{total} "
-                                "moving to contact position."
-                            )
-                            self._stage_controller.run_external_move_to_xy(
-                                contact_xy[0],
-                                contact_xy[1],
-                            )
-                            if self._stop_requested.is_set():
-                                message = "Route measurement stopped by user."
-                                break
+                if self._measure_enabled:
+                    contact_xy = self._adjusted_stage_xy(point)
+                    if not self._same_stage_xy(target_xy, contact_xy):
+                        self._status(
+                            f"Route measurement: point {position}/{total} "
+                            "moving to contact position."
+                        )
+                        self._stage_controller.run_external_move_to_xy(
+                            contact_xy[0],
+                            contact_xy[1],
+                        )
+                        if self._stop_requested.is_set():
+                            message = "Route measurement stopped by user."
+                            break
                 if not self._measure_enabled:
                     position_index += 1
                     continue
@@ -1007,7 +1007,7 @@ class RouteMeasurementRunner:
         total: int,
     ) -> object | None:
         if self._photo_focus_callback is None:
-            raise ValueError("Route photo autofocus is not configured.")
+            raise ValueError("Route autofocus is not configured.")
         return self._photo_focus_callback(point, position, total)
 
     @staticmethod
@@ -1651,6 +1651,8 @@ class RouteMeasurementRunner:
 __all__ = [
     "RouteMeasurementCsvWriter",
     "CSV_FIELDS",
+    "filter_route_points_by_previous_status",
+    "latest_route_measurement_statuses",
     "RouteContactHeightRecord",
     "RouteContactQuality",
     "RouteContactSeekResult",
@@ -1695,6 +1697,46 @@ def _structure_number_for_point(point: RouteMeasurementPoint) -> int:
             except ValueError:
                 pass
     return int(point.index)
+
+
+def latest_route_measurement_statuses(csv_path: str | Path) -> dict[int, str]:
+    """Return the latest measurement status by structure number from a route CSV."""
+
+    statuses: dict[int, str] = {}
+    with Path(csv_path).expanduser().open(
+        "r",
+        encoding="utf-8-sig",
+        newline="",
+    ) as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            try:
+                structure_number = int(str(row.get("structure_number", "")).strip())
+            except (TypeError, ValueError):
+                continue
+            status = str(row.get("status", "")).strip().lower()
+            if status:
+                statuses[structure_number] = status
+    return statuses
+
+
+def filter_route_points_by_previous_status(
+    points: Collection[RouteMeasurementPoint],
+    csv_path: str | Path,
+    *,
+    allowed_statuses: Collection[str],
+) -> list[RouteMeasurementPoint]:
+    """Keep only points whose latest CSV status is in allowed_statuses."""
+
+    allowed = {str(status).strip().lower() for status in allowed_statuses}
+    if not allowed:
+        return []
+    statuses = latest_route_measurement_statuses(csv_path)
+    return [
+        point
+        for point in points
+        if statuses.get(_structure_number_for_point(point)) in allowed
+    ]
 
 
 def _focus_result_to_dict(result: object | None) -> dict[str, object] | None:

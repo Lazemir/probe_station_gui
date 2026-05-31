@@ -152,6 +152,7 @@ from probe_station_gui.route_measurement import (
     RoutePhotoRecord,
     RouteMeasurementRecord,
     RouteMeasurementRunner,
+    filter_route_points_by_previous_status,
     route_measurement_sample_from_raw,
     summarize_route_contact_quality,
 )
@@ -6265,6 +6266,28 @@ class Main(QMainWindow):
         if not points:
             self._show_status("Route has no enabled points.", 5000)
             return
+        previous_ok_skipped_count: int | None = None
+        if configuration.previous_ok_only:
+            original_point_count = len(points)
+            try:
+                points = filter_route_points_by_previous_status(
+                    points,
+                    configuration.previous_csv_path,
+                    allowed_statuses={"ok"},
+                )
+            except (OSError, csv.Error) as exc:
+                message = f"Unable to read previous route CSV: {exc}"
+                self._show_status(message, 8000)
+                if self._route_measurement_dialog is not None:
+                    self._route_measurement_dialog.set_status(message)
+                return
+            previous_ok_skipped_count = original_point_count - len(points)
+            if not points:
+                message = "Previous route CSV has no OK points for this route."
+                self._show_status(message, 8000)
+                if self._route_measurement_dialog is not None:
+                    self._route_measurement_dialog.set_status(message)
+                return
         if not self._route_measurement_session_active:
             self._route_measurement_session_active = True
             self._set_route_measurement_pending(True)
@@ -6287,10 +6310,14 @@ class Main(QMainWindow):
             if self._route_measurement_dialog is not None:
                 self._route_measurement_dialog.set_status(message)
             return
-        if photo_enabled:
+        if photo_enabled or configuration.photo_autofocus_enabled:
             frame, _counter = self._wait_for_camera_frame(timeout_s=0.1)
             if frame is None:
-                message = "Camera frame is unavailable; cannot capture route photos."
+                message = (
+                    "Camera frame is unavailable; cannot capture route photos."
+                    if photo_enabled
+                    else "Camera frame is unavailable; cannot autofocus route points."
+                )
                 self._show_status(message, 8000)
                 self._send_telegram_alert(
                     "route_failed",
@@ -6395,18 +6422,21 @@ class Main(QMainWindow):
             name="RouteMeasurement",
             daemon=True,
         )
+        start_message = f"Route measurement starting: {len(points)} points."
+        if previous_ok_skipped_count is not None:
+            start_message = (
+                f"Route measurement starting: {len(points)} previous OK points; "
+                f"skipped {previous_ok_skipped_count}."
+            )
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_route_measurement_running(True)
             self.design_navigator_panel.set_route_measurement_waiting(False)
             self.design_navigator_panel.set_route_measurement_status(
-                f"Route measurement starting: {len(points)} points."
+                start_message
             )
         if self._route_measurement_dialog is not None:
             self._route_measurement_dialog.set_running(True)
-            self._route_measurement_dialog.set_status(
-                f"Route measurement starting: {len(points)} points."
-            )
-        start_message = f"Route measurement starting: {len(points)} points."
+            self._route_measurement_dialog.set_status(start_message)
         self._show_status(start_message)
         self._send_telegram_alert(
             "route_started",
