@@ -1,10 +1,13 @@
 import sys
 import csv
+import subprocess
+import struct
 import threading
 import time
 import tempfile
 import types
 import unittest
+import zlib
 from pathlib import Path
 
 
@@ -26,7 +29,12 @@ def _restore_real_imports_for_main() -> None:
 
 _restore_real_imports_for_main()
 from main import Main
-from probe_station_gui.route_measurement import RoutePhotoRecord
+from probe_station_gui.route_measurement import (
+    RouteContactHeightRecord,
+    RouteContactQuality,
+    RouteContactSeekResult,
+    RoutePhotoRecord,
+)
 from probe_station_gui.settings_manager import Settings
 
 
@@ -332,7 +340,180 @@ def _make_cancel_main() -> tuple[Main, _FakeStageController, _FakeButton, list[s
     return window, stage_controller, cancel_button, statuses
 
 
+def _telegram_test_photo_bytes(width: int, height: int, fill: int) -> bytes:
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(data))
+            + kind
+            + data
+            + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+        )
+
+    red = (fill >> 16) & 0xFF
+    green = (fill >> 8) & 0xFF
+    blue = fill & 0xFF
+    row = b"\x00" + bytes((red, green, blue)) * int(width)
+    raw = row * int(height)
+    header = struct.pack(">IIBBBBB", int(width), int(height), 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
+
+
 class MainCoordinateFeedrateTest(unittest.TestCase):
+    def test_combine_telegram_contact_photos_side_by_side(self) -> None:
+        script = r"""
+import struct
+import zlib
+from PySide6.QtGui import QImage
+from main import Main
+
+def png_bytes(width, height, fill):
+    def chunk(kind, data):
+        return (
+            struct.pack(">I", len(data))
+            + kind
+            + data
+            + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+        )
+    red = (fill >> 16) & 0xFF
+    green = (fill >> 8) & 0xFF
+    blue = fill & 0xFF
+    row = b"\x00" + bytes((red, green, blue)) * int(width)
+    header = struct.pack(">IIBBBBB", int(width), int(height), 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(row * int(height)))
+        + chunk(b"IEND", b"")
+    )
+
+combined = Main._combine_telegram_contact_photos(
+    png_bytes(8, 4, 0x00FF0000),
+    png_bytes(2, 4, 0x0000FF00),
+)
+assert combined is not None
+image = QImage()
+assert image.loadFromData(combined[0])
+assert combined[1] == "route-contact-comparison.jpg"
+assert image.width() == 10
+assert image.height() == 4
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=Path(__file__).resolve().parents[1],
+            timeout=20,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+
+    def test_route_contact_result_sends_one_combined_telegram_photo(self) -> None:
+        window = Main.__new__(Main)
+        before = (
+            _telegram_test_photo_bytes(8, 4, 0x00FF0000),
+            "before.jpg",
+            "Route contact before needle press:\nPoint 1/2, structure 3, P003.",
+        )
+        after = (
+            _telegram_test_photo_bytes(2, 4, 0x0000FF00),
+            "after.jpg",
+            "Route contact attempt photo:\n"
+            "Point 1/2, structure 3, P003, status=bad_contact.",
+        )
+        sent: list[tuple[str, tuple[bytes, str] | None, object | None]] = []
+
+        window._route_measurement_dialog = None
+        window._take_pending_telegram_contact_photos = lambda: (before, after)
+        window._telegram_contact_photo_payload = (
+            lambda _before, _after: (
+                (b"combined", "route-contact-comparison.jpg"),
+                "Route contact check:\n"
+                "Left: before needle press. Right: contact attempt.\n"
+                "Point 1/2, structure 3, P003, status=bad_contact.",
+            )
+        )
+        window._send_telegram_bot_message = (
+            lambda message, *, photo=None, reply_markup=None: sent.append(
+                (message, photo, reply_markup)
+            )
+        )
+        window._telegram_default_markup = lambda: "markup"
+
+        Main._on_route_measurement_result(
+            window,
+            types.SimpleNamespace(),
+            1,
+            2,
+            True,
+        )
+
+        self.assertEqual(len(sent), 1)
+        message, photo, reply_markup = sent[0]
+        self.assertIn("Left: before needle press. Right: contact attempt.", message)
+        self.assertIn("status=bad_contact", message)
+        self.assertIsNotNone(photo)
+        assert photo is not None
+        self.assertEqual(photo[1], "route-contact-comparison.jpg")
+        self.assertEqual(reply_markup, "markup")
+
+    def test_route_attention_sends_one_combined_contact_photo(self) -> None:
+        window = Main.__new__(Main)
+        before = (
+            _telegram_test_photo_bytes(8, 4, 0x00FF0000),
+            "before.jpg",
+            "Route contact before needle press:\nPoint 1/2, structure 3, P003.",
+        )
+        after = (
+            _telegram_test_photo_bytes(2, 4, 0x0000FF00),
+            "after.jpg",
+            "Route contact attempt photo:\n"
+            "Point 1/2, structure 3, P003, status=bad_contact.",
+        )
+        alerts: list[tuple[str, str, dict[str, object]]] = []
+        message = (
+            "Route measurement: point 1/2 contact check failed (bad_contact); "
+            "correct contact, then Remeasure, Skip, or Go To."
+        )
+
+        window._last_telegram_attention_message = ""
+        window._show_status = lambda _message: None
+        window._route_attention_status = lambda _message: True
+        window._latest_route_contact_failure_telegram_photos = lambda: (before, after)
+        window._telegram_contact_photo_payload = (
+            lambda _before, _after: (
+                (b"combined", "route-contact-comparison.jpg"),
+                "Route contact check:\n"
+                "Left: before needle press. Right: contact attempt.\n"
+                "Point 1/2, structure 3, P003, status=bad_contact.",
+            )
+        )
+        window._send_telegram_alert = (
+            lambda key, text, **kwargs: alerts.append((key, text, kwargs))
+        )
+        window._telegram_route_actions_markup = lambda: "actions"
+        window.design_navigator_panel = None
+        window._route_measurement_dialog = None
+
+        Main._on_route_measurement_status(window, message)
+
+        self.assertEqual(len(alerts), 1)
+        key, text, kwargs = alerts[0]
+        self.assertEqual(key, "route_attention")
+        self.assertIn(message, text)
+        self.assertIn("Left: before needle press. Right: contact attempt.", text)
+        self.assertFalse(kwargs["attach_photo"])
+        self.assertEqual(kwargs["reply_markup"], "actions")
+        photo = kwargs["photo"]
+        self.assertIsNotNone(photo)
+        assert photo is not None
+        self.assertEqual(photo[1], "route-contact-comparison.jpg")
+
     def test_wait_for_camera_frame_requires_fresh_counter_after_marker(self) -> None:
         window = Main.__new__(Main)
         window._latest_camera_frame_condition = threading.Condition()
@@ -398,6 +579,73 @@ class MainCoordinateFeedrateTest(unittest.TestCase):
         self.assertEqual(rows[0]["stage_y"], "2.0")
         self.assertEqual(rows[0]["focus_best_z_mm"], "10.0")
         self.assertEqual(rows[0]["focus_delta_um"], "20.0")
+
+    def test_record_route_contact_height_writes_height_map_csv(self) -> None:
+        window = Main.__new__(Main)
+        window._design_session = types.SimpleNamespace(
+            route=types.SimpleNamespace(name="route-a")
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "measurements" / "route.csv"
+            record = RouteContactHeightRecord(
+                timestamp="2026-05-29T12:00:00+03:00",
+                structure_number=1,
+                point_index=1,
+                point_id="p001",
+                label="P001",
+                design_center=(10.0, 20.0),
+                stage_xy=(1.0, 2.0),
+                measurement_status="ok",
+                resistance_ohm=1000.5,
+                resistance_rms_ohm=0.5,
+                relative_rms=0.0005,
+                contact_quality=RouteContactQuality(
+                    assessed=True,
+                    good=True,
+                    status="good",
+                    median_ohm=1000.5,
+                    mad_sigma_ohm=1.2,
+                    p95_abs_step_ohm=2.0,
+                    span_ohm=3.0,
+                ),
+                contact_found=True,
+                contact_depth_below_down_mm=0.002,
+                contact_axis_a_lowering_mm=1.002,
+                contact_seek=RouteContactSeekResult(
+                    found=True,
+                    status="found",
+                    attempts=3,
+                    initial_status="bad_contact",
+                    final_status="good",
+                    depth_below_down_mm=0.002,
+                    axis_a_lowering_mm=1.002,
+                    step_mm=0.001,
+                    max_depth_mm=0.002,
+                ),
+            )
+
+            Main._record_route_contact_height(
+                window,
+                record,
+                1,
+                3,
+                csv_path=csv_path,
+            )
+
+            height_map_path = csv_path.parent / "route-contact-height-map.csv"
+            with height_map_path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["route_name"], "route-a")
+        self.assertEqual(rows[0]["design_x"], "10.0")
+        self.assertEqual(rows[0]["stage_y"], "2.0")
+        self.assertEqual(rows[0]["measurement_status"], "ok")
+        self.assertEqual(rows[0]["contact_found"], "true")
+        self.assertEqual(rows[0]["contact_depth_below_down_mm"], "0.002")
+        self.assertEqual(rows[0]["contact_axis_a_lowering_mm"], "1.002")
+        self.assertEqual(rows[0]["contact_seek_status"], "found")
+        self.assertEqual(rows[0]["contact_seek_attempts"], "3")
 
     def test_saving_needle_down_target_does_not_reapply_full_settings(self) -> None:
         window = Main.__new__(Main)

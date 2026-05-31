@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import logging
 import math
 import os
 import re
@@ -15,6 +16,9 @@ from typing import Any, Callable
 
 
 Point2D = tuple[float, float]
+
+
+logger = logging.getLogger(__name__)
 
 
 CONTACT_MAX_MAD_SIGMA_OHM = 300.0
@@ -59,6 +63,21 @@ class RouteContactQuality:
 
 
 @dataclass(frozen=True)
+class RouteContactSeekResult:
+    """Needle depth selected by automatic contact seek for one route point."""
+
+    found: bool
+    status: str
+    attempts: int
+    initial_status: str
+    final_status: str
+    depth_below_down_mm: float
+    axis_a_lowering_mm: float = math.nan
+    step_mm: float = math.nan
+    max_depth_mm: float = math.nan
+
+
+@dataclass(frozen=True)
 class RouteMeasurementRecord:
     """One completed measurement row written to CSV."""
 
@@ -73,6 +92,28 @@ class RouteMeasurementRecord:
     status: str
     contact_quality: RouteContactQuality | None = None
     raw_samples: tuple["RouteMeasurementSample", ...] = ()
+
+
+@dataclass(frozen=True)
+class RouteContactHeightRecord:
+    """One contact-height map row written next to route measurements."""
+
+    timestamp: str
+    structure_number: int
+    point_index: int
+    point_id: str
+    label: str
+    design_center: Point2D
+    stage_xy: Point2D
+    measurement_status: str
+    resistance_ohm: float
+    resistance_rms_ohm: float
+    relative_rms: float
+    contact_quality: RouteContactQuality | None = None
+    contact_found: bool = False
+    contact_depth_below_down_mm: float = math.nan
+    contact_axis_a_lowering_mm: float = math.nan
+    contact_seek: RouteContactSeekResult | None = None
 
 
 @dataclass(frozen=True)
@@ -193,6 +234,21 @@ class RouteMeasurementRunner:
         | None = None,
         photo_record_callback: Callable[[RoutePhotoRecord, int, int], None]
         | None = None,
+        contact_height_record_callback: Callable[
+            [RouteContactHeightRecord, int, int],
+            None,
+        ]
+        | None = None,
+        contact_photo_callback: Callable[
+            [RouteMeasurementPoint, RouteMeasurementRecord, int, int, bool],
+            None,
+        ]
+        | None = None,
+        pre_contact_photo_callback: Callable[
+            [RouteMeasurementPoint, int, int],
+            None,
+        ]
+        | None = None,
         result_callback: Callable[[RouteMeasurementRecord, int, int, bool], None]
         | None = None,
         waiting_callback: Callable[[bool], None] | None = None,
@@ -244,6 +300,9 @@ class RouteMeasurementRunner:
         self._photo_callback = photo_callback
         self._photo_focus_callback = photo_focus_callback
         self._photo_record_callback = photo_record_callback
+        self._contact_height_record_callback = contact_height_record_callback
+        self._contact_photo_callback = contact_photo_callback
+        self._pre_contact_photo_callback = pre_contact_photo_callback
         self._result_callback = result_callback
         self._waiting_callback = waiting_callback
         self._operation_mode = _normalize_operation_mode(operation_mode)
@@ -266,6 +325,7 @@ class RouteMeasurementRunner:
         self._route_offset_lock = threading.Lock()
         self._route_offset_xy: Point2D = (0.0, 0.0)
         self._last_recorded_point: RouteMeasurementPoint | None = None
+        self._current_contact_seek_result: RouteContactSeekResult | None = None
 
     @property
     def csv_path(self) -> Path:
@@ -485,6 +545,7 @@ class RouteMeasurementRunner:
                     continue
                 needles_lowered = False
                 record: RouteMeasurementRecord | None = None
+                contact_height_record: RouteContactHeightRecord | None = None
                 record_saved = False
                 quality_rejected = False
                 result_emitted = False
@@ -492,6 +553,7 @@ class RouteMeasurementRunner:
                 try:
                     if not point_interrupted:
                         needs_final_lift = True
+                        self._emit_pre_contact_photo(point, position, total)
                         self._stage_controller.run_external_needles_action(
                             "lower",
                             self._needle_feedrate,
@@ -520,6 +582,12 @@ class RouteMeasurementRunner:
                                 point=point,
                                 samples=samples,
                             )
+                            contact_height_record = (
+                                self._contact_height_record_for_point(
+                                    point=point,
+                                    record=record,
+                                )
+                            )
                     if not point_interrupted and record is not None:
                         if (
                             self._confirm_each_point
@@ -535,6 +603,13 @@ class RouteMeasurementRunner:
                             self._csv_writer.append(record)
                             measurements_saved += 1
                             record_saved = True
+                        self._emit_contact_photo(
+                            point,
+                            record,
+                            position,
+                            total,
+                            record_saved,
+                        )
                         self._emit_result(record, position, total, record_saved)
                         result_emitted = True
                 finally:
@@ -604,6 +679,16 @@ class RouteMeasurementRunner:
                         self._set_waiting(True)
                 if not result_emitted:
                     self._emit_result(record, position, total, record_saved)
+                if (
+                    record_saved
+                    and contact_height_record is not None
+                    and self._contact_height_record_callback is not None
+                ):
+                    self._contact_height_record_callback(
+                        contact_height_record,
+                        position,
+                        total,
+                    )
                 if self._record_callback is not None:
                     self._record_callback(record, position, total)
                 if self._confirm_each_point:
@@ -778,6 +863,34 @@ class RouteMeasurementRunner:
         if self._result_callback is not None:
             self._result_callback(record, position, total, saved)
 
+    def _emit_contact_photo(
+        self,
+        point: RouteMeasurementPoint,
+        record: RouteMeasurementRecord,
+        position: int,
+        total: int,
+        saved: bool,
+    ) -> None:
+        if self._contact_photo_callback is None:
+            return
+        try:
+            self._contact_photo_callback(point, record, position, total, saved)
+        except Exception as exc:
+            logger.warning("Route contact photo callback failed: %s", exc)
+
+    def _emit_pre_contact_photo(
+        self,
+        point: RouteMeasurementPoint,
+        position: int,
+        total: int,
+    ) -> None:
+        if self._pre_contact_photo_callback is None:
+            return
+        try:
+            self._pre_contact_photo_callback(point, position, total)
+        except Exception as exc:
+            logger.warning("Route pre-contact photo callback failed: %s", exc)
+
     def _capture_photo(
         self,
         point: RouteMeasurementPoint,
@@ -842,6 +955,7 @@ class RouteMeasurementRunner:
         position: int,
         total: int,
     ) -> list[RouteMeasurementSample] | None:
+        self._current_contact_seek_result = None
         initial_count = self._initial_measurement_count()
         samples = self._read_measurement_samples(initial_count, start_index=1)
         if samples is None:
@@ -935,6 +1049,10 @@ class RouteMeasurementRunner:
         ]
         if not skip_current_depth:
             depths_mm.insert(0, 0.0)
+        attempts = 0
+        last_depth_mm = math.nan
+        last_axis_a_lowering_mm = math.nan
+        last_status = initial_quality.status
         for depth_mm in depths_mm:
             if (
                 self._stop_requested.is_set()
@@ -970,8 +1088,11 @@ class RouteMeasurementRunner:
                 or self._point_interrupt_requested.is_set()
             ):
                 return None
+            attempts += 1
+            last_depth_mm = float(depth_mm)
             if not self._sleep_contact_settle():
                 return None
+            last_axis_a_lowering_mm = self._latest_axis_a_lowering()
             samples = self._read_measurement_samples(
                 self._initial_measurement_count(),
                 start_index=1,
@@ -984,12 +1105,23 @@ class RouteMeasurementRunner:
                 else f"{depth_mm:.4f} mm below down"
             )
             if self._samples_are_short(samples):
+                last_status = "short"
                 self._status(
                     f"Route measurement: point {position}/{total} "
                     f"{depth_label}, short-circuit detected."
                 )
+                self._set_contact_seek_result(
+                    found=True,
+                    status="short",
+                    attempts=attempts,
+                    initial_status=initial_quality.status,
+                    final_status=last_status,
+                    depth_below_down_mm=depth_mm,
+                    axis_a_lowering_mm=last_axis_a_lowering_mm,
+                )
                 return samples
             quality = _contact_quality_from_samples(samples)
+            last_status = quality.status
             self._status(
                 f"Route measurement: point {position}/{total} "
                 f"{depth_label}, {quality.status}, "
@@ -1002,9 +1134,22 @@ class RouteMeasurementRunner:
                     return None
                 samples = completed_samples
                 if self._completed_measurement_is_acceptable(completed_samples):
+                    last_status = self._contact_status_for_samples(completed_samples)
+                    self._set_contact_seek_result(
+                        found=True,
+                        status="found"
+                        if last_status != "short"
+                        else "short",
+                        attempts=attempts,
+                        initial_status=initial_quality.status,
+                        final_status=last_status,
+                        depth_below_down_mm=depth_mm,
+                        axis_a_lowering_mm=last_axis_a_lowering_mm,
+                    )
                     return completed_samples
                 if self._samples_have_bad_contact(completed_samples):
                     full_quality = _contact_quality_from_samples(completed_samples)
+                    last_status = full_quality.status
                     self._status(
                         f"Route measurement: point {position}/{total} full "
                         f"measurement at {depth_label} failed contact check "
@@ -1015,6 +1160,7 @@ class RouteMeasurementRunner:
                     )
                 elif self._samples_exceed_relative_rms_limit(completed_samples):
                     relative_rms = self._relative_rms_from_samples(completed_samples)
+                    last_status = "unstable"
                     self._status(
                         f"Route measurement: point {position}/{total} full "
                         f"measurement at {depth_label} relative RMS "
@@ -1026,7 +1172,96 @@ class RouteMeasurementRunner:
             f"Route measurement: point {position}/{total} contact seek did not "
             f"find stable contact within {self._auto_contact_seek_max_total_mm:.3f} mm."
         )
+        self._set_contact_seek_result(
+            found=False,
+            status="not_found",
+            attempts=attempts,
+            initial_status=initial_quality.status,
+            final_status=last_status,
+            depth_below_down_mm=last_depth_mm,
+            axis_a_lowering_mm=last_axis_a_lowering_mm,
+        )
         return samples
+
+    def _set_contact_seek_result(
+        self,
+        *,
+        found: bool,
+        status: str,
+        attempts: int,
+        initial_status: str,
+        final_status: str,
+        depth_below_down_mm: float,
+        axis_a_lowering_mm: float,
+    ) -> None:
+        self._current_contact_seek_result = RouteContactSeekResult(
+            found=bool(found),
+            status=str(status),
+            attempts=max(0, int(attempts)),
+            initial_status=str(initial_status),
+            final_status=str(final_status),
+            depth_below_down_mm=float(depth_below_down_mm),
+            axis_a_lowering_mm=float(axis_a_lowering_mm),
+            step_mm=abs(float(self._auto_contact_seek_step_mm)),
+            max_depth_mm=float(self._auto_contact_seek_max_total_mm),
+        )
+
+    def _latest_axis_a_lowering(self) -> float:
+        getter = getattr(self._stage_controller, "latest_axis_a_lowering", None)
+        if not callable(getter):
+            return math.nan
+        try:
+            value = float(getter())
+        except (TypeError, ValueError):
+            return math.nan
+        return value if math.isfinite(value) else math.nan
+
+    def _contact_height_record_for_point(
+        self,
+        *,
+        point: RouteMeasurementPoint,
+        record: RouteMeasurementRecord,
+    ) -> RouteContactHeightRecord:
+        contact_seek = self._current_contact_seek_result
+        axis_a_lowering_mm = self._latest_axis_a_lowering()
+        depth_below_down_mm = 0.0
+        if contact_seek is not None:
+            depth_below_down_mm = contact_seek.depth_below_down_mm
+            if not math.isfinite(axis_a_lowering_mm):
+                axis_a_lowering_mm = contact_seek.axis_a_lowering_mm
+        return RouteContactHeightRecord(
+            timestamp=record.timestamp,
+            structure_number=record.structure_number,
+            point_index=int(point.index),
+            point_id=point.point_id,
+            label=point.label,
+            design_center=point.design_center,
+            stage_xy=point.stage_xy,
+            measurement_status=record.status,
+            resistance_ohm=record.resistance_ohm,
+            resistance_rms_ohm=record.resistance_rms_ohm,
+            relative_rms=record.relative_rms,
+            contact_quality=record.contact_quality,
+            contact_found=self._measurement_record_has_contact(record),
+            contact_depth_below_down_mm=depth_below_down_mm,
+            contact_axis_a_lowering_mm=axis_a_lowering_mm,
+            contact_seek=contact_seek,
+        )
+
+    @staticmethod
+    def _measurement_record_has_contact(record: RouteMeasurementRecord) -> bool:
+        if record.status in {"ok", "short"}:
+            return True
+        contact = record.contact_quality
+        return contact is not None and contact.good is True
+
+    def _contact_status_for_samples(
+        self,
+        samples: list[RouteMeasurementSample] | tuple[RouteMeasurementSample, ...],
+    ) -> str:
+        if self._samples_are_short(samples):
+            return "short"
+        return _contact_quality_from_samples(samples).status
 
     def _completed_measurement_is_acceptable(
         self,
@@ -1308,7 +1543,9 @@ class RouteMeasurementRunner:
 __all__ = [
     "RouteMeasurementCsvWriter",
     "CSV_FIELDS",
+    "RouteContactHeightRecord",
     "RouteContactQuality",
+    "RouteContactSeekResult",
     "RouteMeasurementPoint",
     "RoutePhotoRecord",
     "RouteMeasurementRecord",

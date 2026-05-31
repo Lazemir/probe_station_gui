@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 from probe_station_gui import logging_config
 from probe_station_gui import telegram_notifications
@@ -114,3 +116,59 @@ def test_telegram_transport_loggers_stay_at_warning(tmp_path) -> None:
         assert logging.getLogger("httpcore").level == logging.WARNING
     finally:
         logging_config._stop_listener()
+
+
+def test_command_service_continues_after_update_handler_timeout(monkeypatch) -> None:
+    class FakeBot:
+        def __init__(self) -> None:
+            self.polls = 0
+
+        async def __aenter__(self) -> "FakeBot":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def get_updates(self, **_kwargs: object) -> list[SimpleNamespace]:
+            self.polls += 1
+            if self.polls == 1:
+                return [SimpleNamespace(update_id=10)]
+            if self.polls == 2:
+                return [SimpleNamespace(update_id=11)]
+            raise AssertionError("polling should have stopped")
+
+    fake_bot = FakeBot()
+    monkeypatch.setattr(telegram_notifications, "Bot", lambda **_kwargs: fake_bot)
+    service = telegram_notifications.TelegramBotCommandService(
+        bot_token="token",
+        chat_id="123",
+        request_handler=lambda _request: None,
+    )
+    handled: list[int] = []
+
+    async def handle_update(_bot: object, update: object) -> None:
+        update_id = int(getattr(update, "update_id"))
+        handled.append(update_id)
+        if update_id == 10:
+            raise TimeoutError("Timed out")
+        service._stop_requested.set()
+
+    monkeypatch.setattr(service, "_handle_update", handle_update)
+
+    asyncio.run(service._run_async())
+
+    assert handled == [10, 11]
+
+
+def test_command_service_reports_running_thread() -> None:
+    service = telegram_notifications.TelegramBotCommandService(
+        bot_token="token",
+        chat_id="123",
+        request_handler=lambda _request: None,
+    )
+
+    assert not service.is_running()
+
+    service._thread = SimpleNamespace(is_alive=lambda: True)  # type: ignore[assignment]
+
+    assert service.is_running()

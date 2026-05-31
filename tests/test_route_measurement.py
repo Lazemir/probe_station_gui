@@ -17,6 +17,7 @@ from probe_station_gui.route_measurement import (
 class _FakeStage:
     def __init__(self) -> None:
         self.calls: list[object] = []
+        self.axis_a_lowering_mm = math.nan
 
     def begin_external_task(self, label: str) -> None:
         self.calls.append(("begin", label))
@@ -34,6 +35,10 @@ class _FakeStage:
         feedrate: float | None = None,
     ) -> str:
         self.calls.append(("needles", action, feedrate))
+        if action == "lower":
+            self.axis_a_lowering_mm = 1.0
+        elif action in {"lift", "raise"}:
+            self.axis_a_lowering_mm = 0.0
         return f"{action} done"
 
     def run_external_needles_adjust(
@@ -42,6 +47,8 @@ class _FakeStage:
         feedrate: float | None = None,
     ) -> str:
         self.calls.append(("adjust", step_mm, feedrate))
+        if math.isfinite(self.axis_a_lowering_mm):
+            self.axis_a_lowering_mm += abs(float(step_mm))
         return "adjusted"
 
     def run_external_needles_lower_to_depth_below_down(
@@ -50,11 +57,15 @@ class _FakeStage:
         feedrate: float | None = None,
     ) -> str:
         self.calls.append(("lower_to_depth", depth_mm, feedrate))
+        self.axis_a_lowering_mm = 1.0 + float(depth_mm)
         return "lowered to depth"
 
     def run_external_local_autofocus(self, *, range_mm: float, step_mm=None) -> str:
         self.calls.append(("autofocus", range_mm, step_mm))
         return "local autofocus done"
+
+    def latest_axis_a_lowering(self) -> float:
+        return self.axis_a_lowering_mm
 
 
 class _NotifyingStage(_FakeStage):
@@ -430,6 +441,71 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
             if index > lower_index and call == ("needles", "lift", 75.0)
         )
         self.assertLess(result_index, post_measurement_lift_index)
+
+    def test_contact_photo_callback_runs_before_post_measurement_lift(self) -> None:
+        point = _point(1)
+        stage = _FakeStage()
+
+        def on_contact_photo(_point, _record, _position, _total, saved) -> None:
+            stage.calls.append(("contact_photo", bool(saved), stage.axis_a_lowering_mm))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = RouteMeasurementRunner(
+                points=[point],
+                csv_path=Path(tmpdir) / "route.csv",
+                stage_controller=stage,
+                lcr_controller=_FakeLCR([5.0]),
+                needle_feedrate=75.0,
+                contact_settle_s=0.0,
+                contact_photo_callback=on_contact_photo,
+            )
+
+            success, message = runner.run()
+
+        self.assertTrue(success, message)
+        callback_index = next(
+            index
+            for index, call in enumerate(stage.calls)
+            if isinstance(call, tuple) and call[:2] == ("contact_photo", True)
+        )
+        lower_index = stage.calls.index(("needles", "lower", 75.0))
+        post_measurement_lift_index = next(
+            index
+            for index, call in enumerate(stage.calls)
+            if index > lower_index and call == ("needles", "lift", 75.0)
+        )
+        self.assertLess(callback_index, post_measurement_lift_index)
+        self.assertEqual(stage.calls[callback_index][2], 1.0)
+
+    def test_pre_contact_photo_callback_runs_before_needle_lower(self) -> None:
+        point = _point(1)
+        stage = _FakeStage()
+
+        def on_pre_contact_photo(_point, _position, _total) -> None:
+            stage.calls.append(("pre_contact_photo", stage.axis_a_lowering_mm))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = RouteMeasurementRunner(
+                points=[point],
+                csv_path=Path(tmpdir) / "route.csv",
+                stage_controller=stage,
+                lcr_controller=_FakeLCR([5.0]),
+                needle_feedrate=75.0,
+                contact_settle_s=0.0,
+                pre_contact_photo_callback=on_pre_contact_photo,
+            )
+
+            success, message = runner.run()
+
+        self.assertTrue(success, message)
+        callback_index = next(
+            index
+            for index, call in enumerate(stage.calls)
+            if isinstance(call, tuple) and call[0] == "pre_contact_photo"
+        )
+        lower_index = stage.calls.index(("needles", "lower", 75.0))
+        self.assertLess(callback_index, lower_index)
+        self.assertEqual(stage.calls[callback_index][1], 0.0)
 
     def test_interactive_wait_releases_stage_and_shift_moves_following_points(self) -> None:
         points = [
@@ -855,6 +931,7 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
     def test_auto_contact_seek_presses_deeper_when_full_batch_turns_bad(self) -> None:
         point = _point(1)
         stage = _FakeStage()
+        contact_heights = []
         lcr = _FakeBatchRouteLCR(
             [
                 {"differential_resistance_ohm": value}
@@ -875,6 +952,9 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
             ]
         )
 
+        def on_contact_height(record, _position, _total) -> None:
+            contact_heights.append(record)
+
         with tempfile.TemporaryDirectory() as tmpdir:
             csv_path = Path(tmpdir) / "route.csv"
             runner = RouteMeasurementRunner(
@@ -889,6 +969,7 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                 auto_contact_seek_step_mm=0.001,
                 auto_contact_seek_max_total_mm=0.002,
                 contact_settle_s=0.0,
+                contact_height_record_callback=on_contact_height,
             )
 
             success, message = runner.run()
@@ -899,6 +980,25 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                 rows = list(csv.DictReader(handle))
             self.assertEqual(rows[0]["status"], "ok")
             self.assertEqual(rows[0]["n_measurements"], "4")
+            self.assertEqual(len(contact_heights), 1)
+            self.assertTrue(contact_heights[0].contact_found)
+            self.assertAlmostEqual(
+                contact_heights[0].contact_depth_below_down_mm,
+                0.002,
+            )
+            self.assertAlmostEqual(
+                contact_heights[0].contact_axis_a_lowering_mm,
+                1.002,
+            )
+            self.assertIsNotNone(contact_heights[0].contact_seek)
+            self.assertTrue(contact_heights[0].contact_seek.found)
+            self.assertEqual(contact_heights[0].contact_seek.status, "found")
+            self.assertEqual(contact_heights[0].contact_seek.attempts, 3)
+            self.assertEqual(
+                contact_heights[0].contact_seek.initial_status,
+                "bad_contact",
+            )
+            self.assertEqual(contact_heights[0].contact_seek.final_status, "good")
 
         self.assertEqual(
             [call for call in stage.calls if call[0] == "lower_to_depth"],
