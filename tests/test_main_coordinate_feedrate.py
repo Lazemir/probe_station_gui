@@ -695,6 +695,23 @@ assert image.height() == 4
         self.assertIn("Session total: 2 measurements in CSV.", text)
         self.assertEqual(kwargs["document_path"], csv_path)
 
+    def test_route_progress_updates_dialog_progress_bar(self) -> None:
+        window = Main.__new__(Main)
+        resumed: list[int] = []
+        progress: list[tuple[int, int, int]] = []
+
+        window._set_route_measurement_resume_point = resumed.append
+        window._route_measurement_dialog = types.SimpleNamespace(
+            set_progress=lambda position, total, point_number: progress.append(
+                (position, total, point_number)
+            )
+        )
+
+        Main._on_route_measurement_progress(window, 3, 7, 12)
+
+        self.assertEqual(resumed, [12])
+        self.assertEqual(progress, [(3, 7, 12)])
+
     def test_cancel_route_measurement_session_clears_persisted_state(self) -> None:
         window = Main.__new__(Main)
         statuses: list[str] = []

@@ -10,11 +10,9 @@ import re
 import threading
 import time
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Collection
-
-from tqdm import tqdm
 
 
 Point2D = tuple[float, float]
@@ -496,11 +494,9 @@ class RouteMeasurementRunner:
                 position = position_index + 1
                 point = self._points[position_index]
                 self._emit_progress(position, total, int(point.index))
-                progress_text = self._route_progress_text(position, total)
                 self._status(
                     f"Route measurement: point {position}/{total} "
                     f"{point.label}."
-                    f"{(' ' + progress_text) if progress_text else ''}"
                 )
                 if self._photo_enabled or self._photo_focus_enabled:
                     self._status(
@@ -896,32 +892,6 @@ class RouteMeasurementRunner:
     def _set_waiting(self, waiting: bool) -> None:
         if self._waiting_callback is not None:
             self._waiting_callback(bool(waiting))
-
-    def _route_progress_text(self, position: int, total: int) -> str:
-        started_at = self._progress_started_at
-        if started_at is None:
-            return ""
-        total_points = max(1, int(total))
-        completed = min(max(0, int(position) - 1), total_points)
-        elapsed_s = max(0.0, time.monotonic() - started_at)
-        meter = tqdm.format_meter(
-            completed,
-            total_points,
-            elapsed_s,
-            unit="point",
-            ascii=True,
-        )
-        if completed <= 0 or elapsed_s <= 0.0:
-            return f"Progress {meter}; ETA after first point."
-        points_per_second = completed / elapsed_s
-        if points_per_second <= 0.0:
-            return f"Progress {meter}; ETA after first point."
-        remaining_s = max(0.0, (total_points - completed) / points_per_second)
-        finish_at = datetime.now().astimezone() + timedelta(seconds=remaining_s)
-        return (
-            f"Progress {meter}; remaining {tqdm.format_interval(remaining_s)}, "
-            f"finish {finish_at:%Y-%m-%d %H:%M:%S %Z}."
-        )
 
     def _auto_next_ok_or_short_enabled(self) -> bool:
         with self._auto_next_lock:

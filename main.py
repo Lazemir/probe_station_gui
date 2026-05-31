@@ -6436,6 +6436,7 @@ class Main(QMainWindow):
             )
         if self._route_measurement_dialog is not None:
             self._route_measurement_dialog.set_running(True)
+            self._route_measurement_dialog.reset_progress(len(points))
             self._route_measurement_dialog.set_status(start_message)
         self._show_status(start_message)
         self._send_telegram_alert(
@@ -7267,8 +7268,13 @@ class Main(QMainWindow):
         total: int,
         point_number: int,
     ) -> None:
-        _ = position, total
         self._set_route_measurement_resume_point(point_number)
+        if self._route_measurement_dialog is not None:
+            self._route_measurement_dialog.set_progress(
+                position,
+                total,
+                point_number,
+            )
 
     def _on_route_measurement_current_point_changed(self, point_number: int) -> None:
         self._set_route_measurement_resume_point(point_number)
@@ -7395,6 +7401,7 @@ class Main(QMainWindow):
             self.design_navigator_panel.set_route_measurement_status(message)
         if self._route_measurement_dialog is not None:
             self._route_measurement_dialog.set_running(False)
+            self._route_measurement_dialog.finish_progress(success)
             self._route_measurement_dialog.set_status(message)
         if success:
             session_measurement_count = (

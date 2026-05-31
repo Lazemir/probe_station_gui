@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +26,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QProgressBar,
     QScrollArea,
     QSpinBox,
     QStackedWidget,
@@ -298,6 +301,8 @@ class RouteMeasurementDialog(QDialog):
         self._last_raw_samples: tuple[object, ...] = ()
         self._measurement_pending = False
         self._measurement_session_active = False
+        self._progress_started_at: float | None = None
+        self._progress_total = max(1, int(route_point_count))
 
         outer_layout = QVBoxLayout(self)
         scroll_area = QScrollArea(self)
@@ -497,6 +502,41 @@ class RouteMeasurementDialog(QDialog):
         self._status_label = QLabel("Idle.", self)
         self._status_label.setWordWrap(True)
         layout.addWidget(self._status_label)
+
+        self._progress_label = QLabel("Progress: idle.", self)
+        self._progress_label.setWordWrap(True)
+        layout.addWidget(self._progress_label)
+        self._progress_bar = QProgressBar(self)
+        self._progress_bar.setRange(0, self._progress_total)
+        self._progress_bar.setValue(0)
+        self._progress_bar.setTextVisible(True)
+        self._progress_bar.setFormat("0/%m")
+        self._progress_bar.setStyleSheet(
+            """
+            QProgressBar {
+                border: 1px solid #6b7280;
+                border-radius: 4px;
+                background: #111827;
+                color: #f9fafb;
+                min-height: 20px;
+                text-align: center;
+            }
+            QProgressBar::chunk {
+                border-radius: 3px;
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 1, y2: 0,
+                    stop: 0 #16a34a,
+                    stop: 0.55 #0891b2,
+                    stop: 1 #4f46e5
+                );
+            }
+            """
+        )
+        layout.addWidget(self._progress_bar)
+        self._progress_eta_label = QLabel("Remaining: -- | Finish: --", self)
+        self._progress_eta_label.setWordWrap(True)
+        layout.addWidget(self._progress_eta_label)
+
         self._result_label = QLabel("Last result: none.", self)
         self._result_label.setWordWrap(True)
         layout.addWidget(self._result_label)
@@ -621,6 +661,72 @@ class RouteMeasurementDialog(QDialog):
     def set_status(self, message: str) -> None:
         self._status_label.setText(message or "Idle.")
 
+    def reset_progress(self, total: int | None = None) -> None:
+        self._progress_started_at = None
+        if total is not None:
+            self._progress_total = max(1, int(total))
+        self._progress_bar.setRange(0, self._progress_total)
+        self._progress_bar.setValue(0)
+        self._progress_bar.setFormat(f"0/{self._progress_total} (0%)")
+        self._progress_label.setText("Progress: waiting for first route point.")
+        self._progress_eta_label.setText("Remaining: -- | Finish: --")
+
+    def set_progress(self, position: int, total: int, point_number: int) -> None:
+        total_points = max(1, int(total))
+        position_value = min(max(1, int(position)), total_points)
+        completed = min(max(0, position_value - 1), total_points)
+        self._progress_total = total_points
+        if self._progress_started_at is None:
+            self._progress_started_at = time.monotonic()
+        self._progress_bar.setRange(0, total_points)
+        self._progress_bar.setValue(completed)
+        percent = int(round((completed / total_points) * 100.0))
+        self._progress_bar.setFormat(f"{completed}/{total_points} ({percent}%)")
+        self._progress_label.setText(
+            f"Progress: point {position_value}/{total_points}, "
+            f"route point {int(point_number)}."
+        )
+        self._progress_eta_label.setText(
+            self._progress_eta_text(completed, total_points)
+        )
+
+    def finish_progress(self, success: bool) -> None:
+        total_points = max(1, int(self._progress_total))
+        if success:
+            self._progress_bar.setRange(0, total_points)
+            self._progress_bar.setValue(total_points)
+            self._progress_bar.setFormat(f"{total_points}/{total_points} (100%)")
+            self._progress_label.setText("Progress: complete.")
+            self._progress_eta_label.setText("Remaining: 00:00 | Finish: now")
+        else:
+            self._progress_label.setText("Progress: stopped.")
+
+    def _progress_eta_text(self, completed: int, total: int) -> str:
+        started_at = self._progress_started_at
+        if started_at is None or completed <= 0:
+            return "Remaining: ETA after first point | Finish: --"
+        elapsed_s = max(0.0, time.monotonic() - started_at)
+        if elapsed_s <= 0.0:
+            return "Remaining: ETA after first point | Finish: --"
+        points_per_second = completed / elapsed_s
+        if points_per_second <= 0.0:
+            return "Remaining: ETA after first point | Finish: --"
+        remaining_s = max(0.0, (max(1, int(total)) - completed) / points_per_second)
+        finish_at = datetime.now().astimezone() + timedelta(seconds=remaining_s)
+        return (
+            f"Remaining: {self._format_progress_interval(remaining_s)} | "
+            f"Finish: {finish_at:%Y-%m-%d %H:%M:%S %Z}"
+        )
+
+    @staticmethod
+    def _format_progress_interval(seconds: float) -> str:
+        total_seconds = max(0, int(round(float(seconds))))
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds_value = divmod(remainder, 60)
+        if hours:
+            return f"{hours:d}:{minutes:02d}:{seconds_value:02d}"
+        return f"{minutes:02d}:{seconds_value:02d}"
+
     def set_result(
         self,
         record: object,
@@ -695,6 +801,8 @@ class RouteMeasurementDialog(QDialog):
         default_photo_dir: str | None = None,
     ) -> None:
         self._route_point_count = max(1, int(route_point_count))
+        if not self._running:
+            self.reset_progress(self._route_point_count)
         self._route_combo.setItemText(
             0,
             f"{route_name} ({route_point_count} points)",

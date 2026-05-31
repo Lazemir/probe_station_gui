@@ -580,7 +580,7 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
         self.assertTrue(success, message)
         self.assertEqual(progress, [(1, 2, 2), (2, 2, 5)])
 
-    def test_runner_status_includes_tqdm_progress_eta(self) -> None:
+    def test_runner_keeps_progress_out_of_status_log(self) -> None:
         statuses: list[str] = []
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -597,14 +597,8 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
             success, message = runner.run()
 
         self.assertTrue(success, message)
-        self.assertTrue(
-            any(
-                "%|" in status
-                and "/2" in status
-                and "remaining" in status
-                and "finish" in status
-                for status in statuses
-            )
+        self.assertFalse(
+            any("%|" in status or "remaining" in status for status in statuses)
         )
 
     def test_result_callback_runs_before_post_measurement_lift(self) -> None:
