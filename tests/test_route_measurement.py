@@ -458,6 +458,33 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
         self.assertTrue(success, message)
         self.assertEqual(progress, [(1, 2, 2), (2, 2, 5)])
 
+    def test_runner_status_includes_tqdm_progress_eta(self) -> None:
+        statuses: list[str] = []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = RouteMeasurementRunner(
+                points=[_point(1), _point(2)],
+                csv_path=Path(tmpdir) / "route.csv",
+                stage_controller=_FakeStage(),
+                lcr_controller=_FakeLCR([5.0, 7.0]),
+                needle_feedrate=None,
+                contact_settle_s=0.01,
+                status_callback=statuses.append,
+            )
+
+            success, message = runner.run()
+
+        self.assertTrue(success, message)
+        self.assertTrue(
+            any(
+                "%|" in status
+                and "/2" in status
+                and "remaining" in status
+                and "finish" in status
+                for status in statuses
+            )
+        )
+
     def test_result_callback_runs_before_post_measurement_lift(self) -> None:
         point = _point(1)
         stage = _FakeStage()

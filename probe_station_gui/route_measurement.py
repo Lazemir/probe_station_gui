@@ -10,9 +10,11 @@ import re
 import threading
 import time
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
+
+from tqdm import tqdm
 
 
 Point2D = tuple[float, float]
@@ -323,6 +325,7 @@ class RouteMeasurementRunner:
         self._confirmation_condition = threading.Condition()
         self._pending_confirmation: str | None = None
         self._stage_task_active = False
+        self._progress_started_at: float | None = None
         self._route_offset_lock = threading.Lock()
         self._route_offset_xy: Point2D = (0.0, 0.0)
         self._last_recorded_point: RouteMeasurementPoint | None = None
@@ -483,6 +486,7 @@ class RouteMeasurementRunner:
                     f"{self._start_point_number} is not enabled or not found."
                 )
             position_index = start_index
+            self._progress_started_at = time.monotonic()
             while position_index < total:
                 if self._stop_requested.is_set():
                     message = "Route measurement stopped by user."
@@ -491,9 +495,11 @@ class RouteMeasurementRunner:
                 position = position_index + 1
                 point = self._points[position_index]
                 self._emit_progress(position, total, int(point.index))
+                progress_text = self._route_progress_text(position, total)
                 self._status(
                     f"Route measurement: point {position}/{total} "
                     f"{point.label}."
+                    f"{(' ' + progress_text) if progress_text else ''}"
                 )
                 if self._photo_enabled:
                     self._status(
@@ -851,6 +857,32 @@ class RouteMeasurementRunner:
     def _set_waiting(self, waiting: bool) -> None:
         if self._waiting_callback is not None:
             self._waiting_callback(bool(waiting))
+
+    def _route_progress_text(self, position: int, total: int) -> str:
+        started_at = self._progress_started_at
+        if started_at is None:
+            return ""
+        total_points = max(1, int(total))
+        completed = min(max(0, int(position) - 1), total_points)
+        elapsed_s = max(0.0, time.monotonic() - started_at)
+        meter = tqdm.format_meter(
+            completed,
+            total_points,
+            elapsed_s,
+            unit="point",
+            ascii=True,
+        )
+        if completed <= 0 or elapsed_s <= 0.0:
+            return f"Progress {meter}; ETA after first point."
+        points_per_second = completed / elapsed_s
+        if points_per_second <= 0.0:
+            return f"Progress {meter}; ETA after first point."
+        remaining_s = max(0.0, (total_points - completed) / points_per_second)
+        finish_at = datetime.now().astimezone() + timedelta(seconds=remaining_s)
+        return (
+            f"Progress {meter}; remaining {tqdm.format_interval(remaining_s)}, "
+            f"finish {finish_at:%Y-%m-%d %H:%M:%S %Z}."
+        )
 
     def _auto_next_ok_or_short_enabled(self) -> bool:
         with self._auto_next_lock:
