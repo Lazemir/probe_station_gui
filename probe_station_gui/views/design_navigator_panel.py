@@ -1162,17 +1162,21 @@ class _DesignPlotPane(QWidget):
     def _on_mouse_clicked(self, event) -> None:  # pragma: no cover - UI interaction
         if self._plot is None or self._document is None:
             return
-        route_pick = self._route_pick_mode is not None and event.button() == Qt.LeftButton
+        is_left_click = event.button() == Qt.LeftButton
+        is_double_click = self._is_double_click_event(event)
+        route_pick = self._route_pick_mode is not None and is_left_click
         route_click = (
             not route_pick
             and self._route_edit_enabled
-            and event.button() == Qt.LeftButton
+            and is_left_click
         )
         if route_pick or route_click:
             slot = None
-        elif self._navigation_enabled and event.button() == Qt.LeftButton:
+        elif self._navigation_enabled and is_left_click:
+            if not is_double_click:
+                return
             slot = None
-        elif event.button() == Qt.LeftButton:
+        elif is_left_click:
             slot = 0
         elif event.button() == Qt.RightButton:
             slot = 1
@@ -1217,6 +1221,16 @@ class _DesignPlotPane(QWidget):
             )
             return
         self.calibration_point_selected.emit(slot, snap_result.point[0], snap_result.point[1])
+
+    @staticmethod
+    def _is_double_click_event(event) -> bool:
+        double = getattr(event, "double", None)
+        if not callable(double):
+            return False
+        try:
+            return bool(double())
+        except Exception:
+            return False
 
     def _on_mouse_moved(self, position) -> None:  # pragma: no cover - UI interaction
         self._pending_hover_scene_pos = position

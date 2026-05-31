@@ -703,7 +703,9 @@ class Main(QMainWindow):
         self.view.clicked.connect(self.on_click)
         self.view.hovered.connect(self._on_view_hover)
         self.view.hover_left.connect(self._on_view_hover_left)
-        self.view.design_minimap_clicked.connect(self._move_to_minimap_design_point)
+        self.view.design_minimap_clicked.connect(
+            self._open_design_window_from_minimap_point
+        )
         self.view.design_minimap_double_clicked.connect(
             lambda: self._toggle_design_layout_window(True)
         )
@@ -7500,6 +7502,14 @@ class Main(QMainWindow):
             f"Moving to minimap point X={design_xy[0]:.3f}, Y={design_xy[1]:.3f}.",
             3000,
         )
+
+    def _open_design_window_from_minimap_point(
+        self,
+        x_value: float,
+        y_value: float,
+    ) -> None:
+        _ = float(x_value), float(y_value)
+        self._toggle_design_layout_window(True)
 
     def _move_to_design_coordinate(
         self, design_xy: tuple[float, float], *, source_label: str
