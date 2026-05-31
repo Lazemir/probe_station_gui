@@ -335,6 +335,41 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
         lower_index = stage.calls.index(("needles", "lower", 75.0))
         self.assertLess(photo_index, lower_index)
 
+    def test_photo_then_measure_raises_needles_before_next_point_move(self) -> None:
+        points = [_point(1), _point(2)]
+        stage = _FakeStage()
+
+        def capture(_point, _position, _total, _focus_result) -> str:
+            stage.calls.append(("photo", _point.index))
+            return "photo.png"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = RouteMeasurementRunner(
+                points=points,
+                csv_path=Path(tmpdir) / "route.csv",
+                stage_controller=stage,
+                lcr_controller=_FakeLCR([5.0, 7.0]),
+                needle_feedrate=75.0,
+                operation_mode=ROUTE_OPERATION_PHOTO_THEN_MEASURE,
+                photo_callback=capture,
+                photo_settle_s=0.0,
+                contact_settle_s=0.0,
+            )
+
+            success, message = runner.run()
+
+        self.assertTrue(success, message)
+        second_move_index = stage.calls.index(("move", 2.0, 12.0))
+        self.assertEqual(
+            stage.calls[second_move_index - 1],
+            ("needles", "raise", 75.0),
+        )
+        second_photo_index = stage.calls.index(("photo", 2))
+        self.assertNotIn(
+            ("needles", "raise", 75.0),
+            stage.calls[second_move_index + 1 : second_photo_index],
+        )
+
     def test_photo_focus_runs_after_raise_and_before_capture(self) -> None:
         point = _point(1)
         stage = _FakeStage()

@@ -495,6 +495,18 @@ class RouteMeasurementRunner:
                     f"Route measurement: point {position}/{total} "
                     f"{point.label}."
                 )
+                if self._photo_enabled:
+                    self._status(
+                        f"Route measurement: point {position}/{total} "
+                        "raising needles before move."
+                    )
+                    self._stage_controller.run_external_needles_action(
+                        "raise",
+                        self._needle_feedrate,
+                    )
+                    if self._stop_requested.is_set():
+                        message = "Route measurement stopped by user."
+                        break
                 target_xy = self._adjusted_stage_xy(point)
                 self._stage_controller.run_external_move_to_xy(
                     target_xy[0],
@@ -505,14 +517,6 @@ class RouteMeasurementRunner:
                     break
                 if self._photo_enabled:
                     focus_result: object | None = None
-                    self._status(
-                        f"Route measurement: point {position}/{total} "
-                        "raising needles for photo."
-                    )
-                    self._stage_controller.run_external_needles_action(
-                        "raise",
-                        self._needle_feedrate,
-                    )
                     if self._photo_focus_enabled:
                         self._status(
                             f"Route measurement: point {position}/{total} "
