@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import csv
+import importlib
 import json
 import math
 import os
@@ -111,15 +112,6 @@ from probe_station_gui import (
 from probe_station_gui.design_model import DesignDocument, DesignModelError
 from probe_station_gui.design_session import AlignmentPreparation, DesignSession
 from probe_station_gui.diagnostics import configure_crash_diagnostics
-from probe_station_gui.dialogs.route_measurement_dialog import (
-    RouteMeasurementDialog,
-    RouteMeasurementRunConfiguration,
-)
-from probe_station_gui.dialogs.microscope_scan_dialog import (
-    MicroscopeScanConfiguration,
-    MicroscopeScanDialog,
-)
-from probe_station_gui.dialogs.settings_dialog import SettingsDialog
 from probe_station_gui.api_server import ProbeStationApiServer
 from probe_station_gui.lcr_meter import (
     GWInstekRouteMeterSettings,
@@ -201,6 +193,15 @@ _startup_trace("application imports done")
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from probe_station_gui.dialogs.microscope_scan_dialog import (
+        MicroscopeScanConfiguration,
+        MicroscopeScanDialog,
+    )
+    from probe_station_gui.dialogs.route_measurement_dialog import (
+        RouteMeasurementDialog,
+        RouteMeasurementRunConfiguration,
+    )
+    from probe_station_gui.dialogs.settings_dialog import SettingsDialog
     from probe_station_gui.views.surface_map_panel import SurfaceMapWindow
     from probe_station_gui.views.design_navigator_panel import (
         DesignLayoutWindow,
@@ -811,6 +812,7 @@ class Main(QMainWindow):
         QTimer.singleShot(0, self._prime_keyboard_focus)
         QTimer.singleShot(0, self._start_camera_thread)
         QTimer.singleShot(1500, self._preload_design_layout_window)
+        QTimer.singleShot(2500, self._preload_lazy_dialog_modules)
 
         self.setStyleSheet(
             """
@@ -2274,6 +2276,32 @@ class Main(QMainWindow):
         threading.Thread(
             target=load_design_window_module,
             name="DesignLayoutImport",
+            daemon=True,
+        ).start()
+
+    def _preload_lazy_dialog_modules(self) -> None:
+        """Warm non-critical dialogs after the main window is already visible."""
+
+        modules = (
+            "probe_station_gui.dialogs.settings_dialog",
+            "probe_station_gui.dialogs.route_measurement_dialog",
+            "probe_station_gui.dialogs.microscope_scan_dialog",
+        )
+
+        def preload() -> None:
+            for module_name in modules:
+                try:
+                    importlib.import_module(module_name)
+                except Exception:
+                    logger.debug(
+                        "Lazy dialog preload failed: %s",
+                        module_name,
+                        exc_info=True,
+                    )
+
+        threading.Thread(
+            target=preload,
+            name="LazyDialogPreload",
             daemon=True,
         ).start()
 
@@ -3742,6 +3770,8 @@ class Main(QMainWindow):
             )
 
     def _open_settings_dialog(self, initial_tab: object = None) -> None:
+        from probe_station_gui.dialogs.settings_dialog import SettingsDialog
+
         tab_name = initial_tab if isinstance(initial_tab, str) else None
         self._stop_telegram_bot_service()
         dialog = SettingsDialog(
@@ -6032,6 +6062,10 @@ class Main(QMainWindow):
         if route is None or not route.points:
             self._show_status("Create or load a probe route before measuring.", 5000)
             return
+        from probe_station_gui.dialogs.route_measurement_dialog import (
+            RouteMeasurementDialog,
+        )
+
         default_path = "probe_route_measurements.csv"
         default_photo_dir = "probe_route_photos"
         if route.path is not None:
@@ -9172,6 +9206,10 @@ class Main(QMainWindow):
         self.surface_map_window.raise_()
 
     def _show_microscope_scan_dialog(self) -> None:
+        from probe_station_gui.dialogs.microscope_scan_dialog import (
+            MicroscopeScanDialog,
+        )
+
         default_dir = self._default_microscope_scan_output_dir()
         if self.microscope_scan_dialog is None:
             dialog = MicroscopeScanDialog(

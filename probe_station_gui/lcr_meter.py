@@ -4,17 +4,13 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Optional
 
 from PySide6.QtCore import QObject, Signal
-
-from probe_station_gui.gwinstek_lcr_76200 import (
-    format_source_level_value,
-    normalize_resource_name,
-)
 
 
 logger = logging.getLogger(__name__)
@@ -31,6 +27,30 @@ ROUTE_METER_LABELS: dict[str, str] = {
     ROUTE_METER_KEITHLEY: "Keithley 2400 + 2182A",
 }
 DEFAULT_METER_TIMEOUT_MS = 10000
+COM_RESOURCE_PATTERN = re.compile(r"^COM(?P<port>\d+)$", re.IGNORECASE)
+
+
+def normalize_resource_name(resource_name: str) -> str:
+    """Translate ``COM4``-style names into VISA ASRL resources."""
+
+    candidate = (resource_name or "").strip()
+    match = COM_RESOURCE_PATTERN.fullmatch(candidate)
+    if match:
+        return f"ASRL{int(match.group('port'))}::INSTR"
+    return candidate
+
+
+def format_source_level_value(value: float) -> str:
+    """Format source levels in the form accepted by the LCR-76200 firmware."""
+
+    numeric = float(value)
+    if numeric == 0.0 or abs(numeric) >= 0.1:
+        return f"{numeric:.12g}"
+    for scale, suffix in ((1e3, "m"), (1e6, "u"), (1e9, "n")):
+        scaled = numeric * scale
+        if 1.0 <= abs(scaled) < 1000.0:
+            return f"{scaled:.12g}{suffix}"
+    return f"{numeric:.12g}"
 
 
 @dataclass(frozen=True)

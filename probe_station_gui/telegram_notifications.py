@@ -26,13 +26,10 @@ TELEGRAM_BOT_TOKEN_ENV = "PROBE_STATION_TELEGRAM_BOT_TOKEN"
 GLOBAL_TELEGRAM_TOKEN_FILENAME = "telegram-bot.json"
 START_PAYLOAD_PREFIX = "probe_"
 TELEGRAM_PHOTO_CAPTION_LIMIT = 1024
-
-try:  # pragma: no cover - exercised when optional dependency is installed
-    from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
-except Exception:  # pragma: no cover - keeps the GUI importable without extras
-    Bot = None  # type: ignore[assignment]
-    InlineKeyboardButton = None  # type: ignore[assignment]
-    InlineKeyboardMarkup = None  # type: ignore[assignment]
+Bot = None
+InlineKeyboardButton = None
+InlineKeyboardMarkup = None
+_TELEGRAM_CLASSES: tuple[object | None, object | None, object | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -47,6 +44,29 @@ class LinkedTelegramChat:
 
 class TelegramNotificationError(RuntimeError):
     """Raised for user-visible Telegram configuration or API failures."""
+
+
+def _load_telegram_classes() -> tuple[object | None, object | None, object | None]:
+    """Load python-telegram-bot only when a Telegram feature is used."""
+
+    global Bot, InlineKeyboardButton, InlineKeyboardMarkup, _TELEGRAM_CLASSES
+
+    if Bot is not None:
+        return (Bot, InlineKeyboardButton, InlineKeyboardMarkup)
+    if _TELEGRAM_CLASSES is not None:
+        return _TELEGRAM_CLASSES
+    try:  # pragma: no cover - exercised when optional dependency is installed
+        from telegram import Bot as telegram_bot
+        from telegram import InlineKeyboardButton as telegram_inline_button
+        from telegram import InlineKeyboardMarkup as telegram_inline_markup
+    except Exception:  # pragma: no cover - keeps the GUI importable without extras
+        _TELEGRAM_CLASSES = (None, None, None)
+    else:
+        Bot = telegram_bot
+        InlineKeyboardButton = telegram_inline_button
+        InlineKeyboardMarkup = telegram_inline_markup
+        _TELEGRAM_CLASSES = (Bot, InlineKeyboardButton, InlineKeyboardMarkup)
+    return _TELEGRAM_CLASSES
 
 
 @dataclass(frozen=True)
@@ -153,6 +173,7 @@ class TelegramBotCommandService:
 
     async def _run_async(self) -> None:
         offset: int | None = None
+        Bot, _button, _markup = _load_telegram_classes()
         async with Bot(token=self._bot_token) as bot:  # type: ignore[misc,operator]
             while not self._stop_requested.is_set():
                 try:
@@ -249,6 +270,7 @@ class TelegramBotCommandService:
 def telegram_dependency_available() -> bool:
     """Return whether the python-telegram-bot package is importable."""
 
+    Bot, _button, _markup = _load_telegram_classes()
     return Bot is not None
 
 
@@ -402,6 +424,7 @@ async def prepare_telegram_link(bot_token: str, payload: str) -> tuple[str, str]
     token = str(bot_token or "").strip()
     if not token:
         raise TelegramNotificationError("Telegram bot token is empty.")
+    Bot, _button, _markup = _load_telegram_classes()
     async with Bot(token=token) as bot:  # type: ignore[misc,operator]
         me = await bot.get_me()
     username = str(getattr(me, "username", "") or "").strip()
@@ -426,6 +449,7 @@ async def wait_for_telegram_link(
         raise TelegramNotificationError("Telegram bot token is empty.")
     deadline = time.monotonic() + max(1.0, float(timeout_s))
     offset: int | None = None
+    Bot, _button, _markup = _load_telegram_classes()
     async with Bot(token=token) as bot:  # type: ignore[misc,operator]
         me = await bot.get_me()
         bot_username = str(getattr(me, "username", "") or "").strip()
@@ -473,6 +497,7 @@ async def send_telegram_message(
     chat_id_text = str(chat_id or "").strip()
     if not chat_id_text:
         raise TelegramNotificationError("Telegram chat is not linked.")
+    Bot, _button, _markup = _load_telegram_classes()
     async with Bot(token=token) as bot:  # type: ignore[misc,operator]
         await bot.send_message(
             chat_id=_telegram_chat_id_value(chat_id_text),
@@ -505,6 +530,7 @@ async def send_telegram_photo(
         raise TelegramNotificationError("Telegram photo is empty.")
     photo = BytesIO(photo_bytes)
     photo.name = str(photo_name or "microscope.jpg")
+    Bot, _button, _markup = _load_telegram_classes()
     async with Bot(token=token) as bot:  # type: ignore[misc,operator]
         await bot.send_photo(
             chat_id=_telegram_chat_id_value(chat_id_text),
@@ -537,6 +563,7 @@ async def send_telegram_document(
     if not path.exists() or not path.is_file():
         raise TelegramNotificationError(f"Telegram document does not exist: {path}")
     with path.open("rb") as document:
+        Bot, _button, _markup = _load_telegram_classes()
         async with Bot(token=token) as bot:  # type: ignore[misc,operator]
             await bot.send_document(
                 chat_id=_telegram_chat_id_value(chat_id_text),
@@ -622,6 +649,9 @@ def telegram_inline_keyboard(
     """Build a Telegram inline keyboard from ``(label, callback_data)`` rows."""
 
     if not telegram_dependency_available():
+        return None
+    _bot, InlineKeyboardButton, InlineKeyboardMarkup = _load_telegram_classes()
+    if InlineKeyboardButton is None or InlineKeyboardMarkup is None:
         return None
     button_rows = [
         [
