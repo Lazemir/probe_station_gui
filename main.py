@@ -12,6 +12,7 @@ import re
 import threading
 import time
 from datetime import datetime, timezone
+from importlib import resources
 from pathlib import Path
 import sys
 from typing import Any, Callable, TYPE_CHECKING
@@ -77,6 +78,7 @@ from PySide6.QtGui import (
     QAction,
     QDesktopServices,
     QDoubleValidator,
+    QIcon,
     QImage,
     QKeySequence,
     QPainter,
@@ -191,6 +193,31 @@ _startup_trace("application imports done")
 
 
 logger = logging.getLogger(__name__)
+
+APP_ICON_RESOURCE = "assets/app_icon.ico"
+WINDOWS_APP_USER_MODEL_ID = "ProbeStationGUI.ProbeStationGUI"
+
+
+def _application_icon() -> QIcon:
+    icon_path = resources.files("probe_station_gui").joinpath(APP_ICON_RESOURCE)
+    icon = QIcon(str(icon_path))
+    if icon.isNull():
+        logger.warning("Application icon could not be loaded: %s", icon_path)
+    return icon
+
+
+def _configure_windows_app_id() -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            WINDOWS_APP_USER_MODEL_ID
+        )
+    except Exception:
+        logger.debug("Unable to set Windows application user model ID", exc_info=True)
+
 
 if TYPE_CHECKING:
     from probe_station_gui.dialogs.microscope_scan_dialog import (
@@ -540,6 +567,9 @@ class Main(QMainWindow):
         _startup_trace("Main.__init__ entered")
         super().__init__()
         self.setWindowTitle("Microscope control")
+        app = QApplication.instance()
+        if app is not None:
+            self.setWindowIcon(app.windowIcon())
         self.menuBar().setNativeMenuBar(False)
 
         self.view = MicroscopeView()
@@ -10432,8 +10462,13 @@ def main() -> int:
     diagnostics_path = configure_crash_diagnostics()
     _startup_trace("crash diagnostics configured")
     logger.debug("Crash diagnostics enabled: %s", diagnostics_path)
+    _configure_windows_app_id()
+    _startup_trace("platform application identity configured")
     app = QApplication(sys.argv)
     _startup_trace("QApplication created")
+    app.setApplicationName("Probe Station GUI")
+    app.setWindowIcon(_application_icon())
+    _startup_trace("application icon set")
     window = Main()
     _startup_trace("Main created")
     _set_initial_window_geometry(window)

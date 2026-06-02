@@ -38,4 +38,4 @@ packages = [
 ]
 
 [tool.setuptools.package-data]
-"probe_station_gui" = ["default_settings.json"]
+"probe_station_gui" = ["default_settings.json", "assets/*.ico", "assets/*.png"]
