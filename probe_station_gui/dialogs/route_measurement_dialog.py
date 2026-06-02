@@ -10,6 +10,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from tqdm import tqdm
+
 from PySide6.QtCore import QLocale, QPointF, QRectF, QSignalBlocker, Qt, Signal
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
@@ -272,6 +274,7 @@ class RouteMeasurementDialog(QDialog):
     interrupt_requested = Signal()
     pause_requested = Signal()
     jump_requested = Signal(int)
+    move_requested = Signal(int)
     current_point_changed = Signal(int)
 
     def __init__(
@@ -302,6 +305,7 @@ class RouteMeasurementDialog(QDialog):
         self._measurement_pending = False
         self._measurement_session_active = False
         self._progress_started_at: float | None = None
+        self._progress_baseline_completed: int | None = None
         self._progress_total = max(1, int(route_point_count))
 
         outer_layout = QVBoxLayout(self)
@@ -561,9 +565,11 @@ class RouteMeasurementDialog(QDialog):
         self._current_point_spin.setRange(1, self._route_point_count)
         self._current_point_spin.setValue(1)
         self._jump_point_spin = self._current_point_spin
-        self._jump_button = QPushButton("Go To", self)
+        self._move_button = QPushButton("Go To", self)
+        self._jump_button = QPushButton("Jump", self)
         jump_row.addWidget(QLabel("Current point", self))
         jump_row.addWidget(self._current_point_spin)
+        jump_row.addWidget(self._move_button)
         jump_row.addWidget(self._jump_button)
         jump_row.addStretch(1)
         layout.addLayout(jump_row)
@@ -571,13 +577,13 @@ class RouteMeasurementDialog(QDialog):
         button_row = QHBoxLayout()
         self._start_session_button = QPushButton("Start Session", self)
         self._cancel_session_button = QPushButton("Cancel Session", self)
-        self._measure_button = QPushButton("Measure", self)
+        self._measure_button = QPushButton("Next", self)
+        self._next_button = self._measure_button
         self._pause_button = QPushButton("Pause", self)
         self._interrupt_button = QPushButton("Interrupt", self)
         self._save_shift_button = QPushButton("Save Shift", self)
         self._remeasure_button = QPushButton("Remeasure", self)
         self._skip_button = QPushButton("Skip", self)
-        self._next_button = QPushButton("Next", self)
         self._close_button = QPushButton("Close", self)
         button_row.addWidget(self._start_session_button)
         button_row.addWidget(self._cancel_session_button)
@@ -587,7 +593,6 @@ class RouteMeasurementDialog(QDialog):
         button_row.addWidget(self._save_shift_button)
         button_row.addWidget(self._remeasure_button)
         button_row.addWidget(self._skip_button)
-        button_row.addWidget(self._next_button)
         button_row.addStretch(1)
         button_row.addWidget(self._close_button)
         outer_layout.addLayout(button_row)
@@ -619,7 +624,7 @@ class RouteMeasurementDialog(QDialog):
         self._current_point_spin.valueChanged.connect(self._on_current_point_changed)
         self._start_session_button.clicked.connect(self.start_session_requested.emit)
         self._cancel_session_button.clicked.connect(self.cancel_session_requested.emit)
-        self._measure_button.clicked.connect(self._emit_measure_requested)
+        self._measure_button.clicked.connect(self._emit_next_or_measure_requested)
         self._load_profile_button.clicked.connect(self._load_profile)
         self._save_profile_button.clicked.connect(self._save_profile)
         self._histogram_mode_combo.currentIndexChanged.connect(
@@ -631,7 +636,11 @@ class RouteMeasurementDialog(QDialog):
         self._save_shift_button.clicked.connect(self.save_shift_requested.emit)
         self._remeasure_button.clicked.connect(self.remeasure_requested.emit)
         self._skip_button.clicked.connect(self.skip_requested.emit)
-        self._next_button.clicked.connect(self.next_requested.emit)
+        self._move_button.clicked.connect(
+            lambda _checked=False: self.move_requested.emit(
+                int(self._jump_point_spin.value())
+            )
+        )
         self._jump_button.clicked.connect(
             lambda _checked=False: self.jump_requested.emit(
                 int(self._jump_point_spin.value())
@@ -663,6 +672,7 @@ class RouteMeasurementDialog(QDialog):
 
     def reset_progress(self, total: int | None = None) -> None:
         self._progress_started_at = None
+        self._progress_baseline_completed = None
         if total is not None:
             self._progress_total = max(1, int(total))
         self._progress_bar.setRange(0, self._progress_total)
@@ -678,6 +688,7 @@ class RouteMeasurementDialog(QDialog):
         self._progress_total = total_points
         if self._progress_started_at is None:
             self._progress_started_at = time.monotonic()
+            self._progress_baseline_completed = completed
         self._progress_bar.setRange(0, total_points)
         self._progress_bar.setValue(completed)
         percent = int(round((completed / total_points) * 100.0))
@@ -703,29 +714,84 @@ class RouteMeasurementDialog(QDialog):
 
     def _progress_eta_text(self, completed: int, total: int) -> str:
         started_at = self._progress_started_at
-        if started_at is None or completed <= 0:
+        baseline = self._progress_baseline_completed
+        if started_at is None or baseline is None:
+            return "Remaining: ETA after first point | Finish: --"
+        total_points = max(1, int(total))
+        baseline_completed = min(max(0, int(baseline)), total_points)
+        completed_since_start = min(
+            max(0, int(completed) - baseline_completed),
+            max(0, total_points - baseline_completed),
+        )
+        total_since_start = max(1, total_points - baseline_completed)
+        if completed_since_start <= 0:
             return "Remaining: ETA after first point | Finish: --"
         elapsed_s = max(0.0, time.monotonic() - started_at)
         if elapsed_s <= 0.0:
             return "Remaining: ETA after first point | Finish: --"
-        points_per_second = completed / elapsed_s
-        if points_per_second <= 0.0:
+        meter = tqdm.format_meter(
+            completed_since_start,
+            total_since_start,
+            elapsed_s,
+            ascii=True,
+            ncols=0,
+        )
+        remaining_text = self._tqdm_remaining_text(meter)
+        remaining_s = self._parse_tqdm_interval(remaining_text)
+        if remaining_text is None or remaining_s is None:
             return "Remaining: ETA after first point | Finish: --"
-        remaining_s = max(0.0, (max(1, int(total)) - completed) / points_per_second)
         finish_at = datetime.now().astimezone() + timedelta(seconds=remaining_s)
         return (
-            f"Remaining: {self._format_progress_interval(remaining_s)} | "
+            f"Remaining: {remaining_text} | "
             f"Finish: {finish_at:%Y-%m-%d %H:%M:%S %Z}"
         )
 
     @staticmethod
-    def _format_progress_interval(seconds: float) -> str:
-        total_seconds = max(0, int(round(float(seconds))))
-        hours, remainder = divmod(total_seconds, 3600)
-        minutes, seconds_value = divmod(remainder, 60)
-        if hours:
-            return f"{hours:d}:{minutes:02d}:{seconds_value:02d}"
-        return f"{minutes:02d}:{seconds_value:02d}"
+    def _tqdm_remaining_text(meter: str) -> str | None:
+        marker = "<"
+        marker_index = meter.find(marker)
+        if marker_index < 0:
+            return None
+        remaining_start = marker_index + len(marker)
+        remaining_end = meter.find(",", remaining_start)
+        if remaining_end < 0:
+            return None
+        remaining = meter[remaining_start:remaining_end].strip()
+        return remaining if remaining and "?" not in remaining else None
+
+    @staticmethod
+    def _parse_tqdm_interval(text: str | None) -> float | None:
+        if text is None:
+            return None
+        interval = str(text).strip()
+        if not interval or "?" in interval:
+            return None
+        days = 0
+        day_marker = " days, "
+        if day_marker in interval:
+            days_text, interval = interval.split(day_marker, 1)
+            try:
+                days = int(days_text.strip())
+            except ValueError:
+                return None
+        parts = interval.split(":")
+        if len(parts) == 2:
+            hours = 0
+            minutes_text, seconds_text = parts
+        elif len(parts) == 3:
+            hours_text, minutes_text, seconds_text = parts
+            try:
+                hours = int(hours_text)
+            except ValueError:
+                return None
+        else:
+            return None
+        try:
+            minutes = int(minutes_text)
+            seconds = int(seconds_text)
+        except ValueError:
+            return None
+        return float(days * 86400 + hours * 3600 + minutes * 60 + seconds)
 
     def set_result(
         self,
@@ -867,6 +933,7 @@ class RouteMeasurementDialog(QDialog):
         self._skip_button.setEnabled(can_confirm)
         self._next_button.setEnabled(can_confirm)
         self._jump_point_spin.setEnabled((not self._running) or can_confirm)
+        self._move_button.setEnabled((not self._running) or can_confirm)
         self._jump_button.setEnabled(can_confirm)
         self._set_runtime_settings_enabled((not self._running) or can_confirm)
         self._update_session_buttons()
@@ -880,7 +947,8 @@ class RouteMeasurementDialog(QDialog):
             can_change_session and self._measurement_session_active
         )
         self._measure_button.setEnabled(
-            (not self._running) and self._measurement_session_active
+            (self._running and self._waiting)
+            or ((not self._running) and self._measurement_session_active)
         )
 
     def _set_runtime_settings_enabled(self, enabled: bool) -> None:
@@ -1254,6 +1322,12 @@ class RouteMeasurementDialog(QDialog):
             return
         dialog = RouteMeasurementRawDataDialog(self._last_raw_samples, self)
         dialog.exec()
+
+    def _emit_next_or_measure_requested(self) -> None:
+        if self._running and self._waiting:
+            self.next_requested.emit()
+            return
+        self._emit_measure_requested()
 
     def _emit_measure_requested(self) -> None:
         if not self._measurement_session_active:

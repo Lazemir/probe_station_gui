@@ -31,10 +31,15 @@ def _restore_real_imports_for_main() -> None:
 _restore_real_imports_for_main()
 import main as main_module
 from main import Main
+from probe_station_gui.dialogs import (
+    route_measurement_dialog as route_measurement_dialog_module,
+)
+from probe_station_gui.dialogs.route_measurement_dialog import RouteMeasurementDialog
 from probe_station_gui.route_measurement import (
     RouteContactHeightRecord,
     RouteContactQuality,
     RouteContactSeekResult,
+    RouteMeasurementPoint,
     RoutePhotoRecord,
 )
 from probe_station_gui.settings_manager import ObjectiveCalibrationSettings, Settings
@@ -495,7 +500,7 @@ assert image.height() == 4
         alerts: list[tuple[str, str, dict[str, object]]] = []
         message = (
             "Route measurement: point 1/2 contact check failed (bad_contact); "
-            "correct contact, then Remeasure, Skip, or Go To."
+            "correct contact, then Remeasure, Skip, or Jump."
         )
 
         window._last_telegram_attention_message = ""
@@ -932,6 +937,68 @@ assert image.height() == 4
 
         self.assertEqual(resumed, [12])
         self.assertEqual(progress, [(3, 7, 12)])
+
+    def test_route_progress_eta_uses_current_run_baseline(self) -> None:
+        dialog = RouteMeasurementDialog.__new__(RouteMeasurementDialog)
+        dialog._progress_started_at = 100.0
+        dialog._progress_baseline_completed = 187
+        original_monotonic = route_measurement_dialog_module.time.monotonic
+        route_measurement_dialog_module.time.monotonic = lambda: 160.0
+        try:
+            text = RouteMeasurementDialog._progress_eta_text(dialog, 188, 292)
+        finally:
+            route_measurement_dialog_module.time.monotonic = original_monotonic
+
+        self.assertIn("Remaining: 1:44:00 | Finish:", text)
+        self.assertNotIn("Remaining: 00:33", text)
+
+    def test_route_contact_move_raises_needles_and_moves_only(self) -> None:
+        window = Main.__new__(Main)
+        calls: list[object] = []
+        statuses: list[str] = []
+        finished: list[tuple[bool, str]] = []
+        point = RouteMeasurementPoint(
+            index=7,
+            point_id="p007",
+            label="P007",
+            design_center=(10.0, 20.0),
+            stage_xy=(1.25, 2.5),
+            needle_1_design=(11.0, 21.0),
+            needle_2_design=(9.0, 19.0),
+        )
+        window.stage_controller = types.SimpleNamespace(
+            begin_external_task=lambda label: calls.append(("begin", label)),
+            run_external_needles_action=lambda action, feedrate: calls.append(
+                ("needles", action, feedrate)
+            ),
+            run_external_move_to_xy=lambda x_mm, y_mm: calls.append(
+                ("move", x_mm, y_mm)
+            ),
+            finish_external_task=lambda: calls.append(("finish",)),
+        )
+        window.route_measurement_status = types.SimpleNamespace(
+            emit=lambda message: statuses.append(str(message))
+        )
+        window.route_contact_move_finished = types.SimpleNamespace(
+            emit=lambda success, message: finished.append((bool(success), str(message)))
+        )
+
+        Main._run_route_contact_move(window, point, 75.0)
+
+        self.assertEqual(
+            calls,
+            [
+                ("begin", "route contact move"),
+                ("needles", "raise", 75.0),
+                ("move", 1.25, 2.5),
+                ("finish",),
+            ],
+        )
+        self.assertTrue(statuses)
+        self.assertEqual(
+            finished,
+            [(True, "Route contact move complete: point 7 P007.")],
+        )
 
     def test_cancel_route_measurement_session_clears_persisted_state(self) -> None:
         window = Main.__new__(Main)
