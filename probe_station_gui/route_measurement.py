@@ -365,10 +365,6 @@ class RouteMeasurementRunner:
 
     def request_pause_after_current_point(self) -> None:
         self._pause_requested.set()
-        if self._contact_seek_active.is_set():
-            self._point_interrupt_requested.set()
-            with self._confirmation_condition:
-                self._confirmation_condition.notify_all()
 
     def set_auto_next_ok_or_short(self, enabled: bool) -> None:
         with self._auto_next_lock:
@@ -618,6 +614,13 @@ class RouteMeasurementRunner:
                                     record=record,
                                 )
                             )
+                            if needles_lowered:
+                                self._stage_controller.run_external_needles_action(
+                                    "lift",
+                                    self._needle_feedrate,
+                                )
+                                needles_lowered = False
+                                needs_final_lift = False
                     if not point_interrupted and record is not None:
                         if (
                             self._confirm_each_point
@@ -741,7 +744,7 @@ class RouteMeasurementRunner:
                         self._status(
                             f"Route measurement: point {position}/{total} "
                             f"{action_text}; "
-                            "choose Next, Remeasure, Skip, or Go To."
+                            "choose Measure or Skip."
                         )
                         decision = self._wait_for_valid_confirmation()
                         self._set_waiting(False)
@@ -1454,8 +1457,7 @@ class RouteMeasurementRunner:
         self._set_waiting(True)
         self._status(
             f"Route measurement: point {position}/{total} interrupted; "
-            "correct position, Save Shift if needed, then Remeasure, Skip, "
-            "or Go To."
+            "correct position, then Measure or Skip."
         )
         decision = self._wait_for_valid_confirmation()
         self._set_waiting(False)
@@ -1482,15 +1484,15 @@ class RouteMeasurementRunner:
         if contact_quality is not None and contact_quality.good is False:
             self._status(
                 f"Route measurement: point {position}/{total} contact check failed "
-                f"({contact_quality.status}); correct contact, then Remeasure, "
-                "Skip, or Go To."
+                f"({contact_quality.status}); correct contact, then Measure "
+                "or Skip."
             )
         else:
             self._status(
                 f"Route measurement: point {position}/{total} relative RMS "
                 f"{_format_percent(record.relative_rms)} exceeds "
                 f"{_format_percent(self._max_relative_rms or math.nan)}; "
-                "correct contact, then Remeasure, Skip, or Go To."
+                "correct contact, then Measure or Skip."
             )
         decision = self._wait_for_valid_confirmation()
         self._set_waiting(False)

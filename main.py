@@ -503,6 +503,7 @@ class Main(QMainWindow):
     route_measurement_result: Signal = Signal(object, int, int, bool)
     route_measurement_recorded: Signal = Signal(object, int, int)
     route_measurement_finished: Signal = Signal(bool, str, str)
+    route_contact_move_finished: Signal = Signal(bool, str)
     status_message_requested: Signal = Signal(str, int)
     telegram_bot_request_received: Signal = Signal(object)
     microscope_scan_status: Signal = Signal(str)
@@ -703,6 +704,7 @@ class Main(QMainWindow):
         self._controller_reboot_recovery_scheduled = False
         self._route_measurement_runner: RouteMeasurementRunner | None = None
         self._route_measurement_thread: threading.Thread | None = None
+        self._route_contact_move_thread: threading.Thread | None = None
         self._route_measurement_dialog: RouteMeasurementDialog | None = None
         self._route_measurement_waiting = False
         self._route_measurement_photo_enabled = False
@@ -769,6 +771,7 @@ class Main(QMainWindow):
         self.route_measurement_result.connect(self._on_route_measurement_result)
         self.route_measurement_recorded.connect(self._on_route_measurement_recorded)
         self.route_measurement_finished.connect(self._on_route_measurement_finished)
+        self.route_contact_move_finished.connect(self._on_route_contact_move_finished)
         self.telegram_bot_request_received.connect(
             self._on_telegram_bot_request_received
         )
@@ -1139,9 +1142,8 @@ class Main(QMainWindow):
         if self._route_measurement_waiting:
             rows.append(
                 [
-                    ("Remeasure", "route:remeasure"),
+                    ("Measure", "route:remeasure"),
                     ("Skip", "route:skip"),
-                    ("Next", "route:next"),
                 ]
             )
         return telegram_inline_keyboard(rows)
@@ -1151,9 +1153,8 @@ class Main(QMainWindow):
         return telegram_inline_keyboard(
             [
                 [
-                    ("Remeasure", "route:remeasure"),
+                    ("Measure", "route:remeasure"),
                     ("Skip", "route:skip"),
-                    ("Next", "route:next"),
                 ],
                 [("Status", "status")],
             ]
@@ -2978,10 +2979,16 @@ class Main(QMainWindow):
         controller_busy = (
             hasattr(self, "stage_controller") and self.stage_controller.is_busy()
         )
+        route_contact_move_thread = getattr(self, "_route_contact_move_thread", None)
+        route_contact_move_active = (
+            route_contact_move_thread is not None
+            and route_contact_move_thread.is_alive()
+        )
         return (
             self._coordinate_move_axis is not None
             or controller_busy
             or self._controller_reports_active_motion()
+            or route_contact_move_active
             or self._route_measurement_runner is not None
             or self._surface_map_capture_running()
             or self._microscope_scan_running()
@@ -6219,7 +6226,9 @@ class Main(QMainWindow):
                 self._request_route_measurement_point_correction
             )
             dialog.pause_requested.connect(self._request_pause_route_measurement)
+            dialog.stop_requested.connect(self._request_stop_route_measurement)
             dialog.jump_requested.connect(self._submit_route_measurement_jump)
+            dialog.move_requested.connect(self._request_route_contact_move)
             dialog.current_point_changed.connect(
                 self._on_route_measurement_current_point_changed
             )
@@ -6249,7 +6258,7 @@ class Main(QMainWindow):
             dialog.set_waiting(self._route_measurement_waiting)
         elif dialog.measurement_session_active():
             dialog.set_status(
-                "Route measurement session is active; Measure continues from the current point."
+                "Choose a point, then Measure or Move."
             )
         dialog.show()
         dialog.raise_()
@@ -6353,7 +6362,7 @@ class Main(QMainWindow):
         self._set_route_measurement_pending(True)
         self._save_route_measurement_session_metadata(configuration)
         message = (
-            "Route measurement session started; Measure continues from "
+            "Route measurement point set to "
             f"point {point_number}."
         )
         self._show_status(message, 5000)
@@ -6372,6 +6381,28 @@ class Main(QMainWindow):
         self._show_status(message, 5000)
         if self._route_measurement_dialog is not None:
             self._route_measurement_dialog.set_status(message)
+
+    def _request_route_measurement_for_point(self, point_number: int) -> None:
+        thread = self._route_measurement_thread
+        if thread is not None and thread.is_alive():
+            if self._route_measurement_waiting:
+                current_point = self._route_measurement_current_point
+                if current_point is not None and int(current_point) == int(point_number):
+                    self._submit_route_measurement_confirmation("remeasure")
+                else:
+                    self._show_status(
+                        "Stop the current measurement before measuring another contact.",
+                        5000,
+                    )
+                return
+            self._show_status("Route measurement is already active.", 4000)
+            return
+        self._open_route_measurement_dialog()
+        dialog = self._route_measurement_dialog
+        if dialog is None:
+            return
+        dialog.set_current_point(int(point_number))
+        self._start_route_measurement(dialog.current_configuration())
 
     def _start_route_measurement(
         self,
@@ -6425,6 +6456,18 @@ class Main(QMainWindow):
                 if self._route_measurement_dialog is not None:
                     self._route_measurement_dialog.set_status(message)
                 return
+        selected_point_number = int(configuration.current_point)
+        selected_point = self._api_find_contact_point(points, selected_point_number)
+        if selected_point is None:
+            message = (
+                f"Contact {selected_point_number} is not enabled or not included "
+                "by the current route filter."
+            )
+            self._show_status(message, 6000)
+            if self._route_measurement_dialog is not None:
+                self._route_measurement_dialog.set_status(message)
+            return
+        self._set_route_measurement_resume_point(int(selected_point.index))
         if not self._route_measurement_session_active:
             self._route_measurement_session_active = True
             self._set_route_measurement_pending(True)
@@ -6559,11 +6602,24 @@ class Main(QMainWindow):
             name="RouteMeasurement",
             daemon=True,
         )
-        start_message = f"Route measurement starting: {len(points)} points."
+        try:
+            start_offset = next(
+                index
+                for index, point in enumerate(points)
+                if int(point.index) == int(selected_point.index)
+            )
+        except StopIteration:
+            start_offset = 0
+        remaining_count = max(1, len(points) - start_offset)
+        start_message = (
+            "Route measurement starting at "
+            f"point {int(selected_point.index)} {selected_point.label}; "
+            f"{remaining_count} points remaining."
+        )
         if previous_ok_skipped_count is not None:
             start_message = (
-                f"Route measurement starting: {len(points)} previous OK points; "
-                f"skipped {previous_ok_skipped_count}."
+                f"{start_message} Previous filter skipped "
+                f"{previous_ok_skipped_count} points."
             )
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_route_measurement_running(True)
@@ -7289,6 +7345,10 @@ class Main(QMainWindow):
         if runner is None:
             self._show_status("No route measurement is waiting.", 3000)
             return
+        move_thread = getattr(self, "_route_contact_move_thread", None)
+        if move_thread is not None and move_thread.is_alive():
+            self._show_status("Wait for route contact move to finish.", 3000)
+            return
         if self._route_measurement_dialog is not None:
             configuration = self._route_measurement_dialog.current_configuration()
             runner.update_runtime_settings(
@@ -7309,7 +7369,7 @@ class Main(QMainWindow):
             self._route_measurement_dialog.set_waiting(False)
         action_key = str(action).strip().lower()
         if action_key == "remeasure":
-            action_label = "remeasure"
+            action_label = "measure"
         elif action_key == "skip":
             action_label = "skip"
         elif action_key.startswith("jump:") or action_key.isdigit():
@@ -7321,6 +7381,102 @@ class Main(QMainWindow):
 
     def _submit_route_measurement_jump(self, point_number: int) -> None:
         self._submit_route_measurement_confirmation(f"jump:{int(point_number)}")
+
+    def _request_route_contact_move(self, point_number: int) -> None:
+        move_thread = getattr(self, "_route_contact_move_thread", None)
+        if move_thread is not None and move_thread.is_alive():
+            self._show_status("Route contact move is already active.", 3000)
+            return
+        route_thread = self._route_measurement_thread
+        route_active = route_thread is not None and route_thread.is_alive()
+        if route_active and not self._route_measurement_waiting:
+            self._show_status(
+                "Pause or wait for route measurement before moving to a contact.",
+                5000,
+            )
+            return
+        context_result = self._api_contact_context(int(point_number))
+        if not context_result.get("accepted", False):
+            message = str(context_result.get("message") or "Route contact move rejected.")
+            self._show_status(message, 6000)
+            if self._route_measurement_dialog is not None:
+                self._route_measurement_dialog.set_status(message)
+            if self.design_navigator_panel is not None:
+                self.design_navigator_panel.set_route_measurement_status(message)
+            return
+        point = context_result["point"]
+        if not route_active:
+            self._set_route_measurement_resume_point(int(point.index))
+        needle_feedrate = self._current_needle_feedrate()
+        message = f"Route contact move: point {int(point.index)} {point.label}."
+        self._show_status(message, 5000)
+        if self._route_measurement_dialog is not None:
+            self._route_measurement_dialog.set_status(message)
+        if self.design_navigator_panel is not None:
+            self.design_navigator_panel.set_route_measurement_status(message)
+        thread = threading.Thread(
+            target=self._run_route_contact_move,
+            args=(point, needle_feedrate),
+            name="RouteContactMove",
+            daemon=True,
+        )
+        self._route_contact_move_thread = thread
+        thread.start()
+        self._update_stage_coordinate_apply_state()
+
+    def _run_route_contact_move(
+        self,
+        point: RouteMeasurementPoint,
+        needle_feedrate: float | None,
+    ) -> None:
+        success = False
+        message = "Route contact move stopped."
+        active_stage_task = False
+        try:
+            self.stage_controller.begin_external_task("route contact move")
+            active_stage_task = True
+            self.route_measurement_status.emit(
+                f"Route contact move: point {int(point.index)} {point.label}, "
+                "raising needles."
+            )
+            self.stage_controller.run_external_needles_action(
+                "raise",
+                needle_feedrate,
+            )
+            self.route_measurement_status.emit(
+                f"Route contact move: point {int(point.index)} {point.label}, moving."
+            )
+            self.stage_controller.run_external_move_to_xy(
+                point.stage_xy[0],
+                point.stage_xy[1],
+            )
+            success = True
+            message = (
+                f"Route contact move complete: point {int(point.index)} "
+                f"{point.label}."
+            )
+        except StageControllerError as exc:
+            message = f"Route contact move failed: {exc}"
+        except Exception as exc:
+            logger.exception("Route contact move failed")
+            message = f"Route contact move failed: {exc}"
+        finally:
+            if active_stage_task:
+                self.stage_controller.finish_external_task()
+            self.route_contact_move_finished.emit(success, message)
+
+    def _on_route_contact_move_finished(self, success: bool, message: str) -> None:
+        thread = getattr(self, "_route_contact_move_thread", None)
+        if thread is not None and not thread.is_alive():
+            thread.join(timeout=0.1)
+        self._route_contact_move_thread = None
+        self._update_stage_coordinate_apply_state()
+        timeout_ms = 5000 if success else 8000
+        self._show_status(message, timeout_ms)
+        if self.design_navigator_panel is not None:
+            self.design_navigator_panel.set_route_measurement_status(message)
+        if self._route_measurement_dialog is not None:
+            self._route_measurement_dialog.set_status(message)
 
     def _request_pause_route_measurement(self) -> None:
         runner = self._route_measurement_runner
@@ -7547,7 +7703,8 @@ class Main(QMainWindow):
                 if measure_enabled and csv_path
                 else None
             )
-            self._set_route_measurement_resume_point(1)
+            if len(self._route_measurement_point_numbers) > 1:
+                self._set_route_measurement_resume_point(1)
             self._set_route_measurement_pending(False)
             self._route_measurement_point_numbers = []
             suffix = (
@@ -9713,6 +9870,9 @@ class Main(QMainWindow):
         self.design_navigator_panel.route_measurement_run_requested.connect(
             self._open_route_measurement_dialog
         )
+        self.design_navigator_panel.route_measurement_measure_requested.connect(
+            self._request_route_measurement_for_point
+        )
         self.design_navigator_panel.route_measurement_stop_requested.connect(
             self._request_stop_route_measurement
         )
@@ -9730,6 +9890,9 @@ class Main(QMainWindow):
         )
         self.design_navigator_panel.route_measurement_jump_requested.connect(
             self._submit_route_measurement_jump
+        )
+        self.design_navigator_panel.route_measurement_move_requested.connect(
+            self._request_route_contact_move
         )
         self.design_navigator_panel.move_to_target_requested.connect(
             self._move_to_design_target

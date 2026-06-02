@@ -601,7 +601,7 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
             any("%|" in status or "remaining" in status for status in statuses)
         )
 
-    def test_result_callback_runs_before_post_measurement_lift(self) -> None:
+    def test_post_measurement_lift_runs_before_result_callback(self) -> None:
         point = _point(1)
         stage = _FakeStage()
 
@@ -629,9 +629,9 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
             for index, call in enumerate(stage.calls)
             if index > lower_index and call == ("needles", "lift", 75.0)
         )
-        self.assertLess(result_index, post_measurement_lift_index)
+        self.assertLess(post_measurement_lift_index, result_index)
 
-    def test_contact_photo_callback_runs_before_post_measurement_lift(self) -> None:
+    def test_post_measurement_lift_runs_before_contact_photo_callback(self) -> None:
         point = _point(1)
         stage = _FakeStage()
 
@@ -663,8 +663,8 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
             for index, call in enumerate(stage.calls)
             if index > lower_index and call == ("needles", "lift", 75.0)
         )
-        self.assertLess(callback_index, post_measurement_lift_index)
-        self.assertEqual(stage.calls[callback_index][2], 1.0)
+        self.assertLess(post_measurement_lift_index, callback_index)
+        self.assertEqual(stage.calls[callback_index][2], 0.0)
 
     def test_pre_contact_photo_callback_runs_before_needle_lower(self) -> None:
         point = _point(1)
@@ -1303,7 +1303,7 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
         first_depth_index = stage.calls.index(("lower_to_depth", 0.0005, None))
         self.assertEqual(stage.calls[first_depth_index - 1], ("needles", "lift", None))
 
-    def test_pause_during_auto_contact_seek_interrupts_point_and_lifts(self) -> None:
+    def test_pause_during_auto_contact_seek_waits_for_saved_point(self) -> None:
         point = _point(1)
         stage = _FakeStage()
         waiting_values: list[bool] = []
@@ -1374,20 +1374,19 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
             with statuses_changed:
                 self.assertTrue(
                     statuses_changed.wait_for(
-                        lambda: any("interrupted" in status for status in statuses),
+                        lambda: any("paused" in status for status in statuses),
                         timeout=2.0,
                     )
                 )
 
             self.assertTrue(thread.is_alive())
             self.assertEqual(lcr.batch_counts, [2, 2])
-            self.assertNotIn(("lower_to_depth", 0.001, 75.0), stage.calls)
             self.assertGreaterEqual(
                 len([call for call in stage.calls if call == ("needles", "lift", 75.0)]),
                 2,
             )
 
-            runner.submit_confirmation("skip")
+            runner.submit_confirmation("next")
             thread.join(timeout=2.0)
 
         self.assertFalse(thread.is_alive())

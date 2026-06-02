@@ -500,7 +500,7 @@ assert image.height() == 4
         alerts: list[tuple[str, str, dict[str, object]]] = []
         message = (
             "Route measurement: point 1/2 contact check failed (bad_contact); "
-            "correct contact, then Remeasure, Skip, or Jump."
+            "correct contact, then Measure or Skip."
         )
 
         window._last_telegram_attention_message = ""

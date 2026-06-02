@@ -273,6 +273,7 @@ class RouteMeasurementDialog(QDialog):
     save_shift_requested = Signal()
     interrupt_requested = Signal()
     pause_requested = Signal()
+    stop_requested = Signal()
     jump_requested = Signal(int)
     move_requested = Signal(int)
     current_point_changed = Signal(int)
@@ -565,34 +566,36 @@ class RouteMeasurementDialog(QDialog):
         self._current_point_spin.setRange(1, self._route_point_count)
         self._current_point_spin.setValue(1)
         self._jump_point_spin = self._current_point_spin
-        self._move_button = QPushButton("Go To", self)
+        self._move_button = QPushButton("Move", self)
         self._jump_button = QPushButton("Jump", self)
         jump_row.addWidget(QLabel("Current point", self))
         jump_row.addWidget(self._current_point_spin)
-        jump_row.addWidget(self._move_button)
-        jump_row.addWidget(self._jump_button)
         jump_row.addStretch(1)
         layout.addLayout(jump_row)
 
         button_row = QHBoxLayout()
         self._start_session_button = QPushButton("Start Session", self)
         self._cancel_session_button = QPushButton("Cancel Session", self)
-        self._measure_button = QPushButton("Next", self)
+        self._measure_button = QPushButton("Measure", self)
         self._next_button = self._measure_button
         self._pause_button = QPushButton("Pause", self)
+        self._stop_button = QPushButton("Stop", self)
         self._interrupt_button = QPushButton("Interrupt", self)
         self._save_shift_button = QPushButton("Save Shift", self)
         self._remeasure_button = QPushButton("Remeasure", self)
         self._skip_button = QPushButton("Skip", self)
         self._close_button = QPushButton("Close", self)
-        button_row.addWidget(self._start_session_button)
-        button_row.addWidget(self._cancel_session_button)
+        self._start_session_button.hide()
+        self._cancel_session_button.hide()
+        self._jump_button.hide()
+        self._interrupt_button.hide()
+        self._save_shift_button.hide()
+        self._remeasure_button.hide()
         button_row.addWidget(self._measure_button)
-        button_row.addWidget(self._pause_button)
-        button_row.addWidget(self._interrupt_button)
-        button_row.addWidget(self._save_shift_button)
-        button_row.addWidget(self._remeasure_button)
+        button_row.addWidget(self._move_button)
         button_row.addWidget(self._skip_button)
+        button_row.addWidget(self._pause_button)
+        button_row.addWidget(self._stop_button)
         button_row.addStretch(1)
         button_row.addWidget(self._close_button)
         outer_layout.addLayout(button_row)
@@ -632,6 +635,7 @@ class RouteMeasurementDialog(QDialog):
         )
         self._raw_data_button.clicked.connect(self._show_raw_data)
         self._pause_button.clicked.connect(self._emit_pause_requested)
+        self._stop_button.clicked.connect(self.stop_requested.emit)
         self._interrupt_button.clicked.connect(self.interrupt_requested.emit)
         self._save_shift_button.clicked.connect(self.save_shift_requested.emit)
         self._remeasure_button.clicked.connect(self.remeasure_requested.emit)
@@ -919,6 +923,7 @@ class RouteMeasurementDialog(QDialog):
         self._set_runtime_settings_enabled(not self._running)
         self._measure_button.setEnabled(not self._running)
         self._pause_button.setEnabled(self._running and not self._waiting)
+        self._stop_button.setEnabled(self._running)
         self._close_button.setEnabled(True)
         self.set_waiting(False)
         self._update_session_buttons()
@@ -927,13 +932,14 @@ class RouteMeasurementDialog(QDialog):
         self._waiting = bool(waiting)
         can_confirm = self._running and self._waiting
         self._pause_button.setEnabled(self._running and not self._waiting)
+        self._stop_button.setEnabled(self._running)
         self._interrupt_button.setEnabled(self._running and not self._waiting)
         self._save_shift_button.setEnabled(self._running and self._waiting)
         self._remeasure_button.setEnabled(can_confirm)
         self._skip_button.setEnabled(can_confirm)
         self._next_button.setEnabled(can_confirm)
-        self._jump_point_spin.setEnabled((not self._running) or can_confirm)
-        self._move_button.setEnabled((not self._running) or can_confirm)
+        self._jump_point_spin.setEnabled(not self._running)
+        self._move_button.setEnabled(not self._running)
         self._jump_button.setEnabled(can_confirm)
         self._set_runtime_settings_enabled((not self._running) or can_confirm)
         self._update_session_buttons()
@@ -947,8 +953,7 @@ class RouteMeasurementDialog(QDialog):
             can_change_session and self._measurement_session_active
         )
         self._measure_button.setEnabled(
-            (self._running and self._waiting)
-            or ((not self._running) and self._measurement_session_active)
+            (self._running and self._waiting) or (not self._running)
         )
 
     def _set_runtime_settings_enabled(self, enabled: bool) -> None:
@@ -1325,14 +1330,11 @@ class RouteMeasurementDialog(QDialog):
 
     def _emit_next_or_measure_requested(self) -> None:
         if self._running and self._waiting:
-            self.next_requested.emit()
+            self.remeasure_requested.emit()
             return
         self._emit_measure_requested()
 
     def _emit_measure_requested(self) -> None:
-        if not self._measurement_session_active:
-            self.set_status("Start a measurement session before measuring.")
-            return
         mode = str(self._operation_combo.currentData() or ROUTE_OPERATION_MEASURE)
         csv_path = self._csv_path_edit.text().strip()
         if mode in {ROUTE_OPERATION_MEASURE, ROUTE_OPERATION_PHOTO_THEN_MEASURE} and not csv_path:
