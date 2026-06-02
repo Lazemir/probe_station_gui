@@ -3800,6 +3800,7 @@ class Main(QMainWindow):
             self.settings_manager.settings,
             self,
             initial_tab=tab_name,
+            camera_settings_source=self.grabber,
         )
         dialog.settings_applied.connect(self._apply_settings_from_dialog)
         try:

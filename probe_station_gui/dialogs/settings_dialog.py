@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from probe_station_gui.dialogs.camera_settings_dialog import CameraSettingsWidget
 from probe_station_gui.qt_compat import keyboard_modifiers_to_int, native_scan_code_to_int
 from probe_station_gui.settings_manager import (
     CONTROL_ACTIONS,
@@ -1554,6 +1555,7 @@ class SettingsDialog(QDialog):
         parent: QWidget | None = None,
         *,
         initial_tab: str | None = None,
+        camera_settings_source: object | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Settings")
@@ -1561,6 +1563,7 @@ class SettingsDialog(QDialog):
         self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
         self._settings = settings.clone()
         self._applied_once = False
+        self._camera_tab: CameraSettingsWidget | None = None
 
         root_layout = QVBoxLayout(self)
         self._tabs = QTabWidget(self)
@@ -1589,8 +1592,12 @@ class SettingsDialog(QDialog):
             self._settings.axis_z_calibration,
             self,
         )
+        if camera_settings_source is not None:
+            self._camera_tab = CameraSettingsWidget(camera_settings_source, self)
         self._tabs.addTab(self._controls_tab, "Controls")
         self._tabs.addTab(self._api_tab, "API")
+        if self._camera_tab is not None:
+            self._tabs.addTab(self._camera_tab, "Camera")
         self._tabs.addTab(self._telegram_tab, "Telegram")
         self._tabs.addTab(self._jog_tab, "Jog")
         self._tabs.addTab(self._coordinate_system_tab, "Coordinates")
@@ -1604,6 +1611,8 @@ class SettingsDialog(QDialog):
                 if self._tabs.tabText(index).lower() == initial_tab.lower():
                     self._tabs.setCurrentIndex(index)
                     break
+        self._tabs.currentChanged.connect(self._on_tab_changed)
+        self._refresh_camera_tab_if_current()
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.Save | QDialogButtonBox.Apply | QDialogButtonBox.Cancel,
@@ -1615,6 +1624,17 @@ class SettingsDialog(QDialog):
         if apply_button is not None:
             apply_button.clicked.connect(self._apply_without_closing)
         root_layout.addWidget(buttons)
+
+    def _on_tab_changed(self, _index: int) -> None:
+        self._refresh_camera_tab_if_current()
+
+    def _refresh_camera_tab_if_current(self) -> None:
+        if self._camera_tab is None:
+            return
+        if self._tabs.currentWidget() is not self._camera_tab:
+            return
+        if not self._camera_tab.has_loaded():
+            self._camera_tab.refresh()
 
     def accept(self) -> None:  # type: ignore[override]
         self._collect_settings()
@@ -1639,6 +1659,8 @@ class SettingsDialog(QDialog):
         self._measurement_tab.to_settings(self._settings)
         self._needles_tab.to_settings(self._settings)
         self._logging_tab.to_settings(self._settings.logging)
+        if self._camera_tab is not None:
+            self._camera_tab.apply_pending_settings()
 
     def result_settings(self) -> Settings:
         """Return a clone of the adjusted settings."""
