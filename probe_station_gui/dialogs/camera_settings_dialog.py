@@ -525,8 +525,6 @@ class CameraSettingsWidget(QWidget):
         "ExposureCompensation",
         "GainAuto",
         "Gain",
-        "GammaEnable",
-        "Gamma",
         "BlackLevel",
         "BalanceWhiteAuto",
         "BalanceRatioSelector",
