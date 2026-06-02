@@ -531,6 +531,37 @@ assert image.height() == 4
         assert photo is not None
         self.assertEqual(photo[1], "route-contact-comparison.jpg")
 
+    def test_route_photo_autofocus_reports_status_through_signal(self) -> None:
+        window = Main.__new__(Main)
+        emitted: list[str] = []
+        requested_ranges: list[float] = []
+
+        window.route_measurement_status = types.SimpleNamespace(
+            emit=lambda message: emitted.append(str(message))
+        )
+        window.stage_controller = types.SimpleNamespace(
+            run_external_local_autofocus=lambda *, range_mm: requested_ranges.append(
+                float(range_mm)
+            )
+            or "focus-result"
+        )
+        configuration = types.SimpleNamespace(photo_autofocus_range_mm=0.03)
+
+        result = Main._route_photo_autofocus(
+            window,
+            types.SimpleNamespace(),
+            2,
+            5,
+            configuration=configuration,
+        )
+
+        self.assertEqual(result, "focus-result")
+        self.assertEqual(requested_ranges, [0.03])
+        self.assertEqual(
+            emitted,
+            ["Route photo autofocus: point 2/5, +/-0.030 mm."],
+        )
+
     def test_wait_for_camera_frame_requires_fresh_counter_after_marker(self) -> None:
         window = Main.__new__(Main)
         window._latest_camera_frame_condition = threading.Condition()

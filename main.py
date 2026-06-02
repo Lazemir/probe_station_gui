@@ -503,6 +503,7 @@ class Main(QMainWindow):
     route_measurement_result: Signal = Signal(object, int, int, bool)
     route_measurement_recorded: Signal = Signal(object, int, int)
     route_measurement_finished: Signal = Signal(bool, str, str)
+    status_message_requested: Signal = Signal(str, int)
     telegram_bot_request_received: Signal = Signal(object)
     microscope_scan_status: Signal = Signal(str)
     microscope_scan_finished: Signal = Signal(bool, str)
@@ -738,6 +739,10 @@ class Main(QMainWindow):
         self.statusBar().addPermanentWidget(self._status_log, 1)
         self._status_log_path = (
             self.settings_manager.log_file_path().with_name("status-history.log")
+        )
+        self.status_message_requested.connect(
+            self._show_status,
+            Qt.ConnectionType.QueuedConnection,
         )
         self.grabber = Grabber()
         self.thread = QThread()
@@ -2607,10 +2612,19 @@ class Main(QMainWindow):
 
     def _show_status(self, message: str, timeout_ms: int = 0) -> None:
         if message:
-            self._latest_status_message = str(message)
-            self.statusBar().showMessage(message, timeout_ms)
-            self._status_log.appendPlainText(message)
-            self._append_status_log(message)
+            status_text = str(message)
+            try:
+                timeout = int(timeout_ms)
+            except (TypeError, ValueError):
+                timeout = 0
+            app = QApplication.instance()
+            if app is not None and QThread.currentThread() != app.thread():
+                self.status_message_requested.emit(status_text, timeout)
+                return
+            self._latest_status_message = status_text
+            self.statusBar().showMessage(status_text, timeout)
+            self._status_log.appendPlainText(status_text)
+            self._append_status_log(status_text)
 
     def _create_objective_widget(self) -> QWidget:
         widget = QWidget(self)
@@ -6693,8 +6707,9 @@ class Main(QMainWindow):
         configuration: RouteMeasurementRunConfiguration,
     ) -> object:
         _ = point
-        self._show_status(
-            f"Route photo autofocus: point {position}/{total}, "
+        self.route_measurement_status.emit(
+            "Route photo autofocus: "
+            f"point {position}/{total}, "
             f"+/-{configuration.photo_autofocus_range_mm:.3f} mm."
         )
         return self.stage_controller.run_external_local_autofocus(
