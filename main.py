@@ -482,6 +482,8 @@ class Main(QMainWindow):
     contact_seek_status: Signal = Signal(str)
     contact_seek_calibration_found: Signal = Signal(float, str)
     contact_seek_finished: Signal = Signal(bool, str)
+    sample_handling_status: Signal = Signal(str)
+    sample_handling_finished: Signal = Signal(bool, str, bool, object)
 
     ALIGNMENT_CAPTURE_SHORTCUT = "Space"
     ALIGNMENT_TARGET_ANGLES = (-180.0, -90.0, 0.0, 90.0, 180.0)
@@ -529,6 +531,10 @@ class Main(QMainWindow):
     CONTACT_SEEK_MAX_TOTAL_MM = 0.020
     CONTACT_SEEK_QUICK_COUNT = 25
     CONTACT_SEEK_CONFIRM_COUNT = 250
+    SAMPLE_LOAD_X_MM = 0.0
+    SAMPLE_LOAD_Y_MM = 0.0
+    SAMPLE_UNLOAD_X_MM = -32.0
+    SAMPLE_UNLOAD_Y_MM = 32.0
 
     def __init__(self) -> None:
         _startup_trace("Main.__init__ entered")
@@ -588,6 +594,8 @@ class Main(QMainWindow):
         self._design_layout_window_action: QAction | None = None
         self._click_calibration_action: QAction | None = None
         self._click_calibration_dialog: ClickCalibrationDialog | None = None
+        self._sample_load_action: QAction | None = None
+        self._sample_unload_action: QAction | None = None
         self._objective_offset_reference: ObjectiveOffsetReference | None = None
         self._ruler_action: QAction | None = None
         self._rect_action: QAction | None = None
@@ -673,6 +681,8 @@ class Main(QMainWindow):
         self._route_measurement_session_active = False
         self._microscope_scan_thread: threading.Thread | None = None
         self._microscope_scan_stop_requested = threading.Event()
+        self._sample_handling_thread: threading.Thread | None = None
+        self._last_sample_focus_z_by_objective: dict[str, float] = {}
         self._last_telegram_attention_message = ""
         self._telegram_route_photo_requested = False
         self._telegram_contact_photo_requested = False
@@ -734,6 +744,8 @@ class Main(QMainWindow):
             self._on_contact_seek_calibration_found
         )
         self.contact_seek_finished.connect(self._on_contact_seek_finished)
+        self.sample_handling_status.connect(self._show_status)
+        self.sample_handling_finished.connect(self._on_sample_handling_finished)
 
         self.stage_controller = StageController()
         self.stage_controller.status_message.connect(self._show_status)
@@ -2895,6 +2907,7 @@ class Main(QMainWindow):
             or self._route_measurement_runner is not None
             or self._surface_map_capture_running()
             or self._microscope_scan_running()
+            or self._sample_handling_active()
             or self._manual_alignment_pick_slot is not None
             or self._pending_click_to_move is not None
             or bool(self._pending_homing_axes)
@@ -3467,6 +3480,7 @@ class Main(QMainWindow):
 
     def _setup_menus(self) -> None:
         app_menu = self.menuBar().addMenu("Application")
+        navigation_menu = self.menuBar().addMenu("Navigation")
         panels_menu = self.menuBar().addMenu("Tools")
         calibration_menu = self.menuBar().addMenu("Calibration")
 
@@ -3479,6 +3493,14 @@ class Main(QMainWindow):
         open_log_action.setText("Open Status Log")
         open_log_action.triggered.connect(self._open_status_log)
         app_menu.addAction(open_log_action)
+
+        self._sample_load_action = QAction("Load Sample", self)
+        self._sample_load_action.triggered.connect(self._request_sample_load)
+        navigation_menu.addAction(self._sample_load_action)
+
+        self._sample_unload_action = QAction("Unload Sample", self)
+        self._sample_unload_action.triggered.connect(self._request_sample_unload)
+        navigation_menu.addAction(self._sample_unload_action)
 
         self._design_layout_window_action = QAction("Design Window", self)
         self._design_layout_window_action.setCheckable(True)
@@ -5616,7 +5638,9 @@ class Main(QMainWindow):
     def on_autofocus_finished(self, success: bool, message: str) -> None:
         if message:
             self._show_status(message, 5000)
-        if not success:
+        if success:
+            self._remember_sample_focus_from_latest()
+        else:
             logger.error("Autofocus failed: %s", message)
         self._schedule_cancel_state_refresh()
 
@@ -10045,6 +10069,257 @@ class Main(QMainWindow):
             transit_z,
             f"{target_key} position",
         )
+
+    def _sample_handling_active(self) -> bool:
+        thread = getattr(self, "_sample_handling_thread", None)
+        return thread is not None and thread.is_alive()
+
+    def _latest_stage_z(self) -> float | None:
+        latest = self.stage_controller.latest_stage_position()
+        if latest is None or len(latest) < 3:
+            return None
+        try:
+            z_mm = float(latest[2])
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(z_mm):
+            return None
+        return z_mm
+
+    def _active_sample_objective_name(self) -> str:
+        try:
+            objectives = self.settings_manager.objectives_configuration()
+            raw_name = getattr(objectives, "active_name", "")
+        except Exception:
+            logger.debug("Unable to read active objective for sample focus.", exc_info=True)
+            raw_name = ""
+        name = normalize_objective_name(raw_name)
+        if name:
+            return name
+        fallback = str(raw_name or "").strip().upper()
+        return fallback or "UNKNOWN"
+
+    def _remember_sample_focus_from_latest(self) -> float | None:
+        z_mm = self._latest_stage_z()
+        if z_mm is not None:
+            focus_by_objective = getattr(
+                self,
+                "_last_sample_focus_z_by_objective",
+                None,
+            )
+            if focus_by_objective is None:
+                focus_by_objective = {}
+                self._last_sample_focus_z_by_objective = focus_by_objective
+            focus_by_objective[self._active_sample_objective_name()] = z_mm
+        return z_mm
+
+    def _sample_load_focus_z(self) -> float | None:
+        objective_name = self._active_sample_objective_name()
+        focus_by_objective = getattr(
+            self,
+            "_last_sample_focus_z_by_objective",
+            {},
+        )
+        if objective_name in focus_by_objective:
+            return focus_by_objective[objective_name]
+        return self._latest_stage_z()
+
+    def _sample_workflow_can_start(self, action: str) -> bool:
+        if not self._stage_serial_ready():
+            self._show_status("Stage is not connected; sample action not started.", 4000)
+            return False
+        if self._sample_handling_active() or self._has_cancelable_operation():
+            self._show_status(f"Stage is busy. Ignoring sample {action} request.", 4000)
+            return False
+        return True
+
+    def _design_registration_is_active(self) -> bool:
+        registration = getattr(
+            getattr(self, "_design_session", None),
+            "registration",
+            None,
+        )
+        return bool(registration is not None and getattr(registration, "valid", False))
+
+    def _request_sample_unload(self) -> None:
+        if not self._sample_workflow_can_start("unload"):
+            return
+        if self._design_registration_is_active():
+            response = QMessageBox.question(
+                self,
+                "Unload Sample",
+                "Unload sample and clear design registration?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if response != QMessageBox.Yes:
+                return
+            self._invalidate_design_registration(
+                "Design registration cleared before sample unload."
+            )
+        self._remember_sample_focus_from_latest()
+        xy_feedrate = self.stage_controller.max_feedrate_for_axes(("X", "Y"))
+        needle_feedrate = self._current_needle_feedrate()
+        thread = threading.Thread(
+            target=self._run_sample_unload,
+            args=(xy_feedrate, needle_feedrate),
+            daemon=True,
+            name="SampleUnload",
+        )
+        self._sample_handling_thread = thread
+        thread.start()
+
+    def _request_sample_load(self) -> None:
+        if not self._sample_workflow_can_start("load"):
+            return
+        focus_z_mm = self._sample_load_focus_z()
+        xy_feedrate = self.stage_controller.max_feedrate_for_axes(("X", "Y"))
+        focus_feedrate = self.stage_controller.max_feedrate_for_axes(("Z",))
+        needle_feedrate = self._current_needle_feedrate()
+        thread = threading.Thread(
+            target=self._run_sample_load,
+            args=(focus_z_mm, xy_feedrate, focus_feedrate, needle_feedrate),
+            daemon=True,
+            name="SampleLoad",
+        )
+        self._sample_handling_thread = thread
+        thread.start()
+
+    def _run_sample_unload(
+        self,
+        xy_feedrate: float,
+        needle_feedrate: float,
+    ) -> None:
+        success = False
+        message = ""
+        try:
+            self.stage_controller.begin_external_task("sample unload")
+            self.sample_handling_status.emit("Sample unload: raising needles.")
+            self.stage_controller.run_external_needles_action(
+                "raise",
+                needle_feedrate,
+            )
+            self.sample_handling_status.emit(
+                "Sample unload: moving to "
+                f"X={self.SAMPLE_UNLOAD_X_MM:.3f}, "
+                f"Y={self.SAMPLE_UNLOAD_Y_MM:.3f}."
+            )
+            self.stage_controller.run_external_move_to_xy(
+                self.SAMPLE_UNLOAD_X_MM,
+                self.SAMPLE_UNLOAD_Y_MM,
+                feedrate=xy_feedrate,
+            )
+            message = (
+                "Sample unloaded at "
+                f"X={self.SAMPLE_UNLOAD_X_MM:.3f}, "
+                f"Y={self.SAMPLE_UNLOAD_Y_MM:.3f}; needles are raised."
+            )
+            success = True
+        except StageControllerError as exc:
+            message = f"Sample unload failed: {exc}"
+        except Exception as exc:
+            logger.exception("Sample unload failed.")
+            message = f"Sample unload failed: {exc}"
+        finally:
+            self.stage_controller.finish_external_task()
+            self.sample_handling_finished.emit(success, message, False, None)
+
+    def _run_sample_load(
+        self,
+        focus_z_mm: float | None,
+        xy_feedrate: float,
+        focus_feedrate: float,
+        needle_feedrate: float,
+    ) -> None:
+        success = False
+        message = ""
+        try:
+            self.stage_controller.begin_external_task("sample load")
+            self.sample_handling_status.emit("Sample load: raising needles.")
+            self.stage_controller.run_external_needles_action(
+                "raise",
+                needle_feedrate,
+            )
+            self.sample_handling_status.emit(
+                "Sample load: moving to "
+                f"X={self.SAMPLE_LOAD_X_MM:.3f}, "
+                f"Y={self.SAMPLE_LOAD_Y_MM:.3f}."
+            )
+            self.stage_controller.run_external_move_to_xy(
+                self.SAMPLE_LOAD_X_MM,
+                self.SAMPLE_LOAD_Y_MM,
+                feedrate=xy_feedrate,
+            )
+            if focus_z_mm is not None:
+                self.sample_handling_status.emit(
+                    f"Sample load: moving Z to last focus {focus_z_mm:.4f} mm."
+                )
+                self.stage_controller.run_external_absolute_axis_targets_move(
+                    {"Z": focus_z_mm},
+                    feedrate=focus_feedrate,
+                )
+                message = (
+                    "Sample loaded at "
+                    f"X={self.SAMPLE_LOAD_X_MM:.3f}, "
+                    f"Y={self.SAMPLE_LOAD_Y_MM:.3f}, "
+                    f"Z={focus_z_mm:.4f}."
+                )
+            else:
+                message = (
+                    "Sample loaded at "
+                    f"X={self.SAMPLE_LOAD_X_MM:.3f}, "
+                    f"Y={self.SAMPLE_LOAD_Y_MM:.3f}; last focus is unavailable."
+                )
+            success = True
+        except StageControllerError as exc:
+            message = f"Sample load failed: {exc}"
+        except Exception as exc:
+            logger.exception("Sample load failed.")
+            message = f"Sample load failed: {exc}"
+        finally:
+            self.stage_controller.finish_external_task()
+            self.sample_handling_finished.emit(
+                success,
+                message,
+                success,
+                focus_z_mm,
+            )
+
+    def _on_sample_handling_finished(
+        self,
+        success: bool,
+        message: str,
+        offer_autofocus: bool,
+        focus_z_mm: object,
+    ) -> None:
+        self._sample_handling_thread = None
+        if message:
+            self._show_status(message, 7000)
+        self._clear_stage_motion_axes()
+        self._update_stage_coordinate_apply_state()
+        self._schedule_cancel_state_refresh()
+        if not success or not offer_autofocus:
+            return
+        prompt = "Run autofocus now?"
+        try:
+            focus_z = float(focus_z_mm)
+        except (TypeError, ValueError):
+            focus_z = math.nan
+        if math.isfinite(focus_z):
+            prompt = f"Sample is near Z={focus_z:.4f} mm. Run autofocus now?"
+        response = QMessageBox.question(
+            self,
+            "Autofocus",
+            prompt,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if response != QMessageBox.Yes:
+            return
+        if self.stage_controller.is_busy():
+            self._show_status("Stage is busy; autofocus not started.", 4000)
+            return
+        self.stage_controller.request_autofocus()
 
     def _on_oscillation_state_changed(self, running: bool, axis: str) -> None:
         if self.oscillation_panel:

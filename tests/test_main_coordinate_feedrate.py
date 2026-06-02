@@ -29,6 +29,7 @@ def _restore_real_imports_for_main() -> None:
 
 
 _restore_real_imports_for_main()
+import main as main_module
 from main import Main
 from probe_station_gui.route_measurement import (
     RouteContactHeightRecord,
@@ -72,6 +73,21 @@ class _FakeSignal:
 
     def emit(self, message: str) -> None:
         self.messages.append(str(message))
+
+
+class _FakeThread:
+    instances: list["_FakeThread"] = []
+
+    def __init__(self, *, target, args=(), daemon=None, name=None) -> None:
+        self.target = target
+        self.args = args
+        self.daemon = daemon
+        self.name = name
+        self.started = False
+        self.__class__.instances.append(self)
+
+    def start(self) -> None:
+        self.started = True
 
 
 class _FakeFrame:
@@ -620,6 +636,180 @@ assert image.height() == 4
 
         self.assertEqual(point.stage_xy, (1.0, 2.0))
         self.assertEqual(point.photo_stage_xy, (1.25, 1.75))
+
+    def test_sample_load_focus_uses_active_objective_cache(self) -> None:
+        window = Main.__new__(Main)
+        settings = Settings()
+        settings.objectives.active_name = "X20"
+        window.settings_manager = types.SimpleNamespace(
+            objectives_configuration=lambda: settings.objectives
+        )
+        window.stage_controller = types.SimpleNamespace(
+            latest_stage_position=lambda: (0.0, 0.0, 9.0)
+        )
+        window._last_sample_focus_z_by_objective = {
+            "X5": 1.25,
+            "X20": 2.5,
+        }
+
+        self.assertEqual(Main._sample_load_focus_z(window), 2.5)
+
+        settings.objectives.active_name = "X5"
+
+        self.assertEqual(Main._sample_load_focus_z(window), 1.25)
+
+    def test_sample_focus_memory_is_stored_per_objective(self) -> None:
+        window = Main.__new__(Main)
+        settings = Settings()
+        latest_z = [3.0]
+        window.settings_manager = types.SimpleNamespace(
+            objectives_configuration=lambda: settings.objectives
+        )
+        window.stage_controller = types.SimpleNamespace(
+            latest_stage_position=lambda: (0.0, 0.0, latest_z[0])
+        )
+        window._last_sample_focus_z_by_objective = {}
+
+        settings.objectives.active_name = "X5"
+        Main._remember_sample_focus_from_latest(window)
+        latest_z[0] = 7.0
+        settings.objectives.active_name = "X20"
+        Main._remember_sample_focus_from_latest(window)
+
+        self.assertEqual(
+            window._last_sample_focus_z_by_objective,
+            {"X5": 3.0, "X20": 7.0},
+        )
+
+    def test_sample_unload_cancel_keeps_registration_and_does_not_start(self) -> None:
+        window = Main.__new__(Main)
+        invalidations: list[str] = []
+        remembered: list[bool] = []
+        window._design_session = types.SimpleNamespace(
+            registration=types.SimpleNamespace(valid=True)
+        )
+        window._stage_serial_ready = lambda: True
+        window._sample_handling_active = lambda: False
+        window._has_cancelable_operation = lambda: False
+        window._invalidate_design_registration = lambda reason: invalidations.append(
+            reason
+        )
+        window._remember_sample_focus_from_latest = lambda: remembered.append(True)
+        window._current_needle_feedrate = lambda: 7.0
+        window.stage_controller = types.SimpleNamespace(
+            max_feedrate_for_axes=lambda _axes: 900.0
+        )
+
+        original_box = main_module.QMessageBox
+        original_thread = main_module.threading.Thread
+        _FakeThread.instances = []
+        main_module.QMessageBox = types.SimpleNamespace(
+            Yes=1,
+            No=2,
+            question=lambda *_args, **_kwargs: 2,
+        )
+        main_module.threading.Thread = _FakeThread
+        try:
+            Main._request_sample_unload(window)
+        finally:
+            main_module.QMessageBox = original_box
+            main_module.threading.Thread = original_thread
+
+        self.assertEqual(invalidations, [])
+        self.assertEqual(remembered, [])
+        self.assertEqual(_FakeThread.instances, [])
+
+    def test_sample_unload_confirm_clears_registration_before_start(self) -> None:
+        window = Main.__new__(Main)
+        events: list[object] = []
+        window._design_session = types.SimpleNamespace(
+            registration=types.SimpleNamespace(valid=True)
+        )
+        window._stage_serial_ready = lambda: True
+        window._sample_handling_active = lambda: False
+        window._has_cancelable_operation = lambda: False
+        window._invalidate_design_registration = lambda reason: events.append(
+            ("invalidate", reason)
+        )
+        window._remember_sample_focus_from_latest = lambda: events.append("remember")
+        window._current_needle_feedrate = lambda: 7.0
+        window._run_sample_unload = lambda *_args: None
+        window.stage_controller = types.SimpleNamespace(
+            max_feedrate_for_axes=lambda axes: 900.0
+            if tuple(axes) == ("X", "Y")
+            else 1.0
+        )
+
+        original_box = main_module.QMessageBox
+        original_thread = main_module.threading.Thread
+        _FakeThread.instances = []
+        main_module.QMessageBox = types.SimpleNamespace(
+            Yes=1,
+            No=2,
+            question=lambda *_args, **_kwargs: 1,
+        )
+        main_module.threading.Thread = _FakeThread
+        try:
+            Main._request_sample_unload(window)
+        finally:
+            main_module.QMessageBox = original_box
+            main_module.threading.Thread = original_thread
+
+        self.assertEqual(
+            events,
+            [
+                (
+                    "invalidate",
+                    "Design registration cleared before sample unload.",
+                ),
+                "remember",
+            ],
+        )
+        self.assertEqual(len(_FakeThread.instances), 1)
+        self.assertTrue(_FakeThread.instances[0].started)
+        self.assertEqual(_FakeThread.instances[0].args, (900.0, 7.0))
+
+    def test_sample_unload_without_registration_skips_prompt_and_reset(self) -> None:
+        window = Main.__new__(Main)
+        invalidations: list[str] = []
+        remembered: list[bool] = []
+        window._design_session = types.SimpleNamespace(registration=None)
+        window._stage_serial_ready = lambda: True
+        window._sample_handling_active = lambda: False
+        window._has_cancelable_operation = lambda: False
+        window._invalidate_design_registration = lambda reason: invalidations.append(
+            reason
+        )
+        window._remember_sample_focus_from_latest = lambda: remembered.append(True)
+        window._current_needle_feedrate = lambda: 7.0
+        window._run_sample_unload = lambda *_args: None
+        window.stage_controller = types.SimpleNamespace(
+            max_feedrate_for_axes=lambda _axes: 900.0
+        )
+
+        original_box = main_module.QMessageBox
+        original_thread = main_module.threading.Thread
+        _FakeThread.instances = []
+
+        def _unexpected_question(*_args, **_kwargs):
+            raise AssertionError("confirmation should not be shown")
+
+        main_module.QMessageBox = types.SimpleNamespace(
+            Yes=1,
+            No=2,
+            question=_unexpected_question,
+        )
+        main_module.threading.Thread = _FakeThread
+        try:
+            Main._request_sample_unload(window)
+        finally:
+            main_module.QMessageBox = original_box
+            main_module.threading.Thread = original_thread
+
+        self.assertEqual(invalidations, [])
+        self.assertEqual(remembered, [True])
+        self.assertEqual(len(_FakeThread.instances), 1)
+        self.assertTrue(_FakeThread.instances[0].started)
 
     def test_route_session_active_reads_new_and_legacy_settings(self) -> None:
         self.assertTrue(

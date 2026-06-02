@@ -1037,6 +1037,28 @@ class StageController(QObject):
 
         return dict(self._axis_max_feedrates)
 
+    def max_feedrate_for_axes(self, axes: object) -> float:
+        """Return the highest configured feedrate usable for a multi-axis move."""
+
+        if isinstance(axes, str):
+            raw_axes = [axes]
+        else:
+            try:
+                raw_axes = list(axes)  # type: ignore[arg-type]
+            except TypeError:
+                raw_axes = []
+        normalized = [
+            str(axis).upper().strip()
+            for axis in raw_axes
+            if str(axis).upper().strip() in self.AXIS_INDEX
+        ]
+        if not normalized:
+            return self.DEFAULT_FEEDRATE
+        return max(
+            self.MIN_FEEDRATE,
+            min(self._axis_max_feedrate(axis) for axis in normalized),
+        )
+
     def query_axis_max_feedrates(self) -> dict[str, float]:
         """Query the live FluidNC configuration for per-axis maximum feedrates."""
 
@@ -1537,7 +1559,13 @@ class StageController(QObject):
             if self._active_thread is current_thread:
                 self._active_thread = None
 
-    def run_external_move_to_xy(self, target_x_mm: float, target_y_mm: float) -> str:
+    def run_external_move_to_xy(
+        self,
+        target_x_mm: float,
+        target_y_mm: float,
+        *,
+        feedrate: float | None = None,
+    ) -> str:
         """Run a blocking X/Y move inside an external controller reservation."""
 
         self.movement_started.emit()
@@ -1551,7 +1579,77 @@ class StageController(QObject):
                 serial_connection,
                 float(target_x_mm),
                 float(target_y_mm),
+                feedrate=feedrate,
             )
+            self.movement_finished.emit(True, message)
+            return message
+        except StageControllerError as exc:
+            self.movement_finished.emit(False, str(exc))
+            raise
+
+    def run_external_absolute_axis_targets_move(
+        self,
+        targets: dict[str, float],
+        *,
+        feedrate: float | None = None,
+        allow_unhomed: bool = False,
+    ) -> str:
+        """Run a blocking absolute coordinate move inside an external reservation."""
+
+        normalized_targets: dict[str, float] = {}
+        for raw_axis, raw_value in targets.items():
+            axis = str(raw_axis).upper().strip()
+            if axis not in self.AXIS_INDEX:
+                raise StageControllerError(f"Unsupported axis: {raw_axis}")
+            try:
+                value = float(raw_value)
+            except (TypeError, ValueError) as exc:
+                raise StageControllerError(
+                    f"Unsupported target for {axis}: {raw_value}"
+                ) from exc
+            if not math.isfinite(value):
+                raise StageControllerError(
+                    f"Unsupported target for {axis}: {raw_value}"
+                )
+            normalized_targets[axis] = value
+        ordered_targets = {
+            axis: normalized_targets[axis]
+            for axis in self.AXIS_INDEX
+            if axis in normalized_targets
+        }
+        if not ordered_targets:
+            raise StageControllerError("No coordinate targets provided.")
+
+        self.movement_started.emit()
+        try:
+            self._check_cancelled()
+            serial_connection = self._serial
+            if serial_connection is None or not serial_connection.is_open:
+                raise StageControllerError("Serial connection is not available.")
+            feedrate_text = (
+                self.DEFAULT_FEEDRATE
+                if feedrate is None
+                else max(self.MIN_FEEDRATE, float(feedrate))
+            )
+            target_text = " ".join(
+                f"{axis}{value:+.3f}" for axis, value in ordered_targets.items()
+            )
+            self.status_message.emit(
+                "Coordinate move (G90): "
+                f"{target_text} F{self._format_gcode_value(feedrate_text)}."
+            )
+            with self._serial_session_lock:
+                self._send_absolute_axis_targets_move(
+                    serial_connection,
+                    ordered_targets,
+                    ignore_needle_safety=self._motion_safety_disabled,
+                    feedrate=feedrate,
+                    wait_for_completion=True,
+                    allow_unhomed=allow_unhomed,
+                    as_jog=True,
+                )
+                self._query_status(serial_connection)
+            message = f"Coordinate move complete (G90 {target_text})."
             self.movement_finished.emit(True, message)
             return message
         except StageControllerError as exc:
@@ -2427,6 +2525,8 @@ class StageController(QObject):
         serial_connection: serial.Serial,
         target_x_mm: float,
         target_y_mm: float,
+        *,
+        feedrate: float | None = None,
     ) -> str:
         with self._serial_session_lock:
             status = self._query_synced_status_for_absolute_motion(
@@ -2452,6 +2552,7 @@ class StageController(QObject):
             self._send_relative_move(
                 serial_connection,
                 move,
+                feedrate=feedrate,
                 as_jog=True,
                 motion_started_callback=lambda _move, feedrate: (
                     self.absolute_xy_move_started.emit(

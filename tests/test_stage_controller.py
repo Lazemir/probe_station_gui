@@ -635,6 +635,17 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
 
         self.assertEqual(rates, {"X": 500.0, "Z": 100.0, "A": 80.0})
 
+    def test_max_feedrate_for_axes_uses_limiting_axis(self) -> None:
+        controller = StageController()
+        controller.apply_axis_max_feedrates({"X": 500.0, "Y": 400.0, "Z": 100.0})
+
+        self.assertEqual(controller.max_feedrate_for_axes(("X", "Y")), 400.0)
+        self.assertEqual(controller.max_feedrate_for_axes(("Z",)), 100.0)
+        self.assertEqual(
+            controller.max_feedrate_for_axes(("C",)),
+            controller.DEFAULT_FEEDRATE,
+        )
+
     def test_ensure_axis_limits_refreshes_partial_cache(self) -> None:
         controller = StageController()
         controller._axis_limits = {"X": (0.0, 64.0)}
@@ -1596,6 +1607,39 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
 
         self.assertIn("$J=G90 G21 X1.5000 Y-2.0000 F25", commands)
         self.assertFalse(any(command.startswith("G1 ") for command in commands))
+        self.assertEqual(movement_results[-1][0], True)
+
+    def test_external_absolute_targets_waits_for_completion(self) -> None:
+        controller = StageController()
+        controller.set_motion_safety_disabled(True)
+        controller._serial = _FakeSerial()
+        movement_results = []
+        idle_calls = []
+        commands = []
+        controller.movement_started = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        controller.movement_finished = types.SimpleNamespace(
+            emit=lambda success, message: movement_results.append((success, message))
+        )
+        controller.status_message = types.SimpleNamespace(
+            emit=lambda *_args, **_kwargs: None
+        )
+        controller._write_command = lambda _serial, command: commands.append(command)
+        controller._wait_for_ok = lambda *_args, **_kwargs: None
+        controller._wait_for_idle = lambda *_args, **_kwargs: idle_calls.append(_args)
+        controller._query_status = lambda _serial: None
+        try:
+            message = controller.run_external_absolute_axis_targets_move(
+                {"z": 3.25},
+                feedrate=12.5,
+            )
+        finally:
+            controller.shutdown()
+
+        self.assertIn("$J=G90 G21 Z3.2500 F12.5", commands)
+        self.assertTrue(idle_calls)
+        self.assertIn("Z+3.250", message)
         self.assertEqual(movement_results[-1][0], True)
 
     def test_machine_coordinate_jog_uses_g53(self) -> None:
