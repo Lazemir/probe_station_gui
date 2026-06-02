@@ -518,7 +518,6 @@ class CameraSettingsWidget(QWidget):
 
     OPERATOR_NODE_NAMES = (
         "AcquisitionMode",
-        "AcquisitionFrameRate",
         "ExposureMode",
         "ExposureAuto",
         "ExposureTime",
@@ -526,6 +525,7 @@ class CameraSettingsWidget(QWidget):
         "ExposureCompensation",
         "GainAuto",
         "Gain",
+        "GammaEnable",
         "Gamma",
         "BlackLevel",
         "BalanceWhiteAuto",
@@ -543,13 +543,9 @@ class CameraSettingsWidget(QWidget):
         self._loaded_once = False
 
         layout = QVBoxLayout(self)
-        status_row = QHBoxLayout()
         self._status_label = QLabel("Camera controls not loaded.", self)
         self._status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self._refresh_button = QPushButton("Refresh", self)
-        status_row.addWidget(self._status_label, 1)
-        status_row.addWidget(self._refresh_button)
-        layout.addLayout(status_row)
+        layout.addWidget(self._status_label)
 
         self._page = _FeatureListPage(
             "camera",
@@ -559,7 +555,6 @@ class CameraSettingsWidget(QWidget):
         )
         layout.addWidget(self._page, 1)
 
-        self._refresh_button.clicked.connect(self.refresh)
         grabber.camera_settings_snapshot_ready.connect(self._on_snapshot)
         grabber.camera_setting_changed.connect(self._on_setting_changed)
 
@@ -608,7 +603,6 @@ class CameraSettingsWidget(QWidget):
         self._snapshot_show_status = show_status
         if show_status:
             self._status_label.setText("Loading camera controls.")
-        self._refresh_button.setEnabled(False)
         self._grabber.request_camera_settings_snapshot(
             map_key="camera",
             node_names=node_names or list(self.OPERATOR_NODE_NAMES),
@@ -621,7 +615,6 @@ class CameraSettingsWidget(QWidget):
         self._snapshot_pending = False
         show_status = self._snapshot_show_status
         self._snapshot_show_status = False
-        self._refresh_button.setEnabled(True)
         if self._pending_settings or self._applying_settings:
             self._set_pending_status()
             return
@@ -667,7 +660,6 @@ class CameraSettingsWidget(QWidget):
                 self._status_label.setText("No supported camera controls found.")
 
     def _on_setting_changed(self, payload: object) -> None:
-        self._refresh_button.setEnabled(True)
         if not isinstance(payload, dict):
             self._status_label.setText("Camera setting response was invalid.")
             return
@@ -717,7 +709,6 @@ class CameraSettingsWidget(QWidget):
         if not pending_items:
             return False
         self._status_label.setText(f"Writing {len(pending_items)} camera settings.")
-        self._refresh_button.setEnabled(False)
         for (map_key, node_name), value in pending_items:
             self._applying_settings[(map_key, node_name)] = value
             self._grabber.request_camera_setting_update(map_key, node_name, value)
@@ -731,7 +722,6 @@ class CameraSettingsWidget(QWidget):
         if not node_name:
             return
         self._status_label.setText(f"Executing {node_name}.")
-        self._refresh_button.setEnabled(False)
         self._grabber.request_camera_command_execute(map_key, node_name)
 
 
