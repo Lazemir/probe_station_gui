@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import importlib
+from collections.abc import Iterable
 from collections import deque
 from queue import Empty, PriorityQueue
 import re
@@ -253,6 +254,8 @@ class StageController(QObject):
     SERIAL_PRIORITY_SOFT_RESET = 20
     SERIAL_PRIORITY_TERMINAL = 30
     SERIAL_JOG_COMMAND_SETTLE_S = 0.03
+    COORDINATE_STATUS_READ_ATTEMPTS = 3
+    COORDINATE_STATUS_RETRY_DELAY_S = 0.05
     FEED_OVERRIDE_RESET = b"\x90"
     FEED_OVERRIDE_PLUS_10 = b"\x91"
     FEED_OVERRIDE_MINUS_10 = b"\x92"
@@ -1317,7 +1320,10 @@ class StageController(QObject):
         axis: str,
         value: float,
     ) -> None:
-        status = self._query_status(serial_connection)
+        status = self._query_status_with_required_coordinates(
+            serial_connection,
+            axes=(axis,),
+        )
         if status is None:
             raise StageControllerError("Unable to read controller status.")
         if status.state.lower() in {"jog", "run"}:
@@ -1350,7 +1356,10 @@ class StageController(QObject):
                 )
             except StageControllerError as exc:
                 logger.warning("Unable to refresh work coordinate offsets: %s", exc)
-        refreshed = self._query_status(serial_connection)
+        refreshed = self._query_status_with_required_coordinates(
+            serial_connection,
+            axes=(axis,),
+        )
         if axis == "A" and refreshed is not None:
             self._update_needles_from_status(refreshed)
         self.status_message.emit(
@@ -1754,7 +1763,8 @@ class StageController(QObject):
                 raise StageControllerError("Serial connection is not available.")
             with self._serial_session_lock:
                 status = self._query_synced_status_for_absolute_motion(
-                    serial_connection
+                    serial_connection,
+                    min_axes=3,
                 )
         if status is None or status.display_position is None:
             raise StageControllerError("Unable to read stage position.")
@@ -1865,7 +1875,10 @@ class StageController(QObject):
             if serial_connection is None or not serial_connection.is_open:
                 raise StageControllerError("Serial connection is not available.")
             with self._serial_session_lock:
-                status = self._query_status(serial_connection)
+                status = self._query_status_with_required_coordinates(
+                    serial_connection,
+                    axes=("X", "Y"),
+                )
                 if status is None or status.display_position is None:
                     raise StageControllerError("Unable to read stage position.")
                 self._ensure_calibration(serial_connection)
@@ -1902,7 +1915,10 @@ class StageController(QObject):
             if serial_connection is None or not serial_connection.is_open:
                 raise StageControllerError("Serial connection is not available.")
             with self._serial_session_lock:
-                status = self._query_status(serial_connection)
+                status = self._query_status_with_required_coordinates(
+                    serial_connection,
+                    axes=("B",),
+                )
         if status is None or self._axis_value_for_configured_mode(status, "B") is None:
             raise StageControllerError("Unable to read B axis position.")
         self._set_b_axis_zero_reference(status)
@@ -2532,6 +2548,7 @@ class StageController(QObject):
             status = self._query_synced_status_for_absolute_motion(
                 serial_connection,
                 refresh_coordinate_state=False,
+                min_axes=2,
             )
             if status is None:
                 raise StageControllerError("Unable to read current stage position.")
@@ -2580,6 +2597,7 @@ class StageController(QObject):
             status = self._query_synced_status_for_absolute_motion(
                 serial_connection,
                 refresh_coordinate_state=False,
+                min_axes=3,
             )
             if status is None:
                 raise StageControllerError("Unable to read current stage position.")
@@ -2650,15 +2668,20 @@ class StageController(QObject):
         serial_connection: serial.Serial,
         *,
         refresh_coordinate_state: bool = True,
+        axes: Iterable[str] | None = None,
+        min_axes: int | None = None,
     ) -> Optional[_Status]:
         """Refresh coordinate-system state before absolute position reads and moves."""
 
         if not refresh_coordinate_state:
             state_was_stale = self._controller_state_stale
-            status = self._query_status(serial_connection)
+            status = self._query_status_with_required_coordinates(
+                serial_connection,
+                axes=axes,
+                min_axes=min_axes,
+            )
             if (
                 status is not None
-                and self._position_for_configured_mode(status) is not None
                 and not state_was_stale
             ):
                 return status
@@ -2668,7 +2691,11 @@ class StageController(QObject):
                 serial_connection,
                 apply_preference=True,
             )
-        return self._query_status(serial_connection)
+        return self._query_status_with_required_coordinates(
+            serial_connection,
+            axes=axes,
+            min_axes=min_axes,
+        )
 
     def _prepare_click_move_without_status_locked(
         self,
@@ -2903,7 +2930,10 @@ class StageController(QObject):
         if fine_step <= 0:
             raise StageControllerError("Autofocus parameters are invalid.")
 
-        status = self._query_synced_status_for_absolute_motion(serial_connection)
+        status = self._query_synced_status_for_absolute_motion(
+            serial_connection,
+            axes=("Z",),
+        )
         position = self._position_for_configured_mode(status)
         if status is None or position is None or len(position) < 3:
             raise StageControllerError("Unable to read Z position for autofocus.")
@@ -2945,7 +2975,10 @@ class StageController(QObject):
         if upper_z <= lower_z:
             raise StageControllerError("Autofocus sweep range is empty.")
 
-        status = self._query_status(serial_connection)
+        status = self._query_status_with_required_coordinates(
+            serial_connection,
+            axes=("Z",),
+        )
         position = self._position_for_configured_mode(status)
         if status is None or position is None or len(position) < 3:
             raise StageControllerError("Unable to read Z position for autofocus.")
@@ -3239,7 +3272,10 @@ class StageController(QObject):
         min_z: float,
         fine_step_mm: float | None = None,
     ) -> None:
-        status = self._query_status(serial_connection)
+        status = self._query_status_with_required_coordinates(
+            serial_connection,
+            axes=("Z",),
+        )
         position = self._position_for_configured_mode(status)
         if status is None or position is None or len(position) < 3:
             raise StageControllerError("Unable to read Z position for autofocus.")
@@ -3435,7 +3471,10 @@ class StageController(QObject):
         if before_frame is None:
             raise StageControllerError("Camera frames are unavailable for calibration.")
 
-        start_status = self._query_status(serial_connection)
+        start_status = self._query_status_with_required_coordinates(
+            serial_connection,
+            axes=("X", "Y"),
+        )
         origin = self._position_for_configured_mode(start_status)
         if start_status is None or origin is None:
             raise StageControllerError("Unable to read position for calibration.")
@@ -3494,7 +3533,10 @@ class StageController(QObject):
         before_frame, frame_counter = self._get_frame_snapshot(timeout=3.0)
         if before_frame is None:
             raise StageControllerError("Camera frames are unavailable for calibration check.")
-        status = self._query_status(serial_connection)
+        status = self._query_status_with_required_coordinates(
+            serial_connection,
+            axes=("X", "Y"),
+        )
         origin = self._position_for_configured_mode(status)
         if status is None or origin is None:
             raise StageControllerError("Unable to read position for calibration check.")
@@ -3593,7 +3635,10 @@ class StageController(QObject):
         observations: list[tuple[np.ndarray, np.ndarray]] = []
         step_mm = float(self.CALIBRATION_PROBE_STEP_MM)
         target_pixels = float(self._objective_calibration_target_pixels)
-        reference_status = self._query_status(serial_connection)
+        reference_status = self._query_status_with_required_coordinates(
+            serial_connection,
+            axes=("X", "Y"),
+        )
         reference_position = self._position_for_configured_mode(reference_status)
         if reference_status is None or reference_position is None:
             raise StageControllerError("Unable to read reference position for calibration.")
@@ -3609,7 +3654,10 @@ class StageController(QObject):
             new_frame, frame_counter = self._wait_for_new_frame(frame_counter, timeout=2.0)
             if new_frame is None:
                 raise StageControllerError("Camera did not update during calibration.")
-            status = self._query_status(serial_connection)
+            status = self._query_status_with_required_coordinates(
+                serial_connection,
+                axes=("X", "Y"),
+            )
             current = self._position_for_configured_mode(status)
             if status is None or current is None:
                 raise StageControllerError("Unable to query position during calibration.")
@@ -3765,7 +3813,10 @@ class StageController(QObject):
                 "Predicted click move is too large; calibration was reset. Recalibrate and try again."
             )
 
-        status = self._query_status(serial_connection)
+        status = self._query_status_with_required_coordinates(
+            serial_connection,
+            axes=("X", "Y"),
+        )
         current = self._position_for_configured_mode(status)
         if status is None or current is None:
             raise StageControllerError("Unable to read position after calibration.")
@@ -3804,7 +3855,10 @@ class StageController(QObject):
     def _return_to_origin(
         self, serial_connection: serial.Serial, origin: tuple[float, float, float]
     ) -> None:
-        status = self._query_status(serial_connection)
+        status = self._query_status_with_required_coordinates(
+            serial_connection,
+            axes=("X", "Y"),
+        )
         current = self._position_for_configured_mode(status)
         if status is None or current is None:
             return
@@ -4043,7 +4097,10 @@ class StageController(QObject):
             raise StageControllerError("Serial connection is not available.")
         with self._serial_session_lock:
             if action in {"raise", "lift", "lower"}:
-                status = self._query_status(serial_connection)
+                status = self._query_status_with_required_coordinates(
+                    serial_connection,
+                    axes=("A",),
+                )
                 current_a = self._axis_value_for_configured_mode(status, "A")
                 if status is None or current_a is None:
                     raise StageControllerError("Unable to read A position for needles.")
@@ -4088,7 +4145,10 @@ class StageController(QObject):
             raise StageControllerError("Needle search depth must be finite.")
         depth_mm = max(0.0, float(depth_mm))
         with self._serial_session_lock:
-            status = self._query_status(serial_connection)
+            status = self._query_status_with_required_coordinates(
+                serial_connection,
+                axes=("A",),
+            )
             current_a = self._axis_value_for_configured_mode(status, "A")
             if status is None or current_a is None:
                 raise StageControllerError("Unable to read A position for needles.")
@@ -4239,7 +4299,10 @@ class StageController(QObject):
         serial_connection: serial.Serial,
         axis: str,
     ) -> float | None:
-        status = self._query_status(serial_connection)
+        status = self._query_status_with_required_coordinates(
+            serial_connection,
+            axes=(axis,),
+        )
         current_value = self._axis_value_for_configured_mode(status, axis)
         if current_value is not None:
             return current_value
@@ -4283,7 +4346,10 @@ class StageController(QObject):
         if abs(step_mm) < 1e-6:
             return "Needle position unchanged."
         with self._serial_session_lock:
-            status = self._query_status(serial_connection)
+            status = self._query_status_with_required_coordinates(
+                serial_connection,
+                axes=("A",),
+            )
             if (
                 status is None
                 or self._axis_value_for_configured_mode(status, "A") is None
@@ -4562,7 +4628,10 @@ class StageController(QObject):
             self._ensure_axis_limits(
                 serial_connection, required_axes=tuple(ordered_targets)
             )
-            status = self._query_status(serial_connection)
+            status = self._query_status_with_required_coordinates(
+                serial_connection,
+                axes=tuple(ordered_targets),
+            )
             if status is None:
                 raise StageControllerError("Unable to read position for absolute move.")
             self._require_homed_axes(
@@ -5024,7 +5093,16 @@ class StageController(QObject):
     ) -> None:
         if not self._axis_limits and abs(move.b) < 1e-6:
             return
-        status = self._query_status(serial_connection)
+        moved_limited_axes = tuple(
+            axis
+            for axis, delta in move.items()
+            if abs(delta) >= 1e-6
+            and (axis == "B" or axis in self._axis_limits)
+        )
+        status = self._query_status_with_required_coordinates(
+            serial_connection,
+            axes=moved_limited_axes,
+        )
         positions = self._position_for_configured_mode(status)
         if status is None or not positions:
             return
@@ -5792,6 +5870,90 @@ class StageController(QObject):
             self.controller_reboot_ready.emit()
         return status
 
+    def _query_status_with_required_coordinates(
+        self,
+        serial_connection: serial.Serial,
+        *,
+        axes: Iterable[str] | None = None,
+        min_axes: int | None = None,
+        timeout: float | None = None,
+        attempts: int | None = None,
+    ) -> Optional[_Status]:
+        """Read status repeatedly until it includes the required coordinates."""
+
+        required_axis_count = self._required_coordinate_axis_count(
+            axes,
+            min_axes=min_axes,
+        )
+        read_attempts = max(
+            1,
+            int(
+                self.COORDINATE_STATUS_READ_ATTEMPTS
+                if attempts is None
+                else attempts
+            ),
+        )
+        for attempt in range(read_attempts):
+            status = (
+                self._query_status(serial_connection)
+                if timeout is None
+                else self._query_status(serial_connection, timeout=timeout)
+            )
+            position = self._position_for_configured_mode(status)
+            if position is not None and len(position) >= required_axis_count:
+                return status
+
+            if attempt + 1 < read_attempts:
+                logger.debug(
+                    "Controller status did not include required coordinates; "
+                    "retrying status query (attempt %d/%d, required_axes=%d, "
+                    "position=%r, state=%r).",
+                    attempt + 1,
+                    read_attempts,
+                    required_axis_count,
+                    position,
+                    None if status is None else getattr(status, "state", None),
+                )
+                if status is None:
+                    self._discard_pending_status_input(serial_connection)
+                time.sleep(self.COORDINATE_STATUS_RETRY_DELAY_S)
+            else:
+                logger.debug(
+                    "Controller status did not include required coordinates "
+                    "(attempt %d/%d, required_axes=%d, position=%r, state=%r).",
+                    attempt + 1,
+                    read_attempts,
+                    required_axis_count,
+                    position,
+                    None if status is None else getattr(status, "state", None),
+                )
+
+        return None
+
+    def _required_coordinate_axis_count(
+        self,
+        axes: Iterable[str] | None,
+        *,
+        min_axes: int | None = None,
+    ) -> int:
+        required = 0 if min_axes is None else max(0, int(min_axes))
+        for axis in axes or ():
+            axis_key = str(axis).upper().strip()
+            try:
+                axis_index = self.AXIS_INDEX[axis_key]
+            except KeyError as exc:
+                raise StageControllerError(f"Unsupported axis: {axis}") from exc
+            required = max(required, axis_index + 1)
+        return required
+
+    def _discard_pending_status_input(
+        self, serial_connection: serial.Serial
+    ) -> None:
+        try:
+            serial_connection.reset_input_buffer()
+        except _SERIAL_IO_EXCEPTIONS:
+            logger.debug("Serial input buffer reset after incomplete status failed.")
+
     def _read_status_frame(
         self, serial_connection: serial.Serial, *, timeout: float
     ) -> Optional[_Status]:
@@ -6186,7 +6348,10 @@ class StageController(QObject):
     ) -> Optional[float]:
         """Read the current A coordinate from the configured controller report mode."""
 
-        status = self._query_status(serial_connection)
+        status = self._query_status_with_required_coordinates(
+            serial_connection,
+            axes=("A",),
+        )
         if status is None:
             self._record_a_position_read_failure(
                 "status query returned no complete status frame"
@@ -6525,7 +6690,10 @@ class StageController(QObject):
         allow_missing_homing: bool = False,
         allow_relative: bool = False,
     ) -> None:
-        status = self._query_status(serial_connection)
+        status = self._query_status_with_required_coordinates(
+            serial_connection,
+            axes=("A",),
+        )
         a_position = self._axis_value_for_configured_mode(status, "A")
         if status is None or a_position is None:
             raise AxisStateError("Unable to read A axis position.")

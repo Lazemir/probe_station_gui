@@ -862,6 +862,69 @@ class StageControllerStatusParsingTest(unittest.TestCase):
 
         self.assertIsNone(status)
 
+    def test_required_coordinate_status_retries_after_empty_status(self) -> None:
+        controller = StageController()
+        controller._position_reporting_mode = "work"
+        statuses = [
+            None,
+            types.SimpleNamespace(
+                state="Idle",
+                position=None,
+                work_position=(1.0, 2.0, 3.0),
+                display_position=(1.0, 2.0, 3.0),
+            ),
+        ]
+        calls = []
+
+        def _query_status(_serial) -> object:
+            calls.append(1)
+            return statuses.pop(0)
+
+        controller._query_status = _query_status
+
+        status = controller._query_status_with_required_coordinates(
+            _FakeSerial(),
+            axes=("X", "Y"),
+        )
+
+        self.assertIsNotNone(status)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(status.work_position[:2], (1.0, 2.0))
+
+    def test_required_coordinate_status_retries_short_axis_tuple(self) -> None:
+        controller = StageController()
+        controller._position_reporting_mode = "machine"
+        statuses = [
+            types.SimpleNamespace(
+                state="Idle",
+                position=(1.0, 2.0, 3.0),
+                work_position=(1.0, 2.0, 3.0),
+                display_position=(1.0, 2.0, 3.0),
+            ),
+            types.SimpleNamespace(
+                state="Idle",
+                position=(1.0, 2.0, 3.0, -0.5),
+                work_position=(1.0, 2.0, 3.0, -0.50),
+                display_position=(1.0, 2.0, 3.0, -0.50),
+            ),
+        ]
+        calls = []
+
+        def _query_status(_serial) -> object:
+            calls.append(1)
+            return statuses.pop(0)
+
+        controller._query_status = _query_status
+
+        status = controller._query_status_with_required_coordinates(
+            _FakeSerial(),
+            axes=("A",),
+        )
+
+        self.assertIsNotNone(status)
+        self.assertEqual(len(calls), 2)
+        self.assertAlmostEqual(status.position[3], -0.50)
+
 
 class StageControllerAutofocusTest(unittest.TestCase):
     def test_autofocus_sweep_feedrate_uses_live_frame_rate(self) -> None:
@@ -2249,6 +2312,66 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
             )
 
             self.assertEqual(message, "Needles lowered to 0.0010 mm below saved down.")
+            self.assertEqual(len(observed), 1)
+            self.assertEqual(observed[0][0], "A")
+            self.assertAlmostEqual(observed[0][1], -1.001)
+            self.assertEqual(observed[0][2], 80.0)
+        finally:
+            controller.shutdown()
+
+    def test_needles_lower_to_depth_retries_missing_a_status(self) -> None:
+        controller = StageController()
+        try:
+            controller._serial = _FakeSerial()
+            controller._position_reporting_mode = "machine"
+            controller.apply_axis_max_feedrates({"A": 500.0})
+            controller.apply_needle_calibration(down_position_mm=1.0)
+            statuses = [
+                None,
+                types.SimpleNamespace(
+                    state="Idle",
+                    position=(0.0, 0.0, 0.0, -0.95),
+                    work_position=(0.0, 0.0, 0.0, -0.95),
+                    display_position=(0.0, 0.0, 0.0, -0.95),
+                    homed_axes={"A"},
+                ),
+            ]
+            status_reads = []
+
+            def _query_status(_serial):
+                status_reads.append(1)
+                return statuses.pop(0)
+
+            controller._query_status = _query_status
+            observed = []
+
+            def _send_absolute_axis_move(_serial, axis, value, **kwargs) -> None:
+                observed.append((axis, value, kwargs.get("feedrate")))
+
+            controller._send_absolute_axis_move = _send_absolute_axis_move
+            controller.needles_action_started = types.SimpleNamespace(
+                emit=lambda *_args, **_kwargs: None
+            )
+            controller.needles_action_finished = types.SimpleNamespace(
+                emit=lambda *_args, **_kwargs: None
+            )
+            controller.needle_height_changed = types.SimpleNamespace(
+                emit=lambda *_args, **_kwargs: None
+            )
+            controller.needles_state_changed = types.SimpleNamespace(
+                emit=lambda *_args, **_kwargs: None
+            )
+            controller.axis_a_ready_changed = types.SimpleNamespace(
+                emit=lambda *_args, **_kwargs: None
+            )
+
+            message = controller.run_external_needles_lower_to_depth_below_down(
+                0.001,
+                feedrate=80.0,
+            )
+
+            self.assertEqual(message, "Needles lowered to 0.0010 mm below saved down.")
+            self.assertEqual(len(status_reads), 2)
             self.assertEqual(len(observed), 1)
             self.assertEqual(observed[0][0], "A")
             self.assertAlmostEqual(observed[0][1], -1.001)
