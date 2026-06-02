@@ -14,6 +14,10 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
 from probe_station_gui.logging_config import configure_logging
+from probe_station_gui.telegram_notifications import (
+    load_global_bot_token,
+    save_global_bot_token,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +192,21 @@ LCR_METER_TYPE_LABELS: dict[str, str] = {
     LCR_METER_TYPE_KEITHLEY: "Keithley 2400 + 2182A",
 }
 
+TELEGRAM_ALERT_TYPES: tuple[tuple[str, str], ...] = (
+    ("route_attention", "Route needs attention"),
+    ("route_started", "Route measurement started"),
+    ("route_completed", "Route measurement complete"),
+    ("route_failed", "Route measurement stopped or failed"),
+    ("contact_seek_failed", "Contact seek failed"),
+    ("camera_error", "Camera error"),
+)
+
+
+def default_telegram_alerts() -> Dict[str, bool]:
+    """Return default Telegram alert selections."""
+
+    return {key: True for key, _label in TELEGRAM_ALERT_TYPES}
+
 
 @dataclass(eq=True, frozen=True)
 class KeyBinding:
@@ -245,7 +264,6 @@ class ApiSettings:
     enabled: bool = True
     host: str = "127.0.0.1"
     port: int = 8765
-    default_feedrate_mm_min: float = 10.0
 
     def clone(self) -> "ApiSettings":
         """Return a copy of the API preferences."""
@@ -254,7 +272,6 @@ class ApiSettings:
             enabled=self.enabled,
             host=self.host,
             port=self.port,
-            default_feedrate_mm_min=self.default_feedrate_mm_min,
         )
 
     def to_dict(self) -> dict[str, bool | int | float | str]:
@@ -264,8 +281,51 @@ class ApiSettings:
             "enabled": self.enabled,
             "host": self.host,
             "port": self.port,
-            "default_feedrate_mm_min": self.default_feedrate_mm_min,
         }
+
+
+@dataclass
+class TelegramSettings:
+    """Configuration for Telegram notifications."""
+
+    enabled: bool = False
+    bot_token: str = ""
+    bot_username: str = ""
+    chat_id: str = ""
+    chat_title: str = ""
+    linked_at_utc: str = ""
+    alerts: Dict[str, bool] = field(default_factory=default_telegram_alerts)
+
+    def clone(self) -> "TelegramSettings":
+        """Return a copy of the Telegram notification preferences."""
+
+        return TelegramSettings(
+            enabled=self.enabled,
+            bot_token=self.bot_token,
+            bot_username=self.bot_username,
+            chat_id=self.chat_id,
+            chat_title=self.chat_title,
+            linked_at_utc=self.linked_at_utc,
+            alerts=dict(self.alerts),
+        )
+
+    def to_dict(self) -> dict[str, bool | str | dict[str, bool]]:
+        """Serialize Telegram preferences without the machine-wide bot token."""
+
+        return {
+            "enabled": self.enabled,
+            "bot_username": self.bot_username,
+            "chat_id": self.chat_id,
+            "chat_title": self.chat_title,
+            "linked_at_utc": self.linked_at_utc,
+            "alerts": dict(self.alerts),
+        }
+
+    def alert_enabled(self, alert_key: str) -> bool:
+        """Return whether a notification type is enabled."""
+
+        defaults = default_telegram_alerts()
+        return bool(self.alerts.get(alert_key, defaults.get(alert_key, False)))
 
 
 @dataclass
@@ -461,7 +521,7 @@ class NeedleCalibrationSettings:
     short_threshold_ohm: float = 10.0
     poll_interval_ms: int = 250
     feedrate_mm_min: float = 1.0
-    contact_zone_mm: float = 0.1
+    contact_zone_mm: float = 0.05
     raise_position_mm: float = 0.0
     raise_position_configured: bool = False
     down_position_mm: float = 0.0
@@ -806,6 +866,7 @@ class Settings:
     controls: Dict[str, List[KeyBinding]] = field(default_factory=dict)
     logging: LoggingSettings = field(default_factory=LoggingSettings)
     api: ApiSettings = field(default_factory=ApiSettings)
+    telegram: TelegramSettings = field(default_factory=TelegramSettings)
     feedrates: FeedrateSettings = field(default_factory=FeedrateSettings)
     oscillation: OscillationSettings = field(default_factory=OscillationSettings)
     jog: JogSettings = field(default_factory=JogSettings)
@@ -832,6 +893,7 @@ class Settings:
             controls={key: list(value) for key, value in self.controls.items()},
             logging=self.logging.clone(),
             api=self.api.clone(),
+            telegram=self.telegram.clone(),
             feedrates=self.feedrates.clone(),
             oscillation=self.oscillation.clone(),
             jog=self.jog.clone(),
@@ -854,6 +916,7 @@ class Settings:
             },
             "logging": self.logging.to_dict(),
             "api": self.api.to_dict(),
+            "telegram": self.telegram.to_dict(),
             "feedrates": {
                 "linear": {
                     "presets": self.feedrates.linear.presets,
@@ -886,7 +949,6 @@ class SettingsManager:
     DEFAULT_API_ENABLED: bool = True
     DEFAULT_API_HOST: str = "127.0.0.1"
     DEFAULT_API_PORT: int = 8765
-    DEFAULT_API_FEEDRATE_MM_MIN: float = 10.0
     MIN_FEEDRATE_MM_MIN: float = 1.0
     DEFAULT_LINEAR_FEEDRATE_PRESETS: tuple[float, ...] = (
         1.0,
@@ -952,7 +1014,7 @@ class SettingsManager:
     DEFAULT_SHORT_THRESHOLD_OHM: float = 10.0
     DEFAULT_LCR_POLL_INTERVAL_MS: int = 250
     DEFAULT_NEEDLE_FEEDRATE_MM_MIN: float = 1.0
-    DEFAULT_NEEDLE_CONTACT_ZONE_MM: float = 0.1
+    DEFAULT_NEEDLE_CONTACT_ZONE_MM: float = 0.05
     DEFAULT_AXIS_A_CALIBRATION_MODEL: str = "cosine_displacement"
     DEFAULT_AXIS_A_CALIBRATION_STEPS_PER_MM: float = 2600.0
     DEFAULT_AXIS_A_CALIBRATION_MIN_MM: float = 0.0
@@ -1221,6 +1283,21 @@ class SettingsManager:
             defaults = ApiSettings().to_dict()
             for key, value in defaults.items():
                 api_section.setdefault(key, value)
+
+        telegram_section = data.get("telegram")
+        if not isinstance(telegram_section, dict):
+            data["telegram"] = TelegramSettings().to_dict()
+        else:
+            defaults = TelegramSettings().to_dict()
+            for key, value in defaults.items():
+                telegram_section.setdefault(key, value)
+            telegram_section.pop("bot_token", None)
+            alerts = telegram_section.get("alerts")
+            if not isinstance(alerts, dict):
+                telegram_section["alerts"] = default_telegram_alerts()
+            else:
+                for key, enabled in default_telegram_alerts().items():
+                    alerts.setdefault(key, enabled)
 
         feedrates_section = data.get("feedrates")
         legacy_presets = data.get("feedrate_presets")
@@ -1577,6 +1654,7 @@ class SettingsManager:
         legacy_presets = raw.get("feedrate_presets") if isinstance(raw, dict) else None
         feedrates = self._parse_feedrates(feedrates_raw, legacy_presets)
         api_raw = raw.get("api") if isinstance(raw, dict) else None
+        telegram_raw = raw.get("telegram") if isinstance(raw, dict) else None
         oscillation_raw = raw.get("oscillation") if isinstance(raw, dict) else None
         jog_raw = raw.get("jog") if isinstance(raw, dict) else None
         click_to_move_raw = (
@@ -1604,6 +1682,7 @@ class SettingsManager:
             controls=controls,
             logging=logging_settings,
             api=self._parse_api(api_raw),
+            telegram=self._parse_telegram(telegram_raw),
             feedrates=feedrates,
             oscillation=self._parse_oscillation(oscillation_raw),
             jog=self._parse_jog(jog_raw),
@@ -1645,21 +1724,55 @@ class SettingsManager:
                 port = settings.port
             if 0 < port <= 65535:
                 settings.port = port
-            try:
-                feedrate = float(
-                    raw_api.get(
-                        "default_feedrate_mm_min",
-                        settings.default_feedrate_mm_min,
-                    )
-                )
-            except (TypeError, ValueError):
-                feedrate = settings.default_feedrate_mm_min
-            if math.isfinite(feedrate) and feedrate > 0.0:
-                settings.default_feedrate_mm_min = max(
-                    self.MIN_FEEDRATE_MM_MIN,
-                    feedrate,
-                )
         return settings
+
+    def _parse_telegram(self, raw_telegram) -> TelegramSettings:
+        """Normalise Telegram notification settings."""
+
+        settings = TelegramSettings()
+        if isinstance(raw_telegram, dict):
+            settings.enabled = self._coerce_bool(
+                raw_telegram.get("enabled", settings.enabled),
+                default=settings.enabled,
+            )
+            legacy_bot_token = ""
+            legacy_bot_token_raw = raw_telegram.get("bot_token", "")
+            if isinstance(legacy_bot_token_raw, (str, int)):
+                legacy_bot_token = str(legacy_bot_token_raw).strip()
+            if legacy_bot_token and not load_global_bot_token():
+                try:
+                    save_global_bot_token(legacy_bot_token)
+                except OSError as exc:
+                    self._logger.warning(
+                        "Failed to migrate Telegram bot token to global settings: %s",
+                        exc,
+                    )
+                    settings.bot_token = legacy_bot_token
+            for attr in (
+                "bot_username",
+                "chat_id",
+                "chat_title",
+                "linked_at_utc",
+            ):
+                raw_value = raw_telegram.get(attr, getattr(settings, attr))
+                if isinstance(raw_value, (str, int)):
+                    setattr(settings, attr, str(raw_value).strip())
+            settings.bot_username = settings.bot_username.lstrip("@")
+            settings.alerts = self._parse_telegram_alerts(
+                raw_telegram.get("alerts")
+            )
+        return settings
+
+    def _parse_telegram_alerts(self, raw_alerts) -> Dict[str, bool]:
+        alerts = default_telegram_alerts()
+        if isinstance(raw_alerts, dict):
+            for key, _label in TELEGRAM_ALERT_TYPES:
+                if key in raw_alerts:
+                    alerts[key] = self._coerce_bool(
+                        raw_alerts.get(key),
+                        default=alerts[key],
+                    )
+        return alerts
 
     def _parse_feedrates(self, raw_feedrates, legacy_presets) -> FeedrateSettings:
         """Normalise persisted feedrate data supporting legacy layouts."""
@@ -2753,6 +2866,7 @@ class SettingsManager:
 
         clone = settings.clone()
         clone.api = self._parse_api(clone.api.to_dict())
+        clone.telegram = self._parse_telegram(clone.telegram.to_dict())
         clone.feedrates = FeedrateSettings(
             linear=self._normalise_feedrate_group(
                 clone.feedrates.linear, fallback=self.DEFAULT_LINEAR_FEEDRATE_PRESETS
@@ -2797,6 +2911,11 @@ class SettingsManager:
         """Return the current local API configuration clone."""
 
         return self._settings.api.clone()
+
+    def telegram_configuration(self) -> TelegramSettings:
+        """Return the current Telegram notification configuration clone."""
+
+        return self._settings.telegram.clone()
 
     def jog_configuration(self) -> JogSettings:
         """Return the current jog configuration clone."""

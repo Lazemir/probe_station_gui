@@ -306,7 +306,7 @@ Capture modes:
 After that you can:
 - click on the minimap;
 - click on the full design map in `Design Window`;
-- move to measurement-plan targets.
+- create and run probe routes.
 
 ### Quick Alignment Without A Design
 
@@ -330,20 +330,7 @@ Design registration must be considered invalid after:
 
 In those cases, repeat alignment.
 
-## Measurement Plan And Targets
-
-When a measurement plan is loaded:
-- `Design Window` shows a target list;
-- you can select targets manually;
-- you can move with `Previous` / `Next`;
-- `Move To` moves the stage to the selected target.
-
-For `Move To` to work correctly you need:
-- a loaded design;
-- valid registration;
-- raised needles.
-
-### Probe Route Measurement
+## Probe Route Measurement
 
 `Probe Route` can run an ordered route and write one numeric resistance value per CSV row.
 
@@ -414,7 +401,9 @@ When the GUI starts, it also starts a local FastAPI server at:
 http://127.0.0.1:8765
 ```
 
-The API uses the same coordinate basis and feedrate that the GUI currently shows. If settings are configured for machine coordinates, API targets are machine coordinates; if settings are configured for work coordinates, API targets are work coordinates. Coordinate move requests go through the same queue and status display as editing the coordinate fields in the status bar.
+Opening the base URL shows links to Swagger UI at `/docs` and ReDoc at `/redoc`.
+
+The API uses the same coordinate basis and feedrate that the GUI currently shows unless a request explicitly provides `feedrate`. If settings are configured for machine coordinates, API targets are machine coordinates; if settings are configured for work coordinates, API targets are work coordinates. Coordinate move requests go through the same queue and status display as editing the coordinate fields in the status bar.
 
 Move to a coordinate:
 
@@ -441,6 +430,32 @@ Read the GUI-visible stage state:
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8765/api/v1/stage/status
 ```
+
+List the currently loaded probe-route contacts:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8765/api/v1/route/contacts
+```
+
+Move to contact 7 and lower the needles:
+
+```powershell
+Invoke-RestMethod -Method Post `
+  -Uri http://127.0.0.1:8765/api/v1/route/contacts/7/move `
+  -ContentType application/json `
+  -Body '{"lower_needles": true, "contact_settle_s": 0.2}'
+```
+
+Run a raw Keithley voltage sweep on contact 7:
+
+```powershell
+Invoke-RestMethod -Method Post `
+  -Uri http://127.0.0.1:8765/api/v1/measurements/raw-sweep `
+  -ContentType application/json `
+  -Body '{"contact_number": 7, "voltages_v": [-0.1, 0, 0.1], "meter": {"meter_type": "keithley", "nplc": 10, "compliance_current_a": 0.0005}}'
+```
+
+The sweep response includes `timestamp_utc`, contact metadata, the requested `voltages_v`, and raw `iv_pairs` plus the full instrument result.
 
 You can override the bind address with `PROBE_STATION_API_HOST` and `PROBE_STATION_API_PORT`.
 

@@ -44,6 +44,7 @@ class MicroscopeView(QWidget):
     _MINIMAP_MARGIN = 16
     _MINIMAP_MIN_SIZE = 160
     _MINIMAP_MAX_SIZE = 240
+    _MINIMAP_CLICK_DELAY_PADDING_MS = 50
     _TARGET_BLINK_MS = 250
     _TARGET_MOTION_UPDATE_MS = 50
     _TARGET_PENDING_COLOR = QColor("#c62828")
@@ -311,7 +312,7 @@ class MicroscopeView(QWidget):
         point = event.position().toPoint()
         if self._minimap_rect is not None and self._minimap_rect.contains(point):
             self._pending_minimap_click_point = QPoint(point)
-            self._minimap_click_timer.start(max(1, int(QApplication.doubleClickInterval())))
+            self._minimap_click_timer.start(self._minimap_click_delay_ms())
             event.accept()
             return
         if not self._display_rect.contains(point):
@@ -1354,6 +1355,7 @@ class MicroscopeView(QWidget):
             return
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing)
+        painter.setClipRect(QRectF(rect))
         center, inside = self._map_design_point_to_rect_clamped(
             self._current_design_position, rect
         )
@@ -1374,9 +1376,14 @@ class MicroscopeView(QWidget):
                 ),
                 rect,
             )
+            fov_rect = self._visible_minimap_fov_rect(
+                QRectF(top_left, bottom_right),
+                rect,
+            )
             painter.setPen(QPen(QColor("#81c784"), 1.2))
             painter.setBrush(Qt.NoBrush)
-            painter.drawRect(QRectF(top_left, bottom_right).normalized())
+            if fov_rect.isValid() and fov_rect.width() > 0.0 and fov_rect.height() > 0.0:
+                painter.drawRect(fov_rect)
         painter.setPen(QPen(QColor(0, 0, 0, 150), 3.6))
         painter.drawLine(
             QPointF(rect.left() + 4.0, center.y()),
@@ -1495,6 +1502,19 @@ class MicroscopeView(QWidget):
         )
         self._pending_minimap_click_point = None
         self.design_minimap_clicked.emit(design_point[0], design_point[1])
+
+    @classmethod
+    def _minimap_click_delay_ms(cls) -> int:
+        return max(
+            1,
+            int(QApplication.doubleClickInterval())
+            + int(cls._MINIMAP_CLICK_DELAY_PADDING_MS),
+        )
+
+    @staticmethod
+    def _visible_minimap_fov_rect(fov_rect: QRectF, content_rect: QRect) -> QRectF:
+        bounds = QRectF(content_rect).adjusted(1.0, 1.0, -1.0, -1.0)
+        return fov_rect.normalized().intersected(bounds)
 
     @staticmethod
     def _layer_color(layer_key: tuple[int, int]) -> QColor:

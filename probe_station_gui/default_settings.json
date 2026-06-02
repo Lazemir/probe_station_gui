@@ -77,8 +77,22 @@
   "api": {
     "enabled": true,
     "host": "127.0.0.1",
-    "port": 8765,
-    "default_feedrate_mm_min": 10.0
+    "port": 8765
+  },
+  "telegram": {
+    "enabled": false,
+    "bot_username": "",
+    "chat_id": "",
+    "chat_title": "",
+    "linked_at_utc": "",
+    "alerts": {
+      "route_attention": true,
+      "route_started": true,
+      "route_completed": true,
+      "route_failed": true,
+      "contact_seek_failed": true,
+      "camera_error": true
+    }
   },
   "click_to_move": {
     "pending_timeout_s": 8.0
@@ -131,7 +145,7 @@
     "short_threshold_ohm": 10.0,
     "poll_interval_ms": 250,
     "feedrate_mm_min": 1.0,
-    "contact_zone_mm": 0.1,
+    "contact_zone_mm": 0.05,
     "raise_position_mm": 0.0,
     "raise_position_configured": false,
     "down_position_mm": 0.0,

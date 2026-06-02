@@ -12,6 +12,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 _AXIS_NAMES = ("X", "Y", "Z", "A", "B", "C")
+_MAX_SWEEP_POINTS = 1000
 
 
 def _axis_targets_from_payload(payload: dict[str, Any]) -> dict[str, float]:
@@ -56,6 +57,47 @@ def _feedrate_from_payload(payload: dict[str, Any]) -> float | None:
     return None
 
 
+def _voltage_sweep_from_payload(payload: dict[str, Any]) -> list[float]:
+    """Extract a finite source-voltage sweep from an API payload."""
+
+    raw_values = None
+    for key in ("voltages_v", "voltages", "voltage_sweep_v", "source_voltages_v"):
+        if key in payload:
+            raw_values = payload.get(key)
+            break
+    if not isinstance(raw_values, (list, tuple)):
+        raise ValueError("Provide voltages_v as a non-empty array.")
+    if not raw_values:
+        raise ValueError("Voltage sweep must contain at least one point.")
+    if len(raw_values) > _MAX_SWEEP_POINTS:
+        raise ValueError(
+            f"Voltage sweep is too large; maximum is {_MAX_SWEEP_POINTS} points."
+        )
+    values: list[float] = []
+    for index, raw_value in enumerate(raw_values):
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Voltage at index {index} is not a number.") from exc
+        if not math.isfinite(value):
+            raise ValueError(f"Voltage at index {index} must be finite.")
+        values.append(value)
+    return values
+
+
+def _raise_for_rejected(result: dict[str, Any]) -> None:
+    if result.get("accepted", False):
+        return
+    from fastapi import HTTPException
+
+    status_code = int(result.get("status_code", 409))
+    detail = {
+        "message": result.get("message", "API request rejected."),
+        "result": result,
+    }
+    raise HTTPException(status_code=status_code, detail=detail)
+
+
 class ProbeStationApiServer:
     """Run a FastAPI app in a background thread.
 
@@ -69,6 +111,7 @@ class ProbeStationApiServer:
         *,
         move_callback: Callable[[dict[str, Any]], dict[str, Any]],
         status_callback: Callable[[], dict[str, Any]],
+        command_callback: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         host: str | None = None,
         port: int | None = None,
     ) -> None:
@@ -76,6 +119,7 @@ class ProbeStationApiServer:
         self.port = int(port) if port is not None else self._port_from_environment()
         self._move_callback = move_callback
         self._status_callback = status_callback
+        self._command_callback = command_callback
         self._server: object | None = None
         self._thread: threading.Thread | None = None
 
@@ -146,6 +190,7 @@ class ProbeStationApiServer:
 
     def _create_app(self):
         from fastapi import Body, FastAPI, HTTPException
+        from fastapi.responses import HTMLResponse
         import uvicorn
 
         app = FastAPI(
@@ -158,6 +203,28 @@ class ProbeStationApiServer:
         @app.get("/health")
         def health() -> dict[str, str]:
             return {"status": "ok"}
+
+        @app.get("/", include_in_schema=False)
+        def docs_index() -> HTMLResponse:
+            return HTMLResponse(
+                """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Probe Station API</title>
+  <style>
+    body { font: 16px/1.4 system-ui, sans-serif; margin: 2rem; }
+    a { display: block; margin: 0.5rem 0; }
+  </style>
+</head>
+<body>
+  <h1>Probe Station API</h1>
+  <a href="/docs">Swagger UI</a>
+  <a href="/redoc">ReDoc</a>
+</body>
+</html>
+"""
+            )
 
         @app.get("/api/v1/stage/status")
         def stage_status() -> dict[str, Any]:
@@ -187,12 +254,76 @@ class ProbeStationApiServer:
                 }
             )
             if not result.get("accepted", False):
-                status_code = int(result.get("status_code", 409))
-                detail = {
-                    "message": result.get("message", "Move request rejected."),
-                    "result": result,
+                _raise_for_rejected(result)
+            return result
+
+        @app.get("/api/v1/route/contacts")
+        def list_route_contacts() -> dict[str, Any]:
+            result = self._call_command({"action": "list_contacts"})
+            _raise_for_rejected(result)
+            return result
+
+        @app.post("/api/v1/route/contacts/{contact_number}/move")
+        def move_to_route_contact(
+            contact_number: int,
+            payload: dict[str, Any] | None = Body(default=None),
+        ) -> dict[str, Any]:
+            body = dict(payload or {})
+            body["contact_number"] = int(contact_number)
+            result = self._call_command(
+                {
+                    "action": "move_to_contact",
+                    "payload": body,
                 }
-                raise HTTPException(status_code=status_code, detail=detail)
+            )
+            _raise_for_rejected(result)
+            return result
+
+        @app.post("/api/v1/route/contacts/{contact_number}/needles")
+        def route_contact_needles(
+            contact_number: int,
+            payload: dict[str, Any] | None = Body(default=None),
+        ) -> dict[str, Any]:
+            body = dict(payload or {})
+            body["contact_number"] = int(contact_number)
+            result = self._call_command(
+                {
+                    "action": "contact_needles",
+                    "payload": body,
+                }
+            )
+            _raise_for_rejected(result)
+            return result
+
+        @app.post("/api/v1/meter/configure")
+        def configure_meter(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+            result = self._call_command(
+                {
+                    "action": "configure_meter",
+                    "payload": dict(payload or {}),
+                }
+            )
+            _raise_for_rejected(result)
+            return result
+
+        @app.post("/api/v1/measurements/raw-sweep")
+        def raw_voltage_sweep(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+            try:
+                voltages = _voltage_sweep_from_payload(payload)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"message": str(exc)},
+                ) from exc
+            body = dict(payload or {})
+            body["voltages_v"] = voltages
+            result = self._call_command(
+                {
+                    "action": "raw_voltage_sweep",
+                    "payload": body,
+                }
+            )
+            _raise_for_rejected(result)
             return result
 
         app.add_api_route(
@@ -202,3 +333,12 @@ class ProbeStationApiServer:
             include_in_schema=False,
         )
         return app, uvicorn
+
+    def _call_command(self, request: dict[str, Any]) -> dict[str, Any]:
+        if self._command_callback is None:
+            return {
+                "accepted": False,
+                "status_code": 501,
+                "message": "This API command is not available in this GUI build.",
+            }
+        return self._command_callback(request)

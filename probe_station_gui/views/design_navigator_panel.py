@@ -76,6 +76,8 @@ class _DesignPlotPane(QWidget):
     HOVER_SNAP_SLOW_MS = 8.0
     SNAP_RADIUS_PX = 14.0
     CURRENT_CROSSHAIR_HALF_SIZE_PX = 8.0
+    PROBE_ROUTE_DETAIL_POINT_LIMIT = 300
+    PROBE_ROUTE_LABEL_POINT_LIMIT = 150
 
     def __init__(self, *, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -107,6 +109,8 @@ class _DesignPlotPane(QWidget):
         self._snap_generation = 0
         self._plot = None
         self._status_label: QLabel | None = None
+        self._route_geometry_redraw_timer: QTimer | None = None
+        self._route_geometry_deferred = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -297,6 +301,10 @@ class _DesignPlotPane(QWidget):
         self._hover_timer.setSingleShot(True)
         self._hover_timer.setInterval(16)
         self._hover_timer.timeout.connect(self._flush_hover_snap)
+        self._route_geometry_redraw_timer = QTimer(self)
+        self._route_geometry_redraw_timer.setSingleShot(True)
+        self._route_geometry_redraw_timer.setInterval(0)
+        self._route_geometry_redraw_timer.timeout.connect(self._redraw_route_geometry)
         self.snap_geometry_ready.connect(self._on_snap_geometry_ready)
         self._plot.addItem(self._hover_item)
         self._plot.addItem(self._target_item)
@@ -327,8 +335,51 @@ class _DesignPlotPane(QWidget):
         self._plot.hide()
 
     def _on_view_range_changed(self) -> None:
+        self._schedule_route_geometry_redraw()
         self._redraw_axis_triad()
         self._redraw_current_position_overlay()
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._schedule_route_geometry_redraw()
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._schedule_route_geometry_redraw()
+
+    def _schedule_route_geometry_redraw(self) -> None:
+        if self._route_geometry_redraw_timer is None:
+            return
+        if self._route_geometry_deferred and self._route_geometry_redraw_timer.isActive():
+            return
+        self._route_geometry_deferred = True
+        if not self._route_geometry_redraw_timer.isActive():
+            self._route_geometry_redraw_timer.start()
+        self._clear_route_arrows()
+
+    def _redraw_route_geometry(self) -> None:
+        if self._plot is None:
+            return
+        if self._probe_route is None and not self._probe_route_preview_points:
+            self._route_geometry_deferred = False
+            self._clear_route_arrows()
+            return
+        if self._route_geometry_pixel_size() is None:
+            self._route_geometry_deferred = True
+            self._clear_route_arrows()
+            if self.isVisible() and self._route_geometry_redraw_timer is not None:
+                self._route_geometry_redraw_timer.start(16)
+            return
+        self._route_geometry_deferred = False
+        self._redraw_probe_route()
+        self._redraw_route_preview()
+        self._plot.update()
+
+    def _clear_route_arrows(self) -> None:
+        if self._plot is None:
+            return
+        self._probe_route_arrow_item.setData([], [])
+        self._probe_route_preview_arrow_item.setData([], [])
 
     def set_document(self, document: DesignDocument | None) -> None:
         same_document = document is self._document
@@ -376,6 +427,7 @@ class _DesignPlotPane(QWidget):
     ) -> None:
         self._probe_route = route
         self._selected_route_point_index = selected_route_point_index
+        self._schedule_route_geometry_redraw()
         self._redraw_overlays()
 
     def set_probe_route_preview(self, preview: object) -> None:
@@ -398,6 +450,7 @@ class _DesignPlotPane(QWidget):
         else:
             self._probe_route_preview_points = []
             self._probe_route_preview_offsets = []
+        self._schedule_route_geometry_redraw()
         self._redraw_overlays()
 
     def set_tool_measure_points(self, points: object) -> None:
@@ -545,6 +598,7 @@ class _DesignPlotPane(QWidget):
             self._layer_items.append(line)
             point_count += len(x_data)
         self.focus_bounds()
+        self._schedule_route_geometry_redraw()
         logger.debug(
             "DESIGN RENDER full items=%d points=%d elapsed_ms=%.2f",
             len(self._layer_items),
@@ -725,13 +779,18 @@ class _DesignPlotPane(QWidget):
         else:
             self._probe_route_selected_item.setData([], [])
 
+        draw_details = len(points) <= self.PROBE_ROUTE_DETAIL_POINT_LIMIT
         needle_1_x: list[float] = []
         needle_1_y: list[float] = []
         needle_2_x: list[float] = []
         needle_2_y: list[float] = []
         connector_x: list[float] = []
         connector_y: list[float] = []
-        for point in points:
+        for route_index, point in enumerate(self._probe_route.points):
+            if not point.enabled:
+                continue
+            if not draw_details and route_index != self._selected_route_point_index:
+                continue
             center = point.camera_center
             hits = self._probe_route.needle_hits_for_point(point)
             for offset_index, (_offset, hit) in enumerate(hits[:2]):
@@ -973,7 +1032,11 @@ class _DesignPlotPane(QWidget):
     ) -> tuple[list[float], list[float]]:
         if len(centers) < 2:
             return [], []
-        pixel_size = self._data_units_per_screen_pixel() or 1.0
+        if self._route_geometry_deferred:
+            return [], []
+        pixel_size = self._route_geometry_pixel_size()
+        if pixel_size is None:
+            return [], []
         reference_length = self._first_segment_length(centers)
         if reference_length <= 1e-12:
             return [], []
@@ -1079,8 +1142,12 @@ class _DesignPlotPane(QWidget):
         self._clear_probe_route_numbers()
         if self._probe_route is None:
             return
+        enabled_points = [point for point in self._probe_route.points if point.enabled]
+        draw_labels = len(enabled_points) <= self.PROBE_ROUTE_LABEL_POINT_LIMIT
         for route_index, route_point in enumerate(self._probe_route.points):
             if not route_point.enabled:
+                continue
+            if not draw_labels and route_index != self._selected_route_point_index:
                 continue
             item = pg.TextItem(
                 text=str(route_index + 1),
@@ -1190,6 +1257,18 @@ class _DesignPlotPane(QWidget):
         if snap_result.distance > snap_threshold:
             return SnapResult(point=raw_point, mode="free", distance=0.0)
         return snap_result
+
+    def _route_geometry_pixel_size(self) -> float | None:
+        if self._plot is None or not self._plot.isVisible():
+            return None
+        view_box = self._plot.getViewBox()
+        scene_rect = view_box.sceneBoundingRect()
+        if scene_rect.width() <= 0.0 or scene_rect.height() <= 0.0:
+            return None
+        pixel_size = self._data_units_per_screen_pixel()
+        if pixel_size is None or not math.isfinite(pixel_size) or pixel_size <= 0.0:
+            return None
+        return pixel_size
 
     def _snap_distance_threshold(self) -> float | None:
         pixel_size = self._data_units_per_screen_pixel()
@@ -1304,8 +1383,6 @@ class DesignNavigatorPanel(QWidget):
     top_cell_changed = Signal(str)
     layer_visibility_changed = Signal(int, int, bool)
     design_rotate_requested = Signal(int)
-    load_script_requested = Signal(str)
-    reload_script_requested = Signal()
     move_to_target_requested = Signal(str)
     next_target_requested = Signal()
     previous_target_requested = Signal()
@@ -1322,6 +1399,7 @@ class DesignNavigatorPanel(QWidget):
     route_measurement_run_requested = Signal()
     route_measurement_stop_requested = Signal()
     route_measurement_interrupt_requested = Signal()
+    route_measurement_pause_requested = Signal()
     route_measurement_save_shift_requested = Signal()
     route_measurement_confirmation_requested = Signal(str)
     route_measurement_jump_requested = Signal(int)
@@ -1439,39 +1517,6 @@ class DesignNavigatorPanel(QWidget):
         self._registration_status_label.setWordWrap(True)
         registration_layout.addWidget(self._registration_status_label)
         root_layout.addWidget(registration_group)
-
-        script_group = QGroupBox("Measurement Plan", self)
-        script_layout = QVBoxLayout(script_group)
-        script_buttons = QHBoxLayout()
-        self._load_script_button = QPushButton("Load Script...", script_group)
-        self._reload_script_button = QPushButton("Reload Script", script_group)
-        script_buttons.addWidget(self._load_script_button)
-        script_buttons.addWidget(self._reload_script_button)
-        script_layout.addLayout(script_buttons)
-        self._script_label = QLabel("No script loaded.", script_group)
-        self._script_label.setWordWrap(True)
-        script_layout.addWidget(self._script_label)
-        self._target_table = QTableWidget(0, 4, script_group)
-        self._target_table.setHorizontalHeaderLabels(["ID", "Label", "Group", "Design center"])
-        self._target_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self._target_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self._target_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self._target_table.itemSelectionChanged.connect(self._on_target_selection_changed)
-        script_layout.addWidget(self._target_table)
-        nav_buttons = QHBoxLayout()
-        self._previous_button = QPushButton("Previous", script_group)
-        self._move_button = QPushButton("Move To", script_group)
-        self._next_button = QPushButton("Next", script_group)
-        nav_buttons.addWidget(self._previous_button)
-        nav_buttons.addWidget(self._move_button)
-        nav_buttons.addWidget(self._next_button)
-        script_layout.addLayout(nav_buttons)
-        self._load_script_button.clicked.connect(self._choose_script_file)
-        self._reload_script_button.clicked.connect(self.reload_script_requested.emit)
-        self._previous_button.clicked.connect(self.previous_target_requested.emit)
-        self._next_button.clicked.connect(self.next_target_requested.emit)
-        self._move_button.clicked.connect(self._emit_move_to_selected_target)
-        root_layout.addWidget(script_group)
 
         route_group = QGroupBox("Probe Route", self)
         route_layout = QVBoxLayout(route_group)
@@ -1668,12 +1713,15 @@ class DesignNavigatorPanel(QWidget):
         route_layout.addLayout(route_edit_buttons)
 
         route_run_buttons = QHBoxLayout()
-        self._route_run_button = QPushButton("Run Route", route_group)
+        self._route_run_button = QPushButton("Measure Route", route_group)
+        self._route_pause_button = QPushButton("Pause", route_group)
+        self._route_pause_button.setEnabled(False)
         self._route_interrupt_button = QPushButton("Interrupt", route_group)
         self._route_interrupt_button.setEnabled(False)
-        self._route_stop_button = QPushButton("Cancel", route_group)
+        self._route_stop_button = QPushButton("Stop", route_group)
         self._route_stop_button.setEnabled(False)
         route_run_buttons.addWidget(self._route_run_button)
+        route_run_buttons.addWidget(self._route_pause_button)
         route_run_buttons.addWidget(self._route_interrupt_button)
         route_run_buttons.addWidget(self._route_stop_button)
         route_layout.addLayout(route_run_buttons)
@@ -1711,6 +1759,9 @@ class DesignNavigatorPanel(QWidget):
         self._route_clear_button.clicked.connect(self.route_clear_requested.emit)
         self._route_run_button.clicked.connect(
             self.route_measurement_run_requested.emit
+        )
+        self._route_pause_button.clicked.connect(
+            self.route_measurement_pause_requested.emit
         )
         self._route_stop_button.clicked.connect(
             self.route_measurement_stop_requested.emit
@@ -1843,12 +1894,6 @@ class DesignNavigatorPanel(QWidget):
         self._update_mark_labels()
         self._update_enabled_state()
 
-    def set_script_path(self, script_path: str | None) -> None:
-        if not script_path:
-            self._script_label.setText("No script loaded.")
-            return
-        self._script_label.setText(str(Path(script_path)))
-
     def set_targets(
         self,
         targets: list[MeasurementTarget],
@@ -1857,23 +1902,6 @@ class DesignNavigatorPanel(QWidget):
     ) -> None:
         self._targets = list(targets)
         self._selected_target_id = selected_target_id
-        self._target_table.blockSignals(True)
-        self._target_table.clearSelection()
-        self._target_table.setRowCount(len(targets))
-        for row, target in enumerate(targets):
-            self._target_table.setItem(row, 0, QTableWidgetItem(target.id))
-            self._target_table.setItem(row, 1, QTableWidgetItem(target.label))
-            self._target_table.setItem(row, 2, QTableWidgetItem(target.group or ""))
-            self._target_table.setItem(
-                row,
-                3,
-                QTableWidgetItem(
-                    f"X={target.design_center[0]:.3f}, Y={target.design_center[1]:.3f}"
-                ),
-            )
-            if target.id == selected_target_id:
-                self._target_table.selectRow(row)
-        self._target_table.blockSignals(False)
         self._update_enabled_state()
 
     def set_route(
@@ -2065,15 +2093,6 @@ class DesignNavigatorPanel(QWidget):
         self._top_cell_combo.setEnabled(has_document)
         self._layer_list.setEnabled(has_document)
         self._snap_checkbox.setEnabled(has_document)
-        self._load_script_button.setEnabled(has_document)
-        self._reload_script_button.setEnabled(
-            has_document and self._script_label.text() != "No script loaded."
-        )
-        has_targets = bool(self._targets)
-        has_selection = self._selected_target_id is not None
-        self._previous_button.setEnabled(has_targets)
-        self._next_button.setEnabled(has_targets)
-        self._move_button.setEnabled(has_targets and has_selection)
         has_route = self._route is not None
         route_running = self._route_measurement_running
         has_route_selection = (
@@ -2118,6 +2137,9 @@ class DesignNavigatorPanel(QWidget):
             has_route and bool(self._route.points) and not route_running
         )
         self._route_stop_button.setEnabled(route_running)
+        self._route_pause_button.setEnabled(
+            route_running and not self._route_measurement_waiting
+        )
         self._route_interrupt_button.setEnabled(
             route_running and not self._route_measurement_waiting
         )
@@ -2736,16 +2758,6 @@ class DesignNavigatorPanel(QWidget):
         if path:
             self.load_design_requested.emit(path)
 
-    def _choose_script_file(self) -> None:  # pragma: no cover - UI interaction
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Open Measurement Plan",
-            "",
-            "Python files (*.py);;All files (*)",
-        )
-        if path:
-            self.load_script_requested.emit(path)
-
     def _choose_route_file(self) -> None:  # pragma: no cover - UI interaction
         start_directory = ""
         if self._route is not None and self._route.path is not None:
@@ -2809,20 +2821,6 @@ class DesignNavigatorPanel(QWidget):
             item.checkState() == Qt.Checked,
         )
 
-    def _on_target_selection_changed(self) -> None:
-        selected_rows = self._target_table.selectionModel().selectedRows()
-        if not selected_rows:
-            self._selected_target_id = None
-            self._update_enabled_state()
-            return
-        row = selected_rows[0].row()
-        if row < 0 or row >= len(self._targets):
-            return
-        target = self._targets[row]
-        self._selected_target_id = target.id
-        self.target_selected.emit(target.id)
-        self._update_enabled_state()
-
     def _on_route_selection_changed(self) -> None:
         selected_rows = self._route_table.selectionModel().selectedRows()
         if not selected_rows:
@@ -2834,11 +2832,6 @@ class DesignNavigatorPanel(QWidget):
         self._selected_route_point_index = row
         self.route_selected.emit(row)
         self._update_enabled_state()
-
-    def _emit_move_to_selected_target(self) -> None:
-        if self._selected_target_id is None:
-            return
-        self.move_to_target_requested.emit(self._selected_target_id)
 
     def _emit_route_measurement_jump_to_selected(self) -> None:
         if self._selected_route_point_index < 0:
@@ -2989,9 +2982,6 @@ class DesignLayoutWindow(QWidget):
 
     def set_stage_registration_marks(self, source_stage_marks: list[Point2D | None]) -> None:
         self.navigator_panel.set_stage_registration_marks(source_stage_marks)
-
-    def set_script_path(self, script_path: str | None) -> None:
-        self.navigator_panel.set_script_path(script_path)
 
     def set_calibration_prompt(self, text: str) -> None:
         self.navigator_panel.set_calibration_prompt(text)

@@ -30,11 +30,14 @@
 ## Settings and logging
 - Default settings file: `probe_station_gui/default_settings.json`.
 - User settings path is platform-dependent (see `SettingsManager._determine_config_dir`).
+- On Windows, user settings live in `%APPDATA%\ProbeStationGUI`; on this machine that is `C:\Users\Lazemir\AppData\Roaming\ProbeStationGUI`. Route measurement settings are in `route-measurement-settings.json` there.
+- Runtime logs default to `%LOCALAPPDATA%\ProbeStationGUI\Logs`; on this machine, inspect `C:\Users\Lazemir\AppData\Local\ProbeStationGUI\Logs\status-history.log` and `C:\Users\Lazemir\AppData\Local\ProbeStationGUI\Logs\probe-station-gui.log` first.
+- A `probe-station-gui.log` under `%APPDATA%\ProbeStationGUI` is a legacy/stale location unless the logging settings explicitly point there.
 - Logging writes to a file configured in settings via `probe_station_gui/logging_config.py`.
 
 ## Development guidelines
 - Avoid running hardware-dependent code in automation unless explicitly requested.
-- Use the local virtual environment for Python commands: `.venv\Scripts\python.exe -m pytest tests`, `.venv\Scripts\python.exe main.py`, etc. Do not rely on bare `python`, which may resolve to the Windows Store alias.
+- Use the shared project virtual environment for Python commands, even from Codex worktrees: `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests`, `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe main.py`, etc. Do not use a missing worktree-local `.venv`, and do not rely on bare `python`, which may resolve to the Windows Store alias.
 - Keep startup lightweight: `main.py` should create the main window and show the GUI first. Do not instantiate heavy optional panels, web engines, hardware clients, long scans, network clients, or calibration workers synchronously during startup; initialize them lazily when opened or after startup via timers/background threads.
 - Keep the GUI thread for Qt widget updates only. Hardware I/O, camera/GenICam node scans, serial polling, calibration, file parsing, image processing, and any large periodic refresh must run in worker threads or be sliced into tiny queued UI updates. Never implement periodic full-widget rebuilds or blocking hardware reads in the GUI thread.
 - Camera settings must not block frame acquisition or stop/restart camera acquisition for periodic refresh. Keep GenICam reads/writes in a dedicated worker/executor and lazily build only the visible Qt controls.

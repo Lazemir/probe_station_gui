@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QLocale, QRectF, Qt, Signal
+from PySide6.QtCore import QLocale, QPointF, QRectF, QSignalBlocker, Qt, Signal
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QStackedWidget,
     QTableWidget,
@@ -42,6 +43,11 @@ from probe_station_gui.lcr_meter import (
     ROUTE_METER_TYPES,
     RouteMeterConfiguration,
 )
+from probe_station_gui.route_measurement import (
+    ROUTE_OPERATION_MEASURE,
+    ROUTE_OPERATION_PHOTO,
+    ROUTE_OPERATION_PHOTO_THEN_MEASURE,
+)
 from probe_station_gui.settings_manager import (
     LCR_APERTURE_RATES,
     LCR_LEVEL_MODES,
@@ -51,30 +57,215 @@ from probe_station_gui.settings_manager import (
 )
 
 
+ROUTE_MEASUREMENT_PROFILE_VERSION = 6
+DEFAULT_ROUTE_INITIAL_MEASUREMENT_COUNT = 10
+DEFAULT_ROUTE_FOLLOWUP_MEASUREMENT_COUNT = 240
+DEFAULT_ROUTE_PHOTO_AUTOFOCUS_RANGE_MM = 0.030
+DEFAULT_KEITHLEY_MEASUREMENT_VOLTAGE_V = 0.03
+DEFAULT_KEITHLEY_SOURCE_RANGE_V = 0.21
+DEFAULT_KEITHLEY_VOLTMETER_RANGE_V = 0.1
+DEFAULT_KEITHLEY_CURRENT_RANGE_A = 10e-6
+DEFAULT_KEITHLEY_COMPLIANCE_CURRENT_A = 10e-6
+DEFAULT_KEITHLEY_NPLC = 1.0
+DEFAULT_KEITHLEY_TRIGGER_DELAY_S = 0.0
+DEFAULT_KEITHLEY_USE_BUFFER = True
+DEFAULT_KEITHLEY_USE_TRIGGER_LINK = True
+DEFAULT_ROUTE_CONTACT_SEEK_RANGE_MM = 0.010
+DEFAULT_ROUTE_CONTACT_SEEK_STEP_MM = 0.001
+
+VOLTAGE_PREFIXES = (
+    ("uV", 1e-6),
+    ("mV", 1e-3),
+    ("V", 1.0),
+)
+CURRENT_PREFIXES = (
+    ("uA", 1e-6),
+    ("mA", 1e-3),
+    ("A", 1.0),
+)
+RESISTANCE_PREFIXES = (
+    ("mohm", 1e-3),
+    ("ohm", 1.0),
+    ("kohm", 1e3),
+    ("Mohm", 1e6),
+    ("Gohm", 1e9),
+)
+FREQUENCY_PREFIXES = (
+    ("Hz", 1.0),
+    ("kHz", 1e3),
+)
+
+
 @dataclass(frozen=True)
 class RouteMeasurementRunConfiguration:
     """Complete per-run route measurement configuration from the dialog."""
 
     csv_path: str
-    measurement_count: int
-    start_point: int
+    operation_mode: str
+    photo_output_dir: str
+    photo_settle_s: float
+    photo_autofocus_enabled: bool
+    photo_autofocus_range_mm: float
+    initial_measurement_count: int
+    followup_measurement_count: int
+    current_point: int
     max_relative_rms: float
-    short_threshold_ohm: float
     contact_settle_s: float
+    contact_seek_range_mm: float
+    contact_seek_step_mm: float
     meter: RouteMeterConfiguration
+
+    @property
+    def measurement_count(self) -> int:
+        """Maximum readings per point after both measurement phases."""
+
+        return max(1, int(self.initial_measurement_count)) + max(
+            0,
+            int(self.followup_measurement_count),
+        )
+
+    @property
+    def start_point(self) -> int:
+        """Backward-compatible alias for older callers."""
+
+        return self.current_point
+
+
+class _SIPrefixSpinBox(QWidget):
+    """Numeric editor that stores values in base SI units."""
+
+    def __init__(
+        self,
+        *,
+        prefixes: tuple[tuple[str, float], ...],
+        base_minimum: float,
+        base_maximum: float,
+        base_value: float,
+        decimals: int = 3,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._prefixes = tuple(prefixes)
+        self._base_minimum = float(base_minimum)
+        self._base_maximum = float(base_maximum)
+        self._base_value = float(base_value)
+        self._updating = False
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._spin = QDoubleSpinBox(self)
+        self._spin.setLocale(QLocale.c())
+        self._spin.setDecimals(decimals)
+        self._spin.setKeyboardTracking(False)
+        self._spin.setMinimumWidth(110)
+        self._prefix_combo = QComboBox(self)
+        for label, factor in self._prefixes:
+            self._prefix_combo.addItem(label, float(factor))
+        layout.addWidget(self._spin, 1)
+        layout.addWidget(self._prefix_combo)
+
+        self._prefix_combo.currentIndexChanged.connect(
+            lambda _index: self._on_prefix_changed()
+        )
+        self._spin.valueChanged.connect(lambda _value: self._on_display_value_changed())
+        self._spin.editingFinished.connect(self._normalize_prefix)
+        self.set_base_value(base_value)
+
+    def base_value(self) -> float:
+        return float(self._base_value)
+
+    def set_base_value(self, value: object) -> None:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(numeric):
+            return
+        self._base_value = self._clamp_base_value(numeric)
+        self._set_prefix_for_value(self._base_value)
+        self._refresh_display()
+
+    def _on_display_value_changed(self) -> None:
+        if self._updating:
+            return
+        factor = self._current_factor()
+        self._base_value = self._clamp_base_value(self._spin.value() * factor)
+
+    def _on_prefix_changed(self) -> None:
+        if self._updating:
+            return
+        self._refresh_display()
+
+    def _normalize_prefix(self) -> None:
+        self._on_display_value_changed()
+        self._set_prefix_for_value(self._base_value)
+        self._refresh_display()
+
+    def _refresh_display(self) -> None:
+        factor = self._current_factor()
+        self._updating = True
+        try:
+            spin_blocker = QSignalBlocker(self._spin)
+            self._spin.setRange(
+                self._base_minimum / factor,
+                self._base_maximum / factor,
+            )
+            self._spin.setValue(self._base_value / factor)
+            del spin_blocker
+        finally:
+            self._updating = False
+
+    def _set_prefix_for_value(self, value: float) -> None:
+        index = self._best_prefix_index(value)
+        if index == self._prefix_combo.currentIndex():
+            return
+        blocker = QSignalBlocker(self._prefix_combo)
+        self._prefix_combo.setCurrentIndex(index)
+        del blocker
+
+    def _best_prefix_index(self, value: float) -> int:
+        absolute = abs(float(value))
+        if absolute <= 0.0:
+            return self._unit_prefix_index()
+        best = 0
+        for index, (_label, factor) in enumerate(self._prefixes):
+            scaled = absolute / factor
+            if 1.0 <= scaled < 1000.0:
+                return index
+            if scaled >= 1.0:
+                best = index
+        return best
+
+    def _unit_prefix_index(self) -> int:
+        for index, (_label, factor) in enumerate(self._prefixes):
+            if factor == 1.0:
+                return index
+        return 0
+
+    def _current_factor(self) -> float:
+        factor = self._prefix_combo.currentData()
+        try:
+            numeric = float(factor)
+        except (TypeError, ValueError):
+            numeric = 1.0
+        return numeric if numeric > 0.0 else 1.0
+
+    def _clamp_base_value(self, value: float) -> float:
+        return max(self._base_minimum, min(self._base_maximum, float(value)))
 
 
 class RouteMeasurementDialog(QDialog):
-    """Non-modal route measurement setup and Next/Cancel control window."""
+    """Non-modal route measurement setup and control window."""
 
-    run_requested = Signal(object)
+    measure_requested = Signal(object)
     next_requested = Signal()
     remeasure_requested = Signal()
     skip_requested = Signal()
     save_shift_requested = Signal()
     interrupt_requested = Signal()
+    pause_requested = Signal()
     jump_requested = Signal(int)
-    cancel_requested = Signal()
+    current_point_changed = Signal(int)
 
     def __init__(
         self,
@@ -82,8 +273,8 @@ class RouteMeasurementDialog(QDialog):
         route_name: str,
         route_point_count: int,
         default_csv_path: str,
+        default_photo_dir: str | None = None,
         default_meter_type: str = ROUTE_METER_KEITHLEY,
-        default_short_threshold_ohm: float = 10.0,
         settings_path: str | Path | None = None,
         parent: QWidget | None = None,
     ) -> None:
@@ -94,12 +285,25 @@ class RouteMeasurementDialog(QDialog):
         self._waiting = False
         self._route_point_count = max(1, int(route_point_count))
         self._default_csv_path = default_csv_path
+        self._default_photo_dir = (
+            default_photo_dir
+            if default_photo_dir is not None
+            else str(Path(default_csv_path).with_suffix("")) + "-photos"
+        )
         self._settings_path = Path(settings_path).expanduser() if settings_path else None
         self._last_raw_samples: tuple[object, ...] = ()
+        self._measurement_pending = False
 
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        scroll_area = QScrollArea(self)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_content = QWidget(scroll_area)
+        layout = QVBoxLayout(scroll_content)
+        scroll_area.setWidget(scroll_content)
+        outer_layout.addWidget(scroll_area, 1)
 
-        common_group = QGroupBox("Run", self)
+        common_group = QGroupBox("Measurement", self)
         common_layout = QFormLayout(common_group)
         common_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         self._route_combo = QComboBox(common_group)
@@ -115,12 +319,74 @@ class RouteMeasurementDialog(QDialog):
         csv_row.addWidget(self._csv_browse_button)
         common_layout.addRow(QLabel("CSV", common_group), csv_row)
 
-        self._measurement_count_spin = QSpinBox(common_group)
-        self._measurement_count_spin.setRange(1, 1000)
-        self._measurement_count_spin.setValue(5)
+        self._operation_combo = QComboBox(common_group)
+        self._operation_combo.addItem("Measure only", ROUTE_OPERATION_MEASURE)
+        self._operation_combo.addItem("Photo only", ROUTE_OPERATION_PHOTO)
+        self._operation_combo.addItem(
+            "Photo then measure",
+            ROUTE_OPERATION_PHOTO_THEN_MEASURE,
+        )
+        common_layout.addRow(QLabel("Route mode", common_group), self._operation_combo)
+
+        photo_row = QHBoxLayout()
+        self._photo_dir_edit = QLineEdit(common_group)
+        self._photo_dir_edit.setText(self._default_photo_dir)
+        self._photo_dir_edit.setPlaceholderText("route photo output directory")
+        self._photo_browse_button = QPushButton("Browse", common_group)
+        photo_row.addWidget(self._photo_dir_edit, 1)
+        photo_row.addWidget(self._photo_browse_button)
+        common_layout.addRow(QLabel("Photos", common_group), photo_row)
+
+        self._photo_settle_spin = QDoubleSpinBox(common_group)
+        self._photo_settle_spin.setLocale(QLocale.c())
+        self._photo_settle_spin.setDecimals(3)
+        self._photo_settle_spin.setRange(0.0, 10.0)
+        self._photo_settle_spin.setSingleStep(0.05)
+        self._photo_settle_spin.setSuffix(" s")
+        self._photo_settle_spin.setValue(0.2)
         common_layout.addRow(
-            QLabel("Readings per point", common_group),
-            self._measurement_count_spin,
+            QLabel("Photo settle", common_group),
+            self._photo_settle_spin,
+        )
+
+        self._photo_autofocus_checkbox = QCheckBox(
+            "Autofocus before each photo",
+            common_group,
+        )
+        common_layout.addRow(QLabel("Photo focus", common_group), self._photo_autofocus_checkbox)
+
+        self._photo_autofocus_range_spin = QDoubleSpinBox(common_group)
+        self._photo_autofocus_range_spin.setLocale(QLocale.c())
+        self._photo_autofocus_range_spin.setDecimals(4)
+        self._photo_autofocus_range_spin.setRange(0.001, 0.200)
+        self._photo_autofocus_range_spin.setSingleStep(0.005)
+        self._photo_autofocus_range_spin.setSuffix(" mm")
+        self._photo_autofocus_range_spin.setValue(
+            DEFAULT_ROUTE_PHOTO_AUTOFOCUS_RANGE_MM
+        )
+        common_layout.addRow(
+            QLabel("AF range", common_group),
+            self._photo_autofocus_range_spin,
+        )
+
+        self._initial_measurement_count_spin = QSpinBox(common_group)
+        self._initial_measurement_count_spin.setRange(1, 1000)
+        self._initial_measurement_count_spin.setValue(
+            DEFAULT_ROUTE_INITIAL_MEASUREMENT_COUNT
+        )
+        common_layout.addRow(
+            QLabel("Initial samples", common_group),
+            self._initial_measurement_count_spin,
+        )
+
+        self._followup_measurement_count_spin = QSpinBox(common_group)
+        self._followup_measurement_count_spin.setRange(0, 1000)
+        self._followup_measurement_count_spin.setValue(
+            DEFAULT_ROUTE_FOLLOWUP_MEASUREMENT_COUNT
+        )
+        common_layout.addRow(
+            QLabel("Follow-up samples", common_group),
+            self._followup_measurement_count_spin,
         )
 
         self._max_relative_rms_spin = QDoubleSpinBox(common_group)
@@ -135,23 +401,6 @@ class RouteMeasurementDialog(QDialog):
             self._max_relative_rms_spin,
         )
 
-        self._short_threshold_spin = QDoubleSpinBox(common_group)
-        self._short_threshold_spin.setLocale(QLocale.c())
-        self._short_threshold_spin.setDecimals(3)
-        self._short_threshold_spin.setRange(0.0, 1_000_000_000.0)
-        self._short_threshold_spin.setSingleStep(1.0)
-        self._short_threshold_spin.setSuffix(" ohm")
-        self._short_threshold_spin.setValue(max(0.0, float(default_short_threshold_ohm)))
-        common_layout.addRow(
-            QLabel("Short threshold", common_group),
-            self._short_threshold_spin,
-        )
-
-        self._start_point_spin = QSpinBox(common_group)
-        self._start_point_spin.setRange(1, self._route_point_count)
-        self._start_point_spin.setValue(1)
-        common_layout.addRow(QLabel("Start point", common_group), self._start_point_spin)
-
         self._contact_settle_spin = QDoubleSpinBox(common_group)
         self._contact_settle_spin.setLocale(QLocale.c())
         self._contact_settle_spin.setDecimals(3)
@@ -163,6 +412,31 @@ class RouteMeasurementDialog(QDialog):
             QLabel("Contact settle", common_group),
             self._contact_settle_spin,
         )
+
+        self._contact_seek_range_spin = QDoubleSpinBox(common_group)
+        self._contact_seek_range_spin.setLocale(QLocale.c())
+        self._contact_seek_range_spin.setDecimals(4)
+        self._contact_seek_range_spin.setRange(0.0, 1.0)
+        self._contact_seek_range_spin.setSingleStep(0.001)
+        self._contact_seek_range_spin.setSuffix(" mm")
+        self._contact_seek_range_spin.setValue(DEFAULT_ROUTE_CONTACT_SEEK_RANGE_MM)
+        common_layout.addRow(
+            QLabel("Contact seek range", common_group),
+            self._contact_seek_range_spin,
+        )
+
+        self._contact_seek_step_spin = QDoubleSpinBox(common_group)
+        self._contact_seek_step_spin.setLocale(QLocale.c())
+        self._contact_seek_step_spin.setDecimals(4)
+        self._contact_seek_step_spin.setRange(0.0001, 1.0)
+        self._contact_seek_step_spin.setSingleStep(0.0005)
+        self._contact_seek_step_spin.setSuffix(" mm")
+        self._contact_seek_step_spin.setValue(DEFAULT_ROUTE_CONTACT_SEEK_STEP_MM)
+        common_layout.addRow(
+            QLabel("Contact seek step", common_group),
+            self._contact_seek_step_spin,
+        )
+
         profile_row = QHBoxLayout()
         self._load_profile_button = QPushButton("Load Profile", common_group)
         self._save_profile_button = QPushButton("Save Profile", common_group)
@@ -213,41 +487,49 @@ class RouteMeasurementDialog(QDialog):
         analysis_row.addStretch(1)
         layout.addLayout(analysis_row)
         self._histogram_widget = _RouteMeasurementHistogram(self)
-        self._histogram_widget.setMinimumHeight(140)
+        self._histogram_widget.setMinimumHeight(170)
         layout.addWidget(self._histogram_widget)
 
         jump_row = QHBoxLayout()
-        self._jump_point_spin = QSpinBox(self)
-        self._jump_point_spin.setRange(1, self._route_point_count)
-        self._jump_point_spin.setValue(1)
+        self._current_point_spin = QSpinBox(self)
+        self._current_point_spin.setRange(1, self._route_point_count)
+        self._current_point_spin.setValue(1)
+        self._jump_point_spin = self._current_point_spin
         self._jump_button = QPushButton("Go To", self)
-        jump_row.addWidget(QLabel("Point", self))
-        jump_row.addWidget(self._jump_point_spin)
+        jump_row.addWidget(QLabel("Current point", self))
+        jump_row.addWidget(self._current_point_spin)
         jump_row.addWidget(self._jump_button)
         jump_row.addStretch(1)
         layout.addLayout(jump_row)
 
         button_row = QHBoxLayout()
-        self._run_button = QPushButton("Run", self)
+        self._measure_button = QPushButton("Measure", self)
+        self._pause_button = QPushButton("Pause", self)
         self._interrupt_button = QPushButton("Interrupt", self)
         self._save_shift_button = QPushButton("Save Shift", self)
         self._remeasure_button = QPushButton("Remeasure", self)
         self._skip_button = QPushButton("Skip", self)
         self._next_button = QPushButton("Next", self)
-        self._cancel_button = QPushButton("Cancel", self)
         self._close_button = QPushButton("Close", self)
-        button_row.addWidget(self._run_button)
+        button_row.addWidget(self._measure_button)
+        button_row.addWidget(self._pause_button)
         button_row.addWidget(self._interrupt_button)
         button_row.addWidget(self._save_shift_button)
         button_row.addWidget(self._remeasure_button)
         button_row.addWidget(self._skip_button)
         button_row.addWidget(self._next_button)
-        button_row.addWidget(self._cancel_button)
         button_row.addStretch(1)
         button_row.addWidget(self._close_button)
-        layout.addLayout(button_row)
+        outer_layout.addLayout(button_row)
 
         self._csv_browse_button.clicked.connect(self._choose_csv_path)
+        self._photo_browse_button.clicked.connect(self._choose_photo_dir)
+        self._operation_combo.currentIndexChanged.connect(
+            lambda _index: self._update_operation_state()
+        )
+        self._photo_autofocus_checkbox.toggled.connect(
+            lambda _checked: self._update_operation_state()
+        )
         self._meter_combo.currentIndexChanged.connect(self._update_meter_page)
         self._gw_function_combo.currentTextChanged.connect(
             lambda _text: self._update_gwinstek_state()
@@ -258,13 +540,15 @@ class RouteMeasurementDialog(QDialog):
         self._gw_bias_checkbox.toggled.connect(
             lambda _checked: self._update_gwinstek_state()
         )
-        self._run_button.clicked.connect(self._emit_run_requested)
+        self._current_point_spin.valueChanged.connect(self._on_current_point_changed)
+        self._measure_button.clicked.connect(self._emit_measure_requested)
         self._load_profile_button.clicked.connect(self._load_profile)
         self._save_profile_button.clicked.connect(self._save_profile)
         self._histogram_mode_combo.currentIndexChanged.connect(
             lambda _index: self._update_histogram_mode()
         )
         self._raw_data_button.clicked.connect(self._show_raw_data)
+        self._pause_button.clicked.connect(self._emit_pause_requested)
         self._interrupt_button.clicked.connect(self.interrupt_requested.emit)
         self._save_shift_button.clicked.connect(self.save_shift_requested.emit)
         self._remeasure_button.clicked.connect(self.remeasure_requested.emit)
@@ -275,19 +559,26 @@ class RouteMeasurementDialog(QDialog):
                 int(self._jump_point_spin.value())
             )
         )
-        self._cancel_button.clicked.connect(self.cancel_requested.emit)
         self._close_button.clicked.connect(self.close)
         self._load_settings_file()
         self._update_meter_page()
+        self._update_operation_state()
         self.set_running(False)
+        self._resize_to_available_screen()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
-        if self._running:
-            self.set_status("Cancel the route measurement before closing.")
-            event.ignore()
-            return
         self._save_settings_file()
         super().closeEvent(event)
+
+    def _resize_to_available_screen(self) -> None:
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            self.resize(820, 720)
+            return
+        available = screen.availableGeometry()
+        target_width = max(640, min(820, available.width() - 80))
+        target_height = max(420, min(760, available.height() - 120))
+        self.resize(target_width, target_height)
 
     def set_status(self, message: str) -> None:
         self._status_label.setText(message or "Idle.")
@@ -304,16 +595,45 @@ class RouteMeasurementDialog(QDialog):
         relative_rms = getattr(record, "relative_rms", math.nan)
         status = str(getattr(record, "status", ""))
         prefix = "Saved" if saved else "Not saved"
+        contact = getattr(record, "contact_quality", None)
+        contact_text = ""
+        if contact is not None and bool(getattr(contact, "assessed", False)):
+            contact_text = (
+                f", contact={getattr(contact, 'status', 'unknown')} "
+                f"(median={_format_ohm(float(getattr(contact, 'median_ohm', math.nan)))}, "
+                f"MAD={_format_ohm(float(getattr(contact, 'mad_sigma_ohm', math.nan)))})"
+            )
         self._result_label.setText(
             f"{prefix} point {position}/{total}: "
             f"R={_format_ohm(float(resistance))}, "
             f"RMS={_format_ohm(float(rms))}, "
             f"rel={_format_percent(float(relative_rms))}, "
-            f"status={status or 'unknown'}."
+            f"status={status or 'unknown'}{contact_text}."
         )
         self._last_raw_samples = tuple(getattr(record, "raw_samples", ()) or ())
         self._histogram_widget.set_samples(self._last_raw_samples)
         self._raw_data_button.setEnabled(bool(self._last_raw_samples))
+
+    def set_current_point(self, point_number: int, *, save: bool = True) -> None:
+        value = min(max(1, int(point_number)), self._route_point_count)
+        with QSignalBlocker(self._current_point_spin):
+            self._current_point_spin.setValue(value)
+        if not self._waiting:
+            with QSignalBlocker(self._jump_point_spin):
+                self._jump_point_spin.setValue(value)
+        if save:
+            self._save_settings_file()
+
+    def set_resume_point(self, point_number: int, *, save: bool = True) -> None:
+        self.set_current_point(point_number, save=save)
+
+    def set_measurement_pending(self, pending: bool, *, save: bool = True) -> None:
+        self._measurement_pending = bool(pending)
+        if save:
+            self._save_settings_file()
+
+    def measurement_pending(self) -> bool:
+        return bool(self._measurement_pending)
 
     def set_route(
         self,
@@ -321,13 +641,14 @@ class RouteMeasurementDialog(QDialog):
         route_name: str,
         route_point_count: int,
         default_csv_path: str,
+        default_photo_dir: str | None = None,
     ) -> None:
         self._route_point_count = max(1, int(route_point_count))
         self._route_combo.setItemText(
             0,
             f"{route_name} ({route_point_count} points)",
         )
-        for spinbox in (self._start_point_spin, self._jump_point_spin):
+        for spinbox in (self._current_point_spin, self._jump_point_spin):
             value = min(max(1, int(spinbox.value())), self._route_point_count)
             spinbox.setRange(1, self._route_point_count)
             spinbox.setValue(value)
@@ -336,6 +657,11 @@ class RouteMeasurementDialog(QDialog):
             if not current_csv or current_csv == self._default_csv_path:
                 self._csv_path_edit.setText(default_csv_path)
             self._default_csv_path = default_csv_path
+            if default_photo_dir is not None:
+                current_photo_dir = self._photo_dir_edit.text().strip()
+                if not current_photo_dir or current_photo_dir == self._default_photo_dir:
+                    self._photo_dir_edit.setText(default_photo_dir)
+                self._default_photo_dir = default_photo_dir
 
     def set_running(self, running: bool) -> None:
         self._running = bool(running)
@@ -343,11 +669,12 @@ class RouteMeasurementDialog(QDialog):
             self._route_combo,
             self._csv_path_edit,
             self._csv_browse_button,
-            self._measurement_count_spin,
-            self._max_relative_rms_spin,
-            self._short_threshold_spin,
-            self._start_point_spin,
-            self._contact_settle_spin,
+            self._operation_combo,
+            self._photo_dir_edit,
+            self._photo_browse_button,
+            self._photo_autofocus_checkbox,
+            self._photo_autofocus_range_spin,
+            self._current_point_spin,
             self._meter_combo,
             self._gwinstek_page,
             self._keithley_page,
@@ -355,21 +682,37 @@ class RouteMeasurementDialog(QDialog):
             self._save_profile_button,
         ):
             widget.setEnabled(not self._running)
-        self._run_button.setEnabled(not self._running)
-        self._cancel_button.setEnabled(self._running)
-        self._close_button.setEnabled(not self._running)
+        self._set_runtime_settings_enabled(not self._running)
+        self._measure_button.setEnabled(not self._running)
+        self._pause_button.setEnabled(self._running and not self._waiting)
+        self._close_button.setEnabled(True)
         self.set_waiting(False)
 
     def set_waiting(self, waiting: bool) -> None:
         self._waiting = bool(waiting)
         can_confirm = self._running and self._waiting
+        self._pause_button.setEnabled(self._running and not self._waiting)
         self._interrupt_button.setEnabled(self._running and not self._waiting)
         self._save_shift_button.setEnabled(self._running and self._waiting)
         self._remeasure_button.setEnabled(can_confirm)
         self._skip_button.setEnabled(can_confirm)
         self._next_button.setEnabled(can_confirm)
-        self._jump_point_spin.setEnabled(can_confirm)
+        self._jump_point_spin.setEnabled((not self._running) or can_confirm)
         self._jump_button.setEnabled(can_confirm)
+        self._set_runtime_settings_enabled((not self._running) or can_confirm)
+
+    def _set_runtime_settings_enabled(self, enabled: bool) -> None:
+        for widget in (
+            self._initial_measurement_count_spin,
+            self._followup_measurement_count_spin,
+            self._max_relative_rms_spin,
+            self._contact_settle_spin,
+            self._contact_seek_range_spin,
+            self._contact_seek_step_spin,
+            self._photo_settle_spin,
+        ):
+            widget.setEnabled(bool(enabled))
+        self._update_operation_state()
 
     def _build_gwinstek_page(self) -> QWidget:
         page = QWidget(self)
@@ -400,12 +743,13 @@ class RouteMeasurementDialog(QDialog):
         self._gw_dcr_range_spin.setValue(4)
         layout.addRow(QLabel("DCR range", page), self._gw_dcr_range_spin)
 
-        self._gw_frequency_spin = QDoubleSpinBox(page)
-        self._gw_frequency_spin.setLocale(QLocale.c())
-        self._gw_frequency_spin.setDecimals(3)
-        self._gw_frequency_spin.setRange(10.0, 300_000.0)
-        self._gw_frequency_spin.setSuffix(" Hz")
-        self._gw_frequency_spin.setValue(50.0)
+        self._gw_frequency_spin = _SIPrefixSpinBox(
+            prefixes=FREQUENCY_PREFIXES,
+            base_minimum=10.0,
+            base_maximum=300_000.0,
+            base_value=50.0,
+            parent=page,
+        )
         layout.addRow(QLabel("AC frequency", page), self._gw_frequency_spin)
 
         self._gw_level_mode_combo = QComboBox(page)
@@ -413,20 +757,22 @@ class RouteMeasurementDialog(QDialog):
             self._gw_level_mode_combo.addItem(mode.title(), mode)
         layout.addRow(QLabel("AC level mode", page), self._gw_level_mode_combo)
 
-        self._gw_voltage_spin = QDoubleSpinBox(page)
-        self._gw_voltage_spin.setLocale(QLocale.c())
-        self._gw_voltage_spin.setDecimals(6)
-        self._gw_voltage_spin.setRange(0.000001, 2.0)
-        self._gw_voltage_spin.setSuffix(" V")
-        self._gw_voltage_spin.setValue(0.03)
+        self._gw_voltage_spin = _SIPrefixSpinBox(
+            prefixes=VOLTAGE_PREFIXES,
+            base_minimum=0.01,
+            base_maximum=2.0,
+            base_value=0.03,
+            parent=page,
+        )
         layout.addRow(QLabel("AC voltage", page), self._gw_voltage_spin)
 
-        self._gw_current_spin = QDoubleSpinBox(page)
-        self._gw_current_spin.setLocale(QLocale.c())
-        self._gw_current_spin.setDecimals(9)
-        self._gw_current_spin.setRange(0.000000001, 0.02)
-        self._gw_current_spin.setSuffix(" A")
-        self._gw_current_spin.setValue(0.0001)
+        self._gw_current_spin = _SIPrefixSpinBox(
+            prefixes=CURRENT_PREFIXES,
+            base_minimum=100e-6,
+            base_maximum=20e-3,
+            base_value=100e-6,
+            parent=page,
+        )
         layout.addRow(QLabel("AC current", page), self._gw_current_spin)
 
         self._gw_source_resistance_combo = QComboBox(page)
@@ -459,11 +805,13 @@ class RouteMeasurementDialog(QDialog):
         self._gw_bias_checkbox = QCheckBox("Enable DC bias", page)
         layout.addRow(self._gw_bias_checkbox)
 
-        self._gw_bias_spin = QDoubleSpinBox(page)
-        self._gw_bias_spin.setLocale(QLocale.c())
-        self._gw_bias_spin.setDecimals(3)
-        self._gw_bias_spin.setRange(-2.5, 2.5)
-        self._gw_bias_spin.setSuffix(" V")
+        self._gw_bias_spin = _SIPrefixSpinBox(
+            prefixes=VOLTAGE_PREFIXES,
+            base_minimum=-2.5,
+            base_maximum=2.5,
+            base_value=0.0,
+            parent=page,
+        )
         layout.addRow(QLabel("DC bias", page), self._gw_bias_spin)
 
         self._update_gwinstek_state()
@@ -474,33 +822,54 @@ class RouteMeasurementDialog(QDialog):
         layout = QFormLayout(page)
         layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
-        self._keithley_voltage_spin = QDoubleSpinBox(page)
-        self._keithley_voltage_spin.setLocale(QLocale.c())
-        self._keithley_voltage_spin.setDecimals(6)
-        self._keithley_voltage_spin.setRange(0.000001, 10.0)
-        self._keithley_voltage_spin.setSingleStep(0.001)
-        self._keithley_voltage_spin.setSuffix(" V")
-        self._keithley_voltage_spin.setValue(0.03)
+        self._keithley_voltage_spin = _SIPrefixSpinBox(
+            prefixes=VOLTAGE_PREFIXES,
+            base_minimum=1e-6,
+            base_maximum=10.0,
+            base_value=DEFAULT_KEITHLEY_MEASUREMENT_VOLTAGE_V,
+            parent=page,
+        )
         layout.addRow(QLabel("+/- voltage", page), self._keithley_voltage_spin)
 
-        self._keithley_range_spin = QDoubleSpinBox(page)
-        self._keithley_range_spin.setLocale(QLocale.c())
-        self._keithley_range_spin.setDecimals(6)
-        self._keithley_range_spin.setRange(0.000001, 210.0)
-        self._keithley_range_spin.setSingleStep(0.01)
-        self._keithley_range_spin.setSuffix(" V")
-        self._keithley_range_spin.setValue(0.21)
+        self._keithley_range_spin = _SIPrefixSpinBox(
+            prefixes=VOLTAGE_PREFIXES,
+            base_minimum=0.2,
+            base_maximum=210.0,
+            base_value=DEFAULT_KEITHLEY_SOURCE_RANGE_V,
+            parent=page,
+        )
         layout.addRow(QLabel("Source range", page), self._keithley_range_spin)
 
-        self._keithley_compliance_spin = QDoubleSpinBox(page)
-        self._keithley_compliance_spin.setLocale(QLocale.c())
-        self._keithley_compliance_spin.setDecimals(9)
-        self._keithley_compliance_spin.setRange(0.000000001, 1.0)
-        self._keithley_compliance_spin.setSingleStep(0.000001)
-        self._keithley_compliance_spin.setSuffix(" A")
-        self._keithley_compliance_spin.setValue(500e-6)
+        self._keithley_compliance_spin = _SIPrefixSpinBox(
+            prefixes=CURRENT_PREFIXES,
+            base_minimum=1e-6,
+            base_maximum=1.0,
+            base_value=DEFAULT_KEITHLEY_COMPLIANCE_CURRENT_A,
+            parent=page,
+        )
         layout.addRow(
             QLabel("Compliance current", page), self._keithley_compliance_spin
+        )
+
+        self._keithley_current_range_spin = _SIPrefixSpinBox(
+            prefixes=CURRENT_PREFIXES,
+            base_minimum=1e-6,
+            base_maximum=1.0,
+            base_value=DEFAULT_KEITHLEY_CURRENT_RANGE_A,
+            parent=page,
+        )
+        layout.addRow(QLabel("Current range", page), self._keithley_current_range_spin)
+
+        self._keithley_voltmeter_range_spin = _SIPrefixSpinBox(
+            prefixes=VOLTAGE_PREFIXES,
+            base_minimum=0.01,
+            base_maximum=100.0,
+            base_value=DEFAULT_KEITHLEY_VOLTMETER_RANGE_V,
+            parent=page,
+        )
+        layout.addRow(
+            QLabel("Voltmeter range", page),
+            self._keithley_voltmeter_range_spin,
         )
 
         self._keithley_nplc_spin = QDoubleSpinBox(page)
@@ -508,7 +877,7 @@ class RouteMeasurementDialog(QDialog):
         self._keithley_nplc_spin.setDecimals(2)
         self._keithley_nplc_spin.setRange(0.01, 50.0)
         self._keithley_nplc_spin.setSingleStep(1.0)
-        self._keithley_nplc_spin.setValue(10.0)
+        self._keithley_nplc_spin.setValue(DEFAULT_KEITHLEY_NPLC)
         layout.addRow(QLabel("NPLC", page), self._keithley_nplc_spin)
 
         self._keithley_terminals_combo = QComboBox(page)
@@ -522,8 +891,18 @@ class RouteMeasurementDialog(QDialog):
         self._keithley_delay_spin.setRange(0.0, 10.0)
         self._keithley_delay_spin.setSingleStep(0.01)
         self._keithley_delay_spin.setSuffix(" s")
-        self._keithley_delay_spin.setValue(0.01)
+        self._keithley_delay_spin.setValue(DEFAULT_KEITHLEY_TRIGGER_DELAY_S)
         layout.addRow(QLabel("Trigger delay", page), self._keithley_delay_spin)
+
+        self._keithley_buffer_checkbox = QCheckBox("Use buffer", page)
+        self._keithley_buffer_checkbox.setChecked(DEFAULT_KEITHLEY_USE_BUFFER)
+        layout.addRow(self._keithley_buffer_checkbox)
+
+        self._keithley_trigger_link_checkbox = QCheckBox("Use Trigger Link", page)
+        self._keithley_trigger_link_checkbox.setChecked(
+            DEFAULT_KEITHLEY_USE_TRIGGER_LINK
+        )
+        layout.addRow(self._keithley_trigger_link_checkbox)
 
         return page
 
@@ -539,6 +918,53 @@ class RouteMeasurementDialog(QDialog):
         if path:
             self._csv_path_edit.setText(path)
             self._save_settings_file()
+
+    def _choose_photo_dir(self) -> None:
+        current = self._photo_dir_edit.text().strip()
+        start = current or self._default_photo_dir or str(Path.cwd())
+        path = QFileDialog.getExistingDirectory(
+            self,
+            "Route Photo Directory",
+            start,
+        )
+        if path:
+            self._photo_dir_edit.setText(path)
+            self._save_settings_file()
+
+    def _update_operation_state(self) -> None:
+        mode = str(self._operation_combo.currentData() or ROUTE_OPERATION_MEASURE)
+        photo_enabled = mode in {
+            ROUTE_OPERATION_PHOTO,
+            ROUTE_OPERATION_PHOTO_THEN_MEASURE,
+        }
+        measure_enabled = mode in {
+            ROUTE_OPERATION_MEASURE,
+            ROUTE_OPERATION_PHOTO_THEN_MEASURE,
+        }
+        can_edit = not self._running or self._waiting
+        self._photo_dir_edit.setEnabled(photo_enabled and not self._running)
+        self._photo_browse_button.setEnabled(photo_enabled and not self._running)
+        self._photo_settle_spin.setEnabled(photo_enabled and can_edit)
+        self._photo_autofocus_checkbox.setEnabled(photo_enabled and not self._running)
+        self._photo_autofocus_range_spin.setEnabled(
+            photo_enabled
+            and self._photo_autofocus_checkbox.isChecked()
+            and not self._running
+        )
+        self._csv_path_edit.setEnabled(measure_enabled and not self._running)
+        self._csv_browse_button.setEnabled(measure_enabled and not self._running)
+        self._meter_combo.setEnabled(measure_enabled and not self._running)
+        self._gwinstek_page.setEnabled(measure_enabled and not self._running)
+        self._keithley_page.setEnabled(measure_enabled and not self._running)
+        for widget in (
+            self._initial_measurement_count_spin,
+            self._followup_measurement_count_spin,
+            self._max_relative_rms_spin,
+            self._contact_settle_spin,
+            self._contact_seek_range_spin,
+            self._contact_seek_step_spin,
+        ):
+            widget.setEnabled(measure_enabled and can_edit)
 
     def _load_profile(self) -> None:
         start = str(self._profile_start_directory() / "route-measurement-profile.json")
@@ -618,23 +1044,56 @@ class RouteMeasurementDialog(QDialog):
         dialog = RouteMeasurementRawDataDialog(self._last_raw_samples, self)
         dialog.exec()
 
-    def _emit_run_requested(self) -> None:
+    def _emit_measure_requested(self) -> None:
+        mode = str(self._operation_combo.currentData() or ROUTE_OPERATION_MEASURE)
         csv_path = self._csv_path_edit.text().strip()
-        if not csv_path:
-            self.set_status("Choose a CSV path before running.")
+        if mode in {ROUTE_OPERATION_MEASURE, ROUTE_OPERATION_PHOTO_THEN_MEASURE} and not csv_path:
+            self.set_status("Choose a CSV path before measuring.")
             return
+        photo_dir = self._photo_dir_edit.text().strip()
+        if mode in {ROUTE_OPERATION_PHOTO, ROUTE_OPERATION_PHOTO_THEN_MEASURE} and not photo_dir:
+            self.set_status("Choose a photo directory before capturing.")
+            return
+        self.measure_requested.emit(self.current_configuration())
+
+    def current_configuration(self) -> RouteMeasurementRunConfiguration:
+        """Return the current dialog configuration without changing UI state."""
+
         self._save_settings_file()
-        self.run_requested.emit(
-            RouteMeasurementRunConfiguration(
-                csv_path=csv_path,
-                measurement_count=int(self._measurement_count_spin.value()),
-                start_point=int(self._start_point_spin.value()),
-                max_relative_rms=float(self._max_relative_rms_spin.value()) / 100.0,
-                short_threshold_ohm=float(self._short_threshold_spin.value()),
-                contact_settle_s=float(self._contact_settle_spin.value()),
-                meter=self._meter_configuration(),
-            )
+        return RouteMeasurementRunConfiguration(
+            csv_path=self._csv_path_edit.text().strip(),
+            operation_mode=str(
+                self._operation_combo.currentData() or ROUTE_OPERATION_MEASURE
+            ),
+            photo_output_dir=self._photo_dir_edit.text().strip(),
+            photo_settle_s=float(self._photo_settle_spin.value()),
+            photo_autofocus_enabled=bool(self._photo_autofocus_checkbox.isChecked()),
+            photo_autofocus_range_mm=float(self._photo_autofocus_range_spin.value()),
+            initial_measurement_count=int(
+                self._initial_measurement_count_spin.value()
+            ),
+            followup_measurement_count=int(
+                self._followup_measurement_count_spin.value()
+            ),
+            current_point=int(self._current_point_spin.value()),
+            max_relative_rms=float(self._max_relative_rms_spin.value()) / 100.0,
+            contact_settle_s=float(self._contact_settle_spin.value()),
+            contact_seek_range_mm=float(self._contact_seek_range_spin.value()),
+            contact_seek_step_mm=float(self._contact_seek_step_spin.value()),
+            meter=self._meter_configuration(),
         )
+
+    def _emit_pause_requested(self) -> None:
+        self._pause_button.setEnabled(False)
+        self.pause_requested.emit()
+
+    def _on_current_point_changed(self, value: int) -> None:
+        point_number = min(max(1, int(value)), self._route_point_count)
+        if not self._waiting:
+            with QSignalBlocker(self._jump_point_spin):
+                self._jump_point_spin.setValue(point_number)
+        self._save_settings_file()
+        self.current_point_changed.emit(point_number)
 
     def _profile_start_directory(self) -> Path:
         csv_path = Path(self._csv_path_edit.text().strip() or ".").expanduser()
@@ -650,7 +1109,9 @@ class RouteMeasurementDialog(QDialog):
         try:
             with self._settings_path.open("r", encoding="utf-8") as handle:
                 data = json.load(handle)
-            self._apply_profile_data(data)
+            migrated = self._apply_profile_data(data)
+            if migrated:
+                self._save_settings_file()
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             return
 
@@ -670,13 +1131,32 @@ class RouteMeasurementDialog(QDialog):
     def _profile_data(self) -> dict[str, Any]:
         meter = self._meter_configuration()
         return {
-            "version": 1,
+            "version": ROUTE_MEASUREMENT_PROFILE_VERSION,
             "csv_path": self._csv_path_edit.text().strip(),
-            "measurement_count": int(self._measurement_count_spin.value()),
-            "start_point": int(self._start_point_spin.value()),
+            "operation_mode": str(
+                self._operation_combo.currentData() or ROUTE_OPERATION_MEASURE
+            ),
+            "photo_output_dir": self._photo_dir_edit.text().strip(),
+            "photo_settle_s": float(self._photo_settle_spin.value()),
+            "photo_autofocus_enabled": bool(
+                self._photo_autofocus_checkbox.isChecked()
+            ),
+            "photo_autofocus_range_mm": float(
+                self._photo_autofocus_range_spin.value()
+            ),
+            "measurement_count": self._total_measurement_count(),
+            "initial_measurement_count": int(
+                self._initial_measurement_count_spin.value()
+            ),
+            "followup_measurement_count": int(
+                self._followup_measurement_count_spin.value()
+            ),
+            "current_point": int(self._current_point_spin.value()),
+            "measurement_pending": bool(self._measurement_pending),
             "max_relative_rms": float(self._max_relative_rms_spin.value()) / 100.0,
-            "short_threshold_ohm": float(self._short_threshold_spin.value()),
             "contact_settle_s": float(self._contact_settle_spin.value()),
+            "contact_seek_range_mm": float(self._contact_seek_range_spin.value()),
+            "contact_seek_step_mm": float(self._contact_seek_step_spin.value()),
             "meter": {
                 "meter_type": meter.meter_type,
                 "gwinstek": asdict(meter.gwinstek),
@@ -684,17 +1164,31 @@ class RouteMeasurementDialog(QDialog):
             },
         }
 
-    def _apply_profile_data(self, data: object) -> None:
+    def _apply_profile_data(self, data: object) -> bool:
         if not isinstance(data, dict):
             raise ValueError("Profile JSON root must be an object.")
+        migrate_keithley_defaults = self._should_migrate_keithley_defaults(data)
         csv_path = data.get("csv_path")
         if isinstance(csv_path, str) and csv_path.strip():
             self._csv_path_edit.setText(csv_path.strip())
-        self._set_spinbox_value(
-            self._measurement_count_spin,
-            data.get("measurement_count"),
+        operation_mode = data.get("operation_mode")
+        if isinstance(operation_mode, str):
+            self._set_combo_data(self._operation_combo, operation_mode)
+        photo_output_dir = data.get("photo_output_dir")
+        if isinstance(photo_output_dir, str) and photo_output_dir.strip():
+            self._photo_dir_edit.setText(photo_output_dir.strip())
+        self._set_spinbox_value(self._photo_settle_spin, data.get("photo_settle_s"))
+        self._photo_autofocus_checkbox.setChecked(
+            bool(data.get("photo_autofocus_enabled", False))
         )
-        self._set_spinbox_value(self._start_point_spin, data.get("start_point"))
+        self._set_spinbox_value(
+            self._photo_autofocus_range_spin,
+            data.get("photo_autofocus_range_mm"),
+        )
+        self._apply_measurement_count_profile(data)
+        self._measurement_pending = bool(data.get("measurement_pending", False))
+        current_point = data.get("current_point", data.get("start_point"))
+        self._set_spinbox_value(self._current_point_spin, current_point)
         max_relative_rms = data.get("max_relative_rms")
         try:
             max_relative_rms_percent = float(max_relative_rms) * 100.0
@@ -702,11 +1196,15 @@ class RouteMeasurementDialog(QDialog):
             max_relative_rms_percent = math.nan
         if math.isfinite(max_relative_rms_percent):
             self._max_relative_rms_spin.setValue(max_relative_rms_percent)
-        self._set_spinbox_value(
-            self._short_threshold_spin,
-            data.get("short_threshold_ohm"),
-        )
         self._set_spinbox_value(self._contact_settle_spin, data.get("contact_settle_s"))
+        self._set_spinbox_value(
+            self._contact_seek_range_spin,
+            data.get("contact_seek_range_mm"),
+        )
+        self._set_spinbox_value(
+            self._contact_seek_step_spin,
+            data.get("contact_seek_step_mm"),
+        )
         meter = data.get("meter")
         if isinstance(meter, dict):
             meter_type = meter.get("meter_type")
@@ -714,8 +1212,70 @@ class RouteMeasurementDialog(QDialog):
                 self._set_combo_data(self._meter_combo, meter_type)
             self._apply_gwinstek_profile(meter.get("gwinstek"))
             self._apply_keithley_profile(meter.get("keithley"))
+        if migrate_keithley_defaults:
+            self._apply_default_keithley_route_settings()
         self._update_meter_page()
         self._update_gwinstek_state()
+        self._update_operation_state()
+        return migrate_keithley_defaults
+
+    def _should_migrate_keithley_defaults(self, data: dict[str, Any]) -> bool:
+        try:
+            version = int(data.get("version", 0))
+        except (TypeError, ValueError):
+            version = 0
+        if version >= ROUTE_MEASUREMENT_PROFILE_VERSION:
+            return False
+        meter = data.get("meter")
+        if not isinstance(meter, dict):
+            return False
+        return meter.get("meter_type") == ROUTE_METER_KEITHLEY
+
+    def _apply_default_keithley_route_settings(self) -> None:
+        self._initial_measurement_count_spin.setValue(
+            DEFAULT_ROUTE_INITIAL_MEASUREMENT_COUNT
+        )
+        self._followup_measurement_count_spin.setValue(
+            DEFAULT_ROUTE_FOLLOWUP_MEASUREMENT_COUNT
+        )
+        self._keithley_voltage_spin.set_base_value(
+            DEFAULT_KEITHLEY_MEASUREMENT_VOLTAGE_V
+        )
+        self._keithley_range_spin.set_base_value(DEFAULT_KEITHLEY_SOURCE_RANGE_V)
+        self._keithley_voltmeter_range_spin.set_base_value(
+            DEFAULT_KEITHLEY_VOLTMETER_RANGE_V
+        )
+        self._keithley_current_range_spin.set_base_value(
+            DEFAULT_KEITHLEY_CURRENT_RANGE_A
+        )
+        self._keithley_compliance_spin.set_base_value(
+            DEFAULT_KEITHLEY_COMPLIANCE_CURRENT_A
+        )
+        self._keithley_nplc_spin.setValue(DEFAULT_KEITHLEY_NPLC)
+        self._keithley_delay_spin.setValue(DEFAULT_KEITHLEY_TRIGGER_DELAY_S)
+        self._keithley_buffer_checkbox.setChecked(DEFAULT_KEITHLEY_USE_BUFFER)
+        self._keithley_trigger_link_checkbox.setChecked(
+            DEFAULT_KEITHLEY_USE_TRIGGER_LINK
+        )
+
+    def _apply_measurement_count_profile(self, data: dict[str, Any]) -> None:
+        initial = self._positive_int_or_none(data.get("initial_measurement_count"))
+        followup = self._nonnegative_int_or_none(
+            data.get("followup_measurement_count")
+        )
+        total = self._positive_int_or_none(data.get("measurement_count"))
+        if initial is None and followup is None and total is not None:
+            initial = min(total, DEFAULT_ROUTE_INITIAL_MEASUREMENT_COUNT)
+            followup = max(0, total - initial)
+        if initial is not None:
+            self._initial_measurement_count_spin.setValue(initial)
+        if followup is not None:
+            self._followup_measurement_count_spin.setValue(followup)
+
+    def _total_measurement_count(self) -> int:
+        return int(self._initial_measurement_count_spin.value()) + int(
+            self._followup_measurement_count_spin.value()
+        )
 
     def _apply_gwinstek_profile(self, data: object) -> None:
         if not isinstance(data, dict):
@@ -754,6 +1314,14 @@ class RouteMeasurementDialog(QDialog):
             data.get("source_voltage_range_v"),
         )
         self._set_spinbox_value(
+            self._keithley_voltmeter_range_spin,
+            data.get("voltmeter_range_v"),
+        )
+        self._set_spinbox_value(
+            self._keithley_current_range_spin,
+            data.get("current_range_a"),
+        )
+        self._set_spinbox_value(
             self._keithley_compliance_spin,
             data.get("compliance_current_a"),
         )
@@ -763,6 +1331,12 @@ class RouteMeasurementDialog(QDialog):
             self._keithley_delay_spin,
             data.get("trigger_delay_s"),
         )
+        use_buffer = data.get("use_buffer")
+        if isinstance(use_buffer, bool):
+            self._keithley_buffer_checkbox.setChecked(use_buffer)
+        use_trigger_link = data.get("use_trigger_link")
+        if isinstance(use_trigger_link, bool):
+            self._keithley_trigger_link_checkbox.setChecked(use_trigger_link)
 
     @staticmethod
     def _set_spinbox_value(spinbox, value: object) -> None:
@@ -771,10 +1345,28 @@ class RouteMeasurementDialog(QDialog):
         except (TypeError, ValueError):
             return
         if math.isfinite(numeric):
-            if isinstance(spinbox, QSpinBox):
+            if isinstance(spinbox, _SIPrefixSpinBox):
+                spinbox.set_base_value(numeric)
+            elif isinstance(spinbox, QSpinBox):
                 spinbox.setValue(int(round(numeric)))
             else:
                 spinbox.setValue(numeric)
+
+    @staticmethod
+    def _positive_int_or_none(value: object) -> int | None:
+        try:
+            numeric = int(round(float(value)))
+        except (TypeError, ValueError):
+            return None
+        return numeric if numeric > 0 else None
+
+    @staticmethod
+    def _nonnegative_int_or_none(value: object) -> int | None:
+        try:
+            numeric = int(round(float(value)))
+        except (TypeError, ValueError):
+            return None
+        return numeric if numeric >= 0 else None
 
     @staticmethod
     def _set_combo_data(combo: QComboBox, value: object) -> None:
@@ -799,10 +1391,10 @@ class RouteMeasurementDialog(QDialog):
                 range_mode=str(self._gw_range_mode_combo.currentData() or "AUTO"),
                 impedance_range=int(self._gw_impedance_range_spin.value()),
                 dcr_range=int(self._gw_dcr_range_spin.value()),
-                frequency_hz=float(self._gw_frequency_spin.value()),
+                frequency_hz=self._gw_frequency_spin.base_value(),
                 level_mode=str(self._gw_level_mode_combo.currentData() or "VOLTAGE"),
-                voltage_level_v=float(self._gw_voltage_spin.value()),
-                current_level_a=float(self._gw_current_spin.value()),
+                voltage_level_v=self._gw_voltage_spin.base_value(),
+                current_level_a=self._gw_current_spin.base_value(),
                 source_resistance_ohm=int(
                     self._gw_source_resistance_combo.currentData() or 100
                 ),
@@ -810,15 +1402,19 @@ class RouteMeasurementDialog(QDialog):
                 aperture_averages=int(self._gw_averages_spin.value()),
                 trigger_delay_s=float(self._gw_trigger_delay_spin.value()),
                 bias_enabled=self._gw_bias_checkbox.isChecked(),
-                bias_level_v=float(self._gw_bias_spin.value()),
+                bias_level_v=self._gw_bias_spin.base_value(),
             ),
             keithley=KeithleyRouteMeterSettings(
-                measurement_voltage_v=float(self._keithley_voltage_spin.value()),
-                source_voltage_range_v=float(self._keithley_range_spin.value()),
-                compliance_current_a=float(self._keithley_compliance_spin.value()),
+                measurement_voltage_v=self._keithley_voltage_spin.base_value(),
+                source_voltage_range_v=self._keithley_range_spin.base_value(),
+                voltmeter_range_v=self._keithley_voltmeter_range_spin.base_value(),
+                current_range_a=self._keithley_current_range_spin.base_value(),
+                compliance_current_a=self._keithley_compliance_spin.base_value(),
                 nplc=float(self._keithley_nplc_spin.value()),
                 terminals=str(self._keithley_terminals_combo.currentData() or "rear"),
                 trigger_delay_s=float(self._keithley_delay_spin.value()),
+                use_buffer=self._keithley_buffer_checkbox.isChecked(),
+                use_trigger_link=self._keithley_trigger_link_checkbox.isChecked(),
             ),
         )
 
@@ -864,22 +1460,97 @@ class _RouteMeasurementHistogram(QWidget):
         max_count = max((max(item) if item else 0 for item in counts), default=1)
         max_count = max(1, max_count)
 
-        plot = self.rect().adjusted(10, 12, -10, -24)
+        metrics = painter.fontMetrics()
+        left_margin = max(64, metrics.horizontalAdvance(str(max_count)) + 34)
+        top_margin = 26 if len(series) > 1 else 18
+        bottom_margin = 42
+        plot = self.rect().adjusted(left_margin, top_margin, -12, -bottom_margin)
         if plot.width() <= 0 or plot.height() <= 0:
             return
+        scale, unit = _resistance_axis_unit(values)
+        x_ticks = (minimum, minimum + (maximum - minimum) * 0.5, maximum)
+        x_decimals = _axis_tick_decimals((maximum - minimum) / scale)
         bar_width = plot.width() / bin_count
-        painter.setPen(self.palette().mid().color())
+        axis_color = self.palette().mid().color()
+        grid_color = QColor(axis_color)
+        grid_color.setAlpha(90)
+
+        painter.setPen(axis_color)
         painter.drawLine(plot.bottomLeft(), plot.bottomRight())
+        painter.drawLine(plot.bottomLeft(), plot.topLeft())
+
+        for tick in _count_axis_ticks(max_count):
+            y = plot.bottom() - plot.height() * (tick / max_count)
+            painter.setPen(grid_color if tick > 0 else axis_color)
+            painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y))
+            painter.setPen(axis_color)
+            label_rect = QRectF(
+                20,
+                y - metrics.height() / 2,
+                plot.left() - 26,
+                metrics.height(),
+            )
+            painter.drawText(label_rect, Qt.AlignRight | Qt.AlignVCenter, str(tick))
+
+        painter.save()
+        painter.setPen(axis_color)
+        painter.translate(4, plot.bottom())
+        painter.rotate(-90)
         painter.drawText(
-            self.rect().adjusted(10, 0, -10, -2),
-            Qt.AlignBottom | Qt.AlignLeft,
-            f"{_format_ohm(minimum)}",
+            QRectF(0, 0, plot.height(), metrics.height()),
+            Qt.AlignCenter,
+            "samples",
         )
-        painter.drawText(
-            self.rect().adjusted(10, 0, -10, -2),
-            Qt.AlignBottom | Qt.AlignRight,
-            f"{_format_ohm(maximum)}",
+        painter.restore()
+
+        painter.setPen(axis_color)
+        for tick in x_ticks:
+            x = plot.left() + plot.width() * ((tick - minimum) / (maximum - minimum))
+            painter.drawLine(
+                int(round(x)),
+                plot.bottom(),
+                int(round(x)),
+                plot.bottom() + 4,
+            )
+            label = f"{tick / scale:.{x_decimals}f}"
+            label_width = max(56, metrics.horizontalAdvance(label) + 8)
+            if tick == minimum:
+                label_x = plot.left()
+                alignment = Qt.AlignLeft | Qt.AlignVCenter
+            elif tick == maximum:
+                label_x = plot.right() - label_width
+                alignment = Qt.AlignRight | Qt.AlignVCenter
+            else:
+                label_x = x - label_width / 2
+                alignment = Qt.AlignCenter
+            painter.drawText(
+                QRectF(label_x, plot.bottom() + 5, label_width, metrics.height()),
+                alignment,
+                label,
+            )
+        x_axis_title_rect = QRectF(
+            plot.left(),
+            self.height() - metrics.height() - 2,
+            plot.width(),
+            metrics.height(),
         )
+        painter.drawText(x_axis_title_rect, Qt.AlignCenter, self._x_axis_label(unit))
+
+        if len(series) > 1:
+            legend_x = plot.right()
+            for label, color, _data in reversed(series):
+                text_width = metrics.horizontalAdvance(label)
+                legend_x -= text_width + 22
+                painter.setPen(QColor(color).darker(125))
+                painter.setBrush(QColor(color))
+                painter.drawRect(QRectF(legend_x, 6, 10, 10))
+                painter.setPen(axis_color)
+                painter.drawText(
+                    QRectF(legend_x + 14, 3, text_width + 4, metrics.height()),
+                    Qt.AlignLeft | Qt.AlignVCenter,
+                    label,
+                )
+                legend_x -= 8
 
         for series_index, (_label, color, _data) in enumerate(series):
             count_row = counts[series_index]
@@ -904,6 +1575,14 @@ class _RouteMeasurementHistogram(QWidget):
                     height,
                 )
                 painter.drawRect(rect)
+        painter.setPen(axis_color)
+        painter.drawLine(plot.bottomLeft(), plot.bottomRight())
+        painter.drawLine(plot.bottomLeft(), plot.topLeft())
+
+    def _x_axis_label(self, unit: str) -> str:
+        if self._mode == "polarity":
+            return f"V/I resistance ({unit})"
+        return f"dV/dI resistance ({unit})"
 
     def _series(self) -> list[tuple[str, QColor, list[float]]]:
         if self._mode == "polarity":
@@ -1011,6 +1690,38 @@ def _histogram_counts(
         index = max(0, min(bin_count - 1, index))
         counts[index] += 1
     return counts
+
+
+def _resistance_axis_unit(values: list[float]) -> tuple[float, str]:
+    finite_values = [abs(value) for value in values if math.isfinite(value)]
+    reference = max(finite_values, default=1.0)
+    for scale, label in (
+        (1e9, "GOhm"),
+        (1e6, "MOhm"),
+        (1e3, "kOhm"),
+        (1.0, "Ohm"),
+        (1e-3, "mOhm"),
+        (1e-6, "uOhm"),
+    ):
+        if reference >= scale:
+            return scale, label
+    return 1.0, "Ohm"
+
+
+def _axis_tick_decimals(scaled_span: float) -> int:
+    span = abs(float(scaled_span))
+    if not math.isfinite(span) or span <= 0.0:
+        return 3
+    tick_step = span / 2.0
+    decimals = int(math.ceil(-math.log10(tick_step))) + 1
+    return max(0, min(6, decimals))
+
+
+def _count_axis_ticks(max_count: int) -> list[int]:
+    if max_count <= 1:
+        return [0, 1]
+    middle = max(1, max_count // 2)
+    return sorted({0, middle, max_count})
 
 
 def _raw_data_rows(samples: tuple[object, ...]) -> list[list[str]]:

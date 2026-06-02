@@ -116,6 +116,68 @@ class _FocusSweepResult:
     edge_peak: bool
 
 
+@dataclass(frozen=True)
+class AutofocusResult:
+    """Structured autofocus result suitable for logs and height maps."""
+
+    objective_name: str
+    mode: str
+    start_z_mm: float
+    best_z_mm: float
+    best_score: float
+    sample_count: int
+    edge_peak: bool
+    range_mm: float
+    fine_step_mm: float
+    lower_z_mm: float
+    upper_z_mm: float
+
+    @property
+    def delta_um(self) -> float:
+        return (float(self.best_z_mm) - float(self.start_z_mm)) * 1000.0
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "objective_name": self.objective_name,
+            "mode": self.mode,
+            "focus_start_z_mm": float(self.start_z_mm),
+            "focus_best_z_mm": float(self.best_z_mm),
+            "focus_delta_um": float(self.delta_um),
+            "focus_score": float(self.best_score),
+            "focus_sample_count": int(self.sample_count),
+            "focus_edge_peak": bool(self.edge_peak),
+            "autofocus_range_mm": float(self.range_mm),
+            "autofocus_fine_step_mm": float(self.fine_step_mm),
+            "autofocus_lower_z_mm": float(self.lower_z_mm),
+            "autofocus_upper_z_mm": float(self.upper_z_mm),
+        }
+
+    def summary(self) -> str:
+        message = (
+            f"Autofocus {self.objective_name} {self.mode} complete. "
+            f"Best score {self.best_score:.2f} at Z={self.best_z_mm:.4f} mm "
+            f"(dZ={self.delta_um:+.1f} um) from {self.sample_count} frames."
+        )
+        if self.edge_peak:
+            message += " Peak was near the search edge."
+        return message
+
+    def __str__(self) -> str:
+        return self.summary()
+
+
+@dataclass(frozen=True)
+class _AutofocusContext:
+    objective_name: str
+    start_z: float
+    min_z: float
+    max_z: float
+    lower_z: float
+    upper_z: float
+    local_range_mm: float
+    fine_step_mm: float
+
+
 class StageController(QObject):
     """Translate mouse clicks into stage movements via serial commands."""
 
@@ -158,7 +220,7 @@ class StageController(QObject):
     CALIBRATION_VERIFY_TARGET_PIXELS = 40.0
     DEFAULT_FEEDRATE = 600.0
     MIN_FEEDRATE = 1.0
-    DEFAULT_NEEDLE_CONTACT_ZONE_MM = 0.1
+    DEFAULT_NEEDLE_CONTACT_ZONE_MM = 0.05
     MOVE_IDLE_TIMEOUT_MARGIN_S = 5.0
     MOVE_IDLE_TIMEOUT_MIN_S = 10.0
     MOVE_IDLE_TIMEOUT_MAX_S = 3600.0
@@ -1408,7 +1470,38 @@ class StageController(QObject):
         self._set_needles_state(False, known=False)
 
     def cancel_active_task(self, reason: str = "Operation cancelled.") -> None:
-        """Signal any active task to stop as soon as possible."""
+        """Signal any active task to stop without forcing a controller reset."""
+
+        self._cancel_event.set()
+        with self._task_lock:
+            had_needles_action = (
+                self._active_needles_action is not None
+                or bool(self._queued_needles_actions)
+                or bool(self._oscillation_needles_actions)
+            )
+            self._queued_needles_actions.clear()
+            self._oscillation_needles_actions.clear()
+            self._active_needles_action = None
+            self._active_needles_programmed_feedrate = None
+        self.status_message.emit(reason)
+        self.queue_jog_stop()
+        if had_needles_action:
+            self._set_needles_state(False, known=False)
+
+    def cancel_active_motion(self, reason: str = "Motion cancel requested.") -> None:
+        """Cancel a jog-backed motion without resetting controller state."""
+
+        self._cancel_event.set()
+        self.queue_jog_stop()
+        self.status_message.emit(reason)
+
+    def reset_controller(
+        self,
+        *,
+        source: str = "unknown",
+        reason: str = "Controller reset requested.",
+    ) -> None:
+        """Abort current work and request a FluidNC soft reset."""
 
         self._cancel_event.set()
         with self._task_lock:
@@ -1417,16 +1510,7 @@ class StageController(QObject):
             self._active_needles_action = None
             self._active_needles_programmed_feedrate = None
         self.status_message.emit(reason)
-        self._update_homing_status(set())
-        self._set_needles_state(False, known=False)
-        self.queue_soft_reset(source="cancel_active_task")
-
-    def cancel_active_motion(self, reason: str = "Motion cancel requested.") -> None:
-        """Cancel a jog-backed motion without resetting controller state."""
-
-        self._cancel_event.set()
-        self.queue_jog_stop()
-        self.status_message.emit(reason)
+        self.queue_soft_reset(source=source)
 
     def is_busy(self) -> bool:
         """Return True when a background movement task is currently running."""
@@ -1490,6 +1574,75 @@ class StageController(QObject):
             return message
         except StageControllerError as exc:
             self.needles_action_finished.emit(False, str(exc), action_key)
+            raise
+
+    def run_external_needles_adjust(
+        self,
+        step_mm: float,
+        feedrate: float | None = None,
+    ) -> str:
+        """Run a blocking A-axis needle adjustment inside an external reservation."""
+
+        action = "adjust"
+        self.needles_action_started.emit(action)
+        try:
+            self._check_cancelled()
+            message = self._perform_needles_adjust(float(step_mm), feedrate)
+            self.needles_action_finished.emit(True, message, action)
+            return message
+        except StageControllerError as exc:
+            self.needles_action_finished.emit(False, str(exc), action)
+            raise
+
+    def run_external_needles_lower_to_depth_below_down(
+        self,
+        depth_mm: float,
+        feedrate: float | None = None,
+    ) -> str:
+        """Lower needles directly to a depth below the saved down position."""
+
+        action = "lower"
+        self.needles_action_started.emit(action)
+        try:
+            self._check_cancelled()
+            message = self._perform_needles_lower_to_depth_below_down(
+                float(depth_mm),
+                feedrate,
+            )
+            self.needles_action_finished.emit(True, message, action)
+            return message
+        except StageControllerError as exc:
+            self.needles_action_finished.emit(False, str(exc), action)
+            raise
+
+    def run_external_local_autofocus(
+        self,
+        *,
+        range_mm: float,
+        step_mm: float | None = None,
+    ) -> AutofocusResult:
+        """Run a fast local Z autofocus inside an external reservation."""
+
+        self.movement_started.emit()
+        try:
+            self._check_cancelled()
+            serial_connection = self._serial
+            if serial_connection is None or not serial_connection.is_open:
+                raise StageControllerError("Serial connection is not available.")
+            with self._serial_session_lock:
+                result = self._run_local_autofocus_locked(
+                    serial_connection,
+                    range_mm=range_mm,
+                    step_mm=step_mm,
+                )
+            message = result.summary()
+            self.autofocus_finished.emit(True, message)
+            self.movement_finished.emit(True, message)
+            return result
+        except StageControllerError as exc:
+            message = str(exc)
+            self.autofocus_finished.emit(False, message)
+            self.movement_finished.emit(False, message)
             raise
 
     def current_stage_position(self) -> tuple[float, ...]:
@@ -2276,7 +2429,10 @@ class StageController(QObject):
         target_y_mm: float,
     ) -> str:
         with self._serial_session_lock:
-            status = self._query_synced_status_for_absolute_motion(serial_connection)
+            status = self._query_synced_status_for_absolute_motion(
+                serial_connection,
+                refresh_coordinate_state=False,
+            )
             if status is None:
                 raise StageControllerError("Unable to read current stage position.")
             self._require_homed_axes(status, {"X", "Y"})
@@ -2296,6 +2452,7 @@ class StageController(QObject):
             self._send_relative_move(
                 serial_connection,
                 move,
+                as_jog=True,
                 motion_started_callback=lambda _move, feedrate: (
                     self.absolute_xy_move_started.emit(
                         float(target_x_mm),
@@ -2319,7 +2476,10 @@ class StageController(QObject):
         label: str,
     ) -> str:
         with self._serial_session_lock:
-            status = self._query_synced_status_for_absolute_motion(serial_connection)
+            status = self._query_synced_status_for_absolute_motion(
+                serial_connection,
+                refresh_coordinate_state=False,
+            )
             if status is None:
                 raise StageControllerError("Unable to read current stage position.")
             self._require_homed_axes(status, {"X", "Y", "Z"})
@@ -2345,6 +2505,7 @@ class StageController(QObject):
                 self._send_relative_move(
                     serial_connection,
                     MoveVector(z=transit_z - current_z),
+                    as_jog=True,
                 )
                 current_z = transit_z
                 moved = True
@@ -2356,7 +2517,7 @@ class StageController(QObject):
                 self.status_message.emit(
                     f"Moving to {label} X={target_x_mm:.3f} mm, Y={target_y_mm:.3f} mm"
                 )
-                self._send_relative_move(serial_connection, xy_move)
+                self._send_relative_move(serial_connection, xy_move, as_jog=True)
                 current_x = float(target_position[0])
                 current_y = float(target_position[1])
                 moved = True
@@ -2369,6 +2530,7 @@ class StageController(QObject):
                 self._send_relative_move(
                     serial_connection,
                     MoveVector(z=delta_z),
+                    as_jog=True,
                 )
                 moved = True
 
@@ -2383,9 +2545,22 @@ class StageController(QObject):
             )
 
     def _query_synced_status_for_absolute_motion(
-        self, serial_connection: serial.Serial
+        self,
+        serial_connection: serial.Serial,
+        *,
+        refresh_coordinate_state: bool = True,
     ) -> Optional[_Status]:
         """Refresh coordinate-system state before absolute position reads and moves."""
+
+        if not refresh_coordinate_state:
+            state_was_stale = self._controller_state_stale
+            status = self._query_status(serial_connection)
+            if (
+                status is not None
+                and self._position_for_configured_mode(status) is not None
+                and not state_was_stale
+            ):
+                return status
 
         if self._position_reporting_mode != "machine" or self._controller_state_stale:
             self._refresh_coordinate_system_state(
@@ -2431,6 +2606,7 @@ class StageController(QObject):
             self._send_relative_move(
                 serial_connection,
                 move,
+                as_jog=True,
                 motion_started_callback=self._emit_click_move_started,
             )
             return before_counter
@@ -2451,6 +2627,7 @@ class StageController(QObject):
                     serial_connection,
                     MoveVector(b=delta_deg),
                     allow_relative=True,
+                    as_jog=True,
                 )
             self.movement_finished.emit(
                 True,
@@ -2479,47 +2656,21 @@ class StageController(QObject):
     def _run_autofocus_locked(self, serial_connection: serial.Serial) -> None:
         """Run autofocus while the caller owns serial access."""
 
-        self._relative_warning_emitted = False
-        objective_name = str(self._active_objective_name)
-        if not self._needles_up:
-            self.status_message.emit("Autofocus: homing A axis.")
-            self._write_command(serial_connection, "$HA")
-            self._wait_for_ok(serial_connection, timeout=30.0)
-            self._wait_for_idle(serial_connection, timeout=30.0)
-            self._set_needles_state(True, known=True, zone="raise")
-        self._move_safety_check()
-
-        self._ensure_axis_limits(serial_connection, required_axes=("Z",))
-        local_range = float(self._objective_autofocus_range_mm)
-        fine_step = float(self._objective_autofocus_fine_step_mm)
-        if fine_step <= 0:
-            raise StageControllerError("Autofocus parameters are invalid.")
+        context = self._prepare_autofocus_context_locked(
+            serial_connection,
+            range_mm=self._objective_autofocus_range_mm,
+            step_mm=self._objective_autofocus_fine_step_mm,
+        )
+        objective_name = context.objective_name
+        local_range = context.local_range_mm
+        fine_step = context.fine_step_mm
         sweep_feedrate = self._autofocus_sweep_feedrate_mm_min(fine_step)
-
-        status = self._query_synced_status_for_absolute_motion(serial_connection)
-        position = self._position_for_configured_mode(status)
-        if status is None or position is None or len(position) < 3:
-            raise StageControllerError("Unable to read Z position for autofocus.")
-        self._require_homed_axes(status, {"Z"}, allow_relative=True)
-        start_z = float(position[2])
-        z_limits = self._axis_limits_for_configured_mode("Z", status)
-        if not z_limits:
-            raise StageControllerError("Z axis limits unavailable.")
-        min_z, max_z = z_limits
-        if start_z < min_z or start_z > max_z:
-            raise StageControllerError(
-                f"Current Z position {start_z:.3f} is outside limits ({min_z:.3f}, {max_z:.3f})."
-            )
-        lower_limit = max(min_z - start_z, -local_range)
-        upper_limit = min(max_z - start_z, local_range)
-        if upper_limit <= lower_limit:
-            raise StageControllerError("Z axis range near current position is empty.")
 
         logger.debug(
             "Autofocus %s parameters start_z=%.6f range=%.6f fine_step=%.6f "
             "sweep_feedrate=%.6f",
             objective_name,
-            start_z,
+            context.start_z,
             local_range,
             fine_step,
             sweep_feedrate,
@@ -2529,16 +2680,16 @@ class StageController(QObject):
         )
         coarse = self._run_focus_sweep_locked(
             serial_connection,
-            start_z + lower_limit,
-            start_z + upper_limit,
+            context.lower_z,
+            context.upper_z,
             feedrate=sweep_feedrate,
         )
         fine_half_range = min(
             max(fine_step * 6.0, local_range * 0.15),
             local_range,
         )
-        fine_lower = max(min_z, coarse.best_z - fine_half_range)
-        fine_upper = min(max_z, coarse.best_z + fine_half_range)
+        fine_lower = max(context.min_z, coarse.best_z - fine_half_range)
+        fine_upper = min(context.max_z, coarse.best_z + fine_half_range)
         best = coarse
         if fine_upper - fine_lower >= fine_step * 2.0:
             self.status_message.emit(
@@ -2557,14 +2708,14 @@ class StageController(QObject):
         best = self._run_static_focus_refinement_locked(
             serial_connection,
             best.best_z,
-            min_z=min_z,
-            max_z=max_z,
+            min_z=context.min_z,
+            max_z=context.max_z,
             step_mm=fine_step,
         )
         self._approach_z_from_below_locked(
             serial_connection,
             best.best_z,
-            min_z=min_z,
+            min_z=context.min_z,
             fine_step_mm=fine_step,
         )
         message = (
@@ -2575,6 +2726,110 @@ class StageController(QObject):
         if best.edge_peak:
             message += " Peak was near a search edge; consider increasing range."
         self.autofocus_finished.emit(True, message)
+
+    def _run_local_autofocus_locked(
+        self,
+        serial_connection: serial.Serial,
+        *,
+        range_mm: float,
+        step_mm: float | None = None,
+    ) -> AutofocusResult:
+        context = self._prepare_autofocus_context_locked(
+            serial_connection,
+            range_mm=range_mm,
+            step_mm=step_mm,
+        )
+        self.status_message.emit(
+            "Autofocus "
+            f"{context.objective_name}: local search within "
+            f"+/-{context.local_range_mm:.3f} mm."
+        )
+        best = self._run_static_focus_refinement_locked(
+            serial_connection,
+            context.start_z,
+            min_z=context.lower_z,
+            max_z=context.upper_z,
+            step_mm=context.fine_step_mm,
+        )
+        self._approach_z_from_below_locked(
+            serial_connection,
+            best.best_z,
+            min_z=context.min_z,
+            fine_step_mm=context.fine_step_mm,
+        )
+        return AutofocusResult(
+            objective_name=context.objective_name,
+            mode="local",
+            start_z_mm=float(context.start_z),
+            best_z_mm=float(best.best_z),
+            best_score=float(best.best_score),
+            sample_count=int(best.sample_count),
+            edge_peak=bool(best.edge_peak),
+            range_mm=float(context.local_range_mm),
+            fine_step_mm=float(context.fine_step_mm),
+            lower_z_mm=float(context.lower_z),
+            upper_z_mm=float(context.upper_z),
+        )
+
+    def _prepare_autofocus_context_locked(
+        self,
+        serial_connection: serial.Serial,
+        *,
+        range_mm: float,
+        step_mm: float | None,
+    ) -> _AutofocusContext:
+        self._relative_warning_emitted = False
+        objective_name = str(self._active_objective_name)
+        if not self._needles_up:
+            self.status_message.emit("Autofocus: homing A axis.")
+            self._write_command(serial_connection, "$HA")
+            self._wait_for_ok(serial_connection, timeout=30.0)
+            self._wait_for_idle(serial_connection, timeout=30.0)
+            self._set_needles_state(True, known=True, zone="raise")
+        self._move_safety_check()
+
+        self._ensure_axis_limits(serial_connection, required_axes=("Z",))
+        local_range = self._positive_profile_value(
+            range_mm,
+            self._objective_autofocus_range_mm,
+        )
+        fine_step = self._positive_profile_value(
+            self._objective_autofocus_fine_step_mm
+            if step_mm is None
+            else step_mm,
+            self._objective_autofocus_fine_step_mm,
+        )
+        if fine_step <= 0:
+            raise StageControllerError("Autofocus parameters are invalid.")
+
+        status = self._query_synced_status_for_absolute_motion(serial_connection)
+        position = self._position_for_configured_mode(status)
+        if status is None or position is None or len(position) < 3:
+            raise StageControllerError("Unable to read Z position for autofocus.")
+        self._require_homed_axes(status, {"Z"}, allow_relative=True)
+        start_z = float(position[2])
+        z_limits = self._axis_limits_for_configured_mode("Z", status)
+        if not z_limits:
+            raise StageControllerError("Z axis limits unavailable.")
+        min_z, max_z = z_limits
+        if start_z < min_z or start_z > max_z:
+            raise StageControllerError(
+                f"Current Z position {start_z:.3f} is outside limits ({min_z:.3f}, {max_z:.3f})."
+            )
+        lower_z = max(min_z, start_z - local_range)
+        upper_z = min(max_z, start_z + local_range)
+        if upper_z <= lower_z:
+            raise StageControllerError("Z axis range near current position is empty.")
+        return _AutofocusContext(
+            objective_name=objective_name,
+            start_z=start_z,
+            min_z=float(min_z),
+            max_z=float(max_z),
+            lower_z=float(lower_z),
+            upper_z=float(upper_z),
+            local_range_mm=float(local_range),
+            fine_step_mm=float(fine_step),
+        )
 
     def _run_focus_sweep_locked(
         self,
@@ -2599,6 +2854,7 @@ class StageController(QObject):
                 serial_connection,
                 MoveVector(z=lower_z - current_z),
                 allow_relative=True,
+                as_jog=True,
             )
 
         with self._frame_condition:
@@ -2615,6 +2871,7 @@ class StageController(QObject):
             MoveVector(z=upper_z - lower_z),
             allow_relative=True,
             feedrate=feedrate,
+            as_jog=True,
         )
         actual_ended_at = time.monotonic()
         samples = self._frame_samples(
@@ -2902,6 +3159,7 @@ class StageController(QObject):
                 serial_connection,
                 MoveVector(z=approach_z - current_z),
                 allow_relative=True,
+                as_jog=True,
             )
             current_z = approach_z
         if abs(target - current_z) >= 1e-5:
@@ -2909,6 +3167,7 @@ class StageController(QObject):
                 serial_connection,
                 MoveVector(z=target - current_z),
                 allow_relative=True,
+                as_jog=True,
             )
 
     def _frame_samples(
@@ -3426,6 +3685,7 @@ class StageController(QObject):
         self._send_relative_move(
             serial_connection,
             move,
+            as_jog=True,
             motion_started_callback=self._emit_click_move_started,
         )
         return (True, before_counter)
@@ -3529,10 +3789,15 @@ class StageController(QObject):
         current_a: float,
         feedrate: float | None,
         status: _Status | None = None,
+        *,
+        target_lowering: float | None = None,
     ) -> list[tuple[float, float, bool]]:
         """Return physical lowering targets, feedrates, and slow-zone markers."""
 
-        target_lowering = self._needle_target_lowering_for_action(action)
+        if target_lowering is None:
+            target_lowering = self._needle_target_lowering_for_action(action)
+        else:
+            target_lowering = max(0.0, float(target_lowering))
         target_a = self._axis_a_configured_coordinate_for_lowering(
             target_lowering,
             status,
@@ -3589,6 +3854,67 @@ class StageController(QObject):
             append_segment(target_lowering, fast_feedrate, False)
         return segments
 
+    def _send_needle_motion_profile_locked(
+        self,
+        serial_connection: serial.Serial,
+        *,
+        action: str,
+        current_a: float,
+        target_lowering: float,
+        feedrate: float | None,
+        status: _Status | None,
+    ) -> bool:
+        target_a = self._axis_a_configured_coordinate_for_lowering(
+            target_lowering,
+            status,
+        )
+        segments = self._needle_motion_profile_segments(
+            action,
+            current_a,
+            feedrate,
+            status,
+            target_lowering=target_lowering,
+        )
+        if not segments:
+            self._update_needles_from_a_position(target_a)
+            return False
+        for segment_lowering, segment_feedrate, slow_zone in segments:
+            self._check_cancelled()
+            segment_target_a = self._axis_a_configured_coordinate_for_lowering(
+                segment_lowering,
+                status,
+            )
+            if abs(segment_target_a - current_a) < 1e-6:
+                continue
+            if slow_zone:
+                programmed_feedrate = self._begin_needles_feedrate_control(
+                    action,
+                    segment_feedrate,
+                )
+                try:
+                    self._send_absolute_axis_move(
+                        serial_connection,
+                        "A",
+                        segment_target_a,
+                        ignore_needle_safety=True,
+                        feedrate=programmed_feedrate,
+                        as_jog=True,
+                    )
+                finally:
+                    self._end_needles_feedrate_control()
+            else:
+                self._send_absolute_axis_move(
+                    serial_connection,
+                    "A",
+                    segment_target_a,
+                    ignore_needle_safety=True,
+                    feedrate=segment_feedrate,
+                    as_jog=True,
+                )
+            current_a = segment_target_a
+        self._update_needles_from_a_position(target_a)
+        return True
+
     def _run_needles_action(
         self,
         action: str,
@@ -3626,13 +3952,15 @@ class StageController(QObject):
                     target_lowering,
                     status,
                 )
-                segments = self._needle_motion_profile_segments(
-                    action,
-                    current_a,
-                    feedrate,
-                    status,
+                moved = self._send_needle_motion_profile_locked(
+                    serial_connection,
+                    action=action,
+                    current_a=current_a,
+                    target_lowering=target_lowering,
+                    feedrate=feedrate,
+                    status=status,
                 )
-                if not segments:
+                if not moved:
                     update_a = current_a if action == "lift" else target_a
                     self._update_needles_from_a_position(update_a)
                     if action == "raise":
@@ -3640,45 +3968,45 @@ class StageController(QObject):
                     if action == "lift":
                         return "Needles already lifted."
                     return "Needles already lowered."
-                for segment_lowering, segment_feedrate, slow_zone in segments:
-                    self._check_cancelled()
-                    segment_target_a = self._axis_a_configured_coordinate_for_lowering(
-                        segment_lowering,
-                        status,
-                    )
-                    if abs(segment_target_a - current_a) < 1e-6:
-                        continue
-                    if slow_zone:
-                        programmed_feedrate = self._begin_needles_feedrate_control(
-                            action,
-                            segment_feedrate,
-                        )
-                        try:
-                            self._send_absolute_axis_move(
-                                serial_connection,
-                                "A",
-                                segment_target_a,
-                                ignore_needle_safety=True,
-                                feedrate=programmed_feedrate,
-                            )
-                        finally:
-                            self._end_needles_feedrate_control()
-                    else:
-                        self._send_absolute_axis_move(
-                            serial_connection,
-                            "A",
-                            segment_target_a,
-                            ignore_needle_safety=True,
-                            feedrate=segment_feedrate,
-                        )
-                    current_a = segment_target_a
-                self._update_needles_from_a_position(target_a)
                 if action == "raise":
                     return "Needles raised."
                 if action == "lift":
                     return "Needles lifted."
                 return "Needles lowered."
             raise StageControllerError(f"Unknown needle action: {action}.")
+
+    def _perform_needles_lower_to_depth_below_down(
+        self,
+        depth_mm: float,
+        feedrate: float | None = None,
+    ) -> str:
+        serial_connection = self._serial
+        if serial_connection is None or not serial_connection.is_open:
+            raise StageControllerError("Serial connection is not available.")
+        if not math.isfinite(depth_mm):
+            raise StageControllerError("Needle search depth must be finite.")
+        depth_mm = max(0.0, float(depth_mm))
+        with self._serial_session_lock:
+            status = self._query_status(serial_connection)
+            current_a = self._axis_value_for_configured_mode(status, "A")
+            if status is None or current_a is None:
+                raise StageControllerError("Unable to read A position for needles.")
+            self._require_homed_axes(status, {"A"})
+            down_lowering = self._needle_target_lowering_for_action("lower")
+            target_lowering = down_lowering + depth_mm
+            moved = self._send_needle_motion_profile_locked(
+                serial_connection,
+                action="lower",
+                current_a=current_a,
+                target_lowering=target_lowering,
+                feedrate=feedrate,
+                status=status,
+            )
+            if not moved:
+                return "Needles already lowered."
+        if depth_mm <= 1e-9:
+            return "Needles lowered."
+        return f"Needles lowered to {depth_mm:.4f} mm below saved down."
 
     def _run_manual_axis_move(
         self,
@@ -3721,6 +4049,7 @@ class StageController(QObject):
                     feedrate=feedrate,
                     wait_for_completion=False,
                     allow_unhomed=allow_unhomed or mode == "G91",
+                    as_jog=True,
                 )
             self.movement_finished.emit(
                 True,
@@ -3829,51 +4158,10 @@ class StageController(QObject):
     ) -> None:
         action = "adjust"
         try:
-            serial_connection = self._serial
-            if serial_connection is None or not serial_connection.is_open:
-                raise StageControllerError("Serial connection is not available.")
-            if abs(step_mm) < 1e-6:
-                self.needles_action_finished.emit(True, "Needle position unchanged.", action)
-                return
-            with self._serial_session_lock:
-                status = self._query_status(serial_connection)
-                if status is None or self._axis_value_for_configured_mode(status, "A") is None:
-                    raise StageControllerError("Unable to read A position for needles.")
-                self._require_homed_axes(status, {"A"})
-                current_a = self._axis_value_for_configured_mode(status, "A")
-                if current_a is None:
-                    raise StageControllerError("Unable to read A position for needles.")
-                target_a = self._axis_a_gcode_coordinate_for_lowering_step(
-                    current_a,
-                    step_mm,
-                )
-                if abs(target_a - current_a) < 1e-6:
-                    self.needles_action_finished.emit(
-                        True, "Needle position unchanged.", action
-                    )
-                    return
-                programmed_feedrate = self._begin_needles_feedrate_control(
-                    action,
-                    feedrate,
-                )
-                try:
-                    self._send_absolute_axis_move(
-                        serial_connection,
-                        "A",
-                        target_a,
-                        ignore_needle_safety=True,
-                        feedrate=programmed_feedrate,
-                    )
-                finally:
-                    self._end_needles_feedrate_control()
-                current_a = self._read_current_a_position(serial_connection)
-                if current_a is None:
-                    raise StageControllerError("Unable to confirm A position after move.")
-                self._update_needles_from_a_position(current_a)
-            direction = "lowered" if step_mm < 0 else "raised"
+            message = self._perform_needles_adjust(step_mm, feedrate)
             self.needles_action_finished.emit(
                 True,
-                f"Needles {direction} by {abs(step_mm):.3f} mm.",
+                message,
                 action,
             )
         except StageControllerError as exc:
@@ -3882,6 +4170,55 @@ class StageController(QObject):
             with self._task_lock:
                 self._active_thread = None
             self._start_next_queued_needles_action()
+
+    def _perform_needles_adjust(
+        self,
+        step_mm: float,
+        feedrate: float | None = None,
+    ) -> str:
+        serial_connection = self._serial
+        if serial_connection is None or not serial_connection.is_open:
+            raise StageControllerError("Serial connection is not available.")
+        if abs(step_mm) < 1e-6:
+            return "Needle position unchanged."
+        with self._serial_session_lock:
+            status = self._query_status(serial_connection)
+            if (
+                status is None
+                or self._axis_value_for_configured_mode(status, "A") is None
+            ):
+                raise StageControllerError("Unable to read A position for needles.")
+            self._require_homed_axes(status, {"A"})
+            current_a = self._axis_value_for_configured_mode(status, "A")
+            if current_a is None:
+                raise StageControllerError("Unable to read A position for needles.")
+            target_a = self._axis_a_gcode_coordinate_for_lowering_step(
+                current_a,
+                step_mm,
+            )
+            if abs(target_a - current_a) < 1e-6:
+                return "Needle position unchanged."
+            programmed_feedrate = self._begin_needles_feedrate_control(
+                "adjust",
+                feedrate,
+            )
+            try:
+                self._send_absolute_axis_move(
+                    serial_connection,
+                    "A",
+                    target_a,
+                    ignore_needle_safety=True,
+                    feedrate=programmed_feedrate,
+                    as_jog=True,
+                )
+            finally:
+                self._end_needles_feedrate_control()
+            current_a = self._read_current_a_position(serial_connection)
+            if current_a is None:
+                raise StageControllerError("Unable to confirm A position after move.")
+            self._update_needles_from_a_position(current_a)
+        direction = "lowered" if step_mm < 0 else "raised"
+        return f"Needles {direction} by {abs(step_mm):.3f} mm."
 
     def _run_oscillation(
         self, mode: str, amplitude_mm: float, feedrate: float, turns_per_sweep: float
@@ -4020,6 +4357,7 @@ class StageController(QObject):
         feedrate: Optional[float] = None,
         wait_for_completion: bool = True,
         motion_started_callback: Optional[Callable[[MoveVector, float], None]] = None,
+        as_jog: bool = False,
     ) -> None:
         if move.is_zero():
             return
@@ -4035,10 +4373,6 @@ class StageController(QObject):
             self._check_relative_move_limits(
                 serial_connection, move, allow_relative=allow_relative
             )
-        self._write_command(serial_connection, "G21")
-        self._wait_for_ok(serial_connection)
-        self._write_command(serial_connection, "G91")
-        self._wait_for_ok(serial_connection)
         move_parts: list[str] = [
             f"{axis}{value:.4f}"
             for axis, value in move.items()
@@ -4056,6 +4390,28 @@ class StageController(QObject):
             + f" F{self._format_gcode_value(effective_feedrate)}"
         )
         self._reset_feed_override_for_serial(serial_connection)
+        if as_jog:
+            command = (
+                "$J=G91 G21 "
+                + " ".join(move_parts)
+                + f" F{self._format_gcode_value(effective_feedrate)}"
+            )
+            self._write_command(serial_connection, command)
+            self._wait_for_ok(serial_connection)
+            if motion_started_callback is not None:
+                motion_started_callback(move, effective_feedrate)
+            if wait_for_completion:
+                self._wait_for_idle(
+                    serial_connection,
+                    timeout=self._idle_timeout_for_distance(
+                        move_distance, effective_feedrate
+                    ),
+                )
+            return
+        self._write_command(serial_connection, "G21")
+        self._wait_for_ok(serial_connection)
+        self._write_command(serial_connection, "G91")
+        self._wait_for_ok(serial_connection)
         self._write_command(serial_connection, command)
         self._wait_for_ok(serial_connection)
         if motion_started_callback is not None:
@@ -4186,6 +4542,7 @@ class StageController(QObject):
         feedrate: Optional[float] = None,
         wait_for_completion: bool = True,
         allow_unhomed: bool = False,
+        as_jog: bool = False,
     ) -> None:
         axis = axis.upper().strip()
         self._send_absolute_axis_targets_move(
@@ -4195,6 +4552,7 @@ class StageController(QObject):
             feedrate=feedrate,
             wait_for_completion=wait_for_completion,
             allow_unhomed=allow_unhomed,
+            as_jog=as_jog,
         )
 
     def _absolute_axis_targets_jog_command(
@@ -4723,14 +5081,50 @@ class StageController(QObject):
         self, serial_connection: serial.Serial, timeout: float = 2.0
     ) -> list[str]:
         self._write_command(serial_connection, "$G")
-        lines = self._read_response_lines(
-            serial_connection, timeout=timeout, description="$G"
-        )
-        for line in lines:
+        deadline = time.monotonic() + timeout
+        saw_ack = False
+        tokens: list[str] | None = None
+        while time.monotonic() < deadline:
+            self._check_cancelled()
+            try:
+                raw = serial_connection.readline()
+            except _SERIAL_IO_EXCEPTIONS as exc:  # pragma: no cover - hardware interaction
+                raise StageControllerError(f"Serial read failed: {exc}") from exc
+            line = raw.decode("ascii", errors="ignore").strip()
+            if not line:
+                continue
+            logger.debug("SERIAL TRACE stage_readline $G line=%r", line)
+            self._raise_if_controller_reboot_line(line, "$G")
+            self._handle_limit_line(line)
+            lower = line.lower()
+            if lower == "ok":
+                if tokens is not None:
+                    return tokens
+                saw_ack = True
+                continue
+            if lower.startswith("alarm"):
+                raise StageControllerError(f"Controller alarm: {line}")
+            if lower.startswith("error") or line.startswith("[MSG:ERR:"):
+                raise StageControllerError(f"Controller reported: {line}")
+            self._handle_coordinate_state_line(line)
             modal_match = self.MODAL_STATE_PATTERN.match(line)
             if modal_match:
-                return modal_match.group("modal").split()
-        return []
+                tokens = modal_match.group("modal").split()
+                if saw_ack:
+                    return tokens
+        if tokens is not None:
+            try:
+                serial_connection.reset_input_buffer()
+            except AttributeError:
+                pass
+            return tokens
+        if saw_ack:
+            try:
+                serial_connection.reset_input_buffer()
+            except AttributeError:
+                pass
+            return []
+        raise StageControllerError("Timeout waiting for controller response: $G.")
 
     def _handle_coordinate_state_line(self, line: str) -> None:
         modal_match = self.MODAL_STATE_PATTERN.match(line)
@@ -4860,11 +5254,39 @@ class StageController(QObject):
         self, serial_connection: serial.Serial, timeout: float = 2.5
     ) -> dict[str, tuple[float, ...]]:
         self._write_command(serial_connection, "$#")
-        lines = self._read_response_lines(
-            serial_connection, timeout=timeout, description="$#"
-        )
+        deadline = time.monotonic() + timeout
         offsets: dict[str, tuple[float, ...]] = {}
-        for line in lines:
+        saw_final_ok = False
+        while time.monotonic() < deadline:
+            self._check_cancelled()
+            try:
+                raw = serial_connection.readline()
+            except _SERIAL_IO_EXCEPTIONS as exc:  # pragma: no cover - hardware interaction
+                raise StageControllerError(f"Serial read failed: {exc}") from exc
+            line = raw.decode("ascii", errors="ignore").strip()
+            if not line:
+                continue
+            logger.debug("SERIAL TRACE stage_readline $# line=%r", line)
+            self._raise_if_controller_reboot_line(line, "$#")
+            self._handle_limit_line(line)
+            homed_msg = self.HOMED_MSG_PATTERN.match(line)
+            if homed_msg:
+                axes = set(homed_msg.group("axes").upper())
+                if self._homed_axes:
+                    axes = set(self._homed_axes).union(axes)
+                self._update_homing_status(axes)
+                continue
+            lower = line.lower()
+            if lower == "ok":
+                if offsets:
+                    saw_final_ok = True
+                    break
+                continue
+            if lower.startswith("alarm"):
+                raise StageControllerError(f"Controller alarm: {line}")
+            if lower.startswith("error") or line.startswith("[MSG:ERR:"):
+                raise StageControllerError(f"Controller reported: {line}")
+            self._handle_coordinate_state_line(line)
             match = self.COORDINATE_OFFSET_PATTERN.match(line)
             if not match:
                 continue
@@ -4872,6 +5294,11 @@ class StageController(QObject):
             if coords is None:
                 continue
             offsets[match.group("system").upper()] = coords
+        if offsets and not saw_final_ok:
+            try:
+                serial_connection.reset_input_buffer()
+            except AttributeError:
+                pass
         return offsets
 
     def _query_axis_max_feedrates_locked(

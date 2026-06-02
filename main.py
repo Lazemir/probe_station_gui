@@ -3,16 +3,75 @@
 from __future__ import annotations
 
 import logging
+import csv
+import json
 import math
+import os
 import re
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
 from typing import Any, Callable, TYPE_CHECKING
 
-from PySide6.QtCore import QObject, QLocale, QThread, QTimer, Qt, QUrl, Signal
+_STARTUP_T0 = time.perf_counter()
+_STARTUP_LAST_ELAPSED_MS = 0.0
+_STARTUP_EVENTS: list[tuple[float, float, str]] = []
+_STARTUP_FLUSHED = False
+
+
+def _startup_trace(label: str) -> None:
+    """Record startup timing before the normal logger is ready."""
+
+    global _STARTUP_LAST_ELAPSED_MS
+
+    elapsed_ms = (time.perf_counter() - _STARTUP_T0) * 1000.0
+    delta_ms = elapsed_ms - _STARTUP_LAST_ELAPSED_MS
+    _STARTUP_LAST_ELAPSED_MS = elapsed_ms
+    if _STARTUP_FLUSHED:
+        logging.getLogger(__name__).info(
+            "STARTUP TRACE +%.1fms (+%.1fms) %s",
+            elapsed_ms,
+            delta_ms,
+            label,
+        )
+        return
+    _STARTUP_EVENTS.append((elapsed_ms, delta_ms, label))
+
+
+def _flush_startup_trace() -> None:
+    """Write buffered startup timing into the configured application log."""
+
+    global _STARTUP_FLUSHED
+
+    if _STARTUP_FLUSHED:
+        return
+    log = logging.getLogger(__name__)
+    for elapsed_ms, delta_ms, label in _STARTUP_EVENTS:
+        log.info(
+            "STARTUP TRACE +%.1fms (+%.1fms) %s",
+            elapsed_ms,
+            delta_ms,
+            label,
+        )
+    _STARTUP_EVENTS.clear()
+    _STARTUP_FLUSHED = True
+
+
+_startup_trace("stdlib imports done")
+
+from PySide6.QtCore import (
+    QBuffer,
+    QIODevice,
+    QObject,
+    QLocale,
+    QThread,
+    QTimer,
+    Qt,
+    QUrl,
+    Signal,
+)
 from PySide6.QtGui import (
     QAction,
     QDesktopServices,
@@ -39,6 +98,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+_startup_trace("PySide imports done")
+
 from probe_station_gui import (
     Grabber,
     JoystickWindow,
@@ -47,16 +108,28 @@ from probe_station_gui import (
     SerialTerminalWindow,
 )
 from probe_station_gui.design_model import DesignDocument, DesignModelError
-from probe_station_gui.design_script import ScriptContext, load_measurement_plan
 from probe_station_gui.design_session import AlignmentPreparation, DesignSession
 from probe_station_gui.diagnostics import configure_crash_diagnostics
 from probe_station_gui.dialogs.route_measurement_dialog import (
     RouteMeasurementDialog,
     RouteMeasurementRunConfiguration,
 )
+from probe_station_gui.dialogs.microscope_scan_dialog import (
+    MicroscopeScanConfiguration,
+    MicroscopeScanDialog,
+)
 from probe_station_gui.dialogs.settings_dialog import SettingsDialog
 from probe_station_gui.api_server import ProbeStationApiServer
-from probe_station_gui.lcr_meter import LCRMeterController, LCRMeterError
+from probe_station_gui.lcr_meter import (
+    GWInstekRouteMeterSettings,
+    KeithleyRouteMeterSettings,
+    LCRMeterController,
+    LCRMeterError,
+    ROUTE_METER_GWINSTEK,
+    ROUTE_METER_KEITHLEY,
+    RouteMeter,
+    RouteMeterConfiguration,
+)
 from probe_station_gui.motion_prediction import interpolate_position, motion_progress
 from probe_station_gui.stage_controller import StageControllerError
 from probe_station_gui.objective_offsets import (
@@ -70,9 +143,29 @@ from probe_station_gui.objective_offsets import (
 )
 from probe_station_gui.route_model import MeasurementRoute
 from probe_station_gui.route_measurement import (
+    ROUTE_OPERATION_MEASURE,
+    ROUTE_OPERATION_PHOTO,
+    ROUTE_OPERATION_PHOTO_THEN_MEASURE,
     RouteMeasurementPoint,
+    RoutePhotoRecord,
     RouteMeasurementRecord,
     RouteMeasurementRunner,
+    route_measurement_sample_from_raw,
+    summarize_route_contact_quality,
+)
+from probe_station_gui.microscope_imaging import (
+    MicroscopeCaptureResult,
+    MicroscopeImageMetadata,
+    MicroscopeScanPlan,
+    MicroscopeScanTile,
+    build_design_scan_plan,
+    objective_scale_calibration,
+    route_photo_filename,
+    save_microscope_image,
+    scan_tile_filename,
+    stage_bounds_from_design_bounds,
+    stitch_scan_tiles,
+    utc_timestamp,
 )
 from probe_station_gui.settings_manager import (
     ObjectiveCalibrationSettings,
@@ -83,6 +176,10 @@ from probe_station_gui.settings_manager import (
     normalize_objective_name,
     ordered_objective_names,
 )
+from probe_station_gui.telegram_notifications import (
+    resolved_bot_token,
+    send_telegram_message_in_thread,
+)
 from probe_station_gui.views.alignment_panel import AlignmentPanel
 from probe_station_gui.views.contact_oscillation_window import (
     ContactOscillationWindow,
@@ -90,6 +187,8 @@ from probe_station_gui.views.contact_oscillation_window import (
 from probe_station_gui.views.dock_widgets import CollapsibleDockWidget
 from probe_station_gui.views.oscillation_panel import OscillationPanel
 from probe_station_gui.views.serial_connection_panel import SerialConnectionPanel
+
+_startup_trace("application imports done")
 
 
 logger = logging.getLogger(__name__)
@@ -364,10 +463,16 @@ class Main(QMainWindow):
     design_layout_module_ready: Signal = Signal(object, object)
     design_document_loaded: Signal = Signal(int, object, object)
     route_measurement_status: Signal = Signal(str)
+    route_measurement_progress: Signal = Signal(int, int, int)
     route_measurement_waiting_changed: Signal = Signal(bool)
     route_measurement_result: Signal = Signal(object, int, int, bool)
     route_measurement_recorded: Signal = Signal(object, int, int)
     route_measurement_finished: Signal = Signal(bool, str, str)
+    microscope_scan_status: Signal = Signal(str)
+    microscope_scan_finished: Signal = Signal(bool, str)
+    contact_seek_status: Signal = Signal(str)
+    contact_seek_calibration_found: Signal = Signal(float, str)
+    contact_seek_finished: Signal = Signal(bool, str)
 
     ALIGNMENT_CAPTURE_SHORTCUT = "Space"
     ALIGNMENT_TARGET_ANGLES = (-180.0, -90.0, 0.0, 90.0, 180.0)
@@ -411,8 +516,13 @@ class Main(QMainWindow):
     CAMERA_UI_FRAME_GAP_WARNING_S = 0.25
     CLICK_TO_MOVE_PENDING_RETRY_MS = 150
     CLICK_TARGET_ANIMATION_PADDING_S = 0.03
+    CONTACT_SEEK_STEP_MM = -0.001
+    CONTACT_SEEK_MAX_TOTAL_MM = 0.020
+    CONTACT_SEEK_QUICK_COUNT = 25
+    CONTACT_SEEK_CONFIRM_COUNT = 250
 
     def __init__(self) -> None:
+        _startup_trace("Main.__init__ entered")
         super().__init__()
         self.setWindowTitle("Microscope control")
         self.menuBar().setNativeMenuBar(False)
@@ -430,6 +540,8 @@ class Main(QMainWindow):
         self.serial_port_name: str | None = None
         self.serial_baud_rate: int | None = None
         self.settings_manager: SettingsManager = SettingsManager()
+        _startup_trace("SettingsManager created; logging configured")
+        _flush_startup_trace()
         self._api_bridge: _ApiRequestBridge | None = None
         self._api_server: ProbeStationApiServer | None = None
         self._api_settings_signature: tuple[bool, str, int] | None = None
@@ -438,6 +550,7 @@ class Main(QMainWindow):
         self.serial_connection_panel: SerialConnectionPanel | None = None
         self.oscillation_panel: OscillationPanel | None = None
         self.surface_map_window: SurfaceMapWindow | None = None
+        self.microscope_scan_dialog: MicroscopeScanDialog | None = None
         self.contact_calibration_window: ContactOscillationWindow | None = None
         self.alignment_panel: AlignmentPanel | None = None
         self.design_navigator_panel: DesignNavigatorPanel | None = None
@@ -459,6 +572,7 @@ class Main(QMainWindow):
         self._alignment_exit_action: QAction | None = None
         self._contact_calibration_window_action: QAction | None = None
         self._surface_map_window_action: QAction | None = None
+        self._microscope_scan_action: QAction | None = None
         self._design_layout_window_action: QAction | None = None
         self._click_calibration_action: QAction | None = None
         self._click_calibration_dialog: ClickCalibrationDialog | None = None
@@ -511,6 +625,10 @@ class Main(QMainWindow):
         self._design_snap_enabled = True
         self._last_reported_b_position: float | None = None
         self._last_camera_frame_ui_timestamp: float | None = None
+        self._latest_camera_frame: QImage | None = None
+        self._latest_camera_frame_counter = 0
+        self._latest_camera_frame_condition = threading.Condition()
+        self._latest_camera_frame_for_notifications: QImage | None = None
         self._stage_unhomed_display_origins: dict[str, float] = {}
         self._stage_axis_fields: dict[str, QLineEdit] = {}
         self._stage_axis_raw_values: dict[str, float] = {}
@@ -535,6 +653,14 @@ class Main(QMainWindow):
         self._route_measurement_runner: RouteMeasurementRunner | None = None
         self._route_measurement_thread: threading.Thread | None = None
         self._route_measurement_dialog: RouteMeasurementDialog | None = None
+        self._route_measurement_waiting = False
+        self._route_measurement_point_numbers: list[int] = []
+        self._route_measurement_current_point: int | None = None
+        self._microscope_scan_thread: threading.Thread | None = None
+        self._microscope_scan_stop_requested = threading.Event()
+        self._last_telegram_attention_message = ""
+        self._contact_seek_thread: threading.Thread | None = None
+        self._contact_seek_stop_requested = threading.Event()
         self._design_session = DesignSession()
         self.statusBar()
         self._objective_widget = self._create_objective_widget()
@@ -566,12 +692,20 @@ class Main(QMainWindow):
         self.design_layout_module_ready.connect(self._on_design_layout_module_ready)
         self.design_document_loaded.connect(self._on_design_document_loaded)
         self.route_measurement_status.connect(self._on_route_measurement_status)
+        self.route_measurement_progress.connect(self._on_route_measurement_progress)
         self.route_measurement_waiting_changed.connect(
             self._on_route_measurement_waiting_changed
         )
         self.route_measurement_result.connect(self._on_route_measurement_result)
         self.route_measurement_recorded.connect(self._on_route_measurement_recorded)
         self.route_measurement_finished.connect(self._on_route_measurement_finished)
+        self.microscope_scan_status.connect(self._on_microscope_scan_status)
+        self.microscope_scan_finished.connect(self._on_microscope_scan_finished)
+        self.contact_seek_status.connect(self._on_contact_seek_status)
+        self.contact_seek_calibration_found.connect(
+            self._on_contact_seek_calibration_found
+        )
+        self.contact_seek_finished.connect(self._on_contact_seek_finished)
 
         self.stage_controller = StageController()
         self.stage_controller.status_message.connect(self._show_status)
@@ -635,11 +769,15 @@ class Main(QMainWindow):
         )
 
         self._create_dock_widgets()
+        _startup_trace("dock widgets created")
 
         self._setup_menus()
+        _startup_trace("menus created")
         self._apply_settings()
+        _startup_trace("settings applied")
         self._api_bridge = _ApiRequestBridge(self._handle_api_request, self)
         self._configure_api_server_from_settings(start_if_enabled=False)
+        _startup_trace("API server configured")
 
         QTimer.singleShot(0, self._start_api_server)
         QTimer.singleShot(0, self._auto_connect_if_possible)
@@ -652,6 +790,7 @@ class Main(QMainWindow):
             QMainWindow::separator { width: 8px; height: 8px; background: palette(window); }
             """
         )
+        _startup_trace("Main.__init__ finished")
 
     def _start_camera_thread(self) -> None:
         if not self.thread.isRunning():
@@ -684,6 +823,7 @@ class Main(QMainWindow):
         self._api_server = ProbeStationApiServer(
             move_callback=self._submit_api_move_request,
             status_callback=self._submit_api_status_request,
+            command_callback=self._submit_api_command_request,
             host=api_settings.host,
             port=api_settings.port,
         )
@@ -717,6 +857,27 @@ class Main(QMainWindow):
                 "message": "GUI API bridge is not ready.",
             }
         return self._api_bridge.submit({"action": "status"})
+
+    def _submit_api_command_request(self, command_request: dict[str, Any]) -> dict[str, Any]:
+        action = str(command_request.get("action", "")).strip().lower()
+        payload = command_request.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        if action == "list_contacts":
+            return self._api_list_contacts()
+        if action == "move_to_contact":
+            return self._api_move_to_contact(payload)
+        if action == "contact_needles":
+            return self._api_contact_needles(payload)
+        if action == "configure_meter":
+            return self._api_configure_meter(payload)
+        if action == "raw_voltage_sweep":
+            return self._api_raw_voltage_sweep(payload)
+        return {
+            "accepted": False,
+            "status_code": 400,
+            "message": f"Unsupported API command: {action}",
+        }
 
     def _handle_api_request(self, request: dict[str, Any]) -> dict[str, Any]:
         action = str(request.get("action", "")).strip().lower()
@@ -904,9 +1065,6 @@ class Main(QMainWindow):
             "active_coordinate_axis": self._coordinate_move_axis,
             "active_coordinate_axes": sorted(self._coordinate_move_axes),
             "current_feedrate_mm_min": self._current_linear_feedrate(),
-            "api_default_feedrate_mm_min": (
-                self.settings_manager.api_configuration().default_feedrate_mm_min
-            ),
         }
 
     def _surface_map_stage_status(self) -> dict[str, Any]:
@@ -1018,7 +1176,7 @@ class Main(QMainWindow):
 
     def _api_move_feedrate(self, feedrate: object) -> float | None:
         if feedrate is None:
-            return self.settings_manager.api_configuration().default_feedrate_mm_min
+            return max(self.MIN_FEEDRATE_MM_MIN, float(self._current_linear_feedrate()))
         try:
             value = float(feedrate)
         except (TypeError, ValueError):
@@ -1026,6 +1184,743 @@ class Main(QMainWindow):
         if not math.isfinite(value) or value <= 0.0:
             return None
         return max(self.MIN_FEEDRATE_MM_MIN, value)
+
+    def _api_list_contacts(self) -> dict[str, Any]:
+        route = self._design_session.route
+        if route is None:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "No probe route is loaded.",
+            }
+        registration_valid = (
+            self._design_session.registration is not None
+            and self._design_session.registration.valid
+        )
+        contacts = [
+            self._api_route_point_payload(
+                route_index=index,
+                route_point=route_point,
+                include_stage_xy=registration_valid,
+            )
+            for index, route_point in enumerate(route.points, start=1)
+        ]
+        return {
+            "accepted": True,
+            "route_name": route.name,
+            "route_path": str(route.path) if route.path is not None else None,
+            "registration_valid": registration_valid,
+            "contacts": contacts,
+        }
+
+    def _api_move_to_contact(self, payload: dict[str, Any]) -> dict[str, Any]:
+        contact_number = self._api_contact_number(payload)
+        if contact_number is None:
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": "Provide a positive contact_number.",
+            }
+        context_result = self._api_contact_context(contact_number)
+        if not context_result.get("accepted", False):
+            return context_result
+        point = context_result["point"]
+        contact = context_result["contact"]
+        lower_needles = self._api_bool(
+            payload,
+            "lower_needles",
+            "lower",
+            default=False,
+        )
+        lift_before_move = self._api_bool(
+            payload,
+            "lift_before_move",
+            default=True,
+        )
+        lift_after = self._api_bool(payload, "lift_after", default=False)
+        contact_settle_s = self._api_float(
+            payload,
+            "contact_settle_s",
+            "settle_s",
+            default=0.2,
+            minimum=0.0,
+        )
+        needle_feedrate = self._api_needle_feedrate(payload)
+        active_stage_task = False
+        needles_lowered = False
+        try:
+            self.stage_controller.begin_external_task("API contact move")
+            active_stage_task = True
+            if lift_before_move:
+                self.stage_controller.run_external_needles_action(
+                    "lift",
+                    needle_feedrate,
+                )
+            self.stage_controller.run_external_move_to_xy(
+                point.stage_xy[0],
+                point.stage_xy[1],
+            )
+            if lower_needles:
+                self.stage_controller.run_external_needles_action(
+                    "lower",
+                    needle_feedrate,
+                )
+                needles_lowered = True
+                if contact_settle_s > 0.0:
+                    time.sleep(contact_settle_s)
+            return {
+                "accepted": True,
+                "message": (
+                    f"Moved to contact {contact['contact_number']}"
+                    + (" and lowered needles." if lower_needles else ".")
+                ),
+                "timestamp_utc": self._api_timestamp_utc(),
+                "contact": contact,
+                "needles_lowered": lower_needles,
+                "lifted_before_move": lift_before_move,
+                "lifted_after": lift_after and needles_lowered,
+                "needle_feedrate_mm_min": needle_feedrate,
+            }
+        except StageControllerError as exc:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": str(exc),
+                "contact": contact,
+            }
+        finally:
+            if active_stage_task:
+                if lift_after and needles_lowered:
+                    try:
+                        self.stage_controller.run_external_needles_action(
+                            "lift",
+                            needle_feedrate,
+                        )
+                    except StageControllerError:
+                        logger.exception("API contact move failed to lift needles.")
+                self.stage_controller.finish_external_task()
+
+    def _api_contact_needles(self, payload: dict[str, Any]) -> dict[str, Any]:
+        contact_number = self._api_contact_number(payload)
+        if contact_number is None:
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": "Provide a positive contact_number.",
+            }
+        context_result = self._api_contact_context(contact_number)
+        if not context_result.get("accepted", False):
+            return context_result
+        contact = context_result["contact"]
+        action = str(payload.get("action", "lower")).strip().lower()
+        if action == "raise":
+            action = "raise"
+        elif action in {"lift", "up"}:
+            action = "lift"
+        elif action in {"lower", "down"}:
+            action = "lower"
+        else:
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": "Needle action must be lower, lift, or raise.",
+            }
+        needle_feedrate = self._api_needle_feedrate(payload)
+        active_stage_task = False
+        try:
+            self.stage_controller.begin_external_task("API needle action")
+            active_stage_task = True
+            self.stage_controller.run_external_needles_action(action, needle_feedrate)
+            return {
+                "accepted": True,
+                "message": f"Needle action '{action}' completed.",
+                "timestamp_utc": self._api_timestamp_utc(),
+                "contact": contact,
+                "needle_action": action,
+                "needle_feedrate_mm_min": needle_feedrate,
+            }
+        except StageControllerError as exc:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": str(exc),
+                "contact": contact,
+            }
+        finally:
+            if active_stage_task:
+                self.stage_controller.finish_external_task()
+
+    def _api_configure_meter(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.lcr_controller.is_connected():
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Measurement instrument is not connected.",
+            }
+        try:
+            configuration = self._api_route_meter_configuration(
+                payload,
+                voltages_v=None,
+            )
+            self.lcr_controller.apply_route_meter_configuration(configuration)
+        except (ValueError, LCRMeterError) as exc:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": str(exc),
+            }
+        return {
+            "accepted": True,
+            "message": "Measurement instrument configured.",
+            "timestamp_utc": self._api_timestamp_utc(),
+            "meter_type": configuration.meter_type,
+            "nplc": configuration.nplc_label(),
+        }
+
+    def _api_raw_voltage_sweep(self, payload: dict[str, Any]) -> dict[str, Any]:
+        voltages = payload.get("voltages_v")
+        if not isinstance(voltages, list) or not voltages:
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": "Provide voltages_v as a non-empty array.",
+            }
+        if not self.lcr_controller.is_connected():
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Measurement instrument is not connected.",
+            }
+        try:
+            voltage_values = [float(value) for value in voltages]
+            configuration = self._api_route_meter_configuration(
+                payload.get("meter", payload.get("meter_configuration", {})),
+                voltages_v=voltage_values,
+            )
+            self.lcr_controller.apply_route_meter_configuration(configuration)
+        except (TypeError, ValueError, LCRMeterError) as exc:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": str(exc),
+            }
+
+        contact_number = self._api_contact_number(payload, required=False)
+        move_to_contact = self._api_bool(
+            payload,
+            "move_to_contact",
+            "move",
+            default=contact_number is not None,
+        )
+        lower_needles = self._api_bool(
+            payload,
+            "lower_needles",
+            "lower",
+            default=contact_number is not None,
+        )
+        lift_after = self._api_bool(payload, "lift_after", default=lower_needles)
+        lift_before_move = self._api_bool(
+            payload,
+            "lift_before_move",
+            default=move_to_contact,
+        )
+        contact_settle_s = self._api_float(
+            payload,
+            "contact_settle_s",
+            "settle_s",
+            default=0.2,
+            minimum=0.0,
+        )
+        point: RouteMeasurementPoint | None = None
+        contact: dict[str, Any] | None = None
+        if contact_number is not None:
+            context_result = self._api_contact_context(contact_number)
+            if not context_result.get("accepted", False):
+                return context_result
+            point = context_result["point"]
+            contact = context_result["contact"]
+        if move_to_contact and point is None:
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": "move_to_contact requires contact_number.",
+            }
+
+        needle_feedrate = self._api_needle_feedrate(payload)
+        active_stage_task = False
+        needles_lowered = False
+        started_at = time.monotonic()
+        timestamp_utc = self._api_timestamp_utc()
+        try:
+            if move_to_contact or lower_needles or lift_after:
+                self.stage_controller.begin_external_task("API raw voltage sweep")
+                active_stage_task = True
+            if active_stage_task and lift_before_move:
+                self.stage_controller.run_external_needles_action(
+                    "lift",
+                    needle_feedrate,
+                )
+            if move_to_contact and point is not None:
+                self.stage_controller.run_external_move_to_xy(
+                    point.stage_xy[0],
+                    point.stage_xy[1],
+                )
+            if active_stage_task and lower_needles:
+                self.stage_controller.run_external_needles_action(
+                    "lower",
+                    needle_feedrate,
+                )
+                needles_lowered = True
+                if contact_settle_s > 0.0:
+                    time.sleep(contact_settle_s)
+            raw_measurement = self.lcr_controller.read_voltage_sweep_now(voltage_values)
+            elapsed_s = time.monotonic() - started_at
+            result = self._api_json_ready(raw_measurement)
+            points = result.get("points", [])
+            if isinstance(points, list):
+                iv_pairs = [
+                    {
+                        "voltage_v": item.get("measured_voltage_v"),
+                        "current_a": item.get("current_a"),
+                    }
+                    for item in points
+                    if isinstance(item, dict)
+                ]
+            else:
+                iv_pairs = []
+            return {
+                "accepted": True,
+                "message": f"Raw voltage sweep complete: {len(voltage_values)} points.",
+                "timestamp_utc": timestamp_utc,
+                "elapsed_s": elapsed_s,
+                "contact": contact,
+                "meter_type": configuration.meter_type,
+                "measurement_kind": "voltage_sweep",
+                "voltages_v": voltage_values,
+                "iv_pairs": iv_pairs,
+                "result": result,
+                "needles_lowered": lower_needles,
+                "lifted_after": lift_after and needles_lowered,
+            }
+        except (StageControllerError, LCRMeterError) as exc:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": str(exc),
+                "contact": contact,
+            }
+        finally:
+            if active_stage_task:
+                if lift_after and needles_lowered:
+                    try:
+                        self.stage_controller.run_external_needles_action(
+                            "lift",
+                            needle_feedrate,
+                        )
+                    except StageControllerError:
+                        logger.exception("API raw voltage sweep failed to lift needles.")
+                self.stage_controller.finish_external_task()
+
+    def _api_contact_context(self, contact_number: int) -> dict[str, Any]:
+        if self.serial_connection is None or not self.serial_connection.is_open:
+            return {
+                "accepted": False,
+                "status_code": 503,
+                "message": "Serial connection is not available.",
+            }
+        route = self._design_session.route
+        if route is None or not route.points:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Create or load a probe route before using contacts.",
+            }
+        registration = self._design_session.registration
+        if registration is None or not registration.valid:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Design registration is required before using contacts.",
+            }
+        try:
+            points = self._route_measurement_points(route)
+        except DesignModelError as exc:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": str(exc),
+            }
+        point = self._api_find_contact_point(points, contact_number)
+        if point is None:
+            return {
+                "accepted": False,
+                "status_code": 404,
+                "message": f"Contact {contact_number} is not enabled or not found.",
+            }
+        return {
+            "accepted": True,
+            "point": point,
+            "contact": self._api_measurement_point_payload(
+                point,
+                requested_contact_number=contact_number,
+            ),
+        }
+
+    def _api_find_contact_point(
+        self,
+        points: list[RouteMeasurementPoint],
+        contact_number: int,
+    ) -> RouteMeasurementPoint | None:
+        for point in points:
+            if int(point.index) == int(contact_number):
+                return point
+        for point in points:
+            if self._api_structure_number_for_measurement_point(point) == int(contact_number):
+                return point
+        return None
+
+    def _api_route_point_payload(
+        self,
+        *,
+        route_index: int,
+        route_point: object,
+        include_stage_xy: bool,
+    ) -> dict[str, Any]:
+        design_center = tuple(getattr(route_point, "camera_center", (0.0, 0.0)))
+        stage_xy = None
+        if include_stage_xy:
+            try:
+                resolved = self._raw_stage_xy_from_design_xy(
+                    (float(design_center[0]), float(design_center[1]))
+                )
+            except (TypeError, ValueError, IndexError):
+                resolved = None
+            if resolved is not None:
+                stage_xy = {"x_mm": float(resolved[0]), "y_mm": float(resolved[1])}
+        return {
+            "contact_number": int(route_index),
+            "structure_number": self._api_structure_number_for_route_point(
+                route_index,
+                route_point,
+            ),
+            "point_id": str(getattr(route_point, "id", "")),
+            "label": str(getattr(route_point, "label", "")),
+            "enabled": bool(getattr(route_point, "enabled", True)),
+            "design_center": {
+                "x": float(design_center[0]),
+                "y": float(design_center[1]),
+            },
+            "stage_xy": stage_xy,
+        }
+
+    def _api_measurement_point_payload(
+        self,
+        point: RouteMeasurementPoint,
+        *,
+        requested_contact_number: int,
+    ) -> dict[str, Any]:
+        return {
+            "contact_number": int(requested_contact_number),
+            "route_index": int(point.index),
+            "structure_number": self._api_structure_number_for_measurement_point(point),
+            "point_id": point.point_id,
+            "label": point.label,
+            "design_center": {
+                "x": float(point.design_center[0]),
+                "y": float(point.design_center[1]),
+            },
+            "stage_xy": {
+                "x_mm": float(point.stage_xy[0]),
+                "y_mm": float(point.stage_xy[1]),
+            },
+            "needle_contacts": [
+                {
+                    "needle": 1,
+                    "design": {
+                        "x": float(point.needle_1_design[0]),
+                        "y": float(point.needle_1_design[1]),
+                    },
+                },
+                {
+                    "needle": 2,
+                    "design": {
+                        "x": float(point.needle_2_design[0]),
+                        "y": float(point.needle_2_design[1]),
+                    },
+                },
+            ],
+        }
+
+    def _api_route_meter_configuration(
+        self,
+        payload: object,
+        *,
+        voltages_v: list[float] | None,
+    ) -> RouteMeterConfiguration:
+        meter_payload = payload if isinstance(payload, dict) else {}
+        meter_type = self._api_meter_type(meter_payload.get("meter_type", meter_payload.get("type")))
+        if meter_type is None:
+            meter_type = self.lcr_controller.meter_type()
+        if meter_type == ROUTE_METER_KEITHLEY:
+            keithley_payload = meter_payload.get("keithley")
+            if not isinstance(keithley_payload, dict):
+                keithley_payload = meter_payload
+            max_voltage = (
+                max(abs(float(value)) for value in voltages_v)
+                if voltages_v
+                else KeithleyRouteMeterSettings().measurement_voltage_v
+            )
+            settings = KeithleyRouteMeterSettings(
+                measurement_voltage_v=self._api_float(
+                    keithley_payload,
+                    "measurement_voltage_v",
+                    "voltage_v",
+                    default=max(max_voltage, 1e-12),
+                    minimum=1e-12,
+                ),
+                source_voltage_range_v=self._api_float(
+                    keithley_payload,
+                    "source_voltage_range_v",
+                    "voltage_range_v",
+                    default=max(0.21, max_voltage),
+                    minimum=1e-12,
+                ),
+                compliance_current_a=self._api_float(
+                    keithley_payload,
+                    "compliance_current_a",
+                    "current_limit_a",
+                    default=KeithleyRouteMeterSettings().compliance_current_a,
+                    minimum=1e-12,
+                ),
+                nplc=self._api_float(
+                    keithley_payload,
+                    "nplc",
+                    default=KeithleyRouteMeterSettings().nplc,
+                    minimum=0.01,
+                ),
+                terminals=str(
+                    keithley_payload.get(
+                        "terminals",
+                        KeithleyRouteMeterSettings().terminals,
+                    )
+                ),
+                trigger_delay_s=self._api_float(
+                    keithley_payload,
+                    "trigger_delay_s",
+                    "delay_s",
+                    default=KeithleyRouteMeterSettings().trigger_delay_s,
+                    minimum=0.0,
+                ),
+            )
+            return RouteMeterConfiguration(
+                meter_type=ROUTE_METER_KEITHLEY,
+                keithley=settings,
+            )
+        if meter_type == ROUTE_METER_GWINSTEK:
+            gw_payload = meter_payload.get("gwinstek")
+            if not isinstance(gw_payload, dict):
+                gw_payload = meter_payload
+            defaults = GWInstekRouteMeterSettings(
+                resource_name=self.settings_manager.needle_calibration_configuration().visa_resource
+            )
+            settings = GWInstekRouteMeterSettings(
+                resource_name=str(gw_payload.get("resource_name", defaults.resource_name)),
+                measurement_function=str(
+                    gw_payload.get("measurement_function", defaults.measurement_function)
+                ),
+                range_mode=str(gw_payload.get("range_mode", defaults.range_mode)),
+                impedance_range=int(
+                    self._api_float(
+                        gw_payload,
+                        "impedance_range",
+                        default=defaults.impedance_range,
+                    )
+                ),
+                dcr_range=int(
+                    self._api_float(gw_payload, "dcr_range", default=defaults.dcr_range)
+                ),
+                frequency_hz=self._api_float(
+                    gw_payload,
+                    "frequency_hz",
+                    default=defaults.frequency_hz,
+                    minimum=10.0,
+                ),
+                level_mode=str(gw_payload.get("level_mode", defaults.level_mode)),
+                voltage_level_v=self._api_float(
+                    gw_payload,
+                    "voltage_level_v",
+                    default=defaults.voltage_level_v,
+                    minimum=0.0,
+                ),
+                current_level_a=self._api_float(
+                    gw_payload,
+                    "current_level_a",
+                    default=defaults.current_level_a,
+                    minimum=0.0,
+                ),
+                source_resistance_ohm=int(
+                    self._api_float(
+                        gw_payload,
+                        "source_resistance_ohm",
+                        default=defaults.source_resistance_ohm,
+                    )
+                ),
+                aperture_rate=str(gw_payload.get("aperture_rate", defaults.aperture_rate)),
+                aperture_averages=int(
+                    self._api_float(
+                        gw_payload,
+                        "aperture_averages",
+                        default=defaults.aperture_averages,
+                        minimum=1.0,
+                    )
+                ),
+                trigger_delay_s=self._api_float(
+                    gw_payload,
+                    "trigger_delay_s",
+                    default=defaults.trigger_delay_s,
+                    minimum=0.0,
+                ),
+                bias_enabled=self._api_bool(gw_payload, "bias_enabled", default=defaults.bias_enabled),
+                bias_level_v=self._api_float(
+                    gw_payload,
+                    "bias_level_v",
+                    default=defaults.bias_level_v,
+                ),
+                monitor1=str(gw_payload.get("monitor1", defaults.monitor1)),
+                monitor2=str(gw_payload.get("monitor2", defaults.monitor2)),
+                alc_enabled=self._api_bool(gw_payload, "alc_enabled", default=defaults.alc_enabled),
+            )
+            return RouteMeterConfiguration(
+                meter_type=ROUTE_METER_GWINSTEK,
+                gwinstek=settings,
+            )
+        raise ValueError(f"Unsupported meter_type: {meter_type!r}")
+
+    def _api_meter_type(self, value: object) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip().lower()
+        if text in {"", "current", "configured"}:
+            return None
+        if text in {"keithley", "keithley_2400_2182a", "2400_2182a"}:
+            return ROUTE_METER_KEITHLEY
+        if text in {"gwinstek", "lcr", "gwinstek_lcr_76200"}:
+            return ROUTE_METER_GWINSTEK
+        return text
+
+    def _api_contact_number(
+        self,
+        payload: dict[str, Any],
+        *,
+        required: bool = True,
+    ) -> int | None:
+        for key in ("contact_number", "contact", "point_number", "structure_number"):
+            if key not in payload:
+                continue
+            try:
+                value = int(payload[key])
+            except (TypeError, ValueError):
+                return None
+            return value if value > 0 else None
+        return None if not required else None
+
+    def _api_needle_feedrate(self, payload: dict[str, Any]) -> float | None:
+        for key in ("needle_feedrate_mm_min", "feedrate_mm_min", "feedrate"):
+            if key not in payload or payload.get(key) is None:
+                continue
+            value = self._api_float(payload, key, default=math.nan, minimum=0.0)
+            return max(self.MIN_FEEDRATE_MM_MIN, value)
+        return float(
+            self.settings_manager.needle_calibration_configuration().feedrate_mm_min
+        )
+
+    @staticmethod
+    def _api_bool(
+        payload: dict[str, Any],
+        *keys: str,
+        default: bool,
+    ) -> bool:
+        for key in keys:
+            if key not in payload:
+                continue
+            value = payload.get(key)
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)):
+                return bool(value)
+            if isinstance(value, str):
+                text = value.strip().lower()
+                if text in {"1", "true", "yes", "y", "on"}:
+                    return True
+                if text in {"0", "false", "no", "n", "off"}:
+                    return False
+        return default
+
+    @staticmethod
+    def _api_float(
+        payload: dict[str, Any],
+        *keys: str,
+        default: float,
+        minimum: float | None = None,
+    ) -> float:
+        value: object = default
+        for key in keys:
+            if key in payload and payload.get(key) is not None:
+                value = payload.get(key)
+                break
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid numeric value for {keys[0]}.") from exc
+        if not math.isfinite(parsed):
+            raise ValueError(f"Invalid numeric value for {keys[0]}.")
+        if minimum is not None and parsed < minimum:
+            raise ValueError(f"{keys[0]} must be at least {minimum}.")
+        return parsed
+
+    @staticmethod
+    def _api_structure_number_for_measurement_point(
+        point: RouteMeasurementPoint,
+    ) -> int:
+        for value in (point.label, point.point_id):
+            match = re.search(r"(\d+)\s*$", str(value).strip())
+            if match is not None:
+                try:
+                    return int(match.group(1))
+                except ValueError:
+                    pass
+        return int(point.index)
+
+    @staticmethod
+    def _api_structure_number_for_route_point(
+        route_index: int,
+        route_point: object,
+    ) -> int:
+        for value in (
+            getattr(route_point, "label", ""),
+            getattr(route_point, "id", ""),
+        ):
+            match = re.search(r"(\d+)\s*$", str(value).strip())
+            if match is not None:
+                try:
+                    return int(match.group(1))
+                except ValueError:
+                    pass
+        return int(route_index)
+
+    @staticmethod
+    def _api_timestamp_utc() -> str:
+        return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+    @classmethod
+    def _api_json_ready(cls, value: object) -> Any:
+        if isinstance(value, dict):
+            return {str(key): cls._api_json_ready(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [cls._api_json_ready(item) for item in value]
+        if isinstance(value, float):
+            return value if math.isfinite(value) else None
+        return value
 
     def _preload_design_layout_window(self) -> None:
         if (
@@ -1222,6 +2117,11 @@ class Main(QMainWindow):
 
     def on_error(self, message: str) -> None:
         logger.error("Camera error: %s", message)
+        self._send_telegram_alert(
+            "camera_error",
+            f"Probe station camera error:\n{message}",
+            attach_photo=True,
+        )
 
     def _on_camera_frame(self, qimg: QImage) -> None:
         now = time.monotonic()
@@ -1233,7 +2133,64 @@ class Main(QMainWindow):
                     frame_gap,
                 )
         self._last_camera_frame_ui_timestamp = now
+        with self._latest_camera_frame_condition:
+            self._latest_camera_frame = qimg.copy()
+            self._latest_camera_frame_counter += 1
+            self._latest_camera_frame_condition.notify_all()
+        self._latest_camera_frame_for_notifications = qimg
         self.view.set_frame(qimg)
+
+    def _latest_camera_counter(self) -> int:
+        with self._latest_camera_frame_condition:
+            return int(self._latest_camera_frame_counter)
+
+    def _wait_for_camera_frame(
+        self,
+        *,
+        after_counter: int | None = None,
+        timeout_s: float = 2.0,
+    ) -> tuple[QImage | None, int]:
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        with self._latest_camera_frame_condition:
+            while True:
+                frame = self._latest_camera_frame
+                counter = int(self._latest_camera_frame_counter)
+                fresh_enough = after_counter is None or counter > int(after_counter)
+                if frame is not None and fresh_enough:
+                    return frame.copy(), counter
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    if frame is not None and after_counter is None:
+                        return frame.copy(), counter
+                    return None, counter
+                self._latest_camera_frame_condition.wait(min(remaining, 0.1))
+
+    def _active_microscope_scale(self):
+        objective = self.settings_manager.active_objective_configuration()
+        return objective_scale_calibration(objective)
+
+    def _active_objective_metadata(self) -> tuple[str, float | None]:
+        objective = self.settings_manager.active_objective_configuration()
+        name = str(getattr(objective, "name", "") or "")
+        try:
+            magnification = float(getattr(objective, "magnification"))
+        except (TypeError, ValueError):
+            magnification = None
+        if magnification is not None and not math.isfinite(magnification):
+            magnification = None
+        return name, magnification
+
+    def _stage_position_for_image_metadata(
+        self,
+        *,
+        stage_xy: tuple[float, float] | None = None,
+    ) -> tuple[float, ...] | None:
+        latest = self.stage_controller.latest_stage_position()
+        if latest is not None:
+            return latest
+        if stage_xy is not None:
+            return (float(stage_xy[0]), float(stage_xy[1]))
+        return None
 
     def _on_view_hover(
         self, dx: float, dy: float, _rel_x: float, _rel_y: float
@@ -1564,6 +2521,10 @@ class Main(QMainWindow):
         except Exception:
             return False
 
+    def _microscope_scan_running(self) -> bool:
+        thread = getattr(self, "_microscope_scan_thread", None)
+        return thread is not None and thread.is_alive()
+
     def _has_cancelable_operation(self) -> bool:
         controller_busy = (
             hasattr(self, "stage_controller") and self.stage_controller.is_busy()
@@ -1574,6 +2535,7 @@ class Main(QMainWindow):
             or self._controller_reports_active_motion()
             or self._route_measurement_runner is not None
             or self._surface_map_capture_running()
+            or self._microscope_scan_running()
             or self._manual_alignment_pick_slot is not None
             or self._pending_click_to_move is not None
             or bool(self._pending_homing_axes)
@@ -1695,6 +2657,13 @@ class Main(QMainWindow):
                 self.surface_map_window.stop_capture()
             except Exception:
                 logger.exception("Failed to stop surface map capture from Cancel.")
+            cancelled_any = True
+        if self._microscope_scan_running():
+            self._microscope_scan_stop_requested.set()
+            if self.microscope_scan_dialog is not None:
+                self.microscope_scan_dialog.set_status(
+                    "Microscope scan stop requested."
+                )
             cancelled_any = True
         if self._coordinate_move_axis is not None:
             self.stage_controller.cancel_active_motion(
@@ -2172,6 +3141,10 @@ class Main(QMainWindow):
         self._surface_map_window_action.triggered.connect(self._show_surface_map_window)
         calibration_menu.addAction(self._surface_map_window_action)
 
+        self._microscope_scan_action = QAction("Microscope Scan", self)
+        self._microscope_scan_action.triggered.connect(self._show_microscope_scan_dialog)
+        calibration_menu.addAction(self._microscope_scan_action)
+
         self._click_calibration_action = QAction(
             self._click_calibration_action_text(),
             self,
@@ -2456,6 +3429,77 @@ class Main(QMainWindow):
         self.settings_manager.save()
         self._apply_settings()
         logger.info("Settings updated from dialog")
+
+    def _send_telegram_alert(
+        self,
+        alert_key: str,
+        message: str,
+        *,
+        attach_photo: bool = False,
+        document_path: str | Path | None = None,
+    ) -> None:
+        telegram_settings = self.settings_manager.telegram_configuration()
+        if not telegram_settings.enabled:
+            logger.debug("Telegram alert skipped: disabled alert=%s", alert_key)
+            return
+        if not telegram_settings.alert_enabled(alert_key):
+            logger.debug("Telegram alert skipped: alert=%s is disabled", alert_key)
+            return
+        if not telegram_settings.chat_id.strip():
+            logger.warning(
+                "Telegram alert skipped: chat is not linked alert=%s",
+                alert_key,
+            )
+            return
+        bot_token = resolved_bot_token(telegram_settings)
+        if not bot_token:
+            logger.warning(
+                "Telegram alert skipped: bot token is not configured alert=%s",
+                alert_key,
+            )
+            return
+        photo: tuple[bytes, str] | None = (
+            self._latest_camera_frame_photo() if attach_photo else None
+        )
+        document = Path(document_path).expanduser() if document_path is not None else None
+        if document is not None and (not document.exists() or not document.is_file()):
+            document = None
+        send_telegram_message_in_thread(
+            bot_token=bot_token,
+            chat_id=telegram_settings.chat_id,
+            text=message,
+            photo_bytes=photo[0] if photo is not None else None,
+            photo_name=photo[1] if photo is not None else "microscope.jpg",
+            document_path=document,
+        )
+
+    def _latest_camera_frame_photo(self) -> tuple[bytes, str] | None:
+        frame = self._latest_camera_frame_for_notifications
+        if frame is None or frame.isNull():
+            return None
+        buffer = QBuffer()
+        if not buffer.open(QIODevice.OpenModeFlag.WriteOnly):
+            return None
+        if frame.save(buffer, "JPG", 88):
+            return bytes(buffer.data()), "microscope.jpg"
+        buffer.close()
+        buffer = QBuffer()
+        if not buffer.open(QIODevice.OpenModeFlag.WriteOnly):
+            return None
+        if frame.save(buffer, "PNG"):
+            return bytes(buffer.data()), "microscope.png"
+        return None
+
+    @staticmethod
+    def _route_attention_status(message: str) -> bool:
+        text = str(message or "")
+        if not text.startswith("Route measurement: point "):
+            return False
+        return (
+            "correct contact" in text
+            or "interrupted" in text
+            or "Save Shift" in text
+        )
 
     def _sync_objective_combo(self, objective_name: str) -> None:
         combo = self._objective_combo
@@ -4298,7 +5342,12 @@ class Main(QMainWindow):
             else:
                 self._design_session.restore_persisted_state(document, restore_state)
             self._pending_alignment_preparation = None
-            self._last_selected_design_point = None
+            current_route_point = self._design_session.current_route_point()
+            self._last_selected_design_point = (
+                current_route_point.camera_center
+                if current_route_point is not None
+                else None
+            )
             self._set_design_snap_enabled(True)
             self.settings_manager.set_design_last_directory(document.path.parent)
             if self.design_navigator_panel is not None:
@@ -4317,6 +5366,7 @@ class Main(QMainWindow):
                 f"Loaded design '{document.path.name}' ({document.top_cell_name}).",
                 5000,
             )
+            self._restore_route_measurement_state_after_design_load()
         except DesignModelError as exc:
             self._show_status(str(exc), 6000)
             if restore_state is not None:
@@ -4448,32 +5498,6 @@ class Main(QMainWindow):
             4000,
         )
 
-    def _load_measurement_script(self, script_path: str) -> None:
-        document = self._design_session.document
-        if document is None:
-            self._show_status("Load a design before loading a measurement plan.", 5000)
-            return
-        try:
-            module, targets = load_measurement_plan(script_path, ScriptContext(document))
-        except DesignModelError as exc:
-            self._show_status(str(exc), 7000)
-            return
-        self._design_session.script_path = script_path
-        self._design_session.script_module_name = module.__name__
-        self._design_session.set_targets(targets)
-        self._refresh_design_panel()
-        self._show_status(
-            f"Loaded measurement plan '{Path(script_path).name}' with {len(targets)} targets.",
-            5000,
-        )
-
-    def _reload_measurement_script(self) -> None:
-        script_path = self._design_session.script_path
-        if not script_path:
-            self._show_status("No measurement script is loaded.", 5000)
-            return
-        self._load_measurement_script(script_path)
-
     def _create_measurement_route(self) -> None:
         try:
             route = self._design_session.create_route()
@@ -4504,6 +5528,7 @@ class Main(QMainWindow):
             f"Loaded route '{route.name}' with {len(route.points)} points.",
             5000,
         )
+        self._restore_route_measurement_state_after_design_load()
 
     def _save_measurement_route(self) -> None:
         route = self._design_session.route
@@ -4634,17 +5659,22 @@ class Main(QMainWindow):
     def _open_route_measurement_dialog(self) -> None:
         route = self._design_session.route
         if route is None or not route.points:
-            self._show_status("Create or load a probe route before running it.", 5000)
+            self._show_status("Create or load a probe route before measuring.", 5000)
             return
         default_path = "probe_route_measurements.csv"
+        default_photo_dir = "probe_route_photos"
         if route.path is not None:
             default_path = str(
                 route.path.with_name(f"{route.path.stem}-measurements.csv")
             )
+            default_photo_dir = str(route.path.with_name(f"{route.path.stem}-photos"))
         elif self._design_session.document is not None:
             default_path = str(
                 self._design_session.document.path.parent
                 / "probe_route_measurements.csv"
+            )
+            default_photo_dir = str(
+                self._design_session.document.path.parent / "probe_route_photos"
             )
         dialog = self._route_measurement_dialog
         if dialog is None:
@@ -4652,15 +5682,15 @@ class Main(QMainWindow):
                 route_name=route.name,
                 route_point_count=len(route.points),
                 default_csv_path=default_path,
+                default_photo_dir=default_photo_dir,
                 default_meter_type=self.lcr_controller.meter_type(),
-                default_short_threshold_ohm=self.lcr_controller.short_threshold_ohm(),
                 settings_path=(
                     self.settings_manager.config_dir()
                     / "route-measurement-settings.json"
                 ),
-                parent=self,
+                parent=None,
             )
-            dialog.run_requested.connect(self._start_route_measurement)
+            dialog.measure_requested.connect(self._start_route_measurement)
             dialog.next_requested.connect(
                 lambda: self._submit_route_measurement_confirmation("next")
             )
@@ -4674,8 +5704,11 @@ class Main(QMainWindow):
             dialog.interrupt_requested.connect(
                 self._request_route_measurement_point_correction
             )
+            dialog.pause_requested.connect(self._request_pause_route_measurement)
             dialog.jump_requested.connect(self._submit_route_measurement_jump)
-            dialog.cancel_requested.connect(self._request_stop_route_measurement)
+            dialog.current_point_changed.connect(
+                self._on_route_measurement_current_point_changed
+            )
             dialog.finished.connect(lambda _result: self._clear_route_measurement_dialog())
             self._route_measurement_dialog = dialog
         else:
@@ -4683,10 +5716,57 @@ class Main(QMainWindow):
                 route_name=route.name,
                 route_point_count=len(route.points),
                 default_csv_path=default_path,
+                default_photo_dir=default_photo_dir,
+            )
+        if (
+            self._route_measurement_thread is not None
+            and self._route_measurement_thread.is_alive()
+        ):
+            dialog.set_running(True)
+            dialog.set_waiting(self._route_measurement_waiting)
+        elif dialog.measurement_pending():
+            dialog.set_status(
+                "Route measurement is pending; Measure continues from the current point."
             )
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    def _restore_route_measurement_state_after_design_load(self) -> None:
+        route = self._design_session.route
+        if route is None or not route.points:
+            return
+        state = self._load_route_measurement_settings()
+        current_point = self._route_measurement_current_point_from_settings(state)
+        if current_point is not None:
+            self._set_route_measurement_resume_point(current_point)
+        pending = bool(state.get("measurement_pending", False))
+        if pending or (current_point is not None and current_point > 1):
+            QTimer.singleShot(0, self._open_route_measurement_dialog)
+
+    def _load_route_measurement_settings(self) -> dict[str, object]:
+        settings_path = (
+            self.settings_manager.config_dir() / "route-measurement-settings.json"
+        )
+        if not settings_path.exists():
+            return {}
+        try:
+            with settings_path.open("r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return dict(loaded) if isinstance(loaded, dict) else {}
+
+    @staticmethod
+    def _route_measurement_current_point_from_settings(
+        state: dict[str, object],
+    ) -> int | None:
+        value = state.get("current_point", state.get("start_point"))
+        try:
+            point_number = int(value)
+        except (TypeError, ValueError):
+            return None
+        return point_number if point_number >= 1 else None
 
     def _clear_route_measurement_dialog(self) -> None:
         self._route_measurement_dialog = None
@@ -4697,19 +5777,19 @@ class Main(QMainWindow):
     ) -> None:
         thread = self._route_measurement_thread
         if thread is not None and thread.is_alive():
-            self._show_status("Route measurement is already running.", 4000)
+            self._show_status("Route measurement is already active.", 4000)
             return
         if self.serial_connection is None or not self.serial_connection.is_open:
-            self._show_status("Connect the stage controller before running a route.", 5000)
+            self._show_status("Connect the stage controller before measuring a route.", 5000)
             return
         route = self._design_session.route
         if route is None or not route.points:
-            self._show_status("Create or load a probe route before running it.", 5000)
+            self._show_status("Create or load a probe route before measuring.", 5000)
             return
         registration = self._design_session.registration
         if registration is None or not registration.valid:
             self._show_status(
-                "Design registration is required before running a route.",
+                "Design registration is required before measuring a route.",
                 6000,
             )
             return
@@ -4721,40 +5801,102 @@ class Main(QMainWindow):
         if not points:
             self._show_status("Route has no enabled points.", 5000)
             return
-        if not self.lcr_controller.is_connected():
-            self._show_status(
-                "Connect the measurement instrument before running a route.",
-                5000,
+        photo_enabled = configuration.operation_mode in {
+            ROUTE_OPERATION_PHOTO,
+            ROUTE_OPERATION_PHOTO_THEN_MEASURE,
+        }
+        measure_enabled = configuration.operation_mode in {
+            ROUTE_OPERATION_MEASURE,
+            ROUTE_OPERATION_PHOTO_THEN_MEASURE,
+        }
+        scale = self._active_microscope_scale()
+        if photo_enabled and scale is None:
+            message = (
+                "Calibrate click-to-move for the active objective before saving "
+                "microscope photos with a scale bar."
             )
-            return
-        try:
-            self.lcr_controller.apply_route_meter_configuration(configuration.meter)
-        except LCRMeterError as exc:
-            message = f"Route measurement instrument setup failed: {exc}"
             self._show_status(message, 8000)
             if self._route_measurement_dialog is not None:
-                self._route_measurement_dialog.set_running(False)
                 self._route_measurement_dialog.set_status(message)
             return
+        if photo_enabled:
+            frame, _counter = self._wait_for_camera_frame(timeout_s=0.1)
+            if frame is None:
+                message = "Camera frame is unavailable; cannot capture route photos."
+                self._show_status(message, 8000)
+                self._send_telegram_alert(
+                    "route_failed",
+                    f"Probe route could not start:\n{message}",
+                    attach_photo=True,
+                )
+                if self._route_measurement_dialog is not None:
+                    self._route_measurement_dialog.set_status(message)
+                return
+        route_lcr_controller: object
+        if measure_enabled:
+            if self.lcr_controller.is_connected():
+                try:
+                    self.lcr_controller.apply_route_meter_configuration(
+                        configuration.meter
+                    )
+                except LCRMeterError as exc:
+                    message = f"Route measurement instrument setup failed: {exc}"
+                    self._show_status(message, 8000)
+                    if self._route_measurement_dialog is not None:
+                        self._route_measurement_dialog.set_running(False)
+                        self._route_measurement_dialog.set_status(message)
+                    return
+                route_lcr_controller = self.lcr_controller
+            else:
+                route_lcr_controller = RouteMeter(configuration.meter)
+        else:
+            route_lcr_controller = object()
         runner = RouteMeasurementRunner(
             points=points,
             csv_path=configuration.csv_path,
             stage_controller=self.stage_controller,
-            lcr_controller=self.lcr_controller,
+            lcr_controller=route_lcr_controller,
             needle_feedrate=self._current_needle_feedrate(),
             measurement_count=configuration.measurement_count,
+            initial_measurement_count=configuration.initial_measurement_count,
             start_point_number=configuration.start_point,
             max_relative_rms=configuration.max_relative_rms,
-            short_threshold_ohm=configuration.short_threshold_ohm,
             confirm_each_point=True,
+            auto_next_ok_or_short=True,
+            auto_contact_seek_on_bad_contact=True,
+            auto_contact_seek_step_mm=configuration.contact_seek_step_mm,
+            auto_contact_seek_max_total_mm=configuration.contact_seek_range_mm,
             contact_settle_s=configuration.contact_settle_s,
             nplc_label=configuration.meter.nplc_label(),
+            measurement_type=configuration.meter.measurement_type_label(),
             status_callback=self.route_measurement_status.emit,
+            progress_callback=self.route_measurement_progress.emit,
             record_callback=self.route_measurement_recorded.emit,
+            photo_callback=lambda point, position, total, focus_result: self._capture_route_photo(
+                point,
+                position,
+                total,
+                configuration=configuration,
+                focus_result=focus_result,
+            ),
+            photo_focus_callback=lambda point, position, total: self._route_photo_autofocus(
+                point,
+                position,
+                total,
+                configuration=configuration,
+            ),
+            photo_record_callback=self._record_route_photo,
             result_callback=self.route_measurement_result.emit,
             waiting_callback=self.route_measurement_waiting_changed.emit,
+            operation_mode=configuration.operation_mode,
+            photo_settle_s=configuration.photo_settle_s,
+            photo_focus_enabled=configuration.photo_autofocus_enabled,
         )
         self._route_measurement_runner = runner
+        self._route_measurement_waiting = False
+        self._route_measurement_point_numbers = [int(point.index) for point in points]
+        self._last_telegram_attention_message = ""
+        self._set_route_measurement_pending(True)
         self._route_measurement_thread = threading.Thread(
             target=self._run_route_measurement,
             args=(runner,),
@@ -4772,7 +5914,12 @@ class Main(QMainWindow):
             self._route_measurement_dialog.set_status(
                 f"Route measurement starting: {len(points)} points."
             )
-        self._show_status(f"Route measurement starting: {len(points)} points.")
+        start_message = f"Route measurement starting: {len(points)} points."
+        self._show_status(start_message)
+        self._send_telegram_alert(
+            "route_started",
+            f"Probe route started:\n{start_message}\nCSV: {configuration.csv_path}",
+        )
         self._route_measurement_thread.start()
         self._update_stage_coordinate_apply_state()
 
@@ -4787,7 +5934,7 @@ class Main(QMainWindow):
             stage_xy = self._raw_stage_xy_from_design_xy(route_point.camera_center)
             if stage_xy is None:
                 raise DesignModelError(
-                    "Design registration is required before running a route."
+                    "Design registration is required before measuring a route."
                 )
             hits = route.needle_hits_for_point(route_point)
             needle_1_design = (
@@ -4818,6 +5965,208 @@ class Main(QMainWindow):
             )
         return points
 
+    def _capture_route_photo(
+        self,
+        point: RouteMeasurementPoint,
+        position: int,
+        total: int,
+        *,
+        configuration: RouteMeasurementRunConfiguration,
+        focus_result: object | None = None,
+    ) -> str:
+        scale = self._active_microscope_scale()
+        if scale is None:
+            raise RuntimeError("Active objective has no calibrated microscope scale.")
+        before_counter = self._latest_camera_counter()
+        frame, _counter = self._wait_for_camera_frame(
+            after_counter=before_counter,
+            timeout_s=2.0,
+        )
+        if frame is None:
+            raise RuntimeError("Camera frame is unavailable.")
+        captured_at = utc_timestamp()
+        objective_name, magnification = self._active_objective_metadata()
+        route = self._design_session.route
+        route_name = route.name if route is not None else "route"
+        filename = route_photo_filename(
+            route_name=route_name,
+            point_index=int(point.index),
+            point_label=point.label,
+            captured_at=captured_at,
+        )
+        stage_position = self._stage_position_for_image_metadata(
+            stage_xy=point.stage_xy
+        )
+        focus_data = self._route_photo_focus_payload(focus_result)
+        metadata = MicroscopeImageMetadata(
+            title="Probe Station Microscope",
+            mode="route photo"
+            if configuration.operation_mode == ROUTE_OPERATION_PHOTO
+            else "route photo before measurement",
+            captured_at=captured_at,
+            objective_name=objective_name,
+            magnification=magnification,
+            route_name=route_name,
+            route_point_index=int(point.index),
+            route_point_label=point.label,
+            route_position=int(position),
+            route_total=int(total),
+            design_xy=point.design_center,
+            stage_position=stage_position,
+            stage_xy=point.stage_xy,
+            notes=(
+                "needles raised before capture",
+                *(
+                    ("local autofocus before capture",)
+                    if configuration.photo_autofocus_enabled
+                    else ()
+                ),
+            ),
+            extra={
+                "point_id": point.point_id,
+                "needle_1_design": list(point.needle_1_design),
+                "needle_2_design": list(point.needle_2_design),
+                "photo_autofocus_enabled": bool(
+                    configuration.photo_autofocus_enabled
+                ),
+                "photo_autofocus_range_mm": float(
+                    configuration.photo_autofocus_range_mm
+                ),
+                "autofocus": focus_data,
+            },
+        )
+        result = save_microscope_image(
+            frame=frame,
+            output_dir=configuration.photo_output_dir,
+            filename_stem=filename,
+            metadata=metadata,
+            scale=scale,
+        )
+        return str(result.image_path)
+
+    def _route_photo_autofocus(
+        self,
+        point: RouteMeasurementPoint,
+        position: int,
+        total: int,
+        *,
+        configuration: RouteMeasurementRunConfiguration,
+    ) -> object:
+        _ = point
+        self._show_status(
+            f"Route photo autofocus: point {position}/{total}, "
+            f"+/-{configuration.photo_autofocus_range_mm:.3f} mm."
+        )
+        return self.stage_controller.run_external_local_autofocus(
+            range_mm=configuration.photo_autofocus_range_mm,
+        )
+
+    @staticmethod
+    def _route_photo_focus_payload(focus_result: object | None) -> dict[str, object] | None:
+        if focus_result is None:
+            return None
+        if isinstance(focus_result, dict):
+            return dict(focus_result)
+        to_dict = getattr(focus_result, "to_dict", None)
+        if callable(to_dict):
+            data = to_dict()
+            return dict(data) if isinstance(data, dict) else None
+        return None
+
+    def _record_route_photo(
+        self,
+        record: RoutePhotoRecord,
+        position: int,
+        total: int,
+    ) -> None:
+        if not record.focus:
+            return
+        try:
+            path = self._route_photo_focus_map_path(record)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            exists = path.exists() and path.stat().st_size > 0
+            with path.open("a", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=self._ROUTE_PHOTO_FOCUS_MAP_FIELDS,
+                )
+                if not exists:
+                    writer.writeheader()
+                writer.writerow(
+                    self._route_photo_focus_map_row(record, position, total)
+                )
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as exc:
+            logger.warning("Unable to write route photo focus map: %s", exc)
+
+    _ROUTE_PHOTO_FOCUS_MAP_FIELDS = (
+        "timestamp",
+        "route_name",
+        "route_position",
+        "route_total",
+        "structure_number",
+        "point_index",
+        "point_id",
+        "label",
+        "design_x",
+        "design_y",
+        "stage_x",
+        "stage_y",
+        "photo_path",
+        "objective_name",
+        "focus_start_z_mm",
+        "focus_best_z_mm",
+        "focus_delta_um",
+        "focus_score",
+        "focus_sample_count",
+        "focus_edge_peak",
+        "autofocus_range_mm",
+        "autofocus_fine_step_mm",
+        "autofocus_lower_z_mm",
+        "autofocus_upper_z_mm",
+    )
+
+    @staticmethod
+    def _route_photo_focus_map_path(record: RoutePhotoRecord) -> Path:
+        return Path(record.path).expanduser().resolve().parent / "route-photo-focus-map.csv"
+
+    def _route_photo_focus_map_row(
+        self,
+        record: RoutePhotoRecord,
+        position: int,
+        total: int,
+    ) -> dict[str, object]:
+        route = self._design_session.route
+        route_name = route.name if route is not None else ""
+        focus = record.focus or {}
+        return {
+            "timestamp": record.timestamp,
+            "route_name": route_name,
+            "route_position": int(position),
+            "route_total": int(total),
+            "structure_number": int(record.structure_number),
+            "point_index": int(record.point_index),
+            "point_id": record.point_id,
+            "label": record.label,
+            "design_x": float(record.design_center[0]),
+            "design_y": float(record.design_center[1]),
+            "stage_x": float(record.stage_xy[0]),
+            "stage_y": float(record.stage_xy[1]),
+            "photo_path": record.path,
+            "objective_name": focus.get("objective_name", ""),
+            "focus_start_z_mm": focus.get("focus_start_z_mm", ""),
+            "focus_best_z_mm": focus.get("focus_best_z_mm", ""),
+            "focus_delta_um": focus.get("focus_delta_um", ""),
+            "focus_score": focus.get("focus_score", ""),
+            "focus_sample_count": focus.get("focus_sample_count", ""),
+            "focus_edge_peak": focus.get("focus_edge_peak", ""),
+            "autofocus_range_mm": focus.get("autofocus_range_mm", ""),
+            "autofocus_fine_step_mm": focus.get("autofocus_fine_step_mm", ""),
+            "autofocus_lower_z_mm": focus.get("autofocus_lower_z_mm", ""),
+            "autofocus_upper_z_mm": focus.get("autofocus_upper_z_mm", ""),
+        }
+
     def _run_route_measurement(self, runner: RouteMeasurementRunner) -> None:
         success, message = runner.run()
         self.route_measurement_finished.emit(success, message, str(runner.csv_path))
@@ -4847,7 +6196,9 @@ class Main(QMainWindow):
             self._show_status("No route measurement is running.", 3000)
             return
         runner.request_current_point_correction()
-        message = "Route measurement correction requested for the current point."
+        message = (
+            "Route measurement correction requested; waiting for current read chunk."
+        )
         self._show_status(message, 5000)
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_route_measurement_status(message)
@@ -4859,6 +6210,17 @@ class Main(QMainWindow):
         if runner is None:
             self._show_status("No route measurement is waiting.", 3000)
             return
+        if self._route_measurement_dialog is not None:
+            configuration = self._route_measurement_dialog.current_configuration()
+            runner.update_runtime_settings(
+                measurement_count=configuration.measurement_count,
+                initial_measurement_count=configuration.initial_measurement_count,
+                max_relative_rms=configuration.max_relative_rms,
+                auto_contact_seek_step_mm=configuration.contact_seek_step_mm,
+                auto_contact_seek_max_total_mm=configuration.contact_seek_range_mm,
+                contact_settle_s=configuration.contact_settle_s,
+                photo_settle_s=configuration.photo_settle_s,
+            )
         if not runner.submit_confirmation(action):
             self._show_status("Unknown route measurement action.", 3000)
             return
@@ -4880,6 +6242,19 @@ class Main(QMainWindow):
 
     def _submit_route_measurement_jump(self, point_number: int) -> None:
         self._submit_route_measurement_confirmation(f"jump:{int(point_number)}")
+
+    def _request_pause_route_measurement(self) -> None:
+        runner = self._route_measurement_runner
+        if runner is None:
+            self._show_status("No route measurement is running.", 3000)
+            return
+        runner.request_pause_after_current_point()
+        message = "Route measurement pause requested; will pause after current point."
+        self._show_status(message, 5000)
+        if self.design_navigator_panel is not None:
+            self.design_navigator_panel.set_route_measurement_status(message)
+        if self._route_measurement_dialog is not None:
+            self._route_measurement_dialog.set_status(message)
 
     def _save_route_measurement_shift(self) -> None:
         runner = self._route_measurement_runner
@@ -4913,12 +6288,35 @@ class Main(QMainWindow):
 
     def _on_route_measurement_status(self, message: str) -> None:
         self._show_status(message)
+        if (
+            self._route_attention_status(message)
+            and message != self._last_telegram_attention_message
+        ):
+            self._last_telegram_attention_message = message
+            self._send_telegram_alert(
+                "route_attention",
+                f"Probe route needs attention:\n{message}",
+                attach_photo=True,
+            )
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_route_measurement_status(message)
         if self._route_measurement_dialog is not None:
             self._route_measurement_dialog.set_status(message)
 
+    def _on_route_measurement_progress(
+        self,
+        position: int,
+        total: int,
+        point_number: int,
+    ) -> None:
+        _ = position, total
+        self._set_route_measurement_resume_point(point_number)
+
+    def _on_route_measurement_current_point_changed(self, point_number: int) -> None:
+        self._set_route_measurement_resume_point(point_number)
+
     def _on_route_measurement_waiting_changed(self, waiting: bool) -> None:
+        self._route_measurement_waiting = bool(waiting)
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_route_measurement_waiting(waiting)
         if self._route_measurement_dialog is not None:
@@ -4965,11 +6363,12 @@ class Main(QMainWindow):
         )
         self._show_status(message)
         if self.design_navigator_panel is not None:
-            self.design_navigator_panel.set_route_measurement_waiting(True)
             self.design_navigator_panel.set_route_measurement_status(message)
         if self._route_measurement_dialog is not None:
-            self._route_measurement_dialog.set_waiting(True)
             self._route_measurement_dialog.set_status(message)
+        next_point_number = self._route_measurement_next_point_number(position)
+        if next_point_number is not None:
+            self._set_route_measurement_resume_point(next_point_number)
 
     @staticmethod
     def _format_route_measurement_record(
@@ -4982,12 +6381,20 @@ class Main(QMainWindow):
         prefix = "Measured" if saved else "Rejected"
         if saved and record.status == "short":
             prefix = "Short"
+        contact = record.contact_quality
+        contact_text = ""
+        if contact is not None and contact.assessed:
+            contact_text = (
+                f", contact={contact.status} "
+                f"(median={_format_route_ohm(contact.median_ohm)}, "
+                f"MAD={_format_route_ohm(contact.mad_sigma_ohm)})"
+            )
         return (
             f"{prefix} route point {position}/{total}: "
             f"R={_format_route_ohm(record.resistance_ohm)}, "
             f"RMS={_format_route_ohm(record.resistance_rms_ohm)}, "
             f"rel={_format_route_percent(record.relative_rms)}, "
-            f"status={record.status}."
+            f"status={record.status}{contact_text}."
         )
 
     def _on_route_measurement_finished(
@@ -5001,6 +6408,7 @@ class Main(QMainWindow):
             thread.join(timeout=0.1)
         self._route_measurement_thread = None
         self._route_measurement_runner = None
+        self._route_measurement_waiting = False
         self._update_stage_coordinate_apply_state()
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_route_measurement_running(False)
@@ -5010,9 +6418,126 @@ class Main(QMainWindow):
             self._route_measurement_dialog.set_running(False)
             self._route_measurement_dialog.set_status(message)
         if success:
-            self._show_status(f"{message} CSV: {csv_path}", 8000)
+            self._set_route_measurement_resume_point(1)
+            self._set_route_measurement_pending(False)
+            self._route_measurement_point_numbers = []
+            suffix = (
+                f" CSV: {csv_path}"
+                if "CSV:" not in message
+                and not message.startswith("Route photo capture")
+                and csv_path
+                else ""
+            )
+            self._show_status(f"{message}{suffix}", 8000)
+            completion_message = f"Probe route completed:\n{message}"
+            if csv_path:
+                completion_message = f"{completion_message}\nCSV: {csv_path}"
+            self._send_telegram_alert(
+                "route_completed",
+                completion_message,
+                document_path=Path(csv_path) if csv_path else None,
+            )
         else:
+            if self._route_measurement_current_point is not None:
+                self._set_route_measurement_resume_point(
+                    self._route_measurement_current_point
+                )
+            self._set_route_measurement_pending(True)
             self._show_status(message, 8000)
+            self._send_telegram_alert(
+                "route_failed",
+                f"Probe route stopped or failed:\n{message}\nCSV: {csv_path}",
+                attach_photo=True,
+            )
+
+    def _route_measurement_next_point_number(self, position: int) -> int | None:
+        try:
+            ordinal = int(position)
+        except (TypeError, ValueError):
+            return None
+        index = ordinal
+        if index < 0 or index >= len(self._route_measurement_point_numbers):
+            return None
+        return int(self._route_measurement_point_numbers[index])
+
+    def _set_route_measurement_resume_point(self, point_number: int) -> None:
+        try:
+            value = int(point_number)
+        except (TypeError, ValueError):
+            return
+        if value < 1:
+            return
+        self._route_measurement_current_point = value
+        self._select_route_point_for_measurement(value)
+        if self._route_measurement_dialog is not None:
+            self._route_measurement_dialog.set_current_point(value)
+            return
+        self._save_route_measurement_current_point(value)
+
+    def _select_route_point_for_measurement(self, point_number: int) -> None:
+        route = self._design_session.route
+        if route is None or not route.points:
+            return
+        index = int(point_number) - 1
+        if not 0 <= index < len(route.points):
+            return
+        if self._design_session.selected_route_point_index == index:
+            return
+        point = self._design_session.select_route_point(index)
+        self._last_selected_design_point = (
+            point.camera_center if point is not None else None
+        )
+        self._refresh_design_panel()
+        self._persist_controller_state_if_available()
+
+    def _save_route_measurement_current_point(self, point_number: int) -> None:
+        settings_path = (
+            self.settings_manager.config_dir() / "route-measurement-settings.json"
+        )
+        data: dict[str, object] = {}
+        if settings_path.exists():
+            try:
+                with settings_path.open("r", encoding="utf-8") as handle:
+                    loaded = json.load(handle)
+                if isinstance(loaded, dict):
+                    data = dict(loaded)
+            except (OSError, json.JSONDecodeError):
+                data = {}
+        data["current_point"] = int(point_number)
+        data["start_point"] = int(point_number)
+        try:
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            with settings_path.open("w", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=2, ensure_ascii=False)
+        except OSError:
+            logger.exception("Failed to persist route measurement resume point.")
+
+    def _set_route_measurement_pending(self, pending: bool) -> None:
+        if self._route_measurement_dialog is not None:
+            self._route_measurement_dialog.set_measurement_pending(bool(pending))
+            return
+        self._save_route_measurement_pending(bool(pending))
+
+    def _save_route_measurement_pending(self, pending: bool) -> None:
+        settings_path = (
+            self.settings_manager.config_dir() / "route-measurement-settings.json"
+        )
+        data: dict[str, object] = {}
+        if settings_path.exists():
+            try:
+                with settings_path.open("r", encoding="utf-8") as handle:
+                    loaded = json.load(handle)
+                if isinstance(loaded, dict):
+                    data = dict(loaded)
+            except (OSError, json.JSONDecodeError):
+                data = {}
+        data["measurement_pending"] = bool(pending)
+        try:
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            with settings_path.open("w", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=2, ensure_ascii=False)
+        except OSError:
+            logger.exception("Failed to persist route measurement pending state.")
 
     def _select_route_point(self, index: int) -> None:
         point = self._design_session.select_route_point(index)
@@ -5194,7 +6719,6 @@ class Main(QMainWindow):
         if panel is not None:
             panel.set_document(self._design_session.document)
             panel.set_design_registration_active(registration_valid)
-            panel.set_script_path(self._design_session.script_path)
             panel.set_targets(
                 self._design_session.targets,
                 selected_target_id=selected_target_id,
@@ -5506,6 +7030,7 @@ class Main(QMainWindow):
             return
         targets = dict(self._pending_stage_axis_targets)
         self.view.setFocus(Qt.OtherFocusReason)
+        self._set_joystick_control_mode_for_coordinate_apply()
         feedrate = self._coordinate_feedrate_for_axes(targets)
         self._start_coordinate_targets_move(
             targets,
@@ -5513,6 +7038,22 @@ class Main(QMainWindow):
             source_label="coordinate fields",
         )
         self._update_stage_coordinate_apply_state()
+
+    def _set_joystick_control_mode_for_coordinate_apply(self) -> None:
+        joystick = self.joystick_panel
+        if joystick is None:
+            return
+        setter = getattr(joystick, "set_control_mode", None)
+        if callable(setter):
+            try:
+                setter("jog", emit_changed=True)
+                return
+            except TypeError:
+                setter("jog")
+                return
+        private_setter = getattr(joystick, "_set_control_mode", None)
+        if callable(private_setter):
+            private_setter("jog", emit_changed=True)
 
     def _set_pending_stage_axis_target(
         self, axis_name: str, raw_target: float, display_target: float
@@ -6237,6 +7778,13 @@ class Main(QMainWindow):
             and self._route_measurement_thread.is_alive()
         ):
             self._route_measurement_thread.join(timeout=2.0)
+        if self._microscope_scan_thread is not None:
+            self._microscope_scan_stop_requested.set()
+        if (
+            self._microscope_scan_thread is not None
+            and self._microscope_scan_thread.is_alive()
+        ):
+            self._microscope_scan_thread.join(timeout=2.0)
         self._stop_jog_before_serial_close("application shutdown")
         self.grabber.stop()
         self.thread.quit()
@@ -6250,15 +7798,22 @@ class Main(QMainWindow):
         self.stage_controller.request_stop_oscillation()
         self.stage_controller.shutdown()
         self.lcr_controller.shutdown()
+        self._close_auxiliary_windows()
+        if self.serial_connection_panel:
+            self.serial_connection_panel.shutdown()
+        event.accept()
+
+    def _close_auxiliary_windows(self) -> None:
+        if self._route_measurement_dialog is not None:
+            self._route_measurement_dialog.close()
         if self.design_layout_window is not None:
             self.design_layout_window.close()
         if self.contact_calibration_window is not None:
             self.contact_calibration_window.close()
         if self.surface_map_window is not None:
             self.surface_map_window.close()
-        if self.serial_connection_panel:
-            self.serial_connection_panel.shutdown()
-        event.accept()
+        if self.microscope_scan_dialog is not None:
+            self.microscope_scan_dialog.close()
 
     def _stop_jog_before_serial_close(self, reason: str) -> None:
         if self.serial_connection is None or not self.serial_connection.is_open:
@@ -6433,7 +7988,9 @@ class Main(QMainWindow):
             self._on_needles_action_finished
         )
         self.joystick_panel.reset_requested.connect(
-            self.stage_controller.cancel_active_task
+            lambda: self.stage_controller.reset_controller(
+                source="joystick_reset_button"
+            )
         )
         self.stage_controller.stage_position_changed.connect(self._persist_controller_state)
         self.joystick_dock = CollapsibleDockWidget("Joystick", self)
@@ -6460,18 +8017,11 @@ class Main(QMainWindow):
         self.contact_calibration_window.move_to_surface_position_requested.connect(
             self._move_to_surface_position
         )
-        self.contact_calibration_window.save_current_needle_height_requested.connect(
-            self._save_current_needle_height
+        self.contact_calibration_window.contact_seek_requested.connect(
+            self._request_contact_seek
         )
-        self.contact_calibration_window.lower_needles_requested.connect(
-            lambda: self.stage_controller.request_needles_lower(
-                self._current_needle_feedrate()
-            )
-        )
-        self.contact_calibration_window.raise_needles_requested.connect(
-            lambda: self.stage_controller.request_needles_raise(
-                self._current_needle_feedrate()
-            )
+        self.contact_calibration_window.contact_seek_cancel_requested.connect(
+            self._cancel_contact_seek
         )
         self.lcr_controller.connection_changed.connect(
             self._on_lcr_connection_changed
@@ -6563,6 +8113,342 @@ class Main(QMainWindow):
         self.surface_map_window.showNormal()
         self.surface_map_window.raise_()
 
+    def _show_microscope_scan_dialog(self) -> None:
+        default_dir = self._default_microscope_scan_output_dir()
+        if self.microscope_scan_dialog is None:
+            dialog = MicroscopeScanDialog(
+                default_output_dir=default_dir,
+                parent=None,
+            )
+            dialog.scan_requested.connect(self._start_microscope_scan)
+            dialog.stop_requested.connect(self._request_stop_microscope_scan)
+            dialog.finished.connect(lambda _result: self._clear_microscope_scan_dialog())
+            self.microscope_scan_dialog = dialog
+        self.microscope_scan_dialog.show()
+        self.microscope_scan_dialog.raise_()
+        self.microscope_scan_dialog.activateWindow()
+
+    def _default_microscope_scan_output_dir(self) -> str:
+        document = self._design_session.document
+        if document is not None:
+            return str(document.path.with_name(f"{document.path.stem}-microscope-scan"))
+        return str(Path.cwd() / "microscope-scan")
+
+    def _clear_microscope_scan_dialog(self) -> None:
+        self.microscope_scan_dialog = None
+
+    def _request_stop_microscope_scan(self) -> None:
+        if not self._microscope_scan_running():
+            self._show_status("No microscope scan is running.", 3000)
+            return
+        self._microscope_scan_stop_requested.set()
+        message = "Microscope scan stop requested."
+        self._show_status(message, 5000)
+        if self.microscope_scan_dialog is not None:
+            self.microscope_scan_dialog.set_status(message)
+
+    def _start_microscope_scan(
+        self,
+        configuration: MicroscopeScanConfiguration,
+    ) -> None:
+        if self._microscope_scan_running():
+            self._show_status("Microscope scan is already running.", 4000)
+            return
+        if self.serial_connection is None or not self.serial_connection.is_open:
+            self._show_status("Connect the stage controller before scanning.", 5000)
+            return
+        document = self._design_session.document
+        if document is None:
+            self._show_status("Load a design before scanning.", 5000)
+            return
+        registration = self._design_session.registration
+        if registration is None or not registration.valid:
+            self._show_status(
+                "Design registration is required before scanning.",
+                6000,
+            )
+            return
+        scale = self._active_microscope_scale()
+        if scale is None:
+            self._show_status(
+                "Calibrate click-to-move for the active objective before scanning.",
+                8000,
+            )
+            return
+        frame, _counter = self._wait_for_camera_frame(timeout_s=0.1)
+        if frame is None:
+            self._show_status("Camera frame is unavailable; cannot scan.", 8000)
+            return
+        fov_size_mm = (
+            frame.width() * scale.pixel_size_x_mm,
+            frame.height() * scale.pixel_size_y_mm,
+        )
+        try:
+            stage_bounds = stage_bounds_from_design_bounds(
+                document.bounds,
+                self._raw_stage_xy_from_design_xy,
+            )
+            plan = build_design_scan_plan(
+                stage_bounds=stage_bounds,
+                fov_size_mm=fov_size_mm,
+                overlap_fraction=configuration.overlap_fraction,
+            )
+        except (ValueError, DesignModelError) as exc:
+            self._show_status(str(exc), 8000)
+            return
+        if not plan.tiles:
+            self._show_status("Microscope scan plan has no tiles.", 5000)
+            return
+        self._microscope_scan_stop_requested.clear()
+        if self.microscope_scan_dialog is not None:
+            self.microscope_scan_dialog.set_running(True)
+            self.microscope_scan_dialog.set_status(
+                f"Microscope scan starting: {len(plan.tiles)} tiles."
+            )
+        self._microscope_scan_thread = threading.Thread(
+            target=self._run_microscope_scan,
+            args=(configuration, plan),
+            name="MicroscopeDesignScan",
+            daemon=True,
+        )
+        self._microscope_scan_thread.start()
+        self._update_stage_coordinate_apply_state()
+
+    def _run_microscope_scan(
+        self,
+        configuration: MicroscopeScanConfiguration,
+        plan: MicroscopeScanPlan,
+    ) -> None:
+        success = False
+        message = "Microscope scan stopped."
+        output_dir = Path(configuration.output_dir).expanduser().resolve()
+        scale = self._active_microscope_scale()
+        if scale is None:
+            self.microscope_scan_finished.emit(
+                False,
+                "Active objective has no calibrated microscope scale.",
+            )
+            return
+        captured_tiles: list[tuple[MicroscopeScanTile, QImage]] = []
+        tile_results: list[MicroscopeCaptureResult] = []
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            self.stage_controller.begin_external_task("microscope design scan")
+            self.microscope_scan_status.emit("Microscope scan: raising needles.")
+            self.stage_controller.run_external_needles_action(
+                "raise",
+                self._current_needle_feedrate(),
+            )
+            for tile in plan.tiles:
+                if self._microscope_scan_stop_requested.is_set():
+                    message = "Microscope scan stopped by user."
+                    break
+                total = len(plan.tiles)
+                self.microscope_scan_status.emit(
+                    f"Microscope scan: tile {tile.index}/{total}."
+                )
+                self.stage_controller.run_external_move_to_xy(
+                    tile.stage_xy[0],
+                    tile.stage_xy[1],
+                )
+                if not self._sleep_microscope_scan_settle(configuration.settle_s):
+                    message = "Microscope scan stopped by user."
+                    break
+                result = self._capture_microscope_scan_tile(
+                    tile,
+                    plan,
+                    output_dir=output_dir,
+                    scale=scale,
+                )
+                tile_results.append(result)
+                captured_tiles.append((tile, result.raw_image))
+            else:
+                mosaic = stitch_scan_tiles(
+                    plan=plan,
+                    tile_images=captured_tiles,
+                    scale=scale,
+                )
+                mosaic_result = self._save_microscope_scan_mosaic(
+                    mosaic,
+                    plan,
+                    output_dir=output_dir,
+                    scale=scale,
+                )
+                manifest_path = self._write_microscope_scan_manifest(
+                    output_dir=output_dir,
+                    plan=plan,
+                    tile_results=tile_results,
+                    mosaic_result=mosaic_result,
+                )
+                success = True
+                message = (
+                    f"Microscope scan complete: {len(tile_results)} tiles, "
+                    f"mosaic {mosaic_result.image_path}, manifest {manifest_path}."
+                )
+        except Exception as exc:
+            logger.exception("Microscope scan failed")
+            message = f"Microscope scan failed: {exc}"
+        finally:
+            self.stage_controller.finish_external_task()
+            self.microscope_scan_finished.emit(success, message)
+
+    def _sleep_microscope_scan_settle(self, settle_s: float) -> bool:
+        deadline = time.monotonic() + max(0.0, float(settle_s))
+        while True:
+            if self._microscope_scan_stop_requested.is_set():
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                return True
+            time.sleep(min(remaining, 0.05))
+
+    def _capture_microscope_scan_tile(
+        self,
+        tile: MicroscopeScanTile,
+        plan: MicroscopeScanPlan,
+        *,
+        output_dir: Path,
+        scale,
+    ) -> MicroscopeCaptureResult:
+        before_counter = self._latest_camera_counter()
+        frame, _counter = self._wait_for_camera_frame(
+            after_counter=before_counter,
+            timeout_s=2.0,
+        )
+        if frame is None:
+            raise RuntimeError("Camera frame is unavailable.")
+        captured_at = utc_timestamp()
+        objective_name, magnification = self._active_objective_metadata()
+        document = self._design_session.document
+        scan_name = document.path.stem if document is not None else "design_scan"
+        design_xy = self._design_xy_from_raw_stage_xy(tile.stage_xy)
+        metadata = MicroscopeImageMetadata(
+            title="Probe Station Design Scan",
+            mode="design scan tile",
+            captured_at=captured_at,
+            objective_name=objective_name,
+            magnification=magnification,
+            scan_tile_index=tile.index,
+            scan_tile_total=len(plan.tiles),
+            scan_row=tile.row,
+            scan_column=tile.column,
+            design_xy=design_xy,
+            stage_position=self._stage_position_for_image_metadata(
+                stage_xy=tile.stage_xy
+            ),
+            stage_xy=tile.stage_xy,
+            notes=("needles raised before scan",),
+            extra={
+                "overlap_fraction": plan.overlap_fraction,
+                "row_count": plan.row_count,
+                "column_count": plan.column_count,
+            },
+        )
+        return save_microscope_image(
+            frame=frame,
+            output_dir=output_dir / "tiles",
+            filename_stem=scan_tile_filename(
+                scan_name=scan_name,
+                tile=tile,
+                captured_at=captured_at,
+            ),
+            metadata=metadata,
+            scale=scale,
+        )
+
+    def _save_microscope_scan_mosaic(
+        self,
+        mosaic: QImage,
+        plan: MicroscopeScanPlan,
+        *,
+        output_dir: Path,
+        scale,
+    ) -> MicroscopeCaptureResult:
+        captured_at = utc_timestamp()
+        objective_name, magnification = self._active_objective_metadata()
+        document = self._design_session.document
+        scan_name = document.path.stem if document is not None else "design_scan"
+        metadata = MicroscopeImageMetadata(
+            title="Probe Station Design Scan Mosaic",
+            mode="design scan mosaic",
+            captured_at=captured_at,
+            objective_name=objective_name,
+            magnification=magnification,
+            scan_tile_total=len(plan.tiles),
+            notes=("stage-coordinate tile mosaic",),
+            extra={
+                "overlap_fraction": plan.overlap_fraction,
+                "row_count": plan.row_count,
+                "column_count": plan.column_count,
+                "stage_bounds": list(plan.stage_bounds),
+                "covered_stage_bounds": list(plan.covered_stage_bounds),
+                "fov_size_mm": list(plan.fov_size_mm),
+            },
+        )
+        return save_microscope_image(
+            frame=mosaic,
+            output_dir=output_dir,
+            filename_stem=f"{scan_name}_mosaic_{captured_at}",
+            metadata=metadata,
+            scale=scale,
+        )
+
+    def _write_microscope_scan_manifest(
+        self,
+        *,
+        output_dir: Path,
+        plan: MicroscopeScanPlan,
+        tile_results: list[MicroscopeCaptureResult],
+        mosaic_result: MicroscopeCaptureResult,
+    ) -> Path:
+        manifest_path = output_dir / "microscope-scan-manifest.json"
+        data = {
+            "version": 1,
+            "created_at": utc_timestamp(),
+            "tile_count": len(tile_results),
+            "row_count": plan.row_count,
+            "column_count": plan.column_count,
+            "overlap_fraction": plan.overlap_fraction,
+            "stage_bounds": list(plan.stage_bounds),
+            "covered_stage_bounds": list(plan.covered_stage_bounds),
+            "fov_size_mm": list(plan.fov_size_mm),
+            "mosaic": {
+                "image": str(mosaic_result.image_path),
+                "metadata": str(mosaic_result.metadata_path),
+            },
+            "tiles": [
+                {
+                    "index": tile.index,
+                    "row": tile.row,
+                    "column": tile.column,
+                    "stage_xy": list(tile.stage_xy),
+                    "image": str(result.image_path),
+                    "metadata": str(result.metadata_path),
+                }
+                for tile, result in zip(plan.tiles, tile_results)
+            ],
+        }
+        with manifest_path.open("w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2, ensure_ascii=False)
+        return manifest_path
+
+    def _on_microscope_scan_status(self, message: str) -> None:
+        self._show_status(message)
+        if self.microscope_scan_dialog is not None:
+            self.microscope_scan_dialog.set_status(message)
+
+    def _on_microscope_scan_finished(self, success: bool, message: str) -> None:
+        thread = self._microscope_scan_thread
+        if thread is not None and not thread.is_alive():
+            thread.join(timeout=0.1)
+        self._microscope_scan_thread = None
+        self._microscope_scan_stop_requested.clear()
+        self._update_stage_coordinate_apply_state()
+        if self.microscope_scan_dialog is not None:
+            self.microscope_scan_dialog.set_running(False)
+            self.microscope_scan_dialog.set_status(message)
+        self._show_status(message, 10000 if success else 8000)
+
     def _create_design_layout_window(
         self,
         design_layout_window_class: object | None = None,
@@ -6590,12 +8476,6 @@ class Main(QMainWindow):
         )
         self.design_navigator_panel.design_rotate_requested.connect(
             self._rotate_design_document
-        )
-        self.design_navigator_panel.load_script_requested.connect(
-            self._load_measurement_script
-        )
-        self.design_navigator_panel.reload_script_requested.connect(
-            self._reload_measurement_script
         )
         self.design_navigator_panel.route_new_requested.connect(
             self._create_measurement_route
@@ -6635,6 +8515,9 @@ class Main(QMainWindow):
         )
         self.design_navigator_panel.route_measurement_stop_requested.connect(
             self._request_stop_route_measurement
+        )
+        self.design_navigator_panel.route_measurement_pause_requested.connect(
+            self._request_pause_route_measurement
         )
         self.design_navigator_panel.route_measurement_interrupt_requested.connect(
             self._request_route_measurement_point_correction
@@ -6710,6 +8593,173 @@ class Main(QMainWindow):
     def _on_lcr_reading_updated(self, resistance_ohm: float, is_short: bool) -> None:
         if self.serial_connection_panel is not None:
             self.serial_connection_panel.set_lcr_reading(resistance_ohm, is_short)
+
+    def _request_contact_seek(self) -> None:
+        thread = self._contact_seek_thread
+        if thread is not None and thread.is_alive():
+            self._show_status("Contact seek is already running.")
+            return
+        if self._route_measurement_thread is not None and self._route_measurement_thread.is_alive():
+            self._show_status("Stop route measurement before contact seek.")
+            return
+        if not self.lcr_controller.is_connected():
+            self._show_status("Connect the measurement instrument before contact seek.")
+            if self.contact_calibration_window is not None:
+                self.contact_calibration_window.set_contact_seek_result(
+                    "Measurement instrument is not connected."
+                )
+            return
+        self._contact_seek_stop_requested.clear()
+        if self.contact_calibration_window is not None:
+            self.contact_calibration_window.set_contact_seek_running(True)
+            self.contact_calibration_window.set_contact_seek_result("Starting.")
+        thread = threading.Thread(target=self._run_contact_seek, daemon=True)
+        self._contact_seek_thread = thread
+        thread.start()
+
+    def _cancel_contact_seek(self) -> None:
+        self._contact_seek_stop_requested.set()
+        self.lcr_controller.abort_current_measurement()
+        self.stage_controller.cancel_active_motion("Contact seek cancel requested.")
+        self._show_status("Contact seek cancel requested.")
+
+    def _run_contact_seek(self) -> None:
+        stage_reserved = False
+        moved_mm = 0.0
+        try:
+            self.stage_controller.begin_external_task("contact seek")
+            stage_reserved = True
+            feedrate = self._current_needle_feedrate()
+            quick_quality = self._contact_seek_measure_quality(
+                self.CONTACT_SEEK_QUICK_COUNT
+            )
+            self.contact_seek_status.emit(
+                "Contact seek: current position "
+                f"{quick_quality.status}, median="
+                f"{_format_route_ohm(quick_quality.median_ohm)}."
+            )
+            if quick_quality.good is True:
+                if self._confirm_and_save_contact_seek("current position", moved_mm):
+                    return
+
+            max_steps = int(
+                math.ceil(
+                    self.CONTACT_SEEK_MAX_TOTAL_MM
+                    / abs(self.CONTACT_SEEK_STEP_MM)
+                )
+            )
+            for step_index in range(max_steps):
+                if self._contact_seek_stop_requested.is_set():
+                    self.contact_seek_finished.emit(False, "Contact seek cancelled.")
+                    return
+                self.contact_seek_status.emit(
+                    "Contact seek: lowering A "
+                    f"{step_index + 1}/{max_steps}."
+                )
+                self.stage_controller.run_external_needles_adjust(
+                    self.CONTACT_SEEK_STEP_MM,
+                    feedrate,
+                )
+                moved_mm += abs(self.CONTACT_SEEK_STEP_MM)
+                if self._contact_seek_stop_requested.is_set():
+                    self.contact_seek_finished.emit(False, "Contact seek cancelled.")
+                    return
+                quick_quality = self._contact_seek_measure_quality(
+                    self.CONTACT_SEEK_QUICK_COUNT
+                )
+                self.contact_seek_status.emit(
+                    "Contact seek: "
+                    f"{moved_mm:.4f} mm down, {quick_quality.status}, "
+                    f"median={_format_route_ohm(quick_quality.median_ohm)}, "
+                    f"MAD={_format_route_ohm(quick_quality.mad_sigma_ohm)}."
+                )
+                if quick_quality.good is True:
+                    if self._confirm_and_save_contact_seek(
+                        f"{moved_mm:.4f} mm down",
+                        moved_mm,
+                    ):
+                        return
+            self.contact_seek_finished.emit(
+                False,
+                "Contact seek did not find a stable contact within "
+                f"{self.CONTACT_SEEK_MAX_TOTAL_MM:.3f} mm.",
+            )
+        except Exception as exc:
+            logger.exception("Contact seek failed.")
+            self.contact_seek_finished.emit(False, f"Contact seek failed: {exc}")
+        finally:
+            if stage_reserved:
+                self.stage_controller.finish_external_task()
+
+    def _contact_seek_measure_quality(self, count: int):
+        raw_batch = self.lcr_controller.read_route_measurement_batch_now(int(count))
+        samples = tuple(
+            route_measurement_sample_from_raw(raw, index)
+            for index, raw in enumerate(raw_batch, start=1)
+        )
+        return summarize_route_contact_quality(samples)
+
+    def _confirm_and_save_contact_seek(self, label: str, moved_mm: float) -> bool:
+        self.contact_seek_status.emit(
+            "Contact seek: confirming stable contact with "
+            f"{self.CONTACT_SEEK_CONFIRM_COUNT} readings."
+        )
+        confirm_quality = self._contact_seek_measure_quality(
+            self.CONTACT_SEEK_CONFIRM_COUNT
+        )
+        if confirm_quality.good is not True:
+            self.contact_seek_status.emit(
+                "Contact seek: quick check was good, confirmation failed "
+                f"({confirm_quality.status})."
+            )
+            return False
+        lowering_mm = self.stage_controller.latest_axis_a_lowering()
+        if lowering_mm is None:
+            raise StageControllerError("Unable to read A lowering after contact seek.")
+        self.stage_controller.finish_external_task()
+        try:
+            self.stage_controller.set_current_axis_work_coordinate("A", 0.0)
+        except StageControllerError:
+            raise
+        detail = (
+            f"{label}; moved {moved_mm:.4f} mm; "
+            f"median={_format_route_ohm(confirm_quality.median_ohm)}, "
+            f"MAD={_format_route_ohm(confirm_quality.mad_sigma_ohm)}, "
+            f"p95 step={_format_route_ohm(confirm_quality.p95_abs_step_ohm)}."
+        )
+        self.contact_seek_calibration_found.emit(float(lowering_mm), detail)
+        self.contact_seek_finished.emit(True, f"Contact seek found stable contact: {detail}")
+        return True
+
+    def _on_contact_seek_status(self, message: str) -> None:
+        if self.contact_calibration_window is not None:
+            self.contact_calibration_window.set_contact_seek_result(message)
+        self._show_status(message, 5000)
+
+    def _on_contact_seek_calibration_found(
+        self,
+        lowering_mm: float,
+        detail: str,
+    ) -> None:
+        self._save_needle_down_position_from_lowering(float(lowering_mm))
+        if self.contact_calibration_window is not None:
+            self.contact_calibration_window.set_contact_seek_result(detail)
+
+    def _on_contact_seek_finished(self, success: bool, message: str) -> None:
+        thread = self._contact_seek_thread
+        if thread is not None and not thread.is_alive():
+            thread.join(timeout=0.1)
+        self._contact_seek_thread = None
+        if self.contact_calibration_window is not None:
+            self.contact_calibration_window.set_contact_seek_running(False)
+            self.contact_calibration_window.set_contact_seek_result(message)
+        self._show_status(message, 8000 if not success else 5000)
+        if not success:
+            self._send_telegram_alert(
+                "contact_seek_failed",
+                f"Contact seek needs attention:\n{message}",
+                attach_photo=True,
+            )
 
     def _display_a_for_needle_lowering(self, lowering_mm: float | None) -> float | None:
         if lowering_mm is None:
@@ -6992,13 +9042,20 @@ def _fit_window_to_screen(window: QMainWindow) -> None:
 
 
 def main() -> int:
+    _startup_trace("main() entered")
     diagnostics_path = configure_crash_diagnostics()
+    _startup_trace("crash diagnostics configured")
     logger.debug("Crash diagnostics enabled: %s", diagnostics_path)
     app = QApplication(sys.argv)
+    _startup_trace("QApplication created")
     window = Main()
+    _startup_trace("Main created")
     _set_initial_window_geometry(window)
+    _startup_trace("initial window geometry set")
     window.show()
+    _startup_trace("window.show() called")
     QTimer.singleShot(0, lambda: _fit_window_to_screen(window))
+    _startup_trace("screen fit scheduled")
     return app.exec()
 
 
