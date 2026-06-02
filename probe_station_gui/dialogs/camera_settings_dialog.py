@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -50,6 +51,7 @@ class _FeatureListPage(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self._scroll_area = QScrollArea(self)
+        self._scroll_area.setFrameShape(QFrame.NoFrame)
         self._scroll_area.setWidgetResizable(True)
         layout.addWidget(self._scroll_area, 1)
 
@@ -545,12 +547,10 @@ class CameraSettingsWidget(QWidget):
         self._applying_settings: dict[tuple[str, str], object] = {}
         self._snapshot_pending = False
         self._snapshot_show_status = False
+        self._status_text = ""
         self._loaded_once = False
 
         layout = QVBoxLayout(self)
-        self._status_label = QLabel("Camera controls not loaded.", self)
-        self._status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(self._status_label)
 
         self._page = _FeatureListPage(
             "camera",
@@ -572,7 +572,7 @@ class CameraSettingsWidget(QWidget):
 
     def refresh(self) -> None:
         if self._pending_settings or self._applying_settings:
-            self._status_label.setText("Apply pending camera settings before refreshing.")
+            self._set_status("Apply pending camera settings before refreshing.")
             return
         self._request_snapshot(
             show_status=True,
@@ -607,7 +607,7 @@ class CameraSettingsWidget(QWidget):
         self._snapshot_pending = True
         self._snapshot_show_status = show_status
         if show_status:
-            self._status_label.setText("Loading camera controls.")
+            self._set_status("Loading camera controls.")
         self._grabber.request_camera_settings_snapshot(
             map_key="camera",
             node_names=node_names or list(self.OPERATOR_NODE_NAMES),
@@ -624,10 +624,10 @@ class CameraSettingsWidget(QWidget):
             self._set_pending_status()
             return
         if not isinstance(payload, dict):
-            self._status_label.setText("Camera settings response was invalid.")
+            self._set_status("Camera settings response was invalid.")
             return
         if not payload.get("ok", False):
-            self._status_label.setText(str(payload.get("message") or "Camera error."))
+            self._set_status(str(payload.get("message") or "Camera error."))
             return
 
         maps = [
@@ -660,15 +660,15 @@ class CameraSettingsWidget(QWidget):
         if first_load or show_status:
             loaded_count = len(self._page.node_names())
             if loaded_count:
-                self._status_label.setText(f"Loaded {loaded_count} camera controls.")
+                self._set_status(f"Loaded {loaded_count} camera controls.")
             else:
-                self._status_label.setText("No supported camera controls found.")
+                self._set_status("No supported camera controls found.")
 
     def _on_setting_changed(self, payload: object) -> None:
         if not isinstance(payload, dict):
-            self._status_label.setText("Camera setting response was invalid.")
+            self._set_status("Camera setting response was invalid.")
             return
-        self._status_label.setText(str(payload.get("message") or "Camera setting updated."))
+        self._set_status(str(payload.get("message") or "Camera setting updated."))
         map_key = str(payload.get("map_key") or "")
         node_name = str(payload.get("node_name") or "")
         key = (map_key, node_name)
@@ -695,9 +695,9 @@ class CameraSettingsWidget(QWidget):
     def _set_pending_status(self) -> None:
         pending_count = len(self._pending_settings)
         if pending_count == 1:
-            self._status_label.setText("1 camera setting pending.")
+            self._set_status("1 camera setting pending.")
         else:
-            self._status_label.setText(f"{pending_count} camera settings pending.")
+            self._set_status(f"{pending_count} camera settings pending.")
 
     def apply_pending_settings(self) -> bool:
         self._page.queue_current_editor_value()
@@ -713,7 +713,7 @@ class CameraSettingsWidget(QWidget):
         ]
         if not pending_items:
             return False
-        self._status_label.setText(f"Writing {len(pending_items)} camera settings.")
+        self._set_status(f"Writing {len(pending_items)} camera settings.")
         for (map_key, node_name), value in pending_items:
             self._applying_settings[(map_key, node_name)] = value
             self._grabber.request_camera_setting_update(map_key, node_name, value)
@@ -726,8 +726,11 @@ class CameraSettingsWidget(QWidget):
     def _execute_command(self, map_key: str, node_name: str) -> None:
         if not node_name:
             return
-        self._status_label.setText(f"Executing {node_name}.")
+        self._set_status(f"Executing {node_name}.")
         self._grabber.request_camera_command_execute(map_key, node_name)
+
+    def _set_status(self, message: str) -> None:
+        self._status_text = message
 
 
 __all__ = ["CameraSettingsWidget"]
