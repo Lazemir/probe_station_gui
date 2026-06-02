@@ -518,6 +518,13 @@ class CameraSettingsWidget(QWidget):
 
     OPERATOR_NODE_NAMES = (
         "AcquisitionMode",
+        "TriggerSelector",
+        "TriggerMode",
+        "TriggerSource",
+        "TriggerActivation",
+        "TriggerOverlap",
+        "TriggerDelay",
+        "TriggerSoftware",
         "ExposureMode",
         "ExposureAuto",
         "ExposureTime",

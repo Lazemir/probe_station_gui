@@ -7,6 +7,7 @@ import concurrent.futures
 import importlib
 import queue
 import time
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -57,6 +58,7 @@ class Grabber(QObject):
     error: Signal = Signal(str)
     camera_settings_snapshot_ready: Signal = Signal(object)
     camera_setting_changed: Signal = Signal(object)
+    camera_settings_override_changed: Signal = Signal(object)
 
     def __init__(self) -> None:
         super().__init__()
@@ -67,6 +69,7 @@ class Grabber(QObject):
         self._last_frame_timestamp: float | None = None
         self._last_frame_log_timestamp = 0.0
         self._camera_commands: queue.Queue[_CameraCommand] = queue.Queue()
+        self._temporary_camera_settings: dict[str, list[dict[str, Any]]] = {}
         self._camera_settings_executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="camera-settings",
@@ -142,6 +145,76 @@ class Grabber(QObject):
                 {
                     "map_key": str(map_key),
                     "node_name": str(node_name),
+                },
+            )
+        )
+
+    def request_temporary_camera_settings(
+        self,
+        settings: Mapping[str, object] | Iterable[tuple[str, object]],
+        *,
+        map_key: str = "camera",
+        restore_key: str = "default",
+    ) -> None:
+        """Temporarily apply GenICam settings, saving current values for restore."""
+
+        if self._camera is None:
+            self.camera_settings_override_changed.emit(
+                {
+                    "ok": False,
+                    "message": "Camera is not ready.",
+                    "restore_key": restore_key,
+                }
+            )
+            return
+        try:
+            setting_items = self._camera_setting_items(settings)
+        except Exception as exc:
+            self.camera_settings_override_changed.emit(
+                {
+                    "ok": False,
+                    "message": f"Camera temporary settings invalid: {exc}",
+                    "restore_key": restore_key,
+                }
+            )
+            return
+        if not setting_items:
+            self.camera_settings_override_changed.emit(
+                {
+                    "ok": False,
+                    "message": "No camera settings provided.",
+                    "restore_key": restore_key,
+                }
+            )
+            return
+        self._camera_commands.put(
+            _CameraCommand(
+                "temporary_set",
+                {
+                    "map_key": str(map_key),
+                    "restore_key": str(restore_key),
+                    "settings": setting_items,
+                },
+            )
+        )
+
+    def request_restore_camera_settings(self, *, restore_key: str = "default") -> None:
+        """Restore a previously applied temporary GenICam settings set."""
+
+        if self._camera is None:
+            self.camera_settings_override_changed.emit(
+                {
+                    "ok": False,
+                    "message": "Camera is not ready.",
+                    "restore_key": restore_key,
+                }
+            )
+            return
+        self._camera_commands.put(
+            _CameraCommand(
+                "temporary_restore",
+                {
+                    "restore_key": str(restore_key),
                 },
             )
         )
@@ -279,6 +352,7 @@ class Grabber(QObject):
         except Exception as exc:  # pragma: no cover - hardware dependent
             logger.warning("Unable to release camera: %s", exc)
         self._camera = None
+        self._temporary_camera_settings.clear()
 
     def _process_camera_commands(self) -> None:
         while True:
@@ -306,6 +380,20 @@ class Grabber(QObject):
                     self._execute_camera_command,
                     command.payload,
                     self.camera_setting_changed,
+                )
+            elif command.action == "temporary_set":
+                self._submit_camera_task(
+                    "temporary settings",
+                    self._apply_temporary_camera_settings,
+                    command.payload,
+                    self.camera_settings_override_changed,
+                )
+            elif command.action == "temporary_restore":
+                self._submit_camera_task(
+                    "settings restore",
+                    self._restore_temporary_camera_settings,
+                    command.payload,
+                    self.camera_settings_override_changed,
                 )
 
     def _submit_camera_task(
@@ -605,14 +693,7 @@ class Grabber(QObject):
         node_name = str(payload.get("node_name", ""))
         value = payload.get("value")
         try:
-            node = self._node_by_name(map_key, node_name)
-            info = self._read_node_info(map_key, node)
-            if info is None:
-                raise RuntimeError("Camera setting is unavailable.")
-            if not info["writable"]:
-                raise RuntimeError("Camera setting is read-only.")
-            self._set_node_value(node, str(info["type"]), value)
-            updated = self._read_node_info(map_key, node) or info
+            updated = self._set_camera_setting_value(map_key, node_name, value)
         except Exception as exc:  # pragma: no cover - hardware dependent
             return {
                 "ok": False,
@@ -627,6 +708,139 @@ class Grabber(QObject):
             "node_name": node_name,
             "node": updated,
         }
+
+    def _apply_temporary_camera_settings(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        map_key = str(payload.get("map_key") or "camera")
+        restore_key = str(payload.get("restore_key") or "default")
+        if restore_key in self._temporary_camera_settings:
+            return {
+                "ok": False,
+                "message": f"Temporary camera settings already active: {restore_key}.",
+                "restore_key": restore_key,
+            }
+        settings = [
+            item
+            for item in payload.get("settings") or []
+            if isinstance(item, dict) and str(item.get("node_name") or "")
+        ]
+        saved_settings: list[dict[str, Any]] = []
+        updated_nodes: list[dict[str, Any]] = []
+        try:
+            for item in settings:
+                node_name = str(item.get("node_name") or "")
+                value = item.get("value")
+                node = self._node_by_name(map_key, node_name)
+                info = self._read_node_info(map_key, node)
+                if info is None:
+                    raise RuntimeError(f"{node_name}: camera setting is unavailable.")
+                if not info["readable"]:
+                    raise RuntimeError(
+                        f"{node_name}: camera setting cannot be restored."
+                    )
+                if not info["writable"]:
+                    raise RuntimeError(f"{node_name}: camera setting is read-only.")
+                saved_settings.append(
+                    {
+                        "map_key": map_key,
+                        "node_name": node_name,
+                        "value": info.get("value"),
+                    }
+                )
+                self._set_node_value(node, str(info["type"]), value)
+                updated_nodes.append(self._read_node_info(map_key, node) or info)
+        except Exception as exc:  # pragma: no cover - hardware dependent
+            _, rollback_errors = self._restore_camera_setting_values(
+                list(reversed(saved_settings))
+            )
+            message = f"Camera temporary settings failed: {exc}"
+            if rollback_errors:
+                message = f"{message}; rollback errors: {'; '.join(rollback_errors)}"
+            return {
+                "ok": False,
+                "message": message,
+                "restore_key": restore_key,
+                "nodes": updated_nodes,
+                "rollback_errors": rollback_errors,
+            }
+
+        self._temporary_camera_settings[restore_key] = saved_settings
+        return {
+            "ok": True,
+            "message": f"Applied {len(updated_nodes)} temporary camera settings.",
+            "restore_key": restore_key,
+            "nodes": updated_nodes,
+        }
+
+    def _restore_temporary_camera_settings(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        restore_key = str(payload.get("restore_key") or "default")
+        saved_settings = self._temporary_camera_settings.get(restore_key)
+        if not saved_settings:
+            return {
+                "ok": True,
+                "message": f"No temporary camera settings active: {restore_key}.",
+                "restore_key": restore_key,
+                "nodes": [],
+            }
+        restored_nodes, errors = self._restore_camera_setting_values(
+            list(reversed(saved_settings))
+        )
+        if errors:
+            return {
+                "ok": False,
+                "message": f"Camera settings restore failed: {'; '.join(errors)}",
+                "restore_key": restore_key,
+                "nodes": restored_nodes,
+                "errors": errors,
+            }
+        self._temporary_camera_settings.pop(restore_key, None)
+        return {
+            "ok": True,
+            "message": f"Restored {len(restored_nodes)} camera settings.",
+            "restore_key": restore_key,
+            "nodes": restored_nodes,
+        }
+
+    def _restore_camera_setting_values(
+        self,
+        saved_settings: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        restored_nodes: list[dict[str, Any]] = []
+        errors: list[str] = []
+        for item in saved_settings:
+            map_key = str(item.get("map_key") or "camera")
+            node_name = str(item.get("node_name") or "")
+            try:
+                restored_nodes.append(
+                    self._set_camera_setting_value(
+                        map_key,
+                        node_name,
+                        item.get("value"),
+                    )
+                )
+            except Exception as exc:  # pragma: no cover - hardware dependent
+                errors.append(f"{node_name}: {exc}")
+        return restored_nodes, errors
+
+    def _set_camera_setting_value(
+        self,
+        map_key: str,
+        node_name: str,
+        value: object,
+    ) -> dict[str, Any]:
+        node = self._node_by_name(map_key, node_name)
+        info = self._read_node_info(map_key, node)
+        if info is None:
+            raise RuntimeError("Camera setting is unavailable.")
+        if not info["writable"]:
+            raise RuntimeError("Camera setting is read-only.")
+        self._set_node_value(node, str(info["type"]), value)
+        return self._read_node_info(map_key, node) or info
 
     def _execute_camera_command(self, payload: dict[str, Any]) -> dict[str, Any]:
         map_key = str(payload.get("map_key", ""))
@@ -725,6 +939,21 @@ class Grabber(QObject):
         if text.lower().startswith("0x"):
             return int(text, 16)
         return int(float(text))
+
+    @staticmethod
+    def _camera_setting_items(
+        settings: Mapping[str, object] | Iterable[tuple[str, object]],
+    ) -> list[dict[str, object]]:
+        if isinstance(settings, Mapping):
+            iterator = settings.items()
+        else:
+            iterator = settings
+        items: list[dict[str, object]] = []
+        for node_name, value in iterator:
+            name = str(node_name)
+            if name:
+                items.append({"node_name": name, "value": value})
+        return items
 
     @staticmethod
     def _safe_node_string(node: object, method_name: str) -> str:
