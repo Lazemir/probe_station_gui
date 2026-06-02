@@ -53,6 +53,27 @@ def format_source_level_value(value: float) -> str:
     return f"{numeric:.12g}"
 
 
+def _voltage_sweep_point_to_dict(point: object) -> dict[str, object]:
+    as_dict = getattr(point, "as_dict", None)
+    if callable(as_dict):
+        return dict(as_dict())
+    if isinstance(point, dict):
+        return dict(point)
+    values: dict[str, object] = {}
+    for name in (
+        "source_voltage_v",
+        "measured_voltage_v",
+        "current_a",
+        "resistance_ohm",
+        "compliance_hit",
+    ):
+        if hasattr(point, name):
+            values[name] = getattr(point, name)
+    if values:
+        return values
+    return {"value": point}
+
+
 @dataclass(frozen=True)
 class GWInstekRouteMeterSettings:
     """Per-run GW Instek LCR settings for route measurements."""
@@ -860,14 +881,21 @@ class LCRMeterController(QObject):
             session = self._session
         if session is None:
             raise LCRMeterError("Measurement instrument is not connected.")
-        reader = getattr(session, "read_voltage_sweep", None)
-        if not callable(reader):
+        voltage_list_reader = getattr(session, "measure_voltage_list", None)
+        if not callable(voltage_list_reader):
             raise LCRMeterError(
                 "Raw voltage sweeps require a Keithley 2400 + 2182A instrument."
             )
         self._stop_polling_session()
         try:
-            measurement = dict(reader(voltages_v, trigger=True))
+            points = [
+                _voltage_sweep_point_to_dict(point)
+                for point in voltage_list_reader(voltages_v)
+            ]
+            measurement = {
+                "source_voltages_v": [float(value) for value in voltages_v],
+                "points": points,
+            }
         except LCRMeterError:
             self._disconnect_session()
             self.connection_changed.emit(False, "", "Instrument read failed.")
@@ -953,6 +981,26 @@ class LCRMeterController(QObject):
             self._active_thread = thread
             thread.start()
 
+    def connect_now(self) -> None:
+        """Open the configured measurement instrument in the current thread."""
+
+        with self._task_lock:
+            if self._session is not None:
+                return
+            if self._active_thread and self._active_thread.is_alive():
+                raise LCRMeterError("Measurement instrument task already running.")
+            self._active_thread = threading.current_thread()
+        try:
+            self._connect_configured_session()
+        except LCRMeterError as exc:
+            self._disconnect_session()
+            self.connection_changed.emit(False, "", str(exc))
+            self.status_message.emit(f"Instrument connection failed: {exc}")
+            raise
+        finally:
+            with self._task_lock:
+                self._active_thread = None
+
     def request_disconnect(self) -> None:
         """Close the current measurement instrument and stop polling."""
 
@@ -1002,40 +1050,7 @@ class LCRMeterController(QObject):
 
     def _run_connect(self) -> None:
         try:
-            if self._meter_type == ROUTE_METER_GWINSTEK and not self._resource_name:
-                raise LCRMeterError("GW Instek resource is empty. Set it in Settings.")
-            if self._meter_type == ROUTE_METER_KEITHLEY:
-                if not self._keithley_source_resource:
-                    raise LCRMeterError(
-                        "Keithley 2400 resource is empty. Set it in Settings."
-                    )
-                if not self._keithley_voltmeter_resource:
-                    raise LCRMeterError(
-                        "Keithley 2182A resource is empty. Set it in Settings."
-                    )
-            self._disconnect_session()
-            session = self._open_configured_session()
-            identify = getattr(session, "identify", None)
-            instrument_id = str(identify()) if callable(identify) else ""
-            backend_name = str(
-                getattr(session, "backend_name", session.__class__.__name__)
-            )
-            logger.info(
-                "Connected to measurement instrument %s (%s)",
-                self.connection_label(),
-                instrument_id or "IDN unavailable",
-            )
-            if self._meter_type == ROUTE_METER_GWINSTEK:
-                self._configure_session(session)
-            self._session = session
-            self._connected_resource_name = self._connection_key()
-            self._stop_polling.clear()
-            self.connection_changed.emit(
-                True, backend_name, self.connection_label()
-            )
-            self.status_message.emit(
-                f"Measurement instrument connected via {backend_name}."
-            )
+            self._connect_configured_session()
         except LCRMeterError as exc:
             self._disconnect_session()
             self.connection_changed.emit(False, "", str(exc))
@@ -1099,6 +1114,40 @@ class LCRMeterController(QObject):
         finally:
             with self._task_lock:
                 self._active_thread = None
+
+    def _connect_configured_session(self) -> None:
+        if self._meter_type == ROUTE_METER_GWINSTEK and not self._resource_name:
+            raise LCRMeterError("GW Instek resource is empty. Set it in Settings.")
+        if self._meter_type == ROUTE_METER_KEITHLEY:
+            if not self._keithley_source_resource:
+                raise LCRMeterError(
+                    "Keithley 2400 resource is empty. Set it in Settings."
+                )
+            if not self._keithley_voltmeter_resource:
+                raise LCRMeterError(
+                    "Keithley 2182A resource is empty. Set it in Settings."
+                )
+        self._disconnect_session()
+        session = self._open_configured_session()
+        identify = getattr(session, "identify", None)
+        instrument_id = str(identify()) if callable(identify) else ""
+        backend_name = str(
+            getattr(session, "backend_name", session.__class__.__name__)
+        )
+        logger.info(
+            "Connected to measurement instrument %s (%s)",
+            self.connection_label(),
+            instrument_id or "IDN unavailable",
+        )
+        if self._meter_type == ROUTE_METER_GWINSTEK:
+            self._configure_session(session)
+        self._session = session
+        self._connected_resource_name = self._connection_key()
+        self._stop_polling.clear()
+        self.connection_changed.emit(True, backend_name, self.connection_label())
+        self.status_message.emit(
+            f"Measurement instrument connected via {backend_name}."
+        )
 
     def _configure_active_session(self, session: _LCRSession) -> None:
         self._configure_session(session)

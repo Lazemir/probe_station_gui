@@ -1729,20 +1729,50 @@ class Main(QMainWindow):
             if active_stage_task:
                 self.stage_controller.finish_external_task()
 
-    def _api_configure_meter(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if not self.lcr_controller.is_connected():
+    def _api_ensure_measurement_instrument_connected(self) -> dict[str, Any] | None:
+        if self.lcr_controller.is_connected():
+            return None
+        connector = getattr(self.lcr_controller, "connect_now", None)
+        if not callable(connector):
             return {
                 "accepted": False,
                 "status_code": 409,
                 "message": "Measurement instrument is not connected.",
             }
         try:
+            connector()
+        except LCRMeterError as exc:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": str(exc),
+            }
+        if not self.lcr_controller.is_connected():
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Measurement instrument is not connected.",
+            }
+        return None
+
+    def _api_configure_meter(self, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
             configuration = self._api_route_meter_configuration(
                 payload,
                 voltages_v=None,
             )
+        except ValueError as exc:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": str(exc),
+            }
+        connect_result = self._api_ensure_measurement_instrument_connected()
+        if connect_result is not None:
+            return connect_result
+        try:
             self.lcr_controller.apply_route_meter_configuration(configuration)
-        except (ValueError, LCRMeterError) as exc:
+        except LCRMeterError as exc:
             return {
                 "accepted": False,
                 "status_code": 409,
@@ -1764,20 +1794,24 @@ class Main(QMainWindow):
                 "status_code": 400,
                 "message": "Provide voltages_v as a non-empty array.",
             }
-        if not self.lcr_controller.is_connected():
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": "Measurement instrument is not connected.",
-            }
         try:
             voltage_values = [float(value) for value in voltages]
             configuration = self._api_route_meter_configuration(
                 payload.get("meter", payload.get("meter_configuration", {})),
                 voltages_v=voltage_values,
             )
+        except (TypeError, ValueError) as exc:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": str(exc),
+            }
+        connect_result = self._api_ensure_measurement_instrument_connected()
+        if connect_result is not None:
+            return connect_result
+        try:
             self.lcr_controller.apply_route_meter_configuration(configuration)
-        except (TypeError, ValueError, LCRMeterError) as exc:
+        except LCRMeterError as exc:
             return {
                 "accepted": False,
                 "status_code": 409,

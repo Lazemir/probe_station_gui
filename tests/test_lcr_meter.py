@@ -80,7 +80,7 @@ class _FakeSession:
 
     def __init__(self) -> None:
         self.read_triggers: list[bool] = []
-        self.voltage_sweeps: list[tuple[list[float], bool]] = []
+        self.voltage_lists: list[list[float]] = []
         self.configurations: list[dict] = []
         self.abort_count = 0
 
@@ -88,25 +88,22 @@ class _FakeSession:
         self.read_triggers.append(bool(trigger))
         return 42.0
 
-    def read_voltage_sweep(
+    def measure_voltage_list(
         self,
         voltages_v: list[float] | tuple[float, ...],
-        *,
-        trigger: bool = False,
-    ) -> dict[str, object]:
+    ) -> list[dict[str, object]]:
         voltages = [float(value) for value in voltages_v]
-        self.voltage_sweeps.append((voltages, bool(trigger)))
-        return {
-            "differential_resistance_ohm": 12.0,
-            "points": [
-                {
-                    "source_voltage_v": voltage,
-                    "measured_voltage_v": voltage,
-                    "current_a": voltage / 12.0 if voltage else 0.0,
-                }
-                for voltage in voltages
-            ],
-        }
+        self.voltage_lists.append(voltages)
+        return [
+            {
+                "source_voltage_v": voltage,
+                "measured_voltage_v": voltage,
+                "current_a": voltage / 12.0 if voltage else 0.0,
+                "resistance_ohm": 12.0,
+                "compliance_hit": False,
+            }
+            for voltage in voltages
+        ]
 
     def configure_measurement(self, **kwargs) -> None:
         self.configurations.append(dict(kwargs))
@@ -190,7 +187,7 @@ class LCRMeterTest(unittest.TestCase):
         self.assertEqual(stopped, [True])
         self.assertEqual(started, [])
 
-    def test_controller_raw_voltage_sweep_delegates_to_session(self) -> None:
+    def test_controller_raw_voltage_sweep_uses_keithley_voltage_list(self) -> None:
         controller = LCRMeterController()
         session = _FakeSession()
         controller._session = session
@@ -204,8 +201,27 @@ class LCRMeterTest(unittest.TestCase):
             restart_polling=True,
         )
 
-        self.assertEqual(measurement["differential_resistance_ohm"], 12.0)
-        self.assertEqual(session.voltage_sweeps, [([-0.03, 0.03], True)])
+        self.assertEqual(measurement["source_voltages_v"], [-0.03, 0.03])
+        self.assertEqual(
+            measurement["points"],
+            [
+                {
+                    "source_voltage_v": -0.03,
+                    "measured_voltage_v": -0.03,
+                    "current_a": -0.0025,
+                    "resistance_ohm": 12.0,
+                    "compliance_hit": False,
+                },
+                {
+                    "source_voltage_v": 0.03,
+                    "measured_voltage_v": 0.03,
+                    "current_a": 0.0025,
+                    "resistance_ohm": 12.0,
+                    "compliance_hit": False,
+                },
+            ],
+        )
+        self.assertEqual(session.voltage_lists, [[-0.03, 0.03]])
         self.assertEqual(stopped, [True])
         self.assertEqual(started, [True])
 
@@ -415,6 +431,61 @@ class LCRMeterTest(unittest.TestCase):
             lcr_module._open_keithley_session = original
 
         self.assertIs(opened, session)
+        self.assertEqual(
+            created,
+            [
+                (
+                    "GPIB0::1::INSTR",
+                    "GPIB0::2::INSTR",
+                    LCRMeterController.DEFAULT_TIMEOUT_MS,
+                )
+            ],
+        )
+
+    def test_controller_connect_now_opens_configured_keithley(self) -> None:
+        created: list[tuple[str, str, int]] = []
+        session = _FakeKeithleySession()
+
+        def fake_open(source: str, voltmeter: str, timeout_ms: int):
+            created.append((source, voltmeter, timeout_ms))
+            return session
+
+        controller = LCRMeterController()
+        controller.apply_configuration(
+            meter_type=ROUTE_METER_KEITHLEY,
+            resource_name="COM4",
+            keithley_source_resource="GPIB0::1::INSTR",
+            keithley_voltmeter_resource="GPIB0::2::INSTR",
+            measurement_function="DCR",
+            range_mode="AUTO",
+            auto_range_enabled=True,
+            impedance_range=3,
+            dcr_range=4,
+            frequency_hz=50.0,
+            level_mode="VOLTAGE",
+            voltage_level_v=0.01,
+            current_level_a=0.0001,
+            source_resistance_ohm=100,
+            aperture_rate="SLOW",
+            aperture_averages=1,
+            trigger_source="INT",
+            trigger_delay_s=0.0,
+            bias_enabled=False,
+            bias_level_v=0.0,
+            monitor1="OFF",
+            monitor2="OFF",
+            alc_enabled=False,
+            short_threshold_ohm=10.0,
+            poll_interval_ms=250,
+        )
+        original = lcr_module._open_keithley_session
+        lcr_module._open_keithley_session = fake_open
+        try:
+            controller.connect_now()
+        finally:
+            lcr_module._open_keithley_session = original
+
+        self.assertTrue(controller.is_connected())
         self.assertEqual(
             created,
             [
