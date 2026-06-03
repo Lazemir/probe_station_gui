@@ -7314,17 +7314,17 @@ class Main(QMainWindow):
             return
         self._pending_route_measure_point = None
         runner.stop()
-        self._show_status("Route measurement stop requested.")
+        self._show_status("Stopping route measurement.")
         self._update_stage_coordinate_apply_state()
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_route_measurement_waiting(False)
             self.design_navigator_panel.set_route_measurement_status(
-                "Route measurement will stop after the current action."
+                "Stopping route measurement."
             )
         if self._route_measurement_dialog is not None:
             self._route_measurement_dialog.set_waiting(False)
             self._route_measurement_dialog.set_status(
-                "Route measurement will stop after the current action."
+                "Stopping route measurement."
             )
 
     def _request_route_measurement_point_correction(
@@ -7339,14 +7339,11 @@ class Main(QMainWindow):
             self._pending_route_measure_point = None
         runner.request_current_point_correction()
         if pending_point_number is None:
-            message = (
-                "Route measurement interrupt requested; Save Shift will be available "
-                "after the current action."
-            )
+            message = "Stopping contact measurement."
         else:
             message = (
-                "Route measurement will switch to "
-                f"point {int(pending_point_number)} after the current action."
+                "Stopping contact measurement, then measuring "
+                f"point {int(pending_point_number)}."
             )
         self._show_status(message, 5000)
         if self.design_navigator_panel is not None:

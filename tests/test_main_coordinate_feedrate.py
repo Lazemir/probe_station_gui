@@ -1110,7 +1110,7 @@ assert image.height() == 4
         self.assertEqual(
             statuses,
             [
-                "Route measurement will switch to point 91 after the current action."
+                "Stopping contact measurement, then measuring point 91."
             ],
         )
         self.assertEqual(runner.confirmations, [])
