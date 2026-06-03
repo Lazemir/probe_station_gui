@@ -7340,7 +7340,8 @@ class Main(QMainWindow):
         runner.request_current_point_correction()
         if pending_point_number is None:
             message = (
-                "Route measurement correction requested; waiting for current read chunk."
+                "Route measurement interrupt requested; Save Shift will be available "
+                "after the current action."
             )
         else:
             message = (
