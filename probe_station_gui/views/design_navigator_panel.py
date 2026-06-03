@@ -1418,7 +1418,7 @@ class DesignNavigatorPanel(QWidget):
     route_measurement_stop_requested = Signal()
     route_measurement_interrupt_requested = Signal()
     route_measurement_pause_requested = Signal()
-    route_measurement_save_shift_requested = Signal()
+    route_measurement_save_shift_requested = Signal(int)
     route_measurement_confirmation_requested = Signal(str)
     route_measurement_jump_requested = Signal(int)
     route_measurement_move_requested = Signal(int)
@@ -1792,7 +1792,7 @@ class DesignNavigatorPanel(QWidget):
             self.route_measurement_interrupt_requested.emit
         )
         self._route_save_shift_button.clicked.connect(
-            self.route_measurement_save_shift_requested.emit
+            self._emit_route_measurement_save_shift_selected
         )
         self._route_remeasure_button.clicked.connect(
             lambda _checked=False: self.route_measurement_confirmation_requested.emit(
@@ -2166,7 +2166,9 @@ class DesignNavigatorPanel(QWidget):
         self._route_interrupt_button.setEnabled(
             route_running and not self._route_measurement_waiting
         )
-        self._route_save_shift_button.setEnabled(self._route_measurement_waiting)
+        self._route_save_shift_button.setEnabled(
+            has_route_selection and self._route_measurement_waiting
+        )
         self._route_remeasure_button.setEnabled(self._route_measurement_waiting)
         self._route_skip_button.setEnabled(self._route_measurement_waiting)
         self._route_next_button.setEnabled(self._route_measurement_waiting)
@@ -2874,6 +2876,13 @@ class DesignNavigatorPanel(QWidget):
         if self._selected_route_point_index < 0:
             return
         self.route_measurement_measure_requested.emit(
+            self._selected_route_point_index + 1
+        )
+
+    def _emit_route_measurement_save_shift_selected(self) -> None:
+        if self._selected_route_point_index < 0:
+            return
+        self.route_measurement_save_shift_requested.emit(
             self._selected_route_point_index + 1
         )
 

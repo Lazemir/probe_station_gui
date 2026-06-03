@@ -719,6 +719,7 @@ class Main(QMainWindow):
         ] | None = None
         self._pending_route_measure_point: int | None = None
         self._route_measurement_session_active = False
+        self._route_measurement_context_close_requested = False
         self._microscope_scan_thread: threading.Thread | None = None
         self._microscope_scan_stop_requested = threading.Event()
         self._sample_handling_thread: threading.Thread | None = None
@@ -2991,12 +2992,17 @@ class Main(QMainWindow):
             route_contact_move_thread is not None
             and route_contact_move_thread.is_alive()
         )
+        route_measurement_thread = getattr(self, "_route_measurement_thread", None)
+        route_measurement_active = (
+            route_measurement_thread is not None
+            and route_measurement_thread.is_alive()
+        )
         return (
             self._coordinate_move_axis is not None
             or controller_busy
             or self._controller_reports_active_motion()
             or route_contact_move_active
-            or self._route_measurement_runner is not None
+            or route_measurement_active
             or self._surface_map_capture_running()
             or self._microscope_scan_running()
             or self._sample_handling_active()
@@ -6201,7 +6207,7 @@ class Main(QMainWindow):
         self._refresh_design_panel()
         self._show_status("Cleared route points.", 3000)
 
-    def _open_route_measurement_dialog(self) -> None:
+    def _open_route_measurement_dialog(self, *, start_context: bool = True) -> None:
         route = self._design_session.route
         if route is None or not route.points:
             self._show_status("Create or load a probe route before measuring.", 5000)
@@ -6266,7 +6272,9 @@ class Main(QMainWindow):
             dialog.current_point_changed.connect(
                 self._on_route_measurement_current_point_changed
             )
-            dialog.finished.connect(lambda _result: self._clear_route_measurement_dialog())
+            dialog.finished.connect(
+                lambda _result: self._clear_route_measurement_dialog()
+            )
             self._route_measurement_dialog = dialog
         else:
             dialog.set_route(
@@ -6297,6 +6305,12 @@ class Main(QMainWindow):
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+        thread = self._route_measurement_thread
+        if start_context and (thread is None or not thread.is_alive()):
+            self._start_route_measurement(
+                dialog.current_configuration(),
+                wait_before_first_point=True,
+            )
 
     def _restore_route_measurement_state_after_design_load(self) -> None:
         route = self._design_session.route
@@ -6375,6 +6389,11 @@ class Main(QMainWindow):
 
     def _clear_route_measurement_dialog(self) -> None:
         self._route_measurement_dialog = None
+        thread = self._route_measurement_thread
+        runner = self._route_measurement_runner
+        if runner is not None and thread is not None and thread.is_alive():
+            self._route_measurement_context_close_requested = True
+            runner.stop()
 
     def _start_route_measurement_session(self) -> None:
         thread = self._route_measurement_thread
@@ -6430,7 +6449,7 @@ class Main(QMainWindow):
                 pending_point_number=point_number
             )
             return
-        self._open_route_measurement_dialog()
+        self._open_route_measurement_dialog(start_context=False)
         dialog = self._route_measurement_dialog
         if dialog is None:
             return
@@ -6440,6 +6459,8 @@ class Main(QMainWindow):
     def _start_route_measurement(
         self,
         configuration: RouteMeasurementRunConfiguration,
+        *,
+        wait_before_first_point: bool = False,
     ) -> None:
         thread = self._route_measurement_thread
         if thread is not None and thread.is_alive():
@@ -6615,6 +6636,7 @@ class Main(QMainWindow):
             operation_mode=configuration.operation_mode,
             photo_settle_s=configuration.photo_settle_s,
             photo_focus_enabled=configuration.photo_autofocus_enabled,
+            wait_before_first_point=wait_before_first_point,
         )
         self._route_measurement_runner = runner
         self._route_measurement_waiting = False
@@ -6645,11 +6667,18 @@ class Main(QMainWindow):
         except StopIteration:
             start_offset = 0
         remaining_count = max(1, len(points) - start_offset)
-        start_message = (
-            "Route measurement starting at "
-            f"point {int(selected_point.index)} {selected_point.label}; "
-            f"{remaining_count} points remaining."
-        )
+        if wait_before_first_point:
+            start_message = (
+                "Preparing route measurement: "
+                f"point {int(selected_point.index)} {selected_point.label}; "
+                f"{remaining_count} points selected."
+            )
+        else:
+            start_message = (
+                "Route measurement starting at "
+                f"point {int(selected_point.index)} {selected_point.label}; "
+                f"{remaining_count} points remaining."
+            )
         if previous_ok_skipped_count is not None:
             start_message = (
                 f"{start_message} Previous filter skipped "
@@ -6667,10 +6696,11 @@ class Main(QMainWindow):
             self._route_measurement_dialog.set_status(start_message)
         self._show_status(start_message)
         self._last_route_measurement_result = None
-        self._send_telegram_alert(
-            "route_started",
-            f"Probe route started:\n{start_message}\nCSV: {configuration.csv_path}",
-        )
+        if not wait_before_first_point:
+            self._send_telegram_alert(
+                "route_started",
+                f"Probe route started:\n{start_message}\nCSV: {configuration.csv_path}",
+            )
         self._route_measurement_thread.start()
         self._update_stage_coordinate_apply_state()
 
@@ -7458,8 +7488,11 @@ class Main(QMainWindow):
                 self.design_navigator_panel.set_route_measurement_status(message)
             return
         point = context_result["point"]
-        if not route_active:
+        if not route_active or self._route_measurement_waiting:
             self._set_route_measurement_resume_point(int(point.index))
+            runner = self._route_measurement_runner
+            if runner is not None and self._route_measurement_waiting:
+                runner.set_current_adjustment_point(int(point.index))
         needle_feedrate = self._current_needle_feedrate()
         message = f"Route contact move: point {int(point.index)} {point.label}."
         self._show_status(message, 5000)
@@ -7544,11 +7577,43 @@ class Main(QMainWindow):
         if self._route_measurement_dialog is not None:
             self._route_measurement_dialog.set_status(message)
 
-    def _save_route_measurement_shift(self) -> None:
+    def _save_route_measurement_shift(self, point_number: int | None = None) -> None:
         runner = self._route_measurement_runner
-        if runner is None:
-            self._show_status("No route measurement is waiting.", 3000)
+        thread = self._route_measurement_thread
+        if runner is None or thread is None or not thread.is_alive():
+            message = "Route measurement is not ready."
+            self._show_status(message, 5000)
+            if self.design_navigator_panel is not None:
+                self.design_navigator_panel.set_route_measurement_status(message)
+            if self._route_measurement_dialog is not None:
+                self._route_measurement_dialog.set_status(message)
             return
+        if not self._route_measurement_waiting:
+            message = "Pause route measurement before saving shift."
+            self._show_status(message, 5000)
+            if self.design_navigator_panel is not None:
+                self.design_navigator_panel.set_route_measurement_status(message)
+            if self._route_measurement_dialog is not None:
+                self._route_measurement_dialog.set_status(message)
+            return
+        if point_number is None:
+            if self._route_measurement_dialog is not None:
+                point_number = int(
+                    self._route_measurement_dialog.current_configuration().current_point
+                )
+            elif self._route_measurement_current_point is not None:
+                point_number = int(self._route_measurement_current_point)
+        if point_number is not None:
+            point_selected, message = runner.set_current_adjustment_point(
+                int(point_number)
+            )
+            if not point_selected:
+                self._show_status(message, 6000)
+                if self.design_navigator_panel is not None:
+                    self.design_navigator_panel.set_route_measurement_status(message)
+                if self._route_measurement_dialog is not None:
+                    self._route_measurement_dialog.set_status(message)
+                return
         try:
             position = self.stage_controller.current_stage_position()
         except StageControllerError as exc:
@@ -7599,6 +7664,9 @@ class Main(QMainWindow):
 
     def _on_route_measurement_current_point_changed(self, point_number: int) -> None:
         self._set_route_measurement_resume_point(point_number)
+        runner = self._route_measurement_runner
+        if runner is not None and self._route_measurement_waiting:
+            runner.set_current_adjustment_point(point_number)
 
     def _on_route_measurement_waiting_changed(self, waiting: bool) -> None:
         self._route_measurement_waiting = bool(waiting)
@@ -7774,6 +7842,10 @@ class Main(QMainWindow):
         csv_path: str,
     ) -> None:
         measure_enabled = self._route_measurement_measure_enabled
+        context_close_requested = bool(
+            getattr(self, "_route_measurement_context_close_requested", False)
+        )
+        self._route_measurement_context_close_requested = False
         thread = self._route_measurement_thread
         if thread is not None and not thread.is_alive():
             thread.join(timeout=0.1)
@@ -7837,11 +7909,12 @@ class Main(QMainWindow):
                 )
             self._set_route_measurement_pending(True)
             self._show_status(message, 8000)
-            self._send_telegram_alert(
-                "route_failed",
-                f"Probe route stopped or failed:\n{message}\nCSV: {csv_path}",
-                attach_photo=True,
-            )
+            if not context_close_requested:
+                self._send_telegram_alert(
+                    "route_failed",
+                    f"Probe route stopped or failed:\n{message}\nCSV: {csv_path}",
+                    attach_photo=True,
+                )
 
     @staticmethod
     def _route_measurement_csv_record_count(csv_path: str | Path) -> int | None:

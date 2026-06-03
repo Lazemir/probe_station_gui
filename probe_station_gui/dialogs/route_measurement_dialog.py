@@ -942,7 +942,7 @@ class RouteMeasurementDialog(QDialog):
         self._pause_button.setEnabled(self._running and not self._waiting)
         self._stop_button.setEnabled(self._running)
         self._interrupt_button.setEnabled(self._running and not self._waiting)
-        self._save_shift_button.setEnabled(self._running and self._waiting)
+        self._save_shift_button.setEnabled(can_confirm)
         self._remeasure_button.setEnabled(can_confirm)
         self._skip_button.setEnabled(can_confirm)
         self._next_button.setEnabled(can_confirm)

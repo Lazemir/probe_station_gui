@@ -256,6 +256,7 @@ class RouteMeasurementRunner:
         operation_mode: str = ROUTE_OPERATION_MEASURE,
         photo_settle_s: float = 0.2,
         photo_focus_enabled: bool = False,
+        wait_before_first_point: bool = False,
     ) -> None:
         self._points = list(points)
         self._csv_writer = RouteMeasurementCsvWriter(csv_path)
@@ -317,6 +318,7 @@ class RouteMeasurementRunner:
         }
         self._photo_settle_s = max(0.0, float(photo_settle_s))
         self._photo_focus_enabled = bool(photo_focus_enabled)
+        self._wait_before_first_point = bool(wait_before_first_point)
         self._stop_requested = threading.Event()
         self._point_interrupt_requested = threading.Event()
         self._contact_seek_active = threading.Event()
@@ -333,6 +335,14 @@ class RouteMeasurementRunner:
     @property
     def csv_path(self) -> Path:
         return self._csv_writer.path
+
+    def set_current_adjustment_point(self, point_number: int) -> tuple[bool, str]:
+        index = self._index_for_point_number(int(point_number))
+        if index is None:
+            return False, f"Point {int(point_number)} is not enabled or not found."
+        with self._route_offset_lock:
+            self._last_recorded_point = self._points[index]
+        return True, ""
 
     def stop(self) -> None:
         self._stop_requested.set()
@@ -482,6 +492,21 @@ class RouteMeasurementRunner:
                 )
             position_index = start_index
             self._progress_started_at = time.monotonic()
+            if self._wait_before_first_point:
+                decision = self._wait_before_first_route_point(
+                    point=self._points[position_index],
+                    position=position_index + 1,
+                    total=total,
+                )
+                if decision == "stop":
+                    message = "Route measurement stopped by user."
+                    return success, message
+                self._begin_stage_task()
+                jump_index = self._jump_target_index(decision)
+                if jump_index is not None:
+                    position_index = jump_index
+                elif decision == "skip":
+                    position_index += 1
             while position_index < total:
                 if self._stop_requested.is_set():
                     message = "Route measurement stopped by user."
@@ -1445,6 +1470,28 @@ class RouteMeasurementRunner:
         else:
             raw = self._lcr_controller.read_primary_value_now()
         return _measurement_sample_from_raw(raw, sample_index)
+
+    def _wait_before_first_route_point(
+        self,
+        *,
+        point: RouteMeasurementPoint,
+        position: int,
+        total: int,
+    ) -> str:
+        self._consume_pause_request()
+        with self._confirmation_condition:
+            self._pending_confirmation = None
+        with self._route_offset_lock:
+            self._last_recorded_point = point
+        self._finish_stage_task()
+        self._emit_progress(position, total, int(point.index))
+        self._set_waiting(True)
+        self._status(
+            f"Route measurement ready: point {position}/{total} {point.label}."
+        )
+        decision = self._wait_for_valid_confirmation()
+        self._set_waiting(False)
+        return decision
 
     def _wait_after_interrupted_point(
         self,
