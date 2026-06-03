@@ -3462,16 +3462,33 @@ class Main(QMainWindow):
         self._pending_persisted_design_position = None
         if self._design_session.document is not None:
             return
-        if expected_position is None or not self._positions_match(
+        axis_mismatches = self._position_axis_mismatches(
             expected_position,
             position,
-        ):
+        )
+        xy_mismatches = axis_mismatches.intersection({"X", "Y"})
+        if expected_position is None or xy_mismatches:
+            if xy_mismatches:
+                removed_axes = self.stage_controller.mark_axes_unhomed(xy_mismatches)
+                if removed_axes:
+                    axes_label = ", ".join(sorted(removed_axes))
+                    self._show_status(
+                        f"Controller {axes_label} coordinate changed. Cleared cached homing.",
+                        5000,
+                    )
             self._show_status(
-                "Controller coordinates changed. Cleared cached design selection.",
+                "Controller X/Y coordinates changed. Cleared cached design selection.",
                 5000,
             )
             self._save_controller_state_without_design()
             return
+        if "Z" in axis_mismatches:
+            removed_axes = self.stage_controller.mark_axes_unhomed({"Z"})
+            if removed_axes:
+                self._show_status(
+                    "Controller Z coordinate changed. Cleared cached Z homing.",
+                    5000,
+                )
         if not self._persisted_design_file_is_current(design_state):
             self._show_status(
                 "Cached design file changed or is unavailable. Cleared cached design selection.",
@@ -3501,20 +3518,34 @@ class Main(QMainWindow):
         self.settings_manager.save_controller_state(state)
 
     @classmethod
-    def _positions_match(
+    def _position_axis_mismatches(
         cls,
-        expected: tuple[float, ...],
+        expected: tuple[float, ...] | None,
         actual: tuple[float, ...],
-    ) -> bool:
-        if not expected or len(actual) < len(expected):
-            return False
+    ) -> set[str]:
+        if not expected:
+            return {"X", "Y"}
         tolerance = cls.DESIGN_RESTORE_POSITION_TOLERANCE
-        for expected_value, actual_value in zip(expected, actual):
-            if not math.isfinite(expected_value) or not math.isfinite(actual_value):
-                return False
-            if abs(expected_value - actual_value) > tolerance:
-                return False
-        return True
+        mismatches: set[str] = set()
+        for index, axis_name in enumerate(cls.STAGE_AXIS_NAMES):
+            if index >= len(expected):
+                break
+            if index >= len(actual):
+                mismatches.add(axis_name)
+                continue
+            try:
+                expected_value = float(expected[index])
+                actual_value = float(actual[index])
+            except (TypeError, ValueError):
+                mismatches.add(axis_name)
+                continue
+            if (
+                not math.isfinite(expected_value)
+                or not math.isfinite(actual_value)
+                or abs(expected_value - actual_value) > tolerance
+            ):
+                mismatches.add(axis_name)
+        return mismatches
 
     @staticmethod
     def _coerce_position_tuple(value: object) -> tuple[float, ...] | None:

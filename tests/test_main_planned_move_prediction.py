@@ -1,4 +1,5 @@
 import sys
+import types
 import unittest
 
 
@@ -46,6 +47,19 @@ class _FakeStageController:
 
     def request_move_to_xy(self, target_x_mm: float, target_y_mm: float) -> None:
         self.move_requests.append((float(target_x_mm), float(target_y_mm)))
+
+
+class _DesignRestoreStageController:
+    def __init__(self) -> None:
+        self.homed_axes = {"X", "Y", "Z", "A"}
+        self.unhomed_requests: list[set[str]] = []
+
+    def mark_axes_unhomed(self, axes: set[str]) -> set[str]:
+        normalized = {str(axis).strip().upper() for axis in axes}
+        self.unhomed_requests.append(normalized)
+        removed = self.homed_axes.intersection(normalized)
+        self.homed_axes -= removed
+        return set(removed)
 
 
 def _make_main(
@@ -107,6 +121,38 @@ def _make_main(
     window._clear_stage_motion_axes = lambda: None
 
     return window, published, reconciles, smooth_calls
+
+
+def _make_design_restore_main(
+    expected_position: tuple[float, ...] | None,
+) -> tuple[
+    Main,
+    _DesignRestoreStageController,
+    list[str],
+    list[tuple[str, dict]],
+    list[bool],
+]:
+    window = Main.__new__(Main)
+    stage_controller = _DesignRestoreStageController()
+    statuses: list[str] = []
+    starts: list[tuple[str, dict]] = []
+    saved_without_design: list[bool] = []
+
+    window.stage_controller = stage_controller
+    window._pending_persisted_design_state = {
+        "document_path": "C:\\designs\\sample.gds",
+    }
+    window._pending_persisted_design_position = expected_position
+    window._design_session = types.SimpleNamespace(document=None)
+    window._show_status = lambda message, _timeout=0: statuses.append(message)
+    window._persisted_design_file_is_current = lambda _state: True
+    window._save_controller_state_without_design = (
+        lambda: saved_without_design.append(True)
+    )
+    window._start_design_document_load = (
+        lambda path, **kwargs: starts.append((path, dict(kwargs)))
+    )
+    return window, stage_controller, statuses, starts, saved_without_design
 
 
 class MainPlannedMovePredictionTest(unittest.TestCase):
@@ -173,6 +219,53 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
         self.assertFalse(window._planned_move_waiting_for_fresh_status)
         self.assertEqual(published[-1][:2], (0.0, 0.0))
         self.assertEqual(smooth_calls, [((5.0, 5.0), (0.0, 0.0))])
+
+
+class MainPersistedDesignRestoreTest(unittest.TestCase):
+    def test_z_a_b_mismatch_keeps_design_and_clears_only_z_homing(self) -> None:
+        window, stage_controller, statuses, starts, saved_without_design = (
+            _make_design_restore_main((1.0, 2.0, 3.0, 4.0, 5.0))
+        )
+
+        Main._maybe_restore_persisted_design(
+            window,
+            (1.0, 2.0, 9.0, 0.0, 8.0),
+        )
+
+        self.assertEqual(stage_controller.unhomed_requests, [{"Z"}])
+        self.assertEqual(stage_controller.homed_axes, {"X", "Y", "A"})
+        self.assertEqual(saved_without_design, [])
+        self.assertEqual(starts[0][0], "C:\\designs\\sample.gds")
+        self.assertEqual(
+            starts[0][1],
+            {
+                "restore_state": {"document_path": "C:\\designs\\sample.gds"},
+                "show_window": False,
+            },
+        )
+        self.assertIn(
+            "Controller Z coordinate changed. Cleared cached Z homing.",
+            statuses,
+        )
+
+    def test_xy_mismatch_clears_design_and_xy_homing(self) -> None:
+        window, stage_controller, statuses, starts, saved_without_design = (
+            _make_design_restore_main((1.0, 2.0, 3.0, 4.0, 5.0))
+        )
+
+        Main._maybe_restore_persisted_design(
+            window,
+            (1.5, 2.5, 3.0, 4.0, 5.0),
+        )
+
+        self.assertEqual(stage_controller.unhomed_requests, [{"X", "Y"}])
+        self.assertEqual(stage_controller.homed_axes, {"Z", "A"})
+        self.assertEqual(starts, [])
+        self.assertEqual(saved_without_design, [True])
+        self.assertIn(
+            "Controller X/Y coordinates changed. Cleared cached design selection.",
+            statuses,
+        )
 
 
 if __name__ == "__main__":

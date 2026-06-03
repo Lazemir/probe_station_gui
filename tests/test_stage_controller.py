@@ -2827,6 +2827,20 @@ class StageControllerNeedlesStateTest(unittest.TestCase):
 
 
 class StageControllerPriorityNeedlesActionTest(unittest.TestCase):
+    def test_mark_axes_unhomed_removes_only_requested_homed_axes(self) -> None:
+        controller = StageController()
+        controller._homed_axes = {"X", "Y", "Z", "A"}
+        emitted = []
+        controller.homing_status_changed = types.SimpleNamespace(
+            emit=lambda axes: emitted.append(set(axes))
+        )
+
+        removed = controller.mark_axes_unhomed({"z", "B"})
+
+        self.assertEqual(removed, {"Z"})
+        self.assertEqual(controller._homed_axes, {"X", "Y", "A"})
+        self.assertEqual(emitted, [{"X", "Y", "A"}])
+
     def test_cancel_active_motion_sends_jog_cancel_without_invalidating_state(self) -> None:
         controller = StageController()
         controller._serial = _WritableFakeSerial()

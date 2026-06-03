@@ -1792,6 +1792,23 @@ class StageController(QObject):
 
         return set(axes).issubset(self._homed_axes)
 
+    def mark_axes_unhomed(self, axes: Iterable[str]) -> set[str]:
+        """Clear cached homing trust for specific axes.
+
+        Returns the axes that were actually removed from the cached homed set.
+        """
+
+        normalized_axes = {
+            str(axis).strip().upper()
+            for axis in axes
+            if str(axis).strip()
+        }
+        removed_axes = self._homed_axes.intersection(normalized_axes)
+        if not removed_axes:
+            return set()
+        self._update_homing_status(self._homed_axes - removed_axes)
+        return set(removed_axes)
+
     def latest_a_position(self) -> float | None:
         """Return the latest cached A position, if known."""
 
