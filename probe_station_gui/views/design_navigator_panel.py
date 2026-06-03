@@ -2158,13 +2158,7 @@ class DesignNavigatorPanel(QWidget):
         self._route_clear_button.setEnabled(
             has_route and bool(self._route.points) and not route_running
         )
-        self._route_run_button.setEnabled(
-            has_route_selection
-            and (
-                not route_running
-                or self._route_measurement_waiting
-            )
-        )
+        self._route_run_button.setEnabled(has_route_selection)
         self._route_stop_button.setEnabled(route_running)
         self._route_pause_button.setEnabled(
             route_running and not self._route_measurement_waiting

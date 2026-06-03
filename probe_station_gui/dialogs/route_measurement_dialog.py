@@ -946,7 +946,7 @@ class RouteMeasurementDialog(QDialog):
         self._remeasure_button.setEnabled(can_confirm)
         self._skip_button.setEnabled(can_confirm)
         self._next_button.setEnabled(can_confirm)
-        self._jump_point_spin.setEnabled(not self._running)
+        self._jump_point_spin.setEnabled((not self._running) or can_confirm)
         self._move_button.setEnabled(not self._running)
         self._jump_button.setEnabled(can_confirm)
         self._set_runtime_settings_enabled((not self._running) or can_confirm)
@@ -1338,7 +1338,7 @@ class RouteMeasurementDialog(QDialog):
 
     def _emit_next_or_measure_requested(self) -> None:
         if self._running and self._waiting:
-            self.remeasure_requested.emit()
+            self.jump_requested.emit(int(self._jump_point_spin.value()))
             return
         self._emit_measure_requested()
 

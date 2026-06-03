@@ -711,6 +711,7 @@ class Main(QMainWindow):
         self._route_measurement_measure_enabled = False
         self._route_measurement_point_numbers: list[int] = []
         self._route_measurement_current_point: int | None = None
+        self._pending_route_measure_point: int | None = None
         self._route_measurement_session_active = False
         self._microscope_scan_thread: threading.Thread | None = None
         self._microscope_scan_stop_requested = threading.Event()
@@ -6374,6 +6375,7 @@ class Main(QMainWindow):
         if thread is not None and thread.is_alive():
             self._show_status("Stop route measurement before canceling the session.", 5000)
             return
+        self._pending_route_measure_point = None
         self._route_measurement_session_active = False
         self._set_route_measurement_resume_point(1)
         self._set_route_measurement_pending(False)
@@ -6383,25 +6385,23 @@ class Main(QMainWindow):
             self._route_measurement_dialog.set_status(message)
 
     def _request_route_measurement_for_point(self, point_number: int) -> None:
+        point_number = int(point_number)
         thread = self._route_measurement_thread
         if thread is not None and thread.is_alive():
             if self._route_measurement_waiting:
-                current_point = self._route_measurement_current_point
-                if current_point is not None and int(current_point) == int(point_number):
-                    self._submit_route_measurement_confirmation("remeasure")
-                else:
-                    self._show_status(
-                        "Stop the current measurement before measuring another contact.",
-                        5000,
-                    )
+                self._pending_route_measure_point = None
+                self._submit_route_measurement_confirmation(f"jump:{point_number}")
                 return
-            self._show_status("Route measurement is already active.", 4000)
+            self._pending_route_measure_point = point_number
+            self._request_route_measurement_point_correction(
+                pending_point_number=point_number
+            )
             return
         self._open_route_measurement_dialog()
         dialog = self._route_measurement_dialog
         if dialog is None:
             return
-        dialog.set_current_point(int(point_number))
+        dialog.set_current_point(point_number)
         self._start_route_measurement(dialog.current_configuration())
 
     def _start_route_measurement(
@@ -6585,6 +6585,7 @@ class Main(QMainWindow):
         )
         self._route_measurement_runner = runner
         self._route_measurement_waiting = False
+        self._pending_route_measure_point = None
         self._route_measurement_photo_enabled = photo_enabled
         self._route_measurement_measure_enabled = measure_enabled
         self._route_measurement_point_numbers = [int(point.index) for point in points]
@@ -7311,6 +7312,7 @@ class Main(QMainWindow):
         if runner is None:
             self._show_status("No route measurement is running.", 3000)
             return
+        self._pending_route_measure_point = None
         runner.stop()
         self._show_status("Route measurement stop requested.")
         self._update_stage_coordinate_apply_state()
@@ -7325,15 +7327,26 @@ class Main(QMainWindow):
                 "Route measurement will stop after the current action."
             )
 
-    def _request_route_measurement_point_correction(self) -> None:
+    def _request_route_measurement_point_correction(
+        self,
+        pending_point_number: int | None = None,
+    ) -> None:
         runner = self._route_measurement_runner
         if runner is None:
             self._show_status("No route measurement is running.", 3000)
             return
+        if pending_point_number is None:
+            self._pending_route_measure_point = None
         runner.request_current_point_correction()
-        message = (
-            "Route measurement correction requested; waiting for current read chunk."
-        )
+        if pending_point_number is None:
+            message = (
+                "Route measurement correction requested; waiting for current read chunk."
+            )
+        else:
+            message = (
+                "Route measurement will switch to "
+                f"point {int(pending_point_number)} after the current action."
+            )
         self._show_status(message, 5000)
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_route_measurement_status(message)
@@ -7374,7 +7387,7 @@ class Main(QMainWindow):
             action_label = "skip"
         elif action_key.startswith("jump:") or action_key.isdigit():
             point_number = action_key.split(":", 1)[-1]
-            action_label = f"go to point {point_number}"
+            action_label = f"measure from point {point_number}"
         else:
             action_label = "next"
         self._show_status(f"Route measurement: {action_label}.")
@@ -7579,6 +7592,15 @@ class Main(QMainWindow):
             self.design_navigator_panel.set_route_measurement_waiting(waiting)
         if self._route_measurement_dialog is not None:
             self._route_measurement_dialog.set_waiting(waiting)
+        if not self._route_measurement_waiting:
+            return
+        pending_point_number = self._pending_route_measure_point
+        if pending_point_number is None:
+            return
+        self._pending_route_measure_point = None
+        self._submit_route_measurement_confirmation(
+            f"jump:{int(pending_point_number)}"
+        )
 
     def _on_route_measurement_result(
         self,
@@ -7680,6 +7702,7 @@ class Main(QMainWindow):
         self._route_measurement_thread = None
         self._route_measurement_runner = None
         self._route_measurement_waiting = False
+        self._pending_route_measure_point = None
         self._route_measurement_photo_enabled = False
         self._route_measurement_measure_enabled = False
         with self._telegram_photo_lock:

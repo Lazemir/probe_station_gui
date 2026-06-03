@@ -95,6 +95,24 @@ class _FakeThread:
         self.started = True
 
 
+class _FakeAliveThread:
+    def is_alive(self) -> bool:
+        return True
+
+
+class _FakeRouteMeasurementRunner:
+    def __init__(self) -> None:
+        self.confirmations: list[str] = []
+        self.correction_requested = False
+
+    def submit_confirmation(self, action: str) -> bool:
+        self.confirmations.append(str(action))
+        return True
+
+    def request_current_point_correction(self) -> None:
+        self.correction_requested = True
+
+
 class _FakeFrame:
     def __init__(self, name: str) -> None:
         self.name = name
@@ -1047,6 +1065,87 @@ assert image.height() == 4
         self.assertFalse(data["measurement_pending"])
         self.assertEqual(data["current_point"], 1)
         self.assertIn("Route measurement session cancelled.", statuses)
+
+    def test_measure_selected_route_point_while_waiting_submits_jump(self) -> None:
+        window = Main.__new__(Main)
+        runner = _FakeRouteMeasurementRunner()
+        statuses: list[str] = []
+
+        window._route_measurement_thread = _FakeAliveThread()
+        window._route_measurement_runner = runner
+        window._route_measurement_waiting = True
+        window._route_measurement_current_point = 38
+        window._pending_route_measure_point = 123
+        window._route_measurement_dialog = None
+        window.design_navigator_panel = None
+        window._show_status = (
+            lambda message, _timeout_ms=None: statuses.append(str(message))
+        )
+
+        Main._request_route_measurement_for_point(window, 91)
+
+        self.assertEqual(runner.confirmations, ["jump:91"])
+        self.assertIsNone(window._pending_route_measure_point)
+        self.assertEqual(statuses, ["Route measurement: measure from point 91."])
+
+    def test_measure_selected_route_point_while_running_queues_interrupt(self) -> None:
+        window = Main.__new__(Main)
+        runner = _FakeRouteMeasurementRunner()
+        statuses: list[str] = []
+
+        window._route_measurement_thread = _FakeAliveThread()
+        window._route_measurement_runner = runner
+        window._route_measurement_waiting = False
+        window._pending_route_measure_point = None
+        window._route_measurement_dialog = None
+        window.design_navigator_panel = None
+        window._show_status = (
+            lambda message, _timeout_ms=None: statuses.append(str(message))
+        )
+
+        Main._request_route_measurement_for_point(window, 91)
+
+        self.assertTrue(runner.correction_requested)
+        self.assertEqual(window._pending_route_measure_point, 91)
+        self.assertEqual(
+            statuses,
+            [
+                "Route measurement will switch to point 91 after the current action."
+            ],
+        )
+        self.assertEqual(runner.confirmations, [])
+
+        Main._on_route_measurement_waiting_changed(window, True)
+
+        self.assertIsNone(window._pending_route_measure_point)
+        self.assertEqual(runner.confirmations, ["jump:91"])
+        self.assertEqual(
+            statuses[-1],
+            "Route measurement: measure from point 91.",
+        )
+
+    def test_waiting_dialog_measure_uses_selected_point(self) -> None:
+        dialog = RouteMeasurementDialog.__new__(RouteMeasurementDialog)
+        jumped: list[int] = []
+        remeasured: list[bool] = []
+        measured: list[bool] = []
+
+        dialog._running = True
+        dialog._waiting = True
+        dialog._jump_point_spin = types.SimpleNamespace(value=lambda: 91)
+        dialog.jump_requested = types.SimpleNamespace(
+            emit=lambda point: jumped.append(int(point))
+        )
+        dialog.remeasure_requested = types.SimpleNamespace(
+            emit=lambda: remeasured.append(True)
+        )
+        dialog._emit_measure_requested = lambda: measured.append(True)
+
+        RouteMeasurementDialog._emit_next_or_measure_requested(dialog)
+
+        self.assertEqual(jumped, [91])
+        self.assertEqual(remeasured, [])
+        self.assertEqual(measured, [])
 
     def test_record_route_contact_height_writes_height_map_csv(self) -> None:
         window = Main.__new__(Main)
