@@ -622,9 +622,13 @@ class RouteMeasurementRunner:
                                 needles_lowered = False
                                 needs_final_lift = False
                     if not point_interrupted and record is not None:
+                        save_exhausted_bad_contact = (
+                            self._should_save_exhausted_bad_contact(record)
+                        )
                         if (
                             self._confirm_each_point
                             and self._record_exceeds_quality_limit(record)
+                            and not save_exhausted_bad_contact
                         ):
                             if not (
                                 record.contact_quality is not None
@@ -725,11 +729,12 @@ class RouteMeasurementRunner:
                 if self._record_callback is not None:
                     self._record_callback(record, position, total)
                 if self._confirm_each_point:
-                    status_detail = (
-                        "short-circuit detected; saved"
-                        if record.status == "short"
-                        else "saved"
-                    )
+                    if save_exhausted_bad_contact:
+                        status_detail = "contact seek exhausted; saved"
+                    elif record.status == "short":
+                        status_detail = "short-circuit detected; saved"
+                    else:
+                        status_detail = "saved"
                     if auto_next:
                         self._status(
                             f"Route measurement: point {position}/{total} "
@@ -1605,6 +1610,29 @@ class RouteMeasurementRunner:
         return (
             math.isfinite(record.relative_rms)
             and record.relative_rms > self._max_relative_rms
+        )
+
+    def _should_save_exhausted_bad_contact(
+        self,
+        record: RouteMeasurementRecord,
+    ) -> bool:
+        contact_quality = record.contact_quality
+        if contact_quality is None or contact_quality.good is not False:
+            return False
+        contact_seek = self._current_contact_seek_result
+        if (
+            contact_seek is None
+            or contact_seek.found
+            or contact_seek.status != "not_found"
+        ):
+            return False
+        depth = float(contact_seek.depth_below_down_mm)
+        max_depth = float(contact_seek.max_depth_mm)
+        return (
+            math.isfinite(depth)
+            and math.isfinite(max_depth)
+            and max_depth > 0.0
+            and depth >= max_depth - 1e-9
         )
 
     def _samples_are_short(

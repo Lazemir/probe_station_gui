@@ -1303,6 +1303,91 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
         first_depth_index = stage.calls.index(("lower_to_depth", 0.0005, None))
         self.assertEqual(stage.calls[first_depth_index - 1], ("needles", "lift", None))
 
+    def test_exhausted_auto_contact_seek_saves_bad_contact_in_confirm_mode(self) -> None:
+        point = _point(1)
+        stage = _FakeStage()
+        lcr = _FakeBatchRouteLCR(
+            [
+                {"differential_resistance_ohm": value}
+                for value in (
+                    200000.0,
+                    210000.0,
+                    220000.0,
+                    230000.0,
+                    240000.0,
+                    250000.0,
+                )
+            ]
+        )
+        results = []
+        results_changed = threading.Condition()
+        contact_heights = []
+
+        def on_result(record, _position, _total, saved) -> None:
+            with results_changed:
+                results.append((record, saved))
+                results_changed.notify_all()
+
+        def on_contact_height(record, _position, _total) -> None:
+            contact_heights.append(record)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "route.csv"
+            runner = RouteMeasurementRunner(
+                points=[point],
+                csv_path=csv_path,
+                stage_controller=stage,
+                lcr_controller=lcr,
+                needle_feedrate=None,
+                measurement_count=4,
+                initial_measurement_count=2,
+                short_threshold_ohm=10.0,
+                confirm_each_point=True,
+                auto_contact_seek_on_bad_contact=True,
+                auto_contact_seek_step_mm=0.001,
+                auto_contact_seek_max_total_mm=0.001,
+                contact_settle_s=0.0,
+                result_callback=on_result,
+                contact_height_record_callback=on_contact_height,
+            )
+            result = []
+            thread = threading.Thread(
+                target=lambda: result.append(runner.run()),
+                daemon=True,
+            )
+
+            thread.start()
+            with results_changed:
+                self.assertTrue(
+                    results_changed.wait_for(
+                        lambda: len(results) >= 1,
+                        timeout=2.0,
+                    )
+                )
+            self.assertEqual(results[0][0].status, "bad_contact")
+            self.assertTrue(results[0][1])
+
+            runner.submit_confirmation("next")
+            thread.join(timeout=2.0)
+
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(result[0][0], True, result[0][1])
+            with csv_path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["status"], "bad_contact")
+            self.assertEqual(rows[0]["n_measurements"], "2")
+
+        self.assertEqual(len(contact_heights), 1)
+        self.assertFalse(contact_heights[0].contact_found)
+        self.assertIsNotNone(contact_heights[0].contact_seek)
+        self.assertFalse(contact_heights[0].contact_seek.found)
+        self.assertEqual(contact_heights[0].contact_seek.status, "not_found")
+        self.assertAlmostEqual(
+            contact_heights[0].contact_seek.depth_below_down_mm,
+            0.001,
+        )
+
     def test_pause_during_auto_contact_seek_waits_for_saved_point(self) -> None:
         point = _point(1)
         stage = _FakeStage()
@@ -1456,7 +1541,7 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                     )
                 )
             self.assertEqual(results[0][0].status, "bad_contact")
-            self.assertFalse(results[0][1])
+            self.assertTrue(results[0][1])
 
             runner.update_runtime_settings(
                 measurement_count=2,
@@ -1483,8 +1568,9 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
             self.assertEqual(result[0][0], True, result[0][1])
             with csv_path.open("r", encoding="utf-8", newline="") as handle:
                 rows = list(csv.DictReader(handle))
-            self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["status"], "ok")
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(rows[0]["status"], "bad_contact")
+            self.assertEqual(rows[1]["status"], "ok")
 
         self.assertIn(("lower_to_depth", 0.002, None), stage.calls)
 
