@@ -11,10 +11,8 @@ from PySide6.QtCore import QEvent, QLocale, QObject, Qt, QThread, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QDoubleValidator, QKeyEvent, QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QDialog,
     QDialogButtonBox,
-    QDoubleSpinBox,
     QFormLayout,
     QHBoxLayout,
     QLineEdit,
@@ -22,7 +20,6 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
-    QSpinBox,
     QFrame,
     QTabWidget,
     QVBoxLayout,
@@ -31,6 +28,11 @@ from PySide6.QtWidgets import (
 
 from probe_station_gui.dialogs.camera_settings_dialog import CameraSettingsWidget
 from probe_station_gui.qt_compat import keyboard_modifiers_to_int, native_scan_code_to_int
+from probe_station_gui.wheel_guard import (
+    GuardedComboBox as QComboBox,
+    GuardedDoubleSpinBox as QDoubleSpinBox,
+    GuardedSpinBox as QSpinBox,
+)
 from probe_station_gui.settings_manager import (
     CONTROL_ACTIONS,
     ApiSettings,

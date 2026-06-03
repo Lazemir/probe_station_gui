@@ -5,7 +5,6 @@ from __future__ import annotations
 import serial
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QComboBox,
     QDialog,
     QFormLayout,
     QHBoxLayout,
@@ -14,6 +13,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 from serial.tools import list_ports
+
+from probe_station_gui.wheel_guard import GuardedComboBox as QComboBox
 
 
 class SerialScannerDialog(QDialog):

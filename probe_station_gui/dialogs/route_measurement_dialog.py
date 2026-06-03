@@ -18,10 +18,8 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
-    QComboBox,
     QDialog,
     QFileDialog,
-    QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -30,7 +28,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QProgressBar,
     QScrollArea,
-    QSpinBox,
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -47,6 +44,11 @@ from probe_station_gui.lcr_meter import (
     ROUTE_METER_LABELS,
     ROUTE_METER_TYPES,
     RouteMeterConfiguration,
+)
+from probe_station_gui.wheel_guard import (
+    GuardedComboBox as QComboBox,
+    GuardedDoubleSpinBox as QDoubleSpinBox,
+    GuardedSpinBox as QSpinBox,
 )
 from probe_station_gui.route_measurement import (
     ROUTE_OPERATION_MEASURE,
@@ -291,6 +293,12 @@ class RouteMeasurementDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Route Measurement")
+        self.setWindowFlags(
+            Qt.Window
+            | Qt.WindowMinimizeButtonHint
+            | Qt.WindowMaximizeButtonHint
+            | Qt.WindowCloseButtonHint
+        )
         self.setModal(False)
         self._running = False
         self._waiting = False

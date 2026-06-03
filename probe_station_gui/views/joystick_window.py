@@ -15,8 +15,6 @@ from PySide6.QtGui import QColor, QCloseEvent, QDoubleValidator, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
-    QComboBox,
-    QDoubleSpinBox,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -25,7 +23,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
-    QSlider,
     QStyle,
     QStyleOptionSlider,
     QTextEdit,
@@ -39,6 +36,12 @@ from probe_station_gui.qt_compat import (
     native_scan_code_to_int,
 )
 from probe_station_gui.settings_manager import CONTROL_ACTIONS, KeyBinding
+from probe_station_gui.wheel_guard import (
+    GuardedComboBox as QComboBox,
+    GuardedDoubleSpinBox as QDoubleSpinBox,
+    GuardedSlider as QSlider,
+    allow_wheel_value_change,
+)
 
 if TYPE_CHECKING:
     from probe_station_gui.stage_controller import StageController
@@ -537,6 +540,7 @@ class JoystickWindow(QWidget):
         self.step_distance_spin.setSingleStep(0.1)
         self.step_distance_spin.setSuffix(" mm/deg")
         self.step_distance_spin.setValue(self._manual_axis_distance_mm)
+        allow_wheel_value_change(self.step_distance_spin)
         mode_layout.addWidget(self.step_distance_label)
         mode_layout.addWidget(self.step_distance_spin)
         root_layout.addLayout(mode_layout)
@@ -555,6 +559,7 @@ class JoystickWindow(QWidget):
             int(self.MIN_LINEAR_FEEDRATE * self.LINEAR_FEEDRATE_SCALE),
             int(self.MIN_LINEAR_FEEDRATE * self.LINEAR_FEEDRATE_SCALE),
         )
+        allow_wheel_value_change(self.linear_feedrate_slider)
         self.linear_feedrate_slider.valueChanged.connect(
             self._on_linear_feedrate_slider_changed
         )
@@ -569,6 +574,7 @@ class JoystickWindow(QWidget):
         self.linear_feedrate_spin.setSingleStep(10.0)
         self.linear_feedrate_spin.setSuffix(" mm/min")
         self.linear_feedrate_spin.setFixedWidth(112)
+        allow_wheel_value_change(self.linear_feedrate_spin)
         self.linear_feedrate_spin.valueChanged.connect(
             self._on_linear_feedrate_spin_changed
         )
@@ -689,6 +695,7 @@ class JoystickWindow(QWidget):
         self.needle_feedrate_spin.setValue(self._needle_feedrate_value)
         self.needle_feedrate_spin.setFixedWidth(96)
         self.needle_feedrate_spin.setToolTip("Needle A feedrate")
+        allow_wheel_value_change(self.needle_feedrate_spin)
         self.needles_raise_button = QPushButton("Raise", self)
         self.needles_lift_button = QPushButton("Lift", self)
         self.needles_lower_button = QPushButton("Lower", self)

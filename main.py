@@ -86,7 +86,6 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
-    QComboBox,
     QDialog,
     QFormLayout,
     QGridLayout,
@@ -126,6 +125,7 @@ from probe_station_gui.lcr_meter import (
     RouteMeterConfiguration,
 )
 from probe_station_gui.motion_prediction import interpolate_position, motion_progress
+from probe_station_gui.wheel_guard import GuardedComboBox as QComboBox
 from probe_station_gui.stage_controller import StageControllerError
 from probe_station_gui.objective_offsets import (
     ObjectiveOffsetReference,

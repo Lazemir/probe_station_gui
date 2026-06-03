@@ -14,8 +14,6 @@ from typing import Any, Callable
 
 from PySide6.QtCore import QObject, QThread, QUrl, Signal, Slot
 from PySide6.QtWidgets import (
-    QComboBox,
-    QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -24,7 +22,6 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QProgressBar,
     QPushButton,
-    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -33,6 +30,12 @@ try:  # pragma: no cover - depends on installed Qt modules.
     from PySide6.QtWebEngineWidgets import QWebEngineView
 except Exception:  # pragma: no cover
     QWebEngineView = None  # type: ignore[assignment]
+
+from probe_station_gui.wheel_guard import (
+    GuardedComboBox as QComboBox,
+    GuardedDoubleSpinBox as QDoubleSpinBox,
+    GuardedSpinBox as QSpinBox,
+)
 
 from ..surface_mapping import (
     SurfaceMapConfig,

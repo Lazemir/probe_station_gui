@@ -9,7 +9,6 @@ from typing import Optional
 import serial
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
-    QComboBox,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -18,6 +17,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from serial.tools import list_ports
+
+from probe_station_gui.wheel_guard import GuardedComboBox as QComboBox
 
 
 logger = logging.getLogger(__name__)

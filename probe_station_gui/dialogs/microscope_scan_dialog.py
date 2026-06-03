@@ -8,7 +8,6 @@ from pathlib import Path
 from PySide6.QtCore import QLocale, Signal
 from PySide6.QtWidgets import (
     QDialog,
-    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
@@ -17,6 +16,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QVBoxLayout,
 )
+
+from probe_station_gui.wheel_guard import GuardedDoubleSpinBox as QDoubleSpinBox
 
 
 @dataclass(frozen=True)

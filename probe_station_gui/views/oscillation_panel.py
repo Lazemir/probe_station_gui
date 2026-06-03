@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QComboBox,
-    QDoubleSpinBox,
     QFormLayout,
     QLabel,
     QPushButton,
     QVBoxLayout,
     QWidget,
+)
+
+from probe_station_gui.wheel_guard import (
+    GuardedComboBox as QComboBox,
+    GuardedDoubleSpinBox as QDoubleSpinBox,
 )
 
 

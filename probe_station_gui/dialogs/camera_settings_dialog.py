@@ -10,7 +10,6 @@ from PySide6.QtGui import QDoubleValidator
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
-    QComboBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -18,9 +17,13 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QScrollArea,
-    QSlider,
     QVBoxLayout,
     QWidget,
+)
+
+from probe_station_gui.wheel_guard import (
+    GuardedComboBox as QComboBox,
+    GuardedSlider as QSlider,
 )
 
 

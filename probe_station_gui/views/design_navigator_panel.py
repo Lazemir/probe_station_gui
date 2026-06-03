@@ -24,8 +24,6 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
     QCheckBox,
-    QComboBox,
-    QDoubleSpinBox,
     QFileDialog,
     QGridLayout,
     QGroupBox,
@@ -35,7 +33,6 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QPushButton,
     QScrollArea,
-    QSpinBox,
     QStackedWidget,
     QStyle,
     QTableWidget,
@@ -43,6 +40,12 @@ from PySide6.QtWidgets import (
     QToolButton,
     QVBoxLayout,
     QWidget,
+)
+
+from probe_station_gui.wheel_guard import (
+    GuardedComboBox as QComboBox,
+    GuardedDoubleSpinBox as QDoubleSpinBox,
+    GuardedSpinBox as QSpinBox,
 )
 
 from ..design_model import (
