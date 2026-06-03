@@ -40,6 +40,7 @@ from probe_station_gui.route_measurement import (
     RouteContactQuality,
     RouteContactSeekResult,
     RouteMeasurementPoint,
+    RouteMeasurementRecord,
     RoutePhotoRecord,
 )
 from probe_station_gui.settings_manager import ObjectiveCalibrationSettings, Settings
@@ -502,7 +503,7 @@ assert image.height() == 4
         self.assertEqual(photo[1], "route-contact-comparison.jpg")
         self.assertEqual(reply_markup, "markup")
 
-    def test_route_attention_sends_one_combined_contact_photo(self) -> None:
+    def test_route_waiting_bad_contact_sends_one_combined_contact_photo(self) -> None:
         window = Main.__new__(Main)
         before = (
             _telegram_test_photo_bytes(8, 4, 0x00FF0000),
@@ -516,14 +517,29 @@ assert image.height() == 4
             "Point 1/2, structure 3, P003, status=bad_contact.",
         )
         alerts: list[tuple[str, str, dict[str, object]]] = []
-        message = (
-            "Route measurement: point 1/2 contact check failed (bad_contact); "
-            "correct contact, then Measure or Skip."
+        record = RouteMeasurementRecord(
+            timestamp="2026-06-03T17:21:46",
+            structure_number=3,
+            nplc="1",
+            measurement_type="test",
+            n_measurements=250,
+            resistance_ohm=298000.0,
+            resistance_rms_ohm=19900.0,
+            relative_rms=0.0666,
+            status="bad_contact",
+            contact_quality=RouteContactQuality(
+                assessed=True,
+                good=False,
+                status="bad_contact",
+                median_ohm=297000.0,
+                mad_sigma_ohm=19100.0,
+            ),
         )
 
         window._last_telegram_attention_message = ""
-        window._show_status = lambda _message: None
-        window._route_attention_status = lambda _message: True
+        window._last_route_measurement_result = (record, 1, 2, True)
+        window._route_measurement_waiting = False
+        window._pending_route_measure_point = None
         window._latest_route_contact_failure_telegram_photos = lambda: (before, after)
         window._telegram_contact_photo_payload = (
             lambda _before, _after: (
@@ -540,12 +556,13 @@ assert image.height() == 4
         window.design_navigator_panel = None
         window._route_measurement_dialog = None
 
-        Main._on_route_measurement_status(window, message)
+        Main._on_route_measurement_waiting_changed(window, True)
 
         self.assertEqual(len(alerts), 1)
         key, text, kwargs = alerts[0]
         self.assertEqual(key, "route_attention")
-        self.assertIn(message, text)
+        self.assertIn("Measured route point 1/2", text)
+        self.assertIn("status=bad_contact", text)
         self.assertIn("Left: before needle press. Right: contact attempt.", text)
         self.assertFalse(kwargs["attach_photo"])
         self.assertEqual(kwargs["reply_markup"], "actions")

@@ -711,6 +711,12 @@ class Main(QMainWindow):
         self._route_measurement_measure_enabled = False
         self._route_measurement_point_numbers: list[int] = []
         self._route_measurement_current_point: int | None = None
+        self._last_route_measurement_result: tuple[
+            RouteMeasurementRecord,
+            int,
+            int,
+            bool,
+        ] | None = None
         self._pending_route_measure_point: int | None = None
         self._route_measurement_session_active = False
         self._microscope_scan_thread: threading.Thread | None = None
@@ -4036,11 +4042,7 @@ class Main(QMainWindow):
         text = str(message or "")
         if not text.startswith("Route measurement: point "):
             return False
-        return (
-            "correct contact" in text
-            or "interrupted" in text
-            or "Save Shift" in text
-        )
+        return "interrupted" in text or "Save Shift" in text
 
     def _sync_objective_combo(self, objective_name: str) -> None:
         combo = self._objective_combo
@@ -6664,6 +6666,7 @@ class Main(QMainWindow):
             self._route_measurement_dialog.reset_progress(len(points))
             self._route_measurement_dialog.set_status(start_message)
         self._show_status(start_message)
+        self._last_route_measurement_result = None
         self._send_telegram_alert(
             "route_started",
             f"Probe route started:\n{start_message}\nCSV: {configuration.csv_path}",
@@ -6966,8 +6969,16 @@ class Main(QMainWindow):
         lock = getattr(self, "_telegram_photo_lock", None)
         if lock is None:
             return
+        contact_attention = self._route_record_needs_contact_attention(record)
         with lock:
-            should_capture = self._telegram_contact_photo_requested or not saved
+            should_capture = (
+                self._telegram_contact_photo_requested
+                or not saved
+                or (
+                    contact_attention
+                    and self._telegram_route_attention_alert_enabled()
+                )
+            )
         if not should_capture:
             return
         before_counter = self._latest_camera_counter()
@@ -6986,7 +6997,7 @@ class Main(QMainWindow):
         )
         before_photo = self._matching_route_pre_contact_photo(point, position)
         with self._telegram_photo_lock:
-            if not saved:
+            if not saved or contact_attention:
                 self._last_route_contact_failure_before_photo = before_photo
                 self._last_route_contact_failure_photo = (
                     photo[0],
@@ -7565,34 +7576,8 @@ class Main(QMainWindow):
 
     def _on_route_measurement_status(self, message: str) -> None:
         self._show_status(message)
-        if (
-            self._route_attention_status(message)
-            and message != self._last_telegram_attention_message
-        ):
-            self._last_telegram_attention_message = message
-            failure_photos = (
-                self._latest_route_contact_failure_telegram_photos()
-                if "correct contact" in str(message)
-                else None
-            )
-            before_photo = failure_photos[0] if failure_photos is not None else None
-            failure_photo = failure_photos[1] if failure_photos is not None else None
-            alert_message = f"Probe route needs attention:\n{message}"
-            alert_photo: tuple[bytes, str] | None = None
-            if failure_photo is not None:
-                alert_photo, contact_caption = self._telegram_contact_photo_payload(
-                    before_photo,
-                    failure_photo,
-                )
-                if contact_caption:
-                    alert_message = f"{alert_message}\n{contact_caption}"
-            self._send_telegram_alert(
-                "route_attention",
-                alert_message,
-                attach_photo=alert_photo is None,
-                photo=alert_photo,
-                reply_markup=self._telegram_route_actions_markup(),
-            )
+        if self._route_attention_status(message):
+            self._send_route_attention_alert(message)
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_route_measurement_status(message)
         if self._route_measurement_dialog is not None:
@@ -7625,6 +7610,7 @@ class Main(QMainWindow):
             return
         pending_point_number = self._pending_route_measure_point
         if pending_point_number is None:
+            self._send_route_waiting_attention_from_last_result()
             return
         self._pending_route_measure_point = None
         self._submit_route_measurement_confirmation(
@@ -7638,6 +7624,12 @@ class Main(QMainWindow):
         total: int,
         saved: bool,
     ) -> None:
+        self._last_route_measurement_result = (
+            record,
+            int(position),
+            int(total),
+            bool(saved),
+        )
         if self._route_measurement_dialog is not None:
             self._route_measurement_dialog.set_result(
                 record,
@@ -7669,6 +7661,63 @@ class Main(QMainWindow):
                 self.design_navigator_panel.set_route_measurement_status(message)
             if self._route_measurement_dialog is not None:
                 self._route_measurement_dialog.set_status(message)
+
+    @staticmethod
+    def _route_record_needs_contact_attention(
+        record: RouteMeasurementRecord,
+    ) -> bool:
+        if record.status == "bad_contact":
+            return True
+        contact = record.contact_quality
+        return contact is not None and contact.good is False
+
+    def _send_route_waiting_attention_from_last_result(self) -> None:
+        last_result = self._last_route_measurement_result
+        if last_result is None:
+            return
+        record, position, total, saved = last_result
+        if not self._route_record_needs_contact_attention(record):
+            return
+        message = self._format_route_measurement_record(
+            record,
+            position,
+            total,
+            saved=saved,
+        )
+        self._send_route_attention_alert(message, include_contact_photos=True)
+
+    def _send_route_attention_alert(
+        self,
+        message: str,
+        *,
+        include_contact_photos: bool = False,
+    ) -> None:
+        if message == self._last_telegram_attention_message:
+            return
+        self._last_telegram_attention_message = message
+        failure_photos = (
+            self._latest_route_contact_failure_telegram_photos()
+            if include_contact_photos
+            else None
+        )
+        before_photo = failure_photos[0] if failure_photos is not None else None
+        failure_photo = failure_photos[1] if failure_photos is not None else None
+        alert_message = f"Probe route needs attention:\n{message}"
+        alert_photo: tuple[bytes, str] | None = None
+        if failure_photo is not None:
+            alert_photo, contact_caption = self._telegram_contact_photo_payload(
+                before_photo,
+                failure_photo,
+            )
+            if contact_caption:
+                alert_message = f"{alert_message}\n{contact_caption}"
+        self._send_telegram_alert(
+            "route_attention",
+            alert_message,
+            attach_photo=alert_photo is None,
+            photo=alert_photo,
+            reply_markup=self._telegram_route_actions_markup(),
+        )
 
     def _on_route_measurement_recorded(
         self,
@@ -7731,6 +7780,7 @@ class Main(QMainWindow):
         self._route_measurement_thread = None
         self._route_measurement_runner = None
         self._route_measurement_waiting = False
+        self._last_route_measurement_result = None
         self._pending_route_measure_point = None
         self._route_measurement_photo_enabled = False
         self._route_measurement_measure_enabled = False
