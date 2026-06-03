@@ -2171,7 +2171,11 @@ class DesignNavigatorPanel(QWidget):
         self._route_skip_button.setEnabled(self._route_measurement_waiting)
         self._route_next_button.setEnabled(self._route_measurement_waiting)
         self._route_move_selected_button.setEnabled(
-            has_route_selection and not route_running
+            has_route_selection
+            and (
+                not route_running
+                or self._route_measurement_waiting
+            )
         )
         self._route_jump_selected_button.setEnabled(
             self._route_measurement_waiting and has_route_selection

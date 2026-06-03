@@ -947,7 +947,7 @@ class RouteMeasurementDialog(QDialog):
         self._skip_button.setEnabled(can_confirm)
         self._next_button.setEnabled(can_confirm)
         self._jump_point_spin.setEnabled((not self._running) or can_confirm)
-        self._move_button.setEnabled(not self._running)
+        self._move_button.setEnabled((not self._running) or can_confirm)
         self._jump_button.setEnabled(can_confirm)
         self._set_runtime_settings_enabled((not self._running) or can_confirm)
         self._update_session_buttons()
