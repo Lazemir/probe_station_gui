@@ -131,11 +131,36 @@ class _FakeKeithleySession:
     def __init__(self) -> None:
         self.configurations: list[dict] = []
         self.read_triggers: list[bool] = []
+        self.prepared_batches: list[tuple[int, int | None]] = []
+        self.route_batches: list[tuple[int, bool, bool]] = []
         self.closed = False
 
     def read_primary_value(self, *, trigger: bool = False) -> float:
         self.read_triggers.append(bool(trigger))
         return 42.0
+
+    def read_route_measurements(
+        self,
+        count: int,
+        *,
+        trigger: bool = False,
+        after_measurement=None,
+    ) -> list[dict[str, object]]:
+        self.route_batches.append((int(count), bool(trigger), after_measurement is not None))
+        if after_measurement is not None:
+            after_measurement()
+        return [
+            {"differential_resistance_ohm": 42.0}
+            for _index in range(int(count))
+        ]
+
+    def prepare_route_measurements(
+        self,
+        count: int,
+        *,
+        source_list_count: int | None = None,
+    ) -> None:
+        self.prepared_batches.append((int(count), source_list_count))
 
     def configure_measurement(self, **kwargs) -> None:
         self.configurations.append(dict(kwargs))
@@ -352,6 +377,26 @@ class LCRMeterTest(unittest.TestCase):
         self.assertEqual(session.configurations[-1]["keithley_use_buffer"], True)
         self.assertEqual(session.configurations[-1]["keithley_use_trigger_link"], True)
 
+    def test_controller_prepares_and_reads_keithley_batch_callbacks(self) -> None:
+        controller = LCRMeterController()
+        session = _FakeKeithleySession()
+        controller._session = session
+        stopped = []
+        controller._stop_polling_session = lambda: stopped.append(True)
+        callbacks: list[bool] = []
+
+        controller.prepare_route_measurement_batch_now(10, source_list_count=240)
+        measurements = controller.read_route_measurement_batch_now(
+            2,
+            after_measurement=lambda: callbacks.append(True),
+        )
+
+        self.assertEqual(session.prepared_batches, [(10, 240)])
+        self.assertEqual(session.route_batches, [(2, True, True)])
+        self.assertEqual(callbacks, [True])
+        self.assertEqual(len(measurements), 2)
+        self.assertEqual(stopped, [True, True])
+
     def test_route_meter_opens_keithley_through_external_driver_factory(self) -> None:
         created: list[tuple[str, str, int]] = []
         session = _FakeKeithleySession()
@@ -386,6 +431,28 @@ class LCRMeterTest(unittest.TestCase):
         self.assertEqual(session.read_triggers, [True])
         self.assertEqual(session.configurations[-1]["keithley_nplc"], 1.0)
         self.assertEqual(session.configurations[-1]["keithley_use_buffer"], True)
+
+    def test_route_meter_prepares_and_reads_keithley_batch_callbacks(self) -> None:
+        session = _FakeKeithleySession()
+        meter = RouteMeter(
+            RouteMeterConfiguration(
+                meter_type=ROUTE_METER_KEITHLEY,
+                keithley=KeithleyRouteMeterSettings(),
+            )
+        )
+        meter._session = session
+        callbacks: list[bool] = []
+
+        meter.prepare_route_measurement_batch_now(10, source_list_count=240)
+        measurements = meter.read_route_measurement_batch_now(
+            2,
+            after_measurement=lambda: callbacks.append(True),
+        )
+
+        self.assertEqual(session.prepared_batches, [(10, 240)])
+        self.assertEqual(session.route_batches, [(2, True, True)])
+        self.assertEqual(callbacks, [True])
+        self.assertEqual(len(measurements), 2)
 
     def test_controller_opens_keithley_with_default_timeout(self) -> None:
         created: list[tuple[str, str, int]] = []

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import math
 import re
@@ -38,6 +39,62 @@ def normalize_resource_name(resource_name: str) -> str:
     if match:
         return f"ASRL{int(match.group('port'))}::INSTR"
     return candidate
+
+
+def _callable_accepts_keyword(function: object, name: str) -> bool:
+    try:
+        signature = inspect.signature(function)
+    except (TypeError, ValueError):
+        return False
+    for parameter in signature.parameters.values():
+        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+            return True
+        if (
+            parameter.name == name
+            and parameter.kind
+            in {
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            }
+        ):
+            return True
+    return False
+
+
+def _prepare_route_measurement_batch(
+    preparer: object,
+    count: int,
+    *,
+    source_list_count: int | None,
+) -> None:
+    if not callable(preparer):
+        return
+    if (
+        source_list_count is not None
+        and _callable_accepts_keyword(preparer, "source_list_count")
+    ):
+        preparer(count, source_list_count=source_list_count)
+        return
+    preparer(count)
+
+
+def _read_route_measurement_batch(
+    batch_reader: object,
+    count: int,
+    *,
+    after_measurement: object | None,
+) -> list[object]:
+    if not callable(batch_reader):
+        return []
+    kwargs: dict[str, object] = {}
+    if _callable_accepts_keyword(batch_reader, "trigger"):
+        kwargs["trigger"] = True
+    if (
+        after_measurement is not None
+        and _callable_accepts_keyword(batch_reader, "after_measurement")
+    ):
+        kwargs["after_measurement"] = after_measurement
+    return list(batch_reader(count, **kwargs))
 
 
 def format_source_level_value(value: float) -> str:
@@ -595,6 +652,7 @@ class RouteMeter:
         count: int,
         *,
         restart_polling: bool = False,
+        after_measurement: object | None = None,
     ) -> list[dict[str, object]]:
         _ = restart_polling
         if self._session is None:
@@ -604,8 +662,32 @@ class RouteMeter:
         count = max(1, int(count))
         batch_reader = getattr(self._session, "read_route_measurements", None)
         if callable(batch_reader):
-            return [dict(item) for item in batch_reader(count, trigger=True)]
+            return [
+                dict(item)
+                for item in _read_route_measurement_batch(
+                    batch_reader,
+                    count,
+                    after_measurement=after_measurement,
+                )
+            ]
         return [self.read_route_measurement_now() for _index in range(count)]
+
+    def prepare_route_measurement_batch_now(
+        self,
+        count: int,
+        *,
+        source_list_count: int | None = None,
+    ) -> None:
+        if self._session is None:
+            self.open()
+        if self._session is None:
+            raise LCRMeterError("Route measurement instrument is not open.")
+        preparer = getattr(self._session, "prepare_route_measurements", None)
+        _prepare_route_measurement_batch(
+            preparer,
+            max(1, int(count)),
+            source_list_count=source_list_count,
+        )
 
     def abort_current_measurement(self) -> None:
         session = self._session
@@ -916,6 +998,7 @@ class LCRMeterController(QObject):
         count: int,
         *,
         restart_polling: bool = False,
+        after_measurement: object | None = None,
     ) -> list[dict[str, object]]:
         """Synchronously run a batch of route measurements when supported."""
 
@@ -930,7 +1013,14 @@ class LCRMeterController(QObject):
         try:
             batch_reader = getattr(session, "read_route_measurements", None)
             if callable(batch_reader):
-                measurements = [dict(item) for item in batch_reader(count, trigger=True)]
+                measurements = [
+                    dict(item)
+                    for item in _read_route_measurement_batch(
+                        batch_reader,
+                        count,
+                        after_measurement=after_measurement,
+                    )
+                ]
             else:
                 measurements = [
                     self.read_route_measurement_now()
@@ -959,6 +1049,43 @@ class LCRMeterController(QObject):
                 self._is_short_reading(primary_value),
             )
         return measurements
+
+    def prepare_route_measurement_batch_now(
+        self,
+        count: int,
+        *,
+        source_list_count: int | None = None,
+    ) -> None:
+        """Prepare a route measurement batch when the backend supports it."""
+
+        count = max(1, int(count))
+        current_thread = threading.current_thread()
+        with self._task_lock:
+            if (
+                self._active_thread
+                and self._active_thread.is_alive()
+                and self._active_thread is not current_thread
+            ):
+                raise LCRMeterError("Measurement instrument task already running.")
+            session = self._session
+            self._active_thread = current_thread
+        if session is None:
+            with self._task_lock:
+                if self._active_thread is current_thread:
+                    self._active_thread = None
+            raise LCRMeterError("Measurement instrument is not connected.")
+        self._stop_polling_session()
+        try:
+            preparer = getattr(session, "prepare_route_measurements", None)
+            _prepare_route_measurement_batch(
+                preparer,
+                count,
+                source_list_count=source_list_count,
+            )
+        finally:
+            with self._task_lock:
+                if self._active_thread is current_thread:
+                    self._active_thread = None
 
     def abort_current_measurement(self) -> None:
         """Best-effort cancellation for a blocking route measurement read."""

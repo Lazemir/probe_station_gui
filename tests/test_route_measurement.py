@@ -134,6 +134,60 @@ class _FakeBatchRouteLCR:
         return [dict(item) for item in batch]
 
 
+class _PreparedBatchRouteLCR(_FakeBatchRouteLCR):
+    def __init__(self, measurements: list[dict[str, object]]) -> None:
+        super().__init__(measurements)
+        self.prepare_calls: list[tuple[int, int | None]] = []
+        self.prepare_started = threading.Event()
+        self.allow_prepare_finish = threading.Event()
+        self.lift_started = threading.Event()
+        self.read_after_measurement: list[bool] = []
+
+    def prepare_route_measurement_batch_now(
+        self,
+        count: int,
+        *,
+        source_list_count: int | None = None,
+    ) -> None:
+        self.prepare_calls.append((int(count), source_list_count))
+        self.prepare_started.set()
+        self.allow_prepare_finish.wait(timeout=2.0)
+
+    def read_route_measurement_batch_now(
+        self,
+        count: int,
+        *,
+        after_measurement=None,
+    ) -> list[dict[str, object]]:
+        self.read_after_measurement.append(after_measurement is not None)
+        if after_measurement is not None:
+            after_measurement()
+            self.lift_started.wait(timeout=2.0)
+        return super().read_route_measurement_batch_now(count)
+
+
+class _PrepareAwareStage(_FakeStage):
+    def __init__(self, lcr: _PreparedBatchRouteLCR) -> None:
+        super().__init__()
+        self.lcr = lcr
+        self.prepare_started_before_lower = False
+
+    def run_external_needles_action(
+        self,
+        action: str,
+        feedrate: float | None = None,
+    ) -> str:
+        if action == "lower":
+            self.prepare_started_before_lower = self.lcr.prepare_started.wait(
+                timeout=2.0
+            )
+            self.lcr.allow_prepare_finish.set()
+        result = super().run_external_needles_action(action, feedrate)
+        if action == "lift":
+            self.lcr.lift_started.set()
+        return result
+
+
 class _PausingBatchRouteLCR(_FakeBatchRouteLCR):
     def __init__(self, measurements: list[dict[str, object]], pause_on_batch) -> None:
         super().__init__(measurements)
@@ -837,6 +891,74 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
             self.assertEqual(rows[0]["resistance_ohm"], "6")
             self.assertEqual(rows[0]["resistance_rms_ohm"], "1")
             self.assertEqual(rows[0]["relative_rms"], "0.166666666667")
+
+    def test_runner_prepares_batch_before_lower_and_lifts_during_read(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "route.csv"
+            lcr = _PreparedBatchRouteLCR(
+                [
+                    {"differential_resistance_ohm": 10.0},
+                    {"differential_resistance_ohm": 12.0},
+                ]
+            )
+            stage = _PrepareAwareStage(lcr)
+            result_events: list[object] = []
+            runner = RouteMeasurementRunner(
+                points=[_point(1)],
+                csv_path=csv_path,
+                stage_controller=stage,
+                lcr_controller=lcr,
+                needle_feedrate=75.0,
+                measurement_count=2,
+                initial_measurement_count=2,
+                contact_settle_s=0.0,
+                result_callback=lambda *_args: result_events.append(("result",)),
+            )
+
+            success, message = runner.run()
+
+            self.assertTrue(success, message)
+            self.assertTrue(stage.prepare_started_before_lower)
+            self.assertEqual(lcr.prepare_calls, [(2, 2)])
+            self.assertEqual(lcr.read_after_measurement, [True])
+            self.assertTrue(lcr.lift_started.is_set())
+            self.assertIn(("needles", "lift", 75.0), stage.calls)
+            self.assertEqual(result_events, [("result",)])
+
+    def test_runner_prepares_initial_batch_with_followup_source_list_capacity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "route.csv"
+            lcr = _FakeBatchRouteLCR(
+                [
+                    {"differential_resistance_ohm": 10.0},
+                    {"differential_resistance_ohm": 12.0},
+                    {"differential_resistance_ohm": 11.0},
+                    {"differential_resistance_ohm": 13.0},
+                    {"differential_resistance_ohm": 14.0},
+                ]
+            )
+            prepare_calls: list[tuple[int, int | None]] = []
+
+            def prepare(count: int, *, source_list_count: int | None = None) -> None:
+                prepare_calls.append((int(count), source_list_count))
+
+            lcr.prepare_route_measurement_batch_now = prepare
+            runner = RouteMeasurementRunner(
+                points=[_point(1)],
+                csv_path=csv_path,
+                stage_controller=_FakeStage(),
+                lcr_controller=lcr,
+                needle_feedrate=75.0,
+                measurement_count=5,
+                initial_measurement_count=2,
+                contact_settle_s=0.0,
+            )
+
+            success, message = runner.run()
+
+            self.assertTrue(success, message)
+            self.assertEqual(prepare_calls[:2], [(2, 3), (3, 3)])
+            self.assertEqual(lcr.batch_counts, [2, 3])
 
     def test_runner_uses_batch_route_reader_when_available(self) -> None:
         point = _point(3)

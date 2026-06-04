@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import inspect
 import logging
 import math
 import os
@@ -31,6 +32,54 @@ ROUTE_OPERATION_MODES = (
     ROUTE_OPERATION_PHOTO,
     ROUTE_OPERATION_PHOTO_THEN_MEASURE,
 )
+
+
+def _callable_accepts_keyword(function: object, name: str) -> bool:
+    try:
+        signature = inspect.signature(function)
+    except (TypeError, ValueError):
+        return False
+    for parameter in signature.parameters.values():
+        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+            return True
+        if (
+            parameter.name == name
+            and parameter.kind
+            in {
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            }
+        ):
+            return True
+    return False
+
+
+class _BackgroundRouteTask:
+    def __init__(self, target: Callable[[], object]) -> None:
+        self._target = target
+        self._done = threading.Event()
+        self._exception: BaseException | None = None
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> "_BackgroundRouteTask":
+        self._thread.start()
+        return self
+
+    def wait(self) -> None:
+        self._thread.join()
+        if self._exception is not None:
+            raise self._exception
+
+    def done(self) -> bool:
+        return self._done.is_set()
+
+    def _run(self) -> None:
+        try:
+            self._target()
+        except BaseException as exc:
+            self._exception = exc
+        finally:
+            self._done.set()
 
 
 @dataclass(frozen=True)
@@ -331,6 +380,7 @@ class RouteMeasurementRunner:
         self._route_offset_xy: Point2D = (0.0, 0.0)
         self._last_recorded_point: RouteMeasurementPoint | None = None
         self._current_contact_seek_result: RouteContactSeekResult | None = None
+        self._background_tasks: list[_BackgroundRouteTask] = []
 
     @property
     def csv_path(self) -> Path:
@@ -543,6 +593,13 @@ class RouteMeasurementRunner:
                 if self._stop_requested.is_set():
                     message = "Route measurement stopped by user."
                     break
+                measurement_prepare_task = (
+                    self._start_measurement_prepare_task(
+                        self._initial_measurement_count()
+                    )
+                    if self._measure_enabled
+                    else None
+                )
                 focus_result: object | None = None
                 if self._photo_focus_enabled:
                     self._status(
@@ -595,6 +652,14 @@ class RouteMeasurementRunner:
                     position_index += 1
                     continue
                 needles_lowered = False
+                lift_task: _BackgroundRouteTask | None = None
+
+                def start_lift_after_measurement() -> None:
+                    nonlocal lift_task
+                    if not needles_lowered or lift_task is not None:
+                        return
+                    lift_task = self._start_needles_lift_task()
+
                 record: RouteMeasurementRecord | None = None
                 contact_height_record: RouteContactHeightRecord | None = None
                 record_saved = False
@@ -621,7 +686,13 @@ class RouteMeasurementRunner:
                             f"Route measurement: point {position}/{total} "
                             "measuring."
                         )
-                        samples = self._measure_samples(position=position, total=total)
+                        samples = self._measure_samples(
+                            position=position,
+                            total=total,
+                            prepare_task=measurement_prepare_task,
+                            after_measurement=start_lift_after_measurement,
+                        )
+                        measurement_prepare_task = None
                         if samples is None:
                             if self._point_interrupt_requested.is_set():
                                 point_interrupted = True
@@ -629,6 +700,10 @@ class RouteMeasurementRunner:
                                 message = "Route measurement stopped by user."
                                 break
                         if not point_interrupted:
+                            if lift_task is not None:
+                                lift_task.wait()
+                                needles_lowered = False
+                                needs_final_lift = False
                             record = self._record_for_point(
                                 point=point,
                                 samples=samples,
@@ -675,12 +750,24 @@ class RouteMeasurementRunner:
                         self._emit_result(record, position, total, record_saved)
                         result_emitted = True
                 finally:
+                    if lift_task is not None and needles_lowered:
+                        try:
+                            lift_task.wait()
+                            needles_lowered = False
+                            needs_final_lift = False
+                        except Exception:
+                            logger.warning(
+                                "Background route needle lift failed; retrying.",
+                                exc_info=True,
+                            )
                     if needles_lowered:
                         self._stage_controller.run_external_needles_action(
                             "lift",
                             self._needle_feedrate,
                         )
                         needs_final_lift = False
+                    if measurement_prepare_task is not None:
+                        measurement_prepare_task.wait()
                 if point_interrupted:
                     self._point_interrupt_requested.clear()
                     decision = self._wait_after_interrupted_point(
@@ -819,6 +906,10 @@ class RouteMeasurementRunner:
                     )
                 except Exception as exc:
                     message = f"{message} Needle lift failed: {exc}"
+            try:
+                self._wait_for_background_tasks()
+            except Exception as exc:
+                message = f"{message} Background route task failed: {exc}"
             self._finish_stage_task()
             if self._measure_enabled and hasattr(self._lcr_controller, "close"):
                 try:
@@ -1013,6 +1104,55 @@ class RouteMeasurementRunner:
             raise ValueError("Route autofocus is not configured.")
         return self._photo_focus_callback(point, position, total)
 
+    def _start_background_task(
+        self,
+        target: Callable[[], object],
+    ) -> _BackgroundRouteTask:
+        task = _BackgroundRouteTask(target).start()
+        self._background_tasks.append(task)
+        return task
+
+    def _wait_for_background_tasks(self) -> None:
+        tasks = list(self._background_tasks)
+        self._background_tasks.clear()
+        for task in tasks:
+            task.wait()
+
+    def _start_measurement_prepare_task(
+        self,
+        count: int,
+    ) -> _BackgroundRouteTask | None:
+        preparer = getattr(
+            self._lcr_controller,
+            "prepare_route_measurement_batch_now",
+            None,
+        )
+        if not callable(preparer):
+            return None
+        count = max(1, int(count))
+        source_list_count = self._source_list_prepare_count(count)
+
+        def prepare() -> None:
+            if _callable_accepts_keyword(preparer, "source_list_count"):
+                preparer(count, source_list_count=source_list_count)
+            else:
+                preparer(count)
+
+        return self._start_background_task(prepare)
+
+    def _start_needles_lift_task(self) -> _BackgroundRouteTask:
+        return self._start_background_task(
+            lambda: self._stage_controller.run_external_needles_action(
+                "lift",
+                self._needle_feedrate,
+            )
+        )
+
+    def _source_list_prepare_count(self, count: int) -> int:
+        initial_count = self._initial_measurement_count()
+        followup_count = max(0, self._measurement_count - initial_count)
+        return max(1, int(count), followup_count)
+
     @staticmethod
     def _normalized_contact_seek_step(value: object) -> float:
         try:
@@ -1038,21 +1178,38 @@ class RouteMeasurementRunner:
         *,
         position: int,
         total: int,
+        prepare_task: _BackgroundRouteTask | None = None,
+        after_measurement: Callable[[], object] | None = None,
     ) -> list[RouteMeasurementSample] | None:
         self._current_contact_seek_result = None
         initial_count = self._initial_measurement_count()
-        samples = self._read_measurement_samples(initial_count, start_index=1)
+        initial_after_measurement = (
+            after_measurement if self._measurement_count <= initial_count else None
+        )
+        samples = self._read_measurement_samples(
+            initial_count,
+            start_index=1,
+            prepare_task=prepare_task,
+            after_measurement=initial_after_measurement,
+        )
         if samples is None:
             return None
         if not self._auto_contact_seek_on_bad_contact or self._samples_are_short(samples):
-            return self._complete_measurement_samples(samples)
+            return self._complete_measurement_samples(
+                samples,
+                after_measurement=after_measurement,
+            )
         if self._samples_have_bad_contact(samples):
             return self._seek_contact_from_current_position(
                 initial_samples=samples,
                 position=position,
                 total=total,
+                after_measurement=after_measurement,
             )
-        completed_samples = self._complete_measurement_samples(samples)
+        completed_samples = self._complete_measurement_samples(
+            samples,
+            after_measurement=after_measurement,
+        )
         if (
             completed_samples is None
             or self._completed_measurement_is_acceptable(completed_samples)
@@ -1063,11 +1220,14 @@ class RouteMeasurementRunner:
             position=position,
             total=total,
             skip_current_depth=True,
+            after_measurement=after_measurement,
         )
 
     def _complete_measurement_samples(
         self,
         samples: list[RouteMeasurementSample],
+        *,
+        after_measurement: Callable[[], object] | None = None,
     ) -> list[RouteMeasurementSample] | None:
         remaining_count = self._measurement_count - len(samples)
         if (
@@ -1079,6 +1239,8 @@ class RouteMeasurementRunner:
         extra_samples = self._read_measurement_samples(
             remaining_count,
             start_index=len(samples) + 1,
+            prepare_task=self._start_measurement_prepare_task(remaining_count),
+            after_measurement=after_measurement,
         )
         if extra_samples is None:
             return None
@@ -1091,6 +1253,7 @@ class RouteMeasurementRunner:
         position: int,
         total: int,
         skip_current_depth: bool = False,
+        after_measurement: Callable[[], object] | None = None,
     ) -> list[RouteMeasurementSample] | None:
         if self._auto_contact_seek_max_total_mm <= 0.0:
             return initial_samples
@@ -1133,6 +1296,7 @@ class RouteMeasurementRunner:
                 needle_action=needle_action,
                 lower_to_depth=lower_to_depth,
                 adjust=adjust,
+                after_measurement=after_measurement,
             )
         finally:
             self._contact_seek_active.clear()
@@ -1148,6 +1312,7 @@ class RouteMeasurementRunner:
         needle_action: Callable[..., object],
         lower_to_depth: Callable[..., object] | None,
         adjust: Callable[..., object],
+        after_measurement: Callable[[], object] | None,
     ) -> list[RouteMeasurementSample] | None:
         step_mm = self._auto_contact_seek_step_mm
         max_depth_steps = int(
@@ -1182,6 +1347,9 @@ class RouteMeasurementRunner:
                     f"lift/lower retry {attempt_number}/{max_depth_steps}, "
                     f"{depth_mm:.4f} mm below down."
                 )
+            prepare_task = self._start_measurement_prepare_task(
+                self._initial_measurement_count()
+            )
             needle_action("lift", self._needle_feedrate)
             if (
                 self._stop_requested.is_set()
@@ -1204,9 +1372,16 @@ class RouteMeasurementRunner:
             if not self._sleep_contact_settle():
                 return None
             last_axis_a_lowering_mm = self._latest_axis_a_lowering()
+            initial_after_measurement = (
+                after_measurement
+                if self._measurement_count <= self._initial_measurement_count()
+                else None
+            )
             samples = self._read_measurement_samples(
                 self._initial_measurement_count(),
                 start_index=1,
+                prepare_task=prepare_task,
+                after_measurement=initial_after_measurement,
             )
             if samples is None:
                 return None
@@ -1240,7 +1415,10 @@ class RouteMeasurementRunner:
                 f"MAD={_format_ohm(quality.mad_sigma_ohm)}."
             )
             if quality.good is not False:
-                completed_samples = self._complete_measurement_samples(samples)
+                completed_samples = self._complete_measurement_samples(
+                    samples,
+                    after_measurement=after_measurement,
+                )
                 if completed_samples is None:
                     return None
                 samples = completed_samples
@@ -1422,10 +1600,14 @@ class RouteMeasurementRunner:
         count: int,
         *,
         start_index: int,
+        prepare_task: _BackgroundRouteTask | None = None,
+        after_measurement: Callable[[], object] | None = None,
     ) -> list[RouteMeasurementSample] | None:
         count = max(0, int(count))
         if count <= 0:
             return []
+        if prepare_task is not None:
+            prepare_task.wait()
         batch_reader = getattr(
             self._lcr_controller,
             "read_route_measurement_batch_now",
@@ -1437,7 +1619,15 @@ class RouteMeasurementRunner:
                 or self._point_interrupt_requested.is_set()
             ):
                 return None
-            raw_batch = list(batch_reader(count))
+            if (
+                after_measurement is not None
+                and _callable_accepts_keyword(batch_reader, "after_measurement")
+            ):
+                raw_batch = list(
+                    batch_reader(count, after_measurement=after_measurement)
+                )
+            else:
+                raw_batch = list(batch_reader(count))
             samples = [
                 _measurement_sample_from_raw(raw, index)
                 for index, raw in enumerate(raw_batch, start=start_index)
