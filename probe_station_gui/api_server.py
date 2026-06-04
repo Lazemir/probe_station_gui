@@ -8,6 +8,13 @@ import threading
 import math
 from typing import Any, Callable
 
+from probe_station_gui.api_keys import (
+    API_PERMISSION_ROUTE_MEASURE,
+    API_PERMISSION_ROUTE_READ,
+    API_PERMISSION_STAGE_READ,
+    API_PERMISSION_STAGE_WRITE,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +92,20 @@ def _voltage_sweep_from_payload(payload: dict[str, Any]) -> list[float]:
     return values
 
 
+def _extract_api_key(
+    authorization: str | None,
+    x_api_key: str | None,
+) -> str | None:
+    bearer_prefix = "bearer "
+    header = str(authorization or "").strip()
+    if header.lower().startswith(bearer_prefix):
+        return header[len(bearer_prefix) :].strip() or None
+    if header and " " not in header:
+        return header
+    x_key = str(x_api_key or "").strip()
+    return x_key or None
+
+
 def _raise_for_rejected(result: dict[str, Any]) -> None:
     if result.get("accepted", False):
         return
@@ -112,6 +133,7 @@ class ProbeStationApiServer:
         move_callback: Callable[[dict[str, Any]], dict[str, Any]],
         status_callback: Callable[[], dict[str, Any]],
         command_callback: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        auth_callback: Callable[[str | None, str], dict[str, Any]] | None = None,
         host: str | None = None,
         port: int | None = None,
     ) -> None:
@@ -120,6 +142,7 @@ class ProbeStationApiServer:
         self._move_callback = move_callback
         self._status_callback = status_callback
         self._command_callback = command_callback
+        self._auth_callback = auth_callback
         self._server: object | None = None
         self._thread: threading.Thread | None = None
 
@@ -189,7 +212,7 @@ class ProbeStationApiServer:
             logger.exception("FastAPI control API stopped unexpectedly.")
 
     def _create_app(self):
-        from fastapi import Body, FastAPI, HTTPException
+        from fastapi import Body, FastAPI, Header, HTTPException
         from fastapi.responses import HTMLResponse
         import uvicorn
 
@@ -227,11 +250,20 @@ class ProbeStationApiServer:
             )
 
         @app.get("/api/v1/stage/status")
-        def stage_status() -> dict[str, Any]:
+        def stage_status(
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+        ) -> dict[str, Any]:
+            self._authorize(API_PERMISSION_STAGE_READ, authorization, x_api_key)
             return self._status_callback()
 
         @app.post("/api/v1/stage/move")
-        def move_stage(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        def move_stage(
+            payload: dict[str, Any] = Body(...),
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+        ) -> dict[str, Any]:
+            self._authorize(API_PERMISSION_STAGE_WRITE, authorization, x_api_key)
             try:
                 targets = _axis_targets_from_payload(payload)
                 mode = _coordinate_mode_from_payload(payload)
@@ -258,7 +290,11 @@ class ProbeStationApiServer:
             return result
 
         @app.get("/api/v1/route/contacts")
-        def list_route_contacts() -> dict[str, Any]:
+        def list_route_contacts(
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+        ) -> dict[str, Any]:
+            self._authorize(API_PERMISSION_ROUTE_READ, authorization, x_api_key)
             result = self._call_command({"action": "list_contacts"})
             _raise_for_rejected(result)
             return result
@@ -267,7 +303,10 @@ class ProbeStationApiServer:
         def move_to_route_contact(
             contact_number: int,
             payload: dict[str, Any] | None = Body(default=None),
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
         ) -> dict[str, Any]:
+            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
             body = dict(payload or {})
             body["contact_number"] = int(contact_number)
             result = self._call_command(
@@ -283,7 +322,10 @@ class ProbeStationApiServer:
         def route_contact_needles(
             contact_number: int,
             payload: dict[str, Any] | None = Body(default=None),
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
         ) -> dict[str, Any]:
+            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
             body = dict(payload or {})
             body["contact_number"] = int(contact_number)
             result = self._call_command(
@@ -295,8 +337,51 @@ class ProbeStationApiServer:
             _raise_for_rejected(result)
             return result
 
+        @app.post("/api/v1/route/contacts/{contact_number}/check")
+        def check_route_contact(
+            contact_number: int,
+            payload: dict[str, Any] | None = Body(default=None),
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+        ) -> dict[str, Any]:
+            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
+            body = dict(payload or {})
+            body["contact_number"] = int(contact_number)
+            result = self._call_command(
+                {
+                    "action": "check_contact",
+                    "payload": body,
+                }
+            )
+            _raise_for_rejected(result)
+            return result
+
+        @app.post("/api/v1/route/contacts/{contact_number}/seek")
+        def seek_route_contact(
+            contact_number: int,
+            payload: dict[str, Any] | None = Body(default=None),
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+        ) -> dict[str, Any]:
+            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
+            body = dict(payload or {})
+            body["contact_number"] = int(contact_number)
+            result = self._call_command(
+                {
+                    "action": "contact_seek",
+                    "payload": body,
+                }
+            )
+            _raise_for_rejected(result)
+            return result
+
         @app.post("/api/v1/meter/configure")
-        def configure_meter(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        def configure_meter(
+            payload: dict[str, Any] = Body(...),
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+        ) -> dict[str, Any]:
+            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
             result = self._call_command(
                 {
                     "action": "configure_meter",
@@ -307,7 +392,12 @@ class ProbeStationApiServer:
             return result
 
         @app.post("/api/v1/measurements/raw-sweep")
-        def raw_voltage_sweep(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        def raw_voltage_sweep(
+            payload: dict[str, Any] = Body(...),
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+        ) -> dict[str, Any]:
+            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
             try:
                 voltages = _voltage_sweep_from_payload(payload)
             except (TypeError, ValueError) as exc:
@@ -333,6 +423,35 @@ class ProbeStationApiServer:
             include_in_schema=False,
         )
         return app, uvicorn
+
+    def _authorize(
+        self,
+        permission: str,
+        authorization: str | None,
+        x_api_key: str | None,
+    ) -> dict[str, Any]:
+        if self._auth_callback is None:
+            return {"accepted": True}
+        from fastapi import HTTPException
+
+        api_key = _extract_api_key(authorization, x_api_key)
+        result = self._auth_callback(api_key, permission)
+        if isinstance(result, dict) and result.get("accepted", False):
+            return result
+        if not isinstance(result, dict):
+            result = {
+                "accepted": False,
+                "status_code": 401,
+                "message": "API key rejected.",
+            }
+        status_code = int(result.get("status_code", 401))
+        raise HTTPException(
+            status_code=status_code,
+            detail={
+                "message": result.get("message", "API key rejected."),
+                "result": result,
+            },
+        )
 
     def _call_command(self, request: dict[str, Any]) -> dict[str, Any]:
         if self._command_callback is None:

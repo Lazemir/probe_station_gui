@@ -363,6 +363,9 @@ class LCRMeterTest(unittest.TestCase):
                 meter_type=ROUTE_METER_KEITHLEY,
                 keithley=KeithleyRouteMeterSettings(
                     measurement_voltage_v=0.03,
+                    range_mode="code_auto",
+                    expected_resistance_ohm=100_000.0,
+                    maximum_current_a=10e-6,
                     nplc=7.5,
                 ),
             )
@@ -371,6 +374,15 @@ class LCRMeterTest(unittest.TestCase):
         self.assertEqual(
             session.configurations[-1]["keithley_measurement_voltage_v"],
             0.03,
+        )
+        self.assertEqual(session.configurations[-1]["keithley_range_mode"], "code_auto")
+        self.assertEqual(
+            session.configurations[-1]["keithley_expected_resistance_ohm"],
+            100_000.0,
+        )
+        self.assertEqual(
+            session.configurations[-1]["keithley_maximum_current_a"],
+            10e-6,
         )
         self.assertEqual(session.configurations[-1]["keithley_nplc"], 7.5)
         self.assertEqual(session.configurations[-1]["keithley_current_range_a"], 10e-6)

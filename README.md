@@ -393,71 +393,261 @@ Operator notes:
 - if you manually change `G54/G55/...` or coordinate-reporting settings, re-check the displayed coordinates and re-sync if needed;
 - make sure the coordinates shown in the UI are the ones you intend to work in.
 
-## HTTP Control API
+## HTTP And Python API
 
-When the GUI starts, it also starts a local FastAPI server at:
+The GUI starts a local FastAPI server when the `API` settings enable `Start with app`.
+The default address is:
 
 ```text
 http://127.0.0.1:8765
 ```
 
 Opening the base URL shows links to Swagger UI at `/docs` and ReDoc at `/redoc`.
+You can change the host and port in `Application` -> `Settings` -> `API`, or with
+`PROBE_STATION_API_HOST` and `PROBE_STATION_API_PORT`.
 
-The API uses the same coordinate basis and feedrate that the GUI currently shows unless a request explicitly provides `feedrate`. If settings are configured for machine coordinates, API targets are machine coordinates; if settings are configured for work coordinates, API targets are work coordinates. Coordinate move requests go through the same queue and status display as editing the coordinate fields in the status bar.
+### API Keys
 
-Move to a coordinate:
+Create API keys in `Application` -> `Settings` -> `API` -> `API keys`.
+Press `Create Key`; the full key is copied to the clipboard and shown only once.
+The GUI stores only a hash plus a short display prefix and suffix.
+
+Each key belongs to a user name and has its own permissions:
+- `Stage read`: read stage status.
+- `Stage write`: send generic stage moves.
+- `Route read`: list contacts from the currently loaded route.
+- `Route measure`: move to route contacts, operate needles for a route contact,
+  check contact quality, run contact seek, configure the meter, and run raw sweeps.
+
+Default new-key permissions are `Stage read`, `Route read`, and `Route measure`.
+`Stage write` is disabled by default. Generic stage moves currently accept all
+stage axes exposed by the API, including `A`; use that permission only for code
+that is allowed to move the stage directly.
+
+Pass the key as a bearer token:
 
 ```powershell
-Invoke-RestMethod -Method Post `
-  -Uri http://127.0.0.1:8765/api/v1/stage/move `
-  -ContentType application/json `
-  -Body '{"x": 12.5, "y": 8.0}'
+$headers = @{ Authorization = "Bearer psk_your_key_here" }
 ```
 
-Equivalent payload:
+The API also accepts `X-API-Key`, but `Authorization: Bearer` is preferred.
 
-```json
-{
-  "coordinates": {
-    "X": 12.5,
-    "Y": 8.0
-  }
-}
-```
+### HTTP Examples
 
 Read the GUI-visible stage state:
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8765/api/v1/stage/status
+Invoke-RestMethod `
+  -Uri http://127.0.0.1:8765/api/v1/stage/status `
+  -Headers $headers
 ```
+
+Move the stage by coordinates:
+
+```powershell
+Invoke-RestMethod -Method Post `
+  -Uri http://127.0.0.1:8765/api/v1/stage/move `
+  -Headers $headers `
+  -ContentType application/json `
+  -Body '{"coordinates": {"X": 12.5, "Y": 8.0}, "mode": "absolute", "feedrate": 120}'
+```
+
+Relative moves use `mode: "relative"`:
+
+```json
+{
+  "coordinates": {
+    "Z": -0.1
+  },
+  "mode": "relative"
+}
+```
+
+The API uses the same coordinate basis that the GUI currently uses. If the GUI
+is configured for machine coordinates, API targets are machine coordinates. If
+the GUI is configured for work coordinates, API targets are work coordinates.
 
 List the currently loaded probe-route contacts:
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8765/api/v1/route/contacts
+Invoke-RestMethod `
+  -Uri http://127.0.0.1:8765/api/v1/route/contacts `
+  -Headers $headers
 ```
 
-Move to contact 7 and lower the needles:
+Move to contact 7 without lowering needles:
 
 ```powershell
 Invoke-RestMethod -Method Post `
   -Uri http://127.0.0.1:8765/api/v1/route/contacts/7/move `
+  -Headers $headers `
   -ContentType application/json `
-  -Body '{"lower_needles": true, "contact_settle_s": 0.2}'
+  -Body '{}'
 ```
+
+Lower or lift needles at a route contact:
+
+```powershell
+Invoke-RestMethod -Method Post `
+  -Uri http://127.0.0.1:8765/api/v1/route/contacts/7/needles `
+  -Headers $headers `
+  -ContentType application/json `
+  -Body '{"action": "lower"}'
+```
+
+Allowed needle actions are `lower`, `lift`, and `raise`.
+
+Check contact quality at the current needle position:
+
+```powershell
+Invoke-RestMethod -Method Post `
+  -Uri http://127.0.0.1:8765/api/v1/route/contacts/7/check `
+  -Headers $headers `
+  -ContentType application/json `
+  -Body '{"check_sample_count": 10, "contact_settle_s": 0.2}'
+```
+
+Run contact seek from the current needle position:
+
+```powershell
+Invoke-RestMethod -Method Post `
+  -Uri http://127.0.0.1:8765/api/v1/route/contacts/7/seek `
+  -Headers $headers `
+  -ContentType application/json `
+  -Body '{"check_sample_count": 10, "contact_seek_range_mm": 0.003, "contact_seek_step_mm": 0.001}'
+```
+
+The HTTP API intentionally exposes these lower-level actions separately. It
+does not have a high-level `prepare contact` endpoint. Use the Python client
+or QCoDeS driver for that convenience workflow.
 
 Run a raw Keithley voltage sweep on contact 7:
 
 ```powershell
 Invoke-RestMethod -Method Post `
   -Uri http://127.0.0.1:8765/api/v1/measurements/raw-sweep `
+  -Headers $headers `
   -ContentType application/json `
-  -Body '{"contact_number": 7, "voltages_v": [-0.1, 0, 0.1], "meter": {"meter_type": "keithley", "nplc": 10, "compliance_current_a": 0.0005}}'
+  -Body '{"contact_number": 7, "voltages_v": [-0.1, 0, 0.1], "meter": {"meter_type": "keithley", "nplc": 10, "ranges": {"mode": "code_auto", "expected_resistance_ohm": 100000, "max_current_a": 0.0005}}}'
 ```
 
-The sweep response includes `timestamp_utc`, contact metadata, the requested `voltages_v`, and raw `iv_pairs` plus the full instrument result.
+The sweep response includes `timestamp_utc`, contact metadata, the requested
+`voltages_v`, raw `iv_pairs`, and the full instrument result.
 
-You can override the bind address with `PROBE_STATION_API_HOST` and `PROBE_STATION_API_PORT`.
+Meter ranges can be configured without device-specific range fields:
+
+```powershell
+Invoke-RestMethod -Method Post `
+  -Uri http://127.0.0.1:8765/api/v1/meter/configure `
+  -Headers $headers `
+  -ContentType application/json `
+  -Body '{"meter_type": "keithley", "measurement_voltage_v": 0.03, "ranges": {"mode": "code_auto", "expected_resistance_ohm": 100000, "max_current_a": 0.00001}}'
+```
+
+`code_auto` is probe-station code autoranging. It computes a fixed voltage
+range plus current and compliance ranges from the external measurement
+parameters before a series starts. `voltage_range_v` is optional; when it is
+omitted, raw sweeps use `max(abs(voltages_v))`, and meter configuration uses
+`measurement_voltage_v`. It does not enable the instrument's own autorange
+during the +/- voltage readings, so both polarities use the same range
+configuration. The range changes only when you call `meter.configure`,
+`meter.raw_sweep`, or `prepare_contact` with different meter/range parameters.
+
+### Python Client
+
+Install the lightweight client extra:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[client]"
+```
+
+Use an explicit key:
+
+```python
+from probe_station_client import ProbeStationClient
+
+client = ProbeStationClient(
+    base_url="http://127.0.0.1:8765",
+    api_key="psk_your_key_here",
+)
+
+print(client.stage_status())
+client.move_to(x=12.5, y=8.0)
+client.move_by(z=-0.1)
+contacts = client.route_contacts()
+```
+
+Or save the key once and let the client load it later:
+
+```python
+from probe_station_client import ProbeStationClient
+
+client = ProbeStationClient(profile="lab-prober")
+backend = client.save_api_key("psk_your_key_here")
+print(f"saved in {backend}")
+
+client = ProbeStationClient(profile="lab-prober")
+client.prepare_contact(7, check_sample_count=10, contact_settle_s=0.2)
+client.meter.configure(
+    meter_type="keithley",
+    measurement_voltage_v=0.03,
+    ranges={
+        "mode": "code_auto",
+        "expected_resistance_ohm": 100_000,
+        "max_current_a": 10e-6,
+    },
+)
+result = client.meter.raw_sweep([-0.1, 0.0, 0.1], contact_number=7)
+```
+
+`prepare_contact` is a client-side recipe. It moves to the loaded route contact,
+lowers needles, checks contact quality, runs contact seek when needed, and lifts
+needles on failure. The backend API still sees only the lower-level commands.
+
+Credential lookup order is:
+1. `PROBE_STATION_API_KEY`;
+2. the OS credential backend through `keyring`;
+3. a per-user credentials file with restrictive permissions where the platform
+   supports them.
+
+The base URL can be passed to `ProbeStationClient` or set with
+`PROBE_STATION_API_URL`.
+
+### QCoDeS Driver
+
+Install the QCoDeS client extra:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[qcodes-client]"
+```
+
+Use the GUI as a QCoDeS instrument:
+
+```python
+from probe_station_client import ProbeStationInstrument
+
+station = ProbeStationInstrument("probe_station", profile="lab-prober")
+
+print(station.stage.state())
+print(station.stage.position())
+station.stage.move_to(x=12.5, y=8.0)
+station.stage.move_by(z=-0.1)
+
+station.meter.configure(
+    meter_type="keithley",
+    measurement_voltage_v=0.03,
+    ranges={"mode": "code_auto", "expected_resistance_ohm": 100_000},
+)
+station.prepare_contact(7, check_sample_count=10, contact_settle_s=0.2)
+data = station.meter.raw_sweep([-0.1, 0.0, 0.1], contact_number=7)
+
+station.close()
+```
+
+Stage motion lives under the `stage` submodule: `station.stage.x`,
+`station.stage.move_to`, and `station.stage.move_by`. Measurement-instrument
+configuration and raw sweeps live under `station.meter`. Route-contact workflow
+methods remain top-level for now.
 
 ## Settings
 

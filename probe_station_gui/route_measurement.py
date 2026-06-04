@@ -145,6 +145,17 @@ class RouteMeasurementRecord:
 
 
 @dataclass(frozen=True)
+class RouteContactPlacementResult:
+    """Result of preparing one route contact for external measurements."""
+
+    success: bool
+    message: str
+    point: RouteMeasurementPoint
+    record: RouteMeasurementRecord
+    contact_seek: RouteContactSeekResult | None = None
+
+
+@dataclass(frozen=True)
 class RouteContactHeightRecord:
     """One contact-height map row written next to route measurements."""
 
@@ -491,6 +502,212 @@ class RouteMeasurementRunner:
             "Route shift saved: "
             f"dX={offset_x:+.4f} mm, dY={offset_y:+.4f} mm.",
         )
+
+    def place_contact(
+        self,
+        point: RouteMeasurementPoint,
+        *,
+        position: int = 1,
+        total: int = 1,
+        move_to_point: bool = True,
+        lift_before_move: bool = True,
+        lift_on_failure: bool = True,
+    ) -> RouteContactPlacementResult:
+        """Move to a route point and leave verified contact under the needles.
+
+        This intentionally reuses the same short contact check and automatic
+        lift/lower retry path as route measurements, but does not write a CSV row.
+        """
+
+        self._point_interrupt_requested.clear()
+        self._current_contact_seek_result = None
+        self._begin_stage_task()
+        needles_lowered = False
+        placement_succeeded = False
+        prepare_task: _BackgroundRouteTask | None = None
+        try:
+            if lift_before_move:
+                self._status(
+                    f"Route contact: point {position}/{total} lifting needles."
+                )
+                self._stage_controller.run_external_needles_action(
+                    "lift",
+                    self._needle_feedrate,
+                )
+            if move_to_point:
+                target_xy = self._adjusted_stage_xy(point)
+                self._status(
+                    f"Route contact: point {position}/{total} moving."
+                )
+                self._stage_controller.run_external_move_to_xy(
+                    target_xy[0],
+                    target_xy[1],
+                )
+            prepare_task = self._start_measurement_prepare_task(
+                self._initial_measurement_count()
+            )
+            self._status(
+                f"Route contact: point {position}/{total} lowering needles."
+            )
+            self._stage_controller.run_external_needles_action(
+                "lower",
+                self._needle_feedrate,
+            )
+            needles_lowered = True
+            if not self._sleep_contact_settle():
+                raise RuntimeError("Contact placement stopped.")
+            self._status(
+                f"Route contact: point {position}/{total} checking contact."
+            )
+            samples = self._measure_samples(
+                position=position,
+                total=total,
+                prepare_task=prepare_task,
+            )
+            prepare_task = None
+            if samples is None:
+                raise RuntimeError("Contact placement stopped.")
+            record = self._record_for_point(point=point, samples=samples)
+            success = self._contact_placement_record_is_success(record)
+            if not success and lift_on_failure and needles_lowered:
+                self._stage_controller.run_external_needles_action(
+                    "lift",
+                    self._needle_feedrate,
+                )
+                needles_lowered = False
+            status = record.status or "unknown"
+            if success:
+                message = (
+                    f"Contact ready: point {position}/{total} {point.label}, "
+                    f"{status}."
+                )
+                placement_succeeded = True
+            else:
+                message = (
+                    f"Contact check failed: point {position}/{total} "
+                    f"{point.label}, {status}."
+                )
+            self._status(message)
+            return RouteContactPlacementResult(
+                success=success,
+                message=message,
+                point=point,
+                record=record,
+                contact_seek=self._current_contact_seek_result,
+            )
+        finally:
+            if needles_lowered and lift_on_failure and not placement_succeeded:
+                try:
+                    self._stage_controller.run_external_needles_action(
+                        "lift",
+                        self._needle_feedrate,
+                    )
+                except Exception:
+                    logger.exception("Failed to lift needles after contact check.")
+            if prepare_task is not None:
+                prepare_task.wait()
+            self._wait_for_background_tasks()
+            self._finish_stage_task()
+
+    def check_contact(
+        self,
+        point: RouteMeasurementPoint,
+        *,
+        position: int = 1,
+        total: int = 1,
+    ) -> RouteContactPlacementResult:
+        """Measure current contact quality without moving needles deeper."""
+
+        return self._measure_current_contact(
+            point,
+            position=position,
+            total=total,
+            auto_contact_seek=False,
+            action_label="Contact check",
+        )
+
+    def seek_contact(
+        self,
+        point: RouteMeasurementPoint,
+        *,
+        position: int = 1,
+        total: int = 1,
+    ) -> RouteContactPlacementResult:
+        """Run automatic contact seek from the current needle position."""
+
+        return self._measure_current_contact(
+            point,
+            position=position,
+            total=total,
+            auto_contact_seek=True,
+            action_label="Contact seek",
+        )
+
+    def _measure_current_contact(
+        self,
+        point: RouteMeasurementPoint,
+        *,
+        position: int,
+        total: int,
+        auto_contact_seek: bool,
+        action_label: str,
+    ) -> RouteContactPlacementResult:
+        self._point_interrupt_requested.clear()
+        self._current_contact_seek_result = None
+        previous_auto_seek = self._auto_contact_seek_on_bad_contact
+        self._auto_contact_seek_on_bad_contact = bool(auto_contact_seek)
+        self._begin_stage_task()
+        prepare_task: _BackgroundRouteTask | None = None
+        try:
+            prepare_task = self._start_measurement_prepare_task(
+                self._initial_measurement_count()
+            )
+            if not self._sleep_contact_settle():
+                raise RuntimeError(f"{action_label} stopped.")
+            self._status(
+                f"{action_label}: point {position}/{total} checking contact."
+            )
+            samples = self._measure_samples(
+                position=position,
+                total=total,
+                prepare_task=prepare_task,
+            )
+            prepare_task = None
+            if samples is None:
+                raise RuntimeError(f"{action_label} stopped.")
+            record = self._record_for_point(point=point, samples=samples)
+            success = self._contact_placement_record_is_success(record)
+            status = record.status or "unknown"
+            seek = self._current_contact_seek_result
+            if auto_contact_seek and seek is not None:
+                message = (
+                    f"{action_label}: point {position}/{total} {point.label}, "
+                    f"{seek.status}, final={status}."
+                )
+            elif success:
+                message = (
+                    f"{action_label}: point {position}/{total} {point.label}, "
+                    f"{status}."
+                )
+            else:
+                message = (
+                    f"{action_label} failed: point {position}/{total} "
+                    f"{point.label}, {status}."
+                )
+            self._status(message)
+            return RouteContactPlacementResult(
+                success=success,
+                message=message,
+                point=point,
+                record=record,
+                contact_seek=seek,
+            )
+        finally:
+            self._auto_contact_seek_on_bad_contact = previous_auto_seek
+            if prepare_task is not None:
+                prepare_task.wait()
+            self._wait_for_background_tasks()
+            self._finish_stage_task()
 
     def run(self) -> tuple[bool, str]:
         needs_final_lift = False
@@ -1849,6 +2066,10 @@ class RouteMeasurementRunner:
             and record.relative_rms > self._max_relative_rms
         )
 
+    @staticmethod
+    def _contact_placement_record_is_success(record: RouteMeasurementRecord) -> bool:
+        return str(record.status).strip().lower() in {"ok", "short"}
+
     def _should_save_exhausted_bad_contact(
         self,
         record: RouteMeasurementRecord,
@@ -1892,6 +2113,7 @@ __all__ = [
     "latest_route_measurement_statuses",
     "RouteContactHeightRecord",
     "RouteContactQuality",
+    "RouteContactPlacementResult",
     "RouteContactSeekResult",
     "RouteMeasurementPoint",
     "RoutePhotoRecord",

@@ -24,14 +24,25 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+client = [
+    "keyring",
+]
+qcodes-client = [
+    "keyring",
+    "qcodes",
+]
 lcr = [
-    "probe-station-measure @ file:///C:/Users/Public/code/probe_station_measure",
     "pyvisa",
     "qcodes",
+    "keyring",
 ]
 
 [tool.setuptools]
 packages = [
+    "probe_station_client",
+    "probe_station_measure",
+    "probe_station_measure.instrument_drivers",
+    "probe_station_measure.instrument_drivers.Keithley",
     "probe_station_gui",
     "probe_station_gui.views",
     "probe_station_gui.dialogs",

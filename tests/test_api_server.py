@@ -1,5 +1,10 @@
 import unittest
 
+from probe_station_gui.api_keys import (
+    API_PERMISSION_ROUTE_MEASURE,
+    API_PERMISSION_STAGE_READ,
+    API_PERMISSION_STAGE_WRITE,
+)
 from probe_station_gui.api_server import _axis_targets_from_payload
 from probe_station_gui.api_server import _coordinate_mode_from_payload
 from probe_station_gui.api_server import _feedrate_from_payload
@@ -47,13 +52,21 @@ class ApiServerPayloadTest(unittest.TestCase):
 
 
 class ApiServerHttpTest(unittest.TestCase):
-    def _client(self, *, move_callback=None, status_callback=None, command_callback=None):
+    def _client(
+        self,
+        *,
+        move_callback=None,
+        status_callback=None,
+        command_callback=None,
+        auth_callback=None,
+    ):
         from fastapi.testclient import TestClient
 
         server = ProbeStationApiServer(
             move_callback=move_callback or (lambda request: {"accepted": True, **request}),
             status_callback=status_callback or (lambda: {"accepted": True, "state": "Idle"}),
             command_callback=command_callback,
+            auth_callback=auth_callback,
         )
         app, _uvicorn = server._create_app()
         return TestClient(app)
@@ -147,6 +160,14 @@ class ApiServerHttpTest(unittest.TestCase):
             "/api/v1/route/contacts/7/needles",
             json={"action": "lift"},
         )
+        check = client.post(
+            "/api/v1/route/contacts/7/check",
+            json={"check_sample_count": 10},
+        )
+        seek = client.post(
+            "/api/v1/route/contacts/7/seek",
+            json={"contact_seek_range_mm": 0.003},
+        )
         configure = client.post(
             "/api/v1/meter/configure",
             json={"meter_type": "keithley"},
@@ -159,6 +180,8 @@ class ApiServerHttpTest(unittest.TestCase):
         self.assertEqual(contacts.status_code, 200)
         self.assertEqual(move.status_code, 200)
         self.assertEqual(needles.status_code, 200)
+        self.assertEqual(check.status_code, 200)
+        self.assertEqual(seek.status_code, 200)
         self.assertEqual(configure.status_code, 200)
         self.assertEqual(sweep.status_code, 200)
         self.assertEqual(
@@ -167,12 +190,64 @@ class ApiServerHttpTest(unittest.TestCase):
                 "list_contacts",
                 "move_to_contact",
                 "contact_needles",
+                "check_contact",
+                "contact_seek",
                 "configure_meter",
                 "raw_voltage_sweep",
             ],
         )
         self.assertEqual(calls[1]["payload"]["contact_number"], 7)
-        self.assertEqual(calls[4]["payload"]["voltages_v"], [-0.1, 0.1])
+        self.assertEqual(calls[3]["payload"]["check_sample_count"], 10)
+        self.assertEqual(calls[4]["payload"]["contact_seek_range_mm"], 0.003)
+        self.assertEqual(calls[6]["payload"]["voltages_v"], [-0.1, 0.1])
+
+    def test_authenticated_endpoints_require_matching_permissions(self) -> None:
+        auth_calls = []
+
+        def auth_callback(api_key, permission):
+            auth_calls.append((api_key, permission))
+            if api_key != "secret":
+                return {
+                    "accepted": False,
+                    "status_code": 401,
+                    "message": "bad key",
+                }
+            if permission == API_PERMISSION_STAGE_WRITE:
+                return {
+                    "accepted": False,
+                    "status_code": 403,
+                    "message": "missing permission",
+                }
+            return {"accepted": True}
+
+        client = self._client(
+            auth_callback=auth_callback,
+            command_callback=lambda request: {"accepted": True, "echo": request},
+        )
+
+        missing = client.get("/api/v1/stage/status")
+        status = client.get(
+            "/api/v1/stage/status",
+            headers={"Authorization": "Bearer secret"},
+        )
+        move = client.post(
+            "/api/v1/stage/move",
+            headers={"Authorization": "Bearer secret"},
+            json={"x": 1.0},
+        )
+        seek = client.post(
+            "/api/v1/route/contacts/3/seek",
+            headers={"X-API-Key": "secret"},
+            json={"check_sample_count": 10},
+        )
+
+        self.assertEqual(missing.status_code, 401)
+        self.assertEqual(status.status_code, 200)
+        self.assertEqual(move.status_code, 403)
+        self.assertEqual(seek.status_code, 200)
+        self.assertIn(("secret", API_PERMISSION_STAGE_READ), auth_calls)
+        self.assertIn(("secret", API_PERMISSION_STAGE_WRITE), auth_calls)
+        self.assertIn(("secret", API_PERMISSION_ROUTE_MEASURE), auth_calls)
 
 
 if __name__ == "__main__":

@@ -13,6 +13,8 @@ from typing import Optional
 
 from PySide6.QtCore import QObject, Signal
 
+from probe_station_measure import OHMMETER_RANGE_MANUAL
+
 
 logger = logging.getLogger(__name__)
 
@@ -162,10 +164,17 @@ class KeithleyRouteMeterSettings:
     source_resource: str = "GPIB0::1::INSTR"
     voltmeter_resource: str = "GPIB0::2::INSTR"
     measurement_voltage_v: float = 0.03
+    range_mode: str = OHMMETER_RANGE_MANUAL
+    expected_resistance_ohm: float | None = None
+    minimum_resistance_ohm: float | None = None
+    maximum_current_a: float | None = None
+    voltage_range_v: float | None = None
     source_voltage_range_v: float = 0.21
     voltmeter_range_v: float = 0.1
     current_range_a: float = 10e-6
     compliance_current_a: float = 10e-6
+    range_voltage_headroom: float = 1.2
+    range_current_headroom: float = 2.0
     nplc: float = 1.0
     terminals: str = "rear"
     trigger_delay_s: float = 0.0
@@ -601,10 +610,17 @@ class RouteMeter:
                     identify()
                 configure(
                     keithley_measurement_voltage_v=settings.measurement_voltage_v,
+                    keithley_range_mode=settings.range_mode,
+                    keithley_expected_resistance_ohm=settings.expected_resistance_ohm,
+                    keithley_minimum_resistance_ohm=settings.minimum_resistance_ohm,
+                    keithley_maximum_current_a=settings.maximum_current_a,
+                    keithley_voltage_range_v=settings.voltage_range_v,
                     keithley_source_voltage_range_v=settings.source_voltage_range_v,
                     keithley_voltmeter_range_v=settings.voltmeter_range_v,
                     keithley_current_range_a=settings.current_range_a,
                     keithley_compliance_current_a=settings.compliance_current_a,
+                    keithley_range_voltage_headroom=settings.range_voltage_headroom,
+                    keithley_range_current_headroom=settings.range_current_headroom,
                     keithley_nplc=settings.nplc,
                     keithley_terminals=settings.terminals,
                     keithley_trigger_delay_s=settings.trigger_delay_s,
@@ -881,10 +897,17 @@ class LCRMeterController(QObject):
                 raise LCRMeterError("Connected instrument is not a Keithley pair.")
             configure(
                 keithley_measurement_voltage_v=settings.measurement_voltage_v,
+                keithley_range_mode=settings.range_mode,
+                keithley_expected_resistance_ohm=settings.expected_resistance_ohm,
+                keithley_minimum_resistance_ohm=settings.minimum_resistance_ohm,
+                keithley_maximum_current_a=settings.maximum_current_a,
+                keithley_voltage_range_v=settings.voltage_range_v,
                 keithley_source_voltage_range_v=settings.source_voltage_range_v,
                 keithley_voltmeter_range_v=settings.voltmeter_range_v,
                 keithley_current_range_a=settings.current_range_a,
                 keithley_compliance_current_a=settings.compliance_current_a,
+                keithley_range_voltage_headroom=settings.range_voltage_headroom,
+                keithley_range_current_headroom=settings.range_current_headroom,
                 keithley_nplc=settings.nplc,
                 keithley_terminals=settings.terminals,
                 keithley_trigger_delay_s=settings.trigger_delay_s,

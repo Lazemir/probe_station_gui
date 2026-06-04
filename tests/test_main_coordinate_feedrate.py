@@ -405,6 +405,54 @@ def _telegram_test_photo_bytes(width: int, height: int, fill: int) -> bytes:
 
 
 class MainCoordinateFeedrateTest(unittest.TestCase):
+    def test_api_keithley_meter_configuration_accepts_code_auto_ranges(self) -> None:
+        window = Main.__new__(Main)
+        window.lcr_controller = types.SimpleNamespace(
+            meter_type=lambda: main_module.ROUTE_METER_KEITHLEY
+        )
+
+        config = Main._api_route_meter_configuration(
+            window,
+            {
+                "meter_type": "keithley",
+                "measurement_voltage_v": 0.03,
+                "ranges": {
+                    "mode": "code_auto",
+                    "expected_resistance_ohm": 100_000.0,
+                    "max_current_a": 10e-6,
+                },
+                "nplc": 5,
+            },
+            voltages_v=None,
+        )
+
+        self.assertEqual(config.meter_type, main_module.ROUTE_METER_KEITHLEY)
+        self.assertEqual(config.keithley.range_mode, "code_auto")
+        self.assertEqual(config.keithley.measurement_voltage_v, 0.03)
+        self.assertEqual(config.keithley.expected_resistance_ohm, 100_000.0)
+        self.assertEqual(config.keithley.maximum_current_a, 10e-6)
+        self.assertEqual(config.keithley.nplc, 5)
+
+    def test_api_keithley_voltage_range_defaults_to_raw_sweep_span(self) -> None:
+        window = Main.__new__(Main)
+        window.lcr_controller = types.SimpleNamespace(
+            meter_type=lambda: main_module.ROUTE_METER_KEITHLEY
+        )
+
+        config = Main._api_route_meter_configuration(
+            window,
+            {
+                "meter_type": "keithley",
+                "nplc": 5,
+            },
+            voltages_v=[-0.3, 0.1, 0.25],
+        )
+
+        self.assertEqual(config.keithley.measurement_voltage_v, 0.3)
+        self.assertEqual(config.keithley.voltage_range_v, 0.3)
+        self.assertEqual(config.keithley.source_voltage_range_v, 0.3)
+        self.assertEqual(config.keithley.voltmeter_range_v, 0.3)
+
     def test_combine_telegram_contact_photos_side_by_side(self) -> None:
         script = r"""
 import struct

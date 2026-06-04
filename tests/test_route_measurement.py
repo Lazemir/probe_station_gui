@@ -1239,6 +1239,160 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
         self.assertLess(retry_lower_index, final_lift_index)
         self.assertEqual([call for call in stage.calls if call[0] == "adjust"], [])
 
+    def test_place_contact_reuses_contact_seek_without_csv_and_leaves_needles_down(
+        self,
+    ) -> None:
+        point = _point(1)
+        stage = _FakeStage()
+        lcr = _FakeBatchRouteLCR(
+            [
+                {"differential_resistance_ohm": value}
+                for value in (200000.0, 210000.0, 1000.0, 1001.0)
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "route.csv"
+            runner = RouteMeasurementRunner(
+                points=[point],
+                csv_path=csv_path,
+                stage_controller=stage,
+                lcr_controller=lcr,
+                needle_feedrate=75.0,
+                measurement_count=2,
+                initial_measurement_count=2,
+                auto_contact_seek_on_bad_contact=True,
+                contact_settle_s=0.0,
+            )
+
+            result = runner.place_contact(point)
+
+            self.assertTrue(result.success, result.message)
+            self.assertEqual(result.record.status, "ok")
+            self.assertEqual(result.record.n_measurements, 2)
+            self.assertFalse(csv_path.exists())
+
+        self.assertEqual(lcr.batch_counts, [2, 2])
+        self.assertEqual(stage.axis_a_lowering_mm, 1.0)
+        self.assertEqual(stage.calls[-1], ("finish",))
+        self.assertNotIn(("needles", "lift", 75.0), stage.calls[-2:])
+
+    def test_place_contact_failure_lifts_needles_without_csv(self) -> None:
+        point = _point(1)
+        stage = _FakeStage()
+        lcr = _FakeBatchRouteLCR(
+            [
+                {"differential_resistance_ohm": value}
+                for value in (
+                    200000.0,
+                    210000.0,
+                    220000.0,
+                    230000.0,
+                    240000.0,
+                    250000.0,
+                )
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "route.csv"
+            runner = RouteMeasurementRunner(
+                points=[point],
+                csv_path=csv_path,
+                stage_controller=stage,
+                lcr_controller=lcr,
+                needle_feedrate=None,
+                measurement_count=2,
+                initial_measurement_count=2,
+                auto_contact_seek_on_bad_contact=True,
+                auto_contact_seek_step_mm=0.001,
+                auto_contact_seek_max_total_mm=0.001,
+                contact_settle_s=0.0,
+            )
+
+            result = runner.place_contact(point)
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.record.status, "bad_contact")
+            self.assertFalse(csv_path.exists())
+
+        self.assertEqual(lcr.batch_counts, [2, 2, 2])
+        self.assertEqual(stage.calls[-2:], [("needles", "lift", None), ("finish",)])
+
+    def test_check_contact_measures_current_position_without_seek_or_csv(self) -> None:
+        point = _point(1)
+        stage = _FakeStage()
+        lcr = _FakeBatchRouteLCR(
+            [
+                {"differential_resistance_ohm": 200000.0},
+                {"differential_resistance_ohm": 210000.0},
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "route.csv"
+            runner = RouteMeasurementRunner(
+                points=[point],
+                csv_path=csv_path,
+                stage_controller=stage,
+                lcr_controller=lcr,
+                needle_feedrate=75.0,
+                measurement_count=2,
+                initial_measurement_count=2,
+                auto_contact_seek_on_bad_contact=True,
+                contact_settle_s=0.0,
+            )
+
+            result = runner.check_contact(point)
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.record.status, "bad_contact")
+            self.assertIsNone(result.contact_seek)
+            self.assertFalse(csv_path.exists())
+
+        self.assertEqual(lcr.batch_counts, [2])
+        self.assertNotIn(("move", 1.0, 2.0), stage.calls)
+        self.assertEqual([call for call in stage.calls if call[0] == "needles"], [])
+        self.assertEqual(stage.calls[-1], ("finish",))
+
+    def test_seek_contact_uses_current_position_without_xy_move_or_csv(self) -> None:
+        point = _point(1)
+        stage = _FakeStage()
+        lcr = _FakeBatchRouteLCR(
+            [
+                {"differential_resistance_ohm": value}
+                for value in (200000.0, 210000.0, 1000.0, 1001.0)
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "route.csv"
+            runner = RouteMeasurementRunner(
+                points=[point],
+                csv_path=csv_path,
+                stage_controller=stage,
+                lcr_controller=lcr,
+                needle_feedrate=75.0,
+                measurement_count=2,
+                initial_measurement_count=2,
+                auto_contact_seek_on_bad_contact=False,
+                contact_settle_s=0.0,
+            )
+
+            result = runner.seek_contact(point)
+
+            self.assertTrue(result.success, result.message)
+            self.assertEqual(result.record.status, "ok")
+            self.assertIsNotNone(result.contact_seek)
+            self.assertTrue(result.contact_seek.found)
+            self.assertFalse(csv_path.exists())
+
+        self.assertEqual(lcr.batch_counts, [2, 2])
+        self.assertNotIn(("move", 1.0, 2.0), stage.calls)
+        self.assertIn(("needles", "lift", 75.0), stage.calls)
+        self.assertIn(("needles", "lower", 75.0), stage.calls)
+        self.assertEqual(stage.calls[-1], ("finish",))
+
     def test_auto_contact_seek_presses_deeper_when_full_batch_turns_bad(self) -> None:
         point = _point(1)
         stage = _FakeStage()

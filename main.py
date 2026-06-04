@@ -114,6 +114,7 @@ from probe_station_gui.design_model import DesignDocument, DesignModelError
 from probe_station_gui.design_session import AlignmentPreparation, DesignSession
 from probe_station_gui.diagnostics import configure_crash_diagnostics
 from probe_station_gui.api_server import ProbeStationApiServer
+from probe_station_gui.api_keys import API_KEY_FILENAME, ApiKeyStore
 from probe_station_gui.lcr_meter import (
     GWInstekRouteMeterSettings,
     KeithleyRouteMeterSettings,
@@ -589,6 +590,9 @@ class Main(QMainWindow):
         self.settings_manager: SettingsManager = SettingsManager()
         _startup_trace("SettingsManager created; logging configured")
         _flush_startup_trace()
+        self._api_key_store = ApiKeyStore(
+            self.settings_manager.config_dir() / API_KEY_FILENAME
+        )
         self._api_bridge: _ApiRequestBridge | None = None
         self._api_server: ProbeStationApiServer | None = None
         self._api_settings_signature: tuple[bool, str, int] | None = None
@@ -911,11 +915,19 @@ class Main(QMainWindow):
             move_callback=self._submit_api_move_request,
             status_callback=self._submit_api_status_request,
             command_callback=self._submit_api_command_request,
+            auth_callback=self._authorize_api_request,
             host=api_settings.host,
             port=api_settings.port,
         )
         if start_if_enabled:
             self._start_api_server()
+
+    def _authorize_api_request(
+        self,
+        api_key: str | None,
+        permission: str,
+    ) -> dict[str, Any]:
+        return self._api_key_store.authorize(api_key, permission)
 
     def _configure_telegram_bot_from_settings(self) -> None:
         telegram_settings = self.settings_manager.telegram_configuration()
@@ -1257,6 +1269,10 @@ class Main(QMainWindow):
             return self._api_move_to_contact(payload)
         if action == "contact_needles":
             return self._api_contact_needles(payload)
+        if action == "check_contact":
+            return self._api_check_contact(payload)
+        if action == "contact_seek":
+            return self._api_contact_seek(payload)
         if action == "configure_meter":
             return self._api_configure_meter(payload)
         if action == "raw_voltage_sweep":
@@ -1696,11 +1712,11 @@ class Main(QMainWindow):
                 "status_code": 400,
                 "message": "Provide a positive contact_number.",
             }
+        action = str(payload.get("action", "lower")).strip().lower()
         context_result = self._api_contact_context(contact_number)
         if not context_result.get("accepted", False):
             return context_result
         contact = context_result["contact"]
-        action = str(payload.get("action", "lower")).strip().lower()
         if action == "raise":
             action = "raise"
         elif action in {"lift", "up"}:
@@ -1737,6 +1753,172 @@ class Main(QMainWindow):
         finally:
             if active_stage_task:
                 self.stage_controller.finish_external_task()
+
+    def _api_check_contact(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._api_measure_current_contact(payload, seek=False)
+
+    def _api_contact_seek(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._api_measure_current_contact(payload, seek=True)
+
+    def _api_measure_current_contact(
+        self,
+        payload: dict[str, Any],
+        *,
+        seek: bool,
+    ) -> dict[str, Any]:
+        contact_number = self._api_contact_number(payload)
+        if contact_number is None:
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": "Provide a positive contact_number.",
+            }
+        context_result = self._api_contact_context(contact_number)
+        if not context_result.get("accepted", False):
+            return context_result
+        point = context_result["point"]
+        contact = context_result["contact"]
+
+        connect_result = self._api_ensure_measurement_instrument_connected()
+        if connect_result is not None:
+            connect_result["contact"] = contact
+            return connect_result
+
+        try:
+            check_sample_count = self._api_int(
+                payload,
+                "check_sample_count",
+                "initial_measurement_count",
+                "initial_samples",
+                default=RouteMeasurementRunner.SHORT_CHECK_SAMPLE_COUNT,
+                minimum=2,
+            )
+            measurement_count = self._api_int(
+                payload,
+                "measurement_count",
+                "sample_count",
+                "samples",
+                default=check_sample_count,
+                minimum=check_sample_count,
+            )
+            contact_seek_range_mm = self._api_float(
+                payload,
+                "contact_seek_range_mm",
+                "contact_seek_max_total_mm",
+                "seek_range_mm",
+                default=RouteMeasurementRunner.AUTO_CONTACT_SEEK_MAX_TOTAL_MM,
+                minimum=0.0,
+            )
+            contact_seek_step_mm = self._api_float(
+                payload,
+                "contact_seek_step_mm",
+                "seek_step_mm",
+                default=abs(RouteMeasurementRunner.AUTO_CONTACT_SEEK_STEP_MM),
+                minimum=0.0,
+            )
+            contact_settle_s = self._api_float(
+                payload,
+                "contact_settle_s",
+                "settle_s",
+                default=RouteMeasurementRunner.DEFAULT_CONTACT_SETTLE_S,
+                minimum=0.0,
+            )
+        except ValueError as exc:
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": str(exc),
+                "contact": contact,
+            }
+        max_relative_rms = None
+        if any(
+            key in payload
+            for key in ("max_relative_rms", "max_rel_rms", "max_relative_rms_percent")
+        ):
+            try:
+                if "max_relative_rms_percent" in payload:
+                    max_relative_rms = (
+                        self._api_float(
+                            payload,
+                            "max_relative_rms_percent",
+                            default=math.nan,
+                            minimum=0.0,
+                        )
+                        / 100.0
+                    )
+                else:
+                    max_relative_rms = self._api_float(
+                        payload,
+                        "max_relative_rms",
+                        "max_rel_rms",
+                        default=math.nan,
+                        minimum=0.0,
+                    )
+            except ValueError as exc:
+                return {
+                    "accepted": False,
+                    "status_code": 400,
+                    "message": str(exc),
+                    "contact": contact,
+                }
+
+        needle_feedrate = self._api_needle_feedrate(payload)
+        runner = RouteMeasurementRunner(
+            points=[point],
+            csv_path=Path(os.devnull),
+            stage_controller=self.stage_controller,
+            lcr_controller=self.lcr_controller,
+            needle_feedrate=needle_feedrate,
+            measurement_count=measurement_count,
+            initial_measurement_count=check_sample_count,
+            start_point_number=int(point.index),
+            max_relative_rms=max_relative_rms,
+            auto_contact_seek_on_bad_contact=seek,
+            auto_contact_seek_step_mm=contact_seek_step_mm,
+            auto_contact_seek_max_total_mm=contact_seek_range_mm,
+            contact_settle_s=contact_settle_s,
+            operation_mode=ROUTE_OPERATION_MEASURE,
+            status_callback=self.route_measurement_status.emit,
+        )
+        try:
+            result = (
+                runner.seek_contact(point)
+                if seek
+                else runner.check_contact(point)
+            )
+        except (StageControllerError, LCRMeterError, RuntimeError) as exc:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": str(exc),
+                "contact": contact,
+            }
+        record = result.record
+        response = {
+            "accepted": True,
+            "message": result.message,
+            "timestamp_utc": self._api_timestamp_utc(),
+            "contact": contact,
+            "needle_feedrate_mm_min": needle_feedrate,
+            "contact_ok": bool(result.success),
+            "check_sample_count": check_sample_count,
+            "measurement_count": measurement_count,
+            "contact_settle_s": contact_settle_s,
+            "contact_seek_range_mm": contact_seek_range_mm,
+            "contact_seek_step_mm": contact_seek_step_mm,
+            "measurement": self._api_route_measurement_record_payload(record),
+            "contact_seek": self._api_contact_seek_payload(result.contact_seek),
+        }
+        if seek:
+            contact_seek = result.contact_seek
+            response["contact_found"] = bool(
+                result.success
+                or (
+                    contact_seek is not None
+                    and bool(getattr(contact_seek, "found", False))
+                )
+            )
+        return response
 
     def _api_ensure_measurement_instrument_connected(self) -> dict[str, Any] | None:
         if self.lcr_controller.is_connected():
@@ -2087,50 +2269,120 @@ class Main(QMainWindow):
             keithley_payload = meter_payload.get("keithley")
             if not isinstance(keithley_payload, dict):
                 keithley_payload = meter_payload
+            range_payload = dict(keithley_payload)
+            nested_ranges = keithley_payload.get("ranges")
+            if isinstance(nested_ranges, dict):
+                range_payload.update(nested_ranges)
+            defaults = KeithleyRouteMeterSettings()
             max_voltage = (
                 max(abs(float(value)) for value in voltages_v)
                 if voltages_v
-                else KeithleyRouteMeterSettings().measurement_voltage_v
+                else defaults.measurement_voltage_v
             )
+            measurement_voltage = self._api_float(
+                range_payload,
+                "measurement_voltage_v",
+                "voltage_v",
+                default=max(max_voltage, 1e-12),
+                minimum=1e-12,
+            )
+            range_mode = str(
+                range_payload.get(
+                    "range_mode",
+                    range_payload.get("mode", defaults.range_mode),
+                )
+            )
+            voltage_range = self._api_optional_float(
+                range_payload,
+                "voltage_range_v",
+                minimum=1e-12,
+            )
+            if voltage_range is None and range_mode.strip().lower() not in {
+                "code_auto",
+                "auto",
+                "software_auto",
+                "computed_auto",
+            }:
+                voltage_range = max(measurement_voltage, max_voltage)
             settings = KeithleyRouteMeterSettings(
-                measurement_voltage_v=self._api_float(
-                    keithley_payload,
-                    "measurement_voltage_v",
-                    "voltage_v",
-                    default=max(max_voltage, 1e-12),
+                measurement_voltage_v=measurement_voltage,
+                range_mode=range_mode,
+                expected_resistance_ohm=self._api_optional_float(
+                    range_payload,
+                    "expected_resistance_ohm",
+                    "resistance_ohm",
                     minimum=1e-12,
                 ),
-                source_voltage_range_v=self._api_float(
-                    keithley_payload,
-                    "source_voltage_range_v",
-                    "voltage_range_v",
-                    default=max(0.21, max_voltage),
+                minimum_resistance_ohm=self._api_optional_float(
+                    range_payload,
+                    "minimum_resistance_ohm",
+                    "min_resistance_ohm",
+                    "resistance_floor_ohm",
+                    minimum=1e-12,
+                ),
+                maximum_current_a=self._api_optional_float(
+                    range_payload,
+                    "maximum_current_a",
+                    "max_current_a",
+                    "current_limit_a",
+                    minimum=1e-12,
+                ),
+                voltage_range_v=voltage_range,
+                source_voltage_range_v=(
+                    voltage_range
+                    if voltage_range is not None
+                    else defaults.source_voltage_range_v
+                ),
+                voltmeter_range_v=(
+                    voltage_range
+                    if voltage_range is not None
+                    else defaults.voltmeter_range_v
+                ),
+                current_range_a=self._api_float(
+                    range_payload,
+                    "current_range_a",
+                    default=defaults.current_range_a,
                     minimum=1e-12,
                 ),
                 compliance_current_a=self._api_float(
-                    keithley_payload,
+                    range_payload,
                     "compliance_current_a",
                     "current_limit_a",
-                    default=KeithleyRouteMeterSettings().compliance_current_a,
+                    "max_current_a",
+                    default=defaults.compliance_current_a,
                     minimum=1e-12,
+                ),
+                range_voltage_headroom=self._api_float(
+                    range_payload,
+                    "range_voltage_headroom",
+                    "voltage_headroom",
+                    default=defaults.range_voltage_headroom,
+                    minimum=1.0,
+                ),
+                range_current_headroom=self._api_float(
+                    range_payload,
+                    "range_current_headroom",
+                    "current_headroom",
+                    default=defaults.range_current_headroom,
+                    minimum=1.0,
                 ),
                 nplc=self._api_float(
                     keithley_payload,
                     "nplc",
-                    default=KeithleyRouteMeterSettings().nplc,
+                    default=defaults.nplc,
                     minimum=0.01,
                 ),
                 terminals=str(
                     keithley_payload.get(
                         "terminals",
-                        KeithleyRouteMeterSettings().terminals,
+                        defaults.terminals,
                     )
                 ),
                 trigger_delay_s=self._api_float(
                     keithley_payload,
                     "trigger_delay_s",
                     "delay_s",
-                    default=KeithleyRouteMeterSettings().trigger_delay_s,
+                    default=defaults.trigger_delay_s,
                     minimum=0.0,
                 ),
             )
@@ -2299,6 +2551,133 @@ class Main(QMainWindow):
         if minimum is not None and parsed < minimum:
             raise ValueError(f"{keys[0]} must be at least {minimum}.")
         return parsed
+
+    @staticmethod
+    def _api_optional_float(
+        payload: dict[str, Any],
+        *keys: str,
+        minimum: float | None = None,
+    ) -> float | None:
+        for key in keys:
+            if key in payload and payload.get(key) is not None:
+                return Main._api_float(
+                    payload,
+                    key,
+                    default=0.0,
+                    minimum=minimum,
+                )
+        return None
+
+    @staticmethod
+    def _api_int(
+        payload: dict[str, Any],
+        *keys: str,
+        default: int,
+        minimum: int | None = None,
+    ) -> int:
+        value: object = default
+        for key in keys:
+            if key in payload and payload.get(key) is not None:
+                value = payload.get(key)
+                break
+        try:
+            parsed = int(round(float(value)))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid integer value for {keys[0]}.") from exc
+        if minimum is not None and parsed < minimum:
+            raise ValueError(f"{keys[0]} must be at least {minimum}.")
+        return parsed
+
+    @classmethod
+    def _api_route_measurement_record_payload(
+        cls,
+        record: RouteMeasurementRecord,
+    ) -> dict[str, Any]:
+        return {
+            "timestamp": record.timestamp,
+            "structure_number": int(record.structure_number),
+            "n_measurements": int(record.n_measurements),
+            "resistance_ohm": cls._api_json_ready(record.resistance_ohm),
+            "resistance_rms_ohm": cls._api_json_ready(record.resistance_rms_ohm),
+            "relative_rms": cls._api_json_ready(record.relative_rms),
+            "status": record.status,
+            "contact_quality": cls._api_contact_quality_payload(
+                record.contact_quality
+            ),
+            "raw_samples": [
+                cls._api_route_sample_payload(sample)
+                for sample in record.raw_samples
+            ],
+        }
+
+    @classmethod
+    def _api_route_sample_payload(cls, sample: object) -> dict[str, Any]:
+        fields = (
+            "sample_index",
+            "differential_resistance_ohm",
+            "compliance_hit",
+            "negative_source_voltage_v",
+            "negative_measured_voltage_v",
+            "negative_current_a",
+            "negative_resistance_ohm",
+            "positive_source_voltage_v",
+            "positive_measured_voltage_v",
+            "positive_current_a",
+            "positive_resistance_ohm",
+        )
+        return {
+            field: cls._api_json_ready(getattr(sample, field, None))
+            for field in fields
+        }
+
+    @classmethod
+    def _api_contact_quality_payload(cls, quality: object | None) -> dict[str, Any] | None:
+        if quality is None:
+            return None
+        return {
+            "assessed": bool(getattr(quality, "assessed", False)),
+            "good": getattr(quality, "good", None),
+            "status": str(getattr(quality, "status", "")),
+            "median_ohm": cls._api_json_ready(
+                getattr(quality, "median_ohm", math.nan)
+            ),
+            "mad_sigma_ohm": cls._api_json_ready(
+                getattr(quality, "mad_sigma_ohm", math.nan)
+            ),
+            "p95_abs_step_ohm": cls._api_json_ready(
+                getattr(quality, "p95_abs_step_ohm", math.nan)
+            ),
+            "span_ohm": cls._api_json_ready(
+                getattr(quality, "span_ohm", math.nan)
+            ),
+            "compliance_hits": int(getattr(quality, "compliance_hits", 0)),
+            "polarity_sign_mismatch_count": int(
+                getattr(quality, "polarity_sign_mismatch_count", 0)
+            ),
+            "reasons": list(getattr(quality, "reasons", ()) or ()),
+        }
+
+    @classmethod
+    def _api_contact_seek_payload(cls, seek: object | None) -> dict[str, Any] | None:
+        if seek is None:
+            return None
+        return {
+            "found": bool(getattr(seek, "found", False)),
+            "status": str(getattr(seek, "status", "")),
+            "attempts": int(getattr(seek, "attempts", 0)),
+            "initial_status": str(getattr(seek, "initial_status", "")),
+            "final_status": str(getattr(seek, "final_status", "")),
+            "depth_below_down_mm": cls._api_json_ready(
+                getattr(seek, "depth_below_down_mm", math.nan)
+            ),
+            "axis_a_lowering_mm": cls._api_json_ready(
+                getattr(seek, "axis_a_lowering_mm", math.nan)
+            ),
+            "step_mm": cls._api_json_ready(getattr(seek, "step_mm", math.nan)),
+            "max_depth_mm": cls._api_json_ready(
+                getattr(seek, "max_depth_mm", math.nan)
+            ),
+        }
 
     @staticmethod
     def _api_structure_number_for_measurement_point(
@@ -3930,6 +4309,7 @@ class Main(QMainWindow):
             self,
             initial_tab=tab_name,
             camera_settings_source=self.grabber,
+            api_key_store=self._api_key_store,
         )
         dialog.settings_applied.connect(self._apply_settings_from_dialog)
         try:
@@ -6307,8 +6687,9 @@ class Main(QMainWindow):
         dialog.activateWindow()
         thread = self._route_measurement_thread
         if start_context and (thread is None or not thread.is_alive()):
+            configuration = dialog.current_configuration()
             self._start_route_measurement(
-                dialog.current_configuration(),
+                configuration,
                 wait_before_first_point=True,
             )
 
@@ -6414,10 +6795,7 @@ class Main(QMainWindow):
         self._set_route_measurement_resume_point(point_number)
         self._set_route_measurement_pending(True)
         self._save_route_measurement_session_metadata(configuration)
-        message = (
-            "Route measurement point set to "
-            f"point {point_number}."
-        )
+        message = f"Route point set to point {point_number}."
         self._show_status(message, 5000)
         if self._route_measurement_dialog is not None:
             self._route_measurement_dialog.set_status(message)
