@@ -1405,6 +1405,26 @@ assert image.height() == 4
         self.assertEqual(paused, [])
         self.assertEqual(interrupted, [])
 
+    def test_running_dialog_close_is_ignored(self) -> None:
+        dialog = RouteMeasurementDialog.__new__(RouteMeasurementDialog)
+        statuses: list[str] = []
+
+        class _CloseEvent:
+            def __init__(self) -> None:
+                self.ignored = False
+
+            def ignore(self) -> None:
+                self.ignored = True
+
+        event = _CloseEvent()
+        dialog._running = True
+        dialog.set_status = lambda message: statuses.append(str(message))
+
+        RouteMeasurementDialog.closeEvent(dialog, event)
+
+        self.assertTrue(event.ignored)
+        self.assertEqual(statuses, ["Stop route measurement before closing."])
+
     def test_record_route_contact_height_writes_height_map_csv(self) -> None:
         window = Main.__new__(Main)
         window._design_session = types.SimpleNamespace(

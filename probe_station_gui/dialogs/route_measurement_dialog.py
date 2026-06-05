@@ -666,6 +666,10 @@ class RouteMeasurementDialog(QDialog):
         self._resize_to_available_screen()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        if self._running:
+            self.set_status("Stop route measurement before closing.")
+            event.ignore()
+            return
         self._save_settings_file()
         super().closeEvent(event)
 
@@ -932,7 +936,7 @@ class RouteMeasurementDialog(QDialog):
         self._measure_button.setEnabled(not self._running)
         self._update_pause_interrupt_buttons()
         self._stop_button.setEnabled(self._running)
-        self._close_button.setEnabled(True)
+        self._close_button.setEnabled(not self._running)
         self.set_waiting(False)
         self._update_session_buttons()
 

@@ -2488,6 +2488,22 @@ class RouteExternalMeasurementSessionRunner:
                 "history": list(self._history),
             }
 
+    def wait_until_initial_pause(self, timeout_s: float) -> bool:
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        with self._condition:
+            while True:
+                if (
+                    self._state == "waiting_paused"
+                    and self._waiting_reason == "paused"
+                ):
+                    return True
+                if self._state in {"complete", "stopped", "failed"}:
+                    return False
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    return False
+                self._condition.wait(timeout=min(0.05, remaining))
+
     def run(self) -> tuple[bool, str]:
         success = False
         message = "Route API session stopped."
@@ -2931,6 +2947,7 @@ class RouteExternalMeasurementSessionRunner:
         with self._condition:
             self._position = int(position)
             self._current_point = point
+            self._condition.notify_all()
 
     def _store_preparation(
         self,
@@ -2971,6 +2988,7 @@ class RouteExternalMeasurementSessionRunner:
                 self._waiting_reason = str(waiting_reason)
             if message is not None:
                 self._message = str(message)
+            self._condition.notify_all()
 
     def _set_waiting(self, waiting: bool) -> None:
         if self._waiting_callback is not None:

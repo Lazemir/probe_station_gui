@@ -602,6 +602,7 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
 
         thread.start()
         self.assertTrue(self._wait_for_state(runner, "waiting_paused"))
+        self.assertTrue(runner.wait_until_initial_pause(timeout_s=0.1))
         self.assertEqual(stage.calls, [])
         self.assertEqual(lcr.batch_counts, [])
         selected, message = runner.set_current_adjustment_point(1)

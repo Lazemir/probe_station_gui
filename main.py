@@ -2626,18 +2626,38 @@ class Main(QMainWindow):
             f"point {int(selected_point.index)} {selected_point.label}; "
             f"{len(points)} points selected."
         )
+        self._last_route_measurement_result = None
+        self._route_measurement_thread.start()
+        if not runner.wait_until_initial_pause(timeout_s=10.0):
+            status = runner.status_payload()
+            if self._route_measurement_thread.is_alive():
+                runner.stop()
+                self._route_measurement_thread.join(timeout=2.0)
+            self._route_measurement_thread = None
+            self._route_measurement_runner = None
+            self._api_route_lcr_controller = None
+            self._route_measurement_waiting = False
+            self._route_measurement_session_active = False
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": (
+                    status.get("message")
+                    or "Route API session did not reach initial pause."
+                ),
+                "status": status,
+            }
+        self._route_measurement_waiting = True
         self.route_measurement_started.emit(
             start_message,
             len(points),
             int(selected_point.index),
             True,
         )
-        self._last_route_measurement_result = None
         self._send_telegram_alert(
             "route_started",
             f"Probe route API session started:\n{start_message}",
         )
-        self._route_measurement_thread.start()
         return runner.status_payload()
 
     def _show_route_measurement_dialog_for_api_session(self) -> None:
