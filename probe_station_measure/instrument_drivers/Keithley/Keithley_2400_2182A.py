@@ -8,7 +8,7 @@ readings are a small convenience layer over this list measurement.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import logging
@@ -411,14 +411,14 @@ def evaluate_contact_quality(
 
 
 class Keithley2400With2182A(AbstractOhmmeter):
-    """One combined instrument made from a 2400 source-meter and 2182A voltmeter."""
+    """One logical ohmmeter made from a 2400 source-meter and optional 2182A."""
 
     backend_name = "probe-station-measure"
 
     def __init__(
         self,
         source_resource: str,
-        voltmeter_resource: str,
+        voltmeter_resource: str | None = None,
         *,
         timeout_ms: int = DEFAULT_VISA_TIMEOUT_MS,
         resource_manager: object | None = None,
@@ -448,7 +448,8 @@ class Keithley2400With2182A(AbstractOhmmeter):
         ] | None = None
         self._prepared_source_voltages: tuple[float, ...] = ()
         self._source = self._open_resource(source_resource, timeout_ms)
-        self._voltmeter = self._open_resource(voltmeter_resource, timeout_ms)
+        if voltmeter_resource is not None and str(voltmeter_resource).strip():
+            self._voltmeter = self._open_resource(voltmeter_resource, timeout_ms)
 
     def _open_resource(self, address: str, timeout_ms: int):
         handle = self._resource_manager.open_resource(str(address).strip())
@@ -502,9 +503,125 @@ class Keithley2400With2182A(AbstractOhmmeter):
         keithley_trigger_delay_s: float = 0.0,
         keithley_use_buffer: bool = True,
         keithley_use_trigger_link: bool = True,
-        **_ignored: object,
+        **aliases: object,
     ) -> None:
         """Configure from route-measurement keyword names."""
+
+        nested_ranges = aliases.get("ranges")
+        if isinstance(nested_ranges, Mapping):
+            aliases = {**aliases, **nested_ranges}
+
+        keithley_measurement_voltage_v = _setting_float(
+            aliases,
+            keithley_measurement_voltage_v,
+            "measurement_voltage_v",
+            "voltage_v",
+        )
+        keithley_range_mode = str(
+            _setting_value(
+                aliases,
+                keithley_range_mode,
+                "range_mode",
+                "mode",
+            )
+        )
+        keithley_expected_resistance_ohm = _setting_optional_float(
+            aliases,
+            keithley_expected_resistance_ohm,
+            "expected_resistance_ohm",
+            "resistance_ohm",
+        )
+        keithley_minimum_resistance_ohm = _setting_optional_float(
+            aliases,
+            keithley_minimum_resistance_ohm,
+            "minimum_resistance_ohm",
+            "min_resistance_ohm",
+            "resistance_floor_ohm",
+        )
+        keithley_maximum_current_a = _setting_optional_float(
+            aliases,
+            keithley_maximum_current_a,
+            "maximum_current_a",
+            "max_current_a",
+            "current_limit_a",
+        )
+        keithley_voltage_range_v = _setting_optional_float(
+            aliases,
+            keithley_voltage_range_v,
+            "voltage_range_v",
+        )
+        keithley_source_voltage_range_v = _setting_float(
+            aliases,
+            keithley_source_voltage_range_v,
+            "source_voltage_range_v",
+            "source_range_v",
+        )
+        keithley_voltmeter_range_v = _setting_float(
+            aliases,
+            keithley_voltmeter_range_v,
+            "voltmeter_range_v",
+            "meter_voltage_range_v",
+            "nanovoltmeter_range_v",
+        )
+        if keithley_voltage_range_v is None:
+            voltage_values = _setting_value(
+                aliases,
+                None,
+                "voltages_v",
+                "voltages",
+                "source_voltages_v",
+                "voltage_sweep_v",
+            )
+            max_voltage = _max_abs_voltage(voltage_values)
+            if max_voltage is not None:
+                keithley_voltage_range_v = max(
+                    abs(float(keithley_measurement_voltage_v)),
+                    max_voltage,
+                )
+        keithley_current_range_a = _setting_float(
+            aliases,
+            keithley_current_range_a,
+            "current_range_a",
+        )
+        keithley_compliance_current_a = _setting_float(
+            aliases,
+            keithley_compliance_current_a,
+            "compliance_current_a",
+            "current_limit_a",
+            "max_current_a",
+        )
+        keithley_range_voltage_headroom = _setting_float(
+            aliases,
+            keithley_range_voltage_headroom,
+            "range_voltage_headroom",
+            "voltage_headroom",
+        )
+        keithley_range_current_headroom = _setting_float(
+            aliases,
+            keithley_range_current_headroom,
+            "range_current_headroom",
+            "current_headroom",
+        )
+        keithley_nplc = _setting_float(aliases, keithley_nplc, "nplc")
+        keithley_terminals = str(
+            _setting_value(aliases, keithley_terminals, "terminals")
+        )
+        keithley_trigger_delay_s = _setting_float(
+            aliases,
+            keithley_trigger_delay_s,
+            "trigger_delay_s",
+            "delay_s",
+        )
+        keithley_use_buffer = _setting_bool(
+            aliases,
+            keithley_use_buffer,
+            "use_buffer",
+        )
+        keithley_use_trigger_link = _setting_bool(
+            aliases,
+            keithley_use_trigger_link,
+            "use_trigger_link",
+        )
 
         self.configure(
             Keithley2400With2182AConfig(
@@ -562,7 +679,12 @@ class Keithley2400With2182A(AbstractOhmmeter):
             cfg = replace(cfg, source_voltage_range_v=max_source_voltage)
         self._config = cfg
 
-        if cfg.use_buffer and cfg.use_trigger_link and len(source_voltages) > 1:
+        if (
+            self._voltmeter is not None
+            and cfg.use_buffer
+            and cfg.use_trigger_link
+            and len(source_voltages) > 1
+        ):
             readings: list[VoltageListReading] = []
             chunk_size = max(1, int(cfg.max_buffer_points_per_chunk))
             for offset in range(0, len(source_voltages), chunk_size):
@@ -679,6 +801,8 @@ class Keithley2400With2182A(AbstractOhmmeter):
     ) -> None:
         """Prepare a buffered route batch without starting source output."""
 
+        if self._voltmeter is None:
+            return
         cfg = self._config.normalized()
         measurement_count = max(1, int(count))
         list_count = (
@@ -711,16 +835,46 @@ class Keithley2400With2182A(AbstractOhmmeter):
     def trace_status(self) -> dict[str, TraceBufferStatus]:
         """Return trace-buffer state for diagnostics."""
 
-        return {
+        status = {
             "source": self._trace_status(
                 self._require_source(),
                 supports_actual_points=True,
             ),
-            "voltmeter": self._trace_status(
+        }
+        if self._voltmeter is not None:
+            status["voltmeter"] = self._trace_status(
                 self._require_voltmeter(),
                 supports_actual_points=False,
-            ),
-        }
+            )
+        return status
+
+    def visa_resource_roles(self) -> dict[str, dict[str, object]]:
+        """Return station-owned VISA roles exposed by this logical meter."""
+
+        roles: dict[str, dict[str, object]] = {}
+        if self._source is not None:
+            roles["meter.source"] = {
+                "role": "meter.source",
+                "kind": "source_meter",
+                "model": "Keithley 2400",
+                "required": True,
+            }
+        if self._voltmeter is not None:
+            roles["meter.voltmeter"] = {
+                "role": "meter.voltmeter",
+                "kind": "voltmeter",
+                "model": "Keithley 2182A",
+                "required": False,
+            }
+        return roles
+
+    def visa_handle_for_role(self, role: str):
+        normalized = _normalize_visa_role(role)
+        if normalized in {"meter.source", "source", "source_meter", "meter"}:
+            return self._require_source()
+        if normalized in {"meter.voltmeter", "voltmeter", "meter.voltage"}:
+            return self._require_voltmeter()
+        raise KeyError(f"Unsupported Keithley VISA role: {role}")
 
     def close(self) -> None:
         source = self._source
@@ -745,17 +899,20 @@ class Keithley2400With2182A(AbstractOhmmeter):
         if not force and self._common_config_key == cfg:
             return
         source = self._require_source()
-        voltmeter = self._require_voltmeter()
+        voltmeter = self._voltmeter
         terminal_scpi = "FRON" if cfg.terminals == "front" else "REAR"
         self._prepared_voltage_list_key = None
 
         self._try_clear(source)
-        self._try_clear(voltmeter)
+        if voltmeter is not None:
+            self._try_clear(voltmeter)
         self._write(source, "*CLS")
-        self._write(voltmeter, "*CLS")
-        self._try_write(voltmeter, "INIT:CONT OFF")
+        if voltmeter is not None:
+            self._write(voltmeter, "*CLS")
+            self._try_write(voltmeter, "INIT:CONT OFF")
         self._try_write(source, ":ABOR")
-        self._try_write(voltmeter, "ABOR")
+        if voltmeter is not None:
+            self._try_write(voltmeter, "ABOR")
         self._try_write(source, ":TRIG:CLE")
         self._try_write(source, f":ROUT:TERM {terminal_scpi}")
 
@@ -770,18 +927,19 @@ class Keithley2400With2182A(AbstractOhmmeter):
         self._write(source, ":TRIG:OUTP NONE")
         self._write(source, ":TRIG:DEL 0")
 
-        self._write(voltmeter, "CONF:VOLT")
-        self._write(voltmeter, "SENS:CHAN 1")
-        self._write(voltmeter, f"SENS:VOLT:RANG {cfg.voltmeter_range_v:.12g}")
-        self._write(voltmeter, f"SENS:VOLT:NPLC {cfg.nplc:.12g}")
-        self._write(voltmeter, "TRIG:SOUR IMM")
-        self._write(voltmeter, "TRIG:COUN 1")
-        self._write(voltmeter, "SAMP:COUN 1")
-        self._write(voltmeter, "TRIG:DEL 0")
-        self._try_write(voltmeter, "TRIG:DEL:AUTO OFF")
-        self._try_write(voltmeter, "SENS:VOLT:DFIL:STAT OFF")
-        self._try_write(voltmeter, "FORM:ELEM READ")
-        self._try_write(voltmeter, "TRAC:CLE")
+        if voltmeter is not None:
+            self._write(voltmeter, "CONF:VOLT")
+            self._write(voltmeter, "SENS:CHAN 1")
+            self._write(voltmeter, f"SENS:VOLT:RANG {cfg.voltmeter_range_v:.12g}")
+            self._write(voltmeter, f"SENS:VOLT:NPLC {cfg.nplc:.12g}")
+            self._write(voltmeter, "TRIG:SOUR IMM")
+            self._write(voltmeter, "TRIG:COUN 1")
+            self._write(voltmeter, "SAMP:COUN 1")
+            self._write(voltmeter, "TRIG:DEL 0")
+            self._try_write(voltmeter, "TRIG:DEL:AUTO OFF")
+            self._try_write(voltmeter, "SENS:VOLT:DFIL:STAT OFF")
+            self._try_write(voltmeter, "FORM:ELEM READ")
+            self._try_write(voltmeter, "TRAC:CLE")
 
         self._try_write(source, ":SENS:FUNC:CONC OFF")
         self._write(source, ':SENS:FUNC "CURR:DC"')
@@ -795,7 +953,8 @@ class Keithley2400With2182A(AbstractOhmmeter):
         self._write(source, ":SOUR:VOLT 0")
         self._write(source, ":OUTP OFF")
         self._raise_scpi_errors(source, "2400 source", "configuration")
-        self._raise_scpi_errors(voltmeter, "2182A voltmeter", "configuration")
+        if voltmeter is not None:
+            self._raise_scpi_errors(voltmeter, "2182A voltmeter", "configuration")
         self._common_config_key = cfg
 
     def _measure_voltage_list_software(
@@ -805,7 +964,7 @@ class Keithley2400With2182A(AbstractOhmmeter):
     ) -> list[VoltageListReading]:
         self._configure_common(cfg, force=True)
         source = self._require_source()
-        voltmeter = self._require_voltmeter()
+        voltmeter = self._voltmeter
         readings: list[VoltageListReading] = []
         try:
             self._write(source, ":OUTP ON")
@@ -814,10 +973,14 @@ class Keithley2400With2182A(AbstractOhmmeter):
                 if cfg.trigger_delay_s > 0:
                     time.sleep(cfg.trigger_delay_s)
                 self._write(source, "INIT")
-                voltage_reading = float(self._query(voltmeter, "READ?"))
+                voltage_reading = math.nan
+                if voltmeter is not None:
+                    voltage_reading = float(self._query(voltmeter, "READ?"))
                 source_values = _parse_float_list(self._query(source, "FETC?"))
                 if len(source_values) < 2:
                     raise RuntimeError("2400 FETC? did not return voltage,current")
+                if voltmeter is None:
+                    voltage_reading = float(source_values[0])
                 current = float(source_values[1])
                 readings.append(
                     _voltage_list_reading(
@@ -831,7 +994,8 @@ class Keithley2400With2182A(AbstractOhmmeter):
             self._try_write(source, ":SOUR:VOLT 0")
             self._try_write(source, ":OUTP OFF")
         self._raise_scpi_errors(source, "2400 source", "software measurement")
-        self._raise_scpi_errors(voltmeter, "2182A voltmeter", "software measurement")
+        if voltmeter is not None:
+            self._raise_scpi_errors(voltmeter, "2182A voltmeter", "software measurement")
         return readings
 
     def _measure_voltage_list_buffered_trigger_link(
@@ -1138,6 +1302,24 @@ class Keithley2400With2182A(AbstractOhmmeter):
         return errors
 
 
+class Keithley2400SourceMeter(Keithley2400With2182A):
+    """Source-meter-only ohmmeter using the 2400 voltage/current readback."""
+
+    def __init__(
+        self,
+        source_resource: str,
+        *,
+        timeout_ms: int = DEFAULT_VISA_TIMEOUT_MS,
+        resource_manager: object | None = None,
+    ) -> None:
+        super().__init__(
+            source_resource,
+            None,
+            timeout_ms=timeout_ms,
+            resource_manager=resource_manager,
+        )
+
+
 @contextmanager
 def _temporary_timeout(handle, timeout_ms: int) -> Iterator[None]:
     previous_timeout = getattr(handle, "timeout", None)
@@ -1282,6 +1464,74 @@ def _parse_float_list(response: str) -> list[float]:
             continue
         values.append(float(token))
     return values
+
+
+def _normalize_visa_role(role: object) -> str:
+    return str(role or "").strip().lower().replace("-", "_")
+
+
+def _setting_value(
+    values: Mapping[str, object],
+    default: object,
+    *names: str,
+) -> object:
+    for name in names:
+        if name in values and values[name] is not None:
+            return values[name]
+    return default
+
+
+def _setting_float(
+    values: Mapping[str, object],
+    default: float,
+    *names: str,
+) -> float:
+    return _finite_float(_setting_value(values, default, *names), default)
+
+
+def _setting_optional_float(
+    values: Mapping[str, object],
+    default: float | None,
+    *names: str,
+) -> float | None:
+    value = _setting_value(values, default, *names)
+    if value is None:
+        return default
+    parsed = _optional_positive_float(value)
+    return parsed if parsed is not None else default
+
+
+def _setting_bool(
+    values: Mapping[str, object],
+    default: bool,
+    *names: str,
+) -> bool:
+    value = _setting_value(values, default, *names)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return bool(default if value is None else value)
+
+
+def _max_abs_voltage(values: object) -> float | None:
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+        return None
+    max_voltage = 0.0
+    found = False
+    for value in values:
+        try:
+            number = abs(float(value))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(number):
+            continue
+        max_voltage = max(max_voltage, number)
+        found = True
+    return max_voltage if found else None
 
 
 def _optional_int(response: str) -> int | None:

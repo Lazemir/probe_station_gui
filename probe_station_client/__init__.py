@@ -26,6 +26,7 @@ from .qcodes_driver import (
     ProbeStationRoute,
     ProbeStationStage,
 )
+from .visa import RemoteVisaInstrument, RemoteVisaResourceManager
 
 
 __all__ = [
@@ -46,5 +47,7 @@ __all__ = [
     "ProbeStationRouteClient",
     "ProbeStationRouteSession",
     "ProbeStationStage",
+    "RemoteVisaInstrument",
+    "RemoteVisaResourceManager",
     "RouteReadyContact",
 ]

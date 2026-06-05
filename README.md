@@ -417,7 +417,8 @@ Each key belongs to a user name and has its own permissions:
 - `Stage write`: send generic stage moves.
 - `Route read`: list contacts from the currently loaded route.
 - `Route measure`: move to route contacts, operate needles for a route contact,
-  check contact quality, run contact seek, configure the meter, and run raw sweeps.
+  check contact quality, run contact seek, configure the meter, access configured
+  meter VISA roles, and run raw sweeps.
 
 Default new-key permissions are `Stage read`, `Route read`, and `Route measure`.
 `Stage write` is disabled by default. Generic stage moves currently accept all
@@ -599,6 +600,27 @@ during the +/- voltage readings, so both polarities use the same range
 configuration. The range changes only when you call `meter.configure`,
 `meter.raw_sweep`, or `prepare_contact` with different meter/range parameters.
 
+For notebook-owned measurements that should reuse the same instrument driver as
+the GUI, prefer station-owned VISA roles instead of adding new API measurement
+schemas. The server owns the real VISA resources and exposes only configured
+roles:
+
+```powershell
+Invoke-RestMethod `
+  -Uri http://127.0.0.1:8765/api/v1/visa/resources `
+  -Headers $headers
+
+Invoke-RestMethod -Method Post `
+  -Uri http://127.0.0.1:8765/api/v1/visa/resources/meter.source/query `
+  -Headers $headers `
+  -ContentType application/json `
+  -Body '{"command": "*IDN?", "timeout_ms": 10000}'
+```
+
+Current roles are `meter.source` for the required source meter and
+`meter.voltmeter` when a separate voltmeter is configured. Trigger Link setup is
+not part of the API; it stays inside the high-level meter driver.
+
 ### Python Client
 
 Install the lightweight client extra:
@@ -646,6 +668,34 @@ client.meter.configure(
 result = client.meter.raw_sweep([-0.1, 0.0, 0.1], contact_number=7)
 ```
 
+Use the station-owned measurement instrument from Python:
+
+```python
+from probe_station_client import ProbeStationClient
+
+client = ProbeStationClient(profile="lab-prober")
+
+# Low level, pyvisa-like access to the configured source meter.
+source = client.meter.visa("meter.source")
+print(source.query("*IDN?"))
+
+# High-level ohmmeter interface. If meter.voltmeter exists, the driver uses the
+# configured 2400+2182A pair. If not, it falls back to the 2400 source meter.
+meter = client.meter.ohmmeter()
+meter.configure_measurement(
+    measurement_voltage_v=0.03,
+    voltage_range_v=None,
+    current_range_a=10e-6,
+    compliance_current_a=10e-6,
+    nplc=1,
+    ranges={
+        "mode": "code_auto",
+        "expected_resistance_ohm": 100_000,
+    },
+)
+iv = meter.measure_voltage_list([-0.1, 0.0, 0.1])
+```
+
 `prepare_contact` is a client-side recipe. It moves to the loaded route contact,
 lowers needles, checks contact quality, runs contact seek when needed, and lifts
 needles on failure. The backend API still sees only the lower-level commands.
@@ -685,12 +735,15 @@ for contact in session.iter_ready():
             contact.download_artifact(photo_id)
         )
 
-    # Run the notebook-owned IV measurement here and write its files locally.
+    # Run the notebook-owned IV measurement through the station-owned meter
+    # and write its files locally.
+    meter = client.meter.ohmmeter()
+    iv = meter.measure_voltage_list([-0.1, 0.0, 0.1])
     iv_path = experiment_dir / f"contact-{contact.contact_number}-iv.csv"
 
     contact.submit_result(
         status="ok",
-        summary={"iv_points": 101},
+        summary={"iv_points": len(iv)},
         files=[{"kind": "iv", "path": str(iv_path)}],
     )
 ```
@@ -735,6 +788,8 @@ station.meter.configure(
     ranges={"mode": "code_auto", "expected_resistance_ohm": 100_000},
 )
 data = station.meter.raw_sweep([-0.1, 0.0, 0.1], contact_number=7)
+meter = station.meter.ohmmeter()
+iv = meter.measure_voltage_list([-0.1, 0.0, 0.1])
 
 session = station.route.start_external(initial_measurement_count=10)
 print(station.route.status())
@@ -745,8 +800,9 @@ station.close()
 
 Stage motion lives under the `stage` submodule: `station.stage.x`,
 `station.stage.move_to`, and `station.stage.move_by`. Measurement-instrument
-configuration and raw sweeps live under `station.meter`. GUI-owned route
-workflow controls live under `station.route`.
+configuration, raw sweeps, remote VISA handles, and the high-level ohmmeter
+factory live under `station.meter`. GUI-owned route workflow controls live
+under `station.route`.
 
 ## Settings
 

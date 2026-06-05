@@ -173,6 +173,82 @@ class ProbeStationClientTest(unittest.TestCase):
         self.assertEqual(payload["contact_number"], 7)
         self.assertEqual(payload["meter"], {"meter_type": "keithley"})
 
+    def test_remote_visa_handle_uses_station_resource_endpoints(self) -> None:
+        transport = _FakeTransport(
+            (200, {"accepted": True}),
+            (200, {"accepted": True, "response": "Keithley,2400"}),
+            (200, b"raw-bytes"),
+            (200, {"accepted": True}),
+        )
+        client = ProbeStationClient(api_key="secret", transport=transport)
+
+        handle = client.meter.visa("meter.source", timeout_ms=1234)
+        handle.write("*CLS")
+        idn = handle.query("*IDN?")
+        raw = handle.read_raw()
+        handle.clear()
+
+        self.assertEqual(idn, "Keithley,2400")
+        self.assertEqual(raw, b"raw-bytes")
+        urls = [call["url"] for call in transport.calls]
+        self.assertTrue(urls[0].endswith("/api/v1/visa/resources/meter.source/write"))
+        self.assertTrue(urls[1].endswith("/api/v1/visa/resources/meter.source/query"))
+        self.assertTrue(urls[2].endswith("/api/v1/visa/resources/meter.source/read-raw"))
+        self.assertTrue(urls[3].endswith("/api/v1/visa/resources/meter.source/clear"))
+        payload = json.loads(transport.calls[0]["body"].decode("utf-8"))
+        self.assertEqual(payload["command"], "*CLS")
+        self.assertEqual(payload["timeout_ms"], 1234)
+        self.assertEqual(payload["read_termination"], "\n")
+
+    def test_meter_ohmmeter_factory_uses_remote_visa_roles(self) -> None:
+        from probe_station_measure import AbstractOhmmeter
+
+        transport = _FakeTransport(
+            (
+                200,
+                {
+                    "accepted": True,
+                    "meter_type": "keithley_2400_2182a",
+                    "resources": [
+                        {"role": "meter.source"},
+                        {"role": "meter.voltmeter"},
+                    ],
+                },
+            )
+        )
+        client = ProbeStationClient(api_key="secret", transport=transport)
+
+        ohmmeter = client.meter.ohmmeter(timeout_ms=1000)
+
+        self.assertIsInstance(ohmmeter, AbstractOhmmeter)
+        self.assertEqual(
+            set(ohmmeter.visa_resource_roles()),
+            {"meter.source", "meter.voltmeter"},
+        )
+        self.assertTrue(
+            transport.calls[0]["url"].endswith("/api/v1/visa/resources")
+        )
+
+    def test_meter_ohmmeter_factory_supports_source_only_role(self) -> None:
+        from probe_station_measure import Keithley2400SourceMeter
+
+        transport = _FakeTransport(
+            (
+                200,
+                {
+                    "accepted": True,
+                    "meter_type": "keithley_2400_2182a",
+                    "resources": [{"role": "meter.source"}],
+                },
+            )
+        )
+        client = ProbeStationClient(api_key="secret", transport=transport)
+
+        ohmmeter = client.meter.ohmmeter(timeout_ms=1000)
+
+        self.assertIsInstance(ohmmeter, Keithley2400SourceMeter)
+        self.assertEqual(set(ohmmeter.visa_resource_roles()), {"meter.source"})
+
     def test_route_subclient_session_actions_and_artifact_download(self) -> None:
         transport = _FakeTransport(
             (

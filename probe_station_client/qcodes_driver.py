@@ -124,6 +124,21 @@ if Instrument is not None and InstrumentChannel is not None:
         ) -> dict[str, Any]:
             return self.client.meter.raw_sweep(voltages_v, **options)
 
+        def visa_resources(self) -> dict[str, Any]:
+            return self.client.meter.visa_resources()
+
+        def visa(self, role: str = "meter.source", **options: Any):
+            return self.client.meter.visa(role, **options)
+
+        def source(self, **options: Any):
+            return self.client.meter.source(**options)
+
+        def voltmeter(self, **options: Any):
+            return self.client.meter.voltmeter(**options)
+
+        def ohmmeter(self, **options: Any):
+            return self.client.meter.ohmmeter(**options)
+
     class ProbeStationRoute(InstrumentChannel):  # type: ignore[misc]
         """Route workflow submodule for notebook-owned measurements."""
 

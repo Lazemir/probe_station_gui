@@ -133,6 +133,130 @@ def _voltage_sweep_point_to_dict(point: object) -> dict[str, object]:
     return {"value": point}
 
 
+def _normalize_visa_role(role: object) -> str:
+    return str(role or "").strip().lower().replace("-", "_")
+
+
+def _session_visa_resource_roles(
+    session: object | None,
+    *,
+    meter_type: str,
+) -> dict[str, dict[str, object]]:
+    if session is None:
+        return {}
+    roles_getter = getattr(session, "visa_resource_roles", None)
+    if not callable(roles_getter):
+        return {}
+    roles: dict[str, dict[str, object]] = {}
+    for role, metadata in dict(roles_getter()).items():
+        item = dict(metadata) if isinstance(metadata, dict) else {}
+        item["role"] = str(item.get("role") or role)
+        item["meter_type"] = meter_type
+        item["available"] = True
+        roles[str(role)] = item
+    return roles
+
+
+def _session_visa_operation(
+    session: object | None,
+    role: str,
+    operation: str,
+    *,
+    command: str | None,
+    timeout_ms: int | None,
+    read_termination: str | None,
+    write_termination: str | None,
+) -> object:
+    if session is None:
+        raise LCRMeterError("Measurement instrument is not connected.")
+    resolver = getattr(session, "visa_handle_for_role", None)
+    if not callable(resolver):
+        raise LCRMeterError("Measurement instrument does not expose VISA roles.")
+    try:
+        handle = resolver(role)
+    except KeyError as exc:
+        raise LCRMeterError(str(exc)) from exc
+
+    previous: dict[str, object] = {}
+    try:
+        _set_temporary_visa_attribute(handle, previous, "timeout", timeout_ms)
+        _set_temporary_visa_attribute(
+            handle,
+            previous,
+            "read_termination",
+            read_termination,
+        )
+        _set_temporary_visa_attribute(
+            handle,
+            previous,
+            "write_termination",
+            write_termination,
+        )
+        normalized = str(operation or "").strip().lower().replace("-", "_")
+        if normalized == "write":
+            if command is None:
+                raise LCRMeterError("VISA write requires a command.")
+            handle.write(str(command))
+            return None
+        if normalized in {"query", "ask"}:
+            if command is None:
+                raise LCRMeterError("VISA query requires a command.")
+            query = getattr(handle, "query", None)
+            if callable(query):
+                return str(query(str(command))).strip()
+            ask = getattr(handle, "ask", None)
+            if callable(ask):
+                return str(ask(str(command))).strip()
+            raise LCRMeterError("VISA handle cannot run queries.")
+        if normalized == "read":
+            reader = getattr(handle, "read", None)
+            if not callable(reader):
+                raise LCRMeterError("VISA handle cannot read text.")
+            return str(reader())
+        if normalized == "read_raw":
+            reader = getattr(handle, "read_raw", None)
+            if callable(reader):
+                data = reader()
+            else:
+                text_reader = getattr(handle, "read", None)
+                if not callable(text_reader):
+                    raise LCRMeterError("VISA handle cannot read raw bytes.")
+                data = str(text_reader()).encode("utf-8")
+            return bytes(data)
+        if normalized == "clear":
+            clearer = getattr(handle, "clear", None)
+            if not callable(clearer):
+                clearer = getattr(handle, "device_clear", None)
+            if not callable(clearer):
+                visa_handle = getattr(handle, "visa_handle", None)
+                clearer = getattr(visa_handle, "clear", None)
+            if callable(clearer):
+                clearer()
+            return None
+    finally:
+        for name, value in previous.items():
+            try:
+                setattr(handle, name, value)
+            except Exception:
+                logger.debug("Failed to restore VISA attribute %s", name, exc_info=True)
+    raise LCRMeterError(f"Unsupported VISA operation: {operation}")
+
+
+def _set_temporary_visa_attribute(
+    handle: object,
+    previous: dict[str, object],
+    name: str,
+    value: object,
+) -> None:
+    if value is None or not hasattr(handle, name):
+        return
+    try:
+        previous[name] = getattr(handle, name)
+        setattr(handle, name, value)
+    except Exception:
+        logger.debug("VISA handle does not accept %s=%r", name, value, exc_info=True)
+
+
 @dataclass(frozen=True)
 class GWInstekRouteMeterSettings:
     """Per-run GW Instek LCR settings for route measurements."""
@@ -219,7 +343,7 @@ class LCRMeterError(RuntimeError):
 
 def _open_keithley_session(
     source_resource: str,
-    voltmeter_resource: str,
+    voltmeter_resource: str | None,
     timeout_ms: int,
 ) -> object:
     try:
@@ -230,11 +354,11 @@ def _open_keithley_session(
             "'probe-station-measure'. Install with `pip install .[lcr]`."
         ) from exc
     source = normalize_resource_name(source_resource)
-    voltmeter = normalize_resource_name(voltmeter_resource)
+    voltmeter = normalize_resource_name(voltmeter_resource or "")
     try:
         return Keithley2400With2182A(
             source,
-            voltmeter,
+            voltmeter or None,
             timeout_ms=timeout_ms,
         )
     except Exception as exc:  # pragma: no cover - backend specific failures
@@ -479,6 +603,22 @@ class _LCRSession:
         source = str(trigger_source).strip().upper() or "INT"
         self._write_and_verify(f"TRIG:SOUR {source}", "TRIG:SOUR?", source)
 
+    def visa_resource_roles(self) -> dict[str, dict[str, object]]:
+        return {
+            "meter.source": {
+                "role": "meter.source",
+                "kind": "source_meter",
+                "model": "GW Instek LCR-76200",
+                "required": True,
+            }
+        }
+
+    def visa_handle_for_role(self, role: str):
+        normalized = _normalize_visa_role(role)
+        if normalized not in {"meter.source", "source", "source_meter", "meter"}:
+            raise KeyError(f"Unsupported GW Instek VISA role: {role}")
+        return getattr(self._instrument, "visa_handle", self._instrument)
+
     @staticmethod
     def _configuration_response_matches(response: str, expected: str) -> bool:
         if response == expected:
@@ -711,6 +851,36 @@ class RouteMeter:
         if callable(abort):
             abort()
 
+    def visa_resource_roles(self) -> dict[str, dict[str, object]]:
+        if self._session is None:
+            self.open()
+        return _session_visa_resource_roles(
+            self._session,
+            meter_type=self._configuration.meter_type,
+        )
+
+    def visa_operation(
+        self,
+        role: str,
+        operation: str,
+        *,
+        command: str | None = None,
+        timeout_ms: int | None = None,
+        read_termination: str | None = None,
+        write_termination: str | None = None,
+    ) -> object:
+        if self._session is None:
+            self.open()
+        return _session_visa_operation(
+            self._session,
+            role,
+            operation,
+            command=command,
+            timeout_ms=timeout_ms,
+            read_termination=read_termination,
+            write_termination=write_termination,
+        )
+
     def close(self) -> None:
         session = self._session
         self._session = None
@@ -838,10 +1008,12 @@ class LCRMeterController(QObject):
 
         if self._meter_type == ROUTE_METER_KEITHLEY:
             source = self._keithley_source_resource or "source not configured"
-            voltmeter = (
-                self._keithley_voltmeter_resource or "voltmeter not configured"
-            )
-            return f"Keithley 2400 {source}; 2182A {voltmeter}"
+            if self._keithley_voltmeter_resource:
+                return (
+                    f"Keithley 2400 {source}; "
+                    f"2182A {self._keithley_voltmeter_resource}"
+                )
+            return f"Keithley 2400 {source}"
         return self._resource_name
 
     def apply_route_meter_configuration(
@@ -1118,6 +1290,57 @@ class LCRMeterController(QObject):
         if callable(abort):
             abort()
 
+    def visa_resource_roles(self) -> dict[str, dict[str, object]]:
+        """Return station-owned VISA roles for the connected measurement backend."""
+
+        session = self._session
+        if session is None:
+            return {}
+        return _session_visa_resource_roles(session, meter_type=self._meter_type)
+
+    def visa_operation(
+        self,
+        role: str,
+        operation: str,
+        *,
+        command: str | None = None,
+        timeout_ms: int | None = None,
+        read_termination: str | None = None,
+        write_termination: str | None = None,
+    ) -> object:
+        """Run one serialized VISA-like operation on the connected backend."""
+
+        current_thread = threading.current_thread()
+        with self._task_lock:
+            if (
+                self._active_thread
+                and self._active_thread.is_alive()
+                and self._active_thread is not current_thread
+            ):
+                raise LCRMeterError("Measurement instrument task already running.")
+            session = self._session
+            self._active_thread = current_thread
+        if session is None:
+            with self._task_lock:
+                if self._active_thread is current_thread:
+                    self._active_thread = None
+            raise LCRMeterError("Measurement instrument is not connected.")
+        self._stop_polling_session()
+        try:
+            return _session_visa_operation(
+                session,
+                role,
+                operation,
+                command=command,
+                timeout_ms=timeout_ms,
+                read_termination=read_termination,
+                write_termination=write_termination,
+            )
+        finally:
+            with self._task_lock:
+                if self._active_thread is current_thread:
+                    self._active_thread = None
+
     def request_connect(self) -> None:
         """Open the configured measurement instrument in a background thread."""
 
@@ -1273,10 +1496,6 @@ class LCRMeterController(QObject):
                 raise LCRMeterError(
                     "Keithley 2400 resource is empty. Set it in Settings."
                 )
-            if not self._keithley_voltmeter_resource:
-                raise LCRMeterError(
-                    "Keithley 2182A resource is empty. Set it in Settings."
-                )
         self._disconnect_session()
         session = self._open_configured_session()
         identify = getattr(session, "identify", None)
@@ -1339,7 +1558,7 @@ class LCRMeterController(QObject):
         if self._meter_type == ROUTE_METER_KEITHLEY:
             source = normalize_resource_name(self._keithley_source_resource)
             voltmeter = normalize_resource_name(self._keithley_voltmeter_resource)
-            if not source or not voltmeter:
+            if not source:
                 return ""
             return f"{ROUTE_METER_KEITHLEY}|{source}|{voltmeter}"
         resource = normalize_resource_name(self._resource_name)

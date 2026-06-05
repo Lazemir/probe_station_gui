@@ -730,6 +730,7 @@ class Main(QMainWindow):
         self._route_measurement_context_close_requested = False
         self._api_route_session_id: str | None = None
         self._api_route_last_status: dict[str, Any] | None = None
+        self._api_route_lcr_controller: object | None = None
         self._api_route_artifacts: dict[str, dict[str, object]] = {}
         self._api_route_artifacts_lock = threading.Lock()
         self._microscope_scan_thread: threading.Thread | None = None
@@ -1287,6 +1288,10 @@ class Main(QMainWindow):
             return self._api_configure_meter(payload)
         if action == "raw_voltage_sweep":
             return self._api_raw_voltage_sweep(payload)
+        if action == "visa_list_resources":
+            return self._api_visa_list_resources()
+        if action == "visa_operation":
+            return self._api_visa_operation(payload)
         if action == "start_route_session":
             return self._api_start_route_session(payload)
         if action == "route_session_status":
@@ -2226,6 +2231,132 @@ class Main(QMainWindow):
                         logger.exception("API raw voltage sweep failed to lift needles.")
                 self.stage_controller.finish_external_task()
 
+    def _api_visa_list_resources(self) -> dict[str, Any]:
+        controller = self._api_visa_controller()
+        if controller is self.lcr_controller:
+            connect_result = self._api_ensure_measurement_instrument_connected()
+            if connect_result is not None:
+                return connect_result
+        try:
+            roles_getter = getattr(controller, "visa_resource_roles", None)
+            if not callable(roles_getter):
+                return {
+                    "accepted": False,
+                    "status_code": 409,
+                    "message": "Measurement instrument does not expose VISA roles.",
+                }
+            roles = dict(roles_getter())
+        except LCRMeterError as exc:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": str(exc),
+            }
+        resources = sorted(
+            (dict(item) for item in roles.values()),
+            key=lambda item: str(item.get("role") or ""),
+        )
+        return {
+            "accepted": True,
+            "meter_type": self._api_visa_meter_type(resources),
+            "resources": resources,
+        }
+
+    def _api_visa_operation(self, payload: dict[str, Any]) -> dict[str, Any]:
+        role = str(payload.get("role", "")).strip()
+        operation = str(payload.get("operation", "")).strip().lower()
+        if not role:
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": "VISA role is required.",
+            }
+        if operation not in {"write", "query", "ask", "read", "read_raw", "clear"}:
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": f"Unsupported VISA operation: {operation}.",
+            }
+        controller = self._api_visa_controller()
+        if controller is self.lcr_controller:
+            connect_result = self._api_ensure_measurement_instrument_connected()
+            if connect_result is not None:
+                return connect_result
+        timeout_ms = self._api_optional_timeout_ms(payload)
+        command_value = payload.get("command", payload.get("query"))
+        command = None if command_value is None else str(command_value)
+        read_termination = (
+            str(payload.get("read_termination"))
+            if payload.get("read_termination") is not None
+            else None
+        )
+        write_termination = (
+            str(payload.get("write_termination"))
+            if payload.get("write_termination") is not None
+            else None
+        )
+        try:
+            operation_runner = getattr(controller, "visa_operation", None)
+            if not callable(operation_runner):
+                return {
+                    "accepted": False,
+                    "status_code": 409,
+                    "message": "Measurement instrument does not expose VISA operations.",
+                }
+            result = operation_runner(
+                role,
+                operation,
+                command=command,
+                timeout_ms=timeout_ms,
+                read_termination=read_termination,
+                write_termination=write_termination,
+            )
+        except LCRMeterError as exc:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": str(exc),
+            }
+        response: dict[str, Any] = {
+            "accepted": True,
+            "role": role,
+            "operation": operation,
+            "timestamp_utc": self._api_timestamp_utc(),
+        }
+        if isinstance(result, (bytes, bytearray)):
+            response["data"] = bytes(result)
+            response["size_bytes"] = len(result)
+        elif result is not None:
+            response["response"] = str(result)
+        return response
+
+    def _api_visa_controller(self) -> object:
+        if (
+            self._route_measurement_runner is not None
+            and self._api_route_lcr_controller is not None
+        ):
+            return self._api_route_lcr_controller
+        return self.lcr_controller
+
+    @staticmethod
+    def _api_visa_meter_type(resources: list[dict[str, object]]) -> str:
+        for item in resources:
+            meter_type = item.get("meter_type")
+            if meter_type:
+                return str(meter_type)
+        return ""
+
+    @staticmethod
+    def _api_optional_timeout_ms(payload: dict[str, Any]) -> int | None:
+        value = payload.get("timeout_ms", payload.get("timeout"))
+        if value is None:
+            return None
+        try:
+            timeout = int(float(value))
+        except (TypeError, ValueError):
+            return None
+        return timeout if timeout > 0 else None
+
     def _api_start_route_session(self, payload: dict[str, Any]) -> dict[str, Any]:
         thread = self._route_measurement_thread
         if thread is not None and thread.is_alive():
@@ -2431,6 +2562,7 @@ class Main(QMainWindow):
         with self._api_route_artifacts_lock:
             self._api_route_artifacts.clear()
         self._api_route_session_id = session_id
+        self._api_route_lcr_controller = route_lcr_controller
         self._api_route_last_status = None
         runner = RouteExternalMeasurementSessionRunner(
             session_id=session_id,
@@ -8886,6 +9018,7 @@ class Main(QMainWindow):
             except Exception:
                 logger.exception("Failed to store final API route session status.")
         self._route_measurement_runner = None
+        self._api_route_lcr_controller = None
         self._route_measurement_waiting = False
         self._last_route_measurement_result = None
         self._pending_route_measure_point = None

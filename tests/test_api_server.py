@@ -241,6 +241,80 @@ class ApiServerHttpTest(unittest.TestCase):
         self.assertEqual(calls[9]["payload"]["action"], "pause")
         self.assertEqual(calls[10]["payload"]["summary"], {"points": 31})
 
+    def test_visa_endpoints_delegate_roles_and_operations(self) -> None:
+        calls = []
+
+        def command_callback(request):
+            calls.append(request)
+            if request["action"] == "visa_list_resources":
+                return {
+                    "accepted": True,
+                    "resources": [{"role": "meter.source"}],
+                }
+            payload = request["payload"]
+            if payload["operation"] == "query":
+                return {
+                    "accepted": True,
+                    "role": payload["role"],
+                    "operation": "query",
+                    "response": "Keithley,2400",
+                }
+            if payload["operation"] == "read_raw":
+                return {
+                    "accepted": True,
+                    "role": payload["role"],
+                    "operation": "read_raw",
+                    "data": b"raw-bytes",
+                }
+            return {
+                "accepted": True,
+                "role": payload["role"],
+                "operation": payload["operation"],
+            }
+
+        client = self._client(command_callback=command_callback)
+
+        resources = client.get("/api/v1/visa/resources")
+        write = client.post(
+            "/api/v1/visa/resources/meter.source/write",
+            json={"command": "*CLS", "timeout_ms": 1000},
+        )
+        query = client.post(
+            "/api/v1/visa/resources/meter.source/query",
+            json={"command": "*IDN?"},
+        )
+        raw = client.post(
+            "/api/v1/visa/resources/meter.source/read-raw",
+            json={},
+        )
+        clear = client.post(
+            "/api/v1/visa/resources/meter.source/clear",
+            json={},
+        )
+
+        self.assertEqual(resources.status_code, 200)
+        self.assertEqual(write.status_code, 200)
+        self.assertEqual(query.status_code, 200)
+        self.assertEqual(query.json()["response"], "Keithley,2400")
+        self.assertEqual(raw.status_code, 200)
+        self.assertEqual(raw.content, b"raw-bytes")
+        self.assertEqual(clear.status_code, 200)
+        self.assertEqual(
+            [call["action"] for call in calls],
+            [
+                "visa_list_resources",
+                "visa_operation",
+                "visa_operation",
+                "visa_operation",
+                "visa_operation",
+            ],
+        )
+        self.assertEqual(calls[1]["payload"]["role"], "meter.source")
+        self.assertEqual(calls[1]["payload"]["operation"], "write")
+        self.assertEqual(calls[1]["payload"]["command"], "*CLS")
+        self.assertEqual(calls[2]["payload"]["operation"], "query")
+        self.assertEqual(calls[3]["payload"]["operation"], "read_raw")
+
     def test_authenticated_endpoints_require_matching_permissions(self) -> None:
         auth_calls = []
 

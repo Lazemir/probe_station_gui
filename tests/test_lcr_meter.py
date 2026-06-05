@@ -112,6 +112,26 @@ class _FakeSession:
         self.abort_count += 1
 
 
+class _FakeVisaHandle:
+    def __init__(self) -> None:
+        self.timeout = 0
+        self.read_termination = ""
+        self.write_termination = ""
+        self.writes: list[str] = []
+        self.queries: list[str] = []
+        self.cleared = False
+
+    def write(self, command: str) -> None:
+        self.writes.append(command)
+
+    def query(self, command: str) -> str:
+        self.queries.append(command)
+        return "fake-response"
+
+    def clear(self) -> None:
+        self.cleared = True
+
+
 class _FakeLCRSession(_LCRSession):
     backend_name = "fake-lcr"
 
@@ -133,6 +153,8 @@ class _FakeKeithleySession:
         self.read_triggers: list[bool] = []
         self.prepared_batches: list[tuple[int, int | None]] = []
         self.route_batches: list[tuple[int, bool, bool]] = []
+        self.source_handle = _FakeVisaHandle()
+        self.voltmeter_handle = _FakeVisaHandle()
         self.closed = False
 
     def read_primary_value(self, *, trigger: bool = False) -> float:
@@ -164,6 +186,19 @@ class _FakeKeithleySession:
 
     def configure_measurement(self, **kwargs) -> None:
         self.configurations.append(dict(kwargs))
+
+    def visa_resource_roles(self) -> dict[str, dict[str, object]]:
+        return {
+            "meter.source": {"role": "meter.source"},
+            "meter.voltmeter": {"role": "meter.voltmeter"},
+        }
+
+    def visa_handle_for_role(self, role: str):
+        if role == "meter.source":
+            return self.source_handle
+        if role == "meter.voltmeter":
+            return self.voltmeter_handle
+        raise KeyError(role)
 
     def close(self) -> None:
         self.closed = True
@@ -407,6 +442,31 @@ class LCRMeterTest(unittest.TestCase):
         self.assertEqual(session.route_batches, [(2, True, True)])
         self.assertEqual(callbacks, [True])
         self.assertEqual(len(measurements), 2)
+        self.assertEqual(stopped, [True, True])
+
+    def test_controller_exposes_station_owned_visa_roles(self) -> None:
+        controller = LCRMeterController()
+        session = _FakeKeithleySession()
+        controller._meter_type = ROUTE_METER_KEITHLEY
+        controller._session = session
+        stopped = []
+        controller._stop_polling_session = lambda: stopped.append(True)
+
+        roles = controller.visa_resource_roles()
+        response = controller.visa_operation(
+            "meter.source",
+            "query",
+            command="*IDN?",
+            timeout_ms=1234,
+        )
+        controller.visa_operation("meter.voltmeter", "clear")
+
+        self.assertEqual(set(roles), {"meter.source", "meter.voltmeter"})
+        self.assertEqual(roles["meter.source"]["meter_type"], ROUTE_METER_KEITHLEY)
+        self.assertEqual(response, "fake-response")
+        self.assertEqual(session.source_handle.queries, ["*IDN?"])
+        self.assertEqual(session.source_handle.timeout, 0)
+        self.assertTrue(session.voltmeter_handle.cleared)
         self.assertEqual(stopped, [True, True])
 
     def test_route_meter_opens_keithley_through_external_driver_factory(self) -> None:

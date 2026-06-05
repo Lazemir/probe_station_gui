@@ -435,6 +435,127 @@ class ProbeStationApiServer:
             _raise_for_rejected(result)
             return result
 
+        @app.get("/api/v1/visa/resources")
+        def list_visa_resources(
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+        ) -> dict[str, Any]:
+            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
+            result = self._call_command({"action": "visa_list_resources"})
+            _raise_for_rejected(result)
+            return result
+
+        @app.post("/api/v1/visa/resources/{role}/write")
+        def visa_write(
+            role: str,
+            payload: dict[str, Any] = Body(...),
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+        ) -> dict[str, Any]:
+            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
+            result = self._call_command(
+                {
+                    "action": "visa_operation",
+                    "payload": {
+                        **dict(payload or {}),
+                        "role": role,
+                        "operation": "write",
+                    },
+                }
+            )
+            _raise_for_rejected(result)
+            return result
+
+        @app.post("/api/v1/visa/resources/{role}/query")
+        def visa_query(
+            role: str,
+            payload: dict[str, Any] = Body(...),
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+        ) -> dict[str, Any]:
+            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
+            result = self._call_command(
+                {
+                    "action": "visa_operation",
+                    "payload": {
+                        **dict(payload or {}),
+                        "role": role,
+                        "operation": "query",
+                    },
+                }
+            )
+            _raise_for_rejected(result)
+            return result
+
+        @app.post("/api/v1/visa/resources/{role}/read")
+        def visa_read(
+            role: str,
+            payload: dict[str, Any] | None = Body(default=None),
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+        ) -> dict[str, Any]:
+            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
+            result = self._call_command(
+                {
+                    "action": "visa_operation",
+                    "payload": {
+                        **dict(payload or {}),
+                        "role": role,
+                        "operation": "read",
+                    },
+                }
+            )
+            _raise_for_rejected(result)
+            return result
+
+        @app.post("/api/v1/visa/resources/{role}/read-raw")
+        def visa_read_raw(
+            role: str,
+            payload: dict[str, Any] | None = Body(default=None),
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+        ) -> Response:
+            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
+            result = self._call_command(
+                {
+                    "action": "visa_operation",
+                    "payload": {
+                        **dict(payload or {}),
+                        "role": role,
+                        "operation": "read_raw",
+                    },
+                }
+            )
+            _raise_for_rejected(result)
+            data = result.get("data", b"")
+            if not isinstance(data, (bytes, bytearray)):
+                raise HTTPException(
+                    status_code=500,
+                    detail={"message": "VISA raw response is invalid."},
+                )
+            return Response(content=bytes(data), media_type="application/octet-stream")
+
+        @app.post("/api/v1/visa/resources/{role}/clear")
+        def visa_clear(
+            role: str,
+            payload: dict[str, Any] | None = Body(default=None),
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+        ) -> dict[str, Any]:
+            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
+            result = self._call_command(
+                {
+                    "action": "visa_operation",
+                    "payload": {
+                        **dict(payload or {}),
+                        "role": role,
+                        "operation": "clear",
+                    },
+                }
+            )
+            _raise_for_rejected(result)
+            return result
+
         @app.post("/api/v1/route/sessions")
         def start_route_session(
             payload: dict[str, Any] | None = Body(default=None),
