@@ -724,6 +724,11 @@ session = client.route.start_external(
     },
 )
 
+# start_external opens the GUI route controls and starts the session paused at
+# the first selected contact. Apply Save Shift or choose another current point
+# in the GUI if needed, then resume from the GUI or from Python.
+session.resume()
+
 experiment_dir = Path(r"C:\data\chip-001")
 experiment_dir.mkdir(parents=True, exist_ok=True)
 
@@ -752,9 +757,9 @@ If the resistance precheck reports `short`, the GUI records that status in the
 session result and skips the external wait for that contact. If contact quality
 is bad, the session waits; call `session.seek_current()`, `session.skip()`, or
 use the GUI/Telegram route actions. `session.iter_ready()` yields only contacts
-that are waiting for the notebook-owned external measurement. During pause,
-interrupt correction, or contact attention it keeps polling while the GUI route
-controls remain active; if the session stops or fails, it raises
+that are waiting for the notebook-owned external measurement. During the initial
+paused state, pause, interrupt correction, or contact attention it keeps polling
+while the GUI route controls remain active; if the session stops or fails, it raises
 `ProbeStationClientError` with the server message instead of ending the loop
 silently.
 

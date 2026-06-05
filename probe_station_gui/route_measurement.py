@@ -521,6 +521,7 @@ class RouteMeasurementRunner:
         move_to_point: bool = True,
         lift_before_move: bool = True,
         lift_on_failure: bool = True,
+        clear_interrupt: bool = True,
     ) -> RouteContactPlacementResult:
         """Move to a route point and leave verified contact under the needles.
 
@@ -528,7 +529,10 @@ class RouteMeasurementRunner:
         lift/lower retry path as route measurements, but does not write a CSV row.
         """
 
-        self._point_interrupt_requested.clear()
+        if clear_interrupt:
+            self._point_interrupt_requested.clear()
+        elif self._point_interrupt_requested.is_set():
+            raise RuntimeError("Contact placement interrupted.")
         self._current_contact_seek_result = None
         self._begin_stage_task()
         needles_lowered = False
@@ -543,6 +547,7 @@ class RouteMeasurementRunner:
                     "lift",
                     self._needle_feedrate,
                 )
+                self._raise_if_point_interrupted()
             if move_to_point:
                 target_xy = self._adjusted_stage_xy(point)
                 self._status(
@@ -552,13 +557,17 @@ class RouteMeasurementRunner:
                     target_xy[0],
                     target_xy[1],
                 )
+                self._raise_if_point_interrupted()
+            self._raise_if_point_interrupted()
             prepare_task = self._start_measurement_prepare_task(
                 self._initial_measurement_count()
             )
+            self._raise_if_point_interrupted()
             self._status(
                 f"Route contact: point {position}/{total} lowering needles."
             )
             self._emit_pre_contact_photo(point, position, total)
+            self._raise_if_point_interrupted()
             self._stage_controller.run_external_needles_action(
                 "lower",
                 self._needle_feedrate,
@@ -651,6 +660,7 @@ class RouteMeasurementRunner:
                     "raise",
                     self._needle_feedrate,
                 )
+                self._raise_if_point_interrupted()
                 photo_xy = self._adjusted_photo_stage_xy(point)
                 self._status(
                     f"Route contact: point {position}/{total} moving to photo."
@@ -659,11 +669,13 @@ class RouteMeasurementRunner:
                     photo_xy[0],
                     photo_xy[1],
                 )
+                self._raise_if_point_interrupted()
                 if photo_focus_enabled:
                     self._status(
                         f"Route contact: point {position}/{total} local autofocus."
                     )
                     focus_result = self._run_photo_focus(point, position, total)
+                    self._raise_if_point_interrupted()
                     focus_message = str(focus_result or "")
                     if focus_message.strip():
                         self._status(
@@ -684,6 +696,7 @@ class RouteMeasurementRunner:
                     self._status(
                         f"Route contact: point {position}/{total} photo captured."
                     )
+                    self._raise_if_point_interrupted()
                 contact_xy = self._adjusted_stage_xy(point)
                 if not self._same_stage_xy(photo_xy, contact_xy):
                     self._status(
@@ -694,6 +707,7 @@ class RouteMeasurementRunner:
                         contact_xy[0],
                         contact_xy[1],
                     )
+                    self._raise_if_point_interrupted()
             finally:
                 self._wait_for_background_tasks()
                 self._finish_stage_task()
@@ -706,12 +720,17 @@ class RouteMeasurementRunner:
             move_to_point=move_to_point,
             lift_before_move=lift_before_move,
             lift_on_failure=lift_on_failure,
+            clear_interrupt=False,
         )
         return RouteExternalContactPreparation(
             placement=placement,
             photo_path=photo_path,
             focus=_focus_result_to_dict(focus_result),
         )
+
+    def _raise_if_point_interrupted(self) -> None:
+        if self._point_interrupt_requested.is_set():
+            raise RuntimeError("Route contact interrupted.")
 
     def lift_needles_after_external_measurement(
         self,
@@ -943,12 +962,14 @@ class RouteMeasurementRunner:
                     else None
                 )
                 focus_result: object | None = None
+                point_interrupted = self._point_interrupt_requested.is_set()
                 if self._photo_focus_enabled:
                     self._status(
                         f"Route measurement: point {position}/{total} "
                         "local autofocus."
                     )
                     focus_result = self._run_photo_focus(point, position, total)
+                    point_interrupted = self._point_interrupt_requested.is_set()
                     focus_message = str(focus_result or "")
                     if focus_message.strip():
                         self._status(
@@ -958,25 +979,28 @@ class RouteMeasurementRunner:
                     if self._stop_requested.is_set():
                         message = "Route measurement stopped by user."
                         break
-                if self._photo_enabled:
+                if not point_interrupted and self._photo_enabled:
                     if not self._sleep_photo_settle():
                         message = "Route measurement stopped by user."
                         break
-                    photo_path = self._capture_photo(
-                        point,
-                        position,
-                        total,
-                        focus_result=focus_result,
-                    )
-                    photos_saved += 1
-                    self._status(
-                        f"Route measurement: point {position}/{total} "
-                        f"photo saved to {photo_path}."
-                    )
+                    if self._point_interrupt_requested.is_set():
+                        point_interrupted = True
+                    if not point_interrupted:
+                        photo_path = self._capture_photo(
+                            point,
+                            position,
+                            total,
+                            focus_result=focus_result,
+                        )
+                        photos_saved += 1
+                        self._status(
+                            f"Route measurement: point {position}/{total} "
+                            f"photo saved to {photo_path}."
+                        )
                     if self._stop_requested.is_set():
                         message = "Route measurement stopped by user."
                         break
-                if self._measure_enabled:
+                if self._measure_enabled and not point_interrupted:
                     contact_xy = self._adjusted_stage_xy(point)
                     if not self._same_stage_xy(target_xy, contact_xy):
                         self._status(
@@ -990,7 +1014,29 @@ class RouteMeasurementRunner:
                         if self._stop_requested.is_set():
                             message = "Route measurement stopped by user."
                             break
+                        point_interrupted = (
+                            self._point_interrupt_requested.is_set()
+                        )
                 if not self._measure_enabled:
+                    if point_interrupted:
+                        self._point_interrupt_requested.clear()
+                        decision = self._wait_after_interrupted_point(
+                            point=point,
+                            position=position,
+                            total=total,
+                        )
+                        if decision == "stop":
+                            message = "Route measurement stopped by user."
+                            break
+                        self._begin_stage_task()
+                        jump_index = self._jump_target_index(decision)
+                        if jump_index is not None:
+                            position_index = jump_index
+                            continue
+                        if decision == "skip":
+                            position_index += 1
+                            continue
+                        continue
                     position_index += 1
                     continue
                 needles_lowered = False
@@ -1007,7 +1053,6 @@ class RouteMeasurementRunner:
                 record_saved = False
                 quality_rejected = False
                 result_emitted = False
-                point_interrupted = self._point_interrupt_requested.is_set()
                 try:
                     if not point_interrupted:
                         needs_final_lift = True
@@ -2283,6 +2328,7 @@ class RouteExternalMeasurementSessionRunner:
         photo_enabled: bool = True,
         photo_focus_enabled: bool = True,
         photo_settle_s: float = 0.2,
+        wait_before_first_point: bool = False,
     ) -> None:
         self.session_id = str(session_id)
         self._points = list(points)
@@ -2293,6 +2339,7 @@ class RouteExternalMeasurementSessionRunner:
         self._waiting_callback = waiting_callback
         self._photo_enabled = bool(photo_enabled)
         self._photo_focus_enabled = bool(photo_focus_enabled)
+        self._wait_before_first_point = bool(wait_before_first_point)
         self._condition = threading.Condition()
         self._stop_requested = False
         self._pause_requested = False
@@ -2393,6 +2440,14 @@ class RouteExternalMeasurementSessionRunner:
     def set_current_adjustment_point(self, point_number: int) -> tuple[bool, str]:
         return self._contact_runner.set_current_adjustment_point(point_number)
 
+    def save_current_position_adjustment(
+        self,
+        current_stage_xy: Point2D,
+    ) -> tuple[bool, str]:
+        return self._contact_runner.save_current_position_adjustment(
+            current_stage_xy
+        )
+
     def update_runtime_settings(
         self,
         *,
@@ -2445,6 +2500,23 @@ class RouteExternalMeasurementSessionRunner:
                 lcr.open()
             self._set_state("running", message="Route API session starting.")
             index = self._start_index()
+            if self._wait_before_first_point and index < len(self._points):
+                point = self._points[index]
+                position = index + 1
+                self._set_current(position, point)
+                self._emit_progress(position, len(self._points), int(point.index))
+                decision = self._wait_before_first_point_decision(point, position)
+                action = str(decision.get("action") or "next")
+                if action == "stop":
+                    self.stop()
+                    message = "Route API session stopped by user."
+                    index = len(self._points)
+                else:
+                    jump = self._jump_index(action)
+                    if jump is not None:
+                        index = jump
+                    elif action == "skip":
+                        index += 1
             while index < len(self._points):
                 if self._stop_requested_now():
                     message = "Route API session stopped by user."
@@ -2646,6 +2718,23 @@ class RouteExternalMeasurementSessionRunner:
             allow_external_result=True,
         )
 
+    def _wait_before_first_point_decision(
+        self,
+        point: RouteMeasurementPoint,
+        position: int,
+    ) -> dict[str, Any]:
+        message = (
+            f"Route API session: ready at point {position}/{self._total} "
+            f"{point.label}."
+        )
+        self._status(message)
+        return self._wait_for_decision(
+            state="waiting_paused",
+            reason="paused",
+            message=message,
+            allow_external_result=False,
+        )
+
     def _wait_if_pause_requested(
         self,
         point: RouteMeasurementPoint,
@@ -2676,8 +2765,6 @@ class RouteExternalMeasurementSessionRunner:
         message: str,
         allow_external_result: bool,
     ) -> dict[str, Any]:
-        with self._condition:
-            self._pending_action = None
         self._set_state(state, waiting_reason=reason, message=message)
         self._set_waiting(True)
         try:

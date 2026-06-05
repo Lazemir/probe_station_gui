@@ -26,6 +26,7 @@
 - Autofocus performs a local refinement within ±1 mm of current Z (SciPy required) and auto-homes A if needles are not up.
 - Homing buttons only show spinners after the homing task is accepted; they stop on ALARM/error via `homing_action_finished`.
 - Keyboard jog stop: on key release, a `0x85` stop is sent and resent once after 120 ms if no keys remain; no status polling to avoid lag.
+- Route measurement Pause/Resume/Interrupt controls are safety-critical behavior. Do not change their semantics incidentally. Pause may wait for the current contact checkpoint and then must become Resume. Interrupt must stop the current contact at the first штатная opportunity, must not be cleared before the next route checkpoint, and must not allow later contact steps such as lower/contact-check/external measurement to continue as if nothing happened. If Interrupt aborts autofocus mid-run, the autofocus code must restore the starting Z or another known safe Z before returning control.
 
 ## Settings and logging
 - Default settings file: `probe_station_gui/default_settings.json`.
@@ -47,6 +48,7 @@
 - GUI copy must read like finished product text: short state or next action, not implementation narration. Do not write that a button or control "will be available"; let enabled and disabled states show availability. Do not expose internal terms such as request, correction, pending, runner, or chunk unless they are actual user-domain terms, and do not write defensive "not X, but Y" or changelog-style UI text.
 - Avoid per-objective magic constants in code, especially motion speeds. Prefer live measurements, calibration-script output, or user-editable settings; keep unavoidable numeric guards named and minimal.
 - After the user runs the app or reports runtime behavior, inspect both `status-history.log` and `probe-station-gui.log` before diagnosing or changing behavior.
+- When touching route measurement controls, add or update regression tests for Pause/Resume/Interrupt button behavior and for runner-side interrupt propagation through autofocus/photo/contact placement.
 - Do not emit Qt signals while holding a non-reentrant lock. If controller state reset paths can emit signals that call back into the same object, use a reentrant lock or move signal emission outside the locked section.
 - When changing serial behavior, check both `StageController` and `SerialTerminalWindow` for coordination.
 - When updating controls or feedrates, keep `SettingsManager`, `settings_dialog.py`, and `joystick_window.py` in sync.

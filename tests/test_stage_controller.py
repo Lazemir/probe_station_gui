@@ -1185,6 +1185,68 @@ class StageControllerAutofocusTest(unittest.TestCase):
             ],
         )
 
+    def test_external_local_autofocus_cancel_restores_start_z(self) -> None:
+        controller = StageController()
+        serial_connection = _WritableFakeSerial()
+        controller._serial = serial_connection
+        current_z = [10.025]
+        moves: list[float] = []
+        statuses: list[str] = []
+        controller.status_message = types.SimpleNamespace(
+            emit=lambda message: statuses.append(str(message))
+        )
+
+        def _prepare(_serial, *, range_mm, step_mm):
+            return AutofocusContext(
+                objective_name="X20",
+                start_z=10.000,
+                min_z=0.0,
+                max_z=20.0,
+                lower_z=9.970,
+                upper_z=10.030,
+                local_range_mm=0.030,
+                fine_step_mm=0.010,
+            )
+
+        def _static(_serial, center_z, *, min_z, max_z, step_mm):
+            controller._cancel_event.set()
+            raise StageControllerError("Operation cancelled.")
+
+        def _status(_serial, *, axes):
+            position = (0.0, 0.0, current_z[0])
+            return types.SimpleNamespace(
+                state="Idle",
+                position=position,
+                work_position=position,
+                display_position=position,
+                work_offset=(0.0, 0.0, 0.0),
+                homed_axes={"Z"},
+            )
+
+        def _send_relative_move(_serial, move, **_kwargs) -> None:
+            self.assertFalse(controller._cancel_event.is_set())
+            current_z[0] += move.z
+            moves.append(move.z)
+
+        controller._prepare_autofocus_context_locked = _prepare
+        controller._run_static_focus_refinement_locked = _static
+        controller._query_status_with_required_coordinates = _status
+        controller._position_for_configured_mode = (
+            lambda status: status.display_position
+        )
+        controller._wait_for_idle = lambda _serial, timeout=10.0: None
+        controller._send_relative_move = _send_relative_move
+
+        with self.assertRaisesRegex(StageControllerError, "Operation cancelled"):
+            controller.run_external_local_autofocus(range_mm=0.030)
+
+        self.assertAlmostEqual(current_z[0], 10.000)
+        self.assertEqual(len(moves), 1)
+        self.assertAlmostEqual(moves[0], -0.025)
+        self.assertIn(b"\x85", serial_connection.writes)
+        self.assertTrue(controller._cancel_event.is_set())
+        self.assertIn("returning to start Z", statuses[-1])
+
 
 class StageControllerObjectiveTest(unittest.TestCase):
     def test_verification_moves_directly_to_click_target(self) -> None:

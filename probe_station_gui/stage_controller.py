@@ -107,6 +107,7 @@ class _QueuedSerialWrite:
     payload: bytes = field(compare=False)
     description: str = field(compare=False)
     generation: int = field(compare=False, default=0)
+    clear_epoch: int = field(compare=False, default=0)
 
 
 @dataclass
@@ -385,6 +386,7 @@ class StageController(QObject):
         self._active_work_coordinate_system: Optional[str] = None
         self._controller_coordinate_offsets: dict[str, tuple[float, ...]] = {}
         self._async_write_queue: PriorityQueue[_QueuedSerialWrite] = PriorityQueue()
+        self._async_write_clear_epoch = 0
         self._async_write_shutdown = threading.Event()
         self._async_write_thread = threading.Thread(
             target=self._run_async_write_worker,
@@ -1967,6 +1969,7 @@ class StageController(QObject):
                 payload=(stripped + "\n").encode("ascii"),
                 description=stripped,
                 generation=self._queued_jog_generation,
+                clear_epoch=self._async_write_clear_epoch,
             )
         )
 
@@ -2025,6 +2028,7 @@ class StageController(QObject):
                 payload=(command + "\n").encode("ascii"),
                 description=command,
                 generation=self._queued_jog_generation,
+                clear_epoch=self._async_write_clear_epoch,
             )
         )
         return True
@@ -2133,6 +2137,7 @@ class StageController(QObject):
                 payload=payload,
                 description=f"feed override {applied}%",
                 generation=self._queued_feed_override_generation,
+                clear_epoch=self._async_write_clear_epoch,
             )
         )
         return applied
@@ -2380,6 +2385,7 @@ class StageController(QObject):
             payload=b"\x85",
             description="0x85",
             generation=self._queued_jog_generation,
+            clear_epoch=self._async_write_clear_epoch,
         )
         if self._try_write_jog_stop_immediately(job):
             return
@@ -2406,6 +2412,7 @@ class StageController(QObject):
                 payload=b"\x85",
                 description="0x85 emergency",
                 generation=self._queued_jog_generation,
+                clear_epoch=self._async_write_clear_epoch,
             )
             self._write_async_job(serial_connection, job)
             logger.warning("Emergency jog stop written before serial shutdown.")
@@ -2444,6 +2451,7 @@ class StageController(QObject):
                 kind="soft_reset",
                 payload=b"\x18",
                 description=f"CTRL-X source={source}",
+                clear_epoch=self._async_write_clear_epoch,
             )
         )
 
@@ -2460,6 +2468,7 @@ class StageController(QObject):
                 kind="terminal",
                 payload=payload.encode("utf-8"),
                 description=payload.rstrip(),
+                clear_epoch=self._async_write_clear_epoch,
             )
         )
 
@@ -2894,19 +2903,28 @@ class StageController(QObject):
             f"{context.objective_name}: local search within "
             f"+/-{context.local_range_mm:.3f} mm."
         )
-        best = self._run_static_focus_refinement_locked(
-            serial_connection,
-            context.start_z,
-            min_z=context.lower_z,
-            max_z=context.upper_z,
-            step_mm=context.fine_step_mm,
-        )
-        self._approach_z_from_below_locked(
-            serial_connection,
-            best.best_z,
-            min_z=context.min_z,
-            fine_step_mm=context.fine_step_mm,
-        )
+        try:
+            best = self._run_static_focus_refinement_locked(
+                serial_connection,
+                context.start_z,
+                min_z=context.lower_z,
+                max_z=context.upper_z,
+                step_mm=context.fine_step_mm,
+            )
+            self._approach_z_from_below_locked(
+                serial_connection,
+                best.best_z,
+                min_z=context.min_z,
+                fine_step_mm=context.fine_step_mm,
+            )
+        except StageControllerError as exc:
+            if str(exc) != "Operation cancelled.":
+                raise
+            self._restore_autofocus_start_z_after_cancel_locked(
+                serial_connection,
+                context,
+            )
+            raise
         return AutofocusResult(
             objective_name=context.objective_name,
             mode="local",
@@ -2920,6 +2938,55 @@ class StageController(QObject):
             lower_z_mm=float(context.lower_z),
             upper_z_mm=float(context.upper_z),
         )
+
+    def _restore_autofocus_start_z_after_cancel_locked(
+        self,
+        serial_connection: serial.Serial,
+        context: _AutofocusContext,
+    ) -> None:
+        """Return local autofocus to its starting Z after a user interrupt."""
+
+        was_cancelled = self._cancel_event.is_set()
+        self._cancel_event.clear()
+        self._queued_jog_generation += 1
+        self._clear_pending_async_writes()
+        try:
+            self.status_message.emit(
+                f"Autofocus {context.objective_name}: returning to start Z."
+            )
+            self._write_realtime_payload(
+                serial_connection,
+                b"\x85",
+                "autofocus cancel jog stop 0x85",
+            )
+            try:
+                self._wait_for_idle(serial_connection, timeout=5.0)
+            except StageControllerError:
+                logger.warning(
+                    "Could not confirm idle before restoring autofocus start Z.",
+                    exc_info=True,
+                )
+            status = self._query_status_with_required_coordinates(
+                serial_connection,
+                axes=("Z",),
+            )
+            position = self._position_for_configured_mode(status)
+            if status is None or position is None or len(position) < 3:
+                raise StageControllerError(
+                    "Unable to read Z position after autofocus cancel."
+                )
+            current_z = float(position[2])
+            delta_z = float(context.start_z) - current_z
+            if abs(delta_z) >= 1e-5:
+                self._send_relative_move(
+                    serial_connection,
+                    MoveVector(z=delta_z),
+                    allow_relative=True,
+                    as_jog=True,
+                )
+        finally:
+            if was_cancelled:
+                self._cancel_event.set()
 
     def _prepare_autofocus_context_locked(
         self,
@@ -5701,6 +5768,7 @@ class StageController(QObject):
         return sequence
 
     def _clear_pending_async_writes(self) -> None:
+        self._async_write_clear_epoch += 1
         while True:
             try:
                 self._async_write_queue.get_nowait()
@@ -5744,12 +5812,22 @@ class StageController(QObject):
         return self._queued_jog_command_is_current(job)
 
     def _queued_jog_command_is_current(self, job: _QueuedSerialWrite) -> bool:
+        if job.clear_epoch != self._async_write_clear_epoch:
+            logger.debug(
+                "TIMING %s_dropped_after_queue_clear command=%s epoch=%s current_epoch=%s",
+                job.kind,
+                job.description,
+                job.clear_epoch,
+                self._async_write_clear_epoch,
+            )
+            return False
         if job.kind != "jog_command":
             return True
         if job.generation == self._queued_jog_generation:
             return True
         logger.debug(
-            "TIMING jog_command_dropped_superseded command=%s generation=%s current_generation=%s",
+            "TIMING %s_dropped_superseded command=%s generation=%s current_generation=%s",
+            job.kind,
             job.description,
             job.generation,
             self._queued_jog_generation,

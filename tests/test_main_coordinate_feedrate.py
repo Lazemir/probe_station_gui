@@ -1272,6 +1272,12 @@ assert image.height() == 4
         window._pending_route_measure_point = None
         window._route_measurement_dialog = None
         window.design_navigator_panel = None
+        cancellations: list[str] = []
+        window.stage_controller = types.SimpleNamespace(
+            cancel_active_task=lambda reason: cancellations.append(str(reason))
+        )
+        window._clear_stage_motion_axes = lambda: None
+        window._schedule_status_refreshes = lambda _delays: None
         window._show_status = (
             lambda message, _timeout_ms=None: statuses.append(str(message))
         )
@@ -1279,6 +1285,7 @@ assert image.height() == 4
         Main._request_route_measurement_for_point(window, 91)
 
         self.assertTrue(runner.correction_requested)
+        self.assertEqual(cancellations, ["Route measurement interrupt requested."])
         self.assertEqual(window._pending_route_measure_point, 91)
         self.assertEqual(
             statuses,

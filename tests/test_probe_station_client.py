@@ -336,6 +336,47 @@ class ProbeStationClientTest(unittest.TestCase):
         ):
             list(session.iter_ready(poll_interval_s=0.0))
 
+    def test_route_iter_ready_ignores_initial_paused_state(self) -> None:
+        transport = _FakeTransport(
+            (
+                200,
+                {
+                    "accepted": True,
+                    "session_id": "s1",
+                    "state": "waiting_paused",
+                    "waiting_reason": "paused",
+                    "position": 1,
+                },
+            ),
+            (
+                200,
+                {
+                    "accepted": True,
+                    "session_id": "s1",
+                    "state": "waiting_paused",
+                    "waiting_reason": "paused",
+                    "position": 1,
+                },
+            ),
+            (
+                200,
+                {
+                    "accepted": True,
+                    "session_id": "s1",
+                    "state": "waiting_external_measurement",
+                    "waiting_reason": "external_measurement",
+                    "position": 1,
+                    "current_contact": {"contact_number": 7},
+                },
+            ),
+        )
+        client = ProbeStationClient(api_key="secret", transport=transport)
+        session = client.route.start_external(initial_measurement_count=10)
+
+        ready = next(session.iter_ready(poll_interval_s=0.0))
+
+        self.assertEqual(ready.contact_number, 7)
+
     def test_prepare_contact_is_client_side_recipe_without_backend_prepare(self) -> None:
         transport = _FakeTransport(
             (200, {"accepted": True, "moved": True}),

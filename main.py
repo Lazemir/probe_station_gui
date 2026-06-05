@@ -2599,6 +2599,7 @@ class Main(QMainWindow):
             photo_enabled=photo_enabled,
             photo_focus_enabled=photo_focus_enabled,
             photo_settle_s=photo_settle_s,
+            wait_before_first_point=True,
         )
         self._route_measurement_runner = runner
         self._route_measurement_waiting = False
@@ -2621,7 +2622,7 @@ class Main(QMainWindow):
             daemon=True,
         )
         start_message = (
-            "Route API session starting at "
+            "Route API session ready at "
             f"point {int(selected_point.index)} {selected_point.label}; "
             f"{len(points)} points selected."
         )
@@ -2677,10 +2678,10 @@ class Main(QMainWindow):
                 "action": "pause",
             }
         if action.lower() == "interrupt":
-            self.stage_controller.cancel_active_motion(
-                "Route API session interrupt requested."
+            self._interrupt_route_measurement_runner(
+                runner,
+                reason="Route API session interrupt requested.",
             )
-            runner.request_current_point_correction()
             return {
                 "accepted": True,
                 "message": "Route session interrupt requested.",
@@ -8602,7 +8603,10 @@ class Main(QMainWindow):
             return
         if pending_point_number is None:
             self._pending_route_measure_point = None
-        runner.request_current_point_correction()
+        self._interrupt_route_measurement_runner(
+            runner,
+            reason="Route measurement interrupt requested.",
+        )
         if pending_point_number is None:
             message = "Stopping contact measurement."
         else:
@@ -8831,6 +8835,27 @@ class Main(QMainWindow):
             self.design_navigator_panel.set_route_measurement_status(message)
         if self._route_measurement_dialog is not None:
             self._route_measurement_dialog.set_status(message)
+
+    def _interrupt_route_measurement_runner(
+        self,
+        runner: object,
+        *,
+        reason: str,
+    ) -> None:
+        try:
+            waiting = bool(
+                runner.status_payload().get("waiting")
+                if hasattr(runner, "status_payload")
+                else self._route_measurement_waiting
+            )
+        except Exception:
+            waiting = bool(self._route_measurement_waiting)
+        if hasattr(runner, "request_current_point_correction"):
+            runner.request_current_point_correction()
+        if not waiting:
+            self.stage_controller.cancel_active_task(reason)
+            self._clear_stage_motion_axes()
+            self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
 
     def _on_route_measurement_status(self, message: str) -> None:
         self._show_status(message)
