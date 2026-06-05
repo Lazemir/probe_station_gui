@@ -8562,12 +8562,14 @@ class Main(QMainWindow):
         if open_controls:
             self._show_route_measurement_dialog_for_api_session()
         total_points = max(0, int(total))
+        waiting = bool(getattr(self, "_route_measurement_waiting", False))
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_route_measurement_running(True)
-            self.design_navigator_panel.set_route_measurement_waiting(False)
+            self.design_navigator_panel.set_route_measurement_waiting(waiting)
             self.design_navigator_panel.set_route_measurement_status(message)
         if self._route_measurement_dialog is not None:
             self._route_measurement_dialog.set_running(True)
+            self._route_measurement_dialog.set_waiting(waiting)
             self._route_measurement_dialog.reset_progress(total_points)
             self._route_measurement_dialog.set_status(message)
         self._show_status(message)

@@ -1102,9 +1102,11 @@ assert image.height() == 4
         )
         dialog = types.SimpleNamespace(
             set_running=lambda value: calls.append(("dialog_running", value)),
+            set_waiting=lambda value: calls.append(("dialog_waiting", value)),
             reset_progress=lambda value: calls.append(("dialog_progress", value)),
             set_status=lambda value: calls.append(("dialog_status", value)),
         )
+        window._route_measurement_waiting = False
         window.design_navigator_panel = panel
         window._route_measurement_dialog = dialog
         window._set_route_measurement_resume_point = lambda value: calls.append(
@@ -1128,6 +1130,51 @@ assert image.height() == 4
         self.assertIn(("open_controls",), calls)
         self.assertIn(("dialog_progress", 420), calls)
         self.assertIn(("status", "started"), calls)
+
+    def test_route_started_preserves_initial_waiting_state_for_api_controls(
+        self,
+    ) -> None:
+        window = Main.__new__(Main)
+        calls: list[object] = []
+        panel = types.SimpleNamespace(
+            set_route_measurement_running=lambda value: calls.append(
+                ("panel_running", value)
+            ),
+            set_route_measurement_waiting=lambda value: calls.append(
+                ("panel_waiting", value)
+            ),
+            set_route_measurement_status=lambda value: calls.append(
+                ("panel_status", value)
+            ),
+        )
+        dialog = types.SimpleNamespace(
+            set_running=lambda value: calls.append(("dialog_running", value)),
+            set_waiting=lambda value: calls.append(("dialog_waiting", value)),
+            reset_progress=lambda value: calls.append(("dialog_progress", value)),
+            set_status=lambda value: calls.append(("dialog_status", value)),
+        )
+        window._route_measurement_waiting = True
+        window.design_navigator_panel = panel
+        window._route_measurement_dialog = dialog
+        window._set_route_measurement_resume_point = lambda value: calls.append(
+            ("resume_point", value)
+        )
+        window._set_route_measurement_pending = lambda value: calls.append(
+            ("pending", value)
+        )
+        window._show_route_measurement_dialog_for_api_session = lambda: calls.append(
+            ("open_controls",)
+        )
+        window._show_status = lambda message: calls.append(("status", message))
+        window._update_stage_coordinate_apply_state = lambda: calls.append(
+            ("update_stage_controls",)
+        )
+
+        Main._on_route_measurement_started(window, "started", 420, 7, True)
+
+        self.assertIn(("panel_waiting", True), calls)
+        self.assertIn(("dialog_running", True), calls)
+        self.assertIn(("dialog_waiting", True), calls)
 
     def test_route_progress_eta_uses_current_run_baseline(self) -> None:
         dialog = RouteMeasurementDialog.__new__(RouteMeasurementDialog)
