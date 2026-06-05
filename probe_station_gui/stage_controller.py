@@ -256,6 +256,7 @@ class StageController(QObject):
     SERIAL_JOG_COMMAND_SETTLE_S = 0.03
     COORDINATE_STATUS_READ_ATTEMPTS = 3
     COORDINATE_STATUS_RETRY_DELAY_S = 0.05
+    COORDINATE_TARGET_STATUS_TOLERANCE = 7.5e-4
     FEED_OVERRIDE_RESET = b"\x90"
     FEED_OVERRIDE_PLUS_10 = b"\x91"
     FEED_OVERRIDE_MINUS_10 = b"\x92"
@@ -1974,10 +1975,12 @@ class StageController(QObject):
         targets: dict[str, float],
         *,
         feedrate: float,
+        replace_active: bool = False,
     ) -> bool:
         """Stop and requeue an absolute jog target through the jog command path."""
 
-        if self.is_busy():
+        active_busy = self.is_busy()
+        if active_busy and not replace_active:
             raise StageControllerError("Stage is busy. Wait for the current operation to finish.")
         normalized: dict[str, float] = {}
         for raw_axis, raw_value in targets.items():
@@ -2008,6 +2011,8 @@ class StageController(QObject):
         )
         if not command:
             return False
+        if active_busy:
+            self._cancel_event.set()
         self.queue_jog_stop()
         self._queued_jog_generation += 1
         self._jog_motion_active = False
@@ -4273,13 +4278,13 @@ class StageController(QObject):
                     ordered_targets,
                     ignore_needle_safety=self._motion_safety_disabled,
                     feedrate=feedrate,
-                    wait_for_completion=False,
+                    wait_for_completion=True,
                     allow_unhomed=allow_unhomed,
                     as_jog=True,
                 )
             self.movement_finished.emit(
                 True,
-                f"Coordinate move accepted (G90 {target_text}).",
+                f"Coordinate move complete (G90 {target_text}).",
             )
         except StageControllerError as exc:
             self.movement_finished.emit(False, str(exc))
@@ -4688,8 +4693,9 @@ class StageController(QObject):
                     ordered_targets,
                     current_values,
                 )
-                self._wait_for_idle(
+                self._wait_for_idle_at_targets(
                     serial_connection,
+                    ordered_targets,
                     timeout=self._idle_timeout_for_distance(
                         move_distance, effective_feedrate
                     ),
@@ -5803,6 +5809,10 @@ class StageController(QObject):
 
     def _write_command(self, serial_connection: serial.Serial, command: str) -> None:
         self._check_cancelled()
+        self._discard_pending_status_input(
+            serial_connection,
+            reason=f"before command {command.strip()}",
+        )
         data = (command.strip() + "\n").encode("ascii")
         try:
             logger.debug("SERIAL TRACE stage_write command=%s", command.strip())
@@ -5859,6 +5869,54 @@ class StageController(QObject):
                 raise StageControllerError("Controller entered ALARM state.")
             time.sleep(0.1)
         raise StageControllerError("Controller did not return to IDLE state in time.")
+
+    def _wait_for_idle_at_targets(
+        self,
+        serial_connection: serial.Serial,
+        targets: dict[str, float],
+        *,
+        timeout: float,
+    ) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self._check_cancelled()
+            status = self._query_status(serial_connection)
+            logger.debug(
+                "SERIAL TRACE wait_for_target_idle status=%s position=%s targets=%s",
+                None if status is None else status.state,
+                None if status is None else status.display_position,
+                targets,
+            )
+            if status and status.state.lower() == "alarm":
+                raise StageControllerError("Controller entered ALARM state.")
+            if (
+                status
+                and status.state.lower() == "idle"
+                and self._status_matches_axis_targets(status, targets)
+            ):
+                return
+            time.sleep(0.1)
+        raise StageControllerError("Controller did not reach the requested coordinate in time.")
+
+    def _status_matches_axis_targets(
+        self,
+        status: _Status,
+        targets: dict[str, float],
+        *,
+        tolerance: float | None = None,
+    ) -> bool:
+        allowed_error = (
+            self.COORDINATE_TARGET_STATUS_TOLERANCE
+            if tolerance is None
+            else max(0.0, float(tolerance))
+        )
+        for axis, target in targets.items():
+            value = self._axis_value_for_configured_mode(status, axis)
+            if value is None:
+                return False
+            if abs(float(value) - float(target)) > allowed_error:
+                return False
+        return True
 
     def _query_status(self, serial_connection: serial.Serial, timeout: float = 1.5) -> Optional[_Status]:
         desired_mask = self._desired_status_report_mask_for_mode(
@@ -5964,17 +6022,43 @@ class StageController(QObject):
         return required
 
     def _discard_pending_status_input(
-        self, serial_connection: serial.Serial
+        self,
+        serial_connection: serial.Serial,
+        *,
+        reason: str = "status query",
     ) -> None:
         try:
+            waiting = int(getattr(serial_connection, "in_waiting", 0) or 0)
+        except (TypeError, ValueError, AttributeError, _SERIAL_IO_EXCEPTIONS):
+            waiting = 0
+        if waiting <= 0:
+            return
+        try:
+            if hasattr(serial_connection, "read"):
+                data = serial_connection.read(waiting)
+                logger.debug(
+                    "SERIAL TRACE discard_pending_input reason=%s bytes=%r",
+                    reason,
+                    data[:200],
+                )
+                return
             serial_connection.reset_input_buffer()
-        except _SERIAL_IO_EXCEPTIONS:
-            logger.debug("Serial input buffer reset after incomplete status failed.")
+            logger.debug(
+                "SERIAL TRACE discard_pending_input reason=%s bytes=%d",
+                reason,
+                waiting,
+            )
+        except (AttributeError, _SERIAL_IO_EXCEPTIONS):
+            logger.debug("Serial input buffer reset failed after stale input.")
 
     def _read_status_frame(
         self, serial_connection: serial.Serial, *, timeout: float
     ) -> Optional[_Status]:
         try:
+            self._discard_pending_status_input(
+                serial_connection,
+                reason="before status query",
+            )
             logger.debug("SERIAL TRACE stage_query_status write=?")
             serial_connection.write(b"?\n")
             serial_connection.flush()

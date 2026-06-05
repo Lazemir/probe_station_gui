@@ -379,6 +379,23 @@ class _BufferedFakeSerial(_WritableFakeSerial):
         return chunk
 
 
+class _BufferedLineFakeSerial(_LineFakeSerial):
+    def __init__(self, data: bytes, lines: list[bytes]) -> None:
+        super().__init__(lines)
+        self.data = bytearray(data)
+        self.discarded = bytearray()
+
+    @property
+    def in_waiting(self) -> int:
+        return len(self.data)
+
+    def read(self, size: int) -> bytes:
+        chunk = bytes(self.data[:size])
+        del self.data[:size]
+        self.discarded.extend(chunk)
+        return chunk
+
+
 class StageControllerAbsoluteMoveTest(unittest.TestCase):
     def test_relative_move_callback_runs_after_g1_is_accepted(self) -> None:
         controller = StageController()
@@ -1526,6 +1543,67 @@ class StageControllerJogQueueTest(unittest.TestCase):
         finally:
             controller.shutdown()
 
+    def test_absolute_jog_reissue_rejects_busy_stage_without_replace(self) -> None:
+        controller = StageController()
+        release_thread = threading.Event()
+        active_thread = threading.Thread(target=lambda: release_thread.wait(timeout=1.0))
+        active_thread.start()
+        try:
+            controller._active_thread = active_thread
+
+            with self.assertRaises(StageControllerError):
+                controller.queue_absolute_axis_targets_jog(
+                    {"X": 1.0},
+                    feedrate=180.0,
+                )
+
+            self.assertFalse(controller._cancel_event.is_set())
+        finally:
+            release_thread.set()
+            active_thread.join(timeout=1.0)
+            controller.shutdown()
+
+    def test_absolute_jog_reissue_can_replace_active_coordinate_waiter(self) -> None:
+        controller = StageController()
+        controller.SERIAL_JOG_COMMAND_SETTLE_S = 0.0
+        serial_connection = _WritableFakeSerial()
+        lock_acquired = threading.Event()
+        release_thread = threading.Event()
+
+        def _hold_serial_lock() -> None:
+            with controller._serial_session_lock:
+                lock_acquired.set()
+                release_thread.wait(timeout=1.0)
+
+        active_thread = threading.Thread(target=_hold_serial_lock)
+        active_thread.start()
+        try:
+            controller._serial = serial_connection
+            controller._active_thread = active_thread
+            self.assertTrue(lock_acquired.wait(timeout=1.0))
+            accepted = controller.queue_absolute_axis_targets_jog(
+                {"Y": -2.0, "X": 1.5},
+                feedrate=180.0,
+                replace_active=True,
+            )
+
+            self.assertTrue(accepted)
+            self.assertTrue(controller._cancel_event.is_set())
+            self.assertEqual(serial_connection.writes, [])
+
+            release_thread.set()
+            active_thread.join(timeout=1.0)
+            controller._async_write_queue.join()
+
+            self.assertEqual(
+                serial_connection.writes,
+                [b"\x85", b"$J=G90 G21 X1.5000 Y-2.0000 F180\n"],
+            )
+        finally:
+            release_thread.set()
+            active_thread.join(timeout=1.0)
+            controller.shutdown()
+
     def test_superseded_jog_command_is_dropped_before_write(self) -> None:
         controller = StageController()
         controller.SERIAL_JOG_COMMAND_SETTLE_S = 0.0
@@ -1657,10 +1735,16 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
             emit=lambda *_args, **_kwargs: None
         )
         commands = []
+        target_idle_calls = []
         controller._write_command = lambda _serial, command: commands.append(command)
         controller._wait_for_ok = lambda *_args, **_kwargs: None
         controller._wait_for_idle = lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("waited for idle")
+        )
+        controller._wait_for_idle_at_targets = (
+            lambda _serial, targets, **kwargs: target_idle_calls.append(
+                (dict(targets), dict(kwargs))
+            )
         )
 
         controller._run_absolute_axis_targets_move(
@@ -1670,7 +1754,9 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
 
         self.assertIn("$J=G90 G21 X1.5000 Y-2.0000 F25", commands)
         self.assertFalse(any(command.startswith("G1 ") for command in commands))
+        self.assertEqual(target_idle_calls[0][0], {"X": 1.5, "Y": -2.0})
         self.assertEqual(movement_results[-1][0], True)
+        self.assertIn("complete", movement_results[-1][1])
 
     def test_external_absolute_targets_waits_for_completion(self) -> None:
         controller = StageController()
@@ -1690,7 +1776,14 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
         )
         controller._write_command = lambda _serial, command: commands.append(command)
         controller._wait_for_ok = lambda *_args, **_kwargs: None
-        controller._wait_for_idle = lambda *_args, **_kwargs: idle_calls.append(_args)
+        controller._wait_for_idle = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("waited for plain idle")
+        )
+        controller._wait_for_idle_at_targets = (
+            lambda _serial, targets, **kwargs: idle_calls.append(
+                (dict(targets), dict(kwargs))
+            )
+        )
         controller._query_status = lambda _serial: None
         try:
             message = controller.run_external_absolute_axis_targets_move(
@@ -1702,6 +1795,7 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
 
         self.assertIn("$J=G90 G21 Z3.2500 F12.5", commands)
         self.assertTrue(idle_calls)
+        self.assertEqual(idle_calls[0][0], {"Z": 3.25})
         self.assertIn("Z+3.250", message)
         self.assertEqual(movement_results[-1][0], True)
 
@@ -2976,6 +3070,69 @@ class StageControllerPriorityNeedlesActionTest(unittest.TestCase):
 
 
 class StageControllerStatusRefreshTest(unittest.TestCase):
+    def test_status_query_discards_stale_buffered_status_before_query(self) -> None:
+        controller = StageController()
+        controller._current_status_report_mask = (
+            controller._desired_status_report_mask_for_mode("work")
+        )
+        stale = b"<Idle|WPos:0.000,0.000,0.000,-0.004,0.000|Bf:15,127|FS:0,0>\n"
+        serial_connection = _BufferedLineFakeSerial(
+            stale,
+            [
+                b"<Idle|WPos:0.000,0.000,0.000,-0.010,0.000|Bf:15,127|FS:0,0>\n",
+            ],
+        )
+
+        status = controller._query_status(serial_connection)
+
+        self.assertIsNotNone(status)
+        self.assertEqual(status.work_position[3], -0.010)
+        self.assertEqual(bytes(serial_connection.discarded), stale)
+        self.assertEqual(serial_connection.writes, [b"?\n"])
+
+    def test_target_idle_wait_ignores_stale_idle_before_target(self) -> None:
+        controller = StageController()
+        statuses = [
+            types.SimpleNamespace(
+                state="Idle",
+                work_position=(0.0, 0.0, 0.0, -0.004, 0.0),
+                position=None,
+                display_position=(0.0, 0.0, 0.0, -0.004, 0.0),
+            ),
+            types.SimpleNamespace(
+                state="Jog",
+                work_position=(0.0, 0.0, 0.0, -0.007, 0.0),
+                position=None,
+                display_position=(0.0, 0.0, 0.0, -0.007, 0.0),
+            ),
+            types.SimpleNamespace(
+                state="Idle",
+                work_position=(0.0, 0.0, 0.0, -0.010, 0.0),
+                position=None,
+                display_position=(0.0, 0.0, 0.0, -0.010, 0.0),
+            ),
+        ]
+        seen = []
+
+        def _query_status(_serial):
+            status = statuses.pop(0)
+            seen.append(status)
+            return status
+
+        controller._query_status = _query_status
+        original_sleep = _stage_controller_module.time.sleep
+        _stage_controller_module.time.sleep = lambda _seconds: None
+        try:
+            controller._wait_for_idle_at_targets(
+                _FakeSerial(),
+                {"A": -0.010},
+                timeout=1.0,
+            )
+        finally:
+            _stage_controller_module.time.sleep = original_sleep
+
+        self.assertEqual(len(seen), 3)
+
     def test_status_refresh_is_suppressed_while_jog_is_active(self) -> None:
         controller = StageController()
         controller._serial = _FakeSerial()

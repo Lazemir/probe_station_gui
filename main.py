@@ -535,6 +535,7 @@ class Main(QMainWindow):
     STAGE_COORDINATE_BLINK_MS = 250
     PLANNED_MOVE_DURATION_PADDING_S = 0.12
     COORDINATE_MOVE_MIN_IDLE_ACCEPT_S = 0.15
+    COORDINATE_MOVE_TARGET_TOLERANCE_MM = 7.5e-4
     TERMINAL_REFRESH_DELAYS_MS = (180, 500)
     TERMINAL_RESET_REFRESH_DELAYS_MS = (500, 1100, 1800)
     TERMINAL_RESUME_AFTER_JOG_MS = 180
@@ -675,6 +676,7 @@ class Main(QMainWindow):
         self._coordinate_move_programmed_feedrate: float | None = None
         self._coordinate_move_effective_feedrate: float | None = None
         self._coordinate_move_seen_active_state = False
+        self._coordinate_move_reissue_cancel_pending = False
         self._pending_click_to_move: tuple[float, float, float, float] | None = None
         self._pending_click_deadline: float | None = None
         self._pending_stage_axis_targets: dict[str, tuple[float, float]] = {}
@@ -1271,6 +1273,8 @@ class Main(QMainWindow):
             return self._api_contact_needles(payload)
         if action == "check_contact":
             return self._api_check_contact(payload)
+        if action == "route_contact_focus":
+            return self._api_route_contact_focus(payload)
         if action == "contact_seek":
             return self._api_contact_seek(payload)
         if action == "configure_meter":
@@ -1756,6 +1760,85 @@ class Main(QMainWindow):
 
     def _api_check_contact(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._api_measure_current_contact(payload, seek=False)
+
+    def _api_route_contact_focus(self, payload: dict[str, Any]) -> dict[str, Any]:
+        contact_number = self._api_contact_number(payload)
+        if contact_number is None:
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": "Provide a positive contact_number.",
+            }
+        context_result = self._api_contact_context(contact_number)
+        if not context_result.get("accepted", False):
+            return context_result
+        contact = context_result["contact"]
+        try:
+            focus_range_mm = self._api_float(
+                payload,
+                "range_mm",
+                "focus_range_mm",
+                "photo_autofocus_range_mm",
+                default=0.03,
+                minimum=0.001,
+            )
+            focus_step_mm = self._api_optional_float(
+                payload,
+                "step_mm",
+                "focus_step_mm",
+                minimum=0.001,
+            )
+        except ValueError as exc:
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": str(exc),
+                "contact": contact,
+            }
+
+        active_stage_task = False
+        try:
+            self.stage_controller.begin_external_task("API route contact focus")
+            active_stage_task = True
+            needles_known = bool(getattr(self.stage_controller, "_needles_known", False))
+            needles_up = bool(getattr(self.stage_controller, "_needles_up", False))
+            needles_zone = getattr(self.stage_controller, "_needles_zone", None)
+            if not (needles_known and needles_up and needles_zone == "raise"):
+                return {
+                    "accepted": False,
+                    "status_code": 409,
+                    "message": (
+                        "Route contact focus requires fully raised needles "
+                        "(known needle zone 'raise')."
+                    ),
+                    "contact": contact,
+                    "needles_known": needles_known,
+                    "needles_up": needles_up,
+                    "needles_zone": needles_zone or "unknown",
+                }
+            result = self.stage_controller.run_external_local_autofocus(
+                range_mm=focus_range_mm,
+                step_mm=focus_step_mm,
+            )
+        except StageControllerError as exc:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": str(exc),
+                "contact": contact,
+            }
+        finally:
+            if active_stage_task:
+                self.stage_controller.finish_external_task()
+        return {
+            "accepted": True,
+            "message": str(result.summary()),
+            "timestamp_utc": self._api_timestamp_utc(),
+            "contact": contact,
+            "focus_range_mm": focus_range_mm,
+            "focus_step_mm": focus_step_mm,
+            "focus": self._route_photo_focus_payload(result),
+        }
 
     def _api_contact_seek(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._api_measure_current_contact(payload, seek=True)
@@ -2297,12 +2380,35 @@ class Main(QMainWindow):
                 "voltage_range_v",
                 minimum=1e-12,
             )
-            if voltage_range is None and range_mode.strip().lower() not in {
+            source_voltage_range = self._api_optional_float(
+                range_payload,
+                "source_voltage_range_v",
+                "source_range_v",
+                "keithley_source_voltage_range_v",
+                minimum=1e-12,
+            )
+            voltmeter_range = self._api_optional_float(
+                range_payload,
+                "voltmeter_range_v",
+                "meter_voltage_range_v",
+                "nanovoltmeter_range_v",
+                "keithley_voltmeter_range_v",
+                minimum=1e-12,
+            )
+            if voltage_range is not None:
+                source_voltage_range = voltage_range
+                voltmeter_range = voltage_range
+            if (
+                voltage_range is None
+                and source_voltage_range is None
+                and voltmeter_range is None
+                and range_mode.strip().lower() not in {
                 "code_auto",
                 "auto",
                 "software_auto",
                 "computed_auto",
-            }:
+                }
+            ):
                 voltage_range = max(measurement_voltage, max_voltage)
             settings = KeithleyRouteMeterSettings(
                 measurement_voltage_v=measurement_voltage,
@@ -2329,13 +2435,13 @@ class Main(QMainWindow):
                 ),
                 voltage_range_v=voltage_range,
                 source_voltage_range_v=(
-                    voltage_range
-                    if voltage_range is not None
+                    source_voltage_range
+                    if source_voltage_range is not None
                     else defaults.source_voltage_range_v
                 ),
                 voltmeter_range_v=(
-                    voltage_range
-                    if voltage_range is not None
+                    voltmeter_range
+                    if voltmeter_range is not None
                     else defaults.voltmeter_range_v
                 ),
                 current_range_a=self._api_float(
@@ -6119,6 +6225,20 @@ class Main(QMainWindow):
             self._pending_quick_alignment_rotation = False
             if success:
                 self._collapse_alignment_panel_if_design_open()
+        if (
+            not success
+            and getattr(self, "_coordinate_move_reissue_cancel_pending", False)
+            and "operation cancelled" in message_lower
+        ):
+            self._coordinate_move_reissue_cancel_pending = False
+            logger.debug(
+                "Coordinate move worker cancelled for feedrate reissue; "
+                "keeping coordinate tracking active."
+            )
+            self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
+            self._schedule_cancel_state_refresh()
+            return
+        self._coordinate_move_reissue_cancel_pending = False
         if success:
             if self._pending_click_to_move is None:
                 self.view.finish_target_motion_to_center()
@@ -9155,7 +9275,10 @@ class Main(QMainWindow):
                 return False
             if axis_index >= len(position) or axis_index >= len(target_position):
                 return False
-            if abs(float(position[axis_index]) - float(target_position[axis_index])) > 0.01:
+            if (
+                abs(float(position[axis_index]) - float(target_position[axis_index]))
+                > self.COORDINATE_MOVE_TARGET_TOLERANCE_MM
+            ):
                 return False
         return True
 
@@ -9198,15 +9321,20 @@ class Main(QMainWindow):
         if current_position is None:
             return
         try:
+            replace_active = self.stage_controller.is_busy()
+            if replace_active:
+                self._coordinate_move_reissue_cancel_pending = True
             accepted = self.stage_controller.queue_absolute_axis_targets_jog(
                 raw_targets,
                 feedrate=requested_feedrate,
+                replace_active=True,
             )
         except Exception as error:  # pragma: no cover - UI safety guard
             logger.exception("Failed to update coordinate move feedrate.")
             accepted = False
             self._show_status(str(error), 3000)
         if not accepted:
+            self._coordinate_move_reissue_cancel_pending = False
             self._show_status("Unable to update coordinate move feedrate.", 3000)
             self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
             return
@@ -9272,10 +9400,7 @@ class Main(QMainWindow):
         latest_state = (self.stage_controller.latest_stage_state() or "").lower()
         if latest_state != "idle":
             return
-        if (
-            not self._coordinate_move_seen_active_state
-            and not self._coordinate_position_is_at_target(position)
-        ):
+        if not self._coordinate_position_is_at_target(position):
             return
         if (
             self._coordinate_move_started_at is not None

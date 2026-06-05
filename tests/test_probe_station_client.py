@@ -232,6 +232,114 @@ class ProbeStationClientTest(unittest.TestCase):
         self.assertTrue(result["prepared"])
         self.assertEqual(result["contact_seek"], {"found": True})
 
+    def test_prepare_contact_can_seek_before_measurement(self) -> None:
+        transport = _FakeTransport(
+            (200, {"accepted": True, "needle_action": "raise"}),
+            (200, {"accepted": True, "moved": True}),
+            (200, {"accepted": True, "focus": {"z": 1.2}}),
+            (200, {"accepted": True, "needle_action": "lower"}),
+            (
+                200,
+                {
+                    "accepted": True,
+                    "contact_ok": True,
+                    "contact_found": True,
+                    "measurement": {
+                        "status": "ok",
+                        "contact_quality": {"median_ohm": 10_200.0},
+                    },
+                    "contact_seek": {"found": True},
+                },
+            ),
+        )
+        client = ProbeStationClient(api_key="secret", transport=transport)
+
+        result = client.prepare_contact(
+            7,
+            raise_before_move=True,
+            lift_before_move=False,
+            focus_before_lower=True,
+            focus_range_mm=0.02,
+            seek_before_measurement=True,
+            reference_resistance_ohm=10_000.0,
+            resistance_relative_tolerance=0.05,
+        )
+
+        urls = [call["url"] for call in transport.calls]
+        self.assertTrue(urls[0].endswith("/api/v1/route/contacts/7/needles"))
+        self.assertTrue(urls[1].endswith("/api/v1/route/contacts/7/move"))
+        self.assertTrue(urls[2].endswith("/api/v1/route/contacts/7/focus"))
+        self.assertTrue(urls[3].endswith("/api/v1/route/contacts/7/needles"))
+        self.assertTrue(urls[4].endswith("/api/v1/route/contacts/7/seek"))
+        self.assertFalse(any(url.endswith("/check") for url in urls))
+        self.assertTrue(result["prepared"])
+        self.assertTrue(result["resistance_match"])
+        self.assertAlmostEqual(result["measured_resistance_ohm"], 10_200.0)
+
+    def test_prepare_contact_stops_after_failed_raise_before_move(self) -> None:
+        transport = _FakeTransport(
+            (200, {"accepted": False, "message": "Needles are busy."}),
+        )
+        client = ProbeStationClient(api_key="secret", transport=transport)
+
+        result = client.prepare_contact(7, raise_before_move=True)
+
+        self.assertEqual(len(transport.calls), 1)
+        self.assertTrue(
+            transport.calls[0]["url"].endswith("/api/v1/route/contacts/7/needles")
+        )
+        self.assertFalse(result["prepared"])
+        self.assertIn("Needles are busy", result["message"])
+
+    def test_prepare_contact_retries_seek_on_reference_resistance_mismatch(self) -> None:
+        transport = _FakeTransport(
+            (200, {"accepted": True, "moved": True}),
+            (200, {"accepted": True, "needle_action": "lower"}),
+            (
+                200,
+                {
+                    "accepted": True,
+                    "contact_ok": True,
+                    "measurement": {"status": "ok", "resistance_ohm": 30_000.0},
+                },
+            ),
+            (
+                200,
+                {
+                    "accepted": True,
+                    "contact_ok": True,
+                    "contact_found": True,
+                    "measurement": {"status": "ok", "resistance_ohm": 25_000.0},
+                },
+            ),
+            (
+                200,
+                {
+                    "accepted": True,
+                    "contact_ok": True,
+                    "contact_found": True,
+                    "measurement": {"status": "ok", "resistance_ohm": 10_500.0},
+                    "contact_seek": {"found": True},
+                },
+            ),
+        )
+        client = ProbeStationClient(api_key="secret", transport=transport)
+
+        result = client.prepare_contact(
+            7,
+            reference_resistance_ohm=10_000.0,
+            resistance_relative_tolerance=0.10,
+            seek_attempts=2,
+        )
+
+        urls = [call["url"] for call in transport.calls]
+        seek_urls = [url for url in urls if url.endswith("/api/v1/route/contacts/7/seek")]
+        self.assertEqual(len(seek_urls), 2)
+        self.assertTrue(result["prepared"])
+        self.assertTrue(result["resistance_match"])
+        self.assertEqual(result["seek_attempts"], 2)
+        self.assertAlmostEqual(result["resistance_relative_error"], 0.05)
+
 
 class CredentialStoreTest(unittest.TestCase):
     def test_environment_variable_has_priority(self) -> None:

@@ -113,6 +113,17 @@ class Keithley2400With2182AConfig:
             ),
             capabilities=KEITHLEY_RANGE_CAPABILITIES,
         )
+        source_voltage_range = ranges.source_voltage_range_v
+        voltmeter_range = ranges.voltmeter_range_v
+        if range_mode == OHMMETER_RANGE_MANUAL and self.voltage_range_v is None:
+            source_voltage_range = max(
+                voltage,
+                _positive_finite(self.source_voltage_range_v, 0.21),
+            )
+            voltmeter_range = max(
+                voltage,
+                _positive_finite(self.voltmeter_range_v, 0.1),
+            )
         nplc = _finite_float(self.nplc, 1.0)
         nplc = max(0.01, min(50.0, nplc))
         terminals = str(self.terminals).strip().lower()
@@ -143,8 +154,8 @@ class Keithley2400With2182AConfig:
             ),
             maximum_current_a=_optional_positive_float(self.maximum_current_a),
             voltage_range_v=_optional_positive_float(self.voltage_range_v),
-            source_voltage_range_v=ranges.source_voltage_range_v,
-            voltmeter_range_v=ranges.voltmeter_range_v,
+            source_voltage_range_v=source_voltage_range,
+            voltmeter_range_v=voltmeter_range,
             current_range_a=ranges.current_range_a,
             compliance_current_a=ranges.compliance_current_a,
             range_voltage_headroom=max(
@@ -926,6 +937,12 @@ class Keithley2400With2182A(AbstractOhmmeter):
 
         self._configure_common(cfg)
 
+        self._try_write(source, ":ABOR")
+        self._try_write(voltmeter, "ABOR")
+        self._try_write(source, "TRAC:FEED:CONT NEV")
+        self._try_write(voltmeter, "TRAC:FEED:CONT NEV")
+        self._try_write(source, "*CLS")
+        self._try_write(voltmeter, "*CLS")
         self._try_write(source, ":TRIG:CLE")
         self._write(source, ":SOUR:VOLT:MODE LIST")
         if not self._source_list_covers(source_list):

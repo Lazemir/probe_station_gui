@@ -356,6 +356,25 @@ class ProbeStationApiServer:
             _raise_for_rejected(result)
             return result
 
+        @app.post("/api/v1/route/contacts/{contact_number}/focus")
+        def focus_route_contact(
+            contact_number: int,
+            payload: dict[str, Any] | None = Body(default=None),
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+        ) -> dict[str, Any]:
+            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
+            body = dict(payload or {})
+            body["contact_number"] = int(contact_number)
+            result = self._call_command(
+                {
+                    "action": "route_contact_focus",
+                    "payload": body,
+                }
+            )
+            _raise_for_rejected(result)
+            return result
+
         @app.post("/api/v1/route/contacts/{contact_number}/seek")
         def seek_route_contact(
             contact_number: int,

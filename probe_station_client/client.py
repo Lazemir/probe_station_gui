@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import urllib.error
 import urllib.request
@@ -251,6 +252,13 @@ class ProbeStationClient:
             dict(options),
         )
 
+    def contact_focus(self, contact_number: int, **options: Any) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/api/v1/route/contacts/{int(contact_number)}/focus",
+            dict(options),
+        )
+
     def contact_seek(self, contact_number: int, **options: Any) -> dict[str, Any]:
         return self._request(
             "POST",
@@ -275,6 +283,12 @@ class ProbeStationClient:
             "lower",
             default=True,
         )
+        raise_before_move = self._pop_bool_option(
+            payload,
+            "raise_before_move",
+            "raise_needles_before_move",
+            default=False,
+        )
         lift_before_move = self._pop_bool_option(
             payload,
             "lift_before_move",
@@ -285,32 +299,150 @@ class ProbeStationClient:
             "lift_on_failure",
             default=True,
         )
+        focus_before_lower = self._pop_bool_option(
+            payload,
+            "focus_before_lower",
+            "focus",
+            default=False,
+        )
+        seek_before_measurement = self._pop_bool_option(
+            payload,
+            "seek_before_measurement",
+            "seek_before_check",
+            "force_seek",
+            "always_seek",
+            default=False,
+        )
+        seek_attempts = self._pop_int_option(
+            payload,
+            "seek_attempts",
+            "contact_seek_attempts",
+            default=1,
+        )
+        reference_resistance_ohm = self._pop_float_option(
+            payload,
+            "reference_resistance_ohm",
+            "target_resistance_ohm",
+            default=None,
+        )
+        if reference_resistance_ohm is None and "expected_resistance_ohm" in payload:
+            reference_resistance_ohm = self._coerce_float(
+                payload.get("expected_resistance_ohm"),
+                default=None,
+            )
+        reference_resistance_relative_tolerance = self._pop_float_option(
+            payload,
+            "reference_resistance_relative_tolerance",
+            "resistance_relative_tolerance",
+            "resistance_tolerance_fraction",
+            default=math.inf,
+        )
+        if (
+            reference_resistance_relative_tolerance is not None
+            and reference_resistance_relative_tolerance < 0.0
+        ):
+            reference_resistance_relative_tolerance = 0.0
+        focus_payload = self._contact_focus_payload(payload)
         steps: dict[str, Any] = {}
+
+        def failure_response(
+            step_response: Mapping[str, Any],
+            *,
+            message: str,
+            moved: bool,
+        ) -> dict[str, Any]:
+            response = dict(step_response)
+            response["accepted"] = False
+            response["prepared"] = False
+            response["needles_lowered"] = False
+            response["moved_to_contact"] = bool(moved)
+            response["lifted_before_move"] = bool(move_to_contact and lift_before_move)
+            response["raised_before_move"] = bool(raise_before_move)
+            response["lifted_on_failure"] = False
+            response["check"] = None
+            response["steps"] = steps
+            response["message"] = str(step_response.get("message") or message)
+            return response
+
         if isinstance(meter, Mapping) and meter:
             steps["meter.configure"] = self.meter.configure(**meter)
+        if raise_before_move:
+            raise_step = self.contact_needles(
+                contact_number,
+                action="raise",
+                **self._contact_motion_payload(payload),
+            )
+            steps["raise_needles"] = raise_step
+            if not self._contact_step_accepted(raise_step):
+                return failure_response(
+                    raise_step,
+                    message="Needle raise failed.",
+                    moved=False,
+                )
         if move_to_contact:
             move_payload = self._contact_motion_payload(payload)
             move_payload["lift_before_move"] = lift_before_move
             move_payload["lower_needles"] = False
-            steps["move_to_contact"] = self.move_to_contact(
+            move_step = self.move_to_contact(
                 contact_number,
                 **move_payload,
             )
+            steps["move_to_contact"] = move_step
+            if not self._contact_step_accepted(move_step):
+                return failure_response(
+                    move_step,
+                    message="Contact move failed.",
+                    moved=False,
+                )
+        if focus_before_lower:
+            focus = self.contact_focus(contact_number, **focus_payload)
+            steps["focus_before_lower"] = focus
+            if not bool(focus.get("accepted", False)):
+                return failure_response(
+                    focus,
+                    message="Contact focus failed.",
+                    moved=move_to_contact,
+                )
         if lower_needles:
-            steps["lower_needles"] = self.contact_needles(
+            lower_step = self.contact_needles(
                 contact_number,
                 action="lower",
                 **self._contact_motion_payload(payload),
             )
-        check = self.check_contact(contact_number, **payload)
-        steps["check_contact"] = check
-        final = check
+            steps["lower_needles"] = lower_step
+            if not self._contact_step_accepted(lower_step):
+                return failure_response(
+                    lower_step,
+                    message="Needle lower failed.",
+                    moved=move_to_contact,
+                )
         seek: dict[str, Any] | None = None
-        if not self._contact_response_ok(check):
+        check: dict[str, Any] | None = None
+        if seek_before_measurement:
+            final = self.contact_seek(contact_number, **payload)
+            seek = final
+            steps["contact_seek_1"] = seek
+        else:
+            check = self.check_contact(contact_number, **payload)
+            steps["check_contact"] = check
+            final = check
+
+        success, resistance_summary = self._contact_response_ready(
+            final,
+            reference_resistance_ohm=reference_resistance_ohm,
+            reference_resistance_relative_tolerance=reference_resistance_relative_tolerance,
+        )
+        attempts_used = 1 if seek_before_measurement else 0
+        while not success and attempts_used < max(1, seek_attempts):
+            attempts_used += 1
             seek = self.contact_seek(contact_number, **payload)
-            steps["contact_seek"] = seek
+            steps[f"contact_seek_{attempts_used}"] = seek
             final = seek
-        success = self._contact_response_ok(final)
+            success, resistance_summary = self._contact_response_ready(
+                final,
+                reference_resistance_ohm=reference_resistance_ohm,
+                reference_resistance_relative_tolerance=reference_resistance_relative_tolerance,
+            )
         lifted_on_failure = False
         if not success and lift_on_failure:
             steps["lift_on_failure"] = self.contact_needles(
@@ -325,9 +457,16 @@ class ProbeStationClient:
         response["needles_lowered"] = bool(success and lower_needles)
         response["moved_to_contact"] = bool(move_to_contact)
         response["lifted_before_move"] = bool(move_to_contact and lift_before_move)
+        response["raised_before_move"] = bool(raise_before_move)
         response["lifted_on_failure"] = lifted_on_failure
         response["check"] = check
         response["steps"] = steps
+        response["seek_attempts"] = attempts_used
+        response["reference_resistance_ohm"] = reference_resistance_ohm
+        response["reference_resistance_relative_tolerance"] = (
+            reference_resistance_relative_tolerance
+        )
+        response.update(resistance_summary)
         if seek is not None:
             response["seek"] = seek
             response["contact_seek"] = seek.get("contact_seek")
@@ -360,6 +499,26 @@ class ProbeStationClient:
         value = cls._pop_option(payload, *names, default=default)
         return cls._coerce_bool(value, default=default)
 
+    @classmethod
+    def _pop_int_option(
+        cls,
+        payload: dict[str, Any],
+        *names: str,
+        default: int,
+    ) -> int:
+        value = cls._pop_option(payload, *names, default=default)
+        return cls._coerce_int(value, default=default)
+
+    @classmethod
+    def _pop_float_option(
+        cls,
+        payload: dict[str, Any],
+        *names: str,
+        default: float | None,
+    ) -> float | None:
+        value = cls._pop_option(payload, *names, default=default)
+        return cls._coerce_float(value, default=default)
+
     @staticmethod
     def _coerce_bool(value: Any, *, default: bool) -> bool:
         if value is None:
@@ -374,6 +533,26 @@ class ProbeStationClient:
         return bool(value)
 
     @staticmethod
+    def _coerce_int(value: Any, *, default: int) -> int:
+        if value is None:
+            return int(default)
+        try:
+            number = int(float(value))
+        except (TypeError, ValueError):
+            return int(default)
+        return number
+
+    @staticmethod
+    def _coerce_float(value: Any, *, default: float | None) -> float | None:
+        if value is None:
+            return default
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return default
+        return number if math.isfinite(number) else default
+
+    @staticmethod
     def _contact_motion_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         keys = (
             "needle_feedrate",
@@ -381,6 +560,54 @@ class ProbeStationClient:
             "needle_feedrate_mm_per_min",
         )
         return {key: payload[key] for key in keys if key in payload}
+
+    @staticmethod
+    def _contact_step_accepted(response: Mapping[str, Any]) -> bool:
+        return bool(response.get("accepted", False))
+
+    @staticmethod
+    def _contact_focus_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        if "focus_range_mm" in payload:
+            result["range_mm"] = payload["focus_range_mm"]
+        if "range_mm" in payload:
+            result["range_mm"] = payload["range_mm"]
+        if "focus_step_mm" in payload:
+            result["step_mm"] = payload["focus_step_mm"]
+        if "step_mm" in payload:
+            result["step_mm"] = payload["step_mm"]
+        return result
+
+    @classmethod
+    def _contact_response_ready(
+        cls,
+        response: Mapping[str, Any],
+        *,
+        reference_resistance_ohm: float | None,
+        reference_resistance_relative_tolerance: float | None,
+    ) -> tuple[bool, dict[str, Any]]:
+        contact_ok = cls._contact_response_ok(response)
+        measured = cls._contact_response_resistance_ohm(response)
+        summary: dict[str, Any] = {
+            "measured_resistance_ohm": measured,
+            "resistance_relative_error": None,
+            "resistance_match": None,
+        }
+        if reference_resistance_ohm is None:
+            return contact_ok, summary
+        if reference_resistance_ohm <= 0.0 or measured is None:
+            summary["resistance_match"] = False
+            return False, summary
+        relative_error = abs(measured - reference_resistance_ohm) / reference_resistance_ohm
+        tolerance = (
+            reference_resistance_relative_tolerance
+            if reference_resistance_relative_tolerance is not None
+            else math.inf
+        )
+        resistance_match = relative_error <= tolerance
+        summary["resistance_relative_error"] = relative_error
+        summary["resistance_match"] = resistance_match
+        return contact_ok and resistance_match, summary
 
     @staticmethod
     def _contact_response_ok(response: Mapping[str, Any]) -> bool:
@@ -393,6 +620,38 @@ class ProbeStationClient:
             status = str(measurement.get("status") or "").strip().lower()
             return status in {"ok", "short"}
         return bool(response.get("accepted", False))
+
+    @classmethod
+    def _contact_response_resistance_ohm(
+        cls,
+        response: Mapping[str, Any],
+    ) -> float | None:
+        measurement = response.get("measurement")
+        if isinstance(measurement, Mapping):
+            quality = measurement.get("contact_quality")
+            if isinstance(quality, Mapping):
+                for key in ("median_ohm", "resistance_median_ohm"):
+                    number = cls._coerce_float(quality.get(key), default=None)
+                    if number is not None:
+                        return number
+            for key in (
+                "contact_median_ohm",
+                "median_ohm",
+                "resistance_ohm",
+                "resistance_median_ohm",
+            ):
+                number = cls._coerce_float(measurement.get(key), default=None)
+                if number is not None:
+                    return number
+        for key in (
+            "contact_median_ohm",
+            "measured_resistance_ohm",
+            "resistance_ohm",
+        ):
+            number = cls._coerce_float(response.get(key), default=None)
+            if number is not None:
+                return number
+        return None
 
     def _load_api_key(self) -> str | None:
         try:
