@@ -11,6 +11,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
@@ -143,6 +144,7 @@ from probe_station_gui.route_measurement import (
     ROUTE_OPERATION_PHOTO,
     ROUTE_OPERATION_PHOTO_THEN_MEASURE,
     RouteContactHeightRecord,
+    RouteExternalMeasurementSessionRunner,
     RouteMeasurementPoint,
     RoutePhotoRecord,
     RouteMeasurementRecord,
@@ -726,6 +728,10 @@ class Main(QMainWindow):
         self._pending_route_measure_point: int | None = None
         self._route_measurement_session_active = False
         self._route_measurement_context_close_requested = False
+        self._api_route_session_id: str | None = None
+        self._api_route_last_status: dict[str, Any] | None = None
+        self._api_route_artifacts: dict[str, dict[str, object]] = {}
+        self._api_route_artifacts_lock = threading.Lock()
         self._microscope_scan_thread: threading.Thread | None = None
         self._microscope_scan_stop_requested = threading.Event()
         self._sample_handling_thread: threading.Thread | None = None
@@ -1281,6 +1287,18 @@ class Main(QMainWindow):
             return self._api_configure_meter(payload)
         if action == "raw_voltage_sweep":
             return self._api_raw_voltage_sweep(payload)
+        if action == "start_route_session":
+            return self._api_start_route_session(payload)
+        if action == "route_session_status":
+            return self._api_route_session_status()
+        if action == "route_session_action":
+            return self._api_route_session_action(payload)
+        if action == "route_session_result":
+            return self._api_route_session_result(payload)
+        if action == "route_session_seek":
+            return self._api_route_session_seek()
+        if action == "route_session_artifact":
+            return self._api_route_session_artifact(payload)
         return {
             "accepted": False,
             "status_code": 400,
@@ -2208,6 +2226,508 @@ class Main(QMainWindow):
                         logger.exception("API raw voltage sweep failed to lift needles.")
                 self.stage_controller.finish_external_task()
 
+    def _api_start_route_session(self, payload: dict[str, Any]) -> dict[str, Any]:
+        thread = self._route_measurement_thread
+        if thread is not None and thread.is_alive():
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Route measurement is already active.",
+            }
+        if self.serial_connection is None or not self.serial_connection.is_open:
+            return {
+                "accepted": False,
+                "status_code": 503,
+                "message": "Serial connection is not available.",
+            }
+        route = self._design_session.route
+        if route is None or not route.points:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Create or load a probe route before starting a route session.",
+            }
+        registration = self._design_session.registration
+        if registration is None or not registration.valid:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Design registration is required before using contacts.",
+            }
+        try:
+            points = self._route_measurement_points(route)
+        except DesignModelError as exc:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": str(exc),
+            }
+        if not points:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Route has no enabled points.",
+            }
+        try:
+            start_point = self._api_int(
+                payload,
+                "start_point",
+                "current_point",
+                "contact_number",
+                default=int(self._route_measurement_current_point or 1),
+                minimum=1,
+            )
+            initial_count = self._api_int(
+                payload,
+                "initial_measurement_count",
+                "initial_samples",
+                "check_sample_count",
+                default=10,
+                minimum=1,
+            )
+            followup_count = self._api_int(
+                payload,
+                "followup_measurement_count",
+                "followup_samples",
+                default=240,
+                minimum=0,
+            )
+            measurement_count = self._api_int(
+                payload,
+                "measurement_count",
+                "sample_count",
+                "samples",
+                default=initial_count + followup_count,
+                minimum=initial_count,
+            )
+            contact_seek_range_mm = self._api_float(
+                payload,
+                "contact_seek_range_mm",
+                "contact_seek_max_total_mm",
+                "seek_range_mm",
+                default=RouteMeasurementRunner.AUTO_CONTACT_SEEK_MAX_TOTAL_MM,
+                minimum=0.0,
+            )
+            contact_seek_step_mm = self._api_float(
+                payload,
+                "contact_seek_step_mm",
+                "seek_step_mm",
+                default=abs(RouteMeasurementRunner.AUTO_CONTACT_SEEK_STEP_MM),
+                minimum=0.0,
+            )
+            contact_settle_s = self._api_float(
+                payload,
+                "contact_settle_s",
+                "settle_s",
+                default=RouteMeasurementRunner.DEFAULT_CONTACT_SETTLE_S,
+                minimum=0.0,
+            )
+            photo_settle_s = self._api_float(
+                payload,
+                "photo_settle_s",
+                default=0.2,
+                minimum=0.0,
+            )
+            photo_enabled = self._api_bool(
+                payload,
+                "photo_enabled",
+                "photo",
+                default=True,
+            )
+            photo_focus_enabled = self._api_bool(
+                payload,
+                "photo_autofocus_enabled",
+                "autofocus",
+                "focus",
+                default=True,
+            )
+            photo_focus_range_mm = self._api_float(
+                payload,
+                "photo_autofocus_range_mm",
+                "focus_range_mm",
+                default=0.03,
+                minimum=0.001,
+            )
+        except ValueError as exc:
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": str(exc),
+            }
+        max_relative_rms = None
+        if any(
+            key in payload
+            for key in ("max_relative_rms", "max_rel_rms", "max_relative_rms_percent")
+        ):
+            try:
+                if "max_relative_rms_percent" in payload:
+                    max_relative_rms = (
+                        self._api_float(
+                            payload,
+                            "max_relative_rms_percent",
+                            default=math.nan,
+                            minimum=0.0,
+                        )
+                        / 100.0
+                    )
+                else:
+                    max_relative_rms = self._api_float(
+                        payload,
+                        "max_relative_rms",
+                        "max_rel_rms",
+                        default=math.nan,
+                        minimum=0.0,
+                    )
+            except ValueError as exc:
+                return {
+                    "accepted": False,
+                    "status_code": 400,
+                    "message": str(exc),
+                }
+        selected_point = self._api_find_contact_point(points, start_point)
+        if selected_point is None:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": (
+                    f"Contact {start_point} is not enabled or not included "
+                    "by the current route filter."
+                ),
+            }
+        if photo_enabled or photo_focus_enabled:
+            frame, _counter = self._wait_for_camera_frame(timeout_s=0.1)
+            if frame is None:
+                return {
+                    "accepted": False,
+                    "status_code": 409,
+                    "message": "Camera frame is unavailable; cannot start API route session.",
+                }
+        try:
+            meter_configuration = self._api_route_meter_configuration(
+                payload.get("meter", payload.get("meter_configuration", {})),
+                voltages_v=None,
+            )
+        except ValueError as exc:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": str(exc),
+            }
+        if self.lcr_controller.is_connected():
+            try:
+                self.lcr_controller.apply_route_meter_configuration(
+                    meter_configuration
+                )
+            except LCRMeterError as exc:
+                return {
+                    "accepted": False,
+                    "status_code": 409,
+                    "message": f"Route measurement instrument setup failed: {exc}",
+                }
+            route_lcr_controller: object = self.lcr_controller
+        else:
+            route_lcr_controller = RouteMeter(meter_configuration)
+        session_id = uuid.uuid4().hex
+        with self._api_route_artifacts_lock:
+            self._api_route_artifacts.clear()
+        self._api_route_session_id = session_id
+        self._api_route_last_status = None
+        runner = RouteExternalMeasurementSessionRunner(
+            session_id=session_id,
+            points=points,
+            stage_controller=self.stage_controller,
+            lcr_controller=route_lcr_controller,
+            needle_feedrate=self._current_needle_feedrate(),
+            measurement_count=measurement_count,
+            initial_measurement_count=initial_count,
+            start_point_number=int(selected_point.index),
+            max_relative_rms=max_relative_rms,
+            auto_contact_seek_step_mm=contact_seek_step_mm,
+            auto_contact_seek_max_total_mm=contact_seek_range_mm,
+            contact_settle_s=contact_settle_s,
+            nplc_label=meter_configuration.nplc_label(),
+            measurement_type=meter_configuration.measurement_type_label(),
+            status_callback=self.route_measurement_status.emit,
+            progress_callback=self.route_measurement_progress.emit,
+            photo_callback=self._capture_api_route_photo_artifact,
+            photo_focus_callback=lambda point, position, total: self._api_route_photo_autofocus(
+                point,
+                position,
+                total,
+                range_mm=photo_focus_range_mm,
+            ),
+            contact_photo_callback=self._capture_route_contact_photo,
+            pre_contact_photo_callback=self._capture_route_pre_contact_photo,
+            result_callback=self.route_measurement_result.emit,
+            waiting_callback=self.route_measurement_waiting_changed.emit,
+            photo_enabled=photo_enabled,
+            photo_focus_enabled=photo_focus_enabled,
+            photo_settle_s=photo_settle_s,
+        )
+        self._route_measurement_runner = runner
+        self._route_measurement_waiting = False
+        self._pending_route_measure_point = None
+        self._route_measurement_session_active = True
+        self._route_measurement_photo_enabled = photo_enabled
+        self._route_measurement_measure_enabled = True
+        self._route_measurement_point_numbers = [int(point.index) for point in points]
+        self._last_telegram_attention_message = ""
+        self._set_route_measurement_resume_point(int(selected_point.index))
+        self._set_route_measurement_pending(True)
+        with self._telegram_photo_lock:
+            self._telegram_pending_contact_photo = None
+            self._telegram_pending_contact_before_photo = None
+            self._last_route_pre_contact_photo = None
+            self._last_route_contact_failure_photo = None
+            self._last_route_contact_failure_before_photo = None
+        self._route_measurement_thread = threading.Thread(
+            target=self._run_route_measurement,
+            args=(runner,),
+            name="RouteApiExternalSession",
+            daemon=True,
+        )
+        start_message = (
+            "Route API session starting at "
+            f"point {int(selected_point.index)} {selected_point.label}; "
+            f"{len(points)} points selected."
+        )
+        if self.design_navigator_panel is not None:
+            self.design_navigator_panel.set_route_measurement_running(True)
+            self.design_navigator_panel.set_route_measurement_waiting(False)
+            self.design_navigator_panel.set_route_measurement_status(start_message)
+        if self._route_measurement_dialog is not None:
+            self._route_measurement_dialog.set_running(True)
+            self._route_measurement_dialog.reset_progress(len(points))
+            self._route_measurement_dialog.set_status(start_message)
+        self._show_status(start_message)
+        self._last_route_measurement_result = None
+        self._send_telegram_alert(
+            "route_started",
+            f"Probe route API session started:\n{start_message}",
+        )
+        self._route_measurement_thread.start()
+        self._update_stage_coordinate_apply_state()
+        return runner.status_payload()
+
+    def _api_route_session_status(self) -> dict[str, Any]:
+        runner = self._route_measurement_runner
+        if runner is not None and hasattr(runner, "status_payload"):
+            status = runner.status_payload()
+        elif self._api_route_last_status is not None:
+            status = dict(self._api_route_last_status)
+        else:
+            return {
+                "accepted": False,
+                "status_code": 404,
+                "message": "No API route session is active.",
+            }
+        status["artifacts"] = self._api_route_artifacts_payload()
+        return status
+
+    def _api_route_session_action(self, payload: dict[str, Any]) -> dict[str, Any]:
+        runner = self._route_measurement_runner
+        if runner is None:
+            return {
+                "accepted": False,
+                "status_code": 404,
+                "message": "No route session is active.",
+            }
+        action = str(payload.get("action", payload.get("command", "next"))).strip()
+        if action.lower() == "pause":
+            runner.request_pause_after_current_point()
+            return {
+                "accepted": True,
+                "message": "Route session pause requested.",
+                "action": "pause",
+            }
+        if action.lower() == "interrupt":
+            self.stage_controller.cancel_active_motion(
+                "Route API session interrupt requested."
+            )
+            runner.request_current_point_correction()
+            return {
+                "accepted": True,
+                "message": "Route session interrupt requested.",
+                "action": "interrupt",
+            }
+        if action.lower() == "stop":
+            runner.stop()
+            return {
+                "accepted": True,
+                "message": "Route session stop requested.",
+                "action": "stop",
+            }
+        if not runner.submit_confirmation(action):
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": "Unknown route session action.",
+            }
+        return {
+            "accepted": True,
+            "message": f"Route session action submitted: {action}.",
+            "action": action,
+        }
+
+    def _api_route_session_result(self, payload: dict[str, Any]) -> dict[str, Any]:
+        runner = self._route_measurement_runner
+        if runner is None or not hasattr(runner, "submit_external_result"):
+            return {
+                "accepted": False,
+                "status_code": 404,
+                "message": "No external route session is waiting for a result.",
+            }
+        result = {
+            "status": str(payload.get("status", "ok")).strip().lower() or "ok",
+            "summary": payload.get("summary") if isinstance(payload.get("summary"), dict) else {},
+            "files": payload.get("files") if isinstance(payload.get("files"), list) else [],
+            "message": str(payload.get("message", "")).strip(),
+            "timestamp_utc": self._api_timestamp_utc(),
+        }
+        if not runner.submit_external_result(result):
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Route session is not waiting for an external result.",
+            }
+        return {
+            "accepted": True,
+            "message": "External result submitted.",
+            "result": result,
+        }
+
+    def _api_route_session_seek(self) -> dict[str, Any]:
+        runner = self._route_measurement_runner
+        if runner is None or not hasattr(runner, "request_contact_seek"):
+            return {
+                "accepted": False,
+                "status_code": 404,
+                "message": "No route session is active.",
+            }
+        if not runner.request_contact_seek():
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Route session is not waiting for contact seek.",
+            }
+        return {
+            "accepted": True,
+            "message": "Contact seek requested for current route contact.",
+        }
+
+    def _api_route_session_artifact(self, payload: dict[str, Any]) -> dict[str, Any]:
+        artifact_id = str(payload.get("artifact_id", "")).strip()
+        with self._api_route_artifacts_lock:
+            artifact = dict(self._api_route_artifacts.get(artifact_id) or {})
+        if not artifact:
+            return {
+                "accepted": False,
+                "status_code": 404,
+                "message": "Route session artifact was not found.",
+            }
+        return {
+            "accepted": True,
+            "artifact_id": artifact_id,
+            **artifact,
+        }
+
+    def _api_route_artifacts_payload(self) -> list[dict[str, object]]:
+        with self._api_route_artifacts_lock:
+            artifacts = [
+                {
+                    key: value
+                    for key, value in artifact.items()
+                    if key != "data"
+                }
+                for artifact in self._api_route_artifacts.values()
+            ]
+        return artifacts
+
+    def _add_api_route_artifact(
+        self,
+        *,
+        data: bytes,
+        filename: str,
+        content_type: str,
+        kind: str,
+        metadata: dict[str, object],
+    ) -> str:
+        artifact_id = uuid.uuid4().hex
+        artifact = {
+            "artifact_id": artifact_id,
+            "filename": filename,
+            "content_type": content_type,
+            "kind": kind,
+            "metadata": dict(metadata),
+            "created_at_utc": self._api_timestamp_utc(),
+            "size_bytes": len(data),
+            "data": bytes(data),
+        }
+        with self._api_route_artifacts_lock:
+            self._api_route_artifacts[artifact_id] = artifact
+        return artifact_id
+
+    def _capture_api_route_photo_artifact(
+        self,
+        point: RouteMeasurementPoint,
+        position: int,
+        total: int,
+        focus_result: object | None,
+    ) -> str:
+        before_counter = self._latest_camera_counter()
+        frame, _counter = self._wait_for_camera_frame(
+            after_counter=before_counter,
+            timeout_s=2.0,
+        )
+        photo = self._qimage_telegram_photo(frame) or self._latest_camera_frame_photo()
+        if photo is None:
+            raise RuntimeError("Camera frame is unavailable.")
+        photo_bytes, photo_name = photo
+        artifact_id = self._add_api_route_artifact(
+            data=photo_bytes,
+            filename=photo_name,
+            content_type="image/jpeg" if photo_name.lower().endswith(".jpg") else "image/png",
+            kind="route_photo",
+            metadata={
+                "position": int(position),
+                "total": int(total),
+                "point_index": int(point.index),
+                "contact_number": self._api_structure_number_for_measurement_point(point),
+                "label": point.label,
+                "focus": self._route_photo_focus_payload(focus_result),
+            },
+        )
+        with self._telegram_photo_lock:
+            route_photo_requested = self._telegram_route_photo_requested
+            if route_photo_requested:
+                self._telegram_route_photo_requested = False
+        if route_photo_requested:
+            self._send_telegram_bot_message(
+                "Next route structure photo:\n"
+                f"Point {position}/{total}, structure "
+                f"{self._api_structure_number_for_measurement_point(point)}, "
+                f"{point.label}.",
+                photo=(photo_bytes, photo_name),
+                reply_markup=self._telegram_default_markup(),
+            )
+        return artifact_id
+
+    def _api_route_photo_autofocus(
+        self,
+        _point: RouteMeasurementPoint,
+        position: int,
+        total: int,
+        *,
+        range_mm: float,
+    ) -> object:
+        self.route_measurement_status.emit(
+            "Route photo autofocus: "
+            f"point {position}/{total}, +/-{range_mm:.3f} mm."
+        )
+        return self.stage_controller.run_external_local_autofocus(
+            range_mm=range_mm,
+        )
+
     def _api_contact_context(self, contact_number: int) -> dict[str, Any]:
         if self.serial_connection is None or not self.serial_connection.is_open:
             return {
@@ -2410,6 +2930,8 @@ class Main(QMainWindow):
                 }
             ):
                 voltage_range = max(measurement_voltage, max_voltage)
+                source_voltage_range = voltage_range
+                voltmeter_range = voltage_range
             settings = KeithleyRouteMeterSettings(
                 measurement_voltage_v=measurement_voltage,
                 range_mode=range_mode,
@@ -7875,7 +8397,12 @@ class Main(QMainWindow):
 
     def _run_route_measurement(self, runner: RouteMeasurementRunner) -> None:
         success, message = runner.run()
-        self.route_measurement_finished.emit(success, message, str(runner.csv_path))
+        csv_path = (
+            ""
+            if isinstance(runner, RouteExternalMeasurementSessionRunner)
+            else str(runner.csv_path)
+        )
+        self.route_measurement_finished.emit(success, message, csv_path)
 
     def _request_stop_route_measurement(self) -> None:
         runner = self._route_measurement_runner
@@ -8348,6 +8875,16 @@ class Main(QMainWindow):
         if thread is not None and not thread.is_alive():
             thread.join(timeout=0.1)
         self._route_measurement_thread = None
+        runner = self._route_measurement_runner
+        if (
+            getattr(self, "_api_route_session_id", None)
+            and runner is not None
+            and hasattr(runner, "status_payload")
+        ):
+            try:
+                self._api_route_last_status = runner.status_payload()
+            except Exception:
+                logger.exception("Failed to store final API route session status.")
         self._route_measurement_runner = None
         self._route_measurement_waiting = False
         self._last_route_measurement_result = None
@@ -8408,9 +8945,12 @@ class Main(QMainWindow):
             self._set_route_measurement_pending(True)
             self._show_status(message, 8000)
             if not context_close_requested:
+                failure_message = f"Probe route stopped or failed:\n{message}"
+                if csv_path:
+                    failure_message = f"{failure_message}\nCSV: {csv_path}"
                 self._send_telegram_alert(
                     "route_failed",
-                    f"Probe route stopped or failed:\n{message}\nCSV: {csv_path}",
+                    failure_message,
                     attach_photo=True,
                 )
 

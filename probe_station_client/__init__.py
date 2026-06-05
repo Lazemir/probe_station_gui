@@ -10,6 +10,9 @@ from .client import (
     ProbeStationClientError,
     ProbeStationConnectionError,
     ProbeStationMeterClient,
+    ProbeStationRouteClient,
+    ProbeStationRouteSession,
+    RouteReadyContact,
 )
 from .credentials import (
     CredentialError,
@@ -17,7 +20,12 @@ from .credentials import (
     CredentialStore,
     CredentialStorageUnavailable,
 )
-from .qcodes_driver import ProbeStationInstrument, ProbeStationMeter, ProbeStationStage
+from .qcodes_driver import (
+    ProbeStationInstrument,
+    ProbeStationMeter,
+    ProbeStationRoute,
+    ProbeStationStage,
+)
 
 
 __all__ = [
@@ -34,5 +42,9 @@ __all__ = [
     "ProbeStationInstrument",
     "ProbeStationMeter",
     "ProbeStationMeterClient",
+    "ProbeStationRoute",
+    "ProbeStationRouteClient",
+    "ProbeStationRouteSession",
     "ProbeStationStage",
+    "RouteReadyContact",
 ]

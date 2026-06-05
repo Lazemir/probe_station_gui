@@ -124,6 +124,53 @@ if Instrument is not None and InstrumentChannel is not None:
         ) -> dict[str, Any]:
             return self.client.meter.raw_sweep(voltages_v, **options)
 
+    class ProbeStationRoute(InstrumentChannel):  # type: ignore[misc]
+        """Route workflow submodule for notebook-owned measurements."""
+
+        def __init__(
+            self,
+            parent: Instrument,
+            name: str,
+            *,
+            client: ProbeStationClient,
+            **kwargs: Any,
+        ) -> None:
+            super().__init__(parent, name, **kwargs)
+            self.client = client
+
+        def start_external(self, **options: Any):
+            return self.client.route.start_external(**options)
+
+        def status(self) -> dict[str, Any]:
+            return self.client.route.status()
+
+        def pause(self) -> dict[str, Any]:
+            return self.client.route.pause()
+
+        def resume(self) -> dict[str, Any]:
+            return self.client.route.resume()
+
+        def interrupt(self) -> dict[str, Any]:
+            return self.client.route.interrupt()
+
+        def stop(self) -> dict[str, Any]:
+            return self.client.route.stop()
+
+        def skip(self) -> dict[str, Any]:
+            return self.client.route.skip()
+
+        def remeasure(self) -> dict[str, Any]:
+            return self.client.route.remeasure()
+
+        def seek_current(self) -> dict[str, Any]:
+            return self.client.route.seek_current()
+
+        def submit_result(self, **result: Any) -> dict[str, Any]:
+            return self.client.route.submit_result(**result)
+
+        def download_artifact(self, artifact_id: str) -> bytes:
+            return self.client.route.download_artifact(artifact_id)
+
     class ProbeStationInstrument(Instrument):  # type: ignore[misc]
         """QCoDeS-style driver for the probe station GUI API."""
 
@@ -168,6 +215,14 @@ if Instrument is not None and InstrumentChannel is not None:
                 ProbeStationMeter(
                     self,
                     "meter",
+                    client=self.client,
+                ),
+            )
+            self.add_submodule(
+                "route",
+                ProbeStationRoute(
+                    self,
+                    "route",
                     client=self.client,
                 ),
             )
@@ -225,6 +280,15 @@ else:
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             raise ImportError(
                 "ProbeStationMeter requires qcodes. Install the qcodes-client "
+                "extra or add qcodes to the Python environment."
+            )
+
+    class ProbeStationRoute:  # type: ignore[no-redef]
+        """Placeholder when QCoDeS is not installed."""
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            raise ImportError(
+                "ProbeStationRoute requires qcodes. Install the qcodes-client "
                 "extra or add qcodes to the Python environment."
             )
 

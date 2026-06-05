@@ -142,11 +142,19 @@ class ApiServerHttpTest(unittest.TestCase):
         self.assertEqual(rejected.status_code, 409)
         self.assertEqual(rejected.json()["detail"]["message"], "busy")
 
-    def test_contact_and_raw_sweep_endpoints_delegate_to_command_callback(self) -> None:
+    def test_contact_raw_sweep_and_route_session_endpoints_delegate(self) -> None:
         calls = []
 
         def command_callback(request):
             calls.append(request)
+            if request["action"] == "route_session_artifact":
+                return {
+                    "accepted": True,
+                    "artifact_id": request["payload"]["artifact_id"],
+                    "filename": "contact.jpg",
+                    "content_type": "image/jpeg",
+                    "data": b"jpeg-bytes",
+                }
             return {"accepted": True, "echo": request}
 
         client = self._client(command_callback=command_callback)
@@ -176,6 +184,21 @@ class ApiServerHttpTest(unittest.TestCase):
             "/api/v1/measurements/raw-sweep",
             json={"contact_number": 7, "voltages_v": [-0.1, 0.1]},
         )
+        session = client.post(
+            "/api/v1/route/sessions",
+            json={"initial_measurement_count": 10},
+        )
+        status = client.get("/api/v1/route/sessions/current")
+        action = client.post(
+            "/api/v1/route/sessions/current/actions",
+            json={"action": "pause"},
+        )
+        result = client.post(
+            "/api/v1/route/sessions/current/result",
+            json={"status": "ok", "summary": {"points": 31}},
+        )
+        session_seek = client.post("/api/v1/route/sessions/current/seek", json={})
+        artifact = client.get("/api/v1/route/sessions/current/artifacts/a1")
 
         self.assertEqual(contacts.status_code, 200)
         self.assertEqual(move.status_code, 200)
@@ -184,6 +207,14 @@ class ApiServerHttpTest(unittest.TestCase):
         self.assertEqual(seek.status_code, 200)
         self.assertEqual(configure.status_code, 200)
         self.assertEqual(sweep.status_code, 200)
+        self.assertEqual(session.status_code, 200)
+        self.assertEqual(status.status_code, 200)
+        self.assertEqual(action.status_code, 200)
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(session_seek.status_code, 200)
+        self.assertEqual(artifact.status_code, 200)
+        self.assertEqual(artifact.content, b"jpeg-bytes")
+        self.assertEqual(artifact.headers["x-artifact-id"], "a1")
         self.assertEqual(
             [call["action"] for call in calls],
             [
@@ -194,12 +225,21 @@ class ApiServerHttpTest(unittest.TestCase):
                 "contact_seek",
                 "configure_meter",
                 "raw_voltage_sweep",
+                "start_route_session",
+                "route_session_status",
+                "route_session_action",
+                "route_session_result",
+                "route_session_seek",
+                "route_session_artifact",
             ],
         )
         self.assertEqual(calls[1]["payload"]["contact_number"], 7)
         self.assertEqual(calls[3]["payload"]["check_sample_count"], 10)
         self.assertEqual(calls[4]["payload"]["contact_seek_range_mm"], 0.003)
         self.assertEqual(calls[6]["payload"]["voltages_v"], [-0.1, 0.1])
+        self.assertEqual(calls[7]["payload"]["initial_measurement_count"], 10)
+        self.assertEqual(calls[9]["payload"]["action"], "pause")
+        self.assertEqual(calls[10]["payload"]["summary"], {"points": 31})
 
     def test_authenticated_endpoints_require_matching_permissions(self) -> None:
         auth_calls = []

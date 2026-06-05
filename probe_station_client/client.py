@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
@@ -82,6 +83,215 @@ class ProbeStationMeterClient:
         )
 
 
+class RouteReadyContact:
+    """One route contact currently waiting for notebook-owned measurement."""
+
+    def __init__(
+        self,
+        session: "ProbeStationRouteSession",
+        status: Mapping[str, Any],
+    ) -> None:
+        self.session = session
+        self.status = dict(status)
+        current = self.status.get("current_contact")
+        self.contact = dict(current) if isinstance(current, Mapping) else {}
+        preparation = self.status.get("last_preparation")
+        self.preparation = dict(preparation) if isinstance(preparation, Mapping) else {}
+
+    @property
+    def contact_number(self) -> int | None:
+        value = self.contact.get("contact_number")
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @property
+    def position(self) -> int | None:
+        value = self.status.get("position")
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def submit_result(
+        self,
+        *,
+        status: str = "ok",
+        summary: Mapping[str, Any] | None = None,
+        files: list[Mapping[str, Any]] | None = None,
+        message: str = "",
+    ) -> dict[str, Any]:
+        return self.session.submit_result(
+            status=status,
+            summary=summary,
+            files=files,
+            message=message,
+        )
+
+    def download_artifact(self, artifact_id: str) -> bytes:
+        return self.session.download_artifact(artifact_id)
+
+
+class ProbeStationRouteSession:
+    """Client-side handle for the active GUI-owned route session."""
+
+    def __init__(self, route: "ProbeStationRouteClient", status: Mapping[str, Any]) -> None:
+        self.route = route
+        self.client = route._client
+        self.initial_status = dict(status)
+        self.session_id = str(status.get("session_id") or "")
+
+    def status(self) -> dict[str, Any]:
+        return self.route.status()
+
+    def action(self, action: str, **payload: Any) -> dict[str, Any]:
+        return self.route.action(action, **payload)
+
+    def pause(self) -> dict[str, Any]:
+        return self.action("pause")
+
+    def resume(self) -> dict[str, Any]:
+        return self.action("resume")
+
+    def interrupt(self) -> dict[str, Any]:
+        return self.action("interrupt")
+
+    def stop(self) -> dict[str, Any]:
+        return self.action("stop")
+
+    def skip(self) -> dict[str, Any]:
+        return self.action("skip")
+
+    def remeasure(self) -> dict[str, Any]:
+        return self.action("remeasure")
+
+    def seek_current(self) -> dict[str, Any]:
+        return self.route.seek_current()
+
+    def submit_result(
+        self,
+        *,
+        status: str = "ok",
+        summary: Mapping[str, Any] | None = None,
+        files: list[Mapping[str, Any]] | None = None,
+        message: str = "",
+    ) -> dict[str, Any]:
+        return self.route.submit_result(
+            status=status,
+            summary=summary,
+            files=files,
+            message=message,
+        )
+
+    def download_artifact(self, artifact_id: str) -> bytes:
+        return self.route.download_artifact(artifact_id)
+
+    def iter_ready(
+        self,
+        *,
+        poll_interval_s: float = 0.5,
+        timeout_s: float | None = None,
+    ):
+        """Yield contacts as they become ready for external measurement."""
+
+        started = time.monotonic()
+        yielded: set[tuple[str, int]] = set()
+        while True:
+            status = self.status()
+            state = str(status.get("state") or "")
+            if state in {"complete", "stopped", "failed"}:
+                return
+            reason = str(status.get("waiting_reason") or "")
+            if reason == "external_measurement":
+                session_id = str(status.get("session_id") or self.session_id)
+                position = int(status.get("position") or 0)
+                key = (session_id, position)
+                if key not in yielded:
+                    yielded.add(key)
+                    yield RouteReadyContact(self, status)
+            if timeout_s is not None and time.monotonic() - started >= timeout_s:
+                raise TimeoutError("Route session did not finish before timeout.")
+            time.sleep(max(0.0, float(poll_interval_s)))
+
+
+class ProbeStationRouteClient:
+    """Route workflow namespace for notebook-owned measurements."""
+
+    def __init__(self, client: "ProbeStationClient") -> None:
+        self._client = client
+
+    def start_external(self, **options: Any) -> ProbeStationRouteSession:
+        status = self._client._request(
+            "POST",
+            "/api/v1/route/sessions",
+            dict(options),
+        )
+        return ProbeStationRouteSession(self, status)
+
+    def status(self) -> dict[str, Any]:
+        return self._client._request("GET", "/api/v1/route/sessions/current")
+
+    def action(self, action: str, **payload: Any) -> dict[str, Any]:
+        body = dict(payload)
+        body["action"] = str(action)
+        return self._client._request(
+            "POST",
+            "/api/v1/route/sessions/current/actions",
+            body,
+        )
+
+    def pause(self) -> dict[str, Any]:
+        return self.action("pause")
+
+    def resume(self) -> dict[str, Any]:
+        return self.action("resume")
+
+    def interrupt(self) -> dict[str, Any]:
+        return self.action("interrupt")
+
+    def stop(self) -> dict[str, Any]:
+        return self.action("stop")
+
+    def skip(self) -> dict[str, Any]:
+        return self.action("skip")
+
+    def remeasure(self) -> dict[str, Any]:
+        return self.action("remeasure")
+
+    def seek_current(self) -> dict[str, Any]:
+        return self._client._request(
+            "POST",
+            "/api/v1/route/sessions/current/seek",
+            {},
+        )
+
+    def submit_result(
+        self,
+        *,
+        status: str = "ok",
+        summary: Mapping[str, Any] | None = None,
+        files: list[Mapping[str, Any]] | None = None,
+        message: str = "",
+    ) -> dict[str, Any]:
+        return self._client._request(
+            "POST",
+            "/api/v1/route/sessions/current/result",
+            {
+                "status": status,
+                "summary": dict(summary or {}),
+                "files": [dict(item) for item in files or []],
+                "message": message,
+            },
+        )
+
+    def download_artifact(self, artifact_id: str) -> bytes:
+        return self._client._request_bytes(
+            "GET",
+            f"/api/v1/route/sessions/current/artifacts/{artifact_id}",
+        )
+
+
 def _urllib_transport(
     method: str,
     url: str,
@@ -131,6 +341,7 @@ class ProbeStationClient:
         self._transport = transport or _urllib_transport
         self.api_key = str(api_key).strip() if api_key else self._load_api_key()
         self.meter = ProbeStationMeterClient(self)
+        self.route = ProbeStationRouteClient(self)
 
     def reload_api_key(self) -> str | None:
         """Reload the API key from the configured credential store."""
@@ -684,6 +895,34 @@ class ProbeStationClient:
         response = self._decode_response(response_body)
         if 200 <= status_code < 300:
             return response
+        self._raise_api_error(status_code, response)
+        raise AssertionError("unreachable")
+
+    def _request_bytes(
+        self,
+        method: str,
+        path: str,
+        payload: Mapping[str, Any] | None = None,
+        *,
+        auth: bool = True,
+    ) -> bytes:
+        body = None
+        headers = {"Accept": "*/*"}
+        if payload is not None:
+            body = json.dumps(dict(payload)).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        if auth and self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        status_code, _response_headers, response_body = self._transport(
+            method.upper(),
+            self._url_for(path),
+            headers,
+            body,
+            self.timeout_s,
+        )
+        if 200 <= status_code < 300:
+            return bytes(response_body)
+        response = self._decode_response(response_body)
         self._raise_api_error(status_code, response)
         raise AssertionError("unreachable")
 

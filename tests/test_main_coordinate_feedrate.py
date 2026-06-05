@@ -122,6 +122,18 @@ class _FakeRouteMeasurementRunner:
         self.correction_requested = True
 
 
+class _FakeButton:
+    def __init__(self) -> None:
+        self.text = ""
+        self.enabled = False
+
+    def setText(self, text: str) -> None:
+        self.text = str(text)
+
+    def setEnabled(self, enabled: bool) -> None:
+        self.enabled = bool(enabled)
+
+
 class _FakeFrame:
     def __init__(self, name: str) -> None:
         self.name = name
@@ -1234,6 +1246,37 @@ assert image.height() == 4
         self.assertEqual(jumped, [91])
         self.assertEqual(remeasured, [])
         self.assertEqual(measured, [])
+
+    def test_waiting_dialog_pause_and_interrupt_buttons_resume(self) -> None:
+        dialog = RouteMeasurementDialog.__new__(RouteMeasurementDialog)
+        resumed: list[bool] = []
+        interrupted: list[bool] = []
+        paused: list[bool] = []
+        dialog._running = True
+        dialog._waiting = True
+        dialog._pause_button = _FakeButton()
+        dialog._interrupt_button = _FakeButton()
+        dialog.next_requested = types.SimpleNamespace(
+            emit=lambda: resumed.append(True)
+        )
+        dialog.pause_requested = types.SimpleNamespace(
+            emit=lambda: paused.append(True)
+        )
+        dialog.interrupt_requested = types.SimpleNamespace(
+            emit=lambda: interrupted.append(True)
+        )
+
+        RouteMeasurementDialog._update_pause_interrupt_buttons(dialog)
+        RouteMeasurementDialog._emit_pause_requested(dialog)
+        RouteMeasurementDialog._emit_interrupt_or_resume_requested(dialog)
+
+        self.assertEqual(dialog._pause_button.text, "Resume")
+        self.assertEqual(dialog._interrupt_button.text, "Resume")
+        self.assertTrue(dialog._pause_button.enabled)
+        self.assertTrue(dialog._interrupt_button.enabled)
+        self.assertEqual(len(resumed), 2)
+        self.assertEqual(paused, [])
+        self.assertEqual(interrupted, [])
 
     def test_record_route_contact_height_writes_height_map_csv(self) -> None:
         window = Main.__new__(Main)

@@ -1783,13 +1783,13 @@ class DesignNavigatorPanel(QWidget):
             self._emit_route_measurement_measure_selected
         )
         self._route_pause_button.clicked.connect(
-            self.route_measurement_pause_requested.emit
+            self._emit_route_measurement_pause_or_resume
         )
         self._route_stop_button.clicked.connect(
             self.route_measurement_stop_requested.emit
         )
         self._route_interrupt_button.clicked.connect(
-            self.route_measurement_interrupt_requested.emit
+            self._emit_route_measurement_interrupt_or_resume
         )
         self._route_save_shift_button.clicked.connect(
             self._emit_route_measurement_save_shift_selected
@@ -2160,12 +2160,13 @@ class DesignNavigatorPanel(QWidget):
         )
         self._route_run_button.setEnabled(has_route_selection)
         self._route_stop_button.setEnabled(route_running)
-        self._route_pause_button.setEnabled(
-            route_running and not self._route_measurement_waiting
+        route_resume = route_running and self._route_measurement_waiting
+        self._route_pause_button.setText("Resume" if route_resume else "Pause")
+        self._route_interrupt_button.setText(
+            "Resume" if route_resume else "Interrupt"
         )
-        self._route_interrupt_button.setEnabled(
-            route_running and not self._route_measurement_waiting
-        )
+        self._route_pause_button.setEnabled(route_running)
+        self._route_interrupt_button.setEnabled(route_running)
         self._route_save_shift_button.setEnabled(
             has_route_selection and self._route_measurement_waiting
         )
@@ -2892,6 +2893,18 @@ class DesignNavigatorPanel(QWidget):
         self.route_measurement_move_requested.emit(
             self._selected_route_point_index + 1
         )
+
+    def _emit_route_measurement_pause_or_resume(self) -> None:
+        if self._route_measurement_waiting:
+            self.route_measurement_confirmation_requested.emit("next")
+            return
+        self.route_measurement_pause_requested.emit()
+
+    def _emit_route_measurement_interrupt_or_resume(self) -> None:
+        if self._route_measurement_waiting:
+            self.route_measurement_confirmation_requested.emit("next")
+            return
+        self.route_measurement_interrupt_requested.emit()
 
     @staticmethod
     def _format_bounds(bounds: tuple[float, float, float, float]) -> str:

@@ -213,7 +213,7 @@ class ProbeStationApiServer:
 
     def _create_app(self):
         from fastapi import Body, FastAPI, Header, HTTPException
-        from fastapi.responses import HTMLResponse
+        from fastapi.responses import HTMLResponse, Response
         import uvicorn
 
         app = FastAPI(
@@ -434,6 +434,112 @@ class ProbeStationApiServer:
             )
             _raise_for_rejected(result)
             return result
+
+        @app.post("/api/v1/route/sessions")
+        def start_route_session(
+            payload: dict[str, Any] | None = Body(default=None),
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+        ) -> dict[str, Any]:
+            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
+            result = self._call_command(
+                {
+                    "action": "start_route_session",
+                    "payload": dict(payload or {}),
+                }
+            )
+            _raise_for_rejected(result)
+            return result
+
+        @app.get("/api/v1/route/sessions/current")
+        def route_session_status(
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+        ) -> dict[str, Any]:
+            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
+            result = self._call_command({"action": "route_session_status"})
+            _raise_for_rejected(result)
+            return result
+
+        @app.post("/api/v1/route/sessions/current/actions")
+        def route_session_action(
+            payload: dict[str, Any] = Body(...),
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+        ) -> dict[str, Any]:
+            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
+            result = self._call_command(
+                {
+                    "action": "route_session_action",
+                    "payload": dict(payload or {}),
+                }
+            )
+            _raise_for_rejected(result)
+            return result
+
+        @app.post("/api/v1/route/sessions/current/result")
+        def route_session_result(
+            payload: dict[str, Any] = Body(...),
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+        ) -> dict[str, Any]:
+            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
+            result = self._call_command(
+                {
+                    "action": "route_session_result",
+                    "payload": dict(payload or {}),
+                }
+            )
+            _raise_for_rejected(result)
+            return result
+
+        @app.post("/api/v1/route/sessions/current/seek")
+        def route_session_seek(
+            payload: dict[str, Any] | None = Body(default=None),
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+        ) -> dict[str, Any]:
+            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
+            result = self._call_command(
+                {
+                    "action": "route_session_seek",
+                    "payload": dict(payload or {}),
+                }
+            )
+            _raise_for_rejected(result)
+            return result
+
+        @app.get("/api/v1/route/sessions/current/artifacts/{artifact_id}")
+        def route_session_artifact(
+            artifact_id: str,
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+        ) -> Response:
+            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
+            result = self._call_command(
+                {
+                    "action": "route_session_artifact",
+                    "payload": {"artifact_id": artifact_id},
+                }
+            )
+            _raise_for_rejected(result)
+            data = result.get("data", b"")
+            if not isinstance(data, (bytes, bytearray)):
+                raise HTTPException(
+                    status_code=500,
+                    detail={"message": "Route artifact data is invalid."},
+                )
+            content_type = str(result.get("content_type") or "application/octet-stream")
+            filename = str(result.get("filename") or f"{artifact_id}.bin")
+            headers = {
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "X-Artifact-Id": str(result.get("artifact_id") or artifact_id),
+            }
+            return Response(
+                content=bytes(data),
+                media_type=content_type,
+                headers=headers,
+            )
 
         app.add_api_route(
             "/move",

@@ -156,6 +156,15 @@ class RouteContactPlacementResult:
 
 
 @dataclass(frozen=True)
+class RouteExternalContactPreparation:
+    """Prepared route contact plus optional pre-contact photo/focus details."""
+
+    placement: RouteContactPlacementResult
+    photo_path: str | None = None
+    focus: dict[str, object] | None = None
+
+
+@dataclass(frozen=True)
 class RouteContactHeightRecord:
     """One contact-height map row written next to route measurements."""
 
@@ -549,6 +558,7 @@ class RouteMeasurementRunner:
             self._status(
                 f"Route contact: point {position}/{total} lowering needles."
             )
+            self._emit_pre_contact_photo(point, position, total)
             self._stage_controller.run_external_needles_action(
                 "lower",
                 self._needle_feedrate,
@@ -587,6 +597,7 @@ class RouteMeasurementRunner:
                     f"Contact check failed: point {position}/{total} "
                     f"{point.label}, {status}."
                 )
+            self._emit_contact_photo(point, record, position, total, success)
             self._status(message)
             return RouteContactPlacementResult(
                 success=success,
@@ -606,6 +617,120 @@ class RouteMeasurementRunner:
                     logger.exception("Failed to lift needles after contact check.")
             if prepare_task is not None:
                 prepare_task.wait()
+            self._wait_for_background_tasks()
+            self._finish_stage_task()
+
+    def prepare_external_contact(
+        self,
+        point: RouteMeasurementPoint,
+        *,
+        position: int = 1,
+        total: int = 1,
+        photo_enabled: bool = False,
+        photo_focus_enabled: bool = False,
+        move_to_point: bool = True,
+        lift_before_move: bool = True,
+        lift_on_failure: bool = False,
+    ) -> RouteExternalContactPreparation:
+        """Prepare one route contact and leave needles down when usable.
+
+        This is the contact lifecycle used by API-driven external measurement
+        sessions. It reuses the route photo/autofocus and resistance/contact seek
+        code paths, but does not write resistance rows to CSV.
+        """
+
+        focus_result: object | None = None
+        photo_path: str | None = None
+        if move_to_point and (photo_enabled or photo_focus_enabled):
+            self._begin_stage_task()
+            try:
+                self._status(
+                    f"Route contact: point {position}/{total} raising needles."
+                )
+                self._stage_controller.run_external_needles_action(
+                    "raise",
+                    self._needle_feedrate,
+                )
+                photo_xy = self._adjusted_photo_stage_xy(point)
+                self._status(
+                    f"Route contact: point {position}/{total} moving to photo."
+                )
+                self._stage_controller.run_external_move_to_xy(
+                    photo_xy[0],
+                    photo_xy[1],
+                )
+                if photo_focus_enabled:
+                    self._status(
+                        f"Route contact: point {position}/{total} local autofocus."
+                    )
+                    focus_result = self._run_photo_focus(point, position, total)
+                    focus_message = str(focus_result or "")
+                    if focus_message.strip():
+                        self._status(
+                            f"Route contact: point {position}/{total} "
+                            f"{focus_message}"
+                        )
+                if photo_enabled:
+                    if not self._sleep_photo_settle():
+                        raise RuntimeError("Route contact photo stopped.")
+                    photo_path = str(
+                        self._capture_photo(
+                            point,
+                            position,
+                            total,
+                            focus_result=focus_result,
+                        )
+                    )
+                    self._status(
+                        f"Route contact: point {position}/{total} photo captured."
+                    )
+                contact_xy = self._adjusted_stage_xy(point)
+                if not self._same_stage_xy(photo_xy, contact_xy):
+                    self._status(
+                        f"Route contact: point {position}/{total} "
+                        "moving to contact."
+                    )
+                    self._stage_controller.run_external_move_to_xy(
+                        contact_xy[0],
+                        contact_xy[1],
+                    )
+            finally:
+                self._wait_for_background_tasks()
+                self._finish_stage_task()
+            move_to_point = False
+            lift_before_move = False
+        placement = self.place_contact(
+            point,
+            position=position,
+            total=total,
+            move_to_point=move_to_point,
+            lift_before_move=lift_before_move,
+            lift_on_failure=lift_on_failure,
+        )
+        return RouteExternalContactPreparation(
+            placement=placement,
+            photo_path=photo_path,
+            focus=_focus_result_to_dict(focus_result),
+        )
+
+    def lift_needles_after_external_measurement(
+        self,
+        *,
+        position: int = 1,
+        total: int = 1,
+    ) -> None:
+        """Lift needles after an API/notebook-owned external measurement."""
+
+        self._begin_stage_task()
+        try:
+            self._status(
+                f"Route contact: point {position}/{total} lifting needles."
+            )
+            self._stage_controller.run_external_needles_action(
+                "lift",
+                self._needle_feedrate,
+            )
+        finally:
             self._wait_for_background_tasks()
             self._finish_stage_task()
 
@@ -2106,6 +2231,801 @@ class RouteMeasurementRunner:
         return _contact_quality_from_samples(samples).good is False
 
 
+class RouteExternalMeasurementSessionRunner:
+    """Run route contacts for notebook-owned external measurements.
+
+    The GUI-visible route state machine remains the owner of movement, contact
+    checks, contact seek, pause, interrupt, and Telegram callbacks. The external
+    client only owns the final experiment-specific measurement and storage.
+    """
+
+    def __init__(
+        self,
+        *,
+        session_id: str,
+        points: list[RouteMeasurementPoint],
+        stage_controller: Any,
+        lcr_controller: Any,
+        needle_feedrate: float | None,
+        measurement_count: int,
+        initial_measurement_count: int,
+        start_point_number: int = 1,
+        max_relative_rms: float | None = None,
+        auto_contact_seek_step_mm: float = RouteMeasurementRunner.AUTO_CONTACT_SEEK_STEP_MM,
+        auto_contact_seek_max_total_mm: float = RouteMeasurementRunner.AUTO_CONTACT_SEEK_MAX_TOTAL_MM,
+        contact_settle_s: float = RouteMeasurementRunner.DEFAULT_CONTACT_SETTLE_S,
+        nplc_label: str = "",
+        measurement_type: str = "",
+        status_callback: Callable[[str], None] | None = None,
+        progress_callback: Callable[[int, int, int], None] | None = None,
+        photo_callback: Callable[
+            [RouteMeasurementPoint, int, int, object | None],
+            str | Path,
+        ]
+        | None = None,
+        photo_focus_callback: Callable[[RouteMeasurementPoint, int, int], object | None]
+        | None = None,
+        photo_record_callback: Callable[[RoutePhotoRecord, int, int], None]
+        | None = None,
+        contact_photo_callback: Callable[
+            [RouteMeasurementPoint, RouteMeasurementRecord, int, int, bool],
+            None,
+        ]
+        | None = None,
+        pre_contact_photo_callback: Callable[
+            [RouteMeasurementPoint, int, int],
+            None,
+        ]
+        | None = None,
+        result_callback: Callable[[RouteMeasurementRecord, int, int, bool], None]
+        | None = None,
+        waiting_callback: Callable[[bool], None] | None = None,
+        photo_enabled: bool = True,
+        photo_focus_enabled: bool = True,
+        photo_settle_s: float = 0.2,
+    ) -> None:
+        self.session_id = str(session_id)
+        self._points = list(points)
+        self._csv_path = Path(os.devnull)
+        self._status_callback = status_callback
+        self._progress_callback = progress_callback
+        self._result_callback = result_callback
+        self._waiting_callback = waiting_callback
+        self._photo_enabled = bool(photo_enabled)
+        self._photo_focus_enabled = bool(photo_focus_enabled)
+        self._condition = threading.Condition()
+        self._stop_requested = False
+        self._pause_requested = False
+        self._pending_action: str | None = None
+        self._pending_external_result: dict[str, Any] | None = None
+        self._state = "idle"
+        self._waiting_reason = ""
+        self._message = "Route API session idle."
+        self._position = 0
+        self._total = len(self._points)
+        self._current_point: RouteMeasurementPoint | None = None
+        self._last_preparation: RouteExternalContactPreparation | None = None
+        self._last_external_result: dict[str, Any] | None = None
+        self._history: list[dict[str, Any]] = []
+        self._contact_runner = RouteMeasurementRunner(
+            points=self._points,
+            csv_path=self._csv_path,
+            stage_controller=stage_controller,
+            lcr_controller=lcr_controller,
+            needle_feedrate=needle_feedrate,
+            measurement_count=measurement_count,
+            initial_measurement_count=initial_measurement_count,
+            start_point_number=start_point_number,
+            max_relative_rms=max_relative_rms,
+            confirm_each_point=False,
+            auto_contact_seek_on_bad_contact=True,
+            auto_contact_seek_step_mm=auto_contact_seek_step_mm,
+            auto_contact_seek_max_total_mm=auto_contact_seek_max_total_mm,
+            contact_settle_s=contact_settle_s,
+            nplc_label=nplc_label,
+            measurement_type=measurement_type,
+            status_callback=status_callback,
+            progress_callback=progress_callback,
+            photo_callback=photo_callback,
+            photo_focus_callback=photo_focus_callback,
+            photo_record_callback=photo_record_callback,
+            contact_photo_callback=contact_photo_callback,
+            pre_contact_photo_callback=pre_contact_photo_callback,
+            result_callback=result_callback,
+            waiting_callback=waiting_callback,
+            operation_mode=ROUTE_OPERATION_PHOTO_THEN_MEASURE
+            if self._photo_enabled
+            else ROUTE_OPERATION_MEASURE,
+            photo_settle_s=photo_settle_s,
+            photo_focus_enabled=self._photo_focus_enabled,
+        )
+
+    @property
+    def csv_path(self) -> Path:
+        return self._csv_path
+
+    def stop(self) -> None:
+        with self._condition:
+            self._stop_requested = True
+            self._condition.notify_all()
+        self._contact_runner.stop()
+
+    def request_pause_after_current_point(self) -> None:
+        with self._condition:
+            self._pause_requested = True
+            self._message = (
+                "Route API session pause requested; will pause after current contact."
+            )
+            self._condition.notify_all()
+
+    def request_current_point_correction(self) -> None:
+        self._contact_runner.request_current_point_correction()
+        with self._condition:
+            if self._state.startswith("waiting"):
+                self._pending_action = "interrupt"
+            self._condition.notify_all()
+
+    def submit_confirmation(self, action: str) -> bool:
+        normalized = self._normalize_action(action)
+        if normalized is None:
+            return False
+        with self._condition:
+            self._pending_action = normalized
+            self._condition.notify_all()
+        return True
+
+    def submit_external_result(self, result: dict[str, Any]) -> bool:
+        with self._condition:
+            if self._state != "waiting_external_measurement":
+                return False
+            self._pending_external_result = dict(result)
+            self._condition.notify_all()
+        return True
+
+    def request_contact_seek(self) -> bool:
+        with self._condition:
+            if not self._state.startswith("waiting"):
+                return False
+            self._pending_action = "seek"
+            self._condition.notify_all()
+        return True
+
+    def set_current_adjustment_point(self, point_number: int) -> tuple[bool, str]:
+        return self._contact_runner.set_current_adjustment_point(point_number)
+
+    def update_runtime_settings(
+        self,
+        *,
+        measurement_count: int,
+        initial_measurement_count: int,
+        max_relative_rms: float | None,
+        auto_contact_seek_step_mm: float,
+        auto_contact_seek_max_total_mm: float,
+        contact_settle_s: float,
+        photo_settle_s: float | None = None,
+    ) -> None:
+        self._contact_runner.update_runtime_settings(
+            measurement_count=measurement_count,
+            initial_measurement_count=initial_measurement_count,
+            max_relative_rms=max_relative_rms,
+            auto_contact_seek_step_mm=auto_contact_seek_step_mm,
+            auto_contact_seek_max_total_mm=auto_contact_seek_max_total_mm,
+            contact_settle_s=contact_settle_s,
+            photo_settle_s=photo_settle_s,
+        )
+
+    def status_payload(self) -> dict[str, Any]:
+        with self._condition:
+            return {
+                "accepted": True,
+                "session_id": self.session_id,
+                "state": self._state,
+                "waiting": self._state.startswith("waiting"),
+                "waiting_reason": self._waiting_reason,
+                "message": self._message,
+                "position": self._position,
+                "total": self._total,
+                "current_contact": self._point_payload(self._current_point),
+                "last_preparation": self._preparation_payload(
+                    self._last_preparation
+                ),
+                "last_external_result": self._last_external_result,
+                "history": list(self._history),
+            }
+
+    def run(self) -> tuple[bool, str]:
+        success = False
+        message = "Route API session stopped."
+        try:
+            if not self._points:
+                raise ValueError("Route has no enabled points.")
+            lcr = self._contact_runner._lcr_controller
+            if hasattr(lcr, "open"):
+                self._status("Route API session: connecting meter.")
+                lcr.open()
+            self._set_state("running", message="Route API session starting.")
+            index = self._start_index()
+            while index < len(self._points):
+                if self._stop_requested_now():
+                    message = "Route API session stopped by user."
+                    break
+                point = self._points[index]
+                position = index + 1
+                self._set_current(position, point)
+                self._emit_progress(position, len(self._points), int(point.index))
+                try:
+                    preparation = self._prepare_point(point, position, len(self._points))
+                except RuntimeError:
+                    if not self._point_interrupted():
+                        raise
+                    decision = self._wait_for_interrupted_point(point, position)
+                    jump = self._handle_interrupted_decision(
+                        decision,
+                        position,
+                        len(self._points),
+                    )
+                    index = position - 1 if jump is None else jump
+                    continue
+                record = preparation.placement.record
+                self._store_preparation(preparation)
+                self._emit_result(record, position, len(self._points), record.status in {"ok", "short"})
+                if record.status == "short":
+                    self._append_history(
+                        point,
+                        position,
+                        "short",
+                        preparation=preparation,
+                        external_result=None,
+                    )
+                    self._status(
+                        f"Route API session: point {position}/{len(self._points)} "
+                        "short-circuit detected; external measurement skipped."
+                    )
+                    self._lift_needles(position, len(self._points))
+                    pause_decision = self._wait_if_pause_requested(point, position)
+                    jump = self._handle_post_point_decision(pause_decision)
+                    if jump is not None:
+                        index = jump
+                        continue
+                    index += 1
+                    continue
+                if record.status != "ok":
+                    decision = self._wait_for_contact_attention(point, position)
+                    jump = self._handle_attention_decision(
+                        decision,
+                        point,
+                        position,
+                        len(self._points),
+                    )
+                    if jump is None:
+                        index += 1
+                    else:
+                        index = jump
+                    continue
+                decision = self._wait_for_external_result(point, position)
+                if "result" in decision:
+                    external_result = dict(decision["result"])
+                    self._last_external_result = external_result
+                    self._append_history(
+                        point,
+                        position,
+                        str(external_result.get("status") or "ok"),
+                        preparation=preparation,
+                        external_result=external_result,
+                    )
+                    self._lift_needles(position, len(self._points))
+                    pause_decision = self._wait_if_pause_requested(point, position)
+                    jump = self._handle_post_point_decision(pause_decision)
+                    if jump is not None:
+                        index = jump
+                        continue
+                    index += 1
+                    continue
+                jump = self._handle_attention_decision(
+                    decision,
+                    point,
+                    position,
+                    len(self._points),
+                )
+                if jump is None:
+                    index += 1
+                else:
+                    index = jump
+            if index >= len(self._points) and not self._stop_requested_now():
+                success = True
+                message = "Route API session complete."
+        except Exception as exc:
+            message = str(exc)
+            self._status(f"Route API session failed: {message}")
+        finally:
+            try:
+                lcr = self._contact_runner._lcr_controller
+                if hasattr(lcr, "close"):
+                    lcr.close()
+            except Exception as exc:
+                message = f"{message} Instrument close failed: {exc}"
+            self._set_waiting(False)
+            self._set_state(
+                "complete" if success else "stopped",
+                waiting_reason="",
+                message=message,
+            )
+        return success, message
+
+    @staticmethod
+    def _normalize_action(action: str) -> str | None:
+        normalized = str(action or "").strip().lower()
+        if normalized in {"resume", "next", "continue"}:
+            return "next"
+        if normalized in {"remeasure", "measure"}:
+            return "remeasure"
+        if normalized in {"skip", "stop", "interrupt", "seek"}:
+            return normalized
+        if normalized.isdigit():
+            return f"jump:{int(normalized)}"
+        if normalized.startswith("jump:"):
+            try:
+                return f"jump:{int(normalized.split(':', 1)[1].strip())}"
+            except ValueError:
+                return None
+        return None
+
+    def _start_index(self) -> int:
+        start = self._contact_runner._start_point_number
+        index = self._contact_runner._index_for_point_number(start)
+        return 0 if index is None else index
+
+    def _prepare_point(
+        self,
+        point: RouteMeasurementPoint,
+        position: int,
+        total: int,
+    ) -> RouteExternalContactPreparation:
+        self._set_state(
+            "running",
+            waiting_reason="",
+            message=f"Route API session: preparing point {position}/{total}.",
+        )
+        return self._contact_runner.prepare_external_contact(
+            point,
+            position=position,
+            total=total,
+            photo_enabled=self._photo_enabled,
+            photo_focus_enabled=self._photo_focus_enabled,
+            lift_on_failure=False,
+        )
+
+    def _wait_for_contact_attention(
+        self,
+        point: RouteMeasurementPoint,
+        position: int,
+    ) -> dict[str, Any]:
+        message = (
+            f"Route API session: point {position}/{self._total} "
+            f"{point.label} needs contact action."
+        )
+        self._status(message)
+        return self._wait_for_decision(
+            state="waiting_contact",
+            reason="contact",
+            message=message,
+            allow_external_result=False,
+        )
+
+    def _wait_for_interrupted_point(
+        self,
+        point: RouteMeasurementPoint,
+        position: int,
+    ) -> dict[str, Any]:
+        message = (
+            f"Route API session: point {position}/{self._total} "
+            f"{point.label} interrupted."
+        )
+        self._status(message)
+        return self._wait_for_decision(
+            state="waiting_interrupted",
+            reason="interrupted",
+            message=message,
+            allow_external_result=False,
+        )
+
+    def _wait_for_external_result(
+        self,
+        point: RouteMeasurementPoint,
+        position: int,
+    ) -> dict[str, Any]:
+        message = (
+            f"Route API session: point {position}/{self._total} "
+            f"{point.label} waiting for external measurement."
+        )
+        self._status(message)
+        return self._wait_for_decision(
+            state="waiting_external_measurement",
+            reason="external_measurement",
+            message=message,
+            allow_external_result=True,
+        )
+
+    def _wait_if_pause_requested(
+        self,
+        point: RouteMeasurementPoint,
+        position: int,
+    ) -> dict[str, Any]:
+        with self._condition:
+            requested = self._pause_requested
+            self._pause_requested = False
+        if not requested:
+            return {"action": "next"}
+        message = (
+            f"Route API session: paused after point {position}/{self._total} "
+            f"{point.label}."
+        )
+        self._status(message)
+        return self._wait_for_decision(
+            state="waiting_paused",
+            reason="paused",
+            message=message,
+            allow_external_result=False,
+        )
+
+    def _wait_for_decision(
+        self,
+        *,
+        state: str,
+        reason: str,
+        message: str,
+        allow_external_result: bool,
+    ) -> dict[str, Any]:
+        self._set_waiting(True)
+        self._set_state(state, waiting_reason=reason, message=message)
+        try:
+            with self._condition:
+                self._pending_action = None
+                while True:
+                    if self._stop_requested:
+                        return {"action": "stop"}
+                    if allow_external_result and self._pending_external_result is not None:
+                        result = self._pending_external_result
+                        self._pending_external_result = None
+                        return {"result": result}
+                    if self._pending_action is not None:
+                        action = self._pending_action
+                        self._pending_action = None
+                        return {"action": action}
+                    self._condition.wait(timeout=0.2)
+        finally:
+            self._set_waiting(False)
+
+    def _handle_attention_decision(
+        self,
+        decision: dict[str, Any],
+        point: RouteMeasurementPoint,
+        position: int,
+        total: int,
+    ) -> int | None:
+        action = str(decision.get("action") or "")
+        if action == "stop":
+            self.stop()
+            return len(self._points)
+        if action == "interrupt":
+            self._lift_needles(position, total)
+            return position - 1
+        if action == "skip":
+            self._append_history(
+                point,
+                position,
+                "skipped",
+                preparation=self._last_preparation,
+                external_result=None,
+            )
+            self._lift_needles(position, total)
+            return None
+        if action == "seek":
+            preparation = self._seek_current_contact(point, position, total)
+            self._store_preparation(preparation)
+            record = preparation.placement.record
+            self._emit_result(record, position, total, record.status in {"ok", "short"})
+            if record.status == "short":
+                self._append_history(
+                    point,
+                    position,
+                    "short",
+                    preparation=preparation,
+                    external_result=None,
+                )
+                self._lift_needles(position, total)
+                return None
+            if record.status == "ok":
+                followup = self._wait_for_external_result(point, position)
+                if "result" in followup:
+                    self._last_external_result = dict(followup["result"])
+                    self._append_history(
+                        point,
+                        position,
+                        str(self._last_external_result.get("status") or "ok"),
+                        preparation=preparation,
+                        external_result=self._last_external_result,
+                    )
+                    self._lift_needles(position, total)
+                    return None
+                return self._handle_attention_decision(followup, point, position, total)
+            return self._handle_attention_decision(
+                self._wait_for_contact_attention(point, position),
+                point,
+                position,
+                total,
+            )
+        if action == "remeasure":
+            self._lift_needles(position, total)
+            return position - 1
+        jump = self._jump_index(action)
+        if jump is not None:
+            self._lift_needles(position, total)
+            return jump
+        self._lift_needles(position, total)
+        return None
+
+    def _handle_interrupted_decision(
+        self,
+        decision: dict[str, Any],
+        position: int,
+        total: int,
+    ) -> int | None:
+        action = str(decision.get("action") or "")
+        if action == "stop":
+            self.stop()
+            return len(self._points)
+        if action == "skip":
+            self._lift_needles(position, total)
+            return position
+        jump = self._jump_index(action)
+        if jump is not None:
+            self._lift_needles(position, total)
+            return jump
+        self._lift_needles(position, total)
+        return None
+
+    def _handle_post_point_decision(self, decision: dict[str, Any]) -> int | None:
+        action = str(decision.get("action") or "next")
+        if action == "stop":
+            self.stop()
+            return len(self._points)
+        if action == "remeasure":
+            return max(0, self._position - 1)
+        jump = self._jump_index(action)
+        return jump
+
+    def _seek_current_contact(
+        self,
+        point: RouteMeasurementPoint,
+        position: int,
+        total: int,
+    ) -> RouteExternalContactPreparation:
+        placement = self._contact_runner.seek_contact(
+            point,
+            position=position,
+            total=total,
+        )
+        return RouteExternalContactPreparation(
+            placement=placement,
+            photo_path=None,
+            focus=None,
+        )
+
+    def _lift_needles(self, position: int, total: int) -> None:
+        try:
+            self._contact_runner.lift_needles_after_external_measurement(
+                position=position,
+                total=total,
+            )
+        except Exception:
+            logger.exception("Route API session failed to lift needles.")
+            raise
+
+    def _jump_index(self, action: str) -> int | None:
+        if not str(action).startswith("jump:"):
+            return None
+        try:
+            point_number = int(str(action).split(":", 1)[1])
+        except ValueError:
+            return None
+        index = self._contact_runner._index_for_point_number(point_number)
+        return index
+
+    def _stop_requested_now(self) -> bool:
+        with self._condition:
+            return bool(self._stop_requested)
+
+    def _point_interrupted(self) -> bool:
+        return bool(self._contact_runner._point_interrupt_requested.is_set())
+
+    def _set_current(self, position: int, point: RouteMeasurementPoint) -> None:
+        with self._condition:
+            self._position = int(position)
+            self._current_point = point
+
+    def _store_preparation(
+        self,
+        preparation: RouteExternalContactPreparation,
+    ) -> None:
+        with self._condition:
+            self._last_preparation = preparation
+
+    def _append_history(
+        self,
+        point: RouteMeasurementPoint,
+        position: int,
+        status: str,
+        *,
+        preparation: RouteExternalContactPreparation | None,
+        external_result: dict[str, Any] | None,
+    ) -> None:
+        entry = {
+            "position": int(position),
+            "contact": self._point_payload(point),
+            "status": str(status),
+            "preparation": self._preparation_payload(preparation),
+            "external_result": external_result,
+        }
+        with self._condition:
+            self._history.append(entry)
+
+    def _set_state(
+        self,
+        state: str,
+        *,
+        waiting_reason: str | None = None,
+        message: str | None = None,
+    ) -> None:
+        with self._condition:
+            self._state = str(state)
+            if waiting_reason is not None:
+                self._waiting_reason = str(waiting_reason)
+            if message is not None:
+                self._message = str(message)
+
+    def _set_waiting(self, waiting: bool) -> None:
+        if self._waiting_callback is not None:
+            self._waiting_callback(bool(waiting))
+
+    def _status(self, message: str) -> None:
+        self._set_state(self._state, message=message)
+        if self._status_callback is not None:
+            self._status_callback(message)
+
+    def _emit_progress(self, position: int, total: int, point_number: int) -> None:
+        if self._progress_callback is not None:
+            self._progress_callback(position, total, point_number)
+
+    def _emit_result(
+        self,
+        record: RouteMeasurementRecord,
+        position: int,
+        total: int,
+        saved: bool,
+    ) -> None:
+        if self._result_callback is not None:
+            self._result_callback(record, position, total, saved)
+
+    @staticmethod
+    def _point_payload(point: RouteMeasurementPoint | None) -> dict[str, Any] | None:
+        if point is None:
+            return None
+        return {
+            "contact_number": _structure_number_for_point(point),
+            "point_index": int(point.index),
+            "point_id": point.point_id,
+            "label": point.label,
+            "design_center": list(point.design_center),
+            "stage_xy": list(point.stage_xy),
+        }
+
+    @classmethod
+    def _preparation_payload(
+        cls,
+        preparation: RouteExternalContactPreparation | None,
+    ) -> dict[str, Any] | None:
+        if preparation is None:
+            return None
+        placement = preparation.placement
+        return {
+            "success": bool(placement.success),
+            "message": placement.message,
+            "contact": cls._point_payload(placement.point),
+            "measurement": _route_measurement_record_payload(placement.record),
+            "contact_seek": _route_contact_seek_payload(placement.contact_seek),
+            "photo_artifact_id": preparation.photo_path,
+            "focus": preparation.focus,
+        }
+
+
+def _route_measurement_record_payload(record: RouteMeasurementRecord) -> dict[str, Any]:
+    return {
+        "timestamp": record.timestamp,
+        "structure_number": int(record.structure_number),
+        "nplc": record.nplc,
+        "measurement_type": record.measurement_type,
+        "n_measurements": int(record.n_measurements),
+        "resistance_ohm": _json_ready(record.resistance_ohm),
+        "resistance_rms_ohm": _json_ready(record.resistance_rms_ohm),
+        "relative_rms": _json_ready(record.relative_rms),
+        "status": record.status,
+        "contact_quality": _route_contact_quality_payload(record.contact_quality),
+        "raw_samples": [
+            _route_measurement_sample_payload(sample)
+            for sample in record.raw_samples
+        ],
+    }
+
+
+def _route_measurement_sample_payload(sample: RouteMeasurementSample) -> dict[str, Any]:
+    return {
+        field: _json_ready(getattr(sample, field))
+        for field in (
+            "sample_index",
+            "differential_resistance_ohm",
+            "compliance_hit",
+            "negative_source_voltage_v",
+            "negative_measured_voltage_v",
+            "negative_current_a",
+            "negative_resistance_ohm",
+            "positive_source_voltage_v",
+            "positive_measured_voltage_v",
+            "positive_current_a",
+            "positive_resistance_ohm",
+        )
+    }
+
+
+def _route_contact_quality_payload(
+    quality: RouteContactQuality | None,
+) -> dict[str, Any] | None:
+    if quality is None:
+        return None
+    return {
+        "assessed": bool(quality.assessed),
+        "good": quality.good,
+        "status": quality.status,
+        "median_ohm": _json_ready(quality.median_ohm),
+        "mad_sigma_ohm": _json_ready(quality.mad_sigma_ohm),
+        "p95_abs_step_ohm": _json_ready(quality.p95_abs_step_ohm),
+        "span_ohm": _json_ready(quality.span_ohm),
+        "compliance_hits": int(quality.compliance_hits),
+        "polarity_sign_mismatch_count": int(
+            quality.polarity_sign_mismatch_count
+        ),
+        "reasons": list(quality.reasons),
+    }
+
+
+def _route_contact_seek_payload(
+    seek: RouteContactSeekResult | None,
+) -> dict[str, Any] | None:
+    if seek is None:
+        return None
+    return {
+        "found": bool(seek.found),
+        "status": seek.status,
+        "attempts": int(seek.attempts),
+        "initial_status": seek.initial_status,
+        "final_status": seek.final_status,
+        "depth_below_down_mm": _json_ready(seek.depth_below_down_mm),
+        "axis_a_lowering_mm": _json_ready(seek.axis_a_lowering_mm),
+        "step_mm": _json_ready(seek.step_mm),
+        "max_depth_mm": _json_ready(seek.max_depth_mm),
+    }
+
+
+def _json_ready(value: object) -> object:
+    if isinstance(value, bool) or value is None or isinstance(value, str):
+        return value
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    return value
+
+
 __all__ = [
     "RouteMeasurementCsvWriter",
     "CSV_FIELDS",
@@ -2115,6 +3035,8 @@ __all__ = [
     "RouteContactQuality",
     "RouteContactPlacementResult",
     "RouteContactSeekResult",
+    "RouteExternalContactPreparation",
+    "RouteExternalMeasurementSessionRunner",
     "RouteMeasurementPoint",
     "RoutePhotoRecord",
     "RouteMeasurementRecord",

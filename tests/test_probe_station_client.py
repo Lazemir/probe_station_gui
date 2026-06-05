@@ -38,6 +38,8 @@ class _FakeTransport:
         if not self.responses:
             return 200, {}, b'{"accepted": true}'
         status_code, payload = self.responses.pop(0)
+        if isinstance(payload, bytes):
+            return status_code, {}, payload
         return status_code, {}, json.dumps(payload).encode("utf-8")
 
 
@@ -170,6 +172,63 @@ class ProbeStationClientTest(unittest.TestCase):
         self.assertEqual(payload["voltages_v"], [-0.03, 0.03])
         self.assertEqual(payload["contact_number"], 7)
         self.assertEqual(payload["meter"], {"meter_type": "keithley"})
+
+    def test_route_subclient_session_actions_and_artifact_download(self) -> None:
+        transport = _FakeTransport(
+            (
+                200,
+                {
+                    "accepted": True,
+                    "session_id": "s1",
+                    "state": "running",
+                },
+            ),
+            (
+                200,
+                {
+                    "accepted": True,
+                    "session_id": "s1",
+                    "state": "waiting_external_measurement",
+                    "waiting_reason": "external_measurement",
+                    "position": 1,
+                    "current_contact": {"contact_number": 7},
+                },
+            ),
+            (200, {"accepted": True, "action": "pause"}),
+            (200, {"accepted": True, "message": "seek"}),
+            (200, {"accepted": True, "result": {"status": "ok"}}),
+            (200, b"photo-bytes"),
+        )
+        client = ProbeStationClient(api_key="secret", transport=transport)
+
+        session = client.route.start_external(initial_measurement_count=10)
+        status = session.status()
+        session.pause()
+        session.seek_current()
+        session.submit_result(
+            status="ok",
+            summary={"points": 31},
+            files=[{"kind": "iv", "path": "iv.csv"}],
+        )
+        data = session.download_artifact("a1")
+
+        self.assertEqual(session.session_id, "s1")
+        self.assertEqual(status["waiting_reason"], "external_measurement")
+        self.assertEqual(data, b"photo-bytes")
+        urls = [call["url"] for call in transport.calls]
+        self.assertTrue(urls[0].endswith("/api/v1/route/sessions"))
+        self.assertTrue(urls[1].endswith("/api/v1/route/sessions/current"))
+        self.assertTrue(urls[2].endswith("/api/v1/route/sessions/current/actions"))
+        self.assertTrue(urls[3].endswith("/api/v1/route/sessions/current/seek"))
+        self.assertTrue(urls[4].endswith("/api/v1/route/sessions/current/result"))
+        self.assertTrue(
+            urls[-1].endswith(
+                "/api/v1/route/sessions/current/artifacts/a1"
+            )
+        )
+        result_payload = json.loads(transport.calls[4]["body"].decode("utf-8"))
+        self.assertEqual(result_payload["summary"], {"points": 31})
+        self.assertEqual(result_payload["files"], [{"kind": "iv", "path": "iv.csv"}])
 
     def test_prepare_contact_is_client_side_recipe_without_backend_prepare(self) -> None:
         transport = _FakeTransport(
@@ -396,8 +455,10 @@ class ProbeStationInstrumentTest(unittest.TestCase):
         try:
             self.assertIn("stage", instrument.submodules)
             self.assertIn("meter", instrument.submodules)
+            self.assertIn("route", instrument.submodules)
             self.assertIs(instrument.stage.client, client)
             self.assertIs(instrument.meter.client, client)
+            self.assertIs(instrument.route.client, client)
             self.assertEqual(instrument.stage.state(), "Idle")
             self.assertEqual(instrument.stage.x(), 1.25)
 
@@ -466,6 +527,42 @@ class ProbeStationInstrumentTest(unittest.TestCase):
             payload = json.loads(transport.calls[1]["body"].decode("utf-8"))
             self.assertEqual(payload["voltages_v"], [-0.03, 0.03])
             self.assertEqual(payload["contact_number"], 7)
+        finally:
+            instrument.close()
+
+    def test_route_methods_live_on_route_submodule(self) -> None:
+        if qcodes_driver.Instrument is None:
+            self.skipTest("qcodes is not installed")
+
+        transport = _FakeTransport(
+            (200, {"accepted": True, "session_id": "s1"}),
+            (200, {"accepted": True, "state": "waiting_paused"}),
+            (200, {"accepted": True}),
+        )
+        client = ProbeStationClient(api_key="secret", transport=transport)
+        instrument = qcodes_driver.ProbeStationInstrument(
+            f"probe_station_test_{uuid.uuid4().hex}",
+            client=client,
+        )
+        try:
+            self.assertIn("route", instrument.submodules)
+
+            session = instrument.route.start_external(initial_measurement_count=10)
+            status = instrument.route.status()
+            instrument.route.resume()
+
+            self.assertEqual(session.session_id, "s1")
+            self.assertEqual(status["state"], "waiting_paused")
+            self.assertTrue(
+                transport.calls[0]["url"].endswith("/api/v1/route/sessions")
+            )
+            self.assertTrue(
+                transport.calls[2]["url"].endswith(
+                    "/api/v1/route/sessions/current/actions"
+                )
+            )
+            payload = json.loads(transport.calls[2]["body"].decode("utf-8"))
+            self.assertEqual(payload["action"], "resume")
         finally:
             instrument.close()
 

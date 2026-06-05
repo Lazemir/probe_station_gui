@@ -534,6 +534,52 @@ Invoke-RestMethod -Method Post `
 The sweep response includes `timestamp_utc`, contact metadata, the requested
 `voltages_v`, raw `iv_pairs`, and the full instrument result.
 
+Start a GUI-owned route session for notebook-owned measurements:
+
+```powershell
+Invoke-RestMethod -Method Post `
+  -Uri http://127.0.0.1:8765/api/v1/route/sessions `
+  -Headers $headers `
+  -ContentType application/json `
+  -Body '{"initial_measurement_count": 10, "followup_measurement_count": 240, "photo_enabled": true, "photo_autofocus_enabled": true}'
+```
+
+During this session the GUI owns route movement, autofocus, route photos,
+needle lowering, resistance contact check, contact seek, pause, interrupt,
+Telegram status, and needle lifting. The notebook owns the external
+experiment measurement and storage. Resistance results, raw resistance samples,
+short/bad-contact status, contact seek details, and photo artifact IDs are
+returned through session status; no resistance CSV or route photo directory is
+created on the server for this API mode.
+
+Session controls:
+
+```powershell
+Invoke-RestMethod -Uri http://127.0.0.1:8765/api/v1/route/sessions/current -Headers $headers
+
+Invoke-RestMethod -Method Post `
+  -Uri http://127.0.0.1:8765/api/v1/route/sessions/current/actions `
+  -Headers $headers `
+  -ContentType application/json `
+  -Body '{"action": "pause"}'
+
+Invoke-RestMethod -Method Post `
+  -Uri http://127.0.0.1:8765/api/v1/route/sessions/current/result `
+  -Headers $headers `
+  -ContentType application/json `
+  -Body '{"status": "ok", "summary": {"iv_points": 101}, "files": [{"kind": "iv", "path": "C:/data/contact-7-iv.csv"}]}'
+```
+
+Allowed actions are `pause`, `resume`, `interrupt`, `stop`, `skip`,
+`remeasure`, and `jump:<point>`. Use
+`POST /api/v1/route/sessions/current/seek` to repeat contact seek from the
+current needle position while the session is waiting for contact attention.
+Download photo artifacts from
+`GET /api/v1/route/sessions/current/artifacts/{artifact_id}` and save them in
+the notebook experiment folder. Server-side photo files are only used by the
+normal GUI route-photo workflow; API session artifacts are temporary in-memory
+bytes for the client and Telegram notifications.
+
 Meter ranges can be configured without device-specific range fields:
 
 ```powershell
@@ -604,6 +650,56 @@ result = client.meter.raw_sweep([-0.1, 0.0, 0.1], contact_number=7)
 lowers needles, checks contact quality, runs contact seek when needed, and lifts
 needles on failure. The backend API still sees only the lower-level commands.
 
+For notebook measurements that should keep GUI pause, interrupt, status, and
+Telegram behavior, start an external route session:
+
+```python
+from pathlib import Path
+from probe_station_client import ProbeStationClient
+
+client = ProbeStationClient(profile="lab-prober")
+session = client.route.start_external(
+    initial_measurement_count=10,
+    followup_measurement_count=240,
+    photo_enabled=True,
+    photo_autofocus_enabled=True,
+    meter={
+        "meter_type": "keithley",
+        "measurement_voltage_v": 0.03,
+        "ranges": {
+            "mode": "code_auto",
+            "expected_resistance_ohm": 100_000,
+            "max_current_a": 10e-6,
+        },
+    },
+)
+
+experiment_dir = Path(r"C:\data\chip-001")
+experiment_dir.mkdir(parents=True, exist_ok=True)
+
+for contact in session.iter_ready():
+    prep = contact.preparation
+    photo_id = prep.get("photo_artifact_id")
+    if photo_id:
+        (experiment_dir / f"contact-{contact.contact_number}.jpg").write_bytes(
+            contact.download_artifact(photo_id)
+        )
+
+    # Run the notebook-owned IV measurement here and write its files locally.
+    iv_path = experiment_dir / f"contact-{contact.contact_number}-iv.csv"
+
+    contact.submit_result(
+        status="ok",
+        summary={"iv_points": 101},
+        files=[{"kind": "iv", "path": str(iv_path)}],
+    )
+```
+
+If the resistance precheck reports `short`, the GUI records that status in the
+session result and skips the external wait for that contact. If contact quality
+is bad, the session waits; call `session.seek_current()`, `session.skip()`, or
+use the GUI/Telegram route actions.
+
 Credential lookup order is:
 1. `PROBE_STATION_API_KEY`;
 2. the OS credential backend through `keyring`;
@@ -638,16 +734,19 @@ station.meter.configure(
     measurement_voltage_v=0.03,
     ranges={"mode": "code_auto", "expected_resistance_ohm": 100_000},
 )
-station.prepare_contact(7, check_sample_count=10, contact_settle_s=0.2)
 data = station.meter.raw_sweep([-0.1, 0.0, 0.1], contact_number=7)
+
+session = station.route.start_external(initial_measurement_count=10)
+print(station.route.status())
+station.route.resume()
 
 station.close()
 ```
 
 Stage motion lives under the `stage` submodule: `station.stage.x`,
 `station.stage.move_to`, and `station.stage.move_by`. Measurement-instrument
-configuration and raw sweeps live under `station.meter`. Route-contact workflow
-methods remain top-level for now.
+configuration and raw sweeps live under `station.meter`. GUI-owned route
+workflow controls live under `station.route`.
 
 ## Settings
 
