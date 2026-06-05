@@ -197,6 +197,7 @@ class _FakeStageController:
         self.next_absolute_jog_accept = True
         self.busy = False
         self.latest_state = "Idle"
+        self.latest_position = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         self.last_status_time: float | None = time.monotonic()
         self.cancelled_tasks: list[str] = []
         self.cancelled_motions: list[str] = []
@@ -240,6 +241,9 @@ class _FakeStageController:
 
     def latest_stage_state(self) -> str:
         return self.latest_state
+
+    def latest_stage_position(self) -> tuple[float, ...]:
+        return self.latest_position
 
     def last_status_timestamp(self) -> float | None:
         return self.last_status_time
@@ -317,6 +321,7 @@ def _make_main(current_feedrate: float = 120.0) -> tuple[
 
     window.stage_controller = stage_controller
     window.joystick_panel = joystick
+    window.serial_terminal_panel = None
     window._pending_stage_axis_targets = {}
     window._stage_axis_fields = {}
     window._coordinate_move_axis = None
@@ -338,6 +343,19 @@ def _make_main(current_feedrate: float = 120.0) -> tuple[
     window._planned_move_waiting_for_fresh_status = False
     window._pending_alignment_preparation = None
     window._pending_quick_alignment_rotation = False
+    window._manual_jog_stage_position = None
+    window._manual_jog_stage_xy = None
+    window._manual_jog_axis_velocities = {}
+    window._manual_jog_stop_axis_velocities = {}
+    window._manual_jog_velocity_xy = None
+    window._manual_jog_stop_prediction_until = None
+    window._manual_jog_stop_tail_position = None
+    window._manual_jog_waiting_for_fresh_status = False
+    window._manual_jog_settle_until = 0.0
+    window._manual_jog_stop_status_timestamp = None
+    window._manual_jog_command_started_at = None
+    window._manual_jog_last_timestamp = None
+    window._manual_jog_last_prediction_log_at = 0.0
     window._manual_jog_timer = timer
     window._seed_motion_prediction_position = lambda: (
         0.0,
@@ -376,6 +394,7 @@ def _make_main(current_feedrate: float = 120.0) -> tuple[
     window._publish_stage_position_estimate = (
         lambda position: estimates.append(tuple(float(value) for value in position))
     )
+    window._design_xy_from_raw_stage_xy = lambda _stage_xy: None
     return window, stage_controller, joystick, timer, statuses
 
 
@@ -1056,6 +1075,60 @@ assert image.height() == 4
         self.assertEqual(resumed, [12])
         self.assertEqual(progress, [(3, 7, 12)])
 
+    def test_api_route_session_opens_measurement_controls_without_starting_gui_run(self) -> None:
+        window = Main.__new__(Main)
+        calls: list[bool] = []
+        window._open_route_measurement_dialog = (
+            lambda *, start_context=True: calls.append(bool(start_context))
+        )
+
+        Main._show_route_measurement_dialog_for_api_session(window)
+
+        self.assertEqual(calls, [False])
+
+    def test_api_route_session_started_slot_updates_controls_on_gui_thread(self) -> None:
+        window = Main.__new__(Main)
+        calls: list[object] = []
+        panel = types.SimpleNamespace(
+            set_route_measurement_running=lambda value: calls.append(
+                ("panel_running", value)
+            ),
+            set_route_measurement_waiting=lambda value: calls.append(
+                ("panel_waiting", value)
+            ),
+            set_route_measurement_status=lambda value: calls.append(
+                ("panel_status", value)
+            ),
+        )
+        dialog = types.SimpleNamespace(
+            set_running=lambda value: calls.append(("dialog_running", value)),
+            reset_progress=lambda value: calls.append(("dialog_progress", value)),
+            set_status=lambda value: calls.append(("dialog_status", value)),
+        )
+        window.design_navigator_panel = panel
+        window._route_measurement_dialog = dialog
+        window._set_route_measurement_resume_point = lambda value: calls.append(
+            ("resume_point", value)
+        )
+        window._set_route_measurement_pending = lambda value: calls.append(
+            ("pending", value)
+        )
+        window._show_route_measurement_dialog_for_api_session = lambda: calls.append(
+            ("open_controls",)
+        )
+        window._show_status = lambda message: calls.append(("status", message))
+        window._update_stage_coordinate_apply_state = lambda: calls.append(
+            ("update_stage_controls",)
+        )
+
+        Main._on_route_measurement_started(window, "started", 420, 7, True)
+
+        self.assertIn(("resume_point", 7), calls)
+        self.assertIn(("pending", True), calls)
+        self.assertIn(("open_controls",), calls)
+        self.assertIn(("dialog_progress", 420), calls)
+        self.assertIn(("status", "started"), calls)
+
     def test_route_progress_eta_uses_current_run_baseline(self) -> None:
         dialog = RouteMeasurementDialog.__new__(RouteMeasurementDialog)
         dialog._progress_started_at = 100.0
@@ -1474,6 +1547,7 @@ assert image.height() == 4
         )
         advances = []
         window._advance_coordinate_move_prediction = lambda: advances.append(True)
+        stage_controller.busy = True
 
         Main._apply_coordinate_move_feedrate(window, 180.0)
 
@@ -1503,6 +1577,7 @@ assert image.height() == 4
         )
         window._coordinate_move_axis = None
         window._advance_coordinate_move_prediction = lambda: None
+        stage_controller.busy = True
 
         Main._apply_coordinate_move_feedrate(window, 180.0)
 
@@ -1559,6 +1634,7 @@ assert image.height() == 4
             source_label="coordinate fields",
         )
         stage_controller.next_absolute_jog_accept = False
+        stage_controller.busy = True
         scheduled_delays: list[tuple[int, ...]] = []
         window._schedule_status_refreshes = (
             lambda delays: scheduled_delays.append(tuple(delays))
@@ -1580,6 +1656,39 @@ assert image.height() == 4
                 for item in statuses
             )
         )
+
+    def test_manual_jog_clears_active_coordinate_move_tracking(self) -> None:
+        window, _stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
+        Main._start_coordinate_targets_move(
+            window,
+            {"X": (5.0, 5.0), "Z": (3.84, 3.84)},
+            feedrate_mm_min=120.0,
+            source_label="coordinate fields",
+        )
+
+        Main._on_manual_jog_command_changed(window, (("X", -250.0),), 60.0)
+
+        self.assertIsNone(window._coordinate_move_axis)
+        self.assertEqual(window._coordinate_move_axes, set())
+        self.assertEqual(window._motion_axes, {"X"})
+
+    def test_feedrate_change_does_not_reissue_stale_idle_coordinate_move(self) -> None:
+        window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
+        Main._start_coordinate_targets_move(
+            window,
+            {"X": (5.0, 5.0), "Z": (3.84, 3.84)},
+            feedrate_mm_min=120.0,
+            source_label="coordinate fields",
+        )
+        stage_controller.busy = False
+        stage_controller.latest_state = "Idle"
+
+        Main._apply_coordinate_move_feedrate(window, 180.0)
+
+        self.assertIsNone(window._coordinate_move_axis)
+        self.assertEqual(window._coordinate_move_axes, set())
+        self.assertEqual(stage_controller.requests, [({"X": 5.0, "Z": 3.84}, 120.0)])
+        self.assertEqual(stage_controller.jog_stops, 0)
 
     def test_cancel_button_is_enabled_for_generic_busy_stage_task(self) -> None:
         window, stage_controller, cancel_button, _statuses = _make_cancel_main()

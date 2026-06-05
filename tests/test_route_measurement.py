@@ -530,6 +530,48 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
         )
         self.assertIn(("needles", "lift", 75.0), stage.calls)
 
+    def test_external_session_waiting_action_from_callback_is_not_lost(self) -> None:
+        point = _point(1)
+        stage = _FakeStage()
+        lcr = _FakeBatchRouteLCR(
+            [
+                {"differential_resistance_ohm": 100.0 + index}
+                for index in range(5)
+            ]
+        )
+        runner_holder: dict[str, RouteExternalMeasurementSessionRunner] = {}
+
+        def on_waiting(waiting: bool) -> None:
+            if waiting:
+                runner_holder["runner"].submit_confirmation("skip")
+
+        runner = RouteExternalMeasurementSessionRunner(
+            session_id="session-1",
+            points=[point],
+            stage_controller=stage,
+            lcr_controller=lcr,
+            needle_feedrate=75.0,
+            measurement_count=5,
+            initial_measurement_count=2,
+            contact_settle_s=0.0,
+            photo_enabled=False,
+            photo_focus_enabled=False,
+            waiting_callback=on_waiting,
+        )
+        runner_holder["runner"] = runner
+        finished: list[tuple[bool, str]] = []
+        thread = threading.Thread(
+            target=lambda: finished.append(runner.run()),
+            daemon=True,
+        )
+
+        thread.start()
+        thread.join(timeout=2.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(finished, [(True, "Route API session complete.")])
+        self.assertEqual(runner.status_payload()["history"][0]["status"], "skipped")
+
     @staticmethod
     def _wait_for_state(
         runner: RouteExternalMeasurementSessionRunner,

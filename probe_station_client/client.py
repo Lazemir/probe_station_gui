@@ -234,6 +234,7 @@ class ProbeStationRouteSession:
         *,
         poll_interval_s: float = 0.5,
         timeout_s: float | None = None,
+        raise_on_stop: bool = True,
     ):
         """Yield contacts as they become ready for external measurement."""
 
@@ -242,7 +243,15 @@ class ProbeStationRouteSession:
         while True:
             status = self.status()
             state = str(status.get("state") or "")
-            if state in {"complete", "stopped", "failed"}:
+            if state == "complete":
+                return
+            if state in {"stopped", "failed"}:
+                if raise_on_stop:
+                    message = str(
+                        status.get("message")
+                        or "Route session stopped before completion."
+                    )
+                    raise ProbeStationClientError(message)
                 return
             reason = str(status.get("waiting_reason") or "")
             if reason == "external_measurement":

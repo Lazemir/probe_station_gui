@@ -500,6 +500,7 @@ class Main(QMainWindow):
 
     design_layout_module_ready: Signal = Signal(object, object)
     design_document_loaded: Signal = Signal(int, object, object)
+    route_measurement_started: Signal = Signal(str, int, int, bool)
     route_measurement_status: Signal = Signal(str)
     route_measurement_progress: Signal = Signal(int, int, int)
     route_measurement_waiting_changed: Signal = Signal(bool)
@@ -784,6 +785,9 @@ class Main(QMainWindow):
         self.grabber.error.connect(self.on_error)
         self.design_layout_module_ready.connect(self._on_design_layout_module_ready)
         self.design_document_loaded.connect(self._on_design_document_loaded)
+        self.route_measurement_started.connect(
+            self._on_route_measurement_started
+        )
         self.route_measurement_status.connect(self._on_route_measurement_status)
         self.route_measurement_progress.connect(self._on_route_measurement_progress)
         self.route_measurement_waiting_changed.connect(
@@ -2604,8 +2608,6 @@ class Main(QMainWindow):
         self._route_measurement_measure_enabled = True
         self._route_measurement_point_numbers = [int(point.index) for point in points]
         self._last_telegram_attention_message = ""
-        self._set_route_measurement_resume_point(int(selected_point.index))
-        self._set_route_measurement_pending(True)
         with self._telegram_photo_lock:
             self._telegram_pending_contact_photo = None
             self._telegram_pending_contact_before_photo = None
@@ -2623,23 +2625,25 @@ class Main(QMainWindow):
             f"point {int(selected_point.index)} {selected_point.label}; "
             f"{len(points)} points selected."
         )
-        if self.design_navigator_panel is not None:
-            self.design_navigator_panel.set_route_measurement_running(True)
-            self.design_navigator_panel.set_route_measurement_waiting(False)
-            self.design_navigator_panel.set_route_measurement_status(start_message)
-        if self._route_measurement_dialog is not None:
-            self._route_measurement_dialog.set_running(True)
-            self._route_measurement_dialog.reset_progress(len(points))
-            self._route_measurement_dialog.set_status(start_message)
-        self._show_status(start_message)
+        self.route_measurement_started.emit(
+            start_message,
+            len(points),
+            int(selected_point.index),
+            True,
+        )
         self._last_route_measurement_result = None
         self._send_telegram_alert(
             "route_started",
             f"Probe route API session started:\n{start_message}",
         )
         self._route_measurement_thread.start()
-        self._update_stage_coordinate_apply_state()
         return runner.status_payload()
+
+    def _show_route_measurement_dialog_for_api_session(self) -> None:
+        try:
+            self._open_route_measurement_dialog(start_context=False)
+        except Exception:
+            logger.exception("Failed to open route measurement controls for API session.")
 
     def _api_route_session_status(self) -> dict[str, Any]:
         runner = self._route_measurement_runner
@@ -6291,6 +6295,15 @@ class Main(QMainWindow):
             self._clear_stage_motion_axes()
             self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
             return
+        if self._coordinate_move_axis is not None:
+            logger.debug(
+                "Coordinate move tracking cleared after manual jog command: %s",
+                commanded_distances,
+            )
+            self._clear_coordinate_move_tracking(
+                clear_pending=False,
+                reset_override=False,
+            )
         self._set_stage_motion_axes(
             {
                 axis
@@ -8536,6 +8549,29 @@ class Main(QMainWindow):
         )
         self.route_measurement_finished.emit(success, message, csv_path)
 
+    def _on_route_measurement_started(
+        self,
+        message: str,
+        total: int,
+        start_point: int,
+        open_controls: bool,
+    ) -> None:
+        self._set_route_measurement_resume_point(int(start_point))
+        self._set_route_measurement_pending(True)
+        if open_controls:
+            self._show_route_measurement_dialog_for_api_session()
+        total_points = max(0, int(total))
+        if self.design_navigator_panel is not None:
+            self.design_navigator_panel.set_route_measurement_running(True)
+            self.design_navigator_panel.set_route_measurement_waiting(False)
+            self.design_navigator_panel.set_route_measurement_status(message)
+        if self._route_measurement_dialog is not None:
+            self._route_measurement_dialog.set_running(True)
+            self._route_measurement_dialog.reset_progress(total_points)
+            self._route_measurement_dialog.set_status(message)
+        self._show_status(message)
+        self._update_stage_coordinate_apply_state()
+
     def _request_stop_route_measurement(self) -> None:
         runner = self._route_measurement_runner
         if runner is None:
@@ -9964,6 +10000,17 @@ class Main(QMainWindow):
             or self._coordinate_move_programmed_feedrate is None
             or self._coordinate_move_target_position is None
         ):
+            return
+        latest_state = (self.stage_controller.latest_stage_state() or "").lower()
+        if not self.stage_controller.is_busy() and latest_state in {"", "idle"}:
+            logger.debug(
+                "Ignoring feedrate change for stale coordinate move tracking."
+            )
+            self._clear_coordinate_move_tracking(
+                clear_pending=False,
+                reset_override=False,
+            )
+            self._clear_stage_motion_axes()
             return
         try:
             requested_feedrate = max(

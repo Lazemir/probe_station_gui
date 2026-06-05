@@ -12,6 +12,7 @@ from probe_station_client.client import (
     AuthenticationError,
     PermissionDeniedError,
     ProbeStationClient,
+    ProbeStationClientError,
 )
 from probe_station_client.credentials import (
     ENV_API_KEY,
@@ -305,6 +306,35 @@ class ProbeStationClientTest(unittest.TestCase):
         result_payload = json.loads(transport.calls[4]["body"].decode("utf-8"))
         self.assertEqual(result_payload["summary"], {"points": 31})
         self.assertEqual(result_payload["files"], [{"kind": "iv", "path": "iv.csv"}])
+
+    def test_route_iter_ready_raises_when_session_stops(self) -> None:
+        transport = _FakeTransport(
+            (
+                200,
+                {
+                    "accepted": True,
+                    "session_id": "s1",
+                    "state": "running",
+                },
+            ),
+            (
+                200,
+                {
+                    "accepted": True,
+                    "session_id": "s1",
+                    "state": "stopped",
+                    "message": "Route API session stopped.",
+                },
+            ),
+        )
+        client = ProbeStationClient(api_key="secret", transport=transport)
+        session = client.route.start_external(initial_measurement_count=10)
+
+        with self.assertRaisesRegex(
+            ProbeStationClientError,
+            "Route API session stopped",
+        ):
+            list(session.iter_ready(poll_interval_s=0.0))
 
     def test_prepare_contact_is_client_side_recipe_without_backend_prepare(self) -> None:
         transport = _FakeTransport(

@@ -2676,11 +2676,12 @@ class RouteExternalMeasurementSessionRunner:
         message: str,
         allow_external_result: bool,
     ) -> dict[str, Any]:
-        self._set_waiting(True)
+        with self._condition:
+            self._pending_action = None
         self._set_state(state, waiting_reason=reason, message=message)
+        self._set_waiting(True)
         try:
             with self._condition:
-                self._pending_action = None
                 while True:
                     if self._stop_requested:
                         return {"action": "stop"}

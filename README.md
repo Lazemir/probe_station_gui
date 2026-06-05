@@ -751,7 +751,12 @@ for contact in session.iter_ready():
 If the resistance precheck reports `short`, the GUI records that status in the
 session result and skips the external wait for that contact. If contact quality
 is bad, the session waits; call `session.seek_current()`, `session.skip()`, or
-use the GUI/Telegram route actions.
+use the GUI/Telegram route actions. `session.iter_ready()` yields only contacts
+that are waiting for the notebook-owned external measurement. During pause,
+interrupt correction, or contact attention it keeps polling while the GUI route
+controls remain active; if the session stops or fails, it raises
+`ProbeStationClientError` with the server message instead of ending the loop
+silently.
 
 Credential lookup order is:
 1. `PROBE_STATION_API_KEY`;
