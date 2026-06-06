@@ -728,6 +728,64 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual(finished, [(True, "Route API session complete.")])
 
+    def test_external_session_resume_after_interrupted_focus_retries_point(self) -> None:
+        point = _point(1)
+        stage = _FakeStage()
+        lcr = _FakeBatchRouteLCR(
+            [
+                {"differential_resistance_ohm": 100.0 + index}
+                for index in range(5)
+            ]
+        )
+        runner_holder: dict[str, RouteExternalMeasurementSessionRunner] = {}
+        focus_calls: list[int] = []
+
+        def focus(_point, position, _total) -> str:
+            focus_calls.append(int(position))
+            if len(focus_calls) == 1:
+                runner_holder["runner"].request_current_point_correction()
+                return "focus interrupted"
+            return "focus ok"
+
+        runner = RouteExternalMeasurementSessionRunner(
+            session_id="session-1",
+            points=[point],
+            stage_controller=stage,
+            lcr_controller=lcr,
+            needle_feedrate=75.0,
+            measurement_count=5,
+            initial_measurement_count=2,
+            contact_settle_s=0.0,
+            photo_enabled=False,
+            photo_focus_enabled=True,
+            photo_focus_callback=focus,
+        )
+        runner_holder["runner"] = runner
+        finished: list[tuple[bool, str]] = []
+        thread = threading.Thread(
+            target=lambda: finished.append(runner.run()),
+            daemon=True,
+        )
+
+        thread.start()
+        self.assertTrue(self._wait_for_state(runner, "waiting_interrupted"))
+        self.assertNotIn(("needles", "lower", 75.0), stage.calls)
+        self.assertEqual(lcr.batch_counts, [])
+
+        self.assertTrue(runner.submit_confirmation("next"))
+        self.assertTrue(
+            self._wait_for_state(runner, "waiting_external_measurement")
+        )
+        self.assertEqual(focus_calls, [1, 1])
+        self.assertIn(("needles", "lower", 75.0), stage.calls)
+        self.assertEqual(lcr.batch_counts, [2, 3])
+
+        self.assertTrue(runner.submit_external_result({"status": "ok"}))
+        thread.join(timeout=2.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(finished, [(True, "Route API session complete.")])
+
     @staticmethod
     def _wait_for_state(
         runner: RouteExternalMeasurementSessionRunner,

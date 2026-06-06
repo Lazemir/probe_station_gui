@@ -495,6 +495,9 @@ class RouteMeasurementRunner:
         with self._confirmation_condition:
             self._confirmation_condition.notify_all()
 
+    def clear_current_point_correction_request(self) -> None:
+        self._point_interrupt_requested.clear()
+
     def request_pause_after_current_point(self) -> None:
         self._pause_requested.set()
 
@@ -2894,6 +2897,7 @@ class RouteExternalMeasurementSessionRunner:
             self.stop()
             return len(self._points)
         if action == "interrupt":
+            self._contact_runner.clear_current_point_correction_request()
             self._lift_needles(position, total)
             return position - 1
         if action == "skip":
@@ -2962,12 +2966,15 @@ class RouteExternalMeasurementSessionRunner:
             self.stop()
             return len(self._points)
         if action == "skip":
+            self._contact_runner.clear_current_point_correction_request()
             self._lift_needles(position, total)
             return position
         jump = self._jump_index(action)
         if jump is not None:
+            self._contact_runner.clear_current_point_correction_request()
             self._lift_needles(position, total)
             return jump
+        self._contact_runner.clear_current_point_correction_request()
         self._lift_needles(position, total)
         return None
 
