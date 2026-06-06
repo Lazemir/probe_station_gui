@@ -506,7 +506,7 @@ class Main(QMainWindow):
     route_measurement_waiting_changed: Signal = Signal(bool)
     route_measurement_result: Signal = Signal(object, int, int, bool)
     route_measurement_recorded: Signal = Signal(object, int, int)
-    route_measurement_finished: Signal = Signal(bool, str, str)
+    route_measurement_finished: Signal = Signal(object, bool, str, str)
     route_contact_move_finished: Signal = Signal(bool, str)
     status_message_requested: Signal = Signal(str, int)
     telegram_bot_request_received: Signal = Signal(object)
@@ -2367,11 +2367,35 @@ class Main(QMainWindow):
     def _api_start_route_session(self, payload: dict[str, Any]) -> dict[str, Any]:
         thread = self._route_measurement_thread
         if thread is not None and thread.is_alive():
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": "Route measurement is already active.",
-            }
+            runner = self._route_measurement_runner
+            if isinstance(runner, RouteExternalMeasurementSessionRunner):
+                return runner.status_payload()
+            can_take_over_waiting_gui_runner = (
+                isinstance(runner, RouteMeasurementRunner)
+                and self._route_measurement_waiting
+                and self._last_route_measurement_result is None
+            )
+            if not can_take_over_waiting_gui_runner:
+                return {
+                    "accepted": False,
+                    "status_code": 409,
+                    "message": "Route measurement is already active.",
+                }
+            route_offset_xy = runner.route_offset_xy()
+            runner.stop()
+            thread.join(timeout=2.0)
+            if thread.is_alive():
+                return {
+                    "accepted": False,
+                    "status_code": 409,
+                    "message": "Waiting GUI route measurement did not stop.",
+                }
+            self._route_measurement_thread = None
+            self._route_measurement_runner = None
+            self._route_measurement_waiting = False
+            self._route_measurement_session_active = False
+        else:
+            route_offset_xy = (0.0, 0.0)
         if self.serial_connection is None or not self.serial_connection.is_open:
             return {
                 "accepted": False,
@@ -2604,6 +2628,7 @@ class Main(QMainWindow):
             photo_settle_s=photo_settle_s,
             wait_before_first_point=True,
         )
+        runner.set_route_offset_xy(route_offset_xy)
         self._route_measurement_runner = runner
         self._route_measurement_waiting = False
         self._pending_route_measure_point = None
@@ -8585,7 +8610,7 @@ class Main(QMainWindow):
             if isinstance(runner, RouteExternalMeasurementSessionRunner)
             else str(runner.csv_path)
         )
-        self.route_measurement_finished.emit(success, message, csv_path)
+        self.route_measurement_finished.emit(runner, success, message, csv_path)
 
     def _on_route_measurement_started(
         self,
@@ -9121,12 +9146,22 @@ class Main(QMainWindow):
             f"status={record.status}{contact_text}."
         )
 
-    def _on_route_measurement_finished(
-        self,
-        success: bool,
-        message: str,
-        csv_path: str,
-    ) -> None:
+    def _on_route_measurement_finished(self, *args: object) -> None:
+        if len(args) == 4:
+            finished_runner, success, message, csv_path = args
+        elif len(args) == 3:
+            finished_runner = None
+            success, message, csv_path = args
+        else:
+            return
+        if (
+            finished_runner is not None
+            and finished_runner is not self._route_measurement_runner
+        ):
+            return
+        success = bool(success)
+        message = str(message)
+        csv_path = str(csv_path)
         measure_enabled = self._route_measurement_measure_enabled
         context_close_requested = bool(
             getattr(self, "_route_measurement_context_close_requested", False)

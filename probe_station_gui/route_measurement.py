@@ -424,6 +424,21 @@ class RouteMeasurementRunner:
     def csv_path(self) -> Path:
         return self._csv_writer.path
 
+    def route_offset_xy(self) -> Point2D:
+        with self._route_offset_lock:
+            return self._route_offset_xy
+
+    def set_route_offset_xy(self, offset_xy: Point2D) -> None:
+        try:
+            offset_x = float(offset_xy[0])
+            offset_y = float(offset_xy[1])
+        except (TypeError, ValueError, IndexError):
+            return
+        if not math.isfinite(offset_x) or not math.isfinite(offset_y):
+            return
+        with self._route_offset_lock:
+            self._route_offset_xy = (offset_x, offset_y)
+
     def set_current_adjustment_point(self, point_number: int) -> tuple[bool, str]:
         index = self._index_for_point_number(int(point_number))
         if index is None:
@@ -2429,6 +2444,12 @@ class RouteExternalMeasurementSessionRunner:
     @property
     def csv_path(self) -> Path:
         return self._csv_path
+
+    def route_offset_xy(self) -> Point2D:
+        return self._contact_runner.route_offset_xy()
+
+    def set_route_offset_xy(self, offset_xy: Point2D) -> None:
+        self._contact_runner.set_route_offset_xy(offset_xy)
 
     def stop(self) -> None:
         with self._condition:
