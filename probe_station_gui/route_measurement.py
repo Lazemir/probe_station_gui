@@ -419,6 +419,8 @@ class RouteMeasurementRunner:
         self._last_recorded_point: RouteMeasurementPoint | None = None
         self._current_contact_seek_result: RouteContactSeekResult | None = None
         self._background_tasks: list[_BackgroundRouteTask] = []
+        self._waiting_condition = threading.Condition()
+        self._waiting = False
 
     @property
     def csv_path(self) -> Path:
@@ -438,6 +440,23 @@ class RouteMeasurementRunner:
             return
         with self._route_offset_lock:
             self._route_offset_xy = (offset_x, offset_y)
+
+    def is_waiting(self) -> bool:
+        with self._waiting_condition:
+            return bool(self._waiting)
+
+    def wait_until_waiting(self, timeout_s: float) -> bool:
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        with self._waiting_condition:
+            while True:
+                if self._waiting:
+                    return True
+                if self._stop_requested.is_set():
+                    return False
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    return False
+                self._waiting_condition.wait(timeout=min(0.05, remaining))
 
     def set_current_adjustment_point(self, point_number: int) -> tuple[bool, str]:
         index = self._index_for_point_number(int(point_number))
@@ -1455,6 +1474,9 @@ class RouteMeasurementRunner:
             )
 
     def _set_waiting(self, waiting: bool) -> None:
+        with self._waiting_condition:
+            self._waiting = bool(waiting)
+            self._waiting_condition.notify_all()
         if self._waiting_callback is not None:
             self._waiting_callback(bool(waiting))
 

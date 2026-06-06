@@ -7668,6 +7668,61 @@ class Main(QMainWindow):
     ) -> RouteMeasurementRunConfiguration:
         return self._route_measurement_runtime_configuration or fallback
 
+    @staticmethod
+    def _route_measurement_setup_changed(
+        previous: RouteMeasurementRunConfiguration | None,
+        current: RouteMeasurementRunConfiguration,
+    ) -> bool:
+        if previous is None:
+            return False
+        return (
+            previous.operation_mode != current.operation_mode
+            or bool(previous.previous_ok_only) != bool(current.previous_ok_only)
+            or str(previous.previous_csv_path).strip()
+            != str(current.previous_csv_path).strip()
+        )
+
+    def _restart_waiting_route_measurement(
+        self,
+        configuration: RouteMeasurementRunConfiguration,
+        *,
+        route_offset_xy: tuple[float, float],
+    ) -> bool:
+        old_runner = self._route_measurement_runner
+        old_thread = self._route_measurement_thread
+        if old_runner is not None:
+            old_runner.stop()
+        if old_thread is not None and old_thread.is_alive():
+            old_thread.join(timeout=2.0)
+            if old_thread.is_alive():
+                message = "Waiting route measurement did not stop."
+                self._show_status(message, 8000)
+                if self._route_measurement_dialog is not None:
+                    self._route_measurement_dialog.set_status(message)
+                return False
+        self._route_measurement_thread = None
+        self._route_measurement_runner = None
+        self._route_measurement_waiting = False
+        self._start_route_measurement(
+            configuration,
+            wait_before_first_point=True,
+        )
+        new_runner = self._route_measurement_runner
+        if not isinstance(new_runner, RouteMeasurementRunner):
+            return False
+        new_runner.set_route_offset_xy(route_offset_xy)
+        if not new_runner.wait_until_waiting(timeout_s=10.0):
+            message = "Route measurement did not reach waiting state."
+            new_runner.stop()
+            thread = self._route_measurement_thread
+            if thread is not None and thread.is_alive():
+                thread.join(timeout=2.0)
+            self._show_status(message, 8000)
+            if self._route_measurement_dialog is not None:
+                self._route_measurement_dialog.set_status(message)
+            return False
+        return True
+
     def _start_route_measurement(
         self,
         configuration: RouteMeasurementRunConfiguration,
@@ -8690,6 +8745,28 @@ class Main(QMainWindow):
             return
         if self._route_measurement_dialog is not None:
             configuration = self._route_measurement_dialog.current_configuration()
+            previous_configuration = self._route_measurement_runtime_configuration
+            if (
+                not isinstance(runner, RouteExternalMeasurementSessionRunner)
+                and self._route_measurement_waiting
+                and self._route_measurement_setup_changed(
+                    previous_configuration,
+                    configuration,
+                )
+            ):
+                route_offset_xy = (
+                    runner.route_offset_xy()
+                    if hasattr(runner, "route_offset_xy")
+                    else (0.0, 0.0)
+                )
+                if not self._restart_waiting_route_measurement(
+                    configuration,
+                    route_offset_xy=route_offset_xy,
+                ):
+                    return
+                runner = self._route_measurement_runner
+                if runner is None:
+                    return
             self._route_measurement_runtime_configuration = configuration
             self._save_route_measurement_session_metadata(configuration)
             if isinstance(runner, RouteExternalMeasurementSessionRunner):

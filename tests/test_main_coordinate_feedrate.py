@@ -1426,10 +1426,9 @@ assert image.height() == 4
         dialog = RouteMeasurementDialog.__new__(RouteMeasurementDialog)
         dialog._running = True
         dialog._waiting = False
-        dialog._operation_combo = types.SimpleNamespace(
-            currentData=lambda: (
-                route_measurement_dialog_module.ROUTE_OPERATION_PHOTO_THEN_MEASURE
-            )
+        dialog._operation_combo = _FakeEnabledWidget()
+        dialog._operation_combo.currentData = lambda: (
+            route_measurement_dialog_module.ROUTE_OPERATION_PHOTO_THEN_MEASURE
         )
         dialog._photo_dir_edit = _FakeEnabledWidget()
         dialog._photo_browse_button = _FakeEnabledWidget()
@@ -1466,9 +1465,12 @@ assert image.height() == 4
         RouteMeasurementDialog.set_waiting(dialog, True)
 
         self.assertTrue(dialog._csv_path_edit.enabled)
+        self.assertTrue(dialog._operation_combo.enabled)
         self.assertTrue(dialog._photo_dir_edit.enabled)
         self.assertTrue(dialog._photo_autofocus_checkbox.enabled)
         self.assertTrue(dialog._photo_autofocus_range_spin.enabled)
+        self.assertTrue(dialog._previous_ok_only_checkbox.enabled)
+        self.assertTrue(dialog._previous_csv_path_edit.enabled)
         self.assertTrue(dialog._meter_combo.enabled)
         self.assertTrue(dialog._gwinstek_page.enabled)
         self.assertTrue(dialog._keithley_page.enabled)
@@ -1739,6 +1741,95 @@ assert image.height() == 4
         self.assertFalse(
             any("Camera frame is unavailable" in status for status in statuses)
         )
+
+    def test_submit_restarts_waiting_runner_after_route_setup_change(self) -> None:
+        class _FakeRunner:
+            def __init__(self, offset=(0.0, 0.0)) -> None:
+                self.offset = offset
+                self.updated = False
+                self.applied = False
+                self.confirmations: list[str] = []
+
+            def route_offset_xy(self):
+                return self.offset
+
+            def update_runtime_settings(self, **_kwargs) -> None:
+                self.updated = True
+
+            def apply_meter_configuration(self, _configuration) -> None:
+                self.applied = True
+
+            def submit_confirmation(self, action: str) -> bool:
+                self.confirmations.append(str(action))
+                return True
+
+        def configuration(
+            *,
+            previous_ok_only: bool,
+            previous_csv_path: str,
+        ) -> RouteMeasurementRunConfiguration:
+            return RouteMeasurementRunConfiguration(
+                csv_path="route.csv",
+                previous_csv_path=previous_csv_path,
+                operation_mode=route_measurement_dialog_module.ROUTE_OPERATION_MEASURE,
+                photo_output_dir="photos",
+                photo_settle_s=0.0,
+                photo_autofocus_enabled=False,
+                photo_autofocus_range_mm=0.03,
+                initial_measurement_count=10,
+                followup_measurement_count=240,
+                current_point=1,
+                max_relative_rms=0.01,
+                contact_settle_s=0.0,
+                contact_seek_range_mm=0.01,
+                contact_seek_step_mm=0.001,
+                previous_ok_only=previous_ok_only,
+                meter=RouteMeterConfiguration(),
+            )
+
+        previous = configuration(
+            previous_ok_only=False,
+            previous_csv_path="old.csv",
+        )
+        current = configuration(
+            previous_ok_only=True,
+            previous_csv_path="new.csv",
+        )
+        old_runner = _FakeRunner(offset=(0.125, -0.25))
+        new_runner = _FakeRunner()
+        restart_calls: list[tuple[RouteMeasurementRunConfiguration, tuple[float, float]]] = []
+        window = Main.__new__(Main)
+        window._route_measurement_runner = old_runner
+        window._route_measurement_waiting = True
+        window._route_measurement_runtime_configuration = previous
+        window._route_measurement_dialog = types.SimpleNamespace(
+            current_configuration=lambda: current,
+            set_waiting=lambda _waiting: None,
+            set_status=lambda _message: None,
+        )
+        window._route_contact_move_thread = None
+        window._save_route_measurement_session_metadata = lambda _configuration: None
+        window._show_status = lambda *_args: None
+        window.design_navigator_panel = None
+
+        def restart(
+            config: RouteMeasurementRunConfiguration,
+            *,
+            route_offset_xy: tuple[float, float],
+        ) -> bool:
+            restart_calls.append((config, route_offset_xy))
+            window._route_measurement_runner = new_runner
+            return True
+
+        window._restart_waiting_route_measurement = restart
+
+        Main._submit_route_measurement_confirmation(window, "next")
+
+        self.assertEqual(restart_calls, [(current, (0.125, -0.25))])
+        self.assertEqual(old_runner.confirmations, [])
+        self.assertTrue(new_runner.updated)
+        self.assertTrue(new_runner.applied)
+        self.assertEqual(new_runner.confirmations, ["next"])
 
     def test_record_route_contact_height_writes_height_map_csv(self) -> None:
         window = Main.__new__(Main)
