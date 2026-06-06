@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 
 CONTACT_MAX_MAD_SIGMA_OHM = 300.0
 CONTACT_MAX_P95_ABS_STEP_OHM = 1_000.0
+CONTACT_MAX_RELATIVE_MAD_SIGMA = 0.02
+CONTACT_MAX_RELATIVE_P95_ABS_STEP = 0.05
 ROUTE_OPERATION_MEASURE = "measure"
 ROUTE_OPERATION_PHOTO = "photo"
 ROUTE_OPERATION_PHOTO_THEN_MEASURE = "photo_then_measure"
@@ -480,6 +482,15 @@ class RouteMeasurementRunner:
                 normalized = f"jump:{int(normalized.split(':', 1)[1].strip())}"
             except ValueError:
                 return False
+        elif normalized in {
+            "anyway",
+            "force",
+            "force_measure",
+            "force-measure",
+            "measure_anyway",
+            "measure-anyway",
+        }:
+            normalized = "measure_anyway"
         elif normalized not in {"next", "remeasure", "skip"}:
             return False
         with self._confirmation_condition:
@@ -1265,6 +1276,27 @@ class RouteMeasurementRunner:
                         message = "Route measurement stopped by user."
                         break
                     self._begin_stage_task()
+                    if decision == "measure_anyway":
+                        self._csv_writer.append(record)
+                        measurements_saved += 1
+                        self._emit_result(record, position, total, True)
+                        if (
+                            contact_height_record is not None
+                            and self._contact_height_record_callback is not None
+                        ):
+                            self._contact_height_record_callback(
+                                contact_height_record,
+                                position,
+                                total,
+                            )
+                        if self._record_callback is not None:
+                            self._record_callback(record, position, total)
+                        self._status(
+                            f"Route measurement: point {position}/{total} "
+                            "saved; continuing."
+                        )
+                        position_index += 1
+                        continue
                     jump_index = self._jump_target_index(decision)
                     if jump_index is not None:
                         position_index = jump_index
@@ -2193,14 +2225,14 @@ class RouteMeasurementRunner:
             self._status(
                 f"Route measurement: point {position}/{total} contact check failed "
                 f"({contact_quality.status}); correct contact, then Measure "
-                "or Skip."
+                "Anyway, Remeasure, or Skip."
             )
         else:
             self._status(
                 f"Route measurement: point {position}/{total} relative RMS "
                 f"{_format_percent(record.relative_rms)} exceeds "
                 f"{_format_percent(self._max_relative_rms or math.nan)}; "
-                "correct contact, then Measure or Skip."
+                "correct contact, then Measure Anyway, Remeasure, or Skip."
             )
         decision = self._wait_for_valid_confirmation()
         self._set_waiting(False)
@@ -2732,6 +2764,15 @@ class RouteExternalMeasurementSessionRunner:
             return "next"
         if normalized in {"remeasure", "measure"}:
             return "remeasure"
+        if normalized in {
+            "anyway",
+            "force",
+            "force_measure",
+            "force-measure",
+            "measure_anyway",
+            "measure-anyway",
+        }:
+            return "measure_anyway"
         if normalized in {"skip", "stop", "interrupt", "seek"}:
             return normalized
         if normalized.isdigit():
@@ -2910,6 +2951,20 @@ class RouteExternalMeasurementSessionRunner:
             )
             self._lift_needles(position, total)
             return None
+        if action == "measure_anyway":
+            followup = self._wait_for_external_result(point, position)
+            if "result" in followup:
+                self._last_external_result = dict(followup["result"])
+                self._append_history(
+                    point,
+                    position,
+                    str(self._last_external_result.get("status") or "ok"),
+                    preparation=self._last_preparation,
+                    external_result=self._last_external_result,
+                )
+                self._lift_needles(position, total)
+                return None
+            return self._handle_attention_decision(followup, point, position, total)
         if action == "seek":
             preparation = self._seek_current_contact(point, position, total)
             self._store_preparation(preparation)
@@ -3407,12 +3462,20 @@ def _contact_quality_from_samples(
     span = max(finite_values) - min(finite_values)
 
     reasons: list[str] = []
-    if mad_sigma > CONTACT_MAX_MAD_SIGMA_OHM:
+    scale_ohm = max(abs(median), 1.0)
+    relative_mad_sigma = mad_sigma / scale_ohm
+    relative_p95_abs_step = p95_abs_step / scale_ohm
+
+    if (
+        mad_sigma > CONTACT_MAX_MAD_SIGMA_OHM
+        and relative_mad_sigma > CONTACT_MAX_RELATIVE_MAD_SIGMA
+    ):
         reasons.append("mad_sigma_too_high")
-    if p95_abs_step > CONTACT_MAX_P95_ABS_STEP_OHM:
+    if (
+        p95_abs_step > CONTACT_MAX_P95_ABS_STEP_OHM
+        and relative_p95_abs_step > CONTACT_MAX_RELATIVE_P95_ABS_STEP
+    ):
         reasons.append("step_noise_too_high")
-    if polarity_mismatches:
-        reasons.append("polarity_sign_mismatch")
 
     good = not reasons
     return RouteContactQuality(

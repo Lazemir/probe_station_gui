@@ -641,6 +641,11 @@ assert image.height() == 4
                 status="bad_contact",
                 median_ohm=297000.0,
                 mad_sigma_ohm=19100.0,
+                p95_abs_step_ohm=48300.0,
+                span_ohm=102000.0,
+                compliance_hits=0,
+                polarity_sign_mismatch_count=2,
+                reasons=("mad_sigma_too_high", "step_noise_too_high"),
             ),
         )
 
@@ -671,6 +676,11 @@ assert image.height() == 4
         self.assertEqual(key, "route_attention")
         self.assertIn("Measured route point 1/2", text)
         self.assertIn("status=bad_contact", text)
+        self.assertIn("reasons=mad_sigma_too_high, step_noise_too_high", text)
+        self.assertIn("p95_step=", text)
+        self.assertIn("span=", text)
+        self.assertIn("compliance_hits=0", text)
+        self.assertIn("polarity_mismatches=2", text)
         self.assertIn("Left: before needle press. Right: contact attempt.", text)
         self.assertFalse(kwargs["attach_photo"])
         self.assertEqual(kwargs["reply_markup"], "actions")
@@ -1357,6 +1367,27 @@ assert image.height() == 4
             "Route measurement: measure from point 91.",
         )
 
+    def test_telegram_measure_anyway_submits_waiting_route_action(self) -> None:
+        window = Main.__new__(Main)
+        runner = _FakeRouteMeasurementRunner()
+        statuses: list[str] = []
+
+        window._route_measurement_waiting = True
+        window._route_measurement_runner = runner
+        window._route_measurement_dialog = None
+        window.design_navigator_panel = None
+        window._telegram_default_markup = lambda: "markup"
+        window._show_status = (
+            lambda message, _timeout_ms=None: statuses.append(str(message))
+        )
+
+        response = Main._telegram_route_action_response(window, "measure_anyway")
+
+        self.assertEqual(runner.confirmations, ["measure_anyway"])
+        self.assertEqual(response.callback_answer, "measure_anyway submitted.")
+        self.assertEqual(response.reply_markup, "markup")
+        self.assertEqual(statuses, ["Route measurement: measure anyway."])
+
     def test_waiting_dialog_measure_uses_selected_point(self) -> None:
         dialog = RouteMeasurementDialog.__new__(RouteMeasurementDialog)
         jumped: list[int] = []
@@ -1454,6 +1485,7 @@ assert image.height() == 4
         dialog._stop_button = _FakeButton()
         dialog._save_shift_button = _FakeButton()
         dialog._remeasure_button = _FakeButton()
+        dialog._measure_anyway_button = _FakeButton()
         dialog._skip_button = _FakeButton()
         dialog._next_button = _FakeButton()
         dialog._jump_point_spin = _FakeEnabledWidget()
@@ -1474,6 +1506,7 @@ assert image.height() == 4
         self.assertTrue(dialog._meter_combo.enabled)
         self.assertTrue(dialog._gwinstek_page.enabled)
         self.assertTrue(dialog._keithley_page.enabled)
+        self.assertTrue(dialog._measure_anyway_button.enabled)
 
     def test_running_dialog_close_is_ignored(self) -> None:
         dialog = RouteMeasurementDialog.__new__(RouteMeasurementDialog)

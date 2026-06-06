@@ -271,6 +271,7 @@ class RouteMeasurementDialog(QDialog):
     cancel_session_requested = Signal()
     next_requested = Signal()
     remeasure_requested = Signal()
+    measure_anyway_requested = Signal()
     skip_requested = Signal()
     save_shift_requested = Signal()
     interrupt_requested = Signal()
@@ -591,6 +592,7 @@ class RouteMeasurementDialog(QDialog):
         self._interrupt_button = QPushButton("Interrupt", self)
         self._save_shift_button = QPushButton("Save Shift", self)
         self._remeasure_button = QPushButton("Remeasure", self)
+        self._measure_anyway_button = QPushButton("Measure Anyway", self)
         self._skip_button = QPushButton("Skip", self)
         self._close_button = QPushButton("Close", self)
         self._start_session_button.hide()
@@ -598,6 +600,7 @@ class RouteMeasurementDialog(QDialog):
         self._jump_button.hide()
         self._remeasure_button.hide()
         button_row.addWidget(self._measure_button)
+        button_row.addWidget(self._measure_anyway_button)
         button_row.addWidget(self._move_button)
         button_row.addWidget(self._save_shift_button)
         button_row.addWidget(self._skip_button)
@@ -647,6 +650,9 @@ class RouteMeasurementDialog(QDialog):
         self._interrupt_button.clicked.connect(self._emit_interrupt_or_resume_requested)
         self._save_shift_button.clicked.connect(self.save_shift_requested.emit)
         self._remeasure_button.clicked.connect(self.remeasure_requested.emit)
+        self._measure_anyway_button.clicked.connect(
+            self.measure_anyway_requested.emit
+        )
         self._skip_button.clicked.connect(self.skip_requested.emit)
         self._move_button.clicked.connect(
             lambda _checked=False: self.move_requested.emit(
@@ -824,10 +830,22 @@ class RouteMeasurementDialog(QDialog):
         contact = getattr(record, "contact_quality", None)
         contact_text = ""
         if contact is not None and bool(getattr(contact, "assessed", False)):
+            reasons = tuple(getattr(contact, "reasons", ()) or ())
+            reason_text = (
+                ", ".join(str(reason) for reason in reasons)
+                if reasons
+                else "none"
+            )
             contact_text = (
-                f", contact={getattr(contact, 'status', 'unknown')} "
-                f"(median={_format_ohm(float(getattr(contact, 'median_ohm', math.nan)))}, "
-                f"MAD={_format_ohm(float(getattr(contact, 'mad_sigma_ohm', math.nan)))})"
+                f", contact={getattr(contact, 'status', 'unknown')}, "
+                f"reasons={reason_text}, "
+                f"median={_format_ohm(float(getattr(contact, 'median_ohm', math.nan)))}, "
+                f"MAD={_format_ohm(float(getattr(contact, 'mad_sigma_ohm', math.nan)))}, "
+                f"p95 step={_format_ohm(float(getattr(contact, 'p95_abs_step_ohm', math.nan)))}, "
+                f"span={_format_ohm(float(getattr(contact, 'span_ohm', math.nan)))}, "
+                f"compliance hits={int(getattr(contact, 'compliance_hits', 0))}, "
+                "polarity mismatches="
+                f"{int(getattr(contact, 'polarity_sign_mismatch_count', 0))}"
             )
         self._result_label.setText(
             f"{prefix} point {position}/{total}: "
@@ -947,6 +965,7 @@ class RouteMeasurementDialog(QDialog):
         self._stop_button.setEnabled(self._running)
         self._save_shift_button.setEnabled(can_confirm)
         self._remeasure_button.setEnabled(can_confirm)
+        self._measure_anyway_button.setEnabled(can_confirm)
         self._skip_button.setEnabled(can_confirm)
         self._next_button.setEnabled(can_confirm)
         self._operation_combo.setEnabled((not self._running) or can_confirm)

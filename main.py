@@ -1034,7 +1034,15 @@ class Main(QMainWindow):
             return self._telegram_request_next_route_photo_response()
         if command in {"next_contact", "contact", "контакт"}:
             return self._telegram_request_next_contact_photo_response()
-        if command in {"remeasure", "skip", "next"}:
+        if command in {
+            "anyway",
+            "force",
+            "measure_anyway",
+            "measure-anyway",
+            "remeasure",
+            "skip",
+            "next",
+        }:
             return self._telegram_route_action_response(command)
         return None
 
@@ -1076,7 +1084,7 @@ class Main(QMainWindow):
             "/status - current state and microscope frame\n"
             "/next_photo - send the next route structure photo\n"
             "/next_contact - send the next route contact attempt photo\n"
-            "/remeasure, /skip, /next - answer a waiting route prompt"
+            "/measure_anyway, /remeasure, /skip, /next - answer a waiting route prompt"
         )
 
     def _telegram_status_response(self) -> TelegramBotResponse:
@@ -1141,7 +1149,9 @@ class Main(QMainWindow):
 
     def _telegram_route_action_response(self, action: str) -> TelegramBotResponse:
         action_key = str(action or "").strip().lower()
-        if action_key not in {"remeasure", "skip", "next"}:
+        if action_key in {"anyway", "force", "measure-anyway"}:
+            action_key = "measure_anyway"
+        if action_key not in {"measure_anyway", "remeasure", "skip", "next"}:
             return TelegramBotResponse(
                 "Unknown route action.",
                 reply_markup=self._telegram_default_markup(),
@@ -1178,6 +1188,7 @@ class Main(QMainWindow):
         if self._route_measurement_waiting:
             rows.append(
                 [
+                    ("Measure anyway", "route:measure_anyway"),
                     ("Measure", "route:remeasure"),
                     ("Skip", "route:skip"),
                 ]
@@ -1189,6 +1200,7 @@ class Main(QMainWindow):
         return telegram_inline_keyboard(
             [
                 [
+                    ("Measure anyway", "route:measure_anyway"),
                     ("Measure", "route:remeasure"),
                     ("Skip", "route:skip"),
                 ],
@@ -7466,6 +7478,9 @@ class Main(QMainWindow):
             dialog.remeasure_requested.connect(
                 lambda: self._submit_route_measurement_confirmation("remeasure")
             )
+            dialog.measure_anyway_requested.connect(
+                lambda: self._submit_route_measurement_confirmation("measure_anyway")
+            )
             dialog.skip_requested.connect(
                 lambda: self._submit_route_measurement_confirmation("skip")
             )
@@ -8815,6 +8830,8 @@ class Main(QMainWindow):
         action_key = str(action).strip().lower()
         if action_key == "remeasure":
             action_label = "measure"
+        elif action_key in {"measure_anyway", "measure-anyway", "anyway", "force"}:
+            action_label = "measure anyway"
         elif action_key == "skip":
             action_label = "skip"
         elif action_key.startswith("jump:") or action_key.isdigit():
@@ -9203,19 +9220,32 @@ class Main(QMainWindow):
         if saved and record.status == "short":
             prefix = "Short"
         contact = record.contact_quality
-        contact_text = ""
-        if contact is not None and contact.assessed:
-            contact_text = (
-                f", contact={contact.status} "
-                f"(median={_format_route_ohm(contact.median_ohm)}, "
-                f"MAD={_format_route_ohm(contact.mad_sigma_ohm)})"
-            )
+        contact_text = Main._format_route_contact_diagnostics(contact)
         return (
             f"{prefix} route point {position}/{total}: "
+            f"n={int(record.n_measurements)}, "
             f"R={_format_route_ohm(record.resistance_ohm)}, "
             f"RMS={_format_route_ohm(record.resistance_rms_ohm)}, "
             f"rel={_format_route_percent(record.relative_rms)}, "
             f"status={record.status}{contact_text}."
+        )
+
+    @staticmethod
+    def _format_route_contact_diagnostics(contact: object | None) -> str:
+        if contact is None or not bool(getattr(contact, "assessed", False)):
+            return ""
+        reasons = tuple(getattr(contact, "reasons", ()) or ())
+        reason_text = ", ".join(str(reason) for reason in reasons) if reasons else "none"
+        return (
+            f", contact={getattr(contact, 'status', 'unknown')}, "
+            f"reasons={reason_text}, "
+            f"median={_format_route_ohm(float(getattr(contact, 'median_ohm', math.nan)))}, "
+            f"MAD={_format_route_ohm(float(getattr(contact, 'mad_sigma_ohm', math.nan)))}, "
+            f"p95_step={_format_route_ohm(float(getattr(contact, 'p95_abs_step_ohm', math.nan)))}, "
+            f"span={_format_route_ohm(float(getattr(contact, 'span_ohm', math.nan)))}, "
+            f"compliance_hits={int(getattr(contact, 'compliance_hits', 0))}, "
+            "polarity_mismatches="
+            f"{int(getattr(contact, 'polarity_sign_mismatch_count', 0))}"
         )
 
     def _on_route_measurement_finished(self, *args: object) -> None:
