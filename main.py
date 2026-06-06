@@ -11748,6 +11748,9 @@ class Main(QMainWindow):
                 connected, backend_name, description
             )
         if self.resistance_panel is not None:
+            self.resistance_panel.set_standby_enabled(
+                self.lcr_controller.live_polling_enabled()
+            )
             self.resistance_panel.set_connection_state(
                 connected, backend_name, description
             )
@@ -11770,6 +11773,10 @@ class Main(QMainWindow):
 
     def _on_resistance_standby_enabled_changed(self, enabled: bool) -> None:
         self.lcr_controller.set_live_polling_enabled(bool(enabled))
+        if self.resistance_panel is not None:
+            self.resistance_panel.set_standby_enabled(
+                self.lcr_controller.live_polling_enabled()
+            )
 
     def _resume_resistance_standby_polling(self) -> None:
         lcr_controller = getattr(self, "lcr_controller", None)

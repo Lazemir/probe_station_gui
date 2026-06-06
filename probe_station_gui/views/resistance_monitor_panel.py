@@ -1,4 +1,4 @@
-"""Compact standby resistance display."""
+"""Compact resistance display."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ _DISPLAY_DIGITS = 5
 
 
 class ResistanceMonitorPanel(QWidget):
-    """Display the current standby resistance reading."""
+    """Display the current resistance reading."""
 
     standby_enabled_changed = Signal(bool)
 
@@ -50,8 +50,10 @@ class ResistanceMonitorPanel(QWidget):
         header_row.addWidget(self.standby_button)
         layout.addLayout(header_row)
 
-        screen = QFrame(self)
+        screen = _ResistanceScreen(self)
         screen.setObjectName("ResistanceScreen")
+        screen.setMinimumHeight(126)
+        screen.clicked.connect(self._copy_reading)
         screen_layout = QVBoxLayout(screen)
         screen_layout.setContentsMargins(8, 8, 8, 8)
         screen_layout.setSpacing(4)
@@ -62,15 +64,13 @@ class ResistanceMonitorPanel(QWidget):
         self.value_label.setObjectName("ResistanceValue")
         self.value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.value_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.value_label.setMinimumHeight(74)
         self.unit_label = QLabel("Ohm", screen)
         self.unit_label.setObjectName("ResistanceUnit")
+        self.unit_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.unit_label.setMinimumWidth(46)
-        self.copy_button = QPushButton("Copy", screen)
-        self.copy_button.setEnabled(False)
-        self.copy_button.setMinimumWidth(58)
         value_row.addWidget(self.value_label, 1)
         value_row.addWidget(self.unit_label)
-        value_row.addWidget(self.copy_button)
         screen_layout.addLayout(value_row)
 
         self.status_label = QLabel("Instrument disconnected", screen)
@@ -89,24 +89,23 @@ class ResistanceMonitorPanel(QWidget):
             QLabel#ResistanceValue {
                 color: #8cff76;
                 font-family: Consolas, "Courier New", monospace;
-                font-size: 34px;
+                font-size: 58px;
                 font-weight: 700;
             }
             QLabel#ResistanceUnit {
                 color: #8cff76;
                 font-family: Consolas, "Courier New", monospace;
-                font-size: 14px;
+                font-size: 16px;
             }
             QLabel#ResistanceStatus {
                 color: #b7d7b0;
                 font-family: Consolas, "Courier New", monospace;
-                font-size: 11px;
+                font-size: 12px;
             }
             """
         )
 
         self.standby_button.toggled.connect(self._on_standby_toggled)
-        self.copy_button.clicked.connect(self._copy_reading)
         self._refresh_standby_button()
 
     def set_standby_enabled(self, enabled: bool) -> None:
@@ -130,7 +129,6 @@ class ResistanceMonitorPanel(QWidget):
         self._last_resistance_ohm = None
         self.value_label.setText(_BLANK_READING)
         self.unit_label.setText("Ohm")
-        self.copy_button.setEnabled(False)
         detail = description.strip() or backend_name.strip()
         if detail and self._connected:
             self.status_label.setText(detail)
@@ -151,7 +149,6 @@ class ResistanceMonitorPanel(QWidget):
         self._last_resistance_ohm = None
         self.value_label.setText(_BLANK_READING)
         self.unit_label.setText("Ohm")
-        self.copy_button.setEnabled(False)
         self.status_label.setText(
             "Measuring" if count == 1 else f"Measuring {count}"
         )
@@ -174,7 +171,6 @@ class ResistanceMonitorPanel(QWidget):
             self._last_resistance_ohm = None
             self.value_label.setText(_BLANK_READING)
             self.unit_label.setText("Ohm")
-            self.copy_button.setEnabled(False)
             self._refresh_state_text()
             return
         value = float(resistance_ohm)
@@ -183,7 +179,6 @@ class ResistanceMonitorPanel(QWidget):
         self._last_resistance_ohm = value if self._has_reading else None
         self.value_label.setText(value_text)
         self.unit_label.setText(unit_text)
-        self.copy_button.setEnabled(self._has_reading)
         count = (
             max(1, int(sample_count))
             if sample_count is not None
@@ -217,17 +212,30 @@ class ResistanceMonitorPanel(QWidget):
         self.status_label.setText("Copied")
 
     def _refresh_standby_button(self) -> None:
-        self.standby_button.setText("On" if self._standby_enabled else "Off")
+        self.standby_button.setText("Stop" if self._standby_enabled else "Start")
 
     def _refresh_state_text(self) -> None:
         if not self._standby_enabled:
-            self.status_label.setText("Standby off")
+            self.status_label.setText("Off")
             return
         if not self._connected:
             self.status_label.setText("Instrument disconnected")
             return
         if not self._has_reading:
             self.status_label.setText("Waiting for reading")
+
+
+class _ResistanceScreen(QFrame):
+    clicked = Signal()
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
 
 
 def _format_resistance(value: float) -> tuple[str, str]:

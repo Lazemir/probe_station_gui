@@ -41,6 +41,9 @@ def _install_pyside6_stubs_if_missing() -> None:
 
     qtcore.QObject = QObject
     qtcore.Signal = Signal
+    qtcore.Qt = types.SimpleNamespace(
+        ConnectionType=types.SimpleNamespace(DirectConnection=object())
+    )
     pyside6 = types.ModuleType("PySide6")
     sys.modules["PySide6"] = pyside6
     sys.modules["PySide6.QtCore"] = qtcore
@@ -50,6 +53,7 @@ _restore_real_imports()
 _install_pyside6_stubs_if_missing()
 
 import probe_station_gui.lcr_meter as lcr_module
+from PySide6.QtCore import Qt
 from probe_station_gui.lcr_meter import (
     GWInstekRouteMeterSettings,
     KeithleyRouteMeterSettings,
@@ -61,6 +65,10 @@ from probe_station_gui.lcr_meter import (
     RouteMeterConfiguration,
     _LCRSession,
 )
+
+
+def _connect_direct(signal, slot) -> None:
+    signal.connect(slot, Qt.ConnectionType.DirectConnection)
 
 
 class _FakeInstrument:
@@ -287,7 +295,7 @@ class LCRMeterTest(unittest.TestCase):
         self.assertEqual(stopped, [True])
         self.assertEqual(started, [])
 
-    def test_controller_live_polling_toggle_controls_poll_thread(self) -> None:
+    def test_controller_live_polling_toggle_controls_worker_polling(self) -> None:
         controller = LCRMeterController()
         controller._session = _FakeSession()
         paused = []
@@ -303,6 +311,39 @@ class LCRMeterTest(unittest.TestCase):
         self.assertTrue(controller.live_polling_enabled())
         self.assertEqual(paused, [True])
         self.assertEqual(started, [True])
+
+    def test_controller_enables_live_polling_for_keithley(self) -> None:
+        controller = LCRMeterController()
+        controller._meter_type = ROUTE_METER_KEITHLEY
+
+        self.assertTrue(controller.live_polling_enabled())
+
+        controller.set_live_polling_enabled(False)
+        self.assertFalse(controller.live_polling_enabled())
+        controller.set_live_polling_enabled(True)
+
+        self.assertTrue(controller.live_polling_enabled())
+
+    def test_controller_worker_polls_keithley_when_idle(self) -> None:
+        controller = LCRMeterController()
+        controller._meter_type = ROUTE_METER_KEITHLEY
+        session = _FakeKeithleySession()
+        controller._session = session
+        controller._stop_polling.clear()
+        summaries: list[tuple[float, bool, int]] = []
+        _connect_direct(
+            controller.reading_summary_updated,
+            lambda value, is_short, count: summaries.append(
+                (float(value), bool(is_short), int(count))
+            ),
+        )
+
+        self.assertIsNotNone(controller._meter_worker_poll_timeout())
+        polled = controller._run_meter_poll_once()
+
+        self.assertTrue(polled)
+        self.assertEqual(session.read_triggers, [True])
+        self.assertEqual(summaries, [(42.0, False, 1)])
 
     def test_gpib_interface_reset_uses_unique_boards(self) -> None:
         calls: list[tuple[str, str]] = []
@@ -405,9 +446,38 @@ class LCRMeterTest(unittest.TestCase):
         self.assertTrue(controller.is_connected())
         self.assertEqual(session.configurations[-1]["keithley_nplc"], 5.0)
 
-    def test_controller_batch_read_waits_for_session_io_lock(self) -> None:
+    def test_controller_batch_reads_are_serialized_by_worker(self) -> None:
+        class _BlockingKeithleySession(_FakeKeithleySession):
+            def __init__(self) -> None:
+                super().__init__()
+                self.first_entered = threading.Event()
+                self.release_first = threading.Event()
+                self.active_reads = 0
+                self.max_active_reads = 0
+
+            def read_route_measurements(
+                self,
+                count: int,
+                *,
+                trigger: bool = False,
+                after_measurement=None,
+            ) -> list[dict[str, object]]:
+                self.active_reads += 1
+                self.max_active_reads = max(self.max_active_reads, self.active_reads)
+                self.route_batches.append(
+                    (int(count), bool(trigger), after_measurement is not None)
+                )
+                if len(self.route_batches) == 1:
+                    self.first_entered.set()
+                    self.release_first.wait(timeout=1.0)
+                self.active_reads -= 1
+                return [
+                    {"differential_resistance_ohm": 42.0}
+                    for _index in range(int(count))
+                ]
+
         controller = LCRMeterController()
-        session = _FakeKeithleySession()
+        session = _BlockingKeithleySession()
         controller._session = session
         failures: list[BaseException] = []
 
@@ -417,20 +487,27 @@ class LCRMeterTest(unittest.TestCase):
             except BaseException as exc:
                 failures.append(exc)
 
-        controller._session_io_lock.acquire()
-        try:
-            thread = threading.Thread(target=run_batch)
-            thread.start()
-            time.sleep(0.05)
+        first_thread = threading.Thread(target=run_batch)
+        second_thread = threading.Thread(target=run_batch)
+        first_thread.start()
+        self.assertTrue(session.first_entered.wait(timeout=1.0))
 
-            self.assertEqual(session.route_batches, [])
-        finally:
-            controller._session_io_lock.release()
-        thread.join(timeout=1.0)
-
-        self.assertFalse(thread.is_alive())
-        self.assertEqual(failures, [])
+        second_thread.start()
+        time.sleep(0.05)
         self.assertEqual(session.route_batches, [(1, True, False)])
+        self.assertEqual(session.max_active_reads, 1)
+
+        session.release_first.set()
+        first_thread.join(timeout=1.0)
+        second_thread.join(timeout=1.0)
+
+        self.assertFalse(first_thread.is_alive())
+        self.assertFalse(second_thread.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(
+            session.route_batches,
+            [(1, True, False), (1, True, False)],
+        )
 
     def test_controller_polling_drops_reading_after_stop(self) -> None:
         controller = LCRMeterController()
@@ -438,10 +515,12 @@ class LCRMeterTest(unittest.TestCase):
         controller._session = session
         updates: list[tuple[float, bool]] = []
         summaries: list[tuple[float, bool, int]] = []
-        controller.reading_updated.connect(
+        _connect_direct(
+            controller.reading_updated,
             lambda value, is_short: updates.append((float(value), bool(is_short)))
         )
-        controller.reading_summary_updated.connect(
+        _connect_direct(
+            controller.reading_summary_updated,
             lambda value, is_short, count: summaries.append(
                 (float(value), bool(is_short), int(count))
             )
@@ -459,8 +538,9 @@ class LCRMeterTest(unittest.TestCase):
         controller._session = session
         status_messages: list[str] = []
         connection_events: list[tuple[bool, str]] = []
-        controller.status_message.connect(status_messages.append)
-        controller.connection_changed.connect(
+        _connect_direct(controller.status_message, status_messages.append)
+        _connect_direct(
+            controller.connection_changed,
             lambda connected, _backend, message: connection_events.append(
                 (bool(connected), str(message))
             )
@@ -658,8 +738,9 @@ class LCRMeterTest(unittest.TestCase):
         controller._session = session
         status_messages: list[str] = []
         connection_events: list[tuple[bool, str]] = []
-        controller.status_message.connect(status_messages.append)
-        controller.connection_changed.connect(
+        _connect_direct(controller.status_message, status_messages.append)
+        _connect_direct(
+            controller.connection_changed,
             lambda connected, _backend, message: connection_events.append(
                 (bool(connected), str(message))
             )
@@ -677,7 +758,6 @@ class LCRMeterTest(unittest.TestCase):
         self.assertFalse(controller.is_connected())
         self.assertIn("Instrument setup failed: visa boom", status_messages)
         self.assertIn((False, "visa boom"), connection_events)
-        self.assertIsNone(controller._active_thread)
 
     def test_controller_keithley_route_config_retries_after_reconnect(self) -> None:
         controller = LCRMeterController()
@@ -716,7 +796,7 @@ class LCRMeterTest(unittest.TestCase):
         started: list[bool] = []
         status_messages: list[str] = []
         controller._start_polling_thread = lambda: started.append(True)
-        controller.status_message.connect(status_messages.append)
+        _connect_direct(controller.status_message, status_messages.append)
 
         controller.apply_route_meter_configuration(
             RouteMeterConfiguration(
@@ -741,8 +821,12 @@ class LCRMeterTest(unittest.TestCase):
         callbacks: list[bool] = []
         started: list[int] = []
         summaries: list[tuple[float, bool, int]] = []
-        controller.reading_started.connect(lambda count: started.append(int(count)))
-        controller.reading_summary_updated.connect(
+        _connect_direct(
+            controller.reading_started,
+            lambda count: started.append(int(count)),
+        )
+        _connect_direct(
+            controller.reading_summary_updated,
             lambda value, is_short, count: summaries.append(
                 (float(value), bool(is_short), int(count))
             )
@@ -899,7 +983,7 @@ class LCRMeterTest(unittest.TestCase):
             ],
         )
 
-    def test_controller_connect_now_opens_configured_keithley_without_live_polling(self) -> None:
+    def test_controller_connect_now_starts_live_polling_for_keithley(self) -> None:
         created: list[tuple[str, str, int]] = []
         session = _FakeKeithleySession()
 
@@ -955,7 +1039,7 @@ class LCRMeterTest(unittest.TestCase):
                 )
             ],
         )
-        self.assertEqual(started, [])
+        self.assertEqual(started, [True])
 
     def test_controller_connect_now_rejects_keithley_without_source_idn(self) -> None:
         session = _SourceSilentKeithleySession()

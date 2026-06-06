@@ -5,11 +5,12 @@ from __future__ import annotations
 import inspect
 import logging
 import math
+import queue
 import re
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 from PySide6.QtCore import QObject, Signal
 
@@ -32,6 +33,14 @@ ROUTE_METER_LABELS: dict[str, str] = {
 DEFAULT_METER_TIMEOUT_MS = 10000
 COM_RESOURCE_PATTERN = re.compile(r"^COM(?P<port>\d+)$", re.IGNORECASE)
 GPIB_RESOURCE_PATTERN = re.compile(r"^GPIB(?P<board>\d*)::", re.IGNORECASE)
+
+
+@dataclass
+class _MeterWorkerCall:
+    func: Callable[[], object]
+    done: threading.Event | None = None
+    result: object = None
+    error: BaseException | None = None
 
 
 def normalize_resource_name(resource_name: str) -> str:
@@ -1070,13 +1079,16 @@ class LCRMeterController(QObject):
         self._short_threshold_ohm = 10.0
         self._poll_interval_ms = 250
         self._session: Optional[object] = None
-        self._task_lock = threading.Lock()
-        self._active_thread: Optional[threading.Thread] = None
-        self._poll_thread: Optional[threading.Thread] = None
         self._stop_polling = threading.Event()
         self._live_polling_enabled = True
-        self._session_io_lock = threading.RLock()
         self._pending_route_meter_configuration: RouteMeterConfiguration | None = None
+        self._worker_queue: queue.Queue[_MeterWorkerCall | None] = queue.Queue()
+        self._worker_thread: threading.Thread | None = None
+        self._worker_start_lock = threading.Lock()
+        self._worker_shutdown = threading.Event()
+        self._worker_state = threading.Condition()
+        self._worker_pending_calls = 0
+        self._worker_running_call = False
 
     def apply_configuration(
         self,
@@ -1160,26 +1172,107 @@ class LCRMeterController(QObject):
     def wait_until_idle(self, timeout_s: float | None = None) -> bool:
         """Wait until the current background meter task finishes."""
 
+        worker_thread = self._worker_thread
+        if worker_thread is not None and threading.current_thread() is worker_thread:
+            return True
         timeout = (
             self.TASK_WAIT_TIMEOUT_S
             if timeout_s is None
             else max(0.0, float(timeout_s))
         )
         deadline = time.monotonic() + timeout
-        current_thread = threading.current_thread()
-        while True:
-            with self._task_lock:
-                thread = self._active_thread
-                if (
-                    thread is None
-                    or not thread.is_alive()
-                    or thread is current_thread
-                ):
+        with self._worker_state:
+            while True:
+                if self._worker_pending_calls <= 0 and not self._worker_running_call:
                     return True
-            remaining = deadline - time.monotonic()
-            if remaining <= 0.0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    return False
+                self._worker_state.wait(timeout=min(0.05, remaining))
+
+    def _ensure_worker_started(self) -> None:
+        with self._worker_start_lock:
+            thread = self._worker_thread
+            if thread is not None and thread.is_alive():
+                return
+            self._worker_shutdown.clear()
+            thread = threading.Thread(
+                target=self._meter_worker_loop,
+                name="LCRMeterWorker",
+                daemon=True,
+            )
+            self._worker_thread = thread
+            thread.start()
+
+    def _wake_meter_worker(self) -> None:
+        self._ensure_worker_started()
+        self._worker_queue.put(None)
+
+    def _run_on_meter_worker(self, func: Callable[[], object]) -> object:
+        worker_thread = self._worker_thread
+        if worker_thread is not None and threading.current_thread() is worker_thread:
+            return func()
+        done = threading.Event()
+        call = _MeterWorkerCall(func=func, done=done)
+        with self._worker_state:
+            self._worker_pending_calls += 1
+        self._worker_queue.put(call)
+        self._ensure_worker_started()
+        done.wait()
+        if call.error is not None:
+            raise call.error
+        return call.result
+
+    def _submit_meter_worker_call(self, func: Callable[[], object]) -> bool:
+        with self._worker_state:
+            if self._worker_pending_calls > 0 or self._worker_running_call:
                 return False
-            thread.join(timeout=min(0.05, remaining))
+            self._worker_pending_calls += 1
+        self._worker_queue.put(_MeterWorkerCall(func=func))
+        self._ensure_worker_started()
+        return True
+
+    def _meter_worker_loop(self) -> None:
+        while not self._worker_shutdown.is_set():
+            timeout = self._meter_worker_poll_timeout()
+            try:
+                call = self._worker_queue.get(timeout=timeout)
+            except queue.Empty:
+                with self._worker_state:
+                    self._worker_running_call = True
+                try:
+                    self._run_meter_poll_once()
+                finally:
+                    with self._worker_state:
+                        self._worker_running_call = False
+                        self._worker_state.notify_all()
+                continue
+            if call is None:
+                continue
+            with self._worker_state:
+                self._worker_running_call = True
+            try:
+                call.result = call.func()
+            except BaseException as exc:
+                call.error = exc
+                if call.done is None:
+                    logger.exception("Measurement instrument worker task failed.")
+            finally:
+                if call.done is not None:
+                    call.done.set()
+                with self._worker_state:
+                    self._worker_running_call = False
+                    self._worker_pending_calls = max(0, self._worker_pending_calls - 1)
+                    self._worker_state.notify_all()
+
+    def _meter_worker_poll_timeout(self) -> float | None:
+        if (
+            not self._live_polling_enabled
+            or self._stop_polling.is_set()
+            or self._session is None
+        ):
+            return None
+        return max(0.05, self._poll_interval_ms / 1000.0)
 
     def meter_type(self) -> str:
         """Return the currently configured meter type."""
@@ -1216,27 +1309,25 @@ class LCRMeterController(QObject):
                 f"Connected instrument is {configured_label}; route requested {requested_label}."
             )
         self._pending_route_meter_configuration = configuration
+        self._run_on_meter_worker(
+            lambda: self._apply_route_meter_configuration_on_worker(configuration)
+        )
+
+    def _apply_route_meter_configuration_on_worker(
+        self,
+        configuration: RouteMeterConfiguration,
+    ) -> None:
         session = self._session
         if session is None:
             raise LCRMeterError("Measurement instrument is not connected.")
-        current_thread = threading.current_thread()
-        with self._task_lock:
-            if (
-                self._active_thread
-                and self._active_thread.is_alive()
-                and self._active_thread is not current_thread
-            ):
-                raise LCRMeterError("Measurement instrument task already running.")
-            self._active_thread = current_thread
         self._stop_polling_session()
         try:
-            with self._session_io_lock:
-                if session is not self._session:
-                    raise LCRMeterError("Measurement instrument is not connected.")
-                self._apply_route_meter_configuration_to_session(
-                    session,
-                    configuration,
-                )
+            if session is not self._session:
+                raise LCRMeterError("Measurement instrument is not connected.")
+            self._apply_route_meter_configuration_to_session(
+                session,
+                configuration,
+            )
         except Exception as exc:
             failure: BaseException = exc
             if (
@@ -1248,15 +1339,14 @@ class LCRMeterController(QObject):
                         "Instrument setup failed; reconnecting Keithley."
                     )
                     self._disconnect_session()
-                    self._connect_configured_session()
+                    self._connect_configured_session(resume_polling=False)
                     replacement = self._session
                     if replacement is None:
                         raise LCRMeterError("Measurement instrument is not connected.")
-                    with self._session_io_lock:
-                        self._apply_route_meter_configuration_to_session(
-                            replacement,
-                            configuration,
-                        )
+                    self._apply_route_meter_configuration_to_session(
+                        replacement,
+                        configuration,
+                    )
                     return
                 except Exception as retry_exc:
                     failure = retry_exc
@@ -1265,10 +1355,6 @@ class LCRMeterController(QObject):
             self.connection_changed.emit(False, "", str(error))
             self.status_message.emit(f"Instrument setup failed: {error}")
             raise error from failure
-        finally:
-            with self._task_lock:
-                if self._active_thread is current_thread:
-                    self._active_thread = None
 
     def _apply_route_meter_configuration_to_session(
         self,
@@ -1414,17 +1500,23 @@ class LCRMeterController(QObject):
     ) -> dict[str, object]:
         """Synchronously run one route measurement and return raw readings."""
 
-        with self._task_lock:
-            if self._active_thread and self._active_thread.is_alive():
-                raise LCRMeterError("Measurement instrument task already running.")
-            session = self._session
+        return dict(
+            self._run_on_meter_worker(
+                lambda: self._read_route_measurement_now_on_worker(restart_polling)
+            )
+        )
+
+    def _read_route_measurement_now_on_worker(
+        self,
+        restart_polling: bool,
+    ) -> dict[str, object]:
+        session = self._session
         if session is None:
             raise LCRMeterError("Measurement instrument is not connected.")
         self._stop_polling_session()
         self.reading_started.emit(1)
         try:
-            with self._session_io_lock:
-                measurement = self._read_route_measurement_from_session(session)
+            measurement = self._read_route_measurement_from_session(session)
         except Exception as exc:
             error = self._lcr_error(exc)
             self._disconnect_session()
@@ -1447,10 +1539,21 @@ class LCRMeterController(QObject):
     ) -> dict[str, object]:
         """Synchronously run a raw source-voltage sweep and return V/I points."""
 
-        with self._task_lock:
-            if self._active_thread and self._active_thread.is_alive():
-                raise LCRMeterError("Measurement instrument task already running.")
-            session = self._session
+        return dict(
+            self._run_on_meter_worker(
+                lambda: self._read_voltage_sweep_now_on_worker(
+                    voltages_v,
+                    restart_polling,
+                )
+            )
+        )
+
+    def _read_voltage_sweep_now_on_worker(
+        self,
+        voltages_v: list[float] | tuple[float, ...],
+        restart_polling: bool,
+    ) -> dict[str, object]:
+        session = self._session
         if session is None:
             raise LCRMeterError("Measurement instrument is not connected.")
         voltage_list_reader = getattr(session, "measure_voltage_list", None)
@@ -1461,11 +1564,10 @@ class LCRMeterController(QObject):
         self._stop_polling_session()
         self.reading_started.emit(max(1, len(voltages_v)))
         try:
-            with self._session_io_lock:
-                points = [
-                    _voltage_sweep_point_to_dict(point)
-                    for point in voltage_list_reader(voltages_v)
-                ]
+            points = [
+                _voltage_sweep_point_to_dict(point)
+                for point in voltage_list_reader(voltages_v)
+            ]
             measurement = {
                 "source_voltages_v": [float(value) for value in voltages_v],
                 "points": points,
@@ -1494,31 +1596,43 @@ class LCRMeterController(QObject):
         """Synchronously run a batch of route measurements when supported."""
 
         count = max(1, int(count))
-        with self._task_lock:
-            if self._active_thread and self._active_thread.is_alive():
-                raise LCRMeterError("Measurement instrument task already running.")
-            session = self._session
+        return list(
+            self._run_on_meter_worker(
+                lambda: self._read_route_measurement_batch_now_on_worker(
+                    count,
+                    restart_polling,
+                    after_measurement,
+                )
+            )
+        )
+
+    def _read_route_measurement_batch_now_on_worker(
+        self,
+        count: int,
+        restart_polling: bool,
+        after_measurement: object | None,
+    ) -> list[dict[str, object]]:
+        session = self._session
         if session is None:
             raise LCRMeterError("Measurement instrument is not connected.")
         self._stop_polling_session()
         self.reading_started.emit(count)
         try:
-            with self._session_io_lock:
-                batch_reader = getattr(session, "read_route_measurements", None)
-                if callable(batch_reader):
-                    measurements = [
-                        dict(item)
-                        for item in _read_route_measurement_batch(
-                            batch_reader,
-                            count,
-                            after_measurement=after_measurement,
-                        )
-                    ]
-                else:
-                    measurements = [
-                        self._read_route_measurement_from_session(session)
-                        for _index in range(count)
-                    ]
+            batch_reader = getattr(session, "read_route_measurements", None)
+            if callable(batch_reader):
+                measurements = [
+                    dict(item)
+                    for item in _read_route_measurement_batch(
+                        batch_reader,
+                        count,
+                        after_measurement=after_measurement,
+                    )
+                ]
+            else:
+                measurements = [
+                    self._read_route_measurement_from_session(session)
+                    for _index in range(count)
+                ]
         except Exception as exc:
             error = self._lcr_error(exc)
             self._disconnect_session()
@@ -1542,40 +1656,35 @@ class LCRMeterController(QObject):
         """Prepare a route measurement batch when the backend supports it."""
 
         count = max(1, int(count))
-        current_thread = threading.current_thread()
-        with self._task_lock:
-            if (
-                self._active_thread
-                and self._active_thread.is_alive()
-                and self._active_thread is not current_thread
-            ):
-                raise LCRMeterError("Measurement instrument task already running.")
-            session = self._session
-            self._active_thread = current_thread
+        self._run_on_meter_worker(
+            lambda: self._prepare_route_measurement_batch_now_on_worker(
+                count,
+                source_list_count,
+            )
+        )
+
+    def _prepare_route_measurement_batch_now_on_worker(
+        self,
+        count: int,
+        source_list_count: int | None,
+    ) -> None:
+        session = self._session
         if session is None:
-            with self._task_lock:
-                if self._active_thread is current_thread:
-                    self._active_thread = None
             raise LCRMeterError("Measurement instrument is not connected.")
         self._stop_polling_session()
         try:
-            with self._session_io_lock:
-                preparer = getattr(session, "prepare_route_measurements", None)
-                _prepare_route_measurement_batch(
-                    preparer,
-                    count,
-                    source_list_count=source_list_count,
-                )
+            preparer = getattr(session, "prepare_route_measurements", None)
+            _prepare_route_measurement_batch(
+                preparer,
+                count,
+                source_list_count=source_list_count,
+            )
         except Exception as exc:
             error = self._lcr_error(exc)
             self._disconnect_session()
             self.connection_changed.emit(False, "", str(error))
             self.status_message.emit(f"Instrument preparation failed: {error}")
             raise error from exc
-        finally:
-            with self._task_lock:
-                if self._active_thread is current_thread:
-                    self._active_thread = None
 
     def _read_route_measurement_from_session(self, session: object) -> dict[str, object]:
         reader = getattr(session, "read_route_measurement", None)
@@ -1652,68 +1761,62 @@ class LCRMeterController(QObject):
     ) -> object:
         """Run one serialized VISA-like operation on the connected backend."""
 
-        current_thread = threading.current_thread()
-        with self._task_lock:
-            if (
-                self._active_thread
-                and self._active_thread.is_alive()
-                and self._active_thread is not current_thread
-            ):
-                raise LCRMeterError("Measurement instrument task already running.")
-            session = self._session
-            self._active_thread = current_thread
+        return self._run_on_meter_worker(
+            lambda: self._visa_operation_on_worker(
+                role,
+                operation,
+                command=command,
+                timeout_ms=timeout_ms,
+                read_termination=read_termination,
+                write_termination=write_termination,
+            )
+        )
+
+    def _visa_operation_on_worker(
+        self,
+        role: str,
+        operation: str,
+        *,
+        command: str | None = None,
+        timeout_ms: int | None = None,
+        read_termination: str | None = None,
+        write_termination: str | None = None,
+    ) -> object:
+        session = self._session
         if session is None:
-            with self._task_lock:
-                if self._active_thread is current_thread:
-                    self._active_thread = None
             raise LCRMeterError("Measurement instrument is not connected.")
         self._stop_polling_session()
         try:
-            with self._session_io_lock:
-                return _session_visa_operation(
-                    session,
-                    role,
-                    operation,
-                    command=command,
-                    timeout_ms=timeout_ms,
-                    read_termination=read_termination,
-                    write_termination=write_termination,
-                )
+            return _session_visa_operation(
+                session,
+                role,
+                operation,
+                command=command,
+                timeout_ms=timeout_ms,
+                read_termination=read_termination,
+                write_termination=write_termination,
+            )
         except Exception as exc:
             error = self._lcr_error(exc)
             self._disconnect_session()
             self.connection_changed.emit(False, "", str(error))
             self.status_message.emit(f"Instrument VISA operation failed: {error}")
             raise error from exc
-        finally:
-            with self._task_lock:
-                if self._active_thread is current_thread:
-                    self._active_thread = None
 
     def request_connect(self) -> None:
         """Open the configured measurement instrument in a background thread."""
 
-        with self._task_lock:
-            if self._active_thread and self._active_thread.is_alive():
-                self.status_message.emit(
-                    "Measurement instrument task already running."
-                )
-                return
-            thread = threading.Thread(target=self._run_connect, daemon=True)
-            self._active_thread = thread
-            thread.start()
+        if not self._submit_meter_worker_call(self._run_connect):
+            self.status_message.emit("Measurement instrument task already running.")
 
     def connect_now(self) -> None:
         """Open the configured measurement instrument in the current thread."""
 
-        if not self.wait_until_idle(self.TASK_WAIT_TIMEOUT_S):
-            raise LCRMeterError("Measurement instrument task already running.")
-        with self._task_lock:
-            if self._session is not None:
-                return
-            if self._active_thread and self._active_thread.is_alive():
-                raise LCRMeterError("Measurement instrument task already running.")
-            self._active_thread = threading.current_thread()
+        self._run_on_meter_worker(self._connect_now_on_worker)
+
+    def _connect_now_on_worker(self) -> None:
+        if self._session is not None:
+            return
         try:
             self._connect_configured_session()
         except Exception as exc:
@@ -1722,57 +1825,38 @@ class LCRMeterController(QObject):
             self.connection_changed.emit(False, "", str(error))
             self.status_message.emit(f"Instrument connection failed: {error}")
             raise error from exc
-        finally:
-            with self._task_lock:
-                self._active_thread = None
 
     def request_disconnect(self) -> None:
         """Close the current measurement instrument and stop polling."""
 
-        with self._task_lock:
-            if self._active_thread and self._active_thread.is_alive():
-                self.status_message.emit(
-                    "Measurement instrument task already running."
-                )
-                return
-            thread = threading.Thread(target=self._run_disconnect, daemon=True)
-            self._active_thread = thread
-            thread.start()
+        if not self._submit_meter_worker_call(self._run_disconnect):
+            self.status_message.emit("Measurement instrument task already running.")
 
     def request_reconfigure(self) -> None:
         """Apply the current configuration to an already connected meter."""
 
-        with self._task_lock:
-            if self._session is None:
-                return
-            if self._active_thread and self._active_thread.is_alive():
-                self.status_message.emit(
-                    "Measurement instrument task already running."
-                )
-                return
-            thread = threading.Thread(target=self._run_reconfigure, daemon=True)
-            self._active_thread = thread
-            thread.start()
+        if self._session is None:
+            return
+        if not self._submit_meter_worker_call(self._run_reconfigure):
+            self.status_message.emit("Measurement instrument task already running.")
 
     def shutdown(self) -> None:
         """Stop background work before application exit."""
 
         self._stop_polling.set()
-        poll_thread = self._poll_thread
-        if poll_thread and poll_thread.is_alive():
-            poll_thread.join(timeout=2.0)
-        with self._session_io_lock:
-            session = self._session
-            self._session = None
-            if session is not None:
-                try:
-                    closer = getattr(session, "close", None)
-                    if callable(closer):
-                        closer()
-                except Exception:  # pragma: no cover - best effort shutdown
-                    logger.exception(
-                        "Failed to close measurement instrument session during shutdown"
-                    )
+        try:
+            self._run_on_meter_worker(self._disconnect_session)
+        except Exception:  # pragma: no cover - best effort shutdown
+            logger.exception("Failed to close measurement instrument session during shutdown")
+        self._worker_shutdown.set()
+        self._worker_queue.put(None)
+        worker_thread = self._worker_thread
+        if (
+            worker_thread is not None
+            and worker_thread.is_alive()
+            and worker_thread is not threading.current_thread()
+        ):
+            worker_thread.join(timeout=2.0)
 
     def _run_connect(self) -> None:
         try:
@@ -1782,9 +1866,6 @@ class LCRMeterController(QObject):
             self._disconnect_session()
             self.connection_changed.emit(False, "", str(error))
             self.status_message.emit(f"Instrument connection failed: {error}")
-        finally:
-            with self._task_lock:
-                self._active_thread = None
 
     def _run_reconfigure(self) -> None:
         try:
@@ -1822,8 +1903,7 @@ class LCRMeterController(QObject):
             else:
                 self._stop_polling_session()
             if self._meter_type == ROUTE_METER_GWINSTEK:
-                with self._session_io_lock:
-                    self._configure_active_session(session)
+                self._configure_active_session(session)
             self._stop_polling.clear()
             self.status_message.emit("Instrument settings applied.")
             self._resume_live_polling()
@@ -1831,20 +1911,13 @@ class LCRMeterController(QObject):
             self._disconnect_session()
             self.connection_changed.emit(False, "", str(exc))
             self.status_message.emit(f"Instrument reconfiguration failed: {exc}")
-        finally:
-            with self._task_lock:
-                self._active_thread = None
 
     def _run_disconnect(self) -> None:
-        try:
-            self._disconnect_session()
-            self.connection_changed.emit(False, "", "Disconnected")
-            self.status_message.emit("Measurement instrument disconnected.")
-        finally:
-            with self._task_lock:
-                self._active_thread = None
+        self._disconnect_session()
+        self.connection_changed.emit(False, "", "Disconnected")
+        self.status_message.emit("Measurement instrument disconnected.")
 
-    def _connect_configured_session(self) -> None:
+    def _connect_configured_session(self, *, resume_polling: bool = True) -> None:
         if self._meter_type == ROUTE_METER_GWINSTEK and not self._resource_name:
             raise LCRMeterError("GW Instek resource is empty. Set it in Settings.")
         if self._meter_type == ROUTE_METER_KEITHLEY:
@@ -1880,12 +1953,14 @@ class LCRMeterController(QObject):
             raise
         self._session = session
         self._connected_resource_name = self._connection_key()
-        self._stop_polling.clear()
+        if resume_polling:
+            self._stop_polling.clear()
         self.connection_changed.emit(True, backend_name, self.connection_label())
         self.status_message.emit(
             f"Measurement instrument connected via {backend_name}."
         )
-        self._resume_live_polling()
+        if resume_polling:
+            self._resume_live_polling()
 
     def _validate_connected_session_identity(self, instrument_id: str) -> None:
         if self._meter_type != ROUTE_METER_KEITHLEY:
@@ -1959,77 +2034,61 @@ class LCRMeterController(QObject):
 
     def _stop_polling_session(self) -> None:
         self._stop_polling.set()
-        poll_thread = self._poll_thread
-        self._poll_thread = None
-        if (
-            poll_thread
-            and poll_thread.is_alive()
-            and poll_thread is not threading.current_thread()
-        ):
-            poll_thread.join(timeout=2.0)
 
     def _pause_live_polling(self) -> None:
         self._stop_polling.set()
-        poll_thread = self._poll_thread
-        if poll_thread is not None and not poll_thread.is_alive():
-            self._poll_thread = None
 
     def _disconnect_session(self) -> None:
         self._stop_polling_session()
-        with self._session_io_lock:
-            session = self._session
-            self._session = None
-            self._connected_resource_name = ""
-            if session is not None:
-                try:
-                    closer = getattr(session, "close", None)
-                    if callable(closer):
-                        closer()
-                except Exception:  # pragma: no cover - best effort cleanup
-                    logger.exception(
-                        "Failed to close measurement instrument session cleanly"
-                    )
+        session = self._session
+        self._session = None
+        self._connected_resource_name = ""
+        if session is not None:
+            try:
+                closer = getattr(session, "close", None)
+                if callable(closer):
+                    closer()
+            except Exception:  # pragma: no cover - best effort cleanup
+                logger.exception(
+                    "Failed to close measurement instrument session cleanly"
+                )
 
     def _start_polling_thread(self) -> None:
-        if self._poll_thread and self._poll_thread.is_alive():
-            return
-        thread = threading.Thread(target=self._poll_readings, daemon=True)
-        self._poll_thread = thread
-        thread.start()
+        self._wake_meter_worker()
 
     def _resume_live_polling(self) -> None:
         if not self._live_polling_enabled or self._session is None:
-            return
-        if self._meter_type == ROUTE_METER_KEITHLEY:
             return
         self._stop_polling.clear()
         self._start_polling_thread()
 
     def _poll_readings(self) -> None:
         while not self._stop_polling.is_set():
-            session = self._session
-            if session is None:
+            if not self._run_meter_poll_once():
                 return
-            try:
-                with self._session_io_lock:
-                    if self._stop_polling.is_set() or session is not self._session:
-                        return
-                    reader = getattr(session, "read_primary_value", None)
-                    if not callable(reader):
-                        raise LCRMeterError(
-                            "Measurement instrument cannot read values."
-                        )
-                    primary_value = float(reader(trigger=True))
-            except Exception as exc:
-                error = self._lcr_error(exc)
-                self.status_message.emit(f"Instrument read failed: {error}")
-                self.connection_changed.emit(False, "", str(error))
-                self._disconnect_session()
-                return
-            if self._stop_polling.is_set() or session is not self._session:
-                return
-            self._emit_reading_summary(primary_value, 1)
             time.sleep(self._poll_interval_ms / 1000.0)
+
+    def _run_meter_poll_once(self) -> bool:
+        session = self._session
+        if self._stop_polling.is_set() or session is None:
+            return False
+        try:
+            if self._stop_polling.is_set() or session is not self._session:
+                return False
+            reader = getattr(session, "read_primary_value", None)
+            if not callable(reader):
+                raise LCRMeterError("Measurement instrument cannot read values.")
+            primary_value = float(reader(trigger=True))
+        except Exception as exc:
+            error = self._lcr_error(exc)
+            self.status_message.emit(f"Instrument read failed: {error}")
+            self.connection_changed.emit(False, "", str(error))
+            self._disconnect_session()
+            return False
+        if self._stop_polling.is_set() or session is not self._session:
+            return False
+        self._emit_reading_summary(primary_value, 1)
+        return True
 
     @staticmethod
     def _lcr_error(exc: BaseException) -> LCRMeterError:

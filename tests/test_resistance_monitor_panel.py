@@ -10,7 +10,7 @@ def _restore_real_qt_imports() -> None:
 
 _restore_real_qt_imports()
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QFrame
 
 from probe_station_gui.views.resistance_monitor_panel import (
     ResistanceMonitorPanel,
@@ -53,9 +53,11 @@ def test_resistance_display_uses_fixed_digit_count() -> None:
 def test_resistance_panel_copies_last_reading_in_ohms() -> None:
     app = _app()
     panel = ResistanceMonitorPanel()
+    screen = panel.findChild(QFrame, "ResistanceScreen")
+    assert screen is not None
 
     panel.set_reading_summary(298000.0, False, 10)
-    panel.copy_button.click()
+    screen.clicked.emit()
 
     assert panel.value_label.text() == "298.00"
     assert panel.unit_label.text() == "kOhm"
@@ -63,5 +65,15 @@ def test_resistance_panel_copies_last_reading_in_ohms() -> None:
     assert panel.status_label.text() == "Copied"
 
     panel.set_reading_pending(240)
+    screen.clicked.emit()
 
-    assert not panel.copy_button.isEnabled()
+    assert app.clipboard().text() == "298000 Ohm"
+
+
+def test_resistance_panel_off_state_copy() -> None:
+    _app()
+    panel = ResistanceMonitorPanel()
+
+    panel.set_standby_enabled(False)
+
+    assert panel.status_label.text() == "Off"

@@ -613,6 +613,35 @@ class MainCoordinateFeedrateTest(unittest.TestCase):
         self.assertEqual(lcr.wait_calls, [45.0])
         self.assertEqual(lcr.applied_configurations, [])
 
+    def test_resistance_standby_toggle_reflects_controller_state(self) -> None:
+        class _Lcr:
+            def __init__(self) -> None:
+                self.requests: list[bool] = []
+
+            def set_live_polling_enabled(self, enabled: bool) -> None:
+                self.requests.append(bool(enabled))
+
+            def live_polling_enabled(self) -> bool:
+                return False
+
+        class _Panel:
+            def __init__(self) -> None:
+                self.states: list[bool] = []
+
+            def set_standby_enabled(self, enabled: bool) -> None:
+                self.states.append(bool(enabled))
+
+        lcr = _Lcr()
+        panel = _Panel()
+        window = Main.__new__(Main)
+        window.lcr_controller = lcr
+        window.resistance_panel = panel
+
+        Main._on_resistance_standby_enabled_changed(window, True)
+
+        self.assertEqual(lcr.requests, [True])
+        self.assertEqual(panel.states, [False])
+
     def test_meter_auto_connect_uses_shared_lcr_controller(self) -> None:
         class _SettingsManager:
             def serial_auto_connect_enabled(self) -> bool:
