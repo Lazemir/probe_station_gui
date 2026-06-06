@@ -271,7 +271,7 @@ class RouteMeasurementDialog(QDialog):
     cancel_session_requested = Signal()
     next_requested = Signal()
     remeasure_requested = Signal()
-    measure_anyway_requested = Signal()
+    measure_current_requested = Signal()
     skip_requested = Signal()
     save_shift_requested = Signal()
     interrupt_requested = Signal()
@@ -592,7 +592,6 @@ class RouteMeasurementDialog(QDialog):
         self._interrupt_button = QPushButton("Interrupt", self)
         self._save_shift_button = QPushButton("Save Shift", self)
         self._remeasure_button = QPushButton("Remeasure", self)
-        self._measure_anyway_button = QPushButton("Measure Anyway", self)
         self._skip_button = QPushButton("Skip", self)
         self._close_button = QPushButton("Close", self)
         self._start_session_button.hide()
@@ -600,7 +599,6 @@ class RouteMeasurementDialog(QDialog):
         self._jump_button.hide()
         self._remeasure_button.hide()
         button_row.addWidget(self._measure_button)
-        button_row.addWidget(self._measure_anyway_button)
         button_row.addWidget(self._move_button)
         button_row.addWidget(self._save_shift_button)
         button_row.addWidget(self._skip_button)
@@ -650,9 +648,6 @@ class RouteMeasurementDialog(QDialog):
         self._interrupt_button.clicked.connect(self._emit_interrupt_or_resume_requested)
         self._save_shift_button.clicked.connect(self.save_shift_requested.emit)
         self._remeasure_button.clicked.connect(self.remeasure_requested.emit)
-        self._measure_anyway_button.clicked.connect(
-            self.measure_anyway_requested.emit
-        )
         self._skip_button.clicked.connect(self.skip_requested.emit)
         self._move_button.clicked.connect(
             lambda _checked=False: self.move_requested.emit(
@@ -965,7 +960,6 @@ class RouteMeasurementDialog(QDialog):
         self._stop_button.setEnabled(self._running)
         self._save_shift_button.setEnabled(can_confirm)
         self._remeasure_button.setEnabled(can_confirm)
-        self._measure_anyway_button.setEnabled(can_confirm)
         self._skip_button.setEnabled(can_confirm)
         self._next_button.setEnabled(can_confirm)
         self._operation_combo.setEnabled((not self._running) or can_confirm)
@@ -1372,7 +1366,7 @@ class RouteMeasurementDialog(QDialog):
 
     def _emit_next_or_measure_requested(self) -> None:
         if self._running and self._waiting:
-            self.jump_requested.emit(int(self._jump_point_spin.value()))
+            self.measure_current_requested.emit()
             return
         self._emit_measure_requested()
 

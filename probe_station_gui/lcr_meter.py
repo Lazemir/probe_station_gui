@@ -31,6 +31,7 @@ ROUTE_METER_LABELS: dict[str, str] = {
 }
 DEFAULT_METER_TIMEOUT_MS = 10000
 COM_RESOURCE_PATTERN = re.compile(r"^COM(?P<port>\d+)$", re.IGNORECASE)
+GPIB_RESOURCE_PATTERN = re.compile(r"^GPIB(?P<board>\d*)::", re.IGNORECASE)
 
 
 def normalize_resource_name(resource_name: str) -> str:
@@ -41,6 +42,64 @@ def normalize_resource_name(resource_name: str) -> str:
     if match:
         return f"ASRL{int(match.group('port'))}::INSTR"
     return candidate
+
+
+def _gpib_interface_resources_for(
+    resources: tuple[str | None, ...],
+) -> tuple[str, ...]:
+    interfaces: list[str] = []
+    seen: set[str] = set()
+    for resource in resources:
+        normalized = normalize_resource_name(resource or "")
+        match = GPIB_RESOURCE_PATTERN.match(normalized)
+        if match is None:
+            continue
+        board = match.group("board")
+        interface = f"GPIB{board}::INTFC" if board else "GPIB::INTFC"
+        key = interface.upper()
+        if key in seen:
+            continue
+        seen.add(key)
+        interfaces.append(interface)
+    return tuple(interfaces)
+
+
+def _reset_gpib_interfaces_for_resources(*resources: str | None) -> None:
+    interfaces = _gpib_interface_resources_for(tuple(resources))
+    if not interfaces:
+        return
+    try:
+        import pyvisa
+    except ImportError:
+        logger.debug("PyVISA is unavailable; skipping GPIB interface reset.")
+        return
+    try:
+        resource_manager = pyvisa.ResourceManager()
+    except Exception as exc:  # pragma: no cover - backend specific failures
+        logger.warning("Unable to create VISA resource manager for GPIB reset: %s", exc)
+        return
+    reset_any = False
+    for interface_name in interfaces:
+        try:
+            interface = resource_manager.open_resource(interface_name)
+        except Exception as exc:  # pragma: no cover - backend specific failures
+            logger.warning("Unable to open %s for GPIB reset: %s", interface_name, exc)
+            continue
+        try:
+            send_ifc = getattr(interface, "send_ifc", None)
+            if callable(send_ifc):
+                send_ifc()
+                reset_any = True
+                logger.info("Sent GPIB IFC on %s before Keithley connect.", interface_name)
+        except Exception as exc:  # pragma: no cover - backend specific failures
+            logger.warning("GPIB interface reset failed on %s: %s", interface_name, exc)
+        finally:
+            try:
+                interface.close()
+            except Exception:
+                pass
+    if reset_any:
+        time.sleep(0.25)
 
 
 def _callable_accepts_keyword(function: object, name: str) -> bool:
@@ -356,6 +415,7 @@ def _open_keithley_session(
     source = normalize_resource_name(source_resource)
     voltmeter = normalize_resource_name(voltmeter_resource or "")
     try:
+        _reset_gpib_interfaces_for_resources(source, voltmeter)
         return Keithley2400With2182A(
             source,
             voltmeter or None,
@@ -973,10 +1033,13 @@ class LCRMeterController(QObject):
     """Manage connection and polling for the external measurement instrument."""
 
     connection_changed: Signal = Signal(bool, str, str)
+    reading_started: Signal = Signal(int)
+    reading_summary_updated: Signal = Signal(float, bool, int)
     reading_updated: Signal = Signal(float, bool)
     status_message: Signal = Signal(str)
 
     DEFAULT_TIMEOUT_MS = DEFAULT_METER_TIMEOUT_MS
+    TASK_WAIT_TIMEOUT_S = 45.0
 
     def __init__(self) -> None:
         super().__init__()
@@ -1011,6 +1074,9 @@ class LCRMeterController(QObject):
         self._active_thread: Optional[threading.Thread] = None
         self._poll_thread: Optional[threading.Thread] = None
         self._stop_polling = threading.Event()
+        self._live_polling_enabled = True
+        self._session_io_lock = threading.RLock()
+        self._pending_route_meter_configuration: RouteMeterConfiguration | None = None
 
     def apply_configuration(
         self,
@@ -1077,6 +1143,44 @@ class LCRMeterController(QObject):
 
         return self._session is not None
 
+    def live_polling_enabled(self) -> bool:
+        """Return True when standby resistance polling is enabled."""
+
+        return self._live_polling_enabled
+
+    def set_live_polling_enabled(self, enabled: bool) -> None:
+        """Enable or disable standby resistance polling."""
+
+        self._live_polling_enabled = bool(enabled)
+        if not self._live_polling_enabled:
+            self._pause_live_polling()
+            return
+        self._resume_live_polling()
+
+    def wait_until_idle(self, timeout_s: float | None = None) -> bool:
+        """Wait until the current background meter task finishes."""
+
+        timeout = (
+            self.TASK_WAIT_TIMEOUT_S
+            if timeout_s is None
+            else max(0.0, float(timeout_s))
+        )
+        deadline = time.monotonic() + timeout
+        current_thread = threading.current_thread()
+        while True:
+            with self._task_lock:
+                thread = self._active_thread
+                if (
+                    thread is None
+                    or not thread.is_alive()
+                    or thread is current_thread
+                ):
+                    return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                return False
+            thread.join(timeout=min(0.05, remaining))
+
     def meter_type(self) -> str:
         """Return the currently configured meter type."""
 
@@ -1111,9 +1215,66 @@ class LCRMeterController(QObject):
             raise LCRMeterError(
                 f"Connected instrument is {configured_label}; route requested {requested_label}."
             )
+        self._pending_route_meter_configuration = configuration
         session = self._session
         if session is None:
             raise LCRMeterError("Measurement instrument is not connected.")
+        current_thread = threading.current_thread()
+        with self._task_lock:
+            if (
+                self._active_thread
+                and self._active_thread.is_alive()
+                and self._active_thread is not current_thread
+            ):
+                raise LCRMeterError("Measurement instrument task already running.")
+            self._active_thread = current_thread
+        self._stop_polling_session()
+        try:
+            with self._session_io_lock:
+                if session is not self._session:
+                    raise LCRMeterError("Measurement instrument is not connected.")
+                self._apply_route_meter_configuration_to_session(
+                    session,
+                    configuration,
+                )
+        except Exception as exc:
+            failure: BaseException = exc
+            if (
+                configuration.meter_type == ROUTE_METER_KEITHLEY
+                and bool(self._connection_key())
+            ):
+                try:
+                    self.status_message.emit(
+                        "Instrument setup failed; reconnecting Keithley."
+                    )
+                    self._disconnect_session()
+                    self._connect_configured_session()
+                    replacement = self._session
+                    if replacement is None:
+                        raise LCRMeterError("Measurement instrument is not connected.")
+                    with self._session_io_lock:
+                        self._apply_route_meter_configuration_to_session(
+                            replacement,
+                            configuration,
+                        )
+                    return
+                except Exception as retry_exc:
+                    failure = retry_exc
+            error = self._lcr_error(failure)
+            self._disconnect_session()
+            self.connection_changed.emit(False, "", str(error))
+            self.status_message.emit(f"Instrument setup failed: {error}")
+            raise error from failure
+        finally:
+            with self._task_lock:
+                if self._active_thread is current_thread:
+                    self._active_thread = None
+
+    def _apply_route_meter_configuration_to_session(
+        self,
+        session: object,
+        configuration: RouteMeterConfiguration,
+    ) -> None:
         if configuration.meter_type == ROUTE_METER_GWINSTEK:
             if not isinstance(session, _LCRSession):
                 raise LCRMeterError("Connected instrument is not a GW Instek LCR.")
@@ -1165,6 +1326,70 @@ class LCRMeterController(QObject):
                 keithley_use_buffer=settings.use_buffer,
                 keithley_use_trigger_link=settings.use_trigger_link,
             )
+            return
+        raise LCRMeterError(
+            f"Unsupported route measurement instrument: {configuration.meter_type}"
+        )
+
+    def apply_route_meter_runtime_configuration(
+        self,
+        configuration: RouteMeterConfiguration,
+    ) -> None:
+        """Store route-meter connection settings for a future connection."""
+
+        self._pending_route_meter_configuration = configuration
+        if configuration.meter_type == ROUTE_METER_GWINSTEK:
+            settings = configuration.gwinstek
+            self._meter_type = ROUTE_METER_GWINSTEK
+            self._resource_name = str(settings.resource_name).strip()
+            self._keithley_source_resource = ""
+            self._keithley_voltmeter_resource = ""
+            self._measurement_function = (
+                str(settings.measurement_function).strip() or "DCR"
+            )
+            self._range_mode = str(settings.range_mode).strip().upper() or "HOLD"
+            self._auto_range_enabled = self._range_mode == "AUTO"
+            self._impedance_range = max(0, min(8, int(settings.impedance_range)))
+            self._dcr_range = max(0, min(8, int(settings.dcr_range)))
+            self._frequency_hz = max(10.0, float(settings.frequency_hz))
+            self._level_mode = str(settings.level_mode).strip().upper() or "VOLTAGE"
+            self._voltage_level_v = max(0.0, float(settings.voltage_level_v))
+            self._current_level_a = max(0.0, float(settings.current_level_a))
+            self._source_resistance_ohm = int(settings.source_resistance_ohm)
+            self._aperture_rate = (
+                str(settings.aperture_rate).strip().upper() or "FAST"
+            )
+            self._aperture_averages = max(
+                1, min(256, int(settings.aperture_averages))
+            )
+            self._trigger_source = "BUS"
+            self._trigger_delay_s = max(0.0, float(settings.trigger_delay_s))
+            self._bias_enabled = bool(settings.bias_enabled)
+            self._bias_level_v = max(-2.5, min(2.5, float(settings.bias_level_v)))
+            self._monitor1 = str(settings.monitor1).strip().upper() or "OFF"
+            self._monitor2 = str(settings.monitor2).strip().upper() or "OFF"
+            self._alc_enabled = bool(settings.alc_enabled)
+            return
+        if configuration.meter_type == ROUTE_METER_KEITHLEY:
+            settings = configuration.keithley
+            self._meter_type = ROUTE_METER_KEITHLEY
+            self._resource_name = ""
+            self._keithley_source_resource = str(settings.source_resource).strip()
+            self._keithley_voltmeter_resource = str(
+                settings.voltmeter_resource
+            ).strip()
+            self._measurement_function = "DCR"
+            self._range_mode = str(settings.range_mode).strip().upper() or "AUTO"
+            self._auto_range_enabled = self._range_mode == "AUTO"
+            return
+
+    def open(self) -> None:
+        """Open the configured instrument for route-runner compatibility."""
+
+        self.connect_now()
+        configuration = self._pending_route_meter_configuration
+        if configuration is not None:
+            self.apply_route_meter_configuration(configuration)
 
     def is_short_reading(self, primary_value: float) -> bool:
         """Return True when a primary reading satisfies the configured short threshold."""
@@ -1196,31 +1421,22 @@ class LCRMeterController(QObject):
         if session is None:
             raise LCRMeterError("Measurement instrument is not connected.")
         self._stop_polling_session()
+        self.reading_started.emit(1)
         try:
-            reader = getattr(session, "read_route_measurement", None)
-            if callable(reader):
-                measurement = dict(reader(trigger=True))
-            else:
-                primary_reader = getattr(session, "read_primary_value", None)
-                if not callable(primary_reader):
-                    raise LCRMeterError(
-                        "Measurement instrument cannot read route values."
-                    )
-                primary_value = primary_reader(trigger=True)
-                measurement = {"differential_resistance_ohm": primary_value}
-        except LCRMeterError:
+            with self._session_io_lock:
+                measurement = self._read_route_measurement_from_session(session)
+        except Exception as exc:
+            error = self._lcr_error(exc)
             self._disconnect_session()
-            self.connection_changed.emit(False, "", "Instrument read failed.")
-            raise
+            self.connection_changed.emit(False, "", str(error))
+            self.status_message.emit(f"Instrument read failed: {error}")
+            raise error from exc
         finally:
             if restart_polling and self._session is session:
                 self._stop_polling.clear()
                 self._start_polling_thread()
         primary_value = float(measurement["differential_resistance_ohm"])
-        self.reading_updated.emit(
-            primary_value,
-            self._is_short_reading(primary_value),
-        )
+        self._emit_reading_summary(primary_value, 1)
         return measurement
 
     def read_voltage_sweep_now(
@@ -1243,28 +1459,29 @@ class LCRMeterController(QObject):
                 "Raw voltage sweeps require a Keithley 2400 + 2182A instrument."
             )
         self._stop_polling_session()
+        self.reading_started.emit(max(1, len(voltages_v)))
         try:
-            points = [
-                _voltage_sweep_point_to_dict(point)
-                for point in voltage_list_reader(voltages_v)
-            ]
+            with self._session_io_lock:
+                points = [
+                    _voltage_sweep_point_to_dict(point)
+                    for point in voltage_list_reader(voltages_v)
+                ]
             measurement = {
                 "source_voltages_v": [float(value) for value in voltages_v],
                 "points": points,
             }
-        except LCRMeterError:
+        except Exception as exc:
+            error = self._lcr_error(exc)
             self._disconnect_session()
-            self.connection_changed.emit(False, "", "Instrument read failed.")
-            raise
+            self.connection_changed.emit(False, "", str(error))
+            self.status_message.emit(f"Instrument read failed: {error}")
+            raise error from exc
         finally:
             if restart_polling and self._session is session:
                 self._stop_polling.clear()
                 self._start_polling_thread()
-        primary_value = float(measurement.get("differential_resistance_ohm", math.nan))
-        self.reading_updated.emit(
-            primary_value,
-            self._is_short_reading(primary_value),
-        )
+        primary_value = self._mean_resistance_from_measurements(points)
+        self._emit_reading_summary(primary_value, len(points))
         return measurement
 
     def read_route_measurement_batch_now(
@@ -1284,44 +1501,36 @@ class LCRMeterController(QObject):
         if session is None:
             raise LCRMeterError("Measurement instrument is not connected.")
         self._stop_polling_session()
+        self.reading_started.emit(count)
         try:
-            batch_reader = getattr(session, "read_route_measurements", None)
-            if callable(batch_reader):
-                measurements = [
-                    dict(item)
-                    for item in _read_route_measurement_batch(
-                        batch_reader,
-                        count,
-                        after_measurement=after_measurement,
-                    )
-                ]
-            else:
-                measurements = [
-                    self.read_route_measurement_now()
-                    for _index in range(count)
-                ]
-        except LCRMeterError:
+            with self._session_io_lock:
+                batch_reader = getattr(session, "read_route_measurements", None)
+                if callable(batch_reader):
+                    measurements = [
+                        dict(item)
+                        for item in _read_route_measurement_batch(
+                            batch_reader,
+                            count,
+                            after_measurement=after_measurement,
+                        )
+                    ]
+                else:
+                    measurements = [
+                        self._read_route_measurement_from_session(session)
+                        for _index in range(count)
+                    ]
+        except Exception as exc:
+            error = self._lcr_error(exc)
             self._disconnect_session()
-            self.connection_changed.emit(False, "", "Instrument read failed.")
-            raise
+            self.connection_changed.emit(False, "", str(error))
+            self.status_message.emit(f"Instrument read failed: {error}")
+            raise error from exc
         finally:
             if restart_polling and self._session is session:
                 self._stop_polling.clear()
                 self._start_polling_thread()
-        finite_values: list[float] = []
-        for item in measurements:
-            try:
-                value = float(item.get("differential_resistance_ohm", math.nan))
-            except (TypeError, ValueError):
-                continue
-            if math.isfinite(value):
-                finite_values.append(value)
-        if finite_values:
-            primary_value = sum(finite_values) / len(finite_values)
-            self.reading_updated.emit(
-                primary_value,
-                self._is_short_reading(primary_value),
-            )
+        primary_value = self._mean_resistance_from_measurements(measurements)
+        self._emit_reading_summary(primary_value, len(measurements))
         return measurements
 
     def prepare_route_measurement_batch_now(
@@ -1350,16 +1559,70 @@ class LCRMeterController(QObject):
             raise LCRMeterError("Measurement instrument is not connected.")
         self._stop_polling_session()
         try:
-            preparer = getattr(session, "prepare_route_measurements", None)
-            _prepare_route_measurement_batch(
-                preparer,
-                count,
-                source_list_count=source_list_count,
-            )
+            with self._session_io_lock:
+                preparer = getattr(session, "prepare_route_measurements", None)
+                _prepare_route_measurement_batch(
+                    preparer,
+                    count,
+                    source_list_count=source_list_count,
+                )
+        except Exception as exc:
+            error = self._lcr_error(exc)
+            self._disconnect_session()
+            self.connection_changed.emit(False, "", str(error))
+            self.status_message.emit(f"Instrument preparation failed: {error}")
+            raise error from exc
         finally:
             with self._task_lock:
                 if self._active_thread is current_thread:
                     self._active_thread = None
+
+    def _read_route_measurement_from_session(self, session: object) -> dict[str, object]:
+        reader = getattr(session, "read_route_measurement", None)
+        if callable(reader):
+            return dict(reader(trigger=True))
+        primary_reader = getattr(session, "read_primary_value", None)
+        if not callable(primary_reader):
+            raise LCRMeterError("Measurement instrument cannot read route values.")
+        primary_value = primary_reader(trigger=True)
+        return {"differential_resistance_ohm": primary_value}
+
+    def _emit_reading_summary(self, primary_value: float, sample_count: int) -> None:
+        count = max(1, int(sample_count))
+        is_short = self._is_short_reading(primary_value)
+        self.reading_updated.emit(primary_value, is_short)
+        self.reading_summary_updated.emit(primary_value, is_short, count)
+
+    @staticmethod
+    def _mean_resistance_from_measurements(measurements: object) -> float:
+        finite_values: list[float] = []
+        for item in list(measurements) if measurements is not None else []:
+            value = LCRMeterController._resistance_value_from_measurement(item)
+            if math.isfinite(value):
+                finite_values.append(value)
+        if not finite_values:
+            return math.nan
+        return sum(finite_values) / len(finite_values)
+
+    @staticmethod
+    def _resistance_value_from_measurement(item: object) -> float:
+        if isinstance(item, dict):
+            for key in (
+                "differential_resistance_ohm",
+                "resistance_ohm",
+                "v_over_i_ohm",
+            ):
+                if key not in item:
+                    continue
+                try:
+                    return float(item[key])
+                except (TypeError, ValueError):
+                    continue
+            return math.nan
+        try:
+            return float(item)
+        except (TypeError, ValueError):
+            return math.nan
 
     def abort_current_measurement(self) -> None:
         """Best-effort cancellation for a blocking route measurement read."""
@@ -1406,15 +1669,22 @@ class LCRMeterController(QObject):
             raise LCRMeterError("Measurement instrument is not connected.")
         self._stop_polling_session()
         try:
-            return _session_visa_operation(
-                session,
-                role,
-                operation,
-                command=command,
-                timeout_ms=timeout_ms,
-                read_termination=read_termination,
-                write_termination=write_termination,
-            )
+            with self._session_io_lock:
+                return _session_visa_operation(
+                    session,
+                    role,
+                    operation,
+                    command=command,
+                    timeout_ms=timeout_ms,
+                    read_termination=read_termination,
+                    write_termination=write_termination,
+                )
+        except Exception as exc:
+            error = self._lcr_error(exc)
+            self._disconnect_session()
+            self.connection_changed.emit(False, "", str(error))
+            self.status_message.emit(f"Instrument VISA operation failed: {error}")
+            raise error from exc
         finally:
             with self._task_lock:
                 if self._active_thread is current_thread:
@@ -1436,6 +1706,8 @@ class LCRMeterController(QObject):
     def connect_now(self) -> None:
         """Open the configured measurement instrument in the current thread."""
 
+        if not self.wait_until_idle(self.TASK_WAIT_TIMEOUT_S):
+            raise LCRMeterError("Measurement instrument task already running.")
         with self._task_lock:
             if self._session is not None:
                 return
@@ -1444,11 +1716,12 @@ class LCRMeterController(QObject):
             self._active_thread = threading.current_thread()
         try:
             self._connect_configured_session()
-        except LCRMeterError as exc:
+        except Exception as exc:
+            error = self._lcr_error(exc)
             self._disconnect_session()
-            self.connection_changed.emit(False, "", str(exc))
-            self.status_message.emit(f"Instrument connection failed: {exc}")
-            raise
+            self.connection_changed.emit(False, "", str(error))
+            self.status_message.emit(f"Instrument connection failed: {error}")
+            raise error from exc
         finally:
             with self._task_lock:
                 self._active_thread = None
@@ -1488,25 +1761,27 @@ class LCRMeterController(QObject):
         poll_thread = self._poll_thread
         if poll_thread and poll_thread.is_alive():
             poll_thread.join(timeout=2.0)
-        session = self._session
-        self._session = None
-        if session is not None:
-            try:
-                closer = getattr(session, "close", None)
-                if callable(closer):
-                    closer()
-            except Exception:  # pragma: no cover - best effort shutdown
-                logger.exception(
-                    "Failed to close measurement instrument session during shutdown"
-                )
+        with self._session_io_lock:
+            session = self._session
+            self._session = None
+            if session is not None:
+                try:
+                    closer = getattr(session, "close", None)
+                    if callable(closer):
+                        closer()
+                except Exception:  # pragma: no cover - best effort shutdown
+                    logger.exception(
+                        "Failed to close measurement instrument session during shutdown"
+                    )
 
     def _run_connect(self) -> None:
         try:
             self._connect_configured_session()
-        except LCRMeterError as exc:
+        except Exception as exc:
+            error = self._lcr_error(exc)
             self._disconnect_session()
-            self.connection_changed.emit(False, "", str(exc))
-            self.status_message.emit(f"Instrument connection failed: {exc}")
+            self.connection_changed.emit(False, "", str(error))
+            self.status_message.emit(f"Instrument connection failed: {error}")
         finally:
             with self._task_lock:
                 self._active_thread = None
@@ -1547,9 +1822,11 @@ class LCRMeterController(QObject):
             else:
                 self._stop_polling_session()
             if self._meter_type == ROUTE_METER_GWINSTEK:
-                self._configure_active_session(session)
+                with self._session_io_lock:
+                    self._configure_active_session(session)
             self._stop_polling.clear()
             self.status_message.emit("Instrument settings applied.")
+            self._resume_live_polling()
         except LCRMeterError as exc:
             self._disconnect_session()
             self.connection_changed.emit(False, "", str(exc))
@@ -1577,24 +1854,49 @@ class LCRMeterController(QObject):
                 )
         self._disconnect_session()
         session = self._open_configured_session()
-        identify = getattr(session, "identify", None)
-        instrument_id = str(identify()) if callable(identify) else ""
-        backend_name = str(
-            getattr(session, "backend_name", session.__class__.__name__)
-        )
-        logger.info(
-            "Connected to measurement instrument %s (%s)",
-            self.connection_label(),
-            instrument_id or "IDN unavailable",
-        )
-        if self._meter_type == ROUTE_METER_GWINSTEK:
-            self._configure_session(session)
+        try:
+            identify = getattr(session, "identify", None)
+            instrument_id = str(identify()) if callable(identify) else ""
+            self._validate_connected_session_identity(instrument_id)
+            backend_name = str(
+                getattr(session, "backend_name", session.__class__.__name__)
+            )
+            logger.info(
+                "Connected to measurement instrument %s (%s)",
+                self.connection_label(),
+                instrument_id or "IDN unavailable",
+            )
+            if self._meter_type == ROUTE_METER_GWINSTEK:
+                self._configure_session(session)
+        except Exception:
+            closer = getattr(session, "close", None)
+            if callable(closer):
+                try:
+                    closer()
+                except Exception:  # pragma: no cover - best effort cleanup
+                    logger.exception(
+                        "Failed to close rejected measurement instrument session"
+                    )
+            raise
         self._session = session
         self._connected_resource_name = self._connection_key()
         self._stop_polling.clear()
         self.connection_changed.emit(True, backend_name, self.connection_label())
         self.status_message.emit(
             f"Measurement instrument connected via {backend_name}."
+        )
+        self._resume_live_polling()
+
+    def _validate_connected_session_identity(self, instrument_id: str) -> None:
+        if self._meter_type != ROUTE_METER_KEITHLEY:
+            return
+        normalized = str(instrument_id or "")
+        if normalized.startswith("2400 ") or "; 2400 " in normalized:
+            return
+        raise LCRMeterError(
+            "Keithley 2400 did not respond to *IDN?. "
+            f"Check {self._keithley_source_resource or 'the source resource'} "
+            "or power-cycle the source meter."
         )
 
     def _configure_active_session(self, session: _LCRSession) -> None:
@@ -1666,20 +1968,27 @@ class LCRMeterController(QObject):
         ):
             poll_thread.join(timeout=2.0)
 
+    def _pause_live_polling(self) -> None:
+        self._stop_polling.set()
+        poll_thread = self._poll_thread
+        if poll_thread is not None and not poll_thread.is_alive():
+            self._poll_thread = None
+
     def _disconnect_session(self) -> None:
         self._stop_polling_session()
-        session = self._session
-        self._session = None
-        self._connected_resource_name = ""
-        if session is not None:
-            try:
-                closer = getattr(session, "close", None)
-                if callable(closer):
-                    closer()
-            except Exception:  # pragma: no cover - best effort cleanup
-                logger.exception(
-                    "Failed to close measurement instrument session cleanly"
-                )
+        with self._session_io_lock:
+            session = self._session
+            self._session = None
+            self._connected_resource_name = ""
+            if session is not None:
+                try:
+                    closer = getattr(session, "close", None)
+                    if callable(closer):
+                        closer()
+                except Exception:  # pragma: no cover - best effort cleanup
+                    logger.exception(
+                        "Failed to close measurement instrument session cleanly"
+                    )
 
     def _start_polling_thread(self) -> None:
         if self._poll_thread and self._poll_thread.is_alive():
@@ -1688,24 +1997,43 @@ class LCRMeterController(QObject):
         self._poll_thread = thread
         thread.start()
 
+    def _resume_live_polling(self) -> None:
+        if not self._live_polling_enabled or self._session is None:
+            return
+        if self._meter_type == ROUTE_METER_KEITHLEY:
+            return
+        self._stop_polling.clear()
+        self._start_polling_thread()
+
     def _poll_readings(self) -> None:
         while not self._stop_polling.is_set():
             session = self._session
             if session is None:
                 return
             try:
-                reader = getattr(session, "read_primary_value", None)
-                if not callable(reader):
-                    raise LCRMeterError(
-                        "Measurement instrument cannot read values."
-                    )
-                primary_value = float(reader(trigger=True))
-            except LCRMeterError as exc:
-                self.status_message.emit(f"Instrument read failed: {exc}")
-                self.connection_changed.emit(False, "", str(exc))
+                with self._session_io_lock:
+                    if self._stop_polling.is_set() or session is not self._session:
+                        return
+                    reader = getattr(session, "read_primary_value", None)
+                    if not callable(reader):
+                        raise LCRMeterError(
+                            "Measurement instrument cannot read values."
+                        )
+                    primary_value = float(reader(trigger=True))
+            except Exception as exc:
+                error = self._lcr_error(exc)
+                self.status_message.emit(f"Instrument read failed: {error}")
+                self.connection_changed.emit(False, "", str(error))
                 self._disconnect_session()
                 return
-            self.reading_updated.emit(
-                primary_value, self._is_short_reading(primary_value)
-            )
+            if self._stop_polling.is_set() or session is not self._session:
+                return
+            self._emit_reading_summary(primary_value, 1)
             time.sleep(self._poll_interval_ms / 1000.0)
+
+    @staticmethod
+    def _lcr_error(exc: BaseException) -> LCRMeterError:
+        if isinstance(exc, LCRMeterError):
+            return exc
+        message = str(exc).strip() or exc.__class__.__name__
+        return LCRMeterError(message)

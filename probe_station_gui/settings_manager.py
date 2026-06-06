@@ -945,6 +945,7 @@ class SettingsManager:
     CONFIG_FILENAME = "settings.json"
     CONTROLLER_STATE_FILENAME = "controller-state.json"
     SERIAL_CONNECTION_STATE_FILENAME = "serial-connection-state.json"
+    METER_CONNECTION_STATE_FILENAME = "meter-connection-state.json"
     DEFAULT_LOG_FILENAME = "probe-station-gui.log"
     DEFAULT_API_ENABLED: bool = True
     DEFAULT_API_HOST: str = "127.0.0.1"
@@ -1203,6 +1204,61 @@ class SettingsManager:
         """Return whether startup should restore an open serial connection."""
 
         data = self.load_serial_connection_state()
+        return data.get("status") == "connected"
+
+    def load_meter_connection_state(self) -> dict:
+        """Load persisted measurement-instrument connection state, if present."""
+
+        path = self._config_dir / self.METER_CONNECTION_STATE_FILENAME
+        if not path.exists():
+            return {}
+        try:
+            with path.open("r", encoding="utf-8-sig") as handle:
+                data = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            self._logger.warning(
+                "Failed to load measurement-instrument connection state from %s: %s",
+                path,
+                exc,
+            )
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return data
+
+    def save_meter_connection_state(
+        self,
+        connected: bool,
+        *,
+        meter_type: str | None = None,
+        description: str | None = None,
+    ) -> None:
+        """Persist the latest measurement-instrument connection status."""
+
+        data: dict[str, object] = {
+            "status": "connected" if connected else "disconnected",
+        }
+        if meter_type:
+            data["meter_type"] = str(meter_type)
+        if description:
+            data["description"] = str(description)
+
+        path = self._config_dir / self.METER_CONNECTION_STATE_FILENAME
+        self._config_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            with path.open("w", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=2, ensure_ascii=False)
+        except OSError as exc:
+            self._logger.warning(
+                "Failed to save measurement-instrument connection state to %s: %s",
+                path,
+                exc,
+            )
+
+    def meter_auto_connect_enabled(self) -> bool:
+        """Return whether startup should restore an open measurement instrument."""
+
+        data = self.load_meter_connection_state()
         return data.get("status") == "connected"
 
     def _determine_config_dir(self) -> Path:

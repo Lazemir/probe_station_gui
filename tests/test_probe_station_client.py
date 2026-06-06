@@ -377,6 +377,57 @@ class ProbeStationClientTest(unittest.TestCase):
 
         self.assertEqual(ready.contact_number, 7)
 
+    def test_route_iter_ready_reyields_same_position_for_new_external_request(self) -> None:
+        transport = _FakeTransport(
+            (
+                200,
+                {
+                    "accepted": True,
+                    "session_id": "s1",
+                    "state": "running",
+                },
+            ),
+            (
+                200,
+                {
+                    "accepted": True,
+                    "session_id": "s1",
+                    "state": "waiting_external_measurement",
+                    "waiting_reason": "external_measurement",
+                    "position": 1,
+                    "external_measurement_request_id": 7,
+                    "current_contact": {"contact_number": 12},
+                },
+            ),
+            (
+                200,
+                {
+                    "accepted": True,
+                    "session_id": "s1",
+                    "state": "waiting_external_measurement",
+                    "waiting_reason": "external_measurement_failed",
+                    "position": 1,
+                    "external_measurement_request_id": 8,
+                    "current_contact": {"contact_number": 12},
+                },
+            ),
+            (200, {"accepted": True, "result": {"status": "ok"}}),
+        )
+        client = ProbeStationClient(api_key="secret", transport=transport)
+        session = client.route.start_external(initial_measurement_count=10)
+        ready = session.iter_ready(poll_interval_s=0.0)
+
+        first = next(ready)
+        second = next(ready)
+        second.submit_result(status="ok", summary={"retry": True})
+
+        self.assertEqual(first.position, 1)
+        self.assertEqual(second.position, 1)
+        self.assertEqual(first.external_measurement_request_id, 7)
+        self.assertEqual(second.external_measurement_request_id, 8)
+        result_payload = json.loads(transport.calls[-1]["body"].decode("utf-8"))
+        self.assertEqual(result_payload["external_measurement_request_id"], 8)
+
     def test_prepare_contact_is_client_side_recipe_without_backend_prepare(self) -> None:
         transport = _FakeTransport(
             (200, {"accepted": True, "moved": True}),

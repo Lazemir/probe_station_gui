@@ -98,6 +98,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -123,7 +124,6 @@ from probe_station_gui.lcr_meter import (
     LCRMeterError,
     ROUTE_METER_GWINSTEK,
     ROUTE_METER_KEITHLEY,
-    RouteMeter,
     RouteMeterConfiguration,
 )
 from probe_station_gui.motion_prediction import interpolate_position, motion_progress
@@ -190,6 +190,7 @@ from probe_station_gui.views.contact_oscillation_window import (
 )
 from probe_station_gui.views.dock_widgets import CollapsibleDockWidget
 from probe_station_gui.views.oscillation_panel import OscillationPanel
+from probe_station_gui.views.resistance_monitor_panel import ResistanceMonitorPanel
 from probe_station_gui.views.serial_connection_panel import SerialConnectionPanel
 
 _startup_trace("application imports done")
@@ -606,6 +607,9 @@ class Main(QMainWindow):
         self.joystick_panel: JoystickWindow | None = None
         self.serial_terminal_panel: SerialTerminalWindow | None = None
         self.serial_connection_panel: SerialConnectionPanel | None = None
+        self.serial_connection_dialog: QDialog | None = None
+        self.serial_connection_tabs: QTabWidget | None = None
+        self.resistance_panel: ResistanceMonitorPanel | None = None
         self.oscillation_panel: OscillationPanel | None = None
         self.surface_map_window: SurfaceMapWindow | None = None
         self.microscope_scan_dialog: MicroscopeScanDialog | None = None
@@ -622,8 +626,7 @@ class Main(QMainWindow):
         self._pending_persisted_design_state: dict[str, object] | None = None
         self._pending_persisted_design_position: tuple[float, ...] | None = None
         self.joystick_dock: CollapsibleDockWidget | None = None
-        self.serial_terminal_dock: CollapsibleDockWidget | None = None
-        self.serial_connection_dock: CollapsibleDockWidget | None = None
+        self.resistance_dock: CollapsibleDockWidget | None = None
         self.oscillation_dock: CollapsibleDockWidget | None = None
         self.alignment_dock: CollapsibleDockWidget | None = None
         self._alignment_capture_action: QAction | None = None
@@ -1035,10 +1038,7 @@ class Main(QMainWindow):
         if command in {"next_contact", "contact", "контакт"}:
             return self._telegram_request_next_contact_photo_response()
         if command in {
-            "anyway",
-            "force",
-            "measure_anyway",
-            "measure-anyway",
+            "measure",
             "remeasure",
             "skip",
             "next",
@@ -1084,7 +1084,7 @@ class Main(QMainWindow):
             "/status - current state and microscope frame\n"
             "/next_photo - send the next route structure photo\n"
             "/next_contact - send the next route contact attempt photo\n"
-            "/measure_anyway, /remeasure, /skip, /next - answer a waiting route prompt"
+            "/measure, /remeasure, /skip, /next - answer a waiting route prompt"
         )
 
     def _telegram_status_response(self) -> TelegramBotResponse:
@@ -1149,9 +1149,7 @@ class Main(QMainWindow):
 
     def _telegram_route_action_response(self, action: str) -> TelegramBotResponse:
         action_key = str(action or "").strip().lower()
-        if action_key in {"anyway", "force", "measure-anyway"}:
-            action_key = "measure_anyway"
-        if action_key not in {"measure_anyway", "remeasure", "skip", "next"}:
+        if action_key not in {"measure", "remeasure", "skip", "next"}:
             return TelegramBotResponse(
                 "Unknown route action.",
                 reply_markup=self._telegram_default_markup(),
@@ -1188,8 +1186,8 @@ class Main(QMainWindow):
         if self._route_measurement_waiting:
             rows.append(
                 [
-                    ("Measure anyway", "route:measure_anyway"),
-                    ("Measure", "route:remeasure"),
+                    ("Measure", "route:measure"),
+                    ("Remeasure", "route:remeasure"),
                     ("Skip", "route:skip"),
                 ]
             )
@@ -1200,8 +1198,8 @@ class Main(QMainWindow):
         return telegram_inline_keyboard(
             [
                 [
-                    ("Measure anyway", "route:measure_anyway"),
-                    ("Measure", "route:remeasure"),
+                    ("Measure", "route:measure"),
+                    ("Remeasure", "route:remeasure"),
                     ("Skip", "route:skip"),
                 ],
                 [("Status", "status")],
@@ -2018,6 +2016,14 @@ class Main(QMainWindow):
                 "message": str(exc),
                 "contact": contact,
             }
+        except Exception as exc:
+            prefix = "Contact seek failed" if seek else "Contact check failed"
+            logger.exception("API %s.", prefix.lower())
+            return self._api_instrument_exception_response(
+                prefix,
+                exc,
+                contact=contact,
+            )
         record = result.record
         response = {
             "accepted": True,
@@ -2063,6 +2069,12 @@ class Main(QMainWindow):
                 "status_code": 409,
                 "message": str(exc),
             }
+        except Exception as exc:
+            logger.exception("API measurement instrument connection failed.")
+            return self._api_instrument_exception_response(
+                "Measurement instrument connection failed",
+                exc,
+            )
         if not self.lcr_controller.is_connected():
             return {
                 "accepted": False,
@@ -2070,6 +2082,68 @@ class Main(QMainWindow):
                 "message": "Measurement instrument is not connected.",
             }
         return None
+
+    def _api_prepare_route_meter_controller(
+        self,
+        configuration: RouteMeterConfiguration,
+        *,
+        prefix: str = "Measurement instrument setup failed",
+    ) -> dict[str, Any] | None:
+        wait_until_idle = getattr(self.lcr_controller, "wait_until_idle", None)
+        if callable(wait_until_idle):
+            try:
+                ready = bool(wait_until_idle(45.0))
+            except Exception as exc:
+                logger.exception("API measurement instrument wait failed.")
+                return self._api_instrument_exception_response(
+                    "Measurement instrument wait failed",
+                    exc,
+                )
+            if not ready:
+                return {
+                    "accepted": False,
+                    "status_code": 409,
+                    "message": "Measurement instrument task is still running.",
+                }
+        if not self.lcr_controller.is_connected():
+            runtime_config = getattr(
+                self.lcr_controller,
+                "apply_route_meter_runtime_configuration",
+                None,
+            )
+            if callable(runtime_config):
+                runtime_config(configuration)
+            connect_result = self._api_ensure_measurement_instrument_connected()
+            if connect_result is not None:
+                return connect_result
+        try:
+            self.lcr_controller.apply_route_meter_configuration(configuration)
+        except LCRMeterError as exc:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": str(exc),
+            }
+        except Exception as exc:
+            logger.exception("%s.", prefix)
+            return self._api_instrument_exception_response(prefix, exc)
+        return None
+
+    @staticmethod
+    def _api_instrument_exception_response(
+        prefix: str,
+        exc: Exception,
+        **extra: Any,
+    ) -> dict[str, Any]:
+        message = str(exc).strip()
+        response: dict[str, Any] = {
+            "accepted": False,
+            "status_code": 409,
+            "message": f"{prefix}: {message}" if message else prefix,
+            "error_type": type(exc).__name__,
+        }
+        response.update(extra)
+        return response
 
     def _api_configure_meter(self, payload: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -2083,17 +2157,12 @@ class Main(QMainWindow):
                 "status_code": 409,
                 "message": str(exc),
             }
-        connect_result = self._api_ensure_measurement_instrument_connected()
-        if connect_result is not None:
-            return connect_result
-        try:
-            self.lcr_controller.apply_route_meter_configuration(configuration)
-        except LCRMeterError as exc:
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": str(exc),
-            }
+        setup_result = self._api_prepare_route_meter_controller(
+            configuration,
+            prefix="Measurement instrument setup failed",
+        )
+        if setup_result is not None:
+            return setup_result
         return {
             "accepted": True,
             "message": "Measurement instrument configured.",
@@ -2122,17 +2191,12 @@ class Main(QMainWindow):
                 "status_code": 409,
                 "message": str(exc),
             }
-        connect_result = self._api_ensure_measurement_instrument_connected()
-        if connect_result is not None:
-            return connect_result
-        try:
-            self.lcr_controller.apply_route_meter_configuration(configuration)
-        except LCRMeterError as exc:
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": str(exc),
-            }
+        setup_result = self._api_prepare_route_meter_controller(
+            configuration,
+            prefix="Measurement instrument setup failed",
+        )
+        if setup_result is not None:
+            return setup_result
 
         contact_number = self._api_contact_number(payload, required=False)
         move_to_contact = self._api_bool(
@@ -2238,6 +2302,13 @@ class Main(QMainWindow):
                 "message": str(exc),
                 "contact": contact,
             }
+        except Exception as exc:
+            logger.exception("API raw voltage sweep failed.")
+            return self._api_instrument_exception_response(
+                "Raw voltage sweep failed",
+                exc,
+                contact=contact,
+            )
         finally:
             if active_stage_task:
                 if lift_after and needles_lowered:
@@ -2271,6 +2342,12 @@ class Main(QMainWindow):
                 "status_code": 409,
                 "message": str(exc),
             }
+        except Exception as exc:
+            logger.exception("API VISA resource listing failed.")
+            return self._api_instrument_exception_response(
+                "VISA resource listing failed",
+                exc,
+            )
         resources = sorted(
             (dict(item) for item in roles.values()),
             key=lambda item: str(item.get("role") or ""),
@@ -2336,6 +2413,14 @@ class Main(QMainWindow):
                 "status_code": 409,
                 "message": str(exc),
             }
+        except Exception as exc:
+            logger.exception("API VISA operation failed.")
+            return self._api_instrument_exception_response(
+                "VISA operation failed",
+                exc,
+                role=role,
+                operation=operation,
+            )
         response: dict[str, Any] = {
             "accepted": True,
             "role": role,
@@ -2579,20 +2664,13 @@ class Main(QMainWindow):
                 "status_code": 409,
                 "message": str(exc),
             }
-        if self.lcr_controller.is_connected():
-            try:
-                self.lcr_controller.apply_route_meter_configuration(
-                    meter_configuration
-                )
-            except LCRMeterError as exc:
-                return {
-                    "accepted": False,
-                    "status_code": 409,
-                    "message": f"Route measurement instrument setup failed: {exc}",
-                }
-            route_lcr_controller: object = self.lcr_controller
-        else:
-            route_lcr_controller = RouteMeter(meter_configuration)
+        setup_result = self._api_prepare_route_meter_controller(
+            meter_configuration,
+            prefix="Route measurement instrument setup failed",
+        )
+        if setup_result is not None:
+            return setup_result
+        route_lcr_controller: object = self.lcr_controller
         session_id = uuid.uuid4().hex
         with self._api_route_artifacts_lock:
             self._api_route_artifacts.clear()
@@ -2773,6 +2851,11 @@ class Main(QMainWindow):
             "message": str(payload.get("message", "")).strip(),
             "timestamp_utc": self._api_timestamp_utc(),
         }
+        request_id = payload.get("external_measurement_request_id")
+        if request_id is None:
+            request_id = payload.get("request_id")
+        if request_id is not None:
+            result["external_measurement_request_id"] = request_id
         if not runner.submit_external_result(result):
             return {
                 "accepted": False,
@@ -4422,12 +4505,8 @@ class Main(QMainWindow):
             self.joystick_dock.raise_()
             if self.joystick_dock.isFloating():
                 self.joystick_dock.activateWindow()
-        if self.serial_terminal_panel and self.serial_terminal_dock:
+        if self.serial_terminal_panel:
             self.serial_terminal_panel.set_serial(self.serial_connection)
-            self.serial_terminal_dock.setVisible(True)
-            self.serial_terminal_dock.raise_()
-            if self.serial_terminal_dock.isFloating():
-                self.serial_terminal_dock.activateWindow()
         QTimer.singleShot(0, self._run_serial_startup_sync)
         self._refresh_design_position()
 
@@ -4494,6 +4573,18 @@ class Main(QMainWindow):
             else:
                 logger.debug(
                     "Skipping serial auto-connect because previous session was disconnected"
+                )
+        if self.lcr_controller is not None and not self.lcr_controller.is_connected():
+            if self.settings_manager.meter_auto_connect_enabled():
+                logger.debug(
+                    "Attempting measurement-instrument auto-connect because "
+                    "previous session closed connected"
+                )
+                self.lcr_controller.request_connect()
+            else:
+                logger.debug(
+                    "Skipping measurement-instrument auto-connect because previous "
+                    "session was disconnected"
                 )
 
     def _run_serial_startup_sync(self) -> None:
@@ -4803,6 +4894,22 @@ class Main(QMainWindow):
             baud_rate=self.serial_baud_rate,
         )
 
+    def _persist_lcr_connection_state(
+        self,
+        connected: bool,
+        *,
+        description: str = "",
+    ) -> None:
+        self.settings_manager.save_meter_connection_state(
+            connected,
+            meter_type=self.lcr_controller.meter_type(),
+            description=description or self.lcr_controller.connection_label(),
+        )
+
+    def _request_lcr_disconnect(self) -> None:
+        self._persist_lcr_connection_state(False)
+        self.lcr_controller.request_disconnect()
+
     def _setup_menus(self) -> None:
         app_menu = self.menuBar().addMenu("Application")
         navigation_menu = self.menuBar().addMenu("Navigation")
@@ -4819,6 +4926,10 @@ class Main(QMainWindow):
         open_log_action.triggered.connect(self._open_status_log)
         app_menu.addAction(open_log_action)
 
+        serial_connection_action = QAction("Connection", self)
+        serial_connection_action.triggered.connect(self._show_connection_dialog)
+        app_menu.addAction(serial_connection_action)
+
         self._sample_load_action = QAction("Load Sample", self)
         self._sample_load_action.triggered.connect(self._request_sample_load)
         navigation_menu.addAction(self._sample_load_action)
@@ -4832,7 +4943,7 @@ class Main(QMainWindow):
         self._design_layout_window_action.toggled.connect(
             self._toggle_design_layout_window
         )
-        calibration_menu.addAction(self._design_layout_window_action)
+        navigation_menu.addAction(self._design_layout_window_action)
 
         self._contact_calibration_window_action = QAction(
             "Contact / Stone Calibration", self
@@ -4861,10 +4972,9 @@ class Main(QMainWindow):
         calibration_menu.addAction(self._click_calibration_action)
 
         for dock, title in (
+            (self.resistance_dock, "Resistance"),
             (self.oscillation_dock, "Oscillation"),
-            (self.serial_connection_dock, "Connection"),
             (self.joystick_dock, "Joystick"),
-            (self.serial_terminal_dock, "Serial Terminal"),
         ):
             if dock is None:
                 continue
@@ -5135,6 +5245,21 @@ class Main(QMainWindow):
                     logger.debug("Settings dialog cancelled")
         finally:
             self._configure_telegram_bot_from_settings()
+
+    def _show_connection_dialog(self, tab_name: object = None) -> None:
+        if self.serial_connection_dialog is None:
+            return
+        if self.serial_connection_panel is not None:
+            self.serial_connection_panel.set_lcr_resource(
+                self.lcr_controller.connection_label()
+            )
+        if self.serial_connection_tabs is not None:
+            self.serial_connection_tabs.setCurrentIndex(
+                1 if tab_name == "terminal" else 0
+            )
+        self.serial_connection_dialog.show()
+        self.serial_connection_dialog.raise_()
+        self.serial_connection_dialog.activateWindow()
 
     def _apply_settings_from_dialog(self, new_settings: object) -> None:
         if not isinstance(new_settings, Settings):
@@ -6295,14 +6420,10 @@ class Main(QMainWindow):
             self.joystick_panel.setFocus(Qt.ActiveWindowFocusReason)
 
     def show_serial_terminal_window(self) -> None:
-        if not self.serial_terminal_panel or not self.serial_terminal_dock:
+        if not self.serial_terminal_panel:
             return
-        self.serial_terminal_dock.setVisible(True)
-        self.serial_terminal_dock.raise_()
-        if self.serial_terminal_dock.isFloating():
-            self.serial_terminal_dock.activateWindow()
-        else:
-            self.serial_terminal_panel.setFocus(Qt.ActiveWindowFocusReason)
+        self._show_connection_dialog("terminal")
+        self.serial_terminal_panel.setFocus(Qt.ActiveWindowFocusReason)
 
     def _on_manual_motion_axis(self, axis: str) -> None:
         axis_name = axis.upper()
@@ -7478,8 +7599,8 @@ class Main(QMainWindow):
             dialog.remeasure_requested.connect(
                 lambda: self._submit_route_measurement_confirmation("remeasure")
             )
-            dialog.measure_anyway_requested.connect(
-                lambda: self._submit_route_measurement_confirmation("measure_anyway")
+            dialog.measure_current_requested.connect(
+                lambda: self._submit_route_measurement_confirmation("measure")
             )
             dialog.skip_requested.connect(
                 lambda: self._submit_route_measurement_confirmation("skip")
@@ -7849,21 +7970,23 @@ class Main(QMainWindow):
                 return
         route_lcr_controller: object
         if measure_enabled:
-            if self.lcr_controller.is_connected():
-                try:
+            try:
+                if self.lcr_controller.is_connected():
                     self.lcr_controller.apply_route_meter_configuration(
                         configuration.meter
                     )
-                except LCRMeterError as exc:
-                    message = f"Route measurement instrument setup failed: {exc}"
-                    self._show_status(message, 8000)
-                    if self._route_measurement_dialog is not None:
-                        self._route_measurement_dialog.set_running(False)
-                        self._route_measurement_dialog.set_status(message)
-                    return
-                route_lcr_controller = self.lcr_controller
-            else:
-                route_lcr_controller = RouteMeter(configuration.meter)
+                else:
+                    self.lcr_controller.apply_route_meter_runtime_configuration(
+                        configuration.meter
+                    )
+            except LCRMeterError as exc:
+                message = f"Route measurement instrument setup failed: {exc}"
+                self._show_status(message, 8000)
+                if self._route_measurement_dialog is not None:
+                    self._route_measurement_dialog.set_running(False)
+                    self._route_measurement_dialog.set_status(message)
+                return
+            route_lcr_controller = self.lcr_controller
         else:
             route_lcr_controller = object()
 
@@ -8828,10 +8951,10 @@ class Main(QMainWindow):
         if self._route_measurement_dialog is not None:
             self._route_measurement_dialog.set_waiting(False)
         action_key = str(action).strip().lower()
-        if action_key == "remeasure":
+        if action_key == "measure":
             action_label = "measure"
-        elif action_key in {"measure_anyway", "measure-anyway", "anyway", "force"}:
-            action_label = "measure anyway"
+        elif action_key == "remeasure":
+            action_label = "remeasure"
         elif action_key == "skip":
             action_label = "skip"
         elif action_key.startswith("jump:") or action_key.isdigit():
@@ -9291,6 +9414,7 @@ class Main(QMainWindow):
         self._pending_route_measure_point = None
         self._route_measurement_photo_enabled = False
         self._route_measurement_measure_enabled = False
+        self._resume_resistance_standby_polling()
         with self._telegram_photo_lock:
             self._telegram_route_photo_requested = False
             self._telegram_contact_photo_requested = False
@@ -10741,7 +10865,9 @@ class Main(QMainWindow):
         serial_was_connected = bool(
             self.serial_connection is not None and self.serial_connection.is_open
         )
+        lcr_was_connected = bool(self.lcr_controller.is_connected())
         self._persist_serial_connection_state(serial_was_connected)
+        self._persist_lcr_connection_state(lcr_was_connected)
         if serial_was_connected:
             self._persist_controller_state()
         if self._api_server is not None:
@@ -10798,6 +10924,9 @@ class Main(QMainWindow):
             self.surface_map_window.close()
         if self.microscope_scan_dialog is not None:
             self.microscope_scan_dialog.close()
+        serial_connection_dialog = getattr(self, "serial_connection_dialog", None)
+        if serial_connection_dialog is not None:
+            serial_connection_dialog.close()
 
     def _stop_jog_before_serial_close(self, reason: str) -> None:
         if self.serial_connection is None or not self.serial_connection.is_open:
@@ -10811,25 +10940,69 @@ class Main(QMainWindow):
             logger.exception("Failed to force jog stop before %s.", reason)
 
     def _create_dock_widgets(self) -> None:
-        self.serial_connection_panel = SerialConnectionPanel(self)
+        self.serial_connection_dialog = QDialog(self)
+        self.serial_connection_dialog.setWindowTitle("Connection")
+        self.serial_connection_dialog.setModal(False)
+        self.serial_connection_dialog.setMinimumWidth(420)
+        self.serial_connection_dialog.resize(640, 520)
+
+        dialog_layout = QVBoxLayout(self.serial_connection_dialog)
+        dialog_layout.setContentsMargins(8, 8, 8, 8)
+        dialog_layout.setSpacing(8)
+
+        self.serial_connection_tabs = QTabWidget(self.serial_connection_dialog)
+        dialog_layout.addWidget(self.serial_connection_tabs)
+
+        self.serial_connection_panel = SerialConnectionPanel(
+            self.serial_connection_tabs
+        )
+        self.serial_connection_tabs.addTab(self.serial_connection_panel, "Connection")
+
+        self.serial_terminal_panel = SerialTerminalWindow(self.serial_connection_tabs)
+        self.serial_terminal_panel.set_stage_controller(self.stage_controller)
+        self.serial_terminal_panel.set_serial(self.serial_connection)
+        self.serial_terminal_panel.manual_command_sent.connect(
+            self._on_manual_terminal_command
+        )
+        self.serial_connection_tabs.addTab(self.serial_terminal_panel, "Terminal")
+
+        close_button_row = QHBoxLayout()
+        close_button_row.addStretch(1)
+        close_button = QPushButton("Close", self.serial_connection_dialog)
+        close_button.clicked.connect(self.serial_connection_dialog.close)
+        close_button_row.addWidget(close_button)
+        dialog_layout.addLayout(close_button_row)
+
         self.serial_connection_panel.connected.connect(self.on_serial_connected)
         self.serial_connection_panel.disconnected.connect(self.on_serial_disconnected)
         self.serial_connection_panel.lcr_connect_requested.connect(
             self.lcr_controller.request_connect
         )
         self.serial_connection_panel.lcr_disconnect_requested.connect(
-            self.lcr_controller.request_disconnect
+            self._request_lcr_disconnect
         )
+
+        self.resistance_panel = ResistanceMonitorPanel(self)
+        self.resistance_panel.set_standby_enabled(
+            self.lcr_controller.live_polling_enabled()
+        )
+        self.resistance_panel.standby_enabled_changed.connect(
+            self._on_resistance_standby_enabled_changed
+        )
+        self.resistance_dock = CollapsibleDockWidget("Resistance", self)
+        self.resistance_dock.setObjectName("ResistanceDock")
+        self.resistance_dock.setWidget(self.resistance_panel)
+        self.resistance_dock.setAllowedAreas(
+            Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea
+        )
+        self.addDockWidget(Qt.LeftDockWidgetArea, self.resistance_dock)
+
         self.lcr_controller.status_message.connect(
             self.serial_connection_panel.set_lcr_status_message
         )
-        self.serial_connection_dock = CollapsibleDockWidget("Connection", self)
-        self.serial_connection_dock.setObjectName("SerialConnectionDock")
-        self.serial_connection_dock.setWidget(self.serial_connection_panel)
-        self.serial_connection_dock.setAllowedAreas(
-            Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea
+        self.lcr_controller.status_message.connect(
+            self.resistance_panel.set_status_message
         )
-        self.addDockWidget(Qt.LeftDockWidgetArea, self.serial_connection_dock)
 
         self.joystick_panel = JoystickWindow(self)
         self.joystick_panel.set_stage_controller(self.stage_controller)
@@ -10984,9 +11157,7 @@ class Main(QMainWindow):
             Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea
         )
         self.addDockWidget(Qt.LeftDockWidgetArea, self.joystick_dock)
-        self.splitDockWidget(
-            self.serial_connection_dock, self.joystick_dock, Qt.Vertical
-        )
+        self.splitDockWidget(self.resistance_dock, self.joystick_dock, Qt.Vertical)
 
         self.contact_calibration_window = ContactOscillationWindow()
         self.contact_calibration_window.visibility_changed.connect(
@@ -11010,24 +11181,15 @@ class Main(QMainWindow):
         self.lcr_controller.connection_changed.connect(
             self._on_lcr_connection_changed
         )
+        self.lcr_controller.reading_started.connect(
+            self._on_lcr_reading_started
+        )
+        self.lcr_controller.reading_summary_updated.connect(
+            self._on_lcr_reading_summary_updated
+        )
         self.lcr_controller.reading_updated.connect(
             self._on_lcr_reading_updated
         )
-
-        self.serial_terminal_panel = SerialTerminalWindow(self)
-        self.serial_terminal_panel.set_stage_controller(self.stage_controller)
-        self.serial_terminal_panel.set_serial(self.serial_connection)
-        self.serial_terminal_panel.manual_command_sent.connect(
-            self._on_manual_terminal_command
-        )
-        self.serial_terminal_dock = CollapsibleDockWidget("Serial Terminal", self)
-        self.serial_terminal_dock.setObjectName("SerialTerminalDock")
-        self.serial_terminal_dock.setWidget(self.serial_terminal_panel)
-        self.serial_terminal_dock.setAllowedAreas(
-            Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea
-        )
-        self.addDockWidget(Qt.LeftDockWidgetArea, self.serial_terminal_dock)
-        self.splitDockWidget(self.joystick_dock, self.serial_terminal_dock, Qt.Vertical)
 
         self.oscillation_panel = self.contact_calibration_window.oscillation_panel
         self.oscillation_panel.start_requested.connect(
@@ -11071,8 +11233,8 @@ class Main(QMainWindow):
         self._update_coordinate_display()
         self._refresh_design_panel()
         self.resizeDocks(
-            [self.serial_connection_dock, self.joystick_dock, self.serial_terminal_dock],
-            [150, 340, 220],
+            [self.resistance_dock, self.joystick_dock],
+            [130, 430],
             Qt.Vertical,
         )
         self.resizeDocks(
@@ -11579,14 +11741,43 @@ class Main(QMainWindow):
     def _on_lcr_connection_changed(
         self, connected: bool, backend_name: str, description: str
     ) -> None:
+        if connected:
+            self._persist_lcr_connection_state(True, description=description)
         if self.serial_connection_panel is not None:
             self.serial_connection_panel.set_lcr_connection_state(
+                connected, backend_name, description
+            )
+        if self.resistance_panel is not None:
+            self.resistance_panel.set_connection_state(
                 connected, backend_name, description
             )
 
     def _on_lcr_reading_updated(self, resistance_ohm: float, is_short: bool) -> None:
         if self.serial_connection_panel is not None:
             self.serial_connection_panel.set_lcr_reading(resistance_ohm, is_short)
+
+    def _on_lcr_reading_started(self, sample_count: int) -> None:
+        if self.resistance_panel is not None:
+            self.resistance_panel.set_reading_pending(int(sample_count))
+
+    def _on_lcr_reading_summary_updated(
+        self, resistance_ohm: float, is_short: bool, sample_count: int
+    ) -> None:
+        if self.resistance_panel is not None:
+            self.resistance_panel.set_reading_summary(
+                resistance_ohm, is_short, sample_count
+            )
+
+    def _on_resistance_standby_enabled_changed(self, enabled: bool) -> None:
+        self.lcr_controller.set_live_polling_enabled(bool(enabled))
+
+    def _resume_resistance_standby_polling(self) -> None:
+        lcr_controller = getattr(self, "lcr_controller", None)
+        if (
+            lcr_controller is not None
+            and lcr_controller.live_polling_enabled()
+        ):
+            lcr_controller.set_live_polling_enabled(True)
 
     def _request_contact_seek(self) -> None:
         thread = self._contact_seek_thread
@@ -11744,6 +11935,7 @@ class Main(QMainWindow):
         if thread is not None and not thread.is_alive():
             thread.join(timeout=0.1)
         self._contact_seek_thread = None
+        self._resume_resistance_standby_polling()
         if self.contact_calibration_window is not None:
             self.contact_calibration_window.set_contact_seek_running(False)
             self.contact_calibration_window.set_contact_seek_result(message)

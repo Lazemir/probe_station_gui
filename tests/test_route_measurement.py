@@ -168,6 +168,22 @@ class _PreparedBatchRouteLCR(_FakeBatchRouteLCR):
         return super().read_route_measurement_batch_now(count)
 
 
+class _FailingPreparedBatchRouteLCR(_FakeBatchRouteLCR):
+    def __init__(self, exc: Exception) -> None:
+        super().__init__([])
+        self.exc = exc
+        self.prepare_calls: list[tuple[int, int | None]] = []
+
+    def prepare_route_measurement_batch_now(
+        self,
+        count: int,
+        *,
+        source_list_count: int | None = None,
+    ) -> None:
+        self.prepare_calls.append((int(count), source_list_count))
+        raise self.exc
+
+
 class _PrepareAwareStage(_FakeStage):
     def __init__(self, lcr: _PreparedBatchRouteLCR) -> None:
         super().__init__()
@@ -591,7 +607,7 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
         )
         self.assertIn(("needles", "lift", 75.0), stage.calls)
 
-    def test_external_session_measure_anyway_waits_for_notebook_result(self) -> None:
+    def test_external_session_measure_waits_for_notebook_result(self) -> None:
         point = _point(1)
         stage = _FakeStage()
         lcr = _FakeBatchRouteLCR(
@@ -623,13 +639,15 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
         self.assertTrue(self._wait_for_state(runner, "waiting_contact"))
         status = runner.status_payload()
         self.assertEqual(status["last_preparation"]["measurement"]["status"], "bad_contact")
-        self.assertTrue(runner.submit_confirmation("measure_anyway"))
+        calls_before_measure = list(stage.calls)
+        self.assertTrue(runner.submit_confirmation("measure"))
         self.assertTrue(self._wait_for_state(runner, "waiting_external_measurement"))
+        self.assertEqual(stage.calls, calls_before_measure)
         self.assertTrue(
             runner.submit_external_result(
                 {
                     "status": "ok",
-                    "summary": {"forced_contact": True},
+                    "summary": {"manual_contact": True},
                 }
             )
         )
@@ -641,7 +659,94 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
         self.assertEqual(final_status["history"][0]["status"], "ok")
         self.assertEqual(
             final_status["history"][0]["external_result"]["summary"],
-            {"forced_contact": True},
+            {"manual_contact": True},
+        )
+        self.assertIn(("needles", "lift", 75.0), stage.calls)
+
+    def test_external_session_measure_failed_result_waits_on_same_point(self) -> None:
+        point = _point(1)
+        stage = _FakeStage()
+        lcr = _FakeBatchRouteLCR(
+            [
+                {"differential_resistance_ohm": value}
+                for value in (520000.0, 610000.0, 480000.0, 570000.0)
+            ]
+        )
+        runner = RouteExternalMeasurementSessionRunner(
+            session_id="session-1",
+            points=[point],
+            stage_controller=stage,
+            lcr_controller=lcr,
+            needle_feedrate=75.0,
+            measurement_count=4,
+            initial_measurement_count=4,
+            auto_contact_seek_max_total_mm=0.0,
+            contact_settle_s=0.0,
+            photo_enabled=False,
+            photo_focus_enabled=False,
+        )
+        finished: list[tuple[bool, str]] = []
+        thread = threading.Thread(
+            target=lambda: finished.append(runner.run()),
+            daemon=True,
+        )
+
+        thread.start()
+        self.assertTrue(self._wait_for_state(runner, "waiting_contact"))
+        self.assertTrue(runner.submit_confirmation("measure"))
+        self.assertTrue(self._wait_for_state(runner, "waiting_external_measurement"))
+        first_status = runner.status_payload()
+        first_request_id = int(first_status["external_measurement_request_id"])
+        lift_count_before_failed_result = stage.calls.count(
+            ("needles", "lift", 75.0)
+        )
+        self.assertTrue(
+            runner.submit_external_result(
+                {
+                    "status": "failed",
+                    "message": "source compliance error",
+                    "external_measurement_request_id": first_request_id,
+                }
+            )
+        )
+        self.assertTrue(
+            self._wait_for_waiting_reason(
+                runner,
+                "external_measurement_failed",
+            )
+        )
+        failed_status = runner.status_payload()
+
+        self.assertTrue(thread.is_alive())
+        self.assertEqual(failed_status["waiting_reason"], "external_measurement_failed")
+        self.assertEqual(failed_status["position"], 1)
+        self.assertEqual(failed_status["last_external_result"]["status"], "failed")
+        self.assertEqual(failed_status["history"], [])
+        self.assertEqual(
+            stage.calls.count(("needles", "lift", 75.0)),
+            lift_count_before_failed_result,
+        )
+        retry_request_id = int(failed_status["external_measurement_request_id"])
+        self.assertGreater(retry_request_id, first_request_id)
+
+        self.assertTrue(
+            runner.submit_external_result(
+                {
+                    "status": "ok",
+                    "summary": {"retry": True},
+                    "external_measurement_request_id": retry_request_id,
+                }
+            )
+        )
+        thread.join(timeout=2.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(finished, [(True, "Route API session complete.")])
+        final_status = runner.status_payload()
+        self.assertEqual(final_status["history"][0]["status"], "ok")
+        self.assertEqual(
+            final_status["history"][0]["external_result"]["summary"],
+            {"retry": True},
         )
         self.assertIn(("needles", "lift", 75.0), stage.calls)
 
@@ -850,6 +955,20 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             if runner.status_payload().get("state") == state:
+                return True
+            time.sleep(0.01)
+        return False
+
+    @staticmethod
+    def _wait_for_waiting_reason(
+        runner: RouteExternalMeasurementSessionRunner,
+        reason: str,
+        *,
+        timeout_s: float = 2.0,
+    ) -> bool:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if runner.status_payload().get("waiting_reason") == reason:
                 return True
             time.sleep(0.01)
         return False
@@ -1603,13 +1722,22 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
             self.assertEqual(rows[0]["n_measurements"], "10")
             self.assertEqual(rows[0]["status"], "bad_contact")
 
-    def test_confirm_rejected_measure_anyway_saves_record(self) -> None:
+    def test_confirm_rejected_measure_reads_current_contact_and_saves_record(self) -> None:
         point = _point(1)
         stage = _FakeStage()
         lcr = _FakeBatchRouteLCR(
             [
                 {"differential_resistance_ohm": value}
-                for value in (520000.0, 610000.0, 480000.0, 570000.0)
+                for value in (
+                    520000.0,
+                    610000.0,
+                    480000.0,
+                    570000.0,
+                    1000.0,
+                    1001.0,
+                    1002.0,
+                    1001.0,
+                )
             ]
         )
         results = []
@@ -1651,22 +1779,26 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                 )
             self.assertEqual(results[0][0].status, "bad_contact")
             self.assertFalse(results[0][1])
+            calls_before_measure = list(stage.calls)
 
-            self.assertTrue(runner.submit_confirmation("measure_anyway"))
+            self.assertTrue(runner.submit_confirmation("measure"))
             thread.join(timeout=2.0)
 
             self.assertFalse(thread.is_alive())
             self.assertEqual(finished[0][0], True, finished[0][1])
+            self.assertEqual(lcr.batch_counts, [4, 4])
             self.assertEqual(len(results), 2)
             self.assertTrue(results[1][1])
+            self.assertEqual(results[1][0].status, "ok")
             self.assertEqual(len(records), 1)
-            self.assertEqual(records[0].status, "bad_contact")
+            self.assertEqual(records[0].status, "ok")
+            self.assertEqual(stage.calls, calls_before_measure)
             with csv_path.open("r", encoding="utf-8", newline="") as handle:
                 rows = list(csv.DictReader(handle))
             self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["status"], "bad_contact")
+            self.assertEqual(rows[0]["status"], "ok")
 
-    def test_auto_contact_seek_retries_lift_lower_before_full_measurement(self) -> None:
+    def test_auto_contact_seek_presses_deeper_without_lift_lower_retry(self) -> None:
         point = _point(1)
         stage = _FakeStage()
         lcr = _FakeBatchRouteLCR(
@@ -1709,24 +1841,22 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
             self.assertEqual(rows[0]["n_measurements"], "4")
 
         first_lower_index = stage.calls.index(("needles", "lower", 75.0))
-        retry_lift_index = next(
-            index
-            for index, call in enumerate(stage.calls)
-            if index > first_lower_index and call == ("needles", "lift", 75.0)
-        )
-        retry_lower_index = next(
-            index
-            for index, call in enumerate(stage.calls)
-            if index > retry_lift_index and call == ("needles", "lower", 75.0)
-        )
+        depth_index = stage.calls.index(("lower_to_depth", 0.001, 75.0))
         final_lift_index = next(
             index
             for index, call in enumerate(stage.calls)
-            if index > retry_lower_index and call == ("needles", "lift", 75.0)
+            if index > depth_index and call == ("needles", "lift", 75.0)
         )
-        self.assertLess(first_lower_index, retry_lift_index)
-        self.assertLess(retry_lift_index, retry_lower_index)
-        self.assertLess(retry_lower_index, final_lift_index)
+        self.assertLess(first_lower_index, depth_index)
+        self.assertLess(depth_index, final_lift_index)
+        self.assertEqual(
+            [
+                call
+                for call in stage.calls[first_lower_index + 1 : final_lift_index]
+                if call[0] == "needles"
+            ],
+            [],
+        )
         self.assertEqual([call for call in stage.calls if call[0] == "adjust"], [])
 
     def test_place_contact_reuses_contact_seek_without_csv_and_leaves_needles_down(
@@ -1763,7 +1893,7 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
             self.assertFalse(csv_path.exists())
 
         self.assertEqual(lcr.batch_counts, [2, 2])
-        self.assertEqual(stage.axis_a_lowering_mm, 1.0)
+        self.assertEqual(stage.axis_a_lowering_mm, 1.001)
         self.assertEqual(stage.calls[-1], ("finish",))
         self.assertNotIn(("needles", "lift", 75.0), stage.calls[-2:])
 
@@ -1806,7 +1936,7 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
             self.assertEqual(result.record.status, "bad_contact")
             self.assertFalse(csv_path.exists())
 
-        self.assertEqual(lcr.batch_counts, [2, 2, 2])
+        self.assertEqual(lcr.batch_counts, [2, 2])
         self.assertEqual(stage.calls[-2:], [("needles", "lift", None), ("finish",)])
 
     def test_check_contact_measures_current_position_without_seek_or_csv(self) -> None:
@@ -1845,6 +1975,32 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
         self.assertEqual([call for call in stage.calls if call[0] == "needles"], [])
         self.assertEqual(stage.calls[-1], ("finish",))
 
+    def test_check_contact_finishes_stage_task_when_prepare_fails(self) -> None:
+        point = _point(1)
+        stage = _FakeStage()
+        lcr = _FailingPreparedBatchRouteLCR(RuntimeError("prepare failed"))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "route.csv"
+            runner = RouteMeasurementRunner(
+                points=[point],
+                csv_path=csv_path,
+                stage_controller=stage,
+                lcr_controller=lcr,
+                needle_feedrate=75.0,
+                measurement_count=2,
+                initial_measurement_count=2,
+                contact_settle_s=0.0,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "prepare failed"):
+                runner.check_contact(point)
+
+            self.assertFalse(csv_path.exists())
+
+        self.assertEqual(lcr.prepare_calls, [(2, 2)])
+        self.assertEqual(stage.calls[-1], ("finish",))
+
     def test_seek_contact_uses_current_position_without_xy_move_or_csv(self) -> None:
         point = _point(1)
         stage = _FakeStage()
@@ -1879,8 +2035,11 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
 
         self.assertEqual(lcr.batch_counts, [2, 2])
         self.assertNotIn(("move", 1.0, 2.0), stage.calls)
-        self.assertIn(("needles", "lift", 75.0), stage.calls)
-        self.assertIn(("needles", "lower", 75.0), stage.calls)
+        self.assertEqual([call for call in stage.calls if call[0] == "needles"], [])
+        self.assertEqual(
+            [call for call in stage.calls if call[0] == "lower_to_depth"],
+            [("lower_to_depth", 0.001, 75.0)],
+        )
         self.assertEqual(stage.calls[-1], ("finish",))
 
     def test_auto_contact_seek_presses_deeper_when_full_batch_turns_bad(self) -> None:
@@ -1893,8 +2052,6 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                 for value in (
                     200000.0,
                     210000.0,
-                    220000.0,
-                    230000.0,
                     1000.0,
                     1001.0,
                     1000.0,
@@ -1930,7 +2087,7 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
             success, message = runner.run()
 
             self.assertTrue(success, message)
-            self.assertEqual(lcr.batch_counts, [2, 2, 2, 2, 2, 2])
+            self.assertEqual(lcr.batch_counts, [2, 2, 2, 2, 2])
             with csv_path.open("r", encoding="utf-8", newline="") as handle:
                 rows = list(csv.DictReader(handle))
             self.assertEqual(rows[0]["status"], "ok")
@@ -1948,7 +2105,7 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
             self.assertIsNotNone(contact_heights[0].contact_seek)
             self.assertTrue(contact_heights[0].contact_seek.found)
             self.assertEqual(contact_heights[0].contact_seek.status, "found")
-            self.assertEqual(contact_heights[0].contact_seek.attempts, 3)
+            self.assertEqual(contact_heights[0].contact_seek.attempts, 2)
             self.assertEqual(
                 contact_heights[0].contact_seek.initial_status,
                 "bad_contact",
@@ -2051,7 +2208,7 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
             success, message = runner.run()
 
             self.assertTrue(success, message)
-            self.assertEqual(lcr.batch_counts, [2, 2, 2, 2])
+            self.assertEqual(lcr.batch_counts, [2, 2, 2])
             with csv_path.open("r", encoding="utf-8", newline="") as handle:
                 rows = list(csv.DictReader(handle))
             self.assertEqual(rows[0]["status"], "bad_contact")
@@ -2066,8 +2223,83 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
         )
         self.assertEqual([call for call in stage.calls if call[0] == "adjust"], [])
 
+        first_lower_index = stage.calls.index(("needles", "lower", None))
         first_depth_index = stage.calls.index(("lower_to_depth", 0.0005, None))
-        self.assertEqual(stage.calls[first_depth_index - 1], ("needles", "lift", None))
+        final_lift_index = next(
+            index
+            for index, call in enumerate(stage.calls)
+            if index > first_depth_index and call == ("needles", "lift", None)
+        )
+        self.assertEqual(
+            [
+                call
+                for call in stage.calls[first_lower_index + 1 : final_lift_index]
+                if call[0] == "needles"
+            ],
+            [],
+        )
+
+    def test_auto_contact_seek_adjust_fallback_uses_incremental_steps(self) -> None:
+        class _AdjustOnlyStage(_FakeStage):
+            def __init__(self) -> None:
+                super().__init__()
+                self.run_external_needles_lower_to_depth_below_down = None
+
+        point = _point(1)
+        stage = _AdjustOnlyStage()
+        lcr = _FakeBatchRouteLCR(
+            [
+                {"differential_resistance_ohm": value}
+                for value in (
+                    200000.0,
+                    210000.0,
+                    220000.0,
+                    230000.0,
+                    1000.0,
+                    1001.0,
+                )
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "route.csv"
+            runner = RouteMeasurementRunner(
+                points=[point],
+                csv_path=csv_path,
+                stage_controller=stage,
+                lcr_controller=lcr,
+                needle_feedrate=None,
+                measurement_count=2,
+                initial_measurement_count=2,
+                auto_contact_seek_on_bad_contact=True,
+                auto_contact_seek_step_mm=0.001,
+                auto_contact_seek_max_total_mm=0.002,
+                contact_settle_s=0.0,
+            )
+
+            success, message = runner.run()
+
+            self.assertTrue(success, message)
+            self.assertEqual(lcr.batch_counts, [2, 2, 2])
+
+        first_lower_index = stage.calls.index(("needles", "lower", None))
+        final_lift_index = next(
+            index
+            for index, call in enumerate(stage.calls)
+            if index > first_lower_index and call == ("needles", "lift", None)
+        )
+        self.assertEqual(
+            [call for call in stage.calls if call[0] == "adjust"],
+            [("adjust", -0.001, None), ("adjust", -0.001, None)],
+        )
+        self.assertEqual(
+            [
+                call
+                for call in stage.calls[first_lower_index + 1 : final_lift_index]
+                if call[0] == "needles"
+            ],
+            [],
+        )
 
     def test_exhausted_auto_contact_seek_saves_bad_contact_in_confirm_mode(self) -> None:
         point = _point(1)
@@ -2232,9 +2464,9 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
 
             self.assertTrue(thread.is_alive())
             self.assertEqual(lcr.batch_counts, [2, 2])
-            self.assertGreaterEqual(
-                len([call for call in stage.calls if call == ("needles", "lift", 75.0)]),
-                2,
+            self.assertEqual(
+                [call for call in stage.calls if call[0] == "lower_to_depth"],
+                [("lower_to_depth", 0.001, 75.0)],
             )
 
             runner.submit_confirmation("next")
@@ -2258,10 +2490,6 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                     250000.0,
                     260000.0,
                     270000.0,
-                    280000.0,
-                    290000.0,
-                    300000.0,
-                    310000.0,
                     1000.0,
                     1001.0,
                 )

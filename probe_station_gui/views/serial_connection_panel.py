@@ -1,4 +1,4 @@
-"""Dockable panel for managing FluidNC and measurement-instrument connections."""
+"""Widget for managing FluidNC and measurement-instrument connections."""
 
 from __future__ import annotations
 

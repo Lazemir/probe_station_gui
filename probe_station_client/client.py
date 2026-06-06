@@ -156,6 +156,14 @@ class RouteReadyContact:
         except (TypeError, ValueError):
             return None
 
+    @property
+    def external_measurement_request_id(self) -> int | None:
+        value = self.status.get("external_measurement_request_id")
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
     def submit_result(
         self,
         *,
@@ -169,6 +177,7 @@ class RouteReadyContact:
             summary=summary,
             files=files,
             message=message,
+            external_measurement_request_id=self.external_measurement_request_id,
         )
 
     def download_artifact(self, artifact_id: str) -> bytes:
@@ -218,12 +227,14 @@ class ProbeStationRouteSession:
         summary: Mapping[str, Any] | None = None,
         files: list[Mapping[str, Any]] | None = None,
         message: str = "",
+        external_measurement_request_id: int | None = None,
     ) -> dict[str, Any]:
         return self.route.submit_result(
             status=status,
             summary=summary,
             files=files,
             message=message,
+            external_measurement_request_id=external_measurement_request_id,
         )
 
     def download_artifact(self, artifact_id: str) -> bytes:
@@ -254,10 +265,16 @@ class ProbeStationRouteSession:
                     raise ProbeStationClientError(message)
                 return
             reason = str(status.get("waiting_reason") or "")
-            if reason == "external_measurement":
+            if reason in {"external_measurement", "external_measurement_failed"}:
                 session_id = str(status.get("session_id") or self.session_id)
                 position = int(status.get("position") or 0)
-                key = (session_id, position)
+                try:
+                    request_id = int(
+                        status.get("external_measurement_request_id") or 0
+                    )
+                except (TypeError, ValueError):
+                    request_id = 0
+                key = (session_id, position, request_id)
                 if key not in yielded:
                     yielded.add(key)
                     yield RouteReadyContact(self, status)
@@ -324,16 +341,22 @@ class ProbeStationRouteClient:
         summary: Mapping[str, Any] | None = None,
         files: list[Mapping[str, Any]] | None = None,
         message: str = "",
+        external_measurement_request_id: int | None = None,
     ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "status": status,
+            "summary": dict(summary or {}),
+            "files": [dict(item) for item in files or []],
+            "message": message,
+        }
+        if external_measurement_request_id is not None:
+            payload["external_measurement_request_id"] = int(
+                external_measurement_request_id
+            )
         return self._client._request(
             "POST",
             "/api/v1/route/sessions/current/result",
-            {
-                "status": status,
-                "summary": dict(summary or {}),
-                "files": [dict(item) for item in files or []],
-                "message": message,
-            },
+            payload,
         )
 
     def download_artifact(self, artifact_id: str) -> bytes:

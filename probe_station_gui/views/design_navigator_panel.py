@@ -1749,8 +1749,6 @@ class DesignNavigatorPanel(QWidget):
         self._route_save_shift_button.setEnabled(False)
         self._route_remeasure_button = QPushButton("Remeasure", route_group)
         self._route_remeasure_button.setEnabled(False)
-        self._route_measure_anyway_button = QPushButton("Measure Anyway", route_group)
-        self._route_measure_anyway_button.setEnabled(False)
         self._route_skip_button = QPushButton("Skip", route_group)
         self._route_skip_button.setEnabled(False)
         self._route_next_button = QPushButton("Next", route_group)
@@ -1763,7 +1761,6 @@ class DesignNavigatorPanel(QWidget):
         self._route_next_button.hide()
         self._route_jump_selected_button.hide()
         route_confirm_buttons.addWidget(self._route_save_shift_button)
-        route_confirm_buttons.addWidget(self._route_measure_anyway_button)
         route_confirm_buttons.addWidget(self._route_skip_button)
         route_confirm_buttons.addWidget(self._route_move_selected_button)
         route_layout.addLayout(route_confirm_buttons)
@@ -1800,11 +1797,6 @@ class DesignNavigatorPanel(QWidget):
         self._route_remeasure_button.clicked.connect(
             lambda _checked=False: self.route_measurement_confirmation_requested.emit(
                 "remeasure"
-            )
-        )
-        self._route_measure_anyway_button.clicked.connect(
-            lambda _checked=False: self.route_measurement_confirmation_requested.emit(
-                "measure_anyway"
             )
         )
         self._route_skip_button.clicked.connect(
@@ -2179,7 +2171,6 @@ class DesignNavigatorPanel(QWidget):
             has_route_selection and self._route_measurement_waiting
         )
         self._route_remeasure_button.setEnabled(self._route_measurement_waiting)
-        self._route_measure_anyway_button.setEnabled(self._route_measurement_waiting)
         self._route_skip_button.setEnabled(self._route_measurement_waiting)
         self._route_next_button.setEnabled(self._route_measurement_waiting)
         self._route_move_selected_button.setEnabled(
@@ -2883,6 +2874,9 @@ class DesignNavigatorPanel(QWidget):
         )
 
     def _emit_route_measurement_measure_selected(self) -> None:
+        if self._route_measurement_waiting:
+            self.route_measurement_confirmation_requested.emit("measure")
+            return
         if self._selected_route_point_index < 0:
             return
         self.route_measurement_measure_requested.emit(

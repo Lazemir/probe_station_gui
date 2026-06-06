@@ -513,6 +513,220 @@ class MainCoordinateFeedrateTest(unittest.TestCase):
         self.assertEqual(config.keithley.source_voltage_range_v, 0.3)
         self.assertEqual(config.keithley.voltmeter_range_v, 0.3)
 
+    def test_api_configure_meter_reports_unexpected_instrument_error(self) -> None:
+        class _FailingLcr:
+            def is_connected(self) -> bool:
+                return True
+
+            def apply_route_meter_configuration(
+                self,
+                _configuration: RouteMeterConfiguration,
+            ) -> None:
+                raise RuntimeError(
+                    "VI_ERROR_TMO (-1073807339): Timeout expired before operation completed."
+                )
+
+        window = Main.__new__(Main)
+        window.lcr_controller = _FailingLcr()
+        window._api_route_meter_configuration = (
+            lambda _payload, voltages_v=None: RouteMeterConfiguration()
+        )
+
+        response = Main._api_configure_meter(window, {})
+
+        self.assertFalse(response["accepted"], response)
+        self.assertEqual(response["status_code"], 409)
+        self.assertEqual(response["error_type"], "RuntimeError")
+        self.assertIn("Measurement instrument setup failed", response["message"])
+        self.assertIn("VI_ERROR_TMO", response["message"])
+
+    def test_api_prepare_route_meter_connects_shared_lcr_controller(self) -> None:
+        class _Lcr:
+            def __init__(self) -> None:
+                self.connected = False
+                self.runtime_configurations: list[RouteMeterConfiguration] = []
+                self.applied_configurations: list[RouteMeterConfiguration] = []
+                self.connect_count = 0
+
+            def is_connected(self) -> bool:
+                return self.connected
+
+            def apply_route_meter_runtime_configuration(
+                self,
+                configuration: RouteMeterConfiguration,
+            ) -> None:
+                self.runtime_configurations.append(configuration)
+
+            def connect_now(self) -> None:
+                self.connect_count += 1
+                self.connected = True
+
+            def apply_route_meter_configuration(
+                self,
+                configuration: RouteMeterConfiguration,
+            ) -> None:
+                self.applied_configurations.append(configuration)
+
+        configuration = RouteMeterConfiguration()
+        lcr = _Lcr()
+        window = Main.__new__(Main)
+        window.lcr_controller = lcr
+
+        response = Main._api_prepare_route_meter_controller(window, configuration)
+
+        self.assertIsNone(response)
+        self.assertEqual(lcr.runtime_configurations, [configuration])
+        self.assertEqual(lcr.connect_count, 1)
+        self.assertEqual(lcr.applied_configurations, [configuration])
+
+    def test_api_prepare_route_meter_reports_busy_instrument_task(self) -> None:
+        class _Lcr:
+            def __init__(self) -> None:
+                self.wait_calls: list[float] = []
+                self.applied_configurations: list[RouteMeterConfiguration] = []
+
+            def wait_until_idle(self, timeout_s: float) -> bool:
+                self.wait_calls.append(float(timeout_s))
+                return False
+
+            def is_connected(self) -> bool:
+                return True
+
+            def apply_route_meter_configuration(
+                self,
+                configuration: RouteMeterConfiguration,
+            ) -> None:
+                self.applied_configurations.append(configuration)
+
+        configuration = RouteMeterConfiguration()
+        lcr = _Lcr()
+        window = Main.__new__(Main)
+        window.lcr_controller = lcr
+
+        response = Main._api_prepare_route_meter_controller(window, configuration)
+
+        self.assertIsNotNone(response)
+        assert response is not None
+        self.assertFalse(response["accepted"], response)
+        self.assertEqual(response["status_code"], 409)
+        self.assertEqual(response["message"], "Measurement instrument task is still running.")
+        self.assertEqual(lcr.wait_calls, [45.0])
+        self.assertEqual(lcr.applied_configurations, [])
+
+    def test_meter_auto_connect_uses_shared_lcr_controller(self) -> None:
+        class _SettingsManager:
+            def serial_auto_connect_enabled(self) -> bool:
+                return False
+
+            def meter_auto_connect_enabled(self) -> bool:
+                return True
+
+        class _Lcr:
+            def __init__(self) -> None:
+                self.request_count = 0
+
+            def is_connected(self) -> bool:
+                return False
+
+            def request_connect(self) -> None:
+                self.request_count += 1
+
+        lcr = _Lcr()
+        window = Main.__new__(Main)
+        window.serial_connection_panel = None
+        window.serial_connection = None
+        window.settings_manager = _SettingsManager()
+        window.lcr_controller = lcr
+
+        Main._auto_connect_if_possible(window)
+
+        self.assertEqual(lcr.request_count, 1)
+
+    def test_api_raw_voltage_sweep_reports_unexpected_instrument_error(self) -> None:
+        class _FailingLcr:
+            def is_connected(self) -> bool:
+                return True
+
+            def apply_route_meter_configuration(
+                self,
+                _configuration: RouteMeterConfiguration,
+            ) -> None:
+                pass
+
+            def read_voltage_sweep_now(self, _voltages_v: list[float]) -> dict[str, object]:
+                raise RuntimeError(
+                    "VI_ERROR_TMO (-1073807339): Timeout expired before operation completed."
+                )
+
+        window = Main.__new__(Main)
+        window.lcr_controller = _FailingLcr()
+        window._api_route_meter_configuration = (
+            lambda _payload, voltages_v=None: RouteMeterConfiguration()
+        )
+        window._api_contact_number = lambda _payload, required=False: None
+        window._api_bool = lambda _payload, *names, default=False: default
+        window._api_float = (
+            lambda _payload, *names, default=0.0, minimum=None: default
+        )
+        window._api_needle_feedrate = lambda _payload: None
+        window._api_timestamp_utc = lambda: "2026-06-06T12:00:00+00:00"
+
+        response = Main._api_raw_voltage_sweep(window, {"voltages_v": [0.0]})
+
+        self.assertFalse(response["accepted"], response)
+        self.assertEqual(response["status_code"], 409)
+        self.assertEqual(response["error_type"], "RuntimeError")
+        self.assertIn("Raw voltage sweep failed", response["message"])
+        self.assertIn("VI_ERROR_TMO", response["message"])
+        self.assertIsNone(response["contact"])
+
+    def test_api_route_session_reports_unexpected_instrument_setup_error(self) -> None:
+        class _FailingLcr:
+            def is_connected(self) -> bool:
+                return True
+
+            def apply_route_meter_configuration(
+                self,
+                _configuration: RouteMeterConfiguration,
+            ) -> None:
+                raise RuntimeError(
+                    "Invalid session handle. The resource might be closed."
+                )
+
+        point = RouteMeasurementPoint(
+            index=12,
+            point_id="p012",
+            label="P012",
+            design_center=(100.0, 200.0),
+            stage_xy=(1.0, 2.0),
+            needle_1_design=(101.0, 201.0),
+            needle_2_design=(99.0, 199.0),
+        )
+        window = Main.__new__(Main)
+        window._route_measurement_thread = None
+        window._route_measurement_runner = None
+        window._route_measurement_waiting = False
+        window._last_route_measurement_result = None
+        window._route_measurement_current_point = 12
+        window.serial_connection = types.SimpleNamespace(is_open=True)
+        window._design_session = types.SimpleNamespace(
+            route=types.SimpleNamespace(points=[object()], name="route"),
+            registration=types.SimpleNamespace(valid=True),
+        )
+        window._route_measurement_points = lambda _route: [point]
+        window._api_route_meter_configuration = (
+            lambda _payload, voltages_v=None: RouteMeterConfiguration()
+        )
+        window.lcr_controller = _FailingLcr()
+
+        response = Main._api_start_route_session(window, {})
+
+        self.assertFalse(response["accepted"], response)
+        self.assertEqual(response["status_code"], 409)
+        self.assertEqual(response["error_type"], "RuntimeError")
+        self.assertIn("Route measurement instrument setup failed", response["message"])
+        self.assertIn("Invalid session handle", response["message"])
+
     def test_combine_telegram_contact_photos_side_by_side(self) -> None:
         script = r"""
 import struct
@@ -1367,7 +1581,7 @@ assert image.height() == 4
             "Route measurement: measure from point 91.",
         )
 
-    def test_telegram_measure_anyway_submits_waiting_route_action(self) -> None:
+    def test_telegram_measure_submits_waiting_route_action(self) -> None:
         window = Main.__new__(Main)
         runner = _FakeRouteMeasurementRunner()
         statuses: list[str] = []
@@ -1381,24 +1595,23 @@ assert image.height() == 4
             lambda message, _timeout_ms=None: statuses.append(str(message))
         )
 
-        response = Main._telegram_route_action_response(window, "measure_anyway")
+        response = Main._telegram_route_action_response(window, "measure")
 
-        self.assertEqual(runner.confirmations, ["measure_anyway"])
-        self.assertEqual(response.callback_answer, "measure_anyway submitted.")
+        self.assertEqual(runner.confirmations, ["measure"])
+        self.assertEqual(response.callback_answer, "measure submitted.")
         self.assertEqual(response.reply_markup, "markup")
-        self.assertEqual(statuses, ["Route measurement: measure anyway."])
+        self.assertEqual(statuses, ["Route measurement: measure."])
 
-    def test_waiting_dialog_measure_uses_selected_point(self) -> None:
+    def test_waiting_dialog_measure_confirms_current_contact(self) -> None:
         dialog = RouteMeasurementDialog.__new__(RouteMeasurementDialog)
-        jumped: list[int] = []
+        confirmed: list[bool] = []
         remeasured: list[bool] = []
         measured: list[bool] = []
 
         dialog._running = True
         dialog._waiting = True
-        dialog._jump_point_spin = types.SimpleNamespace(value=lambda: 91)
-        dialog.jump_requested = types.SimpleNamespace(
-            emit=lambda point: jumped.append(int(point))
+        dialog.measure_current_requested = types.SimpleNamespace(
+            emit=lambda: confirmed.append(True)
         )
         dialog.remeasure_requested = types.SimpleNamespace(
             emit=lambda: remeasured.append(True)
@@ -1407,7 +1620,7 @@ assert image.height() == 4
 
         RouteMeasurementDialog._emit_next_or_measure_requested(dialog)
 
-        self.assertEqual(jumped, [91])
+        self.assertEqual(confirmed, [True])
         self.assertEqual(remeasured, [])
         self.assertEqual(measured, [])
 
@@ -1485,7 +1698,6 @@ assert image.height() == 4
         dialog._stop_button = _FakeButton()
         dialog._save_shift_button = _FakeButton()
         dialog._remeasure_button = _FakeButton()
-        dialog._measure_anyway_button = _FakeButton()
         dialog._skip_button = _FakeButton()
         dialog._next_button = _FakeButton()
         dialog._jump_point_spin = _FakeEnabledWidget()
@@ -1506,7 +1718,6 @@ assert image.height() == 4
         self.assertTrue(dialog._meter_combo.enabled)
         self.assertTrue(dialog._gwinstek_page.enabled)
         self.assertTrue(dialog._keithley_page.enabled)
-        self.assertTrue(dialog._measure_anyway_button.enabled)
 
     def test_running_dialog_close_is_ignored(self) -> None:
         dialog = RouteMeasurementDialog.__new__(RouteMeasurementDialog)

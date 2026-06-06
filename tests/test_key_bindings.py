@@ -632,6 +632,32 @@ class SerialConnectionStateTest(unittest.TestCase):
 
             self.assertFalse(manager.serial_auto_connect_enabled())
 
+    def test_meter_auto_connect_follows_last_saved_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self._manager_for_temp_dir(Path(temp_dir))
+
+            self.assertFalse(manager.meter_auto_connect_enabled())
+
+            manager.save_meter_connection_state(
+                True,
+                meter_type="keithley_2400_2182a",
+                description="Keithley 2400 GPIB0::1::INSTR",
+            )
+
+            self.assertTrue(manager.meter_auto_connect_enabled())
+            state_path = (
+                Path(temp_dir) / SettingsManager.METER_CONNECTION_STATE_FILENAME
+            )
+            with state_path.open("r", encoding="utf-8") as handle:
+                saved = json.load(handle)
+            self.assertEqual(saved["status"], "connected")
+            self.assertEqual(saved["meter_type"], "keithley_2400_2182a")
+            self.assertEqual(saved["description"], "Keithley 2400 GPIB0::1::INSTR")
+
+            manager.save_meter_connection_state(False)
+
+            self.assertFalse(manager.meter_auto_connect_enabled())
+
 
 class SettingsLoadTest(unittest.TestCase):
     def test_load_accepts_utf8_bom_settings_file(self) -> None:

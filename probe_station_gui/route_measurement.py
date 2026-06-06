@@ -482,16 +482,7 @@ class RouteMeasurementRunner:
                 normalized = f"jump:{int(normalized.split(':', 1)[1].strip())}"
             except ValueError:
                 return False
-        elif normalized in {
-            "anyway",
-            "force",
-            "force_measure",
-            "force-measure",
-            "measure_anyway",
-            "measure-anyway",
-        }:
-            normalized = "measure_anyway"
-        elif normalized not in {"next", "remeasure", "skip"}:
+        elif normalized not in {"next", "measure", "remeasure", "skip"}:
             return False
         with self._confirmation_condition:
             self._pending_confirmation = normalized
@@ -615,7 +606,7 @@ class RouteMeasurementRunner:
         """Move to a route point and leave verified contact under the needles.
 
         This intentionally reuses the same short contact check and automatic
-        lift/lower retry path as route measurements, but does not write a CSV row.
+        deeper-contact seek path as route measurements, but does not write a CSV row.
         """
 
         if clear_interrupt:
@@ -713,10 +704,10 @@ class RouteMeasurementRunner:
                     )
                 except Exception:
                     logger.exception("Failed to lift needles after contact check.")
-            if prepare_task is not None:
-                prepare_task.wait()
-            self._wait_for_background_tasks()
-            self._finish_stage_task()
+            try:
+                self._wait_for_background_tasks()
+            finally:
+                self._finish_stage_task()
 
     def prepare_external_contact(
         self,
@@ -798,8 +789,10 @@ class RouteMeasurementRunner:
                     )
                     self._raise_if_point_interrupted()
             finally:
-                self._wait_for_background_tasks()
-                self._finish_stage_task()
+                try:
+                    self._wait_for_background_tasks()
+                finally:
+                    self._finish_stage_task()
             move_to_point = False
             lift_before_move = False
         placement = self.place_contact(
@@ -839,8 +832,10 @@ class RouteMeasurementRunner:
                 self._needle_feedrate,
             )
         finally:
-            self._wait_for_background_tasks()
-            self._finish_stage_task()
+            try:
+                self._wait_for_background_tasks()
+            finally:
+                self._finish_stage_task()
 
     def check_contact(
         self,
@@ -937,10 +932,10 @@ class RouteMeasurementRunner:
             )
         finally:
             self._auto_contact_seek_on_bad_contact = previous_auto_seek
-            if prepare_task is not None:
-                prepare_task.wait()
-            self._wait_for_background_tasks()
-            self._finish_stage_task()
+            try:
+                self._wait_for_background_tasks()
+            finally:
+                self._finish_stage_task()
 
     def run(self) -> tuple[bool, str]:
         needs_final_lift = False
@@ -1275,28 +1270,22 @@ class RouteMeasurementRunner:
                     if decision == "stop":
                         message = "Route measurement stopped by user."
                         break
-                    self._begin_stage_task()
-                    if decision == "measure_anyway":
-                        self._csv_writer.append(record)
-                        measurements_saved += 1
-                        self._emit_result(record, position, total, True)
-                        if (
-                            contact_height_record is not None
-                            and self._contact_height_record_callback is not None
-                        ):
-                            self._contact_height_record_callback(
-                                contact_height_record,
-                                position,
-                                total,
-                            )
-                        if self._record_callback is not None:
-                            self._record_callback(record, position, total)
-                        self._status(
-                            f"Route measurement: point {position}/{total} "
-                            "saved; continuing."
+                    if decision == "measure":
+                        manual_record = self._measure_manual_contact_here(
+                            point=point,
+                            position=position,
+                            total=total,
                         )
+                        if manual_record is None:
+                            if self._point_interrupt_requested.is_set():
+                                self._point_interrupt_requested.clear()
+                                continue
+                            message = "Route measurement stopped by user."
+                            break
+                        measurements_saved += 1
                         position_index += 1
                         continue
+                    self._begin_stage_task()
                     jump_index = self._jump_target_index(decision)
                     if jump_index is not None:
                         position_index = jump_index
@@ -1563,6 +1552,50 @@ class RouteMeasurementRunner:
         except Exception as exc:
             logger.warning("Route pre-contact photo callback failed: %s", exc)
 
+    def _measure_manual_contact_here(
+        self,
+        *,
+        point: RouteMeasurementPoint,
+        position: int,
+        total: int,
+    ) -> RouteMeasurementRecord | None:
+        self._current_contact_seek_result = None
+        self._status(
+            f"Route measurement: point {position}/{total} measuring current contact."
+        )
+        samples = self._read_measurement_samples(
+            self._measurement_count,
+            start_index=1,
+            prepare_task=self._start_measurement_prepare_task(
+                self._measurement_count
+            ),
+        )
+        if samples is None:
+            return None
+        record = self._record_for_point(point=point, samples=samples)
+        contact_height_record = self._contact_height_record_for_point(
+            point=point,
+            record=record,
+        )
+        self._csv_writer.append(record)
+        self._emit_contact_photo(point, record, position, total, True)
+        self._emit_result(record, position, total, True)
+        if (
+            contact_height_record is not None
+            and self._contact_height_record_callback is not None
+        ):
+            self._contact_height_record_callback(
+                contact_height_record,
+                position,
+                total,
+            )
+        if self._record_callback is not None:
+            self._record_callback(record, position, total)
+        self._status(
+            f"Route measurement: point {position}/{total} saved; continuing."
+        )
+        return record
+
     def _capture_photo(
         self,
         point: RouteMeasurementPoint,
@@ -1613,8 +1646,15 @@ class RouteMeasurementRunner:
     def _wait_for_background_tasks(self) -> None:
         tasks = list(self._background_tasks)
         self._background_tasks.clear()
+        first_exception: BaseException | None = None
         for task in tasks:
-            task.wait()
+            try:
+                task.wait()
+            except BaseException as exc:
+                if first_exception is None:
+                    first_exception = exc
+        if first_exception is not None:
+            raise first_exception
 
     def _start_measurement_prepare_task(
         self,
@@ -1755,9 +1795,6 @@ class RouteMeasurementRunner:
     ) -> list[RouteMeasurementSample] | None:
         if self._auto_contact_seek_max_total_mm <= 0.0:
             return initial_samples
-        needle_action = getattr(self._stage_controller, "run_external_needles_action", None)
-        if not callable(needle_action):
-            return initial_samples
         lower_to_depth = getattr(
             self._stage_controller,
             "run_external_needles_lower_to_depth_below_down",
@@ -1790,11 +1827,8 @@ class RouteMeasurementRunner:
                 initial_quality=initial_quality,
                 position=position,
                 total=total,
-                skip_current_depth=skip_current_depth,
-                needle_action=needle_action,
                 lower_to_depth=lower_to_depth,
                 adjust=adjust,
-                after_measurement=after_measurement,
             )
         finally:
             self._contact_seek_active.clear()
@@ -1806,11 +1840,8 @@ class RouteMeasurementRunner:
         initial_quality: RouteContactQuality,
         position: int,
         total: int,
-        skip_current_depth: bool,
-        needle_action: Callable[..., object],
         lower_to_depth: Callable[..., object] | None,
-        adjust: Callable[..., object],
-        after_measurement: Callable[[], object] | None,
+        adjust: Callable[..., object] | None,
     ) -> list[RouteMeasurementSample] | None:
         step_mm = self._auto_contact_seek_step_mm
         max_depth_steps = int(
@@ -1821,9 +1852,8 @@ class RouteMeasurementRunner:
             min((step_index + 1) * abs(step_mm), self._auto_contact_seek_max_total_mm)
             for step_index in range(max_depth_steps)
         ]
-        if not skip_current_depth:
-            depths_mm.insert(0, 0.0)
         attempts = 0
+        previous_depth_mm = 0.0
         last_depth_mm = math.nan
         last_axis_a_lowering_mm = math.nan
         last_status = initial_quality.status
@@ -1833,22 +1863,15 @@ class RouteMeasurementRunner:
                 or self._point_interrupt_requested.is_set()
             ):
                 return None
-            if depth_mm <= 0.0:
-                self._status(
-                    f"Route measurement: point {position}/{total} "
-                    "retrying lift/lower."
-                )
-            else:
-                attempt_number = max(1, int(math.ceil(depth_mm / abs(step_mm))))
-                self._status(
-                    f"Route measurement: point {position}/{total} "
-                    f"lift/lower retry {attempt_number}/{max_depth_steps}, "
-                    f"{depth_mm:.4f} mm below down."
-                )
+            attempt_number = max(1, int(math.ceil(depth_mm / abs(step_mm))))
+            self._status(
+                f"Route measurement: point {position}/{total} "
+                f"pressing deeper {attempt_number}/{max_depth_steps}, "
+                f"{depth_mm:.4f} mm below down."
+            )
             prepare_task = self._start_measurement_prepare_task(
                 self._initial_measurement_count()
             )
-            needle_action("lift", self._needle_feedrate)
             if (
                 self._stop_requested.is_set()
                 or self._point_interrupt_requested.is_set()
@@ -1856,10 +1879,12 @@ class RouteMeasurementRunner:
                 return None
             if depth_mm > 0.0 and callable(lower_to_depth):
                 lower_to_depth(depth_mm, self._needle_feedrate)
+            elif callable(adjust):
+                delta_mm = depth_mm - previous_depth_mm
+                adjust(math.copysign(delta_mm, step_mm), self._needle_feedrate)
             else:
-                needle_action("lower", self._needle_feedrate)
-                if depth_mm > 0.0:
-                    adjust(math.copysign(depth_mm, step_mm), self._needle_feedrate)
+                return initial_samples
+            previous_depth_mm = float(depth_mm)
             if (
                 self._stop_requested.is_set()
                 or self._point_interrupt_requested.is_set()
@@ -1870,24 +1895,14 @@ class RouteMeasurementRunner:
             if not self._sleep_contact_settle():
                 return None
             last_axis_a_lowering_mm = self._latest_axis_a_lowering()
-            initial_after_measurement = (
-                after_measurement
-                if self._measurement_count <= self._initial_measurement_count()
-                else None
-            )
             samples = self._read_measurement_samples(
                 self._initial_measurement_count(),
                 start_index=1,
                 prepare_task=prepare_task,
-                after_measurement=initial_after_measurement,
             )
             if samples is None:
                 return None
-            depth_label = (
-                "after lift/lower"
-                if depth_mm <= 0.0
-                else f"{depth_mm:.4f} mm below down"
-            )
+            depth_label = f"{depth_mm:.4f} mm below down"
             if self._samples_are_short(samples):
                 last_status = "short"
                 self._status(
@@ -1915,7 +1930,6 @@ class RouteMeasurementRunner:
             if quality.good is not False:
                 completed_samples = self._complete_measurement_samples(
                     samples,
-                    after_measurement=after_measurement,
                 )
                 if completed_samples is None:
                     return None
@@ -2224,15 +2238,15 @@ class RouteMeasurementRunner:
         if contact_quality is not None and contact_quality.good is False:
             self._status(
                 f"Route measurement: point {position}/{total} contact check failed "
-                f"({contact_quality.status}); correct contact, then Measure "
-                "Anyway, Remeasure, or Skip."
+                f"({contact_quality.status}); correct contact, then Measure, "
+                "Remeasure, or Skip."
             )
         else:
             self._status(
                 f"Route measurement: point {position}/{total} relative RMS "
                 f"{_format_percent(record.relative_rms)} exceeds "
                 f"{_format_percent(self._max_relative_rms or math.nan)}; "
-                "correct contact, then Measure Anyway, Remeasure, or Skip."
+                "correct contact, then Measure, Remeasure, or Skip."
             )
         decision = self._wait_for_valid_confirmation()
         self._set_waiting(False)
@@ -2456,6 +2470,7 @@ class RouteExternalMeasurementSessionRunner:
         self._pause_requested = False
         self._pending_action: str | None = None
         self._pending_external_result: dict[str, Any] | None = None
+        self._external_measurement_request_id = 0
         self._state = "idle"
         self._waiting_reason = ""
         self._message = "Route API session idle."
@@ -2542,6 +2557,13 @@ class RouteExternalMeasurementSessionRunner:
         with self._condition:
             if self._state != "waiting_external_measurement":
                 return False
+            request_id = result.get("external_measurement_request_id")
+            if request_id is None:
+                request_id = result.get("request_id")
+            if request_id is not None and str(request_id) != str(
+                self._external_measurement_request_id
+            ):
+                return False
             self._pending_external_result = dict(result)
             self._condition.notify_all()
         return True
@@ -2597,6 +2619,7 @@ class RouteExternalMeasurementSessionRunner:
                 "message": self._message,
                 "position": self._position,
                 "total": self._total,
+                "external_measurement_request_id": self._external_measurement_request_id,
                 "current_contact": self._point_payload(self._current_point),
                 "last_preparation": self._preparation_payload(
                     self._last_preparation
@@ -2709,18 +2732,13 @@ class RouteExternalMeasurementSessionRunner:
                     continue
                 decision = self._wait_for_external_result(point, position)
                 if "result" in decision:
-                    external_result = dict(decision["result"])
-                    self._last_external_result = external_result
-                    self._append_history(
+                    jump = self._handle_external_result(
+                        dict(decision["result"]),
                         point,
                         position,
-                        str(external_result.get("status") or "ok"),
+                        len(self._points),
                         preparation=preparation,
-                        external_result=external_result,
                     )
-                    self._lift_needles(position, len(self._points))
-                    pause_decision = self._wait_if_pause_requested(point, position)
-                    jump = self._handle_post_point_decision(pause_decision)
                     if jump is not None:
                         index = jump
                         continue
@@ -2762,17 +2780,10 @@ class RouteExternalMeasurementSessionRunner:
         normalized = str(action or "").strip().lower()
         if normalized in {"resume", "next", "continue"}:
             return "next"
-        if normalized in {"remeasure", "measure"}:
+        if normalized == "measure":
+            return "measure"
+        if normalized == "remeasure":
             return "remeasure"
-        if normalized in {
-            "anyway",
-            "force",
-            "force_measure",
-            "force-measure",
-            "measure_anyway",
-            "measure-anyway",
-        }:
-            return "measure_anyway"
         if normalized in {"skip", "stop", "interrupt", "seek"}:
             return normalized
         if normalized.isdigit():
@@ -2848,6 +2859,7 @@ class RouteExternalMeasurementSessionRunner:
         point: RouteMeasurementPoint,
         position: int,
     ) -> dict[str, Any]:
+        self._begin_external_measurement_request()
         message = (
             f"Route API session: point {position}/{self._total} "
             f"{point.label} waiting for external measurement."
@@ -2859,6 +2871,13 @@ class RouteExternalMeasurementSessionRunner:
             message=message,
             allow_external_result=True,
         )
+
+    def _begin_external_measurement_request(self) -> int:
+        with self._condition:
+            self._external_measurement_request_id += 1
+            self._pending_external_result = None
+            self._condition.notify_all()
+            return self._external_measurement_request_id
 
     def _wait_before_first_point_decision(
         self,
@@ -2933,6 +2952,14 @@ class RouteExternalMeasurementSessionRunner:
         position: int,
         total: int,
     ) -> int | None:
+        if "result" in decision:
+            return self._handle_external_result(
+                dict(decision["result"]),
+                point,
+                position,
+                total,
+                preparation=self._last_preparation,
+            )
         action = str(decision.get("action") or "")
         if action == "stop":
             self.stop()
@@ -2951,19 +2978,8 @@ class RouteExternalMeasurementSessionRunner:
             )
             self._lift_needles(position, total)
             return None
-        if action == "measure_anyway":
+        if action == "measure":
             followup = self._wait_for_external_result(point, position)
-            if "result" in followup:
-                self._last_external_result = dict(followup["result"])
-                self._append_history(
-                    point,
-                    position,
-                    str(self._last_external_result.get("status") or "ok"),
-                    preparation=self._last_preparation,
-                    external_result=self._last_external_result,
-                )
-                self._lift_needles(position, total)
-                return None
             return self._handle_attention_decision(followup, point, position, total)
         if action == "seek":
             preparation = self._seek_current_contact(point, position, total)
@@ -2982,17 +2998,6 @@ class RouteExternalMeasurementSessionRunner:
                 return None
             if record.status == "ok":
                 followup = self._wait_for_external_result(point, position)
-                if "result" in followup:
-                    self._last_external_result = dict(followup["result"])
-                    self._append_history(
-                        point,
-                        position,
-                        str(self._last_external_result.get("status") or "ok"),
-                        preparation=preparation,
-                        external_result=self._last_external_result,
-                    )
-                    self._lift_needles(position, total)
-                    return None
                 return self._handle_attention_decision(followup, point, position, total)
             return self._handle_attention_decision(
                 self._wait_for_contact_attention(point, position),
@@ -3009,6 +3014,63 @@ class RouteExternalMeasurementSessionRunner:
             return jump
         self._lift_needles(position, total)
         return None
+
+    def _handle_external_result(
+        self,
+        external_result: dict[str, Any],
+        point: RouteMeasurementPoint,
+        position: int,
+        total: int,
+        *,
+        preparation: RouteExternalContactPreparation | None,
+    ) -> int | None:
+        self._last_external_result = dict(external_result)
+        if not self._external_result_succeeded(external_result):
+            return self._wait_after_external_result_failed(
+                external_result,
+                point,
+                position,
+                total,
+            )
+        self._append_history(
+            point,
+            position,
+            str(external_result.get("status") or "ok"),
+            preparation=preparation,
+            external_result=external_result,
+        )
+        self._lift_needles(position, total)
+        pause_decision = self._wait_if_pause_requested(point, position)
+        return self._handle_post_point_decision(pause_decision)
+
+    def _wait_after_external_result_failed(
+        self,
+        external_result: dict[str, Any],
+        point: RouteMeasurementPoint,
+        position: int,
+        total: int,
+    ) -> int | None:
+        message_text = str(external_result.get("message") or "").strip()
+        status_text = str(external_result.get("status") or "failed").strip() or "failed"
+        detail = f": {message_text}" if message_text else "."
+        message = (
+            f"Route API session: point {position}/{self._total} "
+            f"{point.label} external measurement {status_text}{detail}"
+        )
+        self._status(message)
+        self._begin_external_measurement_request()
+        decision = self._wait_for_decision(
+            state="waiting_external_measurement",
+            reason="external_measurement_failed",
+            message=message,
+            allow_external_result=True,
+        )
+        return self._handle_attention_decision(decision, point, position, total)
+
+    @staticmethod
+    def _external_result_succeeded(external_result: dict[str, Any]) -> bool:
+        status = str(external_result.get("status") or "ok").strip().lower()
+        return status in {"", "ok", "success", "complete", "completed"}
 
     def _handle_interrupted_decision(
         self,
