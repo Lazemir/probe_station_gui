@@ -1454,6 +1454,9 @@ class DesignNavigatorPanel(QWidget):
         self._selected_route_point_index = -1
         self._route_measurement_running = False
         self._route_measurement_waiting = False
+        self._route_measurement_waiting_reason = ""
+        self._route_pause_request_pending = False
+        self._route_interrupt_request_pending = False
         self._design_registration_active = False
         self._current_design_position: Point2D | None = None
         self._active_design_tool = "select"
@@ -1737,6 +1740,7 @@ class DesignNavigatorPanel(QWidget):
         self._route_pause_button.setEnabled(False)
         self._route_interrupt_button = QPushButton("Interrupt", route_group)
         self._route_interrupt_button.setEnabled(False)
+        self._route_interrupt_button.hide()
         self._route_stop_button = QPushButton("Stop", route_group)
         self._route_stop_button.setEnabled(False)
         route_run_buttons.addWidget(self._route_run_button)
@@ -1992,14 +1996,37 @@ class DesignNavigatorPanel(QWidget):
         self._route_measurement_running = bool(running)
         if not self._route_measurement_running:
             self._route_measurement_waiting = False
+            self._route_measurement_waiting_reason = ""
+            self._route_pause_request_pending = False
+            self._route_interrupt_request_pending = False
         if self._route_measurement_running:
             self._route_run_status_label.setText("Route measurement running.")
         elif self._route_run_status_label.text() == "Route measurement running.":
             self._route_run_status_label.setText("Route measurement idle.")
         self._update_enabled_state()
 
-    def set_route_measurement_waiting(self, waiting: bool) -> None:
+    def set_route_measurement_waiting(
+        self,
+        waiting: bool,
+        reason: str = "",
+    ) -> None:
         self._route_measurement_waiting = bool(waiting)
+        if self._route_measurement_waiting:
+            self._route_measurement_waiting_reason = str(reason or "paused")
+            self._route_pause_request_pending = False
+            self._route_interrupt_request_pending = False
+        else:
+            self._route_measurement_waiting_reason = ""
+        self._update_enabled_state()
+
+    def set_route_measurement_pause_request_pending(self, pending: bool) -> None:
+        self._route_pause_request_pending = bool(pending)
+        if self._route_pause_request_pending:
+            self._route_interrupt_request_pending = False
+        self._update_enabled_state()
+
+    def set_route_measurement_interrupt_request_pending(self, pending: bool) -> None:
+        self._route_interrupt_request_pending = bool(pending)
         self._update_enabled_state()
 
     def set_route_measurement_status(self, text: str) -> None:
@@ -2160,28 +2187,47 @@ class DesignNavigatorPanel(QWidget):
         )
         self._route_run_button.setEnabled(has_route_selection)
         self._route_stop_button.setEnabled(route_running)
-        route_resume = route_running and self._route_measurement_waiting
-        self._route_pause_button.setText("Resume" if route_resume else "Pause")
-        self._route_interrupt_button.setText(
-            "Resume" if route_resume else "Interrupt"
+        route_external_waiting = (
+            self._route_measurement_waiting
+            and self._route_measurement_waiting_reason == "external_measurement"
         )
-        self._route_pause_button.setEnabled(route_running)
-        self._route_interrupt_button.setEnabled(route_running)
+        route_confirm_waiting = (
+            self._route_measurement_waiting and not route_external_waiting
+        )
+        route_resume = route_running and route_confirm_waiting
+        if route_resume:
+            self._route_pause_button.setText("Resume")
+            route_control_enabled = route_running
+        elif route_running and (
+            self._route_pause_request_pending
+            or self._route_interrupt_request_pending
+            or route_external_waiting
+        ):
+            self._route_pause_button.setText("Interrupt")
+            route_control_enabled = (
+                route_running and not self._route_interrupt_request_pending
+            )
+        else:
+            self._route_pause_button.setText("Pause")
+            route_control_enabled = route_running
+        self._route_interrupt_button.setText("Interrupt")
+        self._route_pause_button.setEnabled(route_control_enabled)
+        self._route_interrupt_button.setEnabled(False)
         self._route_save_shift_button.setEnabled(
-            has_route_selection and self._route_measurement_waiting
+            has_route_selection and route_confirm_waiting
         )
-        self._route_remeasure_button.setEnabled(self._route_measurement_waiting)
-        self._route_skip_button.setEnabled(self._route_measurement_waiting)
-        self._route_next_button.setEnabled(self._route_measurement_waiting)
+        self._route_remeasure_button.setEnabled(route_confirm_waiting)
+        self._route_skip_button.setEnabled(route_confirm_waiting)
+        self._route_next_button.setEnabled(route_confirm_waiting)
         self._route_move_selected_button.setEnabled(
             has_route_selection
             and (
                 not route_running
-                or self._route_measurement_waiting
+                or route_confirm_waiting
             )
         )
         self._route_jump_selected_button.setEnabled(
-            self._route_measurement_waiting and has_route_selection
+            route_confirm_waiting and has_route_selection
         )
         for widget in (
             self._ruler_clear_button,
@@ -2898,16 +2944,25 @@ class DesignNavigatorPanel(QWidget):
         )
 
     def _emit_route_measurement_pause_or_resume(self) -> None:
-        if self._route_measurement_waiting:
+        route_external_waiting = (
+            self._route_measurement_waiting
+            and self._route_measurement_waiting_reason == "external_measurement"
+        )
+        if self._route_measurement_waiting and not route_external_waiting:
             self.route_measurement_confirmation_requested.emit("next")
             return
+        if (
+            self._route_measurement_running
+            and (self._route_pause_request_pending or route_external_waiting)
+        ):
+            self.set_route_measurement_interrupt_request_pending(True)
+            self.route_measurement_interrupt_requested.emit()
+            return
+        self.set_route_measurement_pause_request_pending(True)
         self.route_measurement_pause_requested.emit()
 
     def _emit_route_measurement_interrupt_or_resume(self) -> None:
-        if self._route_measurement_waiting:
-            self.route_measurement_confirmation_requested.emit("next")
-            return
-        self.route_measurement_interrupt_requested.emit()
+        self._emit_route_measurement_pause_or_resume()
 
     @staticmethod
     def _format_bounds(bounds: tuple[float, float, float, float]) -> str:

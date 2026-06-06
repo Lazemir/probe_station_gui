@@ -303,6 +303,9 @@ class RouteMeasurementDialog(QDialog):
         self.setModal(False)
         self._running = False
         self._waiting = False
+        self._waiting_reason = ""
+        self._pause_request_pending = False
+        self._interrupt_request_pending = False
         self._route_point_count = max(1, int(route_point_count))
         self._default_csv_path = default_csv_path
         self._default_photo_dir = (
@@ -590,6 +593,7 @@ class RouteMeasurementDialog(QDialog):
         self._pause_button = QPushButton("Pause", self)
         self._stop_button = QPushButton("Stop", self)
         self._interrupt_button = QPushButton("Interrupt", self)
+        self._interrupt_button.hide()
         self._save_shift_button = QPushButton("Save Shift", self)
         self._remeasure_button = QPushButton("Remeasure", self)
         self._skip_button = QPushButton("Skip", self)
@@ -925,6 +929,9 @@ class RouteMeasurementDialog(QDialog):
 
     def set_running(self, running: bool) -> None:
         self._running = bool(running)
+        if not self._running:
+            self._pause_request_pending = False
+            self._interrupt_request_pending = False
         for widget in (
             self._route_combo,
             self._csv_path_edit,
@@ -953,9 +960,15 @@ class RouteMeasurementDialog(QDialog):
         self.set_waiting(False)
         self._update_session_buttons()
 
-    def set_waiting(self, waiting: bool) -> None:
+    def set_waiting(self, waiting: bool, reason: str = "") -> None:
         self._waiting = bool(waiting)
-        can_confirm = self._running and self._waiting
+        if self._waiting:
+            self._waiting_reason = str(reason or "paused")
+            self._pause_request_pending = False
+            self._interrupt_request_pending = False
+        else:
+            self._waiting_reason = ""
+        can_confirm = self._can_confirm_waiting()
         self._update_pause_interrupt_buttons()
         self._stop_button.setEnabled(self._running)
         self._save_shift_button.setEnabled(can_confirm)
@@ -970,17 +983,37 @@ class RouteMeasurementDialog(QDialog):
         self._update_operation_state()
         self._update_session_buttons()
 
+    def set_pause_request_pending(self, pending: bool) -> None:
+        self._pause_request_pending = bool(pending)
+        if self._pause_request_pending:
+            self._interrupt_request_pending = False
+        self._update_pause_interrupt_buttons()
+
+    def set_interrupt_request_pending(self, pending: bool) -> None:
+        self._interrupt_request_pending = bool(pending)
+        self._update_pause_interrupt_buttons()
+
     def _update_pause_interrupt_buttons(self) -> None:
-        if self._running and self._waiting:
+        if self._running and self._can_confirm_waiting():
             self._pause_button.setText("Resume")
-            self._interrupt_button.setText("Resume")
             self._pause_button.setEnabled(True)
-            self._interrupt_button.setEnabled(True)
+            self._interrupt_button.setText("Resume")
+            self._interrupt_button.setEnabled(False)
+            return
+        if self._running and (
+            self._pause_request_pending
+            or self._interrupt_request_pending
+            or self._external_measurement_waiting()
+        ):
+            self._pause_button.setText("Interrupt")
+            self._pause_button.setEnabled(not self._interrupt_request_pending)
+            self._interrupt_button.setText("Interrupt")
+            self._interrupt_button.setEnabled(False)
             return
         self._pause_button.setText("Pause")
         self._interrupt_button.setText("Interrupt")
         self._pause_button.setEnabled(self._running)
-        self._interrupt_button.setEnabled(self._running)
+        self._interrupt_button.setEnabled(False)
 
     def _update_session_buttons(self) -> None:
         can_change_session = not self._running
@@ -991,7 +1024,20 @@ class RouteMeasurementDialog(QDialog):
             can_change_session and self._measurement_session_active
         )
         self._measure_button.setEnabled(
-            (self._running and self._waiting) or (not self._running)
+            self._can_confirm_waiting() or (not self._running)
+        )
+
+    def _external_measurement_waiting(self) -> bool:
+        return bool(
+            self._waiting
+            and str(getattr(self, "_waiting_reason", "")) == "external_measurement"
+        )
+
+    def _can_confirm_waiting(self) -> bool:
+        return bool(
+            self._running
+            and self._waiting
+            and not self._external_measurement_waiting()
         )
 
     def _set_runtime_settings_enabled(self, enabled: bool) -> None:
@@ -1427,18 +1473,20 @@ class RouteMeasurementDialog(QDialog):
         )
 
     def _emit_pause_requested(self) -> None:
-        if self._waiting:
+        if self._can_confirm_waiting():
             self.next_requested.emit()
             return
-        self._pause_button.setEnabled(False)
+        if self._running and (
+            self._pause_request_pending or self._external_measurement_waiting()
+        ):
+            self.set_interrupt_request_pending(True)
+            self.interrupt_requested.emit()
+            return
+        self.set_pause_request_pending(True)
         self.pause_requested.emit()
 
     def _emit_interrupt_or_resume_requested(self) -> None:
-        if self._waiting:
-            self.next_requested.emit()
-            return
-        self._interrupt_button.setEnabled(False)
-        self.interrupt_requested.emit()
+        self._emit_pause_requested()
 
     def _on_current_point_changed(self, value: int) -> None:
         point_number = min(max(1, int(value)), self._route_point_count)

@@ -1352,8 +1352,8 @@ assert image.height() == 4
             set_route_measurement_running=lambda value: calls.append(
                 ("panel_running", value)
             ),
-            set_route_measurement_waiting=lambda value: calls.append(
-                ("panel_waiting", value)
+            set_route_measurement_waiting=lambda value, reason="": calls.append(
+                ("panel_waiting", value, reason)
             ),
             set_route_measurement_status=lambda value: calls.append(
                 ("panel_status", value)
@@ -1361,7 +1361,9 @@ assert image.height() == 4
         )
         dialog = types.SimpleNamespace(
             set_running=lambda value: calls.append(("dialog_running", value)),
-            set_waiting=lambda value: calls.append(("dialog_waiting", value)),
+            set_waiting=lambda value, reason="": calls.append(
+                ("dialog_waiting", value, reason)
+            ),
             reset_progress=lambda value: calls.append(("dialog_progress", value)),
             set_status=lambda value: calls.append(("dialog_status", value)),
         )
@@ -1399,8 +1401,8 @@ assert image.height() == 4
             set_route_measurement_running=lambda value: calls.append(
                 ("panel_running", value)
             ),
-            set_route_measurement_waiting=lambda value: calls.append(
-                ("panel_waiting", value)
+            set_route_measurement_waiting=lambda value, reason="": calls.append(
+                ("panel_waiting", value, reason)
             ),
             set_route_measurement_status=lambda value: calls.append(
                 ("panel_status", value)
@@ -1408,7 +1410,9 @@ assert image.height() == 4
         )
         dialog = types.SimpleNamespace(
             set_running=lambda value: calls.append(("dialog_running", value)),
-            set_waiting=lambda value: calls.append(("dialog_waiting", value)),
+            set_waiting=lambda value, reason="": calls.append(
+                ("dialog_waiting", value, reason)
+            ),
             reset_progress=lambda value: calls.append(("dialog_progress", value)),
             set_status=lambda value: calls.append(("dialog_status", value)),
         )
@@ -1431,9 +1435,9 @@ assert image.height() == 4
 
         Main._on_route_measurement_started(window, "started", 420, 7, True)
 
-        self.assertIn(("panel_waiting", True), calls)
+        self.assertIn(("panel_waiting", True, "paused"), calls)
         self.assertIn(("dialog_running", True), calls)
-        self.assertIn(("dialog_waiting", True), calls)
+        self.assertIn(("dialog_waiting", True, "paused"), calls)
 
     def test_route_progress_eta_uses_current_run_baseline(self) -> None:
         dialog = RouteMeasurementDialog.__new__(RouteMeasurementDialog)
@@ -1660,6 +1664,9 @@ assert image.height() == 4
         paused: list[bool] = []
         dialog._running = True
         dialog._waiting = True
+        dialog._waiting_reason = "paused"
+        dialog._pause_request_pending = False
+        dialog._interrupt_request_pending = False
         dialog._pause_button = _FakeButton()
         dialog._interrupt_button = _FakeButton()
         dialog.next_requested = types.SimpleNamespace(
@@ -1679,10 +1686,95 @@ assert image.height() == 4
         self.assertEqual(dialog._pause_button.text, "Resume")
         self.assertEqual(dialog._interrupt_button.text, "Resume")
         self.assertTrue(dialog._pause_button.enabled)
-        self.assertTrue(dialog._interrupt_button.enabled)
+        self.assertFalse(dialog._interrupt_button.enabled)
         self.assertEqual(len(resumed), 2)
         self.assertEqual(paused, [])
         self.assertEqual(interrupted, [])
+
+    def test_running_dialog_pause_button_becomes_interrupt_until_waiting(self) -> None:
+        dialog = RouteMeasurementDialog.__new__(RouteMeasurementDialog)
+        resumed: list[bool] = []
+        interrupted: list[bool] = []
+        paused: list[bool] = []
+        dialog._running = True
+        dialog._waiting = False
+        dialog._waiting_reason = ""
+        dialog._pause_request_pending = False
+        dialog._interrupt_request_pending = False
+        dialog._pause_button = _FakeButton()
+        dialog._interrupt_button = _FakeButton()
+        dialog.next_requested = types.SimpleNamespace(
+            emit=lambda: resumed.append(True)
+        )
+        dialog.pause_requested = types.SimpleNamespace(
+            emit=lambda: paused.append(True)
+        )
+        dialog.interrupt_requested = types.SimpleNamespace(
+            emit=lambda: interrupted.append(True)
+        )
+
+        RouteMeasurementDialog._update_pause_interrupt_buttons(dialog)
+        self.assertEqual(dialog._pause_button.text, "Pause")
+
+        RouteMeasurementDialog._emit_pause_requested(dialog)
+        self.assertEqual(paused, [True])
+        self.assertEqual(dialog._pause_button.text, "Interrupt")
+        self.assertTrue(dialog._pause_button.enabled)
+
+        RouteMeasurementDialog._emit_pause_requested(dialog)
+        self.assertEqual(interrupted, [True])
+        self.assertEqual(resumed, [])
+        self.assertEqual(dialog._pause_button.text, "Interrupt")
+        self.assertFalse(dialog._pause_button.enabled)
+
+        dialog._waiting = True
+        dialog._waiting_reason = "paused"
+        dialog._pause_request_pending = False
+        dialog._interrupt_request_pending = False
+        RouteMeasurementDialog._update_pause_interrupt_buttons(dialog)
+        self.assertEqual(dialog._pause_button.text, "Resume")
+        self.assertTrue(dialog._pause_button.enabled)
+
+    def test_external_measurement_waiting_keeps_interrupt_control(self) -> None:
+        dialog = RouteMeasurementDialog.__new__(RouteMeasurementDialog)
+        dialog._running = True
+        dialog._waiting = False
+        dialog._waiting_reason = ""
+        dialog._pause_request_pending = False
+        dialog._interrupt_request_pending = False
+        dialog._pause_button = _FakeButton()
+        dialog._interrupt_button = _FakeButton()
+        dialog._stop_button = _FakeButton()
+        dialog._save_shift_button = _FakeButton()
+        dialog._remeasure_button = _FakeButton()
+        dialog._skip_button = _FakeButton()
+        dialog._next_button = _FakeButton()
+        dialog._operation_combo = _FakeButton()
+        dialog._jump_point_spin = _FakeButton()
+        dialog._move_button = _FakeButton()
+        dialog._jump_button = _FakeButton()
+        dialog._set_runtime_settings_enabled = lambda _enabled: None
+        dialog._update_operation_state = lambda: None
+        dialog._update_session_buttons = (
+            lambda: RouteMeasurementDialog._update_session_buttons(dialog)
+        )
+        dialog._start_session_button = _FakeButton()
+        dialog._cancel_session_button = _FakeButton()
+        dialog._measurement_session_active = True
+        dialog._measure_button = _FakeButton()
+
+        RouteMeasurementDialog.set_waiting(
+            dialog,
+            True,
+            reason="external_measurement",
+        )
+
+        self.assertEqual(dialog._pause_button.text, "Interrupt")
+        self.assertTrue(dialog._pause_button.enabled)
+        self.assertFalse(dialog._next_button.enabled)
+        self.assertFalse(dialog._measure_button.enabled)
+        self.assertFalse(dialog._save_shift_button.enabled)
+        self.assertFalse(dialog._skip_button.enabled)
 
     def test_waiting_dialog_enables_runtime_output_and_meter_fields(self) -> None:
         class _FakeEnabledWidget:
