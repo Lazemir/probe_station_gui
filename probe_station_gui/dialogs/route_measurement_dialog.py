@@ -953,6 +953,7 @@ class RouteMeasurementDialog(QDialog):
         self._move_button.setEnabled((not self._running) or can_confirm)
         self._jump_button.setEnabled(can_confirm)
         self._set_runtime_settings_enabled((not self._running) or can_confirm)
+        self._update_operation_state()
         self._update_session_buttons()
 
     def _update_pause_interrupt_buttons(self) -> None:
@@ -1236,33 +1237,34 @@ class RouteMeasurementDialog(QDialog):
         }
         route_active = photo_enabled or measure_enabled
         can_edit = not self._running or self._waiting
-        self._photo_dir_edit.setEnabled(photo_enabled and not self._running)
-        self._photo_browse_button.setEnabled(photo_enabled and not self._running)
+        can_edit_route_filter = not self._running
+        self._photo_dir_edit.setEnabled(photo_enabled and can_edit)
+        self._photo_browse_button.setEnabled(photo_enabled and can_edit)
         self._photo_settle_spin.setEnabled(photo_enabled and can_edit)
-        self._photo_autofocus_checkbox.setEnabled(route_active and not self._running)
+        self._photo_autofocus_checkbox.setEnabled(route_active and can_edit)
         self._photo_autofocus_range_spin.setEnabled(
             route_active
             and self._photo_autofocus_checkbox.isChecked()
-            and not self._running
+            and can_edit
         )
-        self._csv_path_edit.setEnabled(measure_enabled and not self._running)
-        self._csv_browse_button.setEnabled(measure_enabled and not self._running)
+        self._csv_path_edit.setEnabled(measure_enabled and can_edit)
+        self._csv_browse_button.setEnabled(measure_enabled and can_edit)
         self._previous_csv_path_edit.setEnabled(
             measure_enabled
             and self._previous_ok_only_checkbox.isChecked()
-            and not self._running
+            and can_edit_route_filter
         )
         self._previous_csv_browse_button.setEnabled(
             measure_enabled
             and self._previous_ok_only_checkbox.isChecked()
-            and not self._running
+            and can_edit_route_filter
         )
         self._previous_ok_only_checkbox.setEnabled(
-            measure_enabled and not self._running
+            measure_enabled and can_edit_route_filter
         )
-        self._meter_combo.setEnabled(measure_enabled and not self._running)
-        self._gwinstek_page.setEnabled(measure_enabled and not self._running)
-        self._keithley_page.setEnabled(measure_enabled and not self._running)
+        self._meter_combo.setEnabled(measure_enabled and can_edit)
+        self._gwinstek_page.setEnabled(measure_enabled and can_edit)
+        self._keithley_page.setEnabled(measure_enabled and can_edit)
         for widget in (
             self._initial_measurement_count_spin,
             self._followup_measurement_count_spin,

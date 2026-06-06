@@ -242,21 +242,39 @@ class RouteMeasurementCsvWriter:
     """Write route measurements after each point so partial runs are preserved."""
 
     def __init__(self, path: str | Path) -> None:
-        self.path = Path(path).expanduser().resolve()
+        self._path = Path(path).expanduser().resolve()
+        self._lock = threading.Lock()
+
+    @property
+    def path(self) -> Path:
+        with self._lock:
+            return self._path
+
+    def set_path(self, path: str | Path) -> None:
+        resolved = Path(path).expanduser().resolve()
+        with self._lock:
+            self._path = resolved
 
     def write_header(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        if self.path.exists() and self.path.stat().st_size > 0:
+        with self._lock:
+            path = self._path
+        self._write_header(path)
+
+    def _write_header(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() and path.stat().st_size > 0:
             return
-        with self.path.open("w", encoding="utf-8", newline="") as handle:
+        with path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
             writer.writeheader()
             handle.flush()
             os.fsync(handle.fileno())
 
     def append(self, record: RouteMeasurementRecord) -> None:
-        self.write_header()
-        with self.path.open("a", encoding="utf-8", newline="") as handle:
+        with self._lock:
+            path = self._path
+        self._write_header(path)
+        with path.open("a", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
             writer.writerow(_record_to_csv_row(record))
             handle.flush()
@@ -460,6 +478,10 @@ class RouteMeasurementRunner:
         auto_contact_seek_max_total_mm: float,
         contact_settle_s: float,
         photo_settle_s: float | None = None,
+        photo_focus_enabled: bool | None = None,
+        csv_path: str | Path | None = None,
+        nplc_label: str | None = None,
+        measurement_type: str | None = None,
     ) -> None:
         """Update settings that are safe to change while waiting for confirmation."""
 
@@ -487,6 +509,25 @@ class RouteMeasurementRunner:
         self._contact_settle_s = max(0.0, float(contact_settle_s))
         if photo_settle_s is not None:
             self._photo_settle_s = max(0.0, float(photo_settle_s))
+        if photo_focus_enabled is not None:
+            self._photo_focus_enabled = bool(photo_focus_enabled)
+        if csv_path is not None:
+            path_text = str(csv_path).strip()
+            if path_text:
+                self._csv_writer.set_path(path_text)
+        if nplc_label is not None:
+            self._nplc_label = str(nplc_label)
+        if measurement_type is not None:
+            self._measurement_type = str(measurement_type)
+
+    def apply_meter_configuration(self, configuration: object) -> None:
+        applicator = getattr(
+            self._lcr_controller,
+            "apply_route_meter_configuration",
+            None,
+        )
+        if callable(applicator):
+            applicator(configuration)
 
     def save_current_position_adjustment(
         self,
@@ -869,8 +910,6 @@ class RouteMeasurementRunner:
             if self._measure_enabled and hasattr(self._lcr_controller, "open"):
                 self._status("Route measurement: connecting meter.")
                 self._lcr_controller.open()
-            if self._measure_enabled:
-                self._csv_writer.write_header()
             self._begin_stage_task()
             if self._stop_requested.is_set():
                 message = "Route measurement stopped by user."

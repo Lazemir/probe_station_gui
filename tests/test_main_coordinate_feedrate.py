@@ -1405,6 +1405,68 @@ assert image.height() == 4
         self.assertEqual(paused, [])
         self.assertEqual(interrupted, [])
 
+    def test_waiting_dialog_enables_runtime_output_and_meter_fields(self) -> None:
+        class _FakeEnabledWidget:
+            def __init__(self, *, checked: bool = False) -> None:
+                self.enabled = False
+                self._checked = bool(checked)
+
+            def setEnabled(self, enabled: bool) -> None:  # noqa: N802
+                self.enabled = bool(enabled)
+
+            def isChecked(self) -> bool:  # noqa: N802
+                return self._checked
+
+        dialog = RouteMeasurementDialog.__new__(RouteMeasurementDialog)
+        dialog._running = True
+        dialog._waiting = False
+        dialog._operation_combo = types.SimpleNamespace(
+            currentData=lambda: (
+                route_measurement_dialog_module.ROUTE_OPERATION_PHOTO_THEN_MEASURE
+            )
+        )
+        dialog._photo_dir_edit = _FakeEnabledWidget()
+        dialog._photo_browse_button = _FakeEnabledWidget()
+        dialog._photo_settle_spin = _FakeEnabledWidget()
+        dialog._photo_autofocus_checkbox = _FakeEnabledWidget(checked=True)
+        dialog._photo_autofocus_range_spin = _FakeEnabledWidget()
+        dialog._csv_path_edit = _FakeEnabledWidget()
+        dialog._csv_browse_button = _FakeEnabledWidget()
+        dialog._previous_ok_only_checkbox = _FakeEnabledWidget(checked=True)
+        dialog._previous_csv_path_edit = _FakeEnabledWidget()
+        dialog._previous_csv_browse_button = _FakeEnabledWidget()
+        dialog._meter_combo = _FakeEnabledWidget()
+        dialog._gwinstek_page = _FakeEnabledWidget()
+        dialog._keithley_page = _FakeEnabledWidget()
+        dialog._initial_measurement_count_spin = _FakeEnabledWidget()
+        dialog._followup_measurement_count_spin = _FakeEnabledWidget()
+        dialog._max_relative_rms_spin = _FakeEnabledWidget()
+        dialog._contact_settle_spin = _FakeEnabledWidget()
+        dialog._contact_seek_range_spin = _FakeEnabledWidget()
+        dialog._contact_seek_step_spin = _FakeEnabledWidget()
+        dialog._pause_button = _FakeButton()
+        dialog._interrupt_button = _FakeButton()
+        dialog._stop_button = _FakeButton()
+        dialog._save_shift_button = _FakeButton()
+        dialog._remeasure_button = _FakeButton()
+        dialog._skip_button = _FakeButton()
+        dialog._next_button = _FakeButton()
+        dialog._jump_point_spin = _FakeEnabledWidget()
+        dialog._move_button = _FakeButton()
+        dialog._jump_button = _FakeButton()
+        dialog._set_runtime_settings_enabled = lambda _enabled: None
+        dialog._update_session_buttons = lambda: None
+
+        RouteMeasurementDialog.set_waiting(dialog, True)
+
+        self.assertTrue(dialog._csv_path_edit.enabled)
+        self.assertTrue(dialog._photo_dir_edit.enabled)
+        self.assertTrue(dialog._photo_autofocus_checkbox.enabled)
+        self.assertTrue(dialog._photo_autofocus_range_spin.enabled)
+        self.assertTrue(dialog._meter_combo.enabled)
+        self.assertTrue(dialog._gwinstek_page.enabled)
+        self.assertTrue(dialog._keithley_page.enabled)
+
     def test_running_dialog_close_is_ignored(self) -> None:
         dialog = RouteMeasurementDialog.__new__(RouteMeasurementDialog)
         statuses: list[str] = []
@@ -1424,6 +1486,22 @@ assert image.height() == 4
 
         self.assertTrue(event.ignored)
         self.assertEqual(statuses, ["Stop route measurement before closing."])
+
+    def test_main_shutdown_forces_route_dialog_close(self) -> None:
+        window = Main.__new__(Main)
+        calls: list[tuple[str, bool | None]] = []
+        window._route_measurement_dialog = types.SimpleNamespace(
+            set_running=lambda value: calls.append(("running", bool(value))),
+            close=lambda: calls.append(("close", None)),
+        )
+        window.design_layout_window = None
+        window.contact_calibration_window = None
+        window.surface_map_window = None
+        window.microscope_scan_dialog = None
+
+        Main._close_auxiliary_windows(window, force_route_dialog=True)
+
+        self.assertEqual(calls, [("running", False), ("close", None)])
 
     def test_record_route_contact_height_writes_height_map_csv(self) -> None:
         window = Main.__new__(Main)

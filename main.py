@@ -715,6 +715,9 @@ class Main(QMainWindow):
         self._route_measurement_thread: threading.Thread | None = None
         self._route_contact_move_thread: threading.Thread | None = None
         self._route_measurement_dialog: RouteMeasurementDialog | None = None
+        self._route_measurement_runtime_configuration: (
+            RouteMeasurementRunConfiguration | None
+        ) = None
         self._route_measurement_waiting = False
         self._route_measurement_photo_enabled = False
         self._route_measurement_measure_enabled = False
@@ -7431,7 +7434,7 @@ class Main(QMainWindow):
                     self.settings_manager.config_dir()
                     / "route-measurement-settings.json"
                 ),
-                parent=None,
+                parent=self,
             )
             dialog.measure_requested.connect(self._start_route_measurement)
             dialog.start_session_requested.connect(
@@ -7642,6 +7645,12 @@ class Main(QMainWindow):
         dialog.set_current_point(point_number)
         self._start_route_measurement(dialog.current_configuration())
 
+    def _current_route_measurement_configuration(
+        self,
+        fallback: RouteMeasurementRunConfiguration,
+    ) -> RouteMeasurementRunConfiguration:
+        return self._route_measurement_runtime_configuration or fallback
+
     def _start_route_measurement(
         self,
         configuration: RouteMeasurementRunConfiguration,
@@ -7711,6 +7720,7 @@ class Main(QMainWindow):
         if not self._route_measurement_session_active:
             self._route_measurement_session_active = True
             self._set_route_measurement_pending(True)
+        self._route_measurement_runtime_configuration = configuration
         self._save_route_measurement_session_metadata(configuration)
         photo_enabled = configuration.operation_mode in {
             ROUTE_OPERATION_PHOTO,
@@ -7772,11 +7782,14 @@ class Main(QMainWindow):
             position: int,
             total: int,
         ) -> None:
+            active_configuration = self._current_route_measurement_configuration(
+                configuration
+            )
             self._record_route_contact_height(
                 record,
                 position,
                 total,
-                csv_path=configuration.csv_path,
+                csv_path=active_configuration.csv_path,
             )
 
         runner = RouteMeasurementRunner(
@@ -7804,14 +7817,18 @@ class Main(QMainWindow):
                 point,
                 position,
                 total,
-                configuration=configuration,
+                configuration=self._current_route_measurement_configuration(
+                    configuration
+                ),
                 focus_result=focus_result,
             ),
             photo_focus_callback=lambda point, position, total: self._route_photo_autofocus(
                 point,
                 position,
                 total,
-                configuration=configuration,
+                configuration=self._current_route_measurement_configuration(
+                    configuration
+                ),
             ),
             photo_record_callback=self._record_route_photo,
             contact_height_record_callback=on_contact_height_record,
@@ -8653,15 +8670,44 @@ class Main(QMainWindow):
             return
         if self._route_measurement_dialog is not None:
             configuration = self._route_measurement_dialog.current_configuration()
-            runner.update_runtime_settings(
-                measurement_count=configuration.measurement_count,
-                initial_measurement_count=configuration.initial_measurement_count,
-                max_relative_rms=configuration.max_relative_rms,
-                auto_contact_seek_step_mm=configuration.contact_seek_step_mm,
-                auto_contact_seek_max_total_mm=configuration.contact_seek_range_mm,
-                contact_settle_s=configuration.contact_settle_s,
-                photo_settle_s=configuration.photo_settle_s,
-            )
+            self._route_measurement_runtime_configuration = configuration
+            self._save_route_measurement_session_metadata(configuration)
+            if isinstance(runner, RouteExternalMeasurementSessionRunner):
+                runner.update_runtime_settings(
+                    measurement_count=configuration.measurement_count,
+                    initial_measurement_count=configuration.initial_measurement_count,
+                    max_relative_rms=configuration.max_relative_rms,
+                    auto_contact_seek_step_mm=configuration.contact_seek_step_mm,
+                    auto_contact_seek_max_total_mm=configuration.contact_seek_range_mm,
+                    contact_settle_s=configuration.contact_settle_s,
+                    photo_settle_s=configuration.photo_settle_s,
+                )
+            else:
+                runner.update_runtime_settings(
+                    measurement_count=configuration.measurement_count,
+                    initial_measurement_count=configuration.initial_measurement_count,
+                    max_relative_rms=configuration.max_relative_rms,
+                    auto_contact_seek_step_mm=configuration.contact_seek_step_mm,
+                    auto_contact_seek_max_total_mm=configuration.contact_seek_range_mm,
+                    contact_settle_s=configuration.contact_settle_s,
+                    photo_settle_s=configuration.photo_settle_s,
+                    photo_focus_enabled=configuration.photo_autofocus_enabled,
+                    csv_path=configuration.csv_path,
+                    nplc_label=configuration.meter.nplc_label(),
+                    measurement_type=configuration.meter.measurement_type_label(),
+                )
+                measure_enabled = configuration.operation_mode in {
+                    ROUTE_OPERATION_MEASURE,
+                    ROUTE_OPERATION_PHOTO_THEN_MEASURE,
+                }
+                if measure_enabled:
+                    try:
+                        runner.apply_meter_configuration(configuration.meter)
+                    except LCRMeterError as exc:
+                        message = f"Route measurement instrument setup failed: {exc}"
+                        self._show_status(message, 8000)
+                        self._route_measurement_dialog.set_status(message)
+                        return
         if not runner.submit_confirmation(action):
             self._show_status("Unknown route measurement action.", 3000)
             return
@@ -9102,6 +9148,7 @@ class Main(QMainWindow):
                 logger.exception("Failed to store final API route session status.")
         self._route_measurement_runner = None
         self._api_route_lcr_controller = None
+        self._route_measurement_runtime_configuration = None
         self._route_measurement_waiting = False
         self._last_route_measurement_result = None
         self._pending_route_measure_point = None
@@ -10596,13 +10643,15 @@ class Main(QMainWindow):
         self.stage_controller.request_stop_oscillation()
         self.stage_controller.shutdown()
         self.lcr_controller.shutdown()
-        self._close_auxiliary_windows()
+        self._close_auxiliary_windows(force_route_dialog=True)
         if self.serial_connection_panel:
             self.serial_connection_panel.shutdown()
         event.accept()
 
-    def _close_auxiliary_windows(self) -> None:
+    def _close_auxiliary_windows(self, *, force_route_dialog: bool = False) -> None:
         if self._route_measurement_dialog is not None:
+            if force_route_dialog:
+                self._route_measurement_dialog.set_running(False)
             self._route_measurement_dialog.close()
         if self.design_layout_window is not None:
             self.design_layout_window.close()

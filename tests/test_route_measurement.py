@@ -226,6 +226,13 @@ def _point(index: int) -> RouteMeasurementPoint:
     )
 
 
+def _read_csv_rows_if_exists(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle))
+
+
 class RouteMeasurementRunnerTest(unittest.TestCase):
     def test_latest_statuses_use_last_csv_row_per_structure(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -360,6 +367,60 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
         ]
         self.assertEqual(len(lift_calls), 3)
         self.assertNotIn(("needles", "raise", 75.0), stage.calls)
+
+    def test_runner_uses_updated_csv_path_after_initial_wait(self) -> None:
+        stage = _FakeStage()
+        lcr = _FakeLCR([100.0])
+        waiting = threading.Event()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old_csv_path = Path(tmpdir) / "old-route.csv"
+            new_csv_path = Path(tmpdir) / "new-route.csv"
+            runner = RouteMeasurementRunner(
+                points=[_point(1)],
+                csv_path=old_csv_path,
+                stage_controller=stage,
+                lcr_controller=lcr,
+                needle_feedrate=75.0,
+                measurement_count=1,
+                initial_measurement_count=1,
+                contact_settle_s=0.0,
+                wait_before_first_point=True,
+                waiting_callback=lambda value: waiting.set() if value else None,
+            )
+            finished: list[tuple[bool, str]] = []
+            thread = threading.Thread(
+                target=lambda: finished.append(runner.run()),
+                daemon=True,
+            )
+
+            thread.start()
+            self.assertTrue(waiting.wait(timeout=2.0))
+            self.assertFalse(old_csv_path.exists())
+            runner.update_runtime_settings(
+                measurement_count=1,
+                initial_measurement_count=1,
+                max_relative_rms=None,
+                auto_contact_seek_step_mm=0.001,
+                auto_contact_seek_max_total_mm=0.001,
+                contact_settle_s=0.0,
+                csv_path=new_csv_path,
+                nplc_label="1",
+                measurement_type="DCR",
+            )
+            self.assertEqual(runner.csv_path, new_csv_path.resolve())
+            self.assertTrue(runner.submit_confirmation("next"))
+            thread.join(timeout=2.0)
+
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(finished[0][0], True, finished[0][1])
+            self.assertFalse(old_csv_path.exists())
+            with new_csv_path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["structure_number"], "1")
+            self.assertEqual(rows[0]["nplc"], "1")
+            self.assertEqual(rows[0]["measurement_type"], "DCR")
 
     def test_photo_only_route_raises_needles_and_skips_meter_and_csv(self) -> None:
         points = [_point(1), _point(2)]
@@ -2381,8 +2442,7 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
 
             self.assertFalse(thread.is_alive())
             self.assertEqual(result[0][0], True, result[0][1])
-            with csv_path.open("r", encoding="utf-8", newline="") as handle:
-                self.assertEqual(list(csv.DictReader(handle)), [])
+            self.assertEqual(_read_csv_rows_if_exists(csv_path), [])
 
     def test_interactive_quality_limit_rejects_noisy_result_without_csv_row(self) -> None:
         point = _point(1)
@@ -2432,8 +2492,7 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                 )
             self.assertFalse(results[0][1])
             self.assertEqual(results[0][0].status, "unstable")
-            with csv_path.open("r", encoding="utf-8", newline="") as handle:
-                self.assertEqual(list(csv.DictReader(handle)), [])
+            self.assertEqual(_read_csv_rows_if_exists(csv_path), [])
 
             runner.submit_confirmation("remeasure")
             with results_changed:
@@ -2692,8 +2751,7 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                 )
 
             self.assertEqual(lcr.abort_count, 0)
-            with csv_path.open("r", encoding="utf-8", newline="") as handle:
-                self.assertEqual(list(csv.DictReader(handle)), [])
+            self.assertEqual(_read_csv_rows_if_exists(csv_path), [])
             self.assertEqual(stage.calls[-1], ("finish",))
 
             saved, message = runner.save_current_position_adjustment((1.25, 11.75))
@@ -2810,9 +2868,7 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
 
             self.assertFalse(success)
             self.assertEqual(message, "Route measurement stopped by user.")
-            with csv_path.open("r", encoding="utf-8", newline="") as handle:
-                rows = list(csv.DictReader(handle))
-            self.assertEqual(rows, [])
+            self.assertEqual(_read_csv_rows_if_exists(csv_path), [])
 
 
 if __name__ == "__main__":
