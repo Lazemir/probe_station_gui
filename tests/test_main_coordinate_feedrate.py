@@ -34,7 +34,10 @@ from main import Main
 from probe_station_gui.dialogs import (
     route_measurement_dialog as route_measurement_dialog_module,
 )
-from probe_station_gui.dialogs.route_measurement_dialog import RouteMeasurementDialog
+from probe_station_gui.dialogs.route_measurement_dialog import (
+    RouteMeasurementDialog,
+    RouteMeasurementRunConfiguration,
+)
 from probe_station_gui.route_measurement import (
     RouteExternalMeasurementSessionRunner,
     RouteContactHeightRecord,
@@ -1592,7 +1595,7 @@ assert image.height() == 4
         window.route_measurement_started = _FakeEmit()
         window.route_measurement_finished = _FakeEmit()
         window._route_measurement_points = lambda _route: [point]
-        window._wait_for_camera_frame = lambda timeout_s=0.1: (object(), 1)
+        window._wait_for_camera_frame = lambda timeout_s=0.1: (None, None)
         window._api_route_meter_configuration = (
             lambda _payload, voltages_v=None: RouteMeterConfiguration()
         )
@@ -1609,10 +1612,7 @@ assert image.height() == 4
 
         response = Main._api_start_route_session(
             window,
-            {
-                "photo_enabled": False,
-                "photo_autofocus_enabled": False,
-            },
+            {},
         )
         new_runner = window._route_measurement_runner
 
@@ -1634,6 +1634,111 @@ assert image.height() == 4
 
         new_runner.stop()
         window._route_measurement_thread.join(timeout=2.0)
+
+    def test_prestart_route_measurement_defers_camera_frame_check(self) -> None:
+        class _FakeEmit:
+            def emit(self, *_args: object) -> None:
+                pass
+
+        class _FakeLcr:
+            def is_connected(self) -> bool:
+                return True
+
+            def apply_route_meter_configuration(
+                self,
+                _configuration: RouteMeterConfiguration,
+            ) -> None:
+                pass
+
+        point = RouteMeasurementPoint(
+            index=1,
+            point_id="p001",
+            label="P001",
+            design_center=(100.0, 200.0),
+            stage_xy=(1.0, 2.0),
+            needle_1_design=(101.0, 201.0),
+            needle_2_design=(99.0, 199.0),
+        )
+        window = Main.__new__(Main)
+        statuses: list[str] = []
+        camera_calls: list[float] = []
+        dialog_calls: list[tuple[str, object]] = []
+        window._route_measurement_thread = None
+        window.serial_connection = types.SimpleNamespace(is_open=True)
+        window._design_session = types.SimpleNamespace(
+            route=types.SimpleNamespace(points=[object()], name="route"),
+            registration=types.SimpleNamespace(valid=True),
+        )
+        window._route_measurement_points = lambda _route: [point]
+        window._set_route_measurement_resume_point = lambda _point: None
+        window._route_measurement_session_active = False
+        window._set_route_measurement_pending = lambda _pending: None
+        window._route_measurement_runtime_configuration = None
+        window._save_route_measurement_session_metadata = lambda _configuration: None
+        window._active_microscope_scale = lambda: None
+
+        def wait_for_camera_frame(*, timeout_s: float = 0.1, **_kwargs):
+            camera_calls.append(float(timeout_s))
+            return None, None
+
+        window._wait_for_camera_frame = wait_for_camera_frame
+        window.lcr_controller = _FakeLcr()
+        window.stage_controller = types.SimpleNamespace()
+        window._current_needle_feedrate = lambda: None
+        window.route_measurement_status = _FakeEmit()
+        window.route_measurement_progress = _FakeEmit()
+        window.route_measurement_recorded = _FakeEmit()
+        window.route_measurement_result = _FakeEmit()
+        window.route_measurement_waiting_changed = _FakeEmit()
+        window.design_navigator_panel = None
+        window._route_measurement_dialog = types.SimpleNamespace(
+            set_running=lambda value: dialog_calls.append(("running", bool(value))),
+            reset_progress=lambda total: dialog_calls.append(("progress", int(total))),
+            set_status=lambda message: dialog_calls.append(("status", str(message))),
+        )
+        window._show_status = lambda message, *_args: statuses.append(str(message))
+        window._send_telegram_alert = lambda *args, **kwargs: None
+        window._telegram_photo_lock = threading.Lock()
+        window._update_stage_coordinate_apply_state = lambda: None
+
+        configuration = RouteMeasurementRunConfiguration(
+            csv_path="route.csv",
+            previous_csv_path="route.csv",
+            operation_mode=route_measurement_dialog_module.ROUTE_OPERATION_MEASURE,
+            photo_output_dir="photos",
+            photo_settle_s=0.0,
+            photo_autofocus_enabled=True,
+            photo_autofocus_range_mm=0.03,
+            initial_measurement_count=10,
+            followup_measurement_count=240,
+            current_point=1,
+            max_relative_rms=0.01,
+            contact_settle_s=0.0,
+            contact_seek_range_mm=0.01,
+            contact_seek_step_mm=0.001,
+            previous_ok_only=False,
+            meter=RouteMeterConfiguration(),
+        )
+        original_thread = main_module.threading.Thread
+        _FakeThread.instances = []
+        main_module.threading.Thread = _FakeThread
+        try:
+            Main._start_route_measurement(
+                window,
+                configuration,
+                wait_before_first_point=True,
+            )
+        finally:
+            main_module.threading.Thread = original_thread
+
+        self.assertEqual(camera_calls, [])
+        self.assertEqual(len(_FakeThread.instances), 1)
+        self.assertTrue(_FakeThread.instances[0].started)
+        self.assertIsNotNone(window._route_measurement_runner)
+        self.assertEqual(dialog_calls[0], ("running", True))
+        self.assertFalse(
+            any("Camera frame is unavailable" in status for status in statuses)
+        )
 
     def test_record_route_contact_height_writes_height_map_csv(self) -> None:
         window = Main.__new__(Main)

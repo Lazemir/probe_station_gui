@@ -2556,14 +2556,6 @@ class Main(QMainWindow):
                     "by the current route filter."
                 ),
             }
-        if photo_enabled or photo_focus_enabled:
-            frame, _counter = self._wait_for_camera_frame(timeout_s=0.1)
-            if frame is None:
-                return {
-                    "accepted": False,
-                    "status_code": 409,
-                    "message": "Camera frame is unavailable; cannot start API route session.",
-                }
         try:
             meter_configuration = self._api_route_meter_configuration(
                 payload.get("meter", payload.get("meter_configuration", {})),
@@ -7765,7 +7757,10 @@ class Main(QMainWindow):
             if self._route_measurement_dialog is not None:
                 self._route_measurement_dialog.set_status(message)
             return
-        if photo_enabled or configuration.photo_autofocus_enabled:
+        if (
+            not wait_before_first_point
+            and (photo_enabled or configuration.photo_autofocus_enabled)
+        ):
             frame, _counter = self._wait_for_camera_frame(timeout_s=0.1)
             if frame is None:
                 message = (
