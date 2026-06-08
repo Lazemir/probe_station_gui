@@ -115,10 +115,47 @@ class _FakeAliveThread:
         return True
 
 
+class _FakeJoinableThread:
+    def __init__(self, *, alive: bool = True) -> None:
+        self.alive = bool(alive)
+        self.join_calls: list[float | None] = []
+
+    def is_alive(self) -> bool:
+        return self.alive
+
+    def join(self, timeout: float | None = None) -> None:
+        self.join_calls.append(timeout)
+        self.alive = False
+
+
+class _FakeVisibleDialog:
+    def __init__(self, visible: bool = True) -> None:
+        self.visible = bool(visible)
+        self.running: list[bool] = []
+        self.waiting: list[tuple[bool, str]] = []
+        self.statuses: list[str] = []
+
+    def isVisible(self) -> bool:  # noqa: N802 - Qt naming
+        return self.visible
+
+    def set_running(self, value: bool) -> None:
+        self.running.append(bool(value))
+
+    def set_pause_request_pending(self, _value: bool) -> None:
+        pass
+
+    def set_waiting(self, value: bool, reason: str = "") -> None:
+        self.waiting.append((bool(value), str(reason)))
+
+    def set_status(self, message: str) -> None:
+        self.statuses.append(str(message))
+
+
 class _FakeRouteMeasurementRunner:
     def __init__(self) -> None:
         self.confirmations: list[str] = []
         self.correction_requested = False
+        self.stop_requested = False
 
     def submit_confirmation(self, action: str) -> bool:
         self.confirmations.append(str(action))
@@ -126,6 +163,9 @@ class _FakeRouteMeasurementRunner:
 
     def request_current_point_correction(self) -> None:
         self.correction_requested = True
+
+    def stop(self) -> None:
+        self.stop_requested = True
 
 
 class _FakeButton:
@@ -1501,6 +1541,83 @@ assert image.height() == 4
             [(True, "Route contact move complete: point 7 P007.")],
         )
 
+    def test_route_contact_move_applies_saved_api_route_shift(self) -> None:
+        window = Main.__new__(Main)
+        calls: list[object] = []
+        point = RouteMeasurementPoint(
+            index=7,
+            point_id="p007",
+            label="P007",
+            design_center=(10.0, 20.0),
+            stage_xy=(1.25, 2.5),
+            needle_1_design=(11.0, 21.0),
+            needle_2_design=(9.0, 19.0),
+        )
+        window._api_route_offset_xy = (0.1, -0.2)
+        window.stage_controller = types.SimpleNamespace(
+            begin_external_task=lambda label: calls.append(("begin", label)),
+            run_external_needles_action=lambda action, feedrate: calls.append(
+                ("needles", action, feedrate)
+            ),
+            run_external_move_to_xy=lambda x_mm, y_mm: calls.append(
+                ("move", x_mm, y_mm)
+            ),
+            finish_external_task=lambda: calls.append(("finish",)),
+        )
+        window.route_measurement_status = types.SimpleNamespace(emit=lambda _message: None)
+        window.route_contact_move_finished = types.SimpleNamespace(
+            emit=lambda _success, _message: None
+        )
+
+        Main._run_route_contact_move(window, point, 75.0)
+
+        self.assertIn(("move", 1.35, 2.3), calls)
+
+    def test_api_route_control_save_shift_updates_direct_route_offset(self) -> None:
+        window = Main.__new__(Main)
+        statuses: list[str] = []
+        point = RouteMeasurementPoint(
+            index=7,
+            point_id="p007",
+            label="P007",
+            design_center=(10.0, 20.0),
+            stage_xy=(1.25, 2.5),
+            needle_1_design=(11.0, 21.0),
+            needle_2_design=(9.0, 19.0),
+        )
+        window._route_measurement_runner = None
+        window._route_measurement_thread = None
+        window._route_measurement_dialog = None
+        window.design_navigator_panel = None
+        window._api_route_control_active = True
+        window._api_route_control_paused = True
+        window._api_route_offset_xy = (0.0, 0.0)
+        window._api_contact_context = lambda _contact: {
+            "accepted": True,
+            "point": point,
+        }
+        window._stage_xy_from_position = lambda _position: (1.75, 2.25)
+        window._show_status = (
+            lambda message, _timeout_ms=None: statuses.append(str(message))
+        )
+        window.stage_controller = types.SimpleNamespace(
+            current_stage_position=lambda: (0.0, 0.0, 0.0),
+            latest_stage_position=lambda: None,
+            is_busy=lambda: False,
+        )
+
+        Main._save_route_measurement_shift(window, 7)
+
+        self.assertEqual(window._api_route_offset_xy, (0.5, -0.25))
+        self.assertEqual(
+            Main._api_route_adjusted_stage_xy(window, point),
+            (1.75, 2.25),
+        )
+        self.assertEqual(
+            statuses,
+            ["Route shift saved: dX=+0.5000 mm, dY=-0.2500 mm."],
+        )
+
     def test_cancel_route_measurement_session_clears_persisted_state(self) -> None:
         window = Main.__new__(Main)
         statuses: list[str] = []
@@ -1571,6 +1688,32 @@ assert image.height() == 4
         self.assertIsNone(window._pending_route_measure_point)
         self.assertEqual(statuses, ["Route measurement: measure from point 91."])
 
+    def test_resume_after_waiting_point_change_jumps_to_selected_point(self) -> None:
+        window = Main.__new__(Main)
+        runner = _FakeRouteMeasurementRunner()
+        resumed: list[int] = []
+        statuses: list[str] = []
+
+        window._route_measurement_runner = runner
+        window._route_measurement_waiting = True
+        window._pending_route_measure_point = None
+        window._route_contact_move_thread = None
+        window._route_measurement_dialog = None
+        window.design_navigator_panel = None
+        window._api_route_control_active = False
+        window._set_route_measurement_resume_point = resumed.append
+        window._show_status = (
+            lambda message, _timeout_ms=None: statuses.append(str(message))
+        )
+
+        Main._on_route_measurement_current_point_changed(window, 42)
+        Main._submit_route_measurement_confirmation(window, "next")
+
+        self.assertEqual(resumed, [42])
+        self.assertIsNone(window._pending_route_measure_point)
+        self.assertEqual(runner.confirmations, ["jump:42"])
+        self.assertEqual(statuses, ["Route measurement: measure from point 42."])
+
     def test_measure_selected_route_point_while_running_queues_interrupt(self) -> None:
         window = Main.__new__(Main)
         runner = _FakeRouteMeasurementRunner()
@@ -1605,13 +1748,588 @@ assert image.height() == 4
         )
         self.assertEqual(runner.confirmations, [])
 
-        Main._on_route_measurement_waiting_changed(window, True)
+    def test_api_route_control_interrupt_cancels_gui_work_and_pauses(self) -> None:
+        window, stage_controller, _joystick, _timer, statuses = _make_main()
+        aborts: list[str] = []
+
+        window._route_measurement_runner = None
+        window._route_measurement_waiting = False
+        window._route_measurement_dialog = None
+        window.design_navigator_panel = None
+        window._pending_route_measure_point = 91
+        window._contact_seek_stop_requested = threading.Event()
+        window._api_route_control_active = True
+        window._api_route_control_pause_requested = True
+        window._api_route_control_paused = False
+        window._api_route_control_stop_requested = True
+        window._api_route_control_label = "chip 163"
+        window._api_route_control_updated_utc = ""
+        window.lcr_controller = types.SimpleNamespace(
+            abort_current_measurement=lambda: aborts.append("lcr")
+        )
+        window._api_route_lcr_controller = None
+        window._controller_reports_active_motion = lambda: True
+
+        Main._request_route_measurement_point_correction(window)
 
         self.assertIsNone(window._pending_route_measure_point)
-        self.assertEqual(runner.confirmations, ["jump:91"])
+        self.assertTrue(window._contact_seek_stop_requested.is_set())
+        self.assertEqual(aborts, [])
         self.assertEqual(
-            statuses[-1],
-            "Route measurement: measure from point 91.",
+            stage_controller.cancelled_tasks,
+            ["API route control interrupt requested."],
+        )
+        self.assertEqual(
+            stage_controller.cancelled_motions,
+            ["API route control interrupt requested."],
+        )
+        self.assertTrue(window._api_route_control_active)
+        self.assertFalse(window._api_route_control_pause_requested)
+        self.assertTrue(window._api_route_control_paused)
+        self.assertFalse(window._api_route_control_stop_requested)
+        self.assertEqual(statuses[-1], "chip 163: interrupted; paused.")
+
+    def test_contact_seek_cancel_does_not_abort_measurement_instrument(self) -> None:
+        window = Main.__new__(Main)
+        aborts: list[str] = []
+        cancelled_motions: list[str] = []
+        statuses: list[str] = []
+
+        window._contact_seek_stop_requested = threading.Event()
+        window.lcr_controller = types.SimpleNamespace(
+            abort_current_measurement=lambda: aborts.append("lcr")
+        )
+        window.stage_controller = types.SimpleNamespace(
+            cancel_active_motion=lambda reason: cancelled_motions.append(str(reason))
+        )
+        window._show_status = (
+            lambda message, _timeout_ms=None: statuses.append(str(message))
+        )
+
+        Main._cancel_contact_seek(window)
+
+        self.assertTrue(window._contact_seek_stop_requested.is_set())
+        self.assertEqual(aborts, [])
+        self.assertEqual(cancelled_motions, ["Contact seek cancel requested."])
+        self.assertEqual(statuses, ["Contact seek cancel requested."])
+
+    def test_api_route_control_confirmation_preserves_requested_action(self) -> None:
+        window = Main.__new__(Main)
+        actions: list[dict[str, object]] = []
+
+        window._route_measurement_runner = None
+        window._api_route_control_active = True
+        window._api_route_control_paused = True
+        window._api_route_control_action = lambda payload: actions.append(dict(payload))
+        window._show_status = lambda *_args: None
+
+        Main._submit_route_measurement_confirmation(window, "skip")
+
+        self.assertEqual(actions, [{"action": "skip"}])
+
+    def test_api_route_control_action_is_consumed_explicitly(self) -> None:
+        window = Main.__new__(Main)
+        statuses: list[str] = []
+
+        window._api_route_control_active = True
+        window._api_route_control_pause_requested = False
+        window._api_route_control_paused = True
+        window._api_route_control_stop_requested = False
+        window._api_route_control_pending_action = ""
+        window._api_route_control_label = "chip 163"
+        window._api_route_control_updated_utc = ""
+        window.design_navigator_panel = None
+        window._route_measurement_dialog = _FakeVisibleDialog(True)
+        window._api_timestamp_utc = lambda: "now"
+        window._show_status = lambda message, _timeout_ms=None: statuses.append(str(message))
+
+        response = Main._api_route_control_action(window, {"action": "skip"})
+
+        self.assertFalse(window._api_route_control_pause_requested)
+        self.assertFalse(window._api_route_control_paused)
+        self.assertEqual(window._api_route_control_pending_action, "skip")
+        self.assertEqual(response["pending_action"], "skip")
+
+        ack = Main._api_route_control_action(window, {"action": "ack"})
+
+        self.assertEqual(window._api_route_control_pending_action, "")
+        self.assertEqual(ack["pending_action"], "")
+        self.assertEqual(statuses[-1], "chip 163: skip.")
+
+    def test_api_route_control_start_clears_waiting_route_runner(self) -> None:
+        window = Main.__new__(Main)
+        statuses: list[str] = []
+        opened: list[bool] = []
+        runner = _FakeRouteMeasurementRunner()
+        thread = _FakeJoinableThread()
+
+        window._route_measurement_runner = runner
+        window._route_measurement_thread = thread
+        window._route_measurement_waiting = True
+        window._route_measurement_waiting_reason = "paused"
+        window._route_measurement_session_active = True
+        window._pending_route_measure_point = 33
+        window._api_route_control_active = False
+        window._api_route_control_pause_requested = False
+        window._api_route_control_paused = False
+        window._api_route_control_stop_requested = False
+        window._api_route_control_pending_action = ""
+        window._api_route_control_label = ""
+        window._api_route_control_updated_utc = ""
+        window.design_navigator_panel = None
+        window._route_measurement_dialog = None
+        window._api_timestamp_utc = lambda: "now"
+        window._show_status = lambda message, _timeout_ms=None: statuses.append(
+            str(message)
+        )
+
+        def open_controls() -> bool:
+            opened.append(True)
+            window._route_measurement_dialog = _FakeVisibleDialog(True)
+            return True
+
+        window._show_route_measurement_dialog_for_api_session = open_controls
+
+        response = Main._api_route_control_action(
+            window,
+            {"action": "start", "label": "chip 163"},
+        )
+
+        self.assertTrue(response["accepted"])
+        self.assertTrue(runner.stop_requested)
+        self.assertEqual(thread.join_calls, [2.0])
+        self.assertIsNone(window._route_measurement_runner)
+        self.assertIsNone(window._route_measurement_thread)
+        self.assertFalse(window._route_measurement_waiting)
+        self.assertFalse(window._route_measurement_session_active)
+        self.assertIsNone(window._pending_route_measure_point)
+        self.assertTrue(window._api_route_control_active)
+        self.assertEqual(statuses[-1], "chip 163: running.")
+        self.assertEqual(opened, [True])
+
+    def test_api_route_control_start_rejects_when_controls_do_not_open(self) -> None:
+        window = Main.__new__(Main)
+        statuses: list[str] = []
+        opened: list[bool] = []
+
+        window._route_measurement_runner = None
+        window._route_measurement_thread = None
+        window._api_route_control_active = False
+        window._api_route_control_pause_requested = False
+        window._api_route_control_paused = False
+        window._api_route_control_stop_requested = False
+        window._api_route_control_pending_action = ""
+        window._api_route_control_label = ""
+        window._api_route_control_updated_utc = ""
+        window.design_navigator_panel = None
+        window._route_measurement_dialog = None
+        window._api_timestamp_utc = lambda: "now"
+        window._show_status = lambda message, _timeout_ms=None: statuses.append(
+            str(message)
+        )
+        window._show_route_measurement_dialog_for_api_session = (
+            lambda: opened.append(True) or False
+        )
+
+        response = Main._api_route_control_action(
+            window,
+            {"action": "start", "label": "chip 163"},
+        )
+
+        self.assertFalse(response["accepted"])
+        self.assertEqual(response["status_code"], 409)
+        self.assertFalse(window._api_route_control_active)
+        self.assertEqual(opened, [True])
+        self.assertIn("window did not open", response["message"])
+
+    def test_api_route_control_start_rejects_busy_route_runner(self) -> None:
+        window = Main.__new__(Main)
+
+        window._route_measurement_runner = _FakeRouteMeasurementRunner()
+        window._route_measurement_thread = _FakeJoinableThread()
+        window._route_measurement_waiting = False
+        window._api_route_control_active = False
+
+        response = Main._api_route_control_action(
+            window,
+            {"action": "start", "label": "chip 163"},
+        )
+
+        self.assertFalse(response["accepted"])
+        self.assertEqual(response["status_code"], 409)
+        self.assertIn("already active", response["message"])
+        self.assertFalse(window._api_route_control_active)
+
+    def test_api_route_control_start_rejects_external_route_session(self) -> None:
+        window = Main.__new__(Main)
+        runner = types.SimpleNamespace(
+            stop=lambda: None,
+            submit_external_result=lambda _result: True,
+        )
+
+        window._route_measurement_runner = runner
+        window._route_measurement_thread = _FakeJoinableThread()
+        window._route_measurement_waiting = True
+        window._api_route_control_active = False
+
+        response = Main._api_route_control_action(
+            window,
+            {"action": "start", "label": "chip 163"},
+        )
+
+        self.assertFalse(response["accepted"])
+        self.assertEqual(response["status_code"], 409)
+        self.assertFalse(window._api_route_control_active)
+
+    def test_probe_route_api_rejects_route_command_without_control_window(self) -> None:
+        window = Main.__new__(Main)
+        statuses: list[str] = []
+
+        window._route_measurement_dialog = None
+        window._show_status = (
+            lambda message, _timeout_ms=None: statuses.append(str(message))
+        )
+
+        response = Main._submit_api_command_request(
+            window,
+            {
+                "action": "move_to_contact",
+                "payload": {"contact_number": 33},
+            },
+        )
+
+        self.assertFalse(response["accepted"])
+        self.assertEqual(response["status_code"], 409)
+        self.assertFalse(response["route_control_window_open"])
+        self.assertIn("Probe route control window is closed", response["message"])
+        self.assertEqual(statuses, [response["message"]])
+
+    def test_api_route_control_command_uses_gui_thread_bridge(self) -> None:
+        window = Main.__new__(Main)
+        requests: list[tuple[dict[str, object], float]] = []
+
+        def submit(request, *, timeout_s=5.0):
+            requests.append((dict(request), float(timeout_s)))
+            return {"accepted": True, "bridged": True}
+
+        window._api_bridge = types.SimpleNamespace(submit=submit)
+
+        response = Main._submit_api_command_request_from_api_thread(
+            window,
+            {
+                "action": "api_route_control_action",
+                "payload": {"action": "start"},
+            },
+        )
+
+        self.assertTrue(response["accepted"])
+        self.assertTrue(response["bridged"])
+        self.assertEqual(len(requests), 1)
+        bridged_request, timeout_s = requests[0]
+        self.assertEqual(bridged_request["action"], "command")
+        self.assertEqual(
+            bridged_request["command"],
+            {
+                "action": "api_route_control_action",
+                "payload": {"action": "start"},
+            },
+        )
+        self.assertEqual(timeout_s, 10.0)
+
+    def test_probe_route_api_guard_uses_gui_thread_before_direct_command(self) -> None:
+        window = Main.__new__(Main)
+        bridge_requests: list[tuple[dict[str, object], float]] = []
+        dispatch_calls: list[tuple[dict[str, object], bool]] = []
+
+        def submit(request, *, timeout_s=5.0):
+            bridge_requests.append((dict(request), float(timeout_s)))
+            return {"accepted": True, "route_control_window_open": True}
+
+        def dispatch(command_request, *, apply_route_control_guard):
+            dispatch_calls.append(
+                (dict(command_request), bool(apply_route_control_guard))
+            )
+            return {"accepted": True, "dispatched": True}
+
+        window._api_bridge = types.SimpleNamespace(submit=submit)
+        window._dispatch_api_command_request = dispatch
+
+        command = {
+            "action": "move_to_contact",
+            "payload": {"contact_number": 33},
+        }
+        response = Main._submit_api_command_request_from_api_thread(window, command)
+
+        self.assertTrue(response["accepted"])
+        self.assertTrue(response["dispatched"])
+        self.assertEqual(len(bridge_requests), 1)
+        guard_request, timeout_s = bridge_requests[0]
+        self.assertEqual(guard_request["action"], "probe_route_window_guard")
+        self.assertEqual(guard_request["guard_action"], "move_to_contact")
+        self.assertEqual(guard_request["payload"], {"contact_number": 33})
+        self.assertEqual(timeout_s, 10.0)
+        self.assertEqual(dispatch_calls, [(command, False)])
+
+    def test_probe_route_api_guard_does_not_cover_bare_stage_move(self) -> None:
+        window = Main.__new__(Main)
+
+        self.assertFalse(
+            Main._probe_route_api_requires_window(
+                window,
+                "move_to_coordinates",
+                {"x": 1.0},
+            )
+        )
+
+    def test_api_route_control_resume_rejects_closed_control_window(self) -> None:
+        window = Main.__new__(Main)
+        statuses: list[str] = []
+
+        window._route_measurement_dialog = None
+        window._api_route_control_active = True
+        window._api_route_control_paused = True
+        window._show_status = (
+            lambda message, _timeout_ms=None: statuses.append(str(message))
+        )
+
+        response = Main._api_route_control_action(window, {"action": "resume"})
+
+        self.assertFalse(response["accepted"])
+        self.assertEqual(response["status_code"], 409)
+        self.assertFalse(response["route_control_window_open"])
+        self.assertEqual(statuses, [response["message"]])
+
+    def test_api_route_control_pause_request_waits_for_ack_before_resume(self) -> None:
+        window = Main.__new__(Main)
+        calls: list[tuple[str, object]] = []
+        statuses: list[str] = []
+
+        panel = types.SimpleNamespace(
+            set_route_measurement_running=lambda value: calls.append(("running", value)),
+            set_route_measurement_pause_request_pending=lambda value: calls.append(
+                ("pending", value)
+            ),
+            set_route_measurement_waiting=lambda value, reason="": calls.append(
+                ("waiting", value, reason)
+            ),
+            set_route_measurement_status=lambda value: calls.append(("status", value)),
+        )
+        window.design_navigator_panel = panel
+        window._route_measurement_dialog = None
+        window._api_route_control_active = True
+        window._api_route_control_pause_requested = False
+        window._api_route_control_paused = False
+        window._api_route_control_stop_requested = False
+        window._api_route_control_pending_action = ""
+        window._api_route_control_label = "chip 163"
+        window._api_route_control_updated_utc = ""
+        window._api_timestamp_utc = lambda: "now"
+        window._show_status = lambda message, _timeout_ms=None: statuses.append(str(message))
+
+        pause = Main._api_route_control_action(window, {"action": "pause"})
+
+        self.assertTrue(pause["pause_requested"])
+        self.assertFalse(pause["paused"])
+        self.assertTrue(window._api_route_control_pause_requested)
+        self.assertFalse(window._api_route_control_paused)
+        self.assertFalse(window._route_measurement_waiting)
+        self.assertIn(("pending", True), calls)
+        self.assertIn(("waiting", False, "paused"), calls)
+
+        paused = Main._api_route_control_action(window, {"action": "pause_ack"})
+
+        self.assertFalse(paused["pause_requested"])
+        self.assertTrue(paused["paused"])
+        self.assertFalse(window._api_route_control_pause_requested)
+        self.assertTrue(window._api_route_control_paused)
+        self.assertTrue(window._route_measurement_waiting)
+        self.assertIn(("pending", False), calls)
+
+    def test_api_route_control_pending_pause_click_interrupts(self) -> None:
+        window = Main.__new__(Main)
+        interrupts: list[str] = []
+
+        window._route_measurement_runner = None
+        window._api_route_control_active = True
+        window._api_route_control_pause_requested = True
+        window._api_route_control_paused = False
+        window._interrupt_api_route_controlled_operation = (
+            lambda reason: interrupts.append(str(reason))
+        )
+        window._show_status = lambda *_args: None
+
+        Main._request_pause_route_measurement(window)
+
+        self.assertEqual(interrupts, ["API route control interrupt requested."])
+
+    def test_api_route_control_pause_uses_control_state_with_existing_route_runner(self) -> None:
+        window = Main.__new__(Main)
+        actions: list[dict[str, object]] = []
+        runner = types.SimpleNamespace(
+            request_pause_after_current_point=lambda: actions.append(
+                {"action": "runner_pause"}
+            )
+        )
+
+        window._route_measurement_runner = runner
+        window._api_route_control_active = True
+        window._api_route_control_pause_requested = False
+        window._api_route_control_paused = False
+        window._api_route_control_action = lambda payload: actions.append(dict(payload))
+        window._show_status = lambda *_args: None
+
+        Main._request_pause_route_measurement(window)
+
+        self.assertEqual(actions, [{"action": "pause"}])
+
+    def test_api_route_control_interrupt_uses_control_state_with_existing_route_runner(self) -> None:
+        window = Main.__new__(Main)
+        interrupts: list[str] = []
+        runner = _FakeRouteMeasurementRunner()
+
+        window._route_measurement_runner = runner
+        window._api_route_control_active = True
+        window._api_route_control_pause_requested = True
+        window._api_route_control_paused = False
+        window._interrupt_api_route_controlled_operation = (
+            lambda reason: interrupts.append(str(reason))
+        )
+        window._show_status = lambda *_args: None
+
+        Main._request_route_measurement_point_correction(window)
+
+        self.assertFalse(runner.correction_requested)
+        self.assertEqual(interrupts, ["API route control interrupt requested."])
+
+    def test_api_route_control_resume_uses_control_state_with_existing_route_runner(self) -> None:
+        window = Main.__new__(Main)
+        actions: list[dict[str, object]] = []
+        runner = _FakeRouteMeasurementRunner()
+
+        window._route_measurement_runner = runner
+        window._api_route_control_active = True
+        window._api_route_control_paused = True
+        window._api_route_control_action = lambda payload: actions.append(dict(payload))
+        window._show_status = lambda *_args: None
+
+        Main._submit_route_measurement_confirmation(window, "next")
+
+        self.assertEqual(runner.confirmations, [])
+        self.assertEqual(actions, [{"action": "resume"}])
+
+    def test_api_route_control_save_shift_uses_control_state_with_existing_route_runner(self) -> None:
+        window = Main.__new__(Main)
+        statuses: list[str] = []
+        runner_calls: list[object] = []
+        point = RouteMeasurementPoint(
+            index=7,
+            point_id="p007",
+            label="P007",
+            design_center=(10.0, 20.0),
+            stage_xy=(1.25, 2.5),
+            needle_1_design=(11.0, 21.0),
+            needle_2_design=(9.0, 19.0),
+        )
+        runner = types.SimpleNamespace(
+            set_current_adjustment_point=lambda point_number: runner_calls.append(
+                ("select", point_number)
+            )
+            or (True, "selected"),
+            save_current_position_adjustment=lambda stage_xy: runner_calls.append(
+                ("save", stage_xy)
+            )
+            or (True, "saved by runner"),
+        )
+
+        window._route_measurement_runner = runner
+        window._route_measurement_thread = _FakeAliveThread()
+        window._route_measurement_dialog = None
+        window.design_navigator_panel = None
+        window._api_route_control_active = True
+        window._api_route_control_paused = True
+        window._api_route_offset_xy = (0.0, 0.0)
+        window._api_contact_context = lambda _contact: {
+            "accepted": True,
+            "point": point,
+        }
+        window._stage_xy_from_position = lambda _position: (1.75, 2.25)
+        window._show_status = (
+            lambda message, _timeout_ms=None: statuses.append(str(message))
+        )
+        window.stage_controller = types.SimpleNamespace(
+            current_stage_position=lambda: (0.0, 0.0, 0.0),
+            latest_stage_position=lambda: None,
+            is_busy=lambda: False,
+        )
+
+        Main._save_route_measurement_shift(window, 7)
+
+        self.assertEqual(runner_calls, [])
+        self.assertEqual(window._api_route_offset_xy, (0.5, -0.25))
+        self.assertEqual(
+            statuses,
+            ["Route shift saved: dX=+0.5000 mm, dY=-0.2500 mm."],
+        )
+
+    def test_api_route_control_save_shift_then_resume_does_not_skip_contact(self) -> None:
+        window = Main.__new__(Main)
+        statuses: list[str] = []
+        actions: list[dict[str, object]] = []
+        point = RouteMeasurementPoint(
+            index=7,
+            point_id="p007",
+            label="P007",
+            design_center=(10.0, 20.0),
+            stage_xy=(1.25, 2.5),
+            needle_1_design=(11.0, 21.0),
+            needle_2_design=(9.0, 19.0),
+        )
+
+        window._route_measurement_runner = None
+        window._route_measurement_thread = None
+        window._route_measurement_dialog = None
+        window.design_navigator_panel = None
+        window._api_route_control_active = True
+        window._api_route_control_paused = True
+        window._api_route_offset_xy = (0.0, 0.0)
+        window._api_contact_context = lambda _contact: {
+            "accepted": True,
+            "point": point,
+        }
+        window._api_route_control_action = lambda payload: actions.append(dict(payload))
+        window._stage_xy_from_position = lambda _position: (1.75, 2.25)
+        window._show_status = (
+            lambda message, _timeout_ms=None: statuses.append(str(message))
+        )
+        window.stage_controller = types.SimpleNamespace(
+            current_stage_position=lambda: (0.0, 0.0, 0.0),
+            latest_stage_position=lambda: None,
+            is_busy=lambda: False,
+        )
+
+        Main._save_route_measurement_shift(window, 7)
+        Main._submit_route_measurement_confirmation(window, "next")
+
+        self.assertEqual(window._api_route_offset_xy, (0.5, -0.25))
+        self.assertEqual(actions, [{"action": "resume"}])
+
+    def test_route_contact_move_requires_paused_api_route_control(self) -> None:
+        window = Main.__new__(Main)
+        statuses: list[str] = []
+
+        window._route_contact_move_thread = None
+        window._route_measurement_thread = None
+        window._api_route_control_active = True
+        window._api_route_control_paused = False
+        window._show_status = (
+            lambda message, _timeout_ms=None: statuses.append(str(message))
+        )
+
+        Main._request_route_contact_move(window, 33)
+
+        self.assertEqual(
+            statuses,
+            ["Pause API route control before moving to a contact."],
         )
 
     def test_telegram_measure_submits_waiting_route_action(self) -> None:
@@ -1634,6 +2352,55 @@ assert image.height() == 4
         self.assertEqual(response.callback_answer, "measure submitted.")
         self.assertEqual(response.reply_markup, "markup")
         self.assertEqual(statuses, ["Route measurement: measure."])
+
+    def test_telegram_remeasure_action_is_disabled(self) -> None:
+        window = Main.__new__(Main)
+        runner = _FakeRouteMeasurementRunner()
+
+        window._route_measurement_waiting = True
+        window._route_measurement_runner = runner
+        window._telegram_default_markup = lambda: "markup"
+
+        response = Main._telegram_route_action_response(window, "remeasure")
+
+        self.assertEqual(runner.confirmations, [])
+        self.assertEqual(response.callback_answer, "Unknown action.")
+        self.assertEqual(response.reply_markup, "markup")
+
+    def test_telegram_route_actions_markup_omits_remeasure(self) -> None:
+        original = main_module.telegram_inline_keyboard
+        main_module.telegram_inline_keyboard = lambda rows: rows
+        try:
+            markup = Main._telegram_route_actions_markup()
+        finally:
+            main_module.telegram_inline_keyboard = original
+
+        labels = [
+            label
+            for row in markup
+            for label, _callback in row
+        ]
+        self.assertIn("Measure", labels)
+        self.assertIn("Skip", labels)
+        self.assertNotIn("Remeasure", labels)
+
+    def test_telegram_skip_submits_paused_api_route_control_action(self) -> None:
+        window = Main.__new__(Main)
+        actions: list[dict[str, object]] = []
+
+        window._route_measurement_waiting = True
+        window._route_measurement_runner = None
+        window._api_route_control_active = True
+        window._api_route_control_paused = True
+        window._telegram_default_markup = lambda: "markup"
+        window._api_route_control_action = lambda payload: actions.append(dict(payload))
+        window._show_status = lambda *_args: None
+
+        response = Main._telegram_route_action_response(window, "skip")
+
+        self.assertEqual(actions, [{"action": "skip"}])
+        self.assertEqual(response.callback_answer, "skip submitted.")
+        self.assertEqual(response.reply_markup, "markup")
 
     def test_waiting_dialog_measure_confirms_current_contact(self) -> None:
         dialog = RouteMeasurementDialog.__new__(RouteMeasurementDialog)
@@ -1966,7 +2733,11 @@ assert image.height() == 4
         window._api_route_meter_configuration = (
             lambda _payload, voltages_v=None: RouteMeterConfiguration()
         )
-        window._current_needle_feedrate = lambda: None
+        window.settings_manager = types.SimpleNamespace(
+            needle_calibration_configuration=lambda: types.SimpleNamespace(
+                feedrate_mm_min=2.0,
+            )
+        )
         window._capture_api_route_photo_artifact = (
             lambda _point, _position, _total, _focus_result: []
         )

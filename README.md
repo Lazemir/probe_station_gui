@@ -535,19 +535,19 @@ Invoke-RestMethod -Method Post `
 The sweep response includes `timestamp_utc`, contact metadata, the requested
 `voltages_v`, raw `iv_pairs`, and the full instrument result.
 
-Start a GUI-owned route session for notebook-owned measurements:
+Start a GUI-owned route session for API-owned measurements:
 
 ```powershell
 Invoke-RestMethod -Method Post `
   -Uri http://127.0.0.1:8765/api/v1/route/sessions `
   -Headers $headers `
   -ContentType application/json `
-  -Body '{"initial_measurement_count": 10, "followup_measurement_count": 240, "photo_enabled": true, "photo_autofocus_enabled": true}'
+  -Body '{"initial_measurement_count": 10, "followup_measurement_count": 240, "photo_enabled": true, "photo_autofocus_enabled": true, "contact_quality": {"max_mad_sigma_ohm": 300, "max_p95_abs_step_ohm": 1000, "max_relative_mad_sigma": 0.02, "max_relative_p95_abs_step": 0.05}}'
 ```
 
 During this session the GUI owns route movement, autofocus, route photos,
 needle lowering, resistance contact check, contact seek, pause, interrupt,
-Telegram status, and needle lifting. The notebook owns the external
+Telegram status, and needle lifting. The API client owns the external
 experiment measurement and storage. Resistance results, raw resistance samples,
 short/bad-contact status, contact seek details, and photo artifact IDs are
 returned through session status; no resistance CSV or route photo directory is
@@ -577,7 +577,7 @@ Allowed actions are `pause`, `resume`, `interrupt`, `stop`, `skip`,
 current needle position while the session is waiting for contact attention.
 Download photo artifacts from
 `GET /api/v1/route/sessions/current/artifacts/{artifact_id}` and save them in
-the notebook experiment folder. Server-side photo files are only used by the
+the API client experiment folder. Server-side photo files are only used by the
 normal GUI route-photo workflow; API session artifacts are temporary in-memory
 bytes for the client and Telegram notifications.
 
@@ -600,7 +600,7 @@ during the +/- voltage readings, so both polarities use the same range
 configuration. The range changes only when you call `meter.configure`,
 `meter.raw_sweep`, or `prepare_contact` with different meter/range parameters.
 
-For notebook-owned measurements that should reuse the same instrument driver as
+For API-owned measurements that should reuse the same instrument driver as
 the GUI, prefer station-owned VISA roles instead of adding new API measurement
 schemas. The server owns the real VISA resources and exposes only configured
 roles:
@@ -697,11 +697,76 @@ iv = meter.measure_voltage_list([-0.1, 0.0, 0.1])
 ```
 
 `prepare_contact` is a client-side recipe. It moves to the loaded route contact,
-lowers needles, checks contact quality, runs contact seek when needed, and lifts
+optionally focuses and captures a contact photo before lowering needles, lowers
+needles, checks contact quality, runs contact seek when needed, and lifts
 needles on failure. The backend API still sees only the lower-level commands.
 
-For notebook measurements that should keep GUI pause, interrupt, status, and
-Telegram behavior, start an external route session:
+For API route control scans, keep the contact loop in the API client and call
+`prepare_contact` for each contact. This avoids hidden route-session state:
+
+```python
+from pathlib import Path
+from probe_station_client import ProbeStationClient
+
+client = ProbeStationClient(profile="lab-prober")
+experiment_dir = Path(r"C:\data\chip-001")
+
+for contact in range(32, 421):
+    run_dir = experiment_dir / f"contact-{contact:03d}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    prep = client.prepare_contact(
+        contact,
+        raise_before_move=True,
+        move_to_contact=True,
+        focus_before_lower=True,
+        photo_path=run_dir / "contact_photo.jpg",
+        lower_needles=True,
+        check_sample_count=10,
+        measurement_count=250,
+        seek_attempts=3,
+        telegram_on_seek_failure=True,
+        contact_quality={
+            "max_mad_sigma_ohm": 300.0,
+            "max_p95_abs_step_ohm": 1_000.0,
+            "max_relative_mad_sigma": 0.02,
+            "max_relative_p95_abs_step": 0.05,
+        },
+    )
+    if prep.get("measurement", {}).get("status") == "short":
+        continue
+    if not prep.get("prepared"):
+        continue
+
+    result = client.meter.raw_sweep(
+        [-0.1, 0.0, 0.1],
+        contact_number=contact,
+        move_to_contact=False,
+        lower_needles=False,
+    )
+```
+
+`GET /api/v1/route/contacts/{contact}/photo` captures the current camera frame
+as bytes. `prepare_contact(photo_path=...)` calls this endpoint after focus and
+before needle lowering, then writes the image into the API client experiment
+folder.
+
+Contact quality criteria are API settings, not hidden code constants. Pass
+`contact_quality` to `check_contact`, `contact_seek`, `prepare_contact`, or
+`route.start_external`. The response includes `contact_quality_limits`; failed
+checks include `measurement.contact_quality.failure_criteria` with the exact
+threshold that rejected the contact.
+
+API route control exposes a GUI pause/resume control without creating a route
+session. Call `client.api_route_control.start(...)` before the loop, poll
+`client.api_route_control.status()` between contacts or voltage blocks, and
+call `client.api_route_control.finish(...)` when done. `pause` is only a pause
+request. The API client must call `client.api_route_control.pause_ack()` when it
+has reached a safe waiting point; only then does the GUI show Resume. While the
+pause request is pending, the same GUI control remains an Interrupt path and
+aborts the current stage/contact-seek/meter operation best-effort.
+
+The older external route session API is still available when the GUI, rather
+than the API client, should own route iteration:
 
 ```python
 from pathlib import Path
@@ -740,7 +805,7 @@ for contact in session.iter_ready():
             contact.download_artifact(photo_id)
         )
 
-    # Run the notebook-owned IV measurement through the station-owned meter
+    # Run the API-owned IV measurement through the station-owned meter
     # and write its files locally.
     meter = client.meter.ohmmeter()
     iv = meter.measure_voltage_list([-0.1, 0.0, 0.1])
@@ -757,7 +822,7 @@ If the resistance precheck reports `short`, the GUI records that status in the
 session result and skips the external wait for that contact. If contact quality
 is bad, the session waits; call `session.seek_current()`, `session.skip()`, or
 use the GUI/Telegram route actions. `session.iter_ready()` yields only contacts
-that are waiting for the notebook-owned external measurement. During the initial
+that are waiting for the API-owned external measurement. During the initial
 paused state, pause, interrupt correction, or contact attention it keeps polling
 while the GUI route controls remain active; if the session stops or fails, it raises
 `ProbeStationClientError` with the server message instead of ending the loop

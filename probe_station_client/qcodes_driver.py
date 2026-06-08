@@ -140,7 +140,7 @@ if Instrument is not None and InstrumentChannel is not None:
             return self.client.meter.ohmmeter(**options)
 
     class ProbeStationRoute(InstrumentChannel):  # type: ignore[misc]
-        """Route workflow submodule for notebook-owned measurements."""
+        """Route workflow submodule for API-owned measurements."""
 
         def __init__(
             self,

@@ -22,10 +22,6 @@ Point2D = tuple[float, float]
 logger = logging.getLogger(__name__)
 
 
-CONTACT_MAX_MAD_SIGMA_OHM = 300.0
-CONTACT_MAX_P95_ABS_STEP_OHM = 1_000.0
-CONTACT_MAX_RELATIVE_MAD_SIGMA = 0.02
-CONTACT_MAX_RELATIVE_P95_ABS_STEP = 0.05
 ROUTE_OPERATION_MEASURE = "measure"
 ROUTE_OPERATION_PHOTO = "photo"
 ROUTE_OPERATION_PHOTO_THEN_MEASURE = "photo_then_measure"
@@ -54,6 +50,16 @@ def _callable_accepts_keyword(function: object, name: str) -> bool:
         ):
             return True
     return False
+
+
+def _finite_nonnegative_or_default(value: object, default: float) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if math.isfinite(numeric) and numeric >= 0.0:
+        return numeric
+    return float(default)
 
 
 class _BackgroundRouteTask:
@@ -99,6 +105,48 @@ class RouteMeasurementPoint:
 
 
 @dataclass(frozen=True)
+class RouteContactQualityLimits:
+    """Configurable thresholds used to classify repeated contact samples."""
+
+    max_mad_sigma_ohm: float = 300.0
+    max_p95_abs_step_ohm: float = 1_000.0
+    max_relative_mad_sigma: float = 0.02
+    max_relative_p95_abs_step: float = 0.05
+
+    def normalized(self) -> "RouteContactQualityLimits":
+        defaults = type(self)()
+        return type(self)(
+            max_mad_sigma_ohm=_finite_nonnegative_or_default(
+                self.max_mad_sigma_ohm,
+                defaults.max_mad_sigma_ohm,
+            ),
+            max_p95_abs_step_ohm=_finite_nonnegative_or_default(
+                self.max_p95_abs_step_ohm,
+                defaults.max_p95_abs_step_ohm,
+            ),
+            max_relative_mad_sigma=_finite_nonnegative_or_default(
+                self.max_relative_mad_sigma,
+                defaults.max_relative_mad_sigma,
+            ),
+            max_relative_p95_abs_step=_finite_nonnegative_or_default(
+                self.max_relative_p95_abs_step,
+                defaults.max_relative_p95_abs_step,
+            ),
+        )
+
+    def as_dict(self) -> dict[str, float]:
+        normalized = self.normalized()
+        return {
+            "max_mad_sigma_ohm": float(normalized.max_mad_sigma_ohm),
+            "max_p95_abs_step_ohm": float(normalized.max_p95_abs_step_ohm),
+            "max_relative_mad_sigma": float(normalized.max_relative_mad_sigma),
+            "max_relative_p95_abs_step": float(
+                normalized.max_relative_p95_abs_step
+            ),
+        }
+
+
+@dataclass(frozen=True)
 class RouteContactQuality:
     """Contact quality metrics calculated from repeated route samples."""
 
@@ -112,6 +160,7 @@ class RouteContactQuality:
     compliance_hits: int = 0
     polarity_sign_mismatch_count: int = 0
     reasons: tuple[str, ...] = ()
+    failure_criteria: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -304,6 +353,7 @@ class RouteMeasurementRunner:
         start_point_number: int = 1,
         max_relative_rms: float | None = None,
         short_threshold_ohm: float | None = None,
+        contact_quality_limits: RouteContactQualityLimits | None = None,
         confirm_each_point: bool = False,
         auto_next_ok_or_short: bool = False,
         auto_contact_seek_on_bad_contact: bool = False,
@@ -369,6 +419,9 @@ class RouteMeasurementRunner:
             and max_relative_rms_value > 0.0
             else None
         )
+        self._contact_quality_limits = (
+            contact_quality_limits or RouteContactQualityLimits()
+        ).normalized()
         _ = short_threshold_ohm
         self._confirm_each_point = bool(confirm_each_point)
         self._auto_next_lock = threading.Lock()
@@ -423,6 +476,7 @@ class RouteMeasurementRunner:
         self._background_tasks: list[_BackgroundRouteTask] = []
         self._waiting_condition = threading.Condition()
         self._waiting = False
+        self._meter_output_context: object | None = None
 
     @property
     def csv_path(self) -> Path:
@@ -442,6 +496,9 @@ class RouteMeasurementRunner:
             return
         with self._route_offset_lock:
             self._route_offset_xy = (offset_x, offset_y)
+
+    def contact_quality_limits(self) -> RouteContactQualityLimits:
+        return self._contact_quality_limits
 
     def is_waiting(self) -> bool:
         with self._waiting_condition:
@@ -516,6 +573,7 @@ class RouteMeasurementRunner:
         auto_contact_seek_step_mm: float,
         auto_contact_seek_max_total_mm: float,
         contact_settle_s: float,
+        contact_quality_limits: RouteContactQualityLimits | None = None,
         photo_settle_s: float | None = None,
         photo_focus_enabled: bool | None = None,
         csv_path: str | Path | None = None,
@@ -539,6 +597,8 @@ class RouteMeasurementRunner:
             and max_relative_rms_value > 0.0
             else None
         )
+        if contact_quality_limits is not None:
+            self._contact_quality_limits = contact_quality_limits.normalized()
         self._auto_contact_seek_step_mm = self._normalized_contact_seek_step(
             auto_contact_seek_step_mm
         )
@@ -643,15 +703,15 @@ class RouteMeasurementRunner:
                 self._initial_measurement_count()
             )
             self._raise_if_point_interrupted()
+            if prepare_task is not None:
+                prepare_task.wait()
+                prepare_task = None
             self._status(
                 f"Route contact: point {position}/{total} lowering needles."
             )
             self._emit_pre_contact_photo(point, position, total)
             self._raise_if_point_interrupted()
-            self._stage_controller.run_external_needles_action(
-                "lower",
-                self._needle_feedrate,
-            )
+            self._lower_needles_for_measurement()
             needles_lowered = True
             if not self._sleep_contact_settle():
                 raise RuntimeError("Contact placement stopped.")
@@ -674,6 +734,7 @@ class RouteMeasurementRunner:
                     self._needle_feedrate,
                 )
                 needles_lowered = False
+                self._close_meter_output_context()
             status = record.status or "unknown"
             if success:
                 message = (
@@ -682,9 +743,14 @@ class RouteMeasurementRunner:
                 )
                 placement_succeeded = True
             else:
+                contact_suffix = (
+                    self._contact_quality_failure_suffix(record.contact_quality)
+                    if record.contact_quality is not None
+                    else ""
+                )
                 message = (
                     f"Contact check failed: point {position}/{total} "
-                    f"{point.label}, {status}."
+                    f"{point.label}, {status}{contact_suffix}."
                 )
             self._emit_contact_photo(point, record, position, total, success)
             self._status(message)
@@ -702,6 +768,7 @@ class RouteMeasurementRunner:
                         "lift",
                         self._needle_feedrate,
                     )
+                    self._close_meter_output_context()
                 except Exception:
                     logger.exception("Failed to lift needles after contact check.")
             try:
@@ -820,7 +887,7 @@ class RouteMeasurementRunner:
         position: int = 1,
         total: int = 1,
     ) -> None:
-        """Lift needles after an API/notebook-owned external measurement."""
+        """Lift needles after an API-owned external measurement."""
 
         self._begin_stage_task()
         try:
@@ -835,7 +902,10 @@ class RouteMeasurementRunner:
             try:
                 self._wait_for_background_tasks()
             finally:
-                self._finish_stage_task()
+                try:
+                    self._close_meter_output_context()
+                finally:
+                    self._finish_stage_task()
 
     def check_contact(
         self,
@@ -907,10 +977,15 @@ class RouteMeasurementRunner:
             success = self._contact_placement_record_is_success(record)
             status = record.status or "unknown"
             seek = self._current_contact_seek_result
+            contact_suffix = (
+                self._contact_quality_failure_suffix(record.contact_quality)
+                if record.contact_quality is not None
+                else ""
+            )
             if auto_contact_seek and seek is not None:
                 message = (
                     f"{action_label}: point {position}/{total} {point.label}, "
-                    f"{seek.status}, final={status}."
+                    f"{seek.status}, final={status}{contact_suffix}."
                 )
             elif success:
                 message = (
@@ -920,7 +995,7 @@ class RouteMeasurementRunner:
             else:
                 message = (
                     f"{action_label} failed: point {position}/{total} "
-                    f"{point.label}, {status}."
+                    f"{point.label}, {status}{contact_suffix}."
                 )
             self._status(message)
             return RouteContactPlacementResult(
@@ -1007,6 +1082,7 @@ class RouteMeasurementRunner:
                 self._point_interrupt_requested.clear()
                 position = position_index + 1
                 point = self._points[position_index]
+                point_interrupted = self._point_interrupt_requested.is_set()
                 self._emit_progress(position, total, int(point.index))
                 self._status(
                     f"Route measurement: point {position}/{total} "
@@ -1017,9 +1093,11 @@ class RouteMeasurementRunner:
                         f"Route measurement: point {position}/{total} "
                         "raising needles before move."
                     )
-                    self._stage_controller.run_external_needles_action(
-                        "raise",
-                        self._needle_feedrate,
+                    point_interrupted = not self._run_point_interruptible_action(
+                        lambda: self._stage_controller.run_external_needles_action(
+                            "raise",
+                            self._needle_feedrate,
+                        )
                     )
                     if self._stop_requested.is_set():
                         message = "Route measurement stopped by user."
@@ -1029,10 +1107,13 @@ class RouteMeasurementRunner:
                     if self._photo_enabled or self._photo_focus_enabled
                     else self._adjusted_stage_xy(point)
                 )
-                self._stage_controller.run_external_move_to_xy(
-                    target_xy[0],
-                    target_xy[1],
-                )
+                if not point_interrupted:
+                    point_interrupted = not self._run_point_interruptible_action(
+                        lambda: self._stage_controller.run_external_move_to_xy(
+                            target_xy[0],
+                            target_xy[1],
+                        )
+                    )
                 if self._stop_requested.is_set():
                     message = "Route measurement stopped by user."
                     break
@@ -1040,12 +1121,14 @@ class RouteMeasurementRunner:
                     self._start_measurement_prepare_task(
                         self._initial_measurement_count()
                     )
-                    if self._measure_enabled
+                    if self._measure_enabled and not point_interrupted
                     else None
                 )
                 focus_result: object | None = None
-                point_interrupted = self._point_interrupt_requested.is_set()
-                if self._photo_focus_enabled:
+                point_interrupted = (
+                    point_interrupted or self._point_interrupt_requested.is_set()
+                )
+                if self._photo_focus_enabled and not point_interrupted:
                     self._status(
                         f"Route measurement: point {position}/{total} "
                         "local autofocus."
@@ -1089,15 +1172,18 @@ class RouteMeasurementRunner:
                             f"Route measurement: point {position}/{total} "
                             "moving to contact position."
                         )
-                        self._stage_controller.run_external_move_to_xy(
-                            contact_xy[0],
-                            contact_xy[1],
+                        point_interrupted = not self._run_point_interruptible_action(
+                            lambda: self._stage_controller.run_external_move_to_xy(
+                                contact_xy[0],
+                                contact_xy[1],
+                            )
                         )
                         if self._stop_requested.is_set():
                             message = "Route measurement stopped by user."
                             break
                         point_interrupted = (
-                            self._point_interrupt_requested.is_set()
+                            point_interrupted
+                            or self._point_interrupt_requested.is_set()
                         )
                 if not self._measure_enabled:
                     if point_interrupted:
@@ -1137,13 +1223,13 @@ class RouteMeasurementRunner:
                 result_emitted = False
                 try:
                     if not point_interrupted:
-                        needs_final_lift = True
+                        if measurement_prepare_task is not None:
+                            measurement_prepare_task.wait()
+                            measurement_prepare_task = None
                         self._emit_pre_contact_photo(point, position, total)
-                        self._stage_controller.run_external_needles_action(
-                            "lower",
-                            self._needle_feedrate,
-                        )
+                        self._lower_needles_for_measurement()
                         needles_lowered = True
+                        needs_final_lift = True
                         if not self._sleep_contact_settle():
                             if self._point_interrupt_requested.is_set():
                                 point_interrupted = True
@@ -1218,9 +1304,16 @@ class RouteMeasurementRunner:
                         )
                         self._emit_result(record, position, total, record_saved)
                         result_emitted = True
+                except Exception as exc:
+                    if self._point_interrupt_cancelled_exception(exc):
+                        point_interrupted = True
+                    else:
+                        raise
                 finally:
                     if lift_task is not None and needles_lowered:
                         try:
+                            if self._point_interrupt_requested.is_set():
+                                self._clear_stage_cancel_after_point_interrupt()
                             lift_task.wait()
                             needles_lowered = False
                             needs_final_lift = False
@@ -1230,6 +1323,8 @@ class RouteMeasurementRunner:
                                 exc_info=True,
                             )
                     if needles_lowered:
+                        if self._point_interrupt_requested.is_set():
+                            self._clear_stage_cancel_after_point_interrupt()
                         self._stage_controller.run_external_needles_action(
                             "lift",
                             self._needle_feedrate,
@@ -1238,6 +1333,7 @@ class RouteMeasurementRunner:
                     if measurement_prepare_task is not None:
                         measurement_prepare_task.wait()
                 if point_interrupted:
+                    self._clear_stage_cancel_after_point_interrupt()
                     self._point_interrupt_requested.clear()
                     decision = self._wait_after_interrupted_point(
                         point=point,
@@ -1284,6 +1380,8 @@ class RouteMeasurementRunner:
                             break
                         measurements_saved += 1
                         position_index += 1
+                        if position_index < total:
+                            self._begin_stage_task()
                         continue
                     self._begin_stage_task()
                     jump_index = self._jump_target_index(decision)
@@ -1352,6 +1450,23 @@ class RouteMeasurementRunner:
                         if decision == "stop":
                             message = "Route measurement stopped by user."
                             break
+                        if decision == "measure":
+                            manual_record = self._measure_manual_contact_here(
+                                point=point,
+                                position=position,
+                                total=total,
+                            )
+                            if manual_record is None:
+                                if self._point_interrupt_requested.is_set():
+                                    self._point_interrupt_requested.clear()
+                                    continue
+                                message = "Route measurement stopped by user."
+                                break
+                            measurements_saved += 1
+                            position_index += 1
+                            if position_index < total:
+                                self._begin_stage_task()
+                            continue
                         self._begin_stage_task()
                         jump_index = self._jump_target_index(decision)
                         if jump_index is not None:
@@ -1394,6 +1509,10 @@ class RouteMeasurementRunner:
                 self._wait_for_background_tasks()
             except Exception as exc:
                 message = f"{message} Background route task failed: {exc}"
+            try:
+                self._close_meter_output_context()
+            except Exception as exc:
+                message = f"{message} Instrument output disable failed: {exc}"
             self._finish_stage_task()
             if self._measure_enabled and hasattr(self._lcr_controller, "close"):
                 try:
@@ -1633,7 +1752,36 @@ class RouteMeasurementRunner:
     ) -> object | None:
         if self._photo_focus_callback is None:
             raise ValueError("Route autofocus is not configured.")
-        return self._photo_focus_callback(point, position, total)
+        try:
+            return self._photo_focus_callback(point, position, total)
+        except Exception as exc:
+            if self._point_interrupt_cancelled_exception(exc):
+                return None
+            raise
+
+    def _point_interrupt_cancelled_exception(self, exc: BaseException) -> bool:
+        return bool(
+            self._point_interrupt_requested.is_set()
+            and str(exc) == "Operation cancelled."
+        )
+
+    def _run_point_interruptible_action(
+        self,
+        action: Callable[[], object],
+    ) -> bool:
+        try:
+            action()
+        except Exception as exc:
+            if self._point_interrupt_cancelled_exception(exc):
+                return False
+            raise
+        return True
+
+    def _clear_stage_cancel_after_point_interrupt(self) -> None:
+        if not self._stage_task_active:
+            return
+        self._finish_stage_task()
+        self._begin_stage_task()
 
     def _start_background_task(
         self,
@@ -1685,6 +1833,35 @@ class RouteMeasurementRunner:
                 self._needle_feedrate,
             )
         )
+
+    def _lower_needles_for_measurement(self) -> None:
+        self._ensure_meter_output_context()
+        self._stage_controller.run_external_needles_action(
+            "lower",
+            self._needle_feedrate,
+        )
+
+    def _ensure_meter_output_context(self) -> None:
+        if self._meter_output_context is not None:
+            return
+        output = getattr(self._lcr_controller, "output", None)
+        if not callable(output):
+            return
+        context = output(True)
+        enter = getattr(context, "__enter__", None)
+        if not callable(enter):
+            return
+        enter()
+        self._meter_output_context = context
+
+    def _close_meter_output_context(self) -> None:
+        context = self._meter_output_context
+        self._meter_output_context = None
+        if context is None:
+            return
+        exit_method = getattr(context, "__exit__", None)
+        if callable(exit_method):
+            exit_method(None, None, None)
 
     def _source_list_prepare_count(self, count: int) -> int:
         initial_count = self._initial_measurement_count()
@@ -1803,7 +1980,7 @@ class RouteMeasurementRunner:
         adjust = getattr(self._stage_controller, "run_external_needles_adjust", None)
         if not callable(lower_to_depth) and not callable(adjust):
             return initial_samples
-        initial_quality = _contact_quality_from_samples(initial_samples)
+        initial_quality = self._contact_quality_from_samples(initial_samples)
         if skip_current_depth:
             self._status(
                 f"Route measurement: point {position}/{total} full measurement "
@@ -1816,7 +1993,8 @@ class RouteMeasurementRunner:
                 f"Route measurement: point {position}/{total} contact check "
                 f"{initial_quality.status}, "
                 f"median={_format_ohm(initial_quality.median_ohm)}, "
-                f"MAD={_format_ohm(initial_quality.mad_sigma_ohm)}; "
+                f"MAD={_format_ohm(initial_quality.mad_sigma_ohm)}"
+                f"{self._contact_quality_failure_suffix(initial_quality)}; "
                 "seeking contact up to "
                 f"{self._auto_contact_seek_max_total_mm:.3f} mm."
             )
@@ -1919,13 +2097,14 @@ class RouteMeasurementRunner:
                     axis_a_lowering_mm=last_axis_a_lowering_mm,
                 )
                 return samples
-            quality = _contact_quality_from_samples(samples)
+            quality = self._contact_quality_from_samples(samples)
             last_status = quality.status
             self._status(
                 f"Route measurement: point {position}/{total} "
                 f"{depth_label}, {quality.status}, "
                 f"median={_format_ohm(quality.median_ohm)}, "
-                f"MAD={_format_ohm(quality.mad_sigma_ohm)}."
+                f"MAD={_format_ohm(quality.mad_sigma_ohm)}"
+                f"{self._contact_quality_failure_suffix(quality)}."
             )
             if quality.good is not False:
                 completed_samples = self._complete_measurement_samples(
@@ -1949,14 +2128,17 @@ class RouteMeasurementRunner:
                     )
                     return completed_samples
                 if self._samples_have_bad_contact(completed_samples):
-                    full_quality = _contact_quality_from_samples(completed_samples)
+                    full_quality = self._contact_quality_from_samples(
+                        completed_samples
+                    )
                     last_status = full_quality.status
                     self._status(
                         f"Route measurement: point {position}/{total} full "
                         f"measurement at {depth_label} failed contact check "
                         f"({full_quality.status}, "
                         f"median={_format_ohm(full_quality.median_ohm)}, "
-                        f"MAD={_format_ohm(full_quality.mad_sigma_ohm)}); "
+                        f"MAD={_format_ohm(full_quality.mad_sigma_ohm)}"
+                        f"{self._contact_quality_failure_suffix(full_quality)}); "
                         "trying deeper."
                     )
                 elif self._samples_exceed_relative_rms_limit(completed_samples):
@@ -2062,7 +2244,7 @@ class RouteMeasurementRunner:
     ) -> str:
         if self._samples_are_short(samples):
             return "short"
-        return _contact_quality_from_samples(samples).status
+        return self._contact_quality_from_samples(samples).status
 
     def _completed_measurement_is_acceptable(
         self,
@@ -2238,7 +2420,9 @@ class RouteMeasurementRunner:
         if contact_quality is not None and contact_quality.good is False:
             self._status(
                 f"Route measurement: point {position}/{total} contact check failed "
-                f"({contact_quality.status}); correct contact, then Measure, "
+                f"({contact_quality.status}"
+                f"{self._contact_quality_failure_suffix(contact_quality)}); "
+                "correct contact, then Measure, "
                 "Remeasure, or Skip."
             )
         else:
@@ -2321,7 +2505,7 @@ class RouteMeasurementRunner:
                 if mean_resistance
                 else math.nan
             )
-            contact_quality = _contact_quality_from_samples(samples)
+            contact_quality = self._contact_quality_from_samples(samples)
             if self._samples_are_short(samples):
                 status = "short"
             elif contact_quality.good is False:
@@ -2394,15 +2578,31 @@ class RouteMeasurementRunner:
     ) -> bool:
         return any(sample.compliance_hit for sample in samples)
 
-    @staticmethod
+    def _contact_quality_from_samples(
+        self,
+        samples: list[RouteMeasurementSample] | tuple[RouteMeasurementSample, ...],
+    ) -> RouteContactQuality:
+        return _contact_quality_from_samples(
+            samples,
+            contact_quality_limits=self._contact_quality_limits,
+        )
+
+    def _contact_quality_failure_suffix(self, quality: RouteContactQuality) -> str:
+        detail = _format_contact_quality_failure(
+            quality,
+            self._contact_quality_limits,
+        )
+        return f", failed criterion: {detail}" if detail else ""
+
     def _samples_have_bad_contact(
+        self,
         samples: list[RouteMeasurementSample] | tuple[RouteMeasurementSample, ...],
     ) -> bool:
-        return _contact_quality_from_samples(samples).good is False
+        return self._contact_quality_from_samples(samples).good is False
 
 
 class RouteExternalMeasurementSessionRunner:
-    """Run route contacts for notebook-owned external measurements.
+    """Run route contacts for API-owned external measurements.
 
     The GUI-visible route state machine remains the owner of movement, contact
     checks, contact seek, pause, interrupt, and Telegram callbacks. The external
@@ -2421,6 +2621,7 @@ class RouteExternalMeasurementSessionRunner:
         initial_measurement_count: int,
         start_point_number: int = 1,
         max_relative_rms: float | None = None,
+        contact_quality_limits: RouteContactQualityLimits | None = None,
         auto_contact_seek_step_mm: float = RouteMeasurementRunner.AUTO_CONTACT_SEEK_STEP_MM,
         auto_contact_seek_max_total_mm: float = RouteMeasurementRunner.AUTO_CONTACT_SEEK_MAX_TOTAL_MM,
         contact_settle_s: float = RouteMeasurementRunner.DEFAULT_CONTACT_SETTLE_S,
@@ -2490,6 +2691,7 @@ class RouteExternalMeasurementSessionRunner:
             initial_measurement_count=initial_measurement_count,
             start_point_number=start_point_number,
             max_relative_rms=max_relative_rms,
+            contact_quality_limits=contact_quality_limits,
             confirm_each_point=False,
             auto_contact_seek_on_bad_contact=True,
             auto_contact_seek_step_mm=auto_contact_seek_step_mm,
@@ -2596,6 +2798,7 @@ class RouteExternalMeasurementSessionRunner:
         auto_contact_seek_step_mm: float,
         auto_contact_seek_max_total_mm: float,
         contact_settle_s: float,
+        contact_quality_limits: RouteContactQualityLimits | None = None,
         photo_settle_s: float | None = None,
     ) -> None:
         self._contact_runner.update_runtime_settings(
@@ -2605,6 +2808,7 @@ class RouteExternalMeasurementSessionRunner:
             auto_contact_seek_step_mm=auto_contact_seek_step_mm,
             auto_contact_seek_max_total_mm=auto_contact_seek_max_total_mm,
             contact_settle_s=contact_settle_s,
+            contact_quality_limits=contact_quality_limits,
             photo_settle_s=photo_settle_s,
         )
 
@@ -2620,6 +2824,9 @@ class RouteExternalMeasurementSessionRunner:
                 "position": self._position,
                 "total": self._total,
                 "external_measurement_request_id": self._external_measurement_request_id,
+                "contact_quality_limits": (
+                    self._contact_runner.contact_quality_limits().as_dict()
+                ),
                 "current_contact": self._point_payload(self._current_point),
                 "last_preparation": self._preparation_payload(
                     self._last_preparation
@@ -3307,6 +3514,7 @@ def _route_contact_quality_payload(
             quality.polarity_sign_mismatch_count
         ),
         "reasons": list(quality.reasons),
+        "failure_criteria": list(quality.failure_criteria),
     }
 
 
@@ -3349,6 +3557,7 @@ __all__ = [
     "RouteContactSeekResult",
     "RouteExternalContactPreparation",
     "RouteExternalMeasurementSessionRunner",
+    "RouteContactQualityLimits",
     "RouteMeasurementPoint",
     "RoutePhotoRecord",
     "RouteMeasurementRecord",
@@ -3490,9 +3699,65 @@ def _format_ohm(value: float) -> str:
     return f"{value:.3g} Ohm"
 
 
+def _contact_quality_failure_parts(
+    *,
+    median_ohm: float,
+    mad_sigma_ohm: float,
+    p95_abs_step_ohm: float,
+    reasons: Collection[str],
+    limits: RouteContactQualityLimits,
+) -> list[str]:
+    normalized_limits = limits.normalized()
+    scale_ohm = max(abs(float(median_ohm)), 1.0)
+    parts: list[str] = []
+    reason_set = {str(reason) for reason in reasons}
+    if "mad_sigma_too_high" in reason_set:
+        relative = float(mad_sigma_ohm) / scale_ohm
+        parts.append(
+            "MAD sigma "
+            f"{_format_ohm(float(mad_sigma_ohm))} > "
+            f"{_format_ohm(normalized_limits.max_mad_sigma_ohm)} "
+            "and relative MAD "
+            f"{_format_percent(relative)} > "
+            f"{_format_percent(normalized_limits.max_relative_mad_sigma)}"
+        )
+    if "step_noise_too_high" in reason_set:
+        relative = float(p95_abs_step_ohm) / scale_ohm
+        parts.append(
+            "p95 step "
+            f"{_format_ohm(float(p95_abs_step_ohm))} > "
+            f"{_format_ohm(normalized_limits.max_p95_abs_step_ohm)} "
+            "and relative p95 step "
+            f"{_format_percent(relative)} > "
+            f"{_format_percent(normalized_limits.max_relative_p95_abs_step)}"
+        )
+    return parts
+
+
+def _format_contact_quality_failure(
+    quality: RouteContactQuality,
+    limits: RouteContactQualityLimits,
+) -> str:
+    if quality.good is not False:
+        return ""
+    parts = list(quality.failure_criteria)
+    if not parts:
+        parts = _contact_quality_failure_parts(
+            median_ohm=float(quality.median_ohm),
+            mad_sigma_ohm=float(quality.mad_sigma_ohm),
+            p95_abs_step_ohm=float(quality.p95_abs_step_ohm),
+            reasons=quality.reasons,
+            limits=limits,
+        )
+    return "; ".join(parts)
+
+
 def _contact_quality_from_samples(
     samples: list[RouteMeasurementSample] | tuple[RouteMeasurementSample, ...],
+    *,
+    contact_quality_limits: RouteContactQualityLimits | None = None,
 ) -> RouteContactQuality:
+    limits = (contact_quality_limits or RouteContactQualityLimits()).normalized()
     finite_values = [
         float(sample.differential_resistance_ohm)
         for sample in samples
@@ -3529,15 +3794,24 @@ def _contact_quality_from_samples(
     relative_p95_abs_step = p95_abs_step / scale_ohm
 
     if (
-        mad_sigma > CONTACT_MAX_MAD_SIGMA_OHM
-        and relative_mad_sigma > CONTACT_MAX_RELATIVE_MAD_SIGMA
+        mad_sigma > limits.max_mad_sigma_ohm
+        and relative_mad_sigma > limits.max_relative_mad_sigma
     ):
         reasons.append("mad_sigma_too_high")
     if (
-        p95_abs_step > CONTACT_MAX_P95_ABS_STEP_OHM
-        and relative_p95_abs_step > CONTACT_MAX_RELATIVE_P95_ABS_STEP
+        p95_abs_step > limits.max_p95_abs_step_ohm
+        and relative_p95_abs_step > limits.max_relative_p95_abs_step
     ):
         reasons.append("step_noise_too_high")
+    failure_criteria = tuple(
+        _contact_quality_failure_parts(
+            median_ohm=median,
+            mad_sigma_ohm=mad_sigma,
+            p95_abs_step_ohm=p95_abs_step,
+            reasons=reasons,
+            limits=limits,
+        )
+    )
 
     good = not reasons
     return RouteContactQuality(
@@ -3551,6 +3825,7 @@ def _contact_quality_from_samples(
         compliance_hits=compliance_hits,
         polarity_sign_mismatch_count=polarity_mismatches,
         reasons=tuple(reasons),
+        failure_criteria=failure_criteria,
     )
 
 
@@ -3666,10 +3941,15 @@ def route_measurement_sample_from_raw(
 
 def summarize_route_contact_quality(
     samples: list[RouteMeasurementSample] | tuple[RouteMeasurementSample, ...],
+    *,
+    contact_quality_limits: RouteContactQualityLimits | None = None,
 ) -> RouteContactQuality:
     """Evaluate the contact-quality metrics used by route workflows."""
 
-    return _contact_quality_from_samples(samples)
+    return _contact_quality_from_samples(
+        samples,
+        contact_quality_limits=contact_quality_limits,
+    )
 
 
 def _raw_bool(

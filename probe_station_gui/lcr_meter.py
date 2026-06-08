@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import inspect
 import logging
 import math
@@ -9,8 +10,10 @@ import queue
 import re
 import threading
 import time
+import weakref
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Callable, Iterator, Optional
 
 from PySide6.QtCore import QObject, Signal
 
@@ -18,6 +21,19 @@ from probe_station_measure import OHMMETER_RANGE_MANUAL
 
 
 logger = logging.getLogger(__name__)
+
+_LCR_METER_CONTROLLERS: "weakref.WeakSet[LCRMeterController]" = weakref.WeakSet()
+
+
+def _shutdown_lcr_meter_controllers() -> None:
+    for controller in list(_LCR_METER_CONTROLLERS):
+        try:
+            controller.shutdown()
+        except Exception:
+            logger.exception("Failed to shut down measurement instrument controller")
+
+
+atexit.register(_shutdown_lcr_meter_controllers)
 
 
 ROUTE_METER_GWINSTEK = "gwinstek_lcr_76200"
@@ -993,6 +1009,18 @@ class RouteMeter:
             source_list_count=source_list_count,
         )
 
+    @contextmanager
+    def output(self, enabled: bool = True) -> Iterator["RouteMeter"]:
+        if self._session is None:
+            self.open()
+        session = self._session
+        output = getattr(session, "output", None)
+        if not callable(output):
+            yield self
+            return
+        with output(bool(enabled)):
+            yield self
+
     def abort_current_measurement(self) -> None:
         session = self._session
         abort = getattr(session, "abort_measurement", None)
@@ -1086,9 +1114,12 @@ class LCRMeterController(QObject):
         self._worker_thread: threading.Thread | None = None
         self._worker_start_lock = threading.Lock()
         self._worker_shutdown = threading.Event()
+        self._shutdown_started = False
         self._worker_state = threading.Condition()
         self._worker_pending_calls = 0
         self._worker_running_call = False
+        self._live_output_context: object | None = None
+        _LCR_METER_CONTROLLERS.add(self)
 
     def apply_configuration(
         self,
@@ -1843,6 +1874,10 @@ class LCRMeterController(QObject):
     def shutdown(self) -> None:
         """Stop background work before application exit."""
 
+        if self._shutdown_started:
+            return
+        self._shutdown_started = True
+        _LCR_METER_CONTROLLERS.discard(self)
         self._stop_polling.set()
         try:
             self._run_on_meter_worker(self._disconnect_session)
@@ -2034,9 +2069,20 @@ class LCRMeterController(QObject):
 
     def _stop_polling_session(self) -> None:
         self._stop_polling.set()
+        if self._live_output_context is None:
+            return
+        worker_thread = self._worker_thread
+        if (
+            worker_thread is not None
+            and worker_thread.is_alive()
+            and worker_thread is not threading.current_thread()
+        ):
+            self._run_on_meter_worker(self._close_live_output_context_on_worker)
+        else:
+            self._close_live_output_context_on_worker()
 
     def _pause_live_polling(self) -> None:
-        self._stop_polling.set()
+        self._stop_polling_session()
 
     def _disconnect_session(self) -> None:
         self._stop_polling_session()
@@ -2075,6 +2121,7 @@ class LCRMeterController(QObject):
         try:
             if self._stop_polling.is_set() or session is not self._session:
                 return False
+            self._ensure_live_output_context_on_worker(session)
             reader = getattr(session, "read_primary_value", None)
             if not callable(reader):
                 raise LCRMeterError("Measurement instrument cannot read values.")
@@ -2089,6 +2136,60 @@ class LCRMeterController(QObject):
             return False
         self._emit_reading_summary(primary_value, 1)
         return True
+
+    @contextmanager
+    def output(self, enabled: bool = True) -> Iterator["LCRMeterController"]:
+        context = self._run_on_meter_worker(
+            lambda: self._enter_output_context_on_worker(bool(enabled))
+        )
+        try:
+            yield self
+        finally:
+            if context is not None:
+                self._run_on_meter_worker(
+                    lambda: self._exit_output_context_on_worker(context)
+                )
+
+    def _enter_output_context_on_worker(self, enabled: bool) -> object | None:
+        session = self._session
+        if session is None:
+            raise LCRMeterError("Measurement instrument is not connected.")
+        self._stop_polling.set()
+        self._close_live_output_context_on_worker()
+        output = getattr(session, "output", None)
+        if not callable(output):
+            return None
+        context = output(bool(enabled))
+        enter = getattr(context, "__enter__", None)
+        if not callable(enter):
+            return None
+        enter()
+        return context
+
+    @staticmethod
+    def _exit_output_context_on_worker(context: object) -> None:
+        exit_method = getattr(context, "__exit__", None)
+        if callable(exit_method):
+            exit_method(None, None, None)
+
+    def _ensure_live_output_context_on_worker(self, session: object) -> None:
+        if self._live_output_context is not None:
+            return
+        output = getattr(session, "output", None)
+        if not callable(output):
+            return
+        context = output(True)
+        enter = getattr(context, "__enter__", None)
+        if not callable(enter):
+            return
+        enter()
+        self._live_output_context = context
+
+    def _close_live_output_context_on_worker(self) -> None:
+        context = self._live_output_context
+        self._live_output_context = None
+        if context is not None:
+            self._exit_output_context_on_worker(context)
 
     @staticmethod
     def _lcr_error(exc: BaseException) -> LCRMeterError:

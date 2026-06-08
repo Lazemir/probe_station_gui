@@ -65,6 +65,14 @@ class _FakeResourceManager:
         self.closed = True
 
 
+def _commands_between_output_on_off(commands: list[str]) -> list[str]:
+    output_on_index = commands.index(":OUTP ON")
+    output_off_index = max(
+        index for index, command in enumerate(commands) if command == ":OUTP OFF"
+    )
+    return commands[output_on_index + 1 : output_off_index]
+
+
 class _BarrierTraceHandle(_FakeHandle):
     def __init__(
         self,
@@ -246,6 +254,62 @@ class KeithleyDriverTest(unittest.TestCase):
         self.assertEqual(reading.negative.resistance_ohm, 29.0)
         self.assertEqual(reading.positive.resistance_ohm, 31.0)
 
+    def test_output_context_keeps_software_loop_relay_enabled(self) -> None:
+        source = _FakeHandle(
+            {
+                "FETC?": [
+                    "-0.03,-0.001",
+                    "0.03,0.001",
+                    "-0.03,-0.001",
+                    "0.03,0.001",
+                ],
+            }
+        )
+        voltmeter = _FakeHandle({"READ?": ["-0.029", "0.031", "-0.029", "0.031"]})
+        meter = Keithley2400With2182A(
+            "GPIB0::1::INSTR",
+            "GPIB0::2::INSTR",
+            resource_manager=_FakeResourceManager(source, voltmeter),
+        )
+        config = Keithley2400With2182AConfig(
+            use_buffer=False,
+            use_trigger_link=False,
+            compliance_current_a=0.5,
+            current_range_a=0.5,
+        )
+        meter.configure(config)
+        source.writes.clear()
+
+        with meter.output(True):
+            first = meter.measure_pair(config)
+            second = meter.measure_pair(config)
+
+        self.assertAlmostEqual(first.differential_resistance_ohm, 30.0)
+        self.assertAlmostEqual(second.differential_resistance_ohm, 30.0)
+        output_commands = [
+            command for command in source.writes if command.startswith(":OUTP")
+        ]
+        self.assertEqual(output_commands, [":OUTP ON", ":OUTP OFF"])
+        self.assertEqual(
+            source.writes[source.writes.index(":OUTP ON") - 1],
+            ":SOUR:VOLT -0.03",
+        )
+        active_commands = _commands_between_output_on_off(source.writes)
+        self.assertNotIn(":SOUR:VOLT 0", active_commands)
+        self.assertEqual(
+            [
+                command
+                for command in active_commands
+                if command.startswith(":SOUR:VOLT ")
+            ],
+            [
+                ":SOUR:VOLT -0.03",
+                ":SOUR:VOLT 0.03",
+                ":SOUR:VOLT -0.03",
+                ":SOUR:VOLT 0.03",
+            ],
+        )
+
     def test_buffered_trigger_link_uses_vmc_sequence_and_trace_data(self) -> None:
         source = _FakeHandle(
             {
@@ -294,6 +358,41 @@ class KeithleyDriverTest(unittest.TestCase):
         self.assertEqual(voltmeter.timeout, 10000)
         self.assertGreater(max(source.timeout_history), 10000)
         self.assertEqual(voltmeter.timeout_history, [10000])
+
+    def test_output_context_keeps_buffered_route_relay_enabled(self) -> None:
+        source = _FakeHandle(
+            {
+                "*OPC?": ["1"],
+                "TRAC:DATA?": ["-0.03,-0.001,0.03,0.001"],
+            }
+        )
+        voltmeter = _FakeHandle({"TRAC:DATA?": ["-0.029,0.031"]})
+        meter = Keithley2400With2182A(
+            "GPIB0::1::INSTR",
+            "GPIB0::2::INSTR",
+            resource_manager=_FakeResourceManager(source, voltmeter),
+        )
+        config = Keithley2400With2182AConfig(
+            use_buffer=True,
+            use_trigger_link=True,
+            compliance_current_a=0.5,
+            current_range_a=0.5,
+        )
+        meter.configure(config)
+        source.writes.clear()
+
+        with meter.output(True):
+            meter.prepare_route_measurements(1)
+            readings = meter.read_route_measurements(1)
+
+        self.assertEqual(len(readings), 1)
+        self.assertAlmostEqual(readings[0]["differential_resistance_ohm"], 30.0)
+        output_commands = [
+            command for command in source.writes if command.startswith(":OUTP")
+        ]
+        self.assertEqual(output_commands, [":OUTP ON", ":OUTP OFF"])
+        active_commands = _commands_between_output_on_off(source.writes)
+        self.assertNotIn(":SOUR:VOLT 0", active_commands)
 
     def test_prepared_route_batch_reuses_covering_source_list(self) -> None:
         source = _FakeHandle(

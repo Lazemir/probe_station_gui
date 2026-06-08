@@ -143,6 +143,7 @@ from probe_station_gui.route_measurement import (
     ROUTE_OPERATION_MEASURE,
     ROUTE_OPERATION_PHOTO,
     ROUTE_OPERATION_PHOTO_THEN_MEASURE,
+    RouteContactQualityLimits,
     RouteContactHeightRecord,
     RouteExternalMeasurementSessionRunner,
     RouteMeasurementPoint,
@@ -741,6 +742,14 @@ class Main(QMainWindow):
         self._api_route_lcr_controller: object | None = None
         self._api_route_artifacts: dict[str, dict[str, object]] = {}
         self._api_route_artifacts_lock = threading.Lock()
+        self._api_route_control_active = False
+        self._api_route_control_pause_requested = False
+        self._api_route_control_paused = False
+        self._api_route_control_stop_requested = False
+        self._api_route_control_pending_action = ""
+        self._api_route_control_label = ""
+        self._api_route_control_updated_utc = ""
+        self._api_route_offset_xy: tuple[float, float] = (0.0, 0.0)
         self._microscope_scan_thread: threading.Thread | None = None
         self._microscope_scan_stop_requested = threading.Event()
         self._sample_handling_thread: threading.Thread | None = None
@@ -934,7 +943,7 @@ class Main(QMainWindow):
         self._api_server = ProbeStationApiServer(
             move_callback=self._submit_api_move_request,
             status_callback=self._submit_api_status_request,
-            command_callback=self._submit_api_command_request,
+            command_callback=self._submit_api_command_request_from_api_thread,
             auth_callback=self._authorize_api_request,
             host=api_settings.host,
             port=api_settings.port,
@@ -1040,7 +1049,6 @@ class Main(QMainWindow):
             return self._telegram_request_next_contact_photo_response()
         if command in {
             "measure",
-            "remeasure",
             "skip",
             "next",
         }:
@@ -1085,7 +1093,7 @@ class Main(QMainWindow):
             "/status - current state and microscope frame\n"
             "/next_photo - send the next route structure photo\n"
             "/next_contact - send the next route contact attempt photo\n"
-            "/measure, /remeasure, /skip, /next - answer a waiting route prompt"
+            "/measure, /skip, /next - answer a waiting route prompt"
         )
 
     def _telegram_status_response(self) -> TelegramBotResponse:
@@ -1150,7 +1158,7 @@ class Main(QMainWindow):
 
     def _telegram_route_action_response(self, action: str) -> TelegramBotResponse:
         action_key = str(action or "").strip().lower()
-        if action_key not in {"measure", "remeasure", "skip", "next"}:
+        if action_key not in {"measure", "skip", "next"}:
             return TelegramBotResponse(
                 "Unknown route action.",
                 reply_markup=self._telegram_default_markup(),
@@ -1164,6 +1172,13 @@ class Main(QMainWindow):
             )
         runner = self._route_measurement_runner
         if runner is None:
+            if bool(self._api_route_control_active) and bool(self._api_route_control_paused):
+                self._submit_route_measurement_confirmation(action_key)
+                return TelegramBotResponse(
+                    f"API route control action submitted: {action_key}.",
+                    reply_markup=self._telegram_default_markup(),
+                    callback_answer=f"{action_key} submitted.",
+                )
             return TelegramBotResponse(
                 "No route measurement is running.",
                 reply_markup=self._telegram_default_markup(),
@@ -1188,7 +1203,6 @@ class Main(QMainWindow):
             rows.append(
                 [
                     ("Measure", "route:measure"),
-                    ("Remeasure", "route:remeasure"),
                     ("Skip", "route:skip"),
                 ]
             )
@@ -1200,7 +1214,6 @@ class Main(QMainWindow):
             [
                 [
                     ("Measure", "route:measure"),
-                    ("Remeasure", "route:remeasure"),
                     ("Skip", "route:skip"),
                 ],
                 [("Status", "status")],
@@ -1226,6 +1239,13 @@ class Main(QMainWindow):
                 route_state = (
                     f"{route_state}, point {self._route_measurement_current_point}"
                 )
+        elif self._api_route_control_active:
+            if self._api_route_control_paused:
+                route_state = "API route control paused"
+            elif self._api_route_control_pause_requested:
+                route_state = "API route control pause requested"
+            else:
+                route_state = "API route control running"
         lines = [
             "Probe Station status",
             f"Current: {self._latest_status_message or 'idle'}",
@@ -1286,10 +1306,90 @@ class Main(QMainWindow):
         return self._api_bridge.submit({"action": "status"})
 
     def _submit_api_command_request(self, command_request: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_api_command_request(
+            command_request,
+            apply_route_control_guard=True,
+        )
+
+    def _submit_api_command_request_from_api_thread(
+        self,
+        command_request: dict[str, Any],
+    ) -> dict[str, Any]:
+        action, payload = self._api_command_action_payload(command_request)
+        if action in {"api_route_control_status", "api_route_control_action"}:
+            return self._submit_api_command_request_on_gui_thread(command_request)
+        if self._probe_route_api_requires_window(action, payload):
+            guard = self._submit_probe_route_window_guard_on_gui_thread(action, payload)
+            if not guard.get("accepted", False):
+                return guard
+            return self._dispatch_api_command_request(
+                command_request,
+                apply_route_control_guard=False,
+            )
+        return self._dispatch_api_command_request(
+            command_request,
+            apply_route_control_guard=False,
+        )
+
+    def _submit_api_command_request_on_gui_thread(
+        self,
+        command_request: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self._api_bridge is None:
+            return {
+                "accepted": False,
+                "status_code": 503,
+                "message": "GUI API bridge is not ready.",
+            }
+        return self._api_bridge.submit(
+            {
+                "action": "command",
+                "command": dict(command_request),
+            },
+            timeout_s=10.0,
+        )
+
+    def _submit_probe_route_window_guard_on_gui_thread(
+        self,
+        action: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self._api_bridge is None:
+            return {
+                "accepted": False,
+                "status_code": 503,
+                "message": "GUI API bridge is not ready.",
+            }
+        return self._api_bridge.submit(
+            {
+                "action": "probe_route_window_guard",
+                "guard_action": action,
+                "payload": dict(payload),
+            },
+            timeout_s=10.0,
+        )
+
+    @staticmethod
+    def _api_command_action_payload(
+        command_request: dict[str, Any],
+    ) -> tuple[str, dict[str, Any]]:
         action = str(command_request.get("action", "")).strip().lower()
         payload = command_request.get("payload")
         if not isinstance(payload, dict):
             payload = {}
+        return action, payload
+
+    def _dispatch_api_command_request(
+        self,
+        command_request: dict[str, Any],
+        *,
+        apply_route_control_guard: bool,
+    ) -> dict[str, Any]:
+        action, payload = self._api_command_action_payload(command_request)
+        if apply_route_control_guard:
+            route_control_guard = self._probe_route_api_window_guard(action, payload)
+            if route_control_guard is not None:
+                return route_control_guard
         if action == "list_contacts":
             return self._api_list_contacts()
         if action == "move_to_contact":
@@ -1300,8 +1400,14 @@ class Main(QMainWindow):
             return self._api_check_contact(payload)
         if action == "route_contact_focus":
             return self._api_route_contact_focus(payload)
+        if action == "route_contact_photo":
+            return self._api_route_contact_photo(payload)
         if action == "contact_seek":
             return self._api_contact_seek(payload)
+        if action == "api_route_control_status":
+            return self._api_route_control_status()
+        if action == "api_route_control_action":
+            return self._api_route_control_action(payload)
         if action == "configure_meter":
             return self._api_configure_meter(payload)
         if action == "raw_voltage_sweep":
@@ -1328,6 +1434,79 @@ class Main(QMainWindow):
             "message": f"Unsupported API command: {action}",
         }
 
+    def _probe_route_api_window_guard(
+        self,
+        action: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if not self._probe_route_api_requires_window(action, payload):
+            return None
+        if self._route_control_window_is_open():
+            return None
+        message = (
+            "Probe route control window is closed. Open the route measurement "
+            "window before using probe route API commands."
+        )
+        self._show_status(message, 8000)
+        return {
+            "accepted": False,
+            "status_code": 409,
+            "message": message,
+            "route_control_window_open": False,
+        }
+
+    def _probe_route_api_requires_window(
+        self,
+        action: str,
+        payload: dict[str, Any],
+    ) -> bool:
+        if action in {
+            "api_route_control_resume",
+            "move_to_contact",
+            "contact_needles",
+            "check_contact",
+            "route_contact_focus",
+            "route_contact_photo",
+            "contact_seek",
+            "start_route_session",
+            "route_session_result",
+            "route_session_seek",
+        }:
+            return True
+        if action == "route_session_action":
+            route_action = str(
+                payload.get("action", payload.get("command", "next"))
+            ).strip().lower()
+            return route_action not in {"pause", "interrupt", "stop", "status"}
+        if action == "raw_voltage_sweep":
+            route_contact_keys = {
+                "contact_number",
+                "contact",
+                "structure_number",
+                "point_number",
+            }
+            if any(key in payload for key in route_contact_keys):
+                return True
+            return (
+                self._api_bool(payload, "move_to_contact", "move", default=False)
+                or self._api_bool(payload, "lower_needles", "lower", default=False)
+                or self._api_bool(payload, "lift_after", default=False)
+            )
+        return False
+
+    def _route_control_window_is_open(self) -> bool:
+        dialog = getattr(self, "_route_measurement_dialog", None)
+        if dialog is None:
+            return False
+        is_visible = getattr(dialog, "isVisible", None)
+        if callable(is_visible):
+            try:
+                return bool(is_visible())
+            except Exception:
+                logger.exception("Failed to query route control window visibility.")
+                return False
+        return True
+
     def _handle_api_request(self, request: dict[str, Any]) -> dict[str, Any]:
         action = str(request.get("action", "")).strip().lower()
         if action == "move_to_coordinates":
@@ -1338,6 +1517,30 @@ class Main(QMainWindow):
             )
         if action == "status":
             return self._api_stage_status()
+        if action == "command":
+            command = request.get("command")
+            if not isinstance(command, dict):
+                return {
+                    "accepted": False,
+                    "status_code": 400,
+                    "message": "API command request must be an object.",
+                }
+            return self._submit_api_command_request(command)
+        if action == "probe_route_window_guard":
+            guard_action = str(request.get("guard_action", "")).strip().lower()
+            payload = request.get("payload")
+            if not isinstance(payload, dict):
+                payload = {}
+            route_control_guard = self._probe_route_api_window_guard(
+                guard_action,
+                payload,
+            )
+            if route_control_guard is not None:
+                return route_control_guard
+            return {
+                "accepted": True,
+                "route_control_window_open": True,
+            }
         return {
             "accepted": False,
             "status_code": 400,
@@ -1705,9 +1908,10 @@ class Main(QMainWindow):
                     "lift",
                     needle_feedrate,
                 )
+            target_xy = self._api_route_adjusted_stage_xy(point)
             self.stage_controller.run_external_move_to_xy(
-                point.stage_xy[0],
-                point.stage_xy[1],
+                target_xy[0],
+                target_xy[1],
             )
             if lower_needles:
                 self.stage_controller.run_external_needles_action(
@@ -1729,6 +1933,14 @@ class Main(QMainWindow):
                 "lifted_before_move": lift_before_move,
                 "lifted_after": lift_after and needles_lowered,
                 "needle_feedrate_mm_min": needle_feedrate,
+                "route_offset_xy": {
+                    "dx_mm": float(self._api_route_offset_xy[0]),
+                    "dy_mm": float(self._api_route_offset_xy[1]),
+                },
+                "target_stage_xy": {
+                    "x_mm": float(target_xy[0]),
+                    "y_mm": float(target_xy[1]),
+                },
             }
         except StageControllerError as exc:
             return {
@@ -1881,8 +2093,333 @@ class Main(QMainWindow):
             "focus": self._route_photo_focus_payload(result),
         }
 
+    def _api_route_contact_photo(self, payload: dict[str, Any]) -> dict[str, Any]:
+        contact_number = self._api_contact_number(payload)
+        if contact_number is None:
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": "Provide a positive contact_number.",
+            }
+        context_result = self._api_contact_context(contact_number)
+        if not context_result.get("accepted", False):
+            return context_result
+        contact = context_result["contact"]
+        photo = self._latest_camera_frame_photo()
+        if photo is None:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Camera frame is unavailable; cannot capture contact photo.",
+                "contact": contact,
+            }
+        photo_bytes, photo_name = photo
+        suffix = Path(photo_name).suffix or ".jpg"
+        filename = f"contact_{contact_number:03d}_photo{suffix}"
+        return {
+            "accepted": True,
+            "message": f"Captured contact {contact_number} photo.",
+            "timestamp_utc": self._api_timestamp_utc(),
+            "contact": contact,
+            "filename": filename,
+            "content_type": (
+                "image/jpeg"
+                if filename.lower().endswith((".jpg", ".jpeg"))
+                else "image/png"
+            ),
+            "data": photo_bytes,
+        }
+
     def _api_contact_seek(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._api_measure_current_contact(payload, seek=True)
+
+    def _api_route_control_status(self) -> dict[str, Any]:
+        return {
+            "accepted": True,
+            "active": bool(self._api_route_control_active),
+            "pause_requested": bool(self._api_route_control_pause_requested),
+            "paused": bool(self._api_route_control_paused),
+            "stop_requested": bool(self._api_route_control_stop_requested),
+            "pending_action": str(self._api_route_control_pending_action or ""),
+            "label": str(self._api_route_control_label or ""),
+            "updated_utc": str(self._api_route_control_updated_utc or ""),
+            "route_control_window_open": self._route_control_window_is_open(),
+        }
+
+    def _api_route_control_action(self, payload: dict[str, Any]) -> dict[str, Any]:
+        action = str(payload.get("action", payload.get("command", "status"))).strip().lower()
+        label = str(payload.get("label", payload.get("name", "")) or "").strip()
+        route_control_start = action in {"start", "begin", "activate"}
+        if action in {"start", "begin", "activate"}:
+            existing_route_result = (
+                self._clear_waiting_route_runner_before_api_control()
+            )
+            if existing_route_result is not None:
+                return existing_route_result
+            self._api_route_control_active = True
+            self._api_route_control_pause_requested = False
+            self._api_route_control_paused = False
+            self._api_route_control_stop_requested = False
+            self._api_route_control_pending_action = ""
+            if label:
+                self._api_route_control_label = label
+            elif not self._api_route_control_label:
+                self._api_route_control_label = "API route control"
+            message = f"{self._api_route_control_label}: running."
+        elif action == "pause":
+            if not self._api_route_control_active:
+                return {
+                    "accepted": False,
+                    "status_code": 409,
+                    "message": "No API route control run is active.",
+                }
+            return self._request_api_route_control_pause(
+                f"{self._api_route_control_label or 'API route control'}: pause requested."
+            )
+        elif action in {"paused", "pause_ack", "ack_pause"}:
+            if not self._api_route_control_active:
+                return {
+                    "accepted": False,
+                    "status_code": 409,
+                    "message": "No API route control run is active.",
+                }
+            return self._ack_api_route_control_pause(
+                f"{self._api_route_control_label or 'API route control'}: paused."
+            )
+        elif action == "interrupt":
+            if not self._api_route_control_active:
+                return {
+                    "accepted": False,
+                    "status_code": 409,
+                    "message": "No API route control run is active.",
+                }
+            return self._interrupt_api_route_controlled_operation(
+                "API route control interrupt requested."
+            )
+        elif action in {"resume", "continue", "measure", "remeasure", "skip", "next"} or action.startswith("jump:"):
+            if not self._api_route_control_active:
+                return {
+                    "accepted": False,
+                    "status_code": 409,
+                    "message": "No API route control run is active.",
+                }
+            if not self._route_control_window_is_open():
+                return self._probe_route_api_window_guard(
+                    "api_route_control_resume",
+                    {"route_action": action},
+                )
+            pending_action = action
+            if pending_action == "continue":
+                pending_action = "resume"
+            explicit_action = str(
+                payload.get("pending_action", payload.get("next_action", "")) or ""
+            ).strip().lower()
+            if explicit_action:
+                pending_action = explicit_action
+            self._api_route_control_pending_action = pending_action
+            self._api_route_control_pause_requested = False
+            self._api_route_control_paused = False
+            action_label = "resumed" if pending_action == "resume" else pending_action
+            message = (
+                f"{self._api_route_control_label or 'API route control'}: "
+                f"{action_label}."
+            )
+        elif action == "stop":
+            if not self._api_route_control_active:
+                return {
+                    "accepted": False,
+                    "status_code": 409,
+                    "message": "No API route control run is active.",
+                }
+            self._api_route_control_stop_requested = True
+            self._api_route_control_pause_requested = False
+            self._api_route_control_paused = False
+            self._api_route_control_pending_action = ""
+            message = f"{self._api_route_control_label or 'API route control'}: stop requested."
+        elif action in {"finish", "complete", "clear", "done"}:
+            self._api_route_control_active = False
+            self._api_route_control_pause_requested = False
+            self._api_route_control_paused = False
+            self._api_route_control_stop_requested = False
+            self._api_route_control_pending_action = ""
+            if label:
+                self._api_route_control_label = label
+            message = f"{self._api_route_control_label or 'API route control'}: finished."
+        elif action in {"ack", "clear_action"}:
+            self._api_route_control_pending_action = ""
+            self._api_route_control_updated_utc = self._api_timestamp_utc()
+            return self._api_route_control_status()
+        elif action == "status":
+            return self._api_route_control_status()
+        else:
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": f"Unknown API route control action: {action}",
+            }
+        self._api_route_control_updated_utc = self._api_timestamp_utc()
+        if route_control_start and not self._show_route_measurement_dialog_for_api_session():
+            self._api_route_control_active = False
+            self._api_route_control_pause_requested = False
+            self._api_route_control_paused = False
+            self._api_route_control_stop_requested = False
+            self._api_route_control_pending_action = ""
+            message = (
+                f"{self._api_route_control_label or 'API route control'}: "
+                "route control window did not open."
+            )
+            self._update_api_route_control_ui(message)
+            status = self._api_route_control_status()
+            status.update(
+                {
+                    "accepted": False,
+                    "status_code": 409,
+                    "message": message,
+                    "route_control_window_open": False,
+                }
+            )
+            return status
+        self._update_api_route_control_ui(message)
+        status = self._api_route_control_status()
+        status["message"] = message
+        return status
+
+    def _clear_waiting_route_runner_before_api_control(
+        self,
+    ) -> dict[str, Any] | None:
+        runner = getattr(self, "_route_measurement_runner", None)
+        thread = getattr(self, "_route_measurement_thread", None)
+        thread_alive = bool(thread is not None and thread.is_alive())
+        if runner is None and not thread_alive:
+            return None
+        if runner is not None and not thread_alive:
+            self._route_measurement_runner = None
+            self._route_measurement_thread = None
+            self._route_measurement_waiting = False
+            self._route_measurement_waiting_reason = ""
+            self._route_measurement_session_active = False
+            self._pending_route_measure_point = None
+            return None
+        can_clear_waiting_gui_route = (
+            runner is not None
+            and bool(getattr(self, "_route_measurement_waiting", False))
+            and not hasattr(runner, "submit_external_result")
+        )
+        if not can_clear_waiting_gui_route:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": (
+                    "Route measurement is already active. Stop or pause it "
+                    "before starting API route control."
+                ),
+            }
+        try:
+            runner.stop()
+            if thread is not None:
+                thread.join(timeout=2.0)
+        except Exception as exc:
+            logger.exception("Failed to clear waiting route measurement.")
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": f"Failed to stop waiting route measurement: {exc}",
+            }
+        if thread is not None and thread.is_alive():
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": (
+                    "Waiting route measurement did not stop before API route "
+                    "control start."
+                ),
+            }
+        self._route_measurement_runner = None
+        self._route_measurement_thread = None
+        self._route_measurement_waiting = False
+        self._route_measurement_waiting_reason = ""
+        self._route_measurement_session_active = False
+        self._pending_route_measure_point = None
+        return None
+
+    def _request_api_route_control_pause(self, message: str) -> dict[str, Any]:
+        self._api_route_control_pause_requested = True
+        self._api_route_control_paused = False
+        self._api_route_control_stop_requested = False
+        self._api_route_control_pending_action = ""
+        self._api_route_control_updated_utc = self._api_timestamp_utc()
+        self._update_api_route_control_ui(message)
+        status = self._api_route_control_status()
+        status["message"] = message
+        return status
+
+    def _ack_api_route_control_pause(self, message: str) -> dict[str, Any]:
+        self._api_route_control_pause_requested = False
+        self._api_route_control_paused = True
+        self._api_route_control_stop_requested = False
+        self._api_route_control_pending_action = ""
+        self._api_route_control_updated_utc = self._api_timestamp_utc()
+        self._update_api_route_control_ui(message)
+        status = self._api_route_control_status()
+        status["message"] = message
+        return status
+
+    def _interrupt_api_route_controlled_operation(self, reason: str) -> dict[str, Any]:
+        self._pending_route_measure_point = None
+        self._api_route_control_pause_requested = False
+        self._api_route_control_paused = True
+        self._api_route_control_stop_requested = False
+        self._api_route_control_pending_action = ""
+        self._api_route_control_updated_utc = self._api_timestamp_utc()
+        self._contact_seek_stop_requested.set()
+        try:
+            self.stage_controller.cancel_active_task(reason)
+        except Exception:
+            logger.exception("Failed to cancel API route control stage task.")
+        try:
+            if self._controller_reports_active_motion():
+                self.stage_controller.cancel_active_motion(reason)
+        except Exception:
+            logger.exception("Failed to cancel API route control active motion.")
+        self._clear_stage_motion_axes()
+        try:
+            self._clear_planned_move_prediction(clear_wait_state=True)
+        except Exception:
+            logger.exception("Failed to clear planned move prediction after API route control interrupt.")
+        self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
+        return self._ack_api_route_control_pause(
+            f"{self._api_route_control_label or 'API route control'}: interrupted; paused."
+        )
+
+    def _update_api_route_control_ui(self, message: str) -> None:
+        active = bool(self._api_route_control_active)
+        pause_requested = bool(self._api_route_control_pause_requested)
+        paused = bool(self._api_route_control_paused)
+        waiting = active and paused
+        pause_pending = active and pause_requested and not paused
+        self._route_measurement_waiting = waiting
+        self._route_measurement_waiting_reason = "paused" if waiting else ""
+        if self.design_navigator_panel is not None:
+            self.design_navigator_panel.set_route_measurement_running(active)
+            if hasattr(
+                self.design_navigator_panel,
+                "set_route_measurement_pause_request_pending",
+            ):
+                self.design_navigator_panel.set_route_measurement_pause_request_pending(
+                    pause_pending
+                )
+            self.design_navigator_panel.set_route_measurement_waiting(
+                waiting,
+                reason="paused",
+            )
+            self.design_navigator_panel.set_route_measurement_status(message)
+        if self._route_measurement_dialog is not None:
+            self._route_measurement_dialog.set_running(active)
+            if hasattr(self._route_measurement_dialog, "set_pause_request_pending"):
+                self._route_measurement_dialog.set_pause_request_pending(pause_pending)
+            self._route_measurement_dialog.set_waiting(waiting, reason="paused")
+            self._route_measurement_dialog.set_status(message)
+        self._show_status(message, 5000)
 
     def _api_measure_current_contact(
         self,
@@ -1947,6 +2484,7 @@ class Main(QMainWindow):
                 default=RouteMeasurementRunner.DEFAULT_CONTACT_SETTLE_S,
                 minimum=0.0,
             )
+            contact_quality_limits = self._api_contact_quality_limits(payload)
         except ValueError as exc:
             return {
                 "accepted": False,
@@ -1997,6 +2535,7 @@ class Main(QMainWindow):
             initial_measurement_count=check_sample_count,
             start_point_number=int(point.index),
             max_relative_rms=max_relative_rms,
+            contact_quality_limits=contact_quality_limits,
             auto_contact_seek_on_bad_contact=seek,
             auto_contact_seek_step_mm=contact_seek_step_mm,
             auto_contact_seek_max_total_mm=contact_seek_range_mm,
@@ -2038,6 +2577,7 @@ class Main(QMainWindow):
             "contact_settle_s": contact_settle_s,
             "contact_seek_range_mm": contact_seek_range_mm,
             "contact_seek_step_mm": contact_seek_step_mm,
+            "contact_quality_limits": contact_quality_limits.as_dict(),
             "measurement": self._api_route_measurement_record_payload(record),
             "contact_seek": self._api_contact_seek_payload(result.contact_seek),
         }
@@ -2050,6 +2590,24 @@ class Main(QMainWindow):
                     and bool(getattr(contact_seek, "found", False))
                 )
             )
+            if (
+                not bool(response["contact_found"])
+                and self._api_bool(
+                    payload,
+                    "telegram_on_failure",
+                    "telegram_on_seek_failure",
+                    "notify_on_failure",
+                    default=False,
+                )
+            ):
+                self._send_telegram_alert(
+                    "route_attention",
+                    "Probe route needs attention:\n"
+                    f"Contact seek failed for contact {contact_number}: "
+                    f"{result.message}",
+                    attach_photo=True,
+                    reply_markup=self._telegram_route_actions_markup(),
+                )
         return response
 
     def _api_ensure_measurement_instrument_connected(self) -> dict[str, Any] | None:
@@ -2255,9 +2813,10 @@ class Main(QMainWindow):
                     needle_feedrate,
                 )
             if move_to_contact and point is not None:
+                target_xy = self._api_route_adjusted_stage_xy(point)
                 self.stage_controller.run_external_move_to_xy(
-                    point.stage_xy[0],
-                    point.stage_xy[1],
+                    target_xy[0],
+                    target_xy[1],
                 )
             if active_stage_task and lower_needles:
                 self.stage_controller.run_external_needles_action(
@@ -2467,7 +3026,34 @@ class Main(QMainWindow):
         if thread is not None and thread.is_alive():
             runner = self._route_measurement_runner
             if isinstance(runner, RouteExternalMeasurementSessionRunner):
-                return runner.status_payload()
+                if self._api_bool(
+                    payload,
+                    "attach_existing_session",
+                    "attach_existing",
+                    "resume_existing",
+                    default=False,
+                ):
+                    return runner.status_payload()
+                status = runner.status_payload()
+                contact = status.get("current_contact")
+                if isinstance(contact, dict):
+                    point_label = (
+                        contact.get("label")
+                        or contact.get("contact_number")
+                        or contact.get("point_index")
+                    )
+                else:
+                    point_label = status.get("position")
+                return {
+                    "accepted": False,
+                    "status_code": 409,
+                    "message": (
+                        "External route session is already active"
+                        f" at {point_label}. Stop it first or pass "
+                        "attach_existing_session=true to attach explicitly."
+                    ),
+                    "active_session": status,
+                }
             can_take_over_waiting_gui_runner = (
                 isinstance(runner, RouteMeasurementRunner)
                 and self._route_measurement_waiting
@@ -2608,6 +3194,7 @@ class Main(QMainWindow):
                 default=0.03,
                 minimum=0.001,
             )
+            contact_quality_limits = self._api_contact_quality_limits(payload)
         except ValueError as exc:
             return {
                 "accepted": False,
@@ -2683,11 +3270,12 @@ class Main(QMainWindow):
             points=points,
             stage_controller=self.stage_controller,
             lcr_controller=route_lcr_controller,
-            needle_feedrate=self._current_needle_feedrate(),
+            needle_feedrate=self._api_needle_feedrate(payload),
             measurement_count=measurement_count,
             initial_measurement_count=initial_count,
             start_point_number=int(selected_point.index),
             max_relative_rms=max_relative_rms,
+            contact_quality_limits=contact_quality_limits,
             auto_contact_seek_step_mm=contact_seek_step_mm,
             auto_contact_seek_max_total_mm=contact_seek_range_mm,
             contact_settle_s=contact_settle_s,
@@ -2772,11 +3360,13 @@ class Main(QMainWindow):
         )
         return runner.status_payload()
 
-    def _show_route_measurement_dialog_for_api_session(self) -> None:
+    def _show_route_measurement_dialog_for_api_session(self) -> bool:
         try:
             self._open_route_measurement_dialog(start_context=False)
         except Exception:
             logger.exception("Failed to open route measurement controls for API session.")
+            return False
+        return self._route_control_window_is_open()
 
     def _api_route_session_status(self) -> dict[str, Any]:
         runner = getattr(self, "_route_measurement_runner", None)
@@ -3047,6 +3637,20 @@ class Main(QMainWindow):
             ),
         }
 
+    def _api_route_adjusted_stage_xy(
+        self,
+        point: RouteMeasurementPoint,
+    ) -> tuple[float, float]:
+        offset_x, offset_y = getattr(
+            self,
+            "_api_route_offset_xy",
+            (0.0, 0.0),
+        )
+        return (
+            float(point.stage_xy[0]) + float(offset_x),
+            float(point.stage_xy[1]) + float(offset_y),
+        )
+
     def _api_find_contact_point(
         self,
         points: list[RouteMeasurementPoint],
@@ -3113,6 +3717,14 @@ class Main(QMainWindow):
             "stage_xy": {
                 "x_mm": float(point.stage_xy[0]),
                 "y_mm": float(point.stage_xy[1]),
+            },
+            "route_offset_xy": {
+                "dx_mm": float(getattr(self, "_api_route_offset_xy", (0.0, 0.0))[0]),
+                "dy_mm": float(getattr(self, "_api_route_offset_xy", (0.0, 0.0))[1]),
+            },
+            "adjusted_stage_xy": {
+                "x_mm": float(self._api_route_adjusted_stage_xy(point)[0]),
+                "y_mm": float(self._api_route_adjusted_stage_xy(point)[1]),
             },
             "needle_contacts": [
                 {
@@ -3491,6 +4103,52 @@ class Main(QMainWindow):
         return parsed
 
     @classmethod
+    def _api_contact_quality_limits(
+        cls,
+        payload: dict[str, Any],
+    ) -> RouteContactQualityLimits:
+        nested = payload.get("contact_quality", payload.get("contact_quality_limits"))
+        if nested is None:
+            nested_payload: dict[str, Any] = {}
+        elif isinstance(nested, dict):
+            nested_payload = dict(nested)
+        else:
+            raise ValueError("contact_quality must be an object.")
+        combined = dict(payload)
+        combined.update(nested_payload)
+        defaults = RouteContactQualityLimits()
+        return RouteContactQualityLimits(
+            max_mad_sigma_ohm=cls._api_float(
+                combined,
+                "max_mad_sigma_ohm",
+                "contact_max_mad_sigma_ohm",
+                default=defaults.max_mad_sigma_ohm,
+                minimum=0.0,
+            ),
+            max_p95_abs_step_ohm=cls._api_float(
+                combined,
+                "max_p95_abs_step_ohm",
+                "contact_max_p95_abs_step_ohm",
+                default=defaults.max_p95_abs_step_ohm,
+                minimum=0.0,
+            ),
+            max_relative_mad_sigma=cls._api_float(
+                combined,
+                "max_relative_mad_sigma",
+                "contact_max_relative_mad_sigma",
+                default=defaults.max_relative_mad_sigma,
+                minimum=0.0,
+            ),
+            max_relative_p95_abs_step=cls._api_float(
+                combined,
+                "max_relative_p95_abs_step",
+                "contact_max_relative_p95_abs_step",
+                default=defaults.max_relative_p95_abs_step,
+                minimum=0.0,
+            ),
+        ).normalized()
+
+    @classmethod
     def _api_route_measurement_record_payload(
         cls,
         record: RouteMeasurementRecord,
@@ -3557,6 +4215,9 @@ class Main(QMainWindow):
                 getattr(quality, "polarity_sign_mismatch_count", 0)
             ),
             "reasons": list(getattr(quality, "reasons", ()) or ()),
+            "failure_criteria": list(
+                getattr(quality, "failure_criteria", ()) or ()
+            ),
         }
 
     @classmethod
@@ -8835,6 +9496,9 @@ class Main(QMainWindow):
         self._update_stage_coordinate_apply_state()
 
     def _request_stop_route_measurement(self) -> None:
+        if bool(getattr(self, "_api_route_control_active", False)):
+            self._api_route_control_action({"action": "stop"})
+            return
         runner = self._route_measurement_runner
         if runner is None:
             self._show_status("No route measurement is running.", 3000)
@@ -8858,6 +9522,11 @@ class Main(QMainWindow):
         self,
         pending_point_number: int | None = None,
     ) -> None:
+        if bool(getattr(self, "_api_route_control_active", False)):
+            self._interrupt_api_route_controlled_operation(
+                "API route control interrupt requested."
+            )
+            return
         runner = self._route_measurement_runner
         if runner is None:
             self._show_status("No route measurement is running.", 3000)
@@ -8882,6 +9551,14 @@ class Main(QMainWindow):
             self._route_measurement_dialog.set_status(message)
 
     def _submit_route_measurement_confirmation(self, action: str) -> None:
+        if bool(getattr(self, "_api_route_control_active", False)) and bool(
+            getattr(self, "_api_route_control_paused", False)
+        ):
+            api_action = str(action).strip().lower()
+            if api_action == "next":
+                api_action = "resume"
+            self._api_route_control_action({"action": api_action})
+            return
         runner = self._route_measurement_runner
         if runner is None:
             self._show_status("No route measurement is waiting.", 3000)
@@ -8952,14 +9629,25 @@ class Main(QMainWindow):
                         self._show_status(message, 8000)
                         self._route_measurement_dialog.set_status(message)
                         return
-        if not runner.submit_confirmation(action):
+        action_to_submit = str(action)
+        action_key = action_to_submit.strip().lower()
+        pending_point_number = getattr(self, "_pending_route_measure_point", None)
+        if (
+            self._route_measurement_waiting
+            and pending_point_number is not None
+            and action_key in {"next", "resume", "continue"}
+        ):
+            action_to_submit = f"jump:{int(pending_point_number)}"
+            action_key = action_to_submit.strip().lower()
+        if not runner.submit_confirmation(action_to_submit):
             self._show_status("Unknown route measurement action.", 3000)
             return
+        if action_to_submit != str(action):
+            self._pending_route_measure_point = None
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_route_measurement_waiting(False)
         if self._route_measurement_dialog is not None:
             self._route_measurement_dialog.set_waiting(False)
-        action_key = str(action).strip().lower()
         if action_key == "measure":
             action_label = "measure"
         elif action_key == "remeasure":
@@ -8983,9 +9671,17 @@ class Main(QMainWindow):
             return
         route_thread = self._route_measurement_thread
         route_active = route_thread is not None and route_thread.is_alive()
+        api_route_active = bool(getattr(self, "_api_route_control_active", False))
+        api_route_paused = bool(getattr(self, "_api_route_control_paused", False))
         if route_active and not self._route_measurement_waiting:
             self._show_status(
                 "Pause or wait for route measurement before moving to a contact.",
+                5000,
+            )
+            return
+        if api_route_active and not api_route_paused:
+            self._show_status(
+                "Pause API route control before moving to a contact.",
                 5000,
             )
             return
@@ -9003,7 +9699,9 @@ class Main(QMainWindow):
             self._set_route_measurement_resume_point(int(point.index))
             runner = self._route_measurement_runner
             if runner is not None and self._route_measurement_waiting:
-                runner.set_current_adjustment_point(int(point.index))
+                self._pending_route_measure_point = int(point.index)
+                if hasattr(runner, "set_current_adjustment_point"):
+                    runner.set_current_adjustment_point(int(point.index))
         needle_feedrate = self._current_needle_feedrate()
         message = f"Route contact move: point {int(point.index)} {point.label}."
         self._show_status(message, 5000)
@@ -9043,9 +9741,10 @@ class Main(QMainWindow):
             self.route_measurement_status.emit(
                 f"Route contact move: point {int(point.index)} {point.label}, moving."
             )
+            target_xy = self._api_route_adjusted_stage_xy(point)
             self.stage_controller.run_external_move_to_xy(
-                point.stage_xy[0],
-                point.stage_xy[1],
+                target_xy[0],
+                target_xy[1],
             )
             success = True
             message = (
@@ -9076,6 +9775,16 @@ class Main(QMainWindow):
             self._route_measurement_dialog.set_status(message)
 
     def _request_pause_route_measurement(self) -> None:
+        if bool(getattr(self, "_api_route_control_active", False)):
+            if bool(getattr(self, "_api_route_control_paused", False)):
+                self._api_route_control_action({"action": "resume"})
+            elif bool(getattr(self, "_api_route_control_pause_requested", False)):
+                self._interrupt_api_route_controlled_operation(
+                    "API route control interrupt requested."
+                )
+            else:
+                self._api_route_control_action({"action": "pause"})
+            return
         runner = self._route_measurement_runner
         if runner is None:
             self._show_status("No route measurement is running.", 3000)
@@ -9103,7 +9812,12 @@ class Main(QMainWindow):
     def _save_route_measurement_shift(self, point_number: int | None = None) -> None:
         runner = self._route_measurement_runner
         thread = self._route_measurement_thread
-        if runner is None or thread is None or not thread.is_alive():
+        runner_active = runner is not None and thread is not None and thread.is_alive()
+        api_route_active = bool(getattr(self, "_api_route_control_active", False))
+        api_route_paused = bool(getattr(self, "_api_route_control_paused", False))
+        if api_route_active:
+            runner_active = False
+        if not runner_active and not api_route_active:
             message = "Route measurement is not ready."
             self._show_status(message, 5000)
             if self.design_navigator_panel is not None:
@@ -9111,8 +9825,16 @@ class Main(QMainWindow):
             if self._route_measurement_dialog is not None:
                 self._route_measurement_dialog.set_status(message)
             return
-        if not self._route_measurement_waiting:
+        if runner_active and not self._route_measurement_waiting:
             message = "Pause route measurement before saving shift."
+            self._show_status(message, 5000)
+            if self.design_navigator_panel is not None:
+                self.design_navigator_panel.set_route_measurement_status(message)
+            if self._route_measurement_dialog is not None:
+                self._route_measurement_dialog.set_status(message)
+            return
+        if not runner_active and not api_route_paused:
+            message = "Pause API route control before saving shift."
             self._show_status(message, 5000)
             if self.design_navigator_panel is not None:
                 self.design_navigator_panel.set_route_measurement_status(message)
@@ -9126,7 +9848,8 @@ class Main(QMainWindow):
                 )
             elif self._route_measurement_current_point is not None:
                 point_number = int(self._route_measurement_current_point)
-        if point_number is not None:
+        adjustment_point: RouteMeasurementPoint | None = None
+        if runner_active and point_number is not None:
             point_selected, message = runner.set_current_adjustment_point(
                 int(point_number)
             )
@@ -9137,6 +9860,28 @@ class Main(QMainWindow):
                 if self._route_measurement_dialog is not None:
                     self._route_measurement_dialog.set_status(message)
                 return
+        elif not runner_active:
+            if point_number is None:
+                message = "Select a route point before saving shift."
+                self._show_status(message, 5000)
+                if self.design_navigator_panel is not None:
+                    self.design_navigator_panel.set_route_measurement_status(message)
+                if self._route_measurement_dialog is not None:
+                    self._route_measurement_dialog.set_status(message)
+                return
+            context_result = self._api_contact_context(int(point_number))
+            if not context_result.get("accepted", False):
+                message = str(
+                    context_result.get("message")
+                    or "Route point is unavailable for saving shift."
+                )
+                self._show_status(message, 6000)
+                if self.design_navigator_panel is not None:
+                    self.design_navigator_panel.set_route_measurement_status(message)
+                if self._route_measurement_dialog is not None:
+                    self._route_measurement_dialog.set_status(message)
+                return
+            adjustment_point = context_result["point"]
         try:
             position = self.stage_controller.current_stage_position()
         except StageControllerError as exc:
@@ -9155,10 +9900,29 @@ class Main(QMainWindow):
             if self._route_measurement_dialog is not None:
                 self._route_measurement_dialog.set_status(message)
             return
-        saved, message = runner.save_current_position_adjustment(stage_xy)
+        if runner_active:
+            saved, message = runner.save_current_position_adjustment(stage_xy)
+            if saved and hasattr(runner, "route_offset_xy"):
+                try:
+                    offset_xy = runner.route_offset_xy()
+                    self._api_route_offset_xy = (
+                        float(offset_xy[0]),
+                        float(offset_xy[1]),
+                    )
+                except (TypeError, ValueError, IndexError):
+                    pass
+        else:
+            offset_x = float(stage_xy[0]) - float(adjustment_point.stage_xy[0])
+            offset_y = float(stage_xy[1]) - float(adjustment_point.stage_xy[1])
+            self._api_route_offset_xy = (offset_x, offset_y)
+            saved = True
+            message = (
+                "Route shift saved: "
+                f"dX={offset_x:+.4f} mm, dY={offset_y:+.4f} mm."
+            )
         self._show_status(message, 5000)
         if self.design_navigator_panel is not None:
-            if hasattr(
+            if runner_active and hasattr(
                 self.design_navigator_panel,
                 "set_route_measurement_interrupt_request_pending",
             ):
@@ -9167,7 +9931,7 @@ class Main(QMainWindow):
                 )
             self.design_navigator_panel.set_route_measurement_status(message)
         if self._route_measurement_dialog is not None:
-            if hasattr(
+            if runner_active and hasattr(
                 self._route_measurement_dialog,
                 "set_interrupt_request_pending",
             ):
@@ -9222,7 +9986,9 @@ class Main(QMainWindow):
         self._set_route_measurement_resume_point(point_number)
         runner = self._route_measurement_runner
         if runner is not None and self._route_measurement_waiting:
-            runner.set_current_adjustment_point(point_number)
+            self._pending_route_measure_point = int(point_number)
+            if hasattr(runner, "set_current_adjustment_point"):
+                runner.set_current_adjustment_point(point_number)
 
     def _on_route_measurement_waiting_changed(self, waiting: bool) -> None:
         self._route_measurement_waiting = bool(waiting)
@@ -9415,6 +10181,12 @@ class Main(QMainWindow):
             return ""
         reasons = tuple(getattr(contact, "reasons", ()) or ())
         reason_text = ", ".join(str(reason) for reason in reasons) if reasons else "none"
+        failure_criteria = tuple(getattr(contact, "failure_criteria", ()) or ())
+        failure_text = (
+            ", failed_criterion=" + " | ".join(str(item) for item in failure_criteria)
+            if failure_criteria
+            else ""
+        )
         return (
             f", contact={getattr(contact, 'status', 'unknown')}, "
             f"reasons={reason_text}, "
@@ -9425,6 +10197,7 @@ class Main(QMainWindow):
             f"compliance_hits={int(getattr(contact, 'compliance_hits', 0))}, "
             "polarity_mismatches="
             f"{int(getattr(contact, 'polarity_sign_mismatch_count', 0))}"
+            f"{failure_text}"
         )
 
     def _on_route_measurement_finished(self, *args: object) -> None:
@@ -11868,7 +12641,6 @@ class Main(QMainWindow):
 
     def _cancel_contact_seek(self) -> None:
         self._contact_seek_stop_requested.set()
-        self.lcr_controller.abort_current_measurement()
         self.stage_controller.cancel_active_motion("Contact seek cancel requested.")
         self._show_status("Contact seek cancel requested.")
 

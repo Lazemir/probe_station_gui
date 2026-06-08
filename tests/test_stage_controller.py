@@ -3152,6 +3152,60 @@ class StageControllerStatusRefreshTest(unittest.TestCase):
         self.assertEqual(bytes(serial_connection.discarded), stale)
         self.assertEqual(serial_connection.writes, [b"?\n"])
 
+    def test_status_query_detects_controller_reboot_in_discarded_input(self) -> None:
+        controller = StageController()
+        controller._current_status_report_mask = (
+            controller._desired_status_report_mask_for_mode("work")
+        )
+        controller._homed_axes = {"A", "X", "Y", "Z"}
+        controller._needles_up = True
+        controller._needles_known = True
+        controller._controller_state_stale = False
+        controller._controller_session_marker = 800
+        controller._last_stage_position = (1.0, 2.0, 3.0, 4.0)
+        controller._axis_limits = {"Z": (0.0, 23.0)}
+        controller._axis_max_feedrates = {"Z": 100.0}
+        positions = []
+        reboot_events = []
+        ready_events = []
+        controller.stage_position_changed = types.SimpleNamespace(
+            emit=lambda position: positions.append(position)
+        )
+        controller.controller_reboot_detected = types.SimpleNamespace(
+            emit=lambda: reboot_events.append(True)
+        )
+        controller.controller_reboot_ready = types.SimpleNamespace(
+            emit=lambda: ready_events.append(True)
+        )
+        boot_text = (
+            b"ok\r\n\r\n"
+            b"Brownout detector was triggered\r\n\r\n"
+            b"ets Jul 29 2019 12:21:46\r\n\r\n"
+            b"rst:0xc (SW_CPU_RESET),boot:0x12 (SPI_FAST_FLASH_BOOT)\r\n"
+        )
+        serial_connection = _BufferedLineFakeSerial(
+            boot_text,
+            [
+                b"<Idle|WPos:-32.000,-32.000,0.000,2.968,0.000|Bf:15,127|FS:0,0>\n",
+            ],
+        )
+
+        status = controller._query_status(serial_connection)
+
+        self.assertIsNotNone(status)
+        self.assertEqual(status.work_position[:4], (-32.0, -32.0, 0.0, 2.968))
+        self.assertEqual(bytes(serial_connection.discarded), boot_text)
+        self.assertEqual(serial_connection.writes, [b"?\n"])
+        self.assertEqual(controller._homed_axes, set())
+        self.assertFalse(controller._needles_up)
+        self.assertFalse(controller._needles_known)
+        self.assertIsNone(controller._controller_session_marker)
+        self.assertEqual(controller._axis_limits, {})
+        self.assertEqual(controller._axis_max_feedrates, {})
+        self.assertEqual(positions[0], None)
+        self.assertEqual(reboot_events, [True])
+        self.assertEqual(ready_events, [True])
+
     def test_target_idle_wait_ignores_stale_idle_before_target(self) -> None:
         controller = StageController()
         statuses = [
@@ -3216,6 +3270,34 @@ class StageControllerStatusRefreshTest(unittest.TestCase):
             thread.join(timeout=1.0)
 
         self.assertEqual(started, [True])
+
+    def test_status_refresh_reads_idle_when_motion_cancel_flag_is_set(self) -> None:
+        controller = StageController()
+        controller._current_status_report_mask = (
+            controller._desired_status_report_mask_for_mode("work")
+        )
+        serial_connection = _LineFakeSerial(
+            [
+                b"<Idle|WPos:0.000,0.000,3.840,2.967,0.000|Bf:15,127|FS:0,0>\n",
+            ]
+        )
+        positions = []
+        controller._serial = serial_connection
+        controller.stage_position_changed = types.SimpleNamespace(
+            emit=lambda position: positions.append(position)
+        )
+        controller._cancel_event.set()
+
+        try:
+            controller._poll_status_once()
+        finally:
+            controller.shutdown()
+
+        self.assertTrue(controller._cancel_event.is_set())
+        self.assertEqual(controller._last_stage_state, "Idle")
+        self.assertEqual(controller._last_stage_position, (0.0, 0.0, 3.84, 2.967, 0.0))
+        self.assertEqual(positions, [(0.0, 0.0, 3.84, 2.967, 0.0)])
+        self.assertEqual(serial_connection.writes, [b"?\n"])
 
 
 class StageControllerStartupSyncTest(unittest.TestCase):
@@ -3505,6 +3587,28 @@ class StageControllerReconnectStateTest(unittest.TestCase):
             controller._controller_coordinate_offsets["G54"],
             (32.0, 32.0, 0.0, -2.885, 0.0),
         )
+
+    def test_cached_session_marker_retries_after_truncated_modal_response(self) -> None:
+        controller = StageController()
+        serial_connection = _LineFakeSerial(
+            [
+                b"T600 F0 S0]\n",
+                b"ok\n",
+                b"[GC:G0 G54 G17 G21 G90 G94 M5 M9 T600 F0 S0]\n",
+                b"ok\n",
+            ]
+        )
+        controller._serial = serial_connection
+
+        try:
+            current = controller.cached_controller_session_is_current(
+                {"controller_session_marker": 600}
+            )
+        finally:
+            controller.shutdown()
+
+        self.assertTrue(current)
+        self.assertEqual(serial_connection.writes, [b"$G\n", b"$G\n"])
 
     def test_status_reader_detects_live_controller_reboot_and_clears_homing(self) -> None:
         controller = StageController()

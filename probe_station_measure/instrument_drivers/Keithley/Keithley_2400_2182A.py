@@ -447,6 +447,8 @@ class Keithley2400With2182A(AbstractOhmmeter):
             int,
         ] | None = None
         self._prepared_source_voltages: tuple[float, ...] = ()
+        self._source_output_enabled = False
+        self._source_output_context_enabled_depth = 0
         self._source = self._open_resource(source_resource, timeout_ms)
         if voltmeter_resource is not None and str(voltmeter_resource).strip():
             self._voltmeter = self._open_resource(voltmeter_resource, timeout_ms)
@@ -645,6 +647,34 @@ class Keithley2400With2182A(AbstractOhmmeter):
             )
         )
 
+    @contextmanager
+    def output(self, enabled: bool = True) -> Iterator["Keithley2400With2182A"]:
+        """Keep the 2400 output relay in one state across several operations."""
+
+        requested_enabled = bool(enabled)
+        previous_enabled = bool(self._source_output_enabled)
+        if requested_enabled:
+            self._source_output_context_enabled_depth += 1
+        try:
+            if requested_enabled and self._common_config_key is None:
+                self._configure_common(self._config)
+            if requested_enabled:
+                self._prime_output_context_source_voltage(self._config)
+            self._set_source_output_enabled(requested_enabled)
+            yield self
+        finally:
+            leave_voltage_as_is = requested_enabled and not previous_enabled
+            if requested_enabled:
+                self._source_output_context_enabled_depth = max(
+                    0,
+                    self._source_output_context_enabled_depth - 1,
+                )
+            self._set_source_output_enabled(
+                previous_enabled,
+                best_effort=True,
+                zero_voltage=not leave_voltage_as_is,
+            )
+
     def measure_pair(
         self,
         config: Keithley2400With2182AConfig | None = None,
@@ -826,8 +856,11 @@ class Keithley2400With2182A(AbstractOhmmeter):
             self._try_write(self._voltmeter, "ABOR")
         if self._source is not None:
             self._try_write(self._source, ":ABOR")
-            self._try_write(self._source, ":SOUR:VOLT 0")
-            self._try_write(self._source, ":OUTP OFF")
+            self._set_source_output_enabled(
+                False,
+                best_effort=True,
+                force=True,
+            )
 
     def abort_measurement(self) -> None:
         self.abort()
@@ -879,12 +912,15 @@ class Keithley2400With2182A(AbstractOhmmeter):
     def close(self) -> None:
         source = self._source
         voltmeter = self._voltmeter
+        if source is not None:
+            self._set_source_output_enabled(
+                False,
+                best_effort=True,
+                force=True,
+            )
+            _close_handle(source)
         self._source = None
         self._voltmeter = None
-        if source is not None:
-            self._try_write(source, ":SOUR:VOLT 0")
-            self._try_write(source, ":OUTP OFF")
-            _close_handle(source)
         if voltmeter is not None:
             _close_handle(voltmeter)
         if self._owns_resource_manager:
@@ -950,8 +986,10 @@ class Keithley2400With2182A(AbstractOhmmeter):
         self._write(source, f":SENS:CURR:PROT {cfg.compliance_current_a:.12g}")
         self._write(source, f":SENS:CURR:NPLC {cfg.nplc:.12g}")
         self._try_write(source, ":FORM:ELEM VOLT,CURR")
-        self._write(source, ":SOUR:VOLT 0")
-        self._write(source, ":OUTP OFF")
+        if not self._source_output_context_enabled():
+            self._write(source, ":SOUR:VOLT 0")
+            self._write(source, ":OUTP OFF")
+            self._source_output_enabled = False
         self._raise_scpi_errors(source, "2400 source", "configuration")
         if voltmeter is not None:
             self._raise_scpi_errors(voltmeter, "2182A voltmeter", "configuration")
@@ -962,12 +1000,15 @@ class Keithley2400With2182A(AbstractOhmmeter):
         source_voltages: Sequence[float],
         cfg: Keithley2400With2182AConfig,
     ) -> list[VoltageListReading]:
-        self._configure_common(cfg, force=True)
+        self._configure_common(
+            cfg,
+            force=not self._source_output_context_enabled(),
+        )
         source = self._require_source()
         voltmeter = self._voltmeter
         readings: list[VoltageListReading] = []
         try:
-            self._write(source, ":OUTP ON")
+            self._set_source_output_enabled(True)
             for voltage in source_voltages:
                 self._write(source, f":SOUR:VOLT {voltage:.12g}")
                 if cfg.trigger_delay_s > 0:
@@ -991,8 +1032,12 @@ class Keithley2400With2182A(AbstractOhmmeter):
                     )
                 )
         finally:
-            self._try_write(source, ":SOUR:VOLT 0")
-            self._try_write(source, ":OUTP OFF")
+            if self._source_output_context_enabled():
+                self._source_output_enabled = True
+            else:
+                self._try_write(source, ":SOUR:VOLT 0")
+                self._try_write(source, ":OUTP OFF")
+                self._source_output_enabled = False
         self._raise_scpi_errors(source, "2400 source", "software measurement")
         if voltmeter is not None:
             self._raise_scpi_errors(voltmeter, "2182A voltmeter", "software measurement")
@@ -1025,7 +1070,7 @@ class Keithley2400With2182A(AbstractOhmmeter):
         try:
             self._write(voltmeter, "INIT")
             time.sleep(0.1)
-            self._write(source, ":OUTP ON")
+            self._set_source_output_enabled(True)
             self._write(source, ":INIT")
             try:
                 with _temporary_timeout(
@@ -1043,8 +1088,13 @@ class Keithley2400With2182A(AbstractOhmmeter):
                     "mapping and the 2182A external-trigger state."
                 ) from exc
         finally:
-            self._try_write(source, ":SOUR:VOLT 0")
-            self._try_write(source, ":OUTP OFF")
+            if self._source_output_context_enabled():
+                self._try_write(source, ":SOUR:VOLT:MODE FIX")
+                self._source_output_enabled = True
+            else:
+                self._try_write(source, ":SOUR:VOLT 0")
+                self._try_write(source, ":OUTP OFF")
+                self._source_output_enabled = False
             self._prepared_voltage_list_key = None
 
         if after_measurement is not None:
@@ -1214,6 +1264,44 @@ class Keithley2400With2182A(AbstractOhmmeter):
                     f"{suffix}"
                 ) from exc
             self._raise_scpi_errors(source, "2400 source", "source list setup")
+
+    def _source_output_context_enabled(self) -> bool:
+        return self._source_output_context_enabled_depth > 0
+
+    def _prime_output_context_source_voltage(
+        self,
+        cfg: Keithley2400With2182AConfig,
+    ) -> None:
+        if self._prepared_voltage_list_key is not None:
+            return
+        source = self._source
+        if source is None:
+            return
+        voltage = -abs(float(cfg.normalized().measurement_voltage_v))
+        self._write(source, ":SOUR:VOLT:MODE FIX")
+        self._write(source, f":SOUR:VOLT {voltage:.12g}")
+
+    def _set_source_output_enabled(
+        self,
+        enabled: bool,
+        *,
+        best_effort: bool = False,
+        force: bool = False,
+        zero_voltage: bool = True,
+    ) -> None:
+        source = self._source
+        if source is None:
+            if best_effort:
+                return
+            source = self._require_source()
+        write = self._try_write if best_effort else self._write
+        enabled = bool(enabled)
+        if not enabled and zero_voltage:
+            write(source, ":SOUR:VOLT 0")
+        if force or self._source_output_enabled != enabled:
+            write(source, f":OUTP {'ON' if enabled else 'OFF'}")
+        self._source_output_enabled = enabled
+
     def _require_source(self):
         if self._source is None:
             raise RuntimeError("Keithley 2400 source is not open")

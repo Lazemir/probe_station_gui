@@ -147,12 +147,16 @@ class _FakeLCRSession(_LCRSession):
 
     def __init__(self) -> None:
         self.configurations: list[dict] = []
+        self.closed = False
 
     def read_primary_value(self, *, trigger: bool = False) -> float:
         return 42.0
 
     def configure_measurement(self, **kwargs) -> None:
         self.configurations.append(dict(kwargs))
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class _FakeKeithleySession:
@@ -163,9 +167,27 @@ class _FakeKeithleySession:
         self.read_triggers: list[bool] = []
         self.prepared_batches: list[tuple[int, int | None]] = []
         self.route_batches: list[tuple[int, bool, bool]] = []
+        self.output_events: list[bool] = []
+        self.output_active = False
         self.source_handle = _FakeVisaHandle()
         self.voltmeter_handle = _FakeVisaHandle()
         self.closed = False
+
+    def output(self, enabled: bool = True):
+        session = self
+        requested = bool(enabled)
+
+        class _OutputContext:
+            def __enter__(self):
+                session.output_active = requested
+                session.output_events.append(requested)
+                return session
+
+            def __exit__(self, _exc_type, _exc, _tb) -> None:
+                session.output_active = False
+                session.output_events.append(False)
+
+        return _OutputContext()
 
     def read_primary_value(self, *, trigger: bool = False) -> float:
         self.read_triggers.append(bool(trigger))
@@ -344,6 +366,34 @@ class LCRMeterTest(unittest.TestCase):
         self.assertTrue(polled)
         self.assertEqual(session.read_triggers, [True])
         self.assertEqual(summaries, [(42.0, False, 1)])
+
+    def test_controller_live_polling_keeps_keithley_output_context(self) -> None:
+        controller = LCRMeterController()
+        controller._meter_type = ROUTE_METER_KEITHLEY
+        session = _FakeKeithleySession()
+        controller._session = session
+        controller._stop_polling.clear()
+
+        self.assertTrue(controller._run_meter_poll_once())
+        self.assertTrue(controller._run_meter_poll_once())
+        controller._stop_polling_session()
+
+        self.assertEqual(session.read_triggers, [True, True])
+        self.assertEqual(session.output_events, [True, False])
+
+    def test_controller_output_context_proxies_keithley_session(self) -> None:
+        controller = LCRMeterController()
+        session = _FakeKeithleySession()
+        controller._session = session
+
+        try:
+            with controller.output(True):
+                self.assertTrue(session.output_active)
+        finally:
+            controller.shutdown()
+
+        self.assertFalse(session.output_active)
+        self.assertEqual(session.output_events, [True, False])
 
     def test_gpib_interface_reset_uses_unique_boards(self) -> None:
         calls: list[tuple[str, str]] = []

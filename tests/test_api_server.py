@@ -147,6 +147,13 @@ class ApiServerHttpTest(unittest.TestCase):
 
         def command_callback(request):
             calls.append(request)
+            if request["action"] == "route_contact_photo":
+                return {
+                    "accepted": True,
+                    "filename": "contact_007_photo.jpg",
+                    "content_type": "image/jpeg",
+                    "data": b"contact-photo",
+                }
             if request["action"] == "route_session_artifact":
                 return {
                     "accepted": True,
@@ -155,6 +162,8 @@ class ApiServerHttpTest(unittest.TestCase):
                     "content_type": "image/jpeg",
                     "data": b"jpeg-bytes",
                 }
+            if request["action"] == "api_route_control_status":
+                return {"accepted": True, "active": False, "paused": False}
             return {"accepted": True, "echo": request}
 
         client = self._client(command_callback=command_callback)
@@ -170,11 +179,23 @@ class ApiServerHttpTest(unittest.TestCase):
         )
         check = client.post(
             "/api/v1/route/contacts/7/check",
-            json={"check_sample_count": 10},
+            json={
+                "check_sample_count": 10,
+                "contact_quality": {"max_mad_sigma_ohm": 900},
+            },
         )
+        photo = client.get("/api/v1/route/contacts/7/photo")
         seek = client.post(
             "/api/v1/route/contacts/7/seek",
-            json={"contact_seek_range_mm": 0.003},
+            json={
+                "contact_seek_range_mm": 0.003,
+                "contact_quality": {"max_relative_mad_sigma": 0.08},
+            },
+        )
+        api_route_control_status = client.get("/api/v1/route/control")
+        api_route_control_pause = client.post(
+            "/api/v1/route/control",
+            json={"action": "pause"},
         )
         configure = client.post(
             "/api/v1/meter/configure",
@@ -186,7 +207,10 @@ class ApiServerHttpTest(unittest.TestCase):
         )
         session = client.post(
             "/api/v1/route/sessions",
-            json={"initial_measurement_count": 10},
+            json={
+                "initial_measurement_count": 10,
+                "contact_quality": {"max_p95_abs_step_ohm": 2500},
+            },
         )
         status = client.get("/api/v1/route/sessions/current")
         action = client.post(
@@ -204,7 +228,12 @@ class ApiServerHttpTest(unittest.TestCase):
         self.assertEqual(move.status_code, 200)
         self.assertEqual(needles.status_code, 200)
         self.assertEqual(check.status_code, 200)
+        self.assertEqual(photo.status_code, 200)
+        self.assertEqual(photo.content, b"contact-photo")
+        self.assertEqual(photo.headers["x-contact-number"], "7")
         self.assertEqual(seek.status_code, 200)
+        self.assertEqual(api_route_control_status.status_code, 200)
+        self.assertEqual(api_route_control_pause.status_code, 200)
         self.assertEqual(configure.status_code, 200)
         self.assertEqual(sweep.status_code, 200)
         self.assertEqual(session.status_code, 200)
@@ -222,7 +251,10 @@ class ApiServerHttpTest(unittest.TestCase):
                 "move_to_contact",
                 "contact_needles",
                 "check_contact",
+                "route_contact_photo",
                 "contact_seek",
+                "api_route_control_status",
+                "api_route_control_action",
                 "configure_meter",
                 "raw_voltage_sweep",
                 "start_route_session",
@@ -235,11 +267,25 @@ class ApiServerHttpTest(unittest.TestCase):
         )
         self.assertEqual(calls[1]["payload"]["contact_number"], 7)
         self.assertEqual(calls[3]["payload"]["check_sample_count"], 10)
-        self.assertEqual(calls[4]["payload"]["contact_seek_range_mm"], 0.003)
-        self.assertEqual(calls[6]["payload"]["voltages_v"], [-0.1, 0.1])
-        self.assertEqual(calls[7]["payload"]["initial_measurement_count"], 10)
-        self.assertEqual(calls[9]["payload"]["action"], "pause")
-        self.assertEqual(calls[10]["payload"]["summary"], {"points": 31})
+        self.assertEqual(
+            calls[3]["payload"]["contact_quality"],
+            {"max_mad_sigma_ohm": 900},
+        )
+        self.assertEqual(calls[4]["payload"]["contact_number"], 7)
+        self.assertEqual(calls[5]["payload"]["contact_seek_range_mm"], 0.003)
+        self.assertEqual(
+            calls[5]["payload"]["contact_quality"],
+            {"max_relative_mad_sigma": 0.08},
+        )
+        self.assertEqual(calls[7]["payload"]["action"], "pause")
+        self.assertEqual(calls[9]["payload"]["voltages_v"], [-0.1, 0.1])
+        self.assertEqual(calls[10]["payload"]["initial_measurement_count"], 10)
+        self.assertEqual(
+            calls[10]["payload"]["contact_quality"],
+            {"max_p95_abs_step_ohm": 2500},
+        )
+        self.assertEqual(calls[12]["payload"]["action"], "pause")
+        self.assertEqual(calls[13]["payload"]["summary"], {"points": 31})
 
     def test_visa_endpoints_delegate_roles_and_operations(self) -> None:
         calls = []

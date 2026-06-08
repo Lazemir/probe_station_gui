@@ -375,6 +375,38 @@ class ProbeStationApiServer:
             _raise_for_rejected(result)
             return result
 
+        @app.get("/api/v1/route/contacts/{contact_number}/photo")
+        def route_contact_photo(
+            contact_number: int,
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+        ) -> Response:
+            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
+            result = self._call_command(
+                {
+                    "action": "route_contact_photo",
+                    "payload": {"contact_number": int(contact_number)},
+                }
+            )
+            _raise_for_rejected(result)
+            data = result.get("data", b"")
+            if not isinstance(data, (bytes, bytearray)):
+                raise HTTPException(
+                    status_code=500,
+                    detail={"message": "Contact photo data is invalid."},
+                )
+            content_type = str(result.get("content_type") or "application/octet-stream")
+            filename = str(result.get("filename") or f"contact_{contact_number}.jpg")
+            headers = {
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "X-Contact-Number": str(contact_number),
+            }
+            return Response(
+                content=bytes(data),
+                media_type=content_type,
+                headers=headers,
+            )
+
         @app.post("/api/v1/route/contacts/{contact_number}/seek")
         def seek_route_contact(
             contact_number: int,
@@ -389,6 +421,32 @@ class ProbeStationApiServer:
                 {
                     "action": "contact_seek",
                     "payload": body,
+                }
+            )
+            _raise_for_rejected(result)
+            return result
+
+        @app.get("/api/v1/route/control")
+        def api_route_control_status(
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+        ) -> dict[str, Any]:
+            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
+            result = self._call_command({"action": "api_route_control_status"})
+            _raise_for_rejected(result)
+            return result
+
+        @app.post("/api/v1/route/control")
+        def api_route_control_action(
+            payload: dict[str, Any] | None = Body(default=None),
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+        ) -> dict[str, Any]:
+            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
+            result = self._call_command(
+                {
+                    "action": "api_route_control_action",
+                    "payload": dict(payload or {}),
                 }
             )
             _raise_for_rejected(result)

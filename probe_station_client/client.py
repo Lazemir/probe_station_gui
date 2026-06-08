@@ -9,6 +9,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import Any
 
 from .credentials import (
@@ -125,8 +126,56 @@ class ProbeStationMeterClient:
         return build_remote_ohmmeter(self._client, timeout_ms=timeout_ms)
 
 
+class ProbeStationApiRouteControlClient:
+    """API route control exposed through the GUI."""
+
+    def __init__(self, client: "ProbeStationClient") -> None:
+        self._client = client
+
+    def status(self) -> dict[str, Any]:
+        return self._client._request("GET", "/api/v1/route/control")
+
+    def action(self, action: str, **payload: Any) -> dict[str, Any]:
+        body = dict(payload)
+        body["action"] = str(action)
+        return self._client._request("POST", "/api/v1/route/control", body)
+
+    def start(self, *, label: str = "API route control") -> dict[str, Any]:
+        return self.action("start", label=label)
+
+    def pause(self) -> dict[str, Any]:
+        return self.action("pause")
+
+    def pause_ack(self) -> dict[str, Any]:
+        return self.action("pause_ack")
+
+    def interrupt(self) -> dict[str, Any]:
+        return self.action("interrupt")
+
+    def resume(self) -> dict[str, Any]:
+        return self.action("resume")
+
+    def skip(self) -> dict[str, Any]:
+        return self.action("skip")
+
+    def remeasure(self) -> dict[str, Any]:
+        return self.action("remeasure")
+
+    def measure(self) -> dict[str, Any]:
+        return self.action("measure")
+
+    def ack(self) -> dict[str, Any]:
+        return self.action("ack")
+
+    def stop(self) -> dict[str, Any]:
+        return self.action("stop")
+
+    def finish(self, *, label: str = "API route control") -> dict[str, Any]:
+        return self.action("finish", label=label)
+
+
 class RouteReadyContact:
-    """One route contact currently waiting for notebook-owned measurement."""
+    """One route contact currently waiting for an API-owned measurement."""
 
     def __init__(
         self,
@@ -284,7 +333,7 @@ class ProbeStationRouteSession:
 
 
 class ProbeStationRouteClient:
-    """Route workflow namespace for notebook-owned measurements."""
+    """Route workflow namespace for API-owned measurements."""
 
     def __init__(self, client: "ProbeStationClient") -> None:
         self._client = client
@@ -415,6 +464,7 @@ class ProbeStationClient:
         self._transport = transport or _urllib_transport
         self.api_key = str(api_key).strip() if api_key else self._load_api_key()
         self.meter = ProbeStationMeterClient(self)
+        self.api_route_control = ProbeStationApiRouteControlClient(self)
         self.route = ProbeStationRouteClient(self)
 
     def reload_api_key(self) -> str | None:
@@ -544,6 +594,12 @@ class ProbeStationClient:
             dict(options),
         )
 
+    def contact_photo(self, contact_number: int) -> bytes:
+        return self._request_bytes(
+            "GET",
+            f"/api/v1/route/contacts/{int(contact_number)}/photo",
+        )
+
     def contact_seek(self, contact_number: int, **options: Any) -> dict[str, Any]:
         return self._request(
             "POST",
@@ -589,6 +645,19 @@ class ProbeStationClient:
             "focus_before_lower",
             "focus",
             default=False,
+        )
+        photo_path = self._pop_option(
+            payload,
+            "photo_path",
+            "contact_photo_path",
+            default=None,
+        )
+        capture_photo_before_lower = self._pop_bool_option(
+            payload,
+            "capture_photo_before_lower",
+            "photo_before_lower",
+            "photo",
+            default=photo_path is not None,
         )
         seek_before_measurement = self._pop_bool_option(
             payload,
@@ -688,6 +757,28 @@ class ProbeStationClient:
                     message="Contact focus failed.",
                     moved=move_to_contact,
                 )
+        if capture_photo_before_lower:
+            try:
+                photo_bytes = self.contact_photo(contact_number)
+                photo_step: dict[str, Any] = {
+                    "accepted": True,
+                    "bytes": len(photo_bytes),
+                }
+                if photo_path is not None:
+                    resolved_photo_path = Path(photo_path).expanduser()
+                    resolved_photo_path.parent.mkdir(parents=True, exist_ok=True)
+                    resolved_photo_path.write_bytes(photo_bytes)
+                    photo_step["path"] = str(resolved_photo_path)
+                steps["photo_before_lower"] = photo_step
+            except Exception as exc:
+                return failure_response(
+                    {
+                        "accepted": False,
+                        "message": f"Contact photo failed: {exc}",
+                    },
+                    message="Contact photo failed.",
+                    moved=move_to_contact,
+                )
         if lower_needles:
             lower_step = self.contact_needles(
                 contact_number,
@@ -739,7 +830,9 @@ class ProbeStationClient:
         response = dict(final)
         response["accepted"] = bool(success)
         response["prepared"] = bool(success)
-        response["needles_lowered"] = bool(success and lower_needles)
+        response["needles_lowered"] = bool(
+            lower_needles and (success or not lifted_on_failure)
+        )
         response["moved_to_contact"] = bool(move_to_contact)
         response["lifted_before_move"] = bool(move_to_contact and lift_before_move)
         response["raised_before_move"] = bool(raise_before_move)
@@ -747,6 +840,8 @@ class ProbeStationClient:
         response["check"] = check
         response["steps"] = steps
         response["seek_attempts"] = attempts_used
+        if photo_path is not None:
+            response["photo_path"] = str(Path(photo_path).expanduser())
         response["reference_resistance_ohm"] = reference_resistance_ohm
         response["reference_resistance_relative_tolerance"] = (
             reference_resistance_relative_tolerance

@@ -307,6 +307,47 @@ class ProbeStationClientTest(unittest.TestCase):
         self.assertEqual(result_payload["summary"], {"points": 31})
         self.assertEqual(result_payload["files"], [{"kind": "iv", "path": "iv.csv"}])
 
+    def test_api_route_control_client_actions(self) -> None:
+        transport = _FakeTransport(
+            (200, {"accepted": True, "active": False, "paused": False}),
+            (200, {"accepted": True, "active": True, "paused": False}),
+            (200, {"accepted": True, "active": True, "pause_requested": True, "paused": False}),
+            (200, {"accepted": True, "active": True, "paused": True}),
+            (200, {"accepted": True, "active": True, "paused": False}),
+            (200, {"accepted": True, "active": True, "paused": True}),
+            (200, {"accepted": True, "active": True, "paused": False}),
+            (200, {"accepted": True, "active": True, "paused": False}),
+            (200, {"accepted": True, "active": False, "paused": False}),
+        )
+        client = ProbeStationClient(api_key="secret", transport=transport)
+
+        client.api_route_control.status()
+        client.api_route_control.start(label="chip 163")
+        client.api_route_control.pause()
+        client.api_route_control.pause_ack()
+        client.api_route_control.resume()
+        client.api_route_control.interrupt()
+        client.api_route_control.skip()
+        client.api_route_control.ack()
+        client.api_route_control.finish(label="chip 163")
+
+        urls = [call["url"] for call in transport.calls]
+        self.assertTrue(urls[0].endswith("/api/v1/route/control"))
+        self.assertTrue(urls[1].endswith("/api/v1/route/control"))
+        self.assertEqual(transport.calls[0]["method"], "GET")
+        self.assertEqual(transport.calls[1]["method"], "POST")
+        payload = json.loads(transport.calls[1]["body"].decode("utf-8"))
+        self.assertEqual(payload["action"], "start")
+        self.assertEqual(payload["label"], "chip 163")
+        pause_ack_payload = json.loads(transport.calls[3]["body"].decode("utf-8"))
+        self.assertEqual(pause_ack_payload["action"], "pause_ack")
+        interrupt_payload = json.loads(transport.calls[5]["body"].decode("utf-8"))
+        self.assertEqual(interrupt_payload["action"], "interrupt")
+        skip_payload = json.loads(transport.calls[6]["body"].decode("utf-8"))
+        self.assertEqual(skip_payload["action"], "skip")
+        ack_payload = json.loads(transport.calls[7]["body"].decode("utf-8"))
+        self.assertEqual(ack_payload["action"], "ack")
+
     def test_route_iter_ready_raises_when_session_stops(self) -> None:
         transport = _FakeTransport(
             (
@@ -489,6 +530,42 @@ class ProbeStationClientTest(unittest.TestCase):
         self.assertTrue(result["prepared"])
         self.assertEqual(result["contact_seek"], {"found": True})
 
+    def test_prepare_contact_can_leave_needles_down_after_failed_seek(self) -> None:
+        transport = _FakeTransport(
+            (200, {"accepted": True, "moved": True}),
+            (200, {"accepted": True, "needle_action": "lower"}),
+            (
+                200,
+                {
+                    "accepted": True,
+                    "contact_ok": False,
+                    "measurement": {"status": "bad_contact"},
+                },
+            ),
+            (
+                200,
+                {
+                    "accepted": True,
+                    "contact_ok": False,
+                    "contact_found": False,
+                    "measurement": {"status": "bad_contact"},
+                    "contact_seek": {"found": False},
+                },
+            ),
+        )
+        client = ProbeStationClient(api_key="secret", transport=transport)
+
+        result = client.prepare_contact(7, lift_on_failure=False)
+
+        urls = [call["url"] for call in transport.calls]
+        self.assertEqual(
+            [url.rsplit("/", 1)[-1] for url in urls],
+            ["move", "needles", "check", "seek"],
+        )
+        self.assertFalse(result["prepared"])
+        self.assertTrue(result["needles_lowered"])
+        self.assertFalse(result["lifted_on_failure"])
+
     def test_prepare_contact_can_seek_before_measurement(self) -> None:
         transport = _FakeTransport(
             (200, {"accepted": True, "needle_action": "raise"}),
@@ -532,6 +609,40 @@ class ProbeStationClientTest(unittest.TestCase):
         self.assertTrue(result["prepared"])
         self.assertTrue(result["resistance_match"])
         self.assertAlmostEqual(result["measured_resistance_ohm"], 10_200.0)
+
+    def test_prepare_contact_can_capture_photo_before_lower(self) -> None:
+        transport = _FakeTransport(
+            (200, {"accepted": True, "moved": True}),
+            (200, {"accepted": True, "focus": {"z": 1.2}}),
+            (200, b"photo-bytes"),
+            (200, {"accepted": True, "needle_action": "lower"}),
+            (
+                200,
+                {
+                    "accepted": True,
+                    "contact_ok": True,
+                    "measurement": {"status": "ok"},
+                },
+            ),
+        )
+        client = ProbeStationClient(api_key="secret", transport=transport)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            photo_path = Path(tmpdir) / "contact_photo.jpg"
+            result = client.prepare_contact(
+                7,
+                focus_before_lower=True,
+                photo_path=photo_path,
+            )
+
+            urls = [call["url"] for call in transport.calls]
+            self.assertTrue(urls[0].endswith("/api/v1/route/contacts/7/move"))
+            self.assertTrue(urls[1].endswith("/api/v1/route/contacts/7/focus"))
+            self.assertTrue(urls[2].endswith("/api/v1/route/contacts/7/photo"))
+            self.assertTrue(urls[3].endswith("/api/v1/route/contacts/7/needles"))
+            self.assertEqual(photo_path.read_bytes(), b"photo-bytes")
+            self.assertEqual(result["photo_path"], str(photo_path))
+            self.assertTrue(result["prepared"])
 
     def test_prepare_contact_stops_after_failed_raise_before_move(self) -> None:
         transport = _FakeTransport(

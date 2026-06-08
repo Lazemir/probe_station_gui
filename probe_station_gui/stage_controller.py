@@ -255,6 +255,7 @@ class StageController(QObject):
     SERIAL_PRIORITY_SOFT_RESET = 20
     SERIAL_PRIORITY_TERMINAL = 30
     SERIAL_JOG_COMMAND_SETTLE_S = 0.03
+    CONTROLLER_SESSION_MARKER_READ_ATTEMPTS = 2
     COORDINATE_STATUS_READ_ATTEMPTS = 3
     COORDINATE_STATUS_RETRY_DELAY_S = 0.05
     COORDINATE_TARGET_STATUS_TOLERANCE = 7.5e-4
@@ -526,20 +527,34 @@ class StageController(QObject):
         serial_connection = self._serial
         if serial_connection is None or not serial_connection.is_open:
             return False
+        attempts = max(1, int(self.CONTROLLER_SESSION_MARKER_READ_ATTEMPTS))
+        current_marker = None
+        used_attempts = 0
         try:
             with self._serial_session_lock:
-                current_marker = self._read_controller_session_marker(
-                    serial_connection
-                )
+                for attempt in range(1, attempts + 1):
+                    used_attempts = attempt
+                    current_marker = self._read_controller_session_marker(
+                        serial_connection
+                    )
+                    if current_marker is not None:
+                        break
+                    if attempt < attempts:
+                        logger.info(
+                            "Controller session marker read returned no marker on attempt %s/%s; retrying.",
+                            attempt,
+                            attempts,
+                        )
         except StageControllerError as exc:
             logger.info("Unable to verify cached controller session marker: %s", exc)
             return False
         matches = current_marker == expected_marker
         logger.info(
-            "Controller session marker check: expected=%s current=%s matches=%s",
+            "Controller session marker check: expected=%s current=%s matches=%s attempts=%s",
             expected_marker,
             current_marker,
             matches,
+            used_attempts,
         )
         return matches
 
@@ -703,7 +718,7 @@ class StageController(QObject):
             if not self._serial_session_lock.acquire(blocking=False):
                 return
             try:
-                self._query_status(serial_connection)
+                self._query_status(serial_connection, check_cancelled=False)
             finally:
                 self._serial_session_lock.release()
         except StageControllerError:
@@ -5288,11 +5303,21 @@ class StageController(QObject):
                 offsets[system] = values
         return offsets
 
-    def _ensure_status_report_mask(self, serial_connection: serial.Serial, mask: int) -> None:
+    def _ensure_status_report_mask(
+        self,
+        serial_connection: serial.Serial,
+        mask: int,
+        *,
+        check_cancelled: bool = True,
+    ) -> None:
         if self._current_status_report_mask == mask:
             return
-        self._write_command(serial_connection, f"$10={int(mask)}")
-        self._wait_for_ok(serial_connection)
+        self._write_command(
+            serial_connection,
+            f"$10={int(mask)}",
+            check_cancelled=check_cancelled,
+        )
+        self._wait_for_ok(serial_connection, check_cancelled=check_cancelled)
         self._current_status_report_mask = int(mask)
 
     def _read_response_lines(
@@ -5352,6 +5377,7 @@ class StageController(QObject):
         self._write_command(serial_connection, "$G")
         deadline = time.monotonic() + timeout
         saw_ack = False
+        saw_non_modal_response = False
         tokens: list[str] | None = None
         while time.monotonic() < deadline:
             self._check_cancelled()
@@ -5369,6 +5395,11 @@ class StageController(QObject):
             if lower == "ok":
                 if tokens is not None:
                     return tokens
+                if saw_non_modal_response:
+                    logger.debug(
+                        "SERIAL TRACE $G returned non-modal response before ok; treating modal state as empty."
+                    )
+                    return []
                 saw_ack = True
                 continue
             if lower.startswith("alarm"):
@@ -5381,6 +5412,8 @@ class StageController(QObject):
                 tokens = modal_match.group("modal").split()
                 if saw_ack:
                     return tokens
+            else:
+                saw_non_modal_response = True
         if tokens is not None:
             try:
                 serial_connection.reset_input_buffer()
@@ -5885,8 +5918,15 @@ class StageController(QObject):
         except _SERIAL_IO_EXCEPTIONS as exc:  # pragma: no cover - hardware interaction
             raise StageControllerError(f"Serial realtime write failed: {exc}") from exc
 
-    def _write_command(self, serial_connection: serial.Serial, command: str) -> None:
-        self._check_cancelled()
+    def _write_command(
+        self,
+        serial_connection: serial.Serial,
+        command: str,
+        *,
+        check_cancelled: bool = True,
+    ) -> None:
+        if check_cancelled:
+            self._check_cancelled()
         self._discard_pending_status_input(
             serial_connection,
             reason=f"before command {command.strip()}",
@@ -5900,10 +5940,17 @@ class StageController(QObject):
         except _SERIAL_IO_EXCEPTIONS as exc:  # pragma: no cover - hardware interaction
             raise StageControllerError(f"Serial write failed: {exc}") from exc
 
-    def _wait_for_ok(self, serial_connection: serial.Serial, timeout: float = 5.0) -> None:
+    def _wait_for_ok(
+        self,
+        serial_connection: serial.Serial,
+        timeout: float = 5.0,
+        *,
+        check_cancelled: bool = True,
+    ) -> None:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            self._check_cancelled()
+            if check_cancelled:
+                self._check_cancelled()
             try:
                 raw = serial_connection.readline()
             except _SERIAL_IO_EXCEPTIONS as exc:  # pragma: no cover - hardware interaction
@@ -5996,12 +6043,26 @@ class StageController(QObject):
                 return False
         return True
 
-    def _query_status(self, serial_connection: serial.Serial, timeout: float = 1.5) -> Optional[_Status]:
+    def _query_status(
+        self,
+        serial_connection: serial.Serial,
+        timeout: float = 1.5,
+        *,
+        check_cancelled: bool = True,
+    ) -> Optional[_Status]:
         desired_mask = self._desired_status_report_mask_for_mode(
             self._position_reporting_mode
         )
-        self._ensure_status_report_mask(serial_connection, desired_mask)
-        status = self._read_status_frame(serial_connection, timeout=timeout)
+        self._ensure_status_report_mask(
+            serial_connection,
+            desired_mask,
+            check_cancelled=check_cancelled,
+        )
+        status = self._read_status_frame(
+            serial_connection,
+            timeout=timeout,
+            check_cancelled=check_cancelled,
+        )
         if status is None:
             return None
         if self._position_reporting_mode == "work":
@@ -6119,6 +6180,7 @@ class StageController(QObject):
                     reason,
                     data[:200],
                 )
+                self._handle_pending_serial_data_side_effects(data, reason)
                 return
             serial_connection.reset_input_buffer()
             logger.debug(
@@ -6130,7 +6192,11 @@ class StageController(QObject):
             logger.debug("Serial input buffer reset failed after stale input.")
 
     def _read_status_frame(
-        self, serial_connection: serial.Serial, *, timeout: float
+        self,
+        serial_connection: serial.Serial,
+        *,
+        timeout: float,
+        check_cancelled: bool = True,
     ) -> Optional[_Status]:
         try:
             self._discard_pending_status_input(
@@ -6145,7 +6211,8 @@ class StageController(QObject):
             raise StageControllerError(f"Serial query failed: {exc}") from exc
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            self._check_cancelled()
+            if check_cancelled:
+                self._check_cancelled()
             try:
                 raw = serial_connection.readline()
             except _SERIAL_IO_EXCEPTIONS as exc:  # pragma: no cover - hardware interaction

@@ -1,5 +1,6 @@
 import csv
 import math
+import os
 import tempfile
 import threading
 import time
@@ -12,10 +13,13 @@ from probe_station_gui.route_measurement import (
     ROUTE_OPERATION_PHOTO,
     ROUTE_OPERATION_PHOTO_THEN_MEASURE,
     RouteMeasurementPoint,
+    RouteMeasurementSample,
     RouteMeasurementRunner,
     RouteExternalMeasurementSessionRunner,
+    RouteContactQualityLimits,
     filter_route_points_by_previous_status,
     latest_route_measurement_statuses,
+    summarize_route_contact_quality,
 )
 
 
@@ -136,11 +140,74 @@ class _FakeBatchRouteLCR:
         return [dict(item) for item in batch]
 
 
+class _EventStage(_FakeStage):
+    def __init__(self, events: list[object]) -> None:
+        super().__init__()
+        self.events = events
+
+    def run_external_needles_action(
+        self,
+        action: str,
+        feedrate: float | None = None,
+    ) -> str:
+        self.events.append(("needles", action))
+        return super().run_external_needles_action(action, feedrate)
+
+
+class _OutputTrackingBatchRouteLCR(_FakeBatchRouteLCR):
+    def __init__(
+        self,
+        measurements: list[dict[str, object]],
+        events: list[object],
+    ) -> None:
+        super().__init__(measurements)
+        self.events = events
+        self.output_active = False
+        self.prepare_calls: list[tuple[int, int | None]] = []
+
+    def output(self, enabled: bool = True):
+        lcr = self
+        requested = bool(enabled)
+
+        class _OutputContext:
+            def __enter__(self):
+                lcr.output_active = requested
+                lcr.events.append(("output", requested))
+                return lcr
+
+            def __exit__(self, _exc_type, _exc, _tb) -> None:
+                lcr.output_active = False
+                lcr.events.append(("output", False))
+
+        return _OutputContext()
+
+    def prepare_route_measurement_batch_now(
+        self,
+        count: int,
+        *,
+        source_list_count: int | None = None,
+    ) -> None:
+        self.prepare_calls.append((int(count), source_list_count))
+        self.events.append(("prepare", int(count), source_list_count))
+
+    def read_route_measurement_batch_now(
+        self,
+        count: int,
+        *,
+        after_measurement=None,
+    ) -> list[dict[str, object]]:
+        self.events.append(("read", int(count), self.output_active))
+        if after_measurement is not None:
+            after_measurement()
+        return super().read_route_measurement_batch_now(count)
+
+
 class _PreparedBatchRouteLCR(_FakeBatchRouteLCR):
     def __init__(self, measurements: list[dict[str, object]]) -> None:
         super().__init__(measurements)
         self.prepare_calls: list[tuple[int, int | None]] = []
         self.prepare_started = threading.Event()
+        self.prepare_finished = threading.Event()
         self.allow_prepare_finish = threading.Event()
         self.lift_started = threading.Event()
         self.read_after_measurement: list[bool] = []
@@ -153,7 +220,7 @@ class _PreparedBatchRouteLCR(_FakeBatchRouteLCR):
     ) -> None:
         self.prepare_calls.append((int(count), source_list_count))
         self.prepare_started.set()
-        self.allow_prepare_finish.wait(timeout=2.0)
+        self.prepare_finished.set()
 
     def read_route_measurement_batch_now(
         self,
@@ -196,10 +263,9 @@ class _PrepareAwareStage(_FakeStage):
         feedrate: float | None = None,
     ) -> str:
         if action == "lower":
-            self.prepare_started_before_lower = self.lcr.prepare_started.wait(
+            self.prepare_started_before_lower = self.lcr.prepare_finished.wait(
                 timeout=2.0
             )
-            self.lcr.allow_prepare_finish.set()
         result = super().run_external_needles_action(action, feedrate)
         if action == "lift":
             self.lcr.lift_started.set()
@@ -506,7 +572,7 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
         lower_index = stage.calls.index(("needles", "lower", 75.0))
         self.assertLess(photo_index, lower_index)
 
-    def test_external_session_waits_for_notebook_result_without_csv(self) -> None:
+    def test_external_session_waits_for_api_result_without_csv(self) -> None:
         point = _point(1)
         stage = _FakeStage()
         lcr = _FakeBatchRouteLCR(
@@ -566,6 +632,57 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
         final_status = runner.status_payload()
         self.assertEqual(final_status["history"][0]["external_result"]["summary"], {"iv_points": 31})
 
+    def test_external_session_uses_contact_runner_output_lifecycle(self) -> None:
+        events: list[object] = []
+        point = _point(1)
+        stage = _EventStage(events)
+        lcr = _OutputTrackingBatchRouteLCR(
+            [
+                {"differential_resistance_ohm": 50.0},
+                {"differential_resistance_ohm": 60.0},
+            ],
+            events,
+        )
+        finished: list[tuple[bool, str]] = []
+        runner = RouteExternalMeasurementSessionRunner(
+            session_id="session-1",
+            points=[point],
+            stage_controller=stage,
+            lcr_controller=lcr,
+            needle_feedrate=75.0,
+            measurement_count=2,
+            initial_measurement_count=2,
+            contact_settle_s=0.0,
+            photo_enabled=False,
+            photo_focus_enabled=False,
+        )
+        thread = threading.Thread(
+            target=lambda: finished.append(runner.run()),
+            daemon=True,
+        )
+
+        thread.start()
+        self.assertTrue(self._wait_for_state(runner, "waiting_external_measurement"))
+        self.assertTrue(runner.submit_external_result({"status": "ok"}))
+        thread.join(timeout=2.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(finished, [(True, "Route API session complete.")])
+        output_on_index = events.index(("output", True))
+        lower_index = events.index(("needles", "lower"))
+        lift_index = max(
+            index for index, event in enumerate(events) if event == ("needles", "lift")
+        )
+        output_off_index = max(
+            index for index, event in enumerate(events) if event == ("output", False)
+        )
+        self.assertLess(output_on_index, lower_index)
+        self.assertGreater(output_off_index, lift_index)
+        self.assertEqual(
+            [event for event in events if event[0] == "output"],
+            [("output", True), ("output", False)],
+        )
+
     def test_external_session_short_skips_external_wait_and_followup(self) -> None:
         point = _point(1)
         stage = _FakeStage()
@@ -607,7 +724,7 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
         )
         self.assertIn(("needles", "lift", 75.0), stage.calls)
 
-    def test_external_session_measure_waits_for_notebook_result(self) -> None:
+    def test_external_session_measure_waits_for_api_result(self) -> None:
         point = _point(1)
         stage = _FakeStage()
         lcr = _FakeBatchRouteLCR(
@@ -1049,6 +1166,151 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
         self.assertLess(photo_index, contact_move_index)
         self.assertLess(contact_move_index, lower_index)
 
+    def test_interrupted_cancelled_contact_move_waits_for_shift_and_confirmation(
+        self,
+    ) -> None:
+        point = RouteMeasurementPoint(
+            index=1,
+            point_id="p001",
+            label="P001",
+            design_center=(100.0, 200.0),
+            stage_xy=(1.0, 2.0),
+            needle_1_design=(101.0, 201.0),
+            needle_2_design=(99.0, 199.0),
+            photo_stage_xy=(1.25, 1.75),
+        )
+        statuses: list[str] = []
+        runner_holder: dict[str, RouteMeasurementRunner] = {}
+
+        class _InterruptingContactMoveStage(_FakeStage):
+            def run_external_move_to_xy(self, x_mm: float, y_mm: float) -> str:
+                self.calls.append(("move", x_mm, y_mm))
+                if len([call for call in self.calls if call[0] == "move"]) == 2:
+                    runner_holder["runner"].request_current_point_correction()
+                    raise RuntimeError("Operation cancelled.")
+                return "moved"
+
+        stage = _InterruptingContactMoveStage()
+
+        def capture(_point, _position, _total, _focus_result) -> str:
+            stage.calls.append(("photo", _point.index))
+            return "photo.png"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = RouteMeasurementRunner(
+                points=[point],
+                csv_path=Path(tmpdir) / "route.csv",
+                stage_controller=stage,
+                lcr_controller=_FakeLCR([5.0]),
+                needle_feedrate=75.0,
+                operation_mode=ROUTE_OPERATION_PHOTO_THEN_MEASURE,
+                photo_callback=capture,
+                photo_settle_s=0.0,
+                contact_settle_s=0.0,
+                status_callback=statuses.append,
+            )
+            runner_holder["runner"] = runner
+            finished: list[tuple[bool, str]] = []
+            thread = threading.Thread(
+                target=lambda: finished.append(runner.run()),
+                daemon=True,
+            )
+
+            thread.start()
+            try:
+                self.assertTrue(runner.wait_until_waiting(timeout_s=2.0))
+                self.assertEqual(finished, [])
+                self.assertNotIn(("needles", "lower", 75.0), stage.calls)
+                selected, message = runner.set_current_adjustment_point(1)
+                self.assertTrue(selected, message)
+                saved, message = runner.save_current_position_adjustment((1.5, 1.75))
+                self.assertTrue(saved, message)
+                self.assertEqual(runner.route_offset_xy(), (0.5, -0.25))
+                self.assertTrue(
+                    any("interrupted; correct position" in item for item in statuses)
+                )
+            finally:
+                if thread.is_alive():
+                    runner.submit_confirmation("skip")
+                    thread.join(timeout=2.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(finished), 1)
+        self.assertTrue(finished[0][0], finished[0][1])
+
+    def test_interrupted_cancelled_lower_waits_for_shift_and_confirmation(self) -> None:
+        point = RouteMeasurementPoint(
+            index=1,
+            point_id="p001",
+            label="P001",
+            design_center=(100.0, 200.0),
+            stage_xy=(1.0, 2.0),
+            needle_1_design=(101.0, 201.0),
+            needle_2_design=(99.0, 199.0),
+            photo_stage_xy=(1.0, 2.0),
+        )
+        statuses: list[str] = []
+        runner_holder: dict[str, RouteMeasurementRunner] = {}
+
+        class _InterruptingLowerStage(_FakeStage):
+            def run_external_needles_action(
+                self,
+                action: str,
+                feedrate: float | None = None,
+            ) -> str:
+                self.calls.append(("needles", action, feedrate))
+                if action == "lower":
+                    runner_holder["runner"].request_current_point_correction()
+                    raise RuntimeError("Operation cancelled.")
+                return f"{action} done"
+
+        stage = _InterruptingLowerStage()
+
+        def capture(_point, _position, _total, _focus_result) -> str:
+            stage.calls.append(("photo", _point.index))
+            return "photo.png"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = RouteMeasurementRunner(
+                points=[point],
+                csv_path=Path(tmpdir) / "route.csv",
+                stage_controller=stage,
+                lcr_controller=_FakeLCR([5.0]),
+                needle_feedrate=75.0,
+                operation_mode=ROUTE_OPERATION_PHOTO_THEN_MEASURE,
+                photo_callback=capture,
+                photo_settle_s=0.0,
+                contact_settle_s=0.0,
+                status_callback=statuses.append,
+            )
+            runner_holder["runner"] = runner
+            finished: list[tuple[bool, str]] = []
+            thread = threading.Thread(
+                target=lambda: finished.append(runner.run()),
+                daemon=True,
+            )
+
+            thread.start()
+            try:
+                self.assertTrue(runner.wait_until_waiting(timeout_s=2.0))
+                self.assertEqual(finished, [])
+                selected, message = runner.set_current_adjustment_point(1)
+                self.assertTrue(selected, message)
+                saved, message = runner.save_current_position_adjustment((1.5, 1.75))
+                self.assertTrue(saved, message)
+                self.assertEqual(runner.route_offset_xy(), (0.5, -0.25))
+                self.assertTrue(
+                    any("interrupted; correct position" in item for item in statuses)
+                )
+            finally:
+                if thread.is_alive():
+                    runner.submit_confirmation("skip")
+                    thread.join(timeout=2.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(finished), 1)
+        self.assertTrue(finished[0][0], finished[0][1])
+
     def test_photo_focus_runs_after_raise_and_before_capture(self) -> None:
         point = _point(1)
         stage = _FakeStage()
@@ -1095,6 +1357,60 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
         self.assertEqual(records[0].focus["focus_best_z_mm"], 1.02)
         self.assertEqual(records[0].design_center, point.design_center)
         self.assertEqual(records[0].stage_xy, point.stage_xy)
+
+    def test_interrupted_cancelled_focus_waits_for_shift_and_confirmation(self) -> None:
+        point = _point(1)
+        stage = _FakeStage()
+        statuses: list[str] = []
+        runner_holder: dict[str, RouteMeasurementRunner] = {}
+
+        def focus(_point, _position, _total) -> str:
+            stage.calls.append(("focus", _point.index))
+            runner_holder["runner"].request_current_point_correction()
+            raise RuntimeError("Operation cancelled.")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = RouteMeasurementRunner(
+                points=[point],
+                csv_path=Path(tmpdir) / "route.csv",
+                stage_controller=stage,
+                lcr_controller=_FakeLCR([5.0]),
+                needle_feedrate=75.0,
+                operation_mode=ROUTE_OPERATION_MEASURE,
+                photo_focus_callback=focus,
+                photo_focus_enabled=True,
+                contact_settle_s=0.0,
+                status_callback=statuses.append,
+            )
+            runner_holder["runner"] = runner
+            finished: list[tuple[bool, str]] = []
+            thread = threading.Thread(
+                target=lambda: finished.append(runner.run()),
+                daemon=True,
+            )
+
+            thread.start()
+            try:
+                self.assertTrue(runner.wait_until_waiting(timeout_s=2.0))
+                self.assertEqual(finished, [])
+                self.assertNotIn(("needles", "lower", 75.0), stage.calls)
+                selected, message = runner.set_current_adjustment_point(1)
+                self.assertTrue(selected, message)
+                saved, message = runner.save_current_position_adjustment((1.5, 10.75))
+                self.assertTrue(saved, message)
+                self.assertEqual(runner.route_offset_xy(), (0.5, -0.25))
+                self.assertTrue(
+                    any("interrupted; correct position" in item for item in statuses)
+                )
+            finally:
+                if thread.is_alive():
+                    runner.submit_confirmation("skip")
+                    thread.join(timeout=2.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(finished), 1)
+        self.assertTrue(finished[0][0], finished[0][1])
+        self.assertIn("0 measurements saved", finished[0][1])
 
     def test_measure_only_focus_raises_needles_before_focus_and_then_moves_to_contact(self) -> None:
         point = RouteMeasurementPoint(
@@ -1470,6 +1786,47 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
             self.assertTrue(lcr.lift_started.is_set())
             self.assertIn(("needles", "lift", 75.0), stage.calls)
             self.assertEqual(result_events, [("result",)])
+
+    def test_runner_keeps_meter_output_enabled_until_final_lift(self) -> None:
+        events: list[object] = []
+        stage = _EventStage(events)
+        lcr = _OutputTrackingBatchRouteLCR(
+            [
+                {"differential_resistance_ohm": 10.0},
+                {"differential_resistance_ohm": 12.0},
+            ],
+            events,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = RouteMeasurementRunner(
+                points=[_point(1)],
+                csv_path=Path(tmpdir) / "route.csv",
+                stage_controller=stage,
+                lcr_controller=lcr,
+                needle_feedrate=75.0,
+                measurement_count=2,
+                initial_measurement_count=2,
+                contact_settle_s=0.0,
+            )
+
+            success, message = runner.run()
+
+        self.assertTrue(success, message)
+        output_on_index = events.index(("output", True))
+        lower_index = events.index(("needles", "lower"))
+        lift_index = max(
+            index for index, event in enumerate(events) if event == ("needles", "lift")
+        )
+        output_off_index = max(
+            index for index, event in enumerate(events) if event == ("output", False)
+        )
+        self.assertLess(output_on_index, lower_index)
+        self.assertGreater(output_off_index, lift_index)
+        self.assertEqual(
+            [event for event in events if event[0] == "output"],
+            [("output", True), ("output", False)],
+        )
+        self.assertEqual([event for event in events if event[0] == "read"], [("read", 2, True)])
 
     def test_runner_prepares_initial_batch_with_followup_source_list_capacity(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2386,6 +2743,120 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
             0.001,
         )
 
+    def test_measure_after_exhausted_contact_seek_measures_current_point(self) -> None:
+        point = _point(1)
+        stage = _FakeStage()
+        lcr = _FakeBatchRouteLCR(
+            [
+                {"differential_resistance_ohm": value}
+                for value in (
+                    200000.0,
+                    210000.0,
+                    220000.0,
+                    230000.0,
+                    12000.0,
+                    12010.0,
+                    11990.0,
+                    12005.0,
+                )
+            ]
+        )
+        results = []
+        results_changed = threading.Condition()
+        statuses: list[str] = []
+
+        def on_result(record, _position, _total, saved) -> None:
+            with results_changed:
+                results.append((record, saved))
+                results_changed.notify_all()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "route.csv"
+            runner = RouteMeasurementRunner(
+                points=[point],
+                csv_path=csv_path,
+                stage_controller=stage,
+                lcr_controller=lcr,
+                needle_feedrate=None,
+                measurement_count=4,
+                initial_measurement_count=2,
+                short_threshold_ohm=10.0,
+                confirm_each_point=True,
+                auto_contact_seek_on_bad_contact=True,
+                auto_contact_seek_step_mm=0.001,
+                auto_contact_seek_max_total_mm=0.001,
+                contact_settle_s=0.0,
+                result_callback=on_result,
+                status_callback=statuses.append,
+            )
+            result = []
+            thread = threading.Thread(
+                target=lambda: result.append(runner.run()),
+                daemon=True,
+            )
+
+            thread.start()
+            with results_changed:
+                self.assertTrue(
+                    results_changed.wait_for(
+                        lambda: len(results) >= 1,
+                        timeout=2.0,
+                    )
+                )
+            self.assertEqual(results[0][0].status, "bad_contact")
+            self.assertTrue(results[0][1])
+
+            runner.submit_confirmation("measure")
+            thread.join(timeout=2.0)
+
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(result[0][0], True, result[0][1])
+            with csv_path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+
+        self.assertEqual([row["structure_number"] for row in rows], ["1", "1"])
+        self.assertEqual(rows[1]["n_measurements"], "4")
+        self.assertTrue(
+            any("point 1/1 measuring current contact" in item for item in statuses)
+        )
+
+    def test_exhausted_contact_seek_message_includes_failed_criterion(self) -> None:
+        point = _point(1)
+        stage = _FakeStage()
+        statuses: list[str] = []
+        lcr = _FakeBatchRouteLCR(
+            [
+                {"differential_resistance_ohm": value}
+                for value in (
+                    100000.0,
+                    500000.0,
+                    120000.0,
+                    520000.0,
+                )
+            ]
+        )
+        runner = RouteMeasurementRunner(
+            points=[point],
+            csv_path=Path(os.devnull),
+            stage_controller=stage,
+            lcr_controller=lcr,
+            needle_feedrate=None,
+            measurement_count=2,
+            initial_measurement_count=2,
+            auto_contact_seek_on_bad_contact=True,
+            auto_contact_seek_step_mm=0.001,
+            auto_contact_seek_max_total_mm=0.001,
+            contact_settle_s=0.0,
+            status_callback=statuses.append,
+        )
+
+        result = runner.seek_contact(point)
+
+        self.assertFalse(result.success)
+        self.assertIn("failed criterion:", result.message)
+        self.assertIn("MAD sigma", result.message)
+        self.assertIn("failed criterion:", statuses[-1])
+
     def test_pause_during_auto_contact_seek_waits_for_saved_point(self) -> None:
         point = _point(1)
         stage = _FakeStage()
@@ -3005,6 +3476,32 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
             self.assertIsNotNone(records[0].contact_quality)
             self.assertTrue(records[0].contact_quality.good)
             self.assertGreater(records[0].contact_quality.mad_sigma_ohm, 300.0)
+
+    def test_contact_quality_thresholds_are_configurable(self) -> None:
+        samples = [
+            RouteMeasurementSample(index, value)
+            for index, value in enumerate(
+                (18_600.0, 19_800.0, 18_900.0, 20_100.0),
+                start=1,
+            )
+        ]
+
+        default_quality = summarize_route_contact_quality(samples)
+        relaxed_quality = summarize_route_contact_quality(
+            samples,
+            contact_quality_limits=RouteContactQualityLimits(
+                max_mad_sigma_ohm=2_000.0,
+                max_p95_abs_step_ohm=3_000.0,
+                max_relative_mad_sigma=0.20,
+                max_relative_p95_abs_step=0.25,
+            ),
+        )
+
+        self.assertFalse(default_quality.good)
+        self.assertIn("mad_sigma_too_high", default_quality.reasons)
+        self.assertTrue(default_quality.failure_criteria)
+        self.assertTrue(relaxed_quality.good)
+        self.assertEqual(relaxed_quality.reasons, ())
 
     def test_contact_quality_treats_polarity_mismatch_as_diagnostic(self) -> None:
         point = _point(1)
