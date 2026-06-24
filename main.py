@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
 import sys
-from typing import Any, Callable, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 _STARTUP_T0 = time.perf_counter()
 _STARTUP_LAST_ELAPSED_MS = 0.0
@@ -67,7 +67,6 @@ _startup_trace("stdlib imports done")
 from PySide6.QtCore import (
     QBuffer,
     QIODevice,
-    QObject,
     QLocale,
     QThread,
     QTimer,
@@ -113,6 +112,7 @@ from probe_station_gui import (
 from probe_station_gui.design_model import DesignDocument, DesignModelError
 from probe_station_gui.design_session import AlignmentPreparation, DesignSession
 from probe_station_gui.diagnostics import configure_crash_diagnostics
+from probe_station_gui.api_request_bridge import ApiRequestBridge
 from probe_station_gui.api_server import ProbeStationApiServer
 from probe_station_gui.api_keys import API_KEY_FILENAME, ApiKeyStore
 from probe_station_gui.lcr_meter import (
@@ -238,72 +238,6 @@ if TYPE_CHECKING:
     )
 
 
-class _ApiRequestBridge(QObject):
-    """Route API thread requests onto the Qt GUI thread."""
-
-    request_received: Signal = Signal(object)
-
-    def __init__(
-        self,
-        handler: Callable[[dict[str, Any]], dict[str, Any]],
-        parent: QObject | None = None,
-    ) -> None:
-        super().__init__(parent)
-        self._handler = handler
-        self.request_received.connect(
-            self._handle_request,
-            Qt.ConnectionType.QueuedConnection,
-        )
-
-    def submit(
-        self,
-        request: dict[str, Any],
-        *,
-        timeout_s: float = 5.0,
-    ) -> dict[str, Any]:
-        event = threading.Event()
-        envelope: dict[str, Any] = {
-            "request": dict(request),
-            "result": None,
-            "event": event,
-        }
-        self.request_received.emit(envelope)
-        if not event.wait(timeout_s):
-            return {
-                "accepted": False,
-                "status_code": 503,
-                "message": "GUI did not process the API request in time.",
-            }
-        result = envelope.get("result")
-        if isinstance(result, dict):
-            return result
-        return {
-            "accepted": False,
-            "status_code": 500,
-            "message": "GUI returned an invalid API response.",
-        }
-
-    def _handle_request(self, envelope: object) -> None:
-        if not isinstance(envelope, dict):
-            return
-        event = envelope.get("event")
-        try:
-            request = envelope.get("request")
-            if not isinstance(request, dict):
-                raise ValueError("Invalid API request envelope.")
-            envelope["result"] = self._handler(request)
-        except Exception as exc:
-            logger.exception("Failed to handle API request.")
-            envelope["result"] = {
-                "accepted": False,
-                "status_code": 500,
-                "message": str(exc),
-            }
-        finally:
-            if isinstance(event, threading.Event):
-                event.set()
-
-
 class Main(QMainWindow):
     """Main application window wiring the camera view and serial dialog."""
 
@@ -406,7 +340,7 @@ class Main(QMainWindow):
         self._api_key_store = ApiKeyStore(
             self.settings_manager.config_dir() / API_KEY_FILENAME
         )
-        self._api_bridge: _ApiRequestBridge | None = None
+        self._api_bridge: ApiRequestBridge | None = None
         self._api_server: ProbeStationApiServer | None = None
         self._api_settings_signature: tuple[bool, str, int] | None = None
         self._telegram_bot_service: TelegramBotCommandService | None = None
@@ -701,7 +635,7 @@ class Main(QMainWindow):
         _startup_trace("menus created")
         self._apply_settings()
         _startup_trace("settings applied")
-        self._api_bridge = _ApiRequestBridge(self._handle_api_request, self)
+        self._api_bridge = ApiRequestBridge(self._handle_api_request, self)
         self._configure_api_server_from_settings(start_if_enabled=False)
         _startup_trace("API server configured")
 
