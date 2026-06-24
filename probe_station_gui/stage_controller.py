@@ -2605,7 +2605,6 @@ class StageController(QObject):
                 f"Moving to X={target_x_mm:.3f} mm, Y={target_y_mm:.3f} mm"
             )
             self._send_relative_move(
-                serial_connection,
                 move,
                 feedrate=feedrate,
                 as_jog=True,
@@ -2659,7 +2658,6 @@ class StageController(QObject):
                     f"Moving Z to safe transfer level {transit_z:.3f} mm before {label}."
                 )
                 self._send_relative_move(
-                    serial_connection,
                     MoveVector(z=transit_z - current_z),
                     as_jog=True,
                 )
@@ -2673,7 +2671,7 @@ class StageController(QObject):
                 self.status_message.emit(
                     f"Moving to {label} X={target_x_mm:.3f} mm, Y={target_y_mm:.3f} mm"
                 )
-                self._send_relative_move(serial_connection, xy_move, as_jog=True)
+                self._send_relative_move(xy_move, as_jog=True)
                 current_x = float(target_position[0])
                 current_y = float(target_position[1])
                 moved = True
@@ -2684,7 +2682,6 @@ class StageController(QObject):
                     f"Moving Z to {label} focus height {target_z_mm:.3f} mm"
                 )
                 self._send_relative_move(
-                    serial_connection,
                     MoveVector(z=delta_z),
                     as_jog=True,
                 )
@@ -2768,7 +2765,6 @@ class StageController(QObject):
                 f"Jogging stage dX={move.x:.3f} mm dY={move.y:.3f} mm"
             )
             self._send_relative_move(
-                serial_connection,
                 move,
                 as_jog=True,
                 motion_started_callback=self._emit_click_move_started,
@@ -2785,7 +2781,6 @@ class StageController(QObject):
                     return
                 self.status_message.emit(f"Chip alignment: rotating B by {delta_deg:+.3f} deg.")
                 self._send_relative_move(
-                    serial_connection,
                     MoveVector(b=delta_deg),
                     allow_relative=True,
                     as_jog=True,
@@ -2968,7 +2963,6 @@ class StageController(QObject):
             delta_z = float(context.start_z) - current_z
             if abs(delta_z) >= 1e-5:
                 self._send_relative_move(
-                    serial_connection,
                     MoveVector(z=delta_z),
                     allow_relative=True,
                     as_jog=True,
@@ -3060,7 +3054,6 @@ class StageController(QObject):
         current_z = float(position[2])
         if abs(lower_z - current_z) >= 1e-5:
             self._send_relative_move(
-                serial_connection,
                 MoveVector(z=lower_z - current_z),
                 allow_relative=True,
                 as_jog=True,
@@ -3076,7 +3069,6 @@ class StageController(QObject):
             1e-6,
         )
         self._send_relative_move(
-            serial_connection,
             MoveVector(z=upper_z - lower_z),
             allow_relative=True,
             feedrate=feedrate,
@@ -3366,7 +3358,6 @@ class StageController(QObject):
         approach_z = max(float(min_z), target - backlash)
         if abs(approach_z - current_z) >= 1e-5:
             self._send_relative_move(
-                serial_connection,
                 MoveVector(z=approach_z - current_z),
                 allow_relative=True,
                 as_jog=True,
@@ -3374,7 +3365,6 @@ class StageController(QObject):
             current_z = approach_z
         if abs(target - current_z) >= 1e-5:
             self._send_relative_move(
-                serial_connection,
                 MoveVector(z=target - current_z),
                 allow_relative=True,
                 as_jog=True,
@@ -3617,7 +3607,7 @@ class StageController(QObject):
             f"Checking {self._active_objective_name} click calibration..."
         )
         try:
-            self._send_relative_move(serial_connection, MoveVector(x=step_mm))
+            self._send_relative_move(MoveVector(x=step_mm))
             after_frame, _frame_counter = self._wait_for_new_frame(
                 frame_counter,
                 timeout=2.0,
@@ -3720,7 +3710,7 @@ class StageController(QObject):
                 move = MoveVector(x=step_mm)
             else:
                 move = MoveVector(y=step_mm)
-            self._send_relative_move(serial_connection, move)
+            self._send_relative_move(move)
             new_frame, frame_counter = self._wait_for_new_frame(frame_counter, timeout=2.0)
             if new_frame is None:
                 raise StageControllerError("Camera did not update during calibration.")
@@ -3905,7 +3895,6 @@ class StageController(QObject):
             f"Jogging stage dX={move.x:.3f} mm dY={move.y:.3f} mm"
         )
         self._send_relative_move(
-            serial_connection,
             move,
             as_jog=True,
             motion_started_callback=self._emit_click_move_started,
@@ -3940,7 +3929,7 @@ class StageController(QObject):
         if move.is_zero(tol=1e-5):
             return
         self.status_message.emit("Returning stage to calibration origin…")
-        self._send_relative_move(serial_connection, move)
+        self._send_relative_move(move)
 
     def _begin_needles_feedrate_control(
         self,
@@ -4567,7 +4556,6 @@ class StageController(QObject):
 
     def _send_relative_move(
         self,
-        serial_connection: serial.Serial,
         move: MoveVector,
         *,
         allow_relative: bool = False,
@@ -4579,6 +4567,7 @@ class StageController(QObject):
     ) -> None:
         if move.is_zero():
             return
+        serial_connection = self._current_serial()
         if not ignore_needle_safety:
             self._move_safety_check()
         if not self._motion_safety_disabled:

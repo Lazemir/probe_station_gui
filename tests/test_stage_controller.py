@@ -400,6 +400,7 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
     def test_relative_move_callback_runs_after_g1_is_accepted(self) -> None:
         controller = StageController()
         serial_connection = _LineFakeSerial([b"ok\n", b"ok\n", b"ok\n", b"ok\n"])
+        controller._serial = serial_connection
         callback_writes: list[list[bytes]] = []
 
         controller._move_safety_check = lambda: None
@@ -408,7 +409,6 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
         controller._reset_feed_override_for_serial = lambda _serial: None
 
         controller._send_relative_move(
-            serial_connection,
             MoveVector(x=0.1),
             wait_for_completion=False,
             motion_started_callback=lambda _move, _feedrate: callback_writes.append(
@@ -447,7 +447,7 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
         controller._query_status = lambda _serial: statuses.pop(0)
         started_moves = []
 
-        def send_relative_move(_serial, move, **kwargs) -> None:
+        def send_relative_move(move, **kwargs) -> None:
             sent_moves.append(move)
             callback = kwargs.get("motion_started_callback")
             if callback is not None:
@@ -522,7 +522,7 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
         controller._query_status = lambda _serial: statuses.pop(0)
         started_moves = []
 
-        def send_relative_move(_serial, move, **kwargs) -> None:
+        def send_relative_move(move, **kwargs) -> None:
             sent_moves.append(move)
             callback = kwargs.get("motion_started_callback")
             if callback is not None:
@@ -724,7 +724,7 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
         controller._wait_for_idle = lambda _serial: None
         controller._query_status = lambda _serial: statuses.pop(0)
         controller._send_relative_move = (
-            lambda _serial, move, **_kwargs: sent_moves.append(move)
+            lambda move, **_kwargs: sent_moves.append(move)
         )
         controller.movement_started = types.SimpleNamespace(emit=lambda *args, **kwargs: None)
         controller.status_message = types.SimpleNamespace(emit=lambda *args, **kwargs: None)
@@ -767,7 +767,7 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
         )
         observed = []
 
-        def _send_relative_move(_serial, _move, **_kwargs) -> None:
+        def _send_relative_move(_move, **_kwargs) -> None:
             def _probe() -> None:
                 acquired = controller._serial_session_lock.acquire(blocking=False)
                 observed.append(acquired)
@@ -1050,7 +1050,7 @@ class StageControllerAutofocusTest(unittest.TestCase):
                 homed_axes={"Z"},
             )
 
-        def _send_relative_move(_serial, move, **_kwargs) -> None:
+        def _send_relative_move(move, **_kwargs) -> None:
             current_z[0] += move.z
 
         frame_counter = [0]
@@ -1100,7 +1100,7 @@ class StageControllerAutofocusTest(unittest.TestCase):
                 homed_axes={"Z"},
             )
 
-        def _send_relative_move(_serial, move, **_kwargs) -> None:
+        def _send_relative_move(move, **_kwargs) -> None:
             current_z[0] += move.z
 
         frame_counter = [0]
@@ -1223,7 +1223,7 @@ class StageControllerAutofocusTest(unittest.TestCase):
                 homed_axes={"Z"},
             )
 
-        def _send_relative_move(_serial, move, **_kwargs) -> None:
+        def _send_relative_move(move, **_kwargs) -> None:
             self.assertFalse(controller._cancel_event.is_set())
             current_z[0] += move.z
             moves.append(move.z)
@@ -1284,7 +1284,7 @@ class StageControllerObjectiveTest(unittest.TestCase):
                 homed_axes={"X", "Y"},
             )
 
-        def _send_relative_move(_serial, move, **_kwargs) -> None:
+        def _send_relative_move(move, **_kwargs) -> None:
             moves.append(move)
             current[0] += move.x
             current[1] += move.y
@@ -1339,7 +1339,7 @@ class StageControllerObjectiveTest(unittest.TestCase):
                 homed_axes={"X", "Y"},
             )
 
-        def _send_relative_move(_serial, move, **_kwargs) -> None:
+        def _send_relative_move(move, **_kwargs) -> None:
             moves.append(move)
             current[0] += move.x
             current[1] += move.y
@@ -1415,7 +1415,7 @@ class StageControllerObjectiveTest(unittest.TestCase):
                 homed_axes={"X", "Y"},
             )
 
-        def _send_relative_move(_serial, move) -> None:
+        def _send_relative_move(move) -> None:
             current[0] += move.x
             current[1] += move.y
 
@@ -1467,7 +1467,7 @@ class StageControllerObjectiveTest(unittest.TestCase):
                 homed_axes={"X", "Y"},
             )
 
-        def _send_relative_move(_serial, move) -> None:
+        def _send_relative_move(move) -> None:
             moves.append(move.x)
             current[0] += move.x
 
@@ -1732,7 +1732,7 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
         controller._wait_for_idle = lambda *_args, **_kwargs: None
 
         controller._move_safety_check()
-        controller._send_relative_move(controller._serial, MoveVector(a=0.25))
+        controller._send_relative_move(MoveVector(a=0.25))
 
         self.assertIn("G1 A0.2500 F600", commands)
 
@@ -3107,11 +3107,11 @@ class StageControllerPriorityNeedlesActionTest(unittest.TestCase):
     def test_relative_move_can_be_sent_as_cancelable_jog(self) -> None:
         controller = StageController()
         serial_connection = _LineFakeSerial([b"ok\n"])
+        controller._serial = serial_connection
         controller.set_motion_safety_disabled(True)
         controller._wait_for_idle = lambda *_args, **_kwargs: None
 
         controller._send_relative_move(
-            serial_connection,
             MoveVector(x=0.5, z=-0.1),
             feedrate=12.3,
             as_jog=True,
