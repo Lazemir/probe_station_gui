@@ -2788,7 +2788,6 @@ class StageController(QObject):
     ) -> None:
         """Return local autofocus to its starting Z after a user interrupt."""
 
-        serial_connection = self._current_serial()
         was_cancelled = self._cancel_event.is_set()
         self._cancel_event.clear()
         self._queued_jog_generation += 1
@@ -2798,10 +2797,10 @@ class StageController(QObject):
                 f"Autofocus {context.objective_name}: returning to start Z."
             )
             self._write_realtime_payload(
-                serial_connection,
                 b"\x85",
                 "autofocus cancel jog stop 0x85",
             )
+            serial_connection = self._current_serial()
             try:
                 self._wait_for_idle(timeout=5.0)
             except StageControllerError:
@@ -5549,9 +5548,7 @@ class StageController(QObject):
             raise StageControllerError(f"Serial write failed: {exc}") from exc
 
     def _reset_feed_override(self) -> None:
-        serial_connection = self._current_serial()
         self._write_realtime_payload(
-            serial_connection,
             self.FEED_OVERRIDE_RESET,
             "feed override reset 100%",
         )
@@ -5559,8 +5556,9 @@ class StageController(QObject):
             self._active_feed_override_percent = 100
 
     def _write_realtime_payload(
-        self, serial_connection: serial.Serial, payload: bytes, description: str
+        self, payload: bytes, description: str
     ) -> None:
+        serial_connection = self._current_serial()
         if not hasattr(serial_connection, "write"):
             logger.debug(
                 "SERIAL TRACE realtime_write skipped for test serial: %s",
