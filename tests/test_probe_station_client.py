@@ -610,6 +610,19 @@ class ProbeStationClientTest(unittest.TestCase):
         self.assertTrue(result["resistance_match"])
         self.assertAlmostEqual(result["measured_resistance_ohm"], 10_200.0)
 
+    def test_local_focus_posts_to_stage_focus_endpoint(self) -> None:
+        transport = _FakeTransport((200, {"accepted": True, "focus": {"z": 1.2}}))
+        client = ProbeStationClient(api_key="secret", transport=transport)
+
+        result = client.local_focus(range_mm=0.03, step_mm=0.002)
+
+        call = transport.calls[0]
+        self.assertEqual(call["method"], "POST")
+        self.assertTrue(call["url"].endswith("/api/v1/stage/focus/local"))
+        self.assertIn(b'"range_mm": 0.03', call["body"])
+        self.assertIn(b'"step_mm": 0.002', call["body"])
+        self.assertEqual(result["focus"], {"z": 1.2})
+
     def test_prepare_contact_can_capture_photo_before_lower(self) -> None:
         transport = _FakeTransport(
             (200, {"accepted": True, "moved": True}),

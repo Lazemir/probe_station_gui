@@ -289,6 +289,22 @@ class ProbeStationApiServer:
                 _raise_for_rejected(result)
             return result
 
+        @app.post("/api/v1/stage/focus/local")
+        def local_stage_focus(
+            payload: dict[str, Any] | None = Body(default=None),
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+        ) -> dict[str, Any]:
+            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
+            result = self._call_command(
+                {
+                    "action": "stage_local_focus",
+                    "payload": dict(payload or {}),
+                }
+            )
+            _raise_for_rejected(result)
+            return result
+
         @app.get("/api/v1/route/contacts")
         def list_route_contacts(
             authorization: str | None = Header(default=None),

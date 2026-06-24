@@ -555,6 +555,11 @@ class ProbeStationClient:
             **axes,
         )
 
+    def local_focus(self, **options: Any) -> dict[str, Any]:
+        """Run the API local static autofocus at the current stage position."""
+
+        return self._request("POST", "/api/v1/stage/focus/local", dict(options))
+
     def route_contacts(self) -> dict[str, Any]:
         return self._request("GET", "/api/v1/route/contacts")
 

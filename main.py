@@ -1398,6 +1398,8 @@ class Main(QMainWindow):
             return self._api_contact_needles(payload)
         if action == "check_contact":
             return self._api_check_contact(payload)
+        if action == "stage_local_focus":
+            return self._api_stage_local_focus(payload)
         if action == "route_contact_focus":
             return self._api_route_contact_focus(payload)
         if action == "route_contact_photo":
@@ -2013,6 +2015,70 @@ class Main(QMainWindow):
 
     def _api_check_contact(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._api_measure_current_contact(payload, seek=False)
+
+    def _api_stage_local_focus(self, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            focus_range_mm = self._api_float(
+                payload,
+                "range_mm",
+                "focus_range_mm",
+                "photo_autofocus_range_mm",
+                default=0.03,
+                minimum=0.001,
+            )
+            focus_step_mm = self._api_optional_float(
+                payload,
+                "step_mm",
+                "focus_step_mm",
+                minimum=0.001,
+            )
+        except ValueError as exc:
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": str(exc),
+            }
+
+        active_stage_task = False
+        try:
+            self.stage_controller.begin_external_task("API local autofocus")
+            active_stage_task = True
+            needles_known = bool(getattr(self.stage_controller, "_needles_known", False))
+            needles_up = bool(getattr(self.stage_controller, "_needles_up", False))
+            needles_zone = getattr(self.stage_controller, "_needles_zone", None)
+            if not (needles_known and needles_up and needles_zone == "raise"):
+                return {
+                    "accepted": False,
+                    "status_code": 409,
+                    "message": (
+                        "Local autofocus requires fully raised needles "
+                        "(known needle zone 'raise')."
+                    ),
+                    "needles_known": needles_known,
+                    "needles_up": needles_up,
+                    "needles_zone": needles_zone or "unknown",
+                }
+            result = self.stage_controller.run_external_local_autofocus(
+                range_mm=focus_range_mm,
+                step_mm=focus_step_mm,
+            )
+        except StageControllerError as exc:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": str(exc),
+            }
+        finally:
+            if active_stage_task:
+                self.stage_controller.finish_external_task()
+        return {
+            "accepted": True,
+            "message": str(result.summary()),
+            "timestamp_utc": self._api_timestamp_utc(),
+            "focus_range_mm": focus_range_mm,
+            "focus_step_mm": focus_step_mm,
+            "focus": self._route_photo_focus_payload(result),
+        }
 
     def _api_route_contact_focus(self, payload: dict[str, Any]) -> dict[str, Any]:
         contact_number = self._api_contact_number(payload)

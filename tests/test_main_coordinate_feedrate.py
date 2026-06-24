@@ -1004,6 +1004,68 @@ assert image.height() == 4
             ["Route photo autofocus: point 2/5, +/-0.030 mm."],
         )
 
+    def test_api_stage_local_focus_runs_local_autofocus(self) -> None:
+        window = Main.__new__(Main)
+        calls: list[tuple[float, float | None]] = []
+
+        class _FocusResult:
+            objective_name = "X50"
+            mode = "local"
+            start_z_mm = 4.0
+            best_z_mm = 4.002
+            best_score = 0.2
+            sample_count = 9
+            edge_peak = False
+            range_mm = 0.03
+            fine_step_mm = 0.002
+            lower_z_mm = 3.97
+            upper_z_mm = 4.03
+
+            @property
+            def delta_um(self) -> float:
+                return 2.0
+
+            def summary(self) -> str:
+                return "focused"
+
+            def to_dict(self) -> dict[str, object]:
+                return {
+                    "objective_name": self.objective_name,
+                    "mode": self.mode,
+                    "focus_start_z_mm": self.start_z_mm,
+                    "focus_best_z_mm": self.best_z_mm,
+                    "focus_delta_um": self.delta_um,
+                    "focus_score": self.best_score,
+                    "focus_sample_count": self.sample_count,
+                    "focus_edge_peak": self.edge_peak,
+                    "autofocus_range_mm": self.range_mm,
+                    "autofocus_fine_step_mm": self.fine_step_mm,
+                    "autofocus_lower_z_mm": self.lower_z_mm,
+                    "autofocus_upper_z_mm": self.upper_z_mm,
+                }
+
+        window.stage_controller = types.SimpleNamespace(
+            _needles_known=True,
+            _needles_up=True,
+            _needles_zone="raise",
+            begin_external_task=lambda _label: None,
+            finish_external_task=lambda: None,
+            run_external_local_autofocus=lambda *, range_mm, step_mm=None: (
+                calls.append((float(range_mm), step_mm))
+                or _FocusResult()
+            ),
+        )
+
+        result = Main._api_stage_local_focus(
+            window,
+            {"range_mm": 0.03, "step_mm": 0.002},
+        )
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(calls, [(0.03, 0.002)])
+        self.assertEqual(result["focus"]["objective_name"], "X50")
+        self.assertEqual(result["focus"]["focus_best_z_mm"], 4.002)
+
     def test_wait_for_camera_frame_requires_fresh_counter_after_marker(self) -> None:
         window = Main.__new__(Main)
         window._latest_camera_frame_condition = threading.Condition()

@@ -122,6 +122,32 @@ class ApiServerHttpTest(unittest.TestCase):
         self.assertEqual(response.json()["mode"], "G91")
         self.assertEqual(response.json()["feedrate"], 45.0)
 
+    def test_local_focus_endpoint_delegates_to_command_callback(self) -> None:
+        calls = []
+
+        client = self._client(
+            command_callback=lambda request: (
+                calls.append(request) or {"accepted": True, "focus": {"z": 1.2}}
+            )
+        )
+
+        response = client.post(
+            "/api/v1/stage/focus/local",
+            json={"range_mm": 0.03, "step_mm": 0.002},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            calls,
+            [
+                {
+                    "action": "stage_local_focus",
+                    "payload": {"range_mm": 0.03, "step_mm": 0.002},
+                }
+            ],
+        )
+        self.assertEqual(response.json()["focus"], {"z": 1.2})
+
     def test_move_endpoint_rejects_empty_or_rejected_moves(self) -> None:
         client = self._client(
             move_callback=lambda _request: {
