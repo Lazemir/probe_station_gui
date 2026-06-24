@@ -123,6 +123,7 @@ class StageControllerStartupLimitsTest(unittest.TestCase):
 
     def test_relative_software_limits_apply_per_homed_axis(self) -> None:
         controller = StageController()
+        controller._serial = _FakeSerial()
         controller._axis_limits = {"X": (0.0, 10.0), "Y": (0.0, 10.0)}
         controller._query_status = lambda _serial: types.SimpleNamespace(
             state="Idle",
@@ -134,13 +135,11 @@ class StageControllerStartupLimitsTest(unittest.TestCase):
         )
         controller._ensure_b_axis_zero_reference = lambda _status: None
 
-        controller._check_relative_move_limits(
-            _FakeSerial(), MoveVector(y=15.0), allow_relative=True
-        )
+        controller._check_relative_move_limits(MoveVector(y=15.0), allow_relative=True)
 
         with self.assertRaises(StageControllerError):
             controller._check_relative_move_limits(
-                _FakeSerial(), MoveVector(x=5.0), allow_relative=True
+                MoveVector(x=5.0), allow_relative=True
             )
 
     def test_constrain_jog_distances_clips_homed_axis_to_soft_limit(self) -> None:

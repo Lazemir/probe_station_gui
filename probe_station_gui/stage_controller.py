@@ -4571,9 +4571,7 @@ class StageController(QObject):
                     axis for axis, delta in move.items() if abs(delta) >= 1e-6
                 ),
             )
-            self._check_relative_move_limits(
-                serial_connection, move, allow_relative=allow_relative
-            )
+            self._check_relative_move_limits(move, allow_relative=allow_relative)
         move_parts: list[str] = [
             f"{axis}{value:.4f}"
             for axis, value in move.items()
@@ -5119,7 +5117,6 @@ class StageController(QObject):
 
     def _check_relative_move_limits(
         self,
-        serial_connection: serial.Serial,
         move: MoveVector,
         *,
         allow_relative: bool = False,
@@ -5132,6 +5129,7 @@ class StageController(QObject):
             if abs(delta) >= 1e-6
             and (axis == "B" or axis in self._axis_limits)
         )
+        serial_connection = self._current_serial()
         status = self._query_status_with_required_coordinates(
             serial_connection,
             axes=moved_limited_axes,
