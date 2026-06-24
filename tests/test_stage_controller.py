@@ -748,7 +748,7 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
         controller._serial = _FakeSerial()
         controller._pixels_to_mm = _stage_controller_module.np.eye(2) * 0.1
         controller._move_safety_check = lambda: None
-        controller._ensure_calibration = lambda _serial, target_pixels=None: (
+        controller._ensure_calibration = lambda target_pixels=None: (
             False,
             None,
         )
@@ -1264,6 +1264,7 @@ class StageControllerObjectiveTest(unittest.TestCase):
     def test_verification_moves_directly_to_click_target(self) -> None:
         controller = StageController()
         serial_connection = _FakeSerial()
+        controller._serial = serial_connection
         current = [0.0, 0.0, 0.0]
         moves: list[MoveVector] = []
         controller._pixels_to_mm = np.array(
@@ -1305,7 +1306,6 @@ class StageControllerObjectiveTest(unittest.TestCase):
         )
 
         handled, before_counter = controller._verify_active_objective_calibration(
-            serial_connection,
             target_pixels=np.array([10.0, -5.0], dtype=float),
         )
 
@@ -1322,6 +1322,7 @@ class StageControllerObjectiveTest(unittest.TestCase):
     def test_fresh_calibration_moves_directly_to_click_target(self) -> None:
         controller = StageController()
         serial_connection = _FakeSerial()
+        controller._serial = serial_connection
         current = [0.0, 0.0, 0.0]
         moves: list[MoveVector] = []
         axis_calls: list[str] = []
@@ -1343,7 +1344,7 @@ class StageControllerObjectiveTest(unittest.TestCase):
             current[0] += move.x
             current[1] += move.y
 
-        def _calibrate_axis_series(_serial, _frame, _origin, axis: str):
+        def _calibrate_axis_series(_frame, _origin, axis: str):
             axis_calls.append(axis)
             if axis == "Y":
                 current[0] = 0.02
@@ -1379,7 +1380,6 @@ class StageControllerObjectiveTest(unittest.TestCase):
         )
 
         handled, before_counter = controller._ensure_calibration(
-            serial_connection,
             target_pixels=np.array([10.0, -5.0], dtype=float),
         )
 
@@ -1402,6 +1402,7 @@ class StageControllerObjectiveTest(unittest.TestCase):
         controller._objective_calibration_target_pixels = 1000.0
         current = [0.4, 0.0, 0.0]
         serial_connection = _FakeSerial()
+        controller._serial = serial_connection
 
         def _status() -> types.SimpleNamespace:
             position = tuple(current)
@@ -1433,7 +1434,6 @@ class StageControllerObjectiveTest(unittest.TestCase):
         )
 
         observations = controller._calibrate_axis_series(
-            serial_connection,
             np.zeros((8, 8), dtype=np.uint8),
             (0.0, 0.0, 0.0),
             axis="Y",
@@ -1454,6 +1454,7 @@ class StageControllerObjectiveTest(unittest.TestCase):
         current = [0.0, 0.0, 0.0]
         moves: list[float] = []
         serial_connection = _FakeSerial()
+        controller._serial = serial_connection
 
         def _status() -> types.SimpleNamespace:
             position = tuple(current)
@@ -1485,7 +1486,6 @@ class StageControllerObjectiveTest(unittest.TestCase):
         )
 
         observations = controller._calibrate_axis_series(
-            serial_connection,
             np.zeros((8, 8), dtype=np.uint8),
             (0.0, 0.0, 0.0),
             axis="X",

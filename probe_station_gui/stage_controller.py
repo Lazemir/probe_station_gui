@@ -1924,17 +1924,14 @@ class StageController(QObject):
                 raise StageControllerError(
                     "Stage is busy. Wait for the current operation to finish."
                 )
-            serial_connection = self._serial
-            if serial_connection is None or not serial_connection.is_open:
-                raise StageControllerError("Serial connection is not available.")
-            with self._serial_session_lock:
+            with self._serial_session() as serial_connection:
                 status = self._query_status_with_required_coordinates(
                     serial_connection,
                     axes=("X", "Y"),
                 )
                 if status is None or status.display_position is None:
                     raise StageControllerError("Unable to read stage position.")
-                self._ensure_calibration(serial_connection)
+                self._ensure_calibration()
         if self._pixels_to_mm is None:
             raise StageControllerError("Calibration failed. Cannot resolve clicked position.")
         return self._resolve_xy_from_center(
@@ -2523,15 +2520,12 @@ class StageController(QObject):
         self.movement_started.emit()
         try:
             self._check_cancelled()
-            serial_connection = self._serial
-            if serial_connection is None or not serial_connection.is_open:
-                raise StageControllerError("Serial connection is not available.")
-            self._move_safety_check()
-            before_counter = self._prepare_click_move_without_status_locked(
-                serial_connection,
-                dx_pixels,
-                dy_pixels,
-            )
+            with self._serial_session():
+                self._move_safety_check()
+                before_counter = self._prepare_click_move_without_status_locked(
+                    dx_pixels,
+                    dy_pixels,
+                )
             if before_counter is None:
                 self.movement_finished.emit(True, "Target already centered.")
                 return
@@ -2763,14 +2757,13 @@ class StageController(QObject):
 
     def _prepare_click_move_without_status_locked(
         self,
-        serial_connection: serial.Serial,
         dx_pixels: float,
         dy_pixels: float,
     ) -> int | None:
+        serial_connection = self._current_serial()
         with self._serial_session_lock:
             pixel_vector = np.array([dx_pixels, dy_pixels], dtype=float)
             target_handled, before_counter = self._ensure_calibration(
-                serial_connection,
                 target_pixels=pixel_vector,
             )
             self._check_cancelled()
@@ -3558,16 +3551,15 @@ class StageController(QObject):
 
     def _ensure_calibration(
         self,
-        serial_connection: serial.Serial,
         target_pixels: np.ndarray | None = None,
     ) -> tuple[bool, int | None]:
+        serial_connection = self._current_serial()
         if self._pixels_to_mm is not None:
             if not self._objective_calibration_verified.get(
                 self._active_objective_name,
                 False,
             ):
                 return self._verify_active_objective_calibration(
-                    serial_connection,
                     target_pixels=target_pixels,
                 )
             return (False, None)
@@ -3591,14 +3583,14 @@ class StageController(QObject):
         try:
             observations.extend(
                 self._calibrate_axis_series(
-                    serial_connection, before_frame, origin, axis="X"
+                    before_frame, origin, axis="X"
                 )
             )
             latest_frame, _ = self._get_frame_snapshot(timeout=2.0)
             reference_for_y = latest_frame if latest_frame is not None else before_frame
             observations.extend(
                 self._calibrate_axis_series(
-                    serial_connection, reference_for_y, origin, axis="Y"
+                    reference_for_y, origin, axis="Y"
                 )
             )
             calibration_matrix = self._calibration_matrix_from_observations(observations)
@@ -3617,12 +3609,11 @@ class StageController(QObject):
             self._objective_matrices[self._active_objective_name] = self._pixels_to_mm
             self._objective_calibration_verified[self._active_objective_name] = True
             target_handled, before_counter = self._move_from_calibration_to_target(
-                serial_connection,
                 origin,
                 target_pixels,
             )
         except Exception:
-            self._return_to_origin(serial_connection, origin)
+            self._return_to_origin(origin)
             raise
 
         self.status_message.emit(
@@ -3632,9 +3623,9 @@ class StageController(QObject):
 
     def _verify_active_objective_calibration(
         self,
-        serial_connection: serial.Serial,
         target_pixels: np.ndarray | None = None,
     ) -> tuple[bool, int | None]:
+        serial_connection = self._current_serial()
         if self._pixels_to_mm is None:
             return (False, None)
         before_frame, frame_counter = self._get_frame_snapshot(timeout=3.0)
@@ -3679,7 +3670,6 @@ class StageController(QObject):
             if active_error <= tolerance:
                 self._objective_calibration_verified[self._active_objective_name] = True
                 target_handled, before_counter = self._move_from_calibration_to_target(
-                    serial_connection,
                     origin,
                     target_pixels,
                 )
@@ -3705,7 +3695,7 @@ class StageController(QObject):
                 "Select the correct objective in the GUI or recalibrate this objective."
             )
         except Exception:
-            self._return_to_origin(serial_connection, origin)
+            self._return_to_origin(origin)
             raise
 
     def _best_objective_for_measurement(
@@ -3731,11 +3721,11 @@ class StageController(QObject):
 
     def _calibrate_axis_series(
         self,
-        serial_connection: serial.Serial,
         reference_frame: np.ndarray,
         _origin: tuple[float, float, float],
         axis: str,
     ) -> list[tuple[np.ndarray, np.ndarray]]:
+        serial_connection = self._current_serial()
         if reference_frame is None:
             raise StageControllerError("Reference frame unavailable for calibration.")
         index = 0 if axis == "X" else 1
@@ -3896,12 +3886,12 @@ class StageController(QObject):
 
     def _move_from_calibration_to_target(
         self,
-        serial_connection: serial.Serial,
         origin: tuple[float, float, float],
         target_pixels: np.ndarray | None,
     ) -> tuple[bool, int | None]:
+        serial_connection = self._current_serial()
         if target_pixels is None:
-            self._return_to_origin(serial_connection, origin)
+            self._return_to_origin(origin)
             return (False, None)
         if self._pixels_to_mm is None:
             raise StageControllerError("Calibration failed. Cannot move stage.")
@@ -3909,7 +3899,7 @@ class StageController(QObject):
         if pixel_vector.shape != (2,):
             raise StageControllerError("Invalid click target for calibration move.")
         if float(np.linalg.norm(pixel_vector)) < 1e-3:
-            self._return_to_origin(serial_connection, origin)
+            self._return_to_origin(origin)
             return (False, None)
 
         click_delta_mm = -(self._pixels_to_mm @ pixel_vector)
@@ -3960,8 +3950,9 @@ class StageController(QObject):
         self.click_move_started.emit(float(move.x), float(move.y), effective_feedrate)
 
     def _return_to_origin(
-        self, serial_connection: serial.Serial, origin: tuple[float, float, float]
+        self, origin: tuple[float, float, float]
     ) -> None:
+        serial_connection = self._current_serial()
         status = self._query_status_with_required_coordinates(
             serial_connection,
             axes=("X", "Y"),
