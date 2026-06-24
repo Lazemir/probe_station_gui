@@ -1954,10 +1954,7 @@ class StageController(QObject):
                 raise StageControllerError(
                     "Stage is busy. Wait for the current operation to finish."
                 )
-            serial_connection = self._serial
-            if serial_connection is None or not serial_connection.is_open:
-                raise StageControllerError("Serial connection is not available.")
-            with self._serial_session_lock:
+            with self._serial_session() as serial_connection:
                 status = self._query_status_with_required_coordinates(
                     serial_connection,
                     axes=("B",),
@@ -2782,14 +2779,11 @@ class StageController(QObject):
         self.movement_started.emit()
         try:
             self._check_cancelled()
-            serial_connection = self._serial
-            if serial_connection is None or not serial_connection.is_open:
-                raise StageControllerError("Serial connection is not available.")
-            if abs(delta_deg) < 1e-3:
-                self.movement_finished.emit(True, "Chip is already aligned.")
-                return
-            self.status_message.emit(f"Chip alignment: rotating B by {delta_deg:+.3f} deg.")
-            with self._serial_session_lock:
+            with self._serial_session() as serial_connection:
+                if abs(delta_deg) < 1e-3:
+                    self.movement_finished.emit(True, "Chip is already aligned.")
+                    return
+                self.status_message.emit(f"Chip alignment: rotating B by {delta_deg:+.3f} deg.")
                 self._send_relative_move(
                     serial_connection,
                     MoveVector(b=delta_deg),
@@ -4297,21 +4291,18 @@ class StageController(QObject):
         self.movement_started.emit()
         try:
             self._check_cancelled()
-            serial_connection = self._serial
-            if serial_connection is None or not serial_connection.is_open:
-                raise StageControllerError("Serial connection is not available.")
-            feedrate_text = (
-                self.DEFAULT_FEEDRATE if feedrate is None else max(self.MIN_FEEDRATE, float(feedrate))
-            )
-            ordered_targets = {
-                axis: float(targets[axis])
-                for axis in self.AXIS_INDEX
-                if axis in targets
-            }
-            target_text = " ".join(
-                f"{axis}{value:+.3f}" for axis, value in ordered_targets.items()
-            )
-            with self._serial_session_lock:
+            with self._serial_session() as serial_connection:
+                feedrate_text = (
+                    self.DEFAULT_FEEDRATE if feedrate is None else max(self.MIN_FEEDRATE, float(feedrate))
+                )
+                ordered_targets = {
+                    axis: float(targets[axis])
+                    for axis in self.AXIS_INDEX
+                    if axis in targets
+                }
+                target_text = " ".join(
+                    f"{axis}{value:+.3f}" for axis, value in ordered_targets.items()
+                )
                 self.status_message.emit(
                     "Coordinate move (G90): "
                     f"{target_text} F{self._format_gcode_value(feedrate_text)}."
