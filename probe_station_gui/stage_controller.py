@@ -3413,11 +3413,8 @@ class StageController(QObject):
     def _run_home(self, command: str, axis_key: str) -> None:
         self.movement_started.emit()
         try:
-            serial_connection = self._serial
-            if serial_connection is None or not serial_connection.is_open:
-                raise StageControllerError("Serial connection is not available.")
-            with self._serial_session_lock:
-                self._perform_home_command(serial_connection, command)
+            with self._serial_session():
+                self._perform_home_command(command)
             self.movement_finished.emit(True, "Homing complete.")
             self.homing_action_finished.emit(True, "Homing complete.", axis_key)
         except StageControllerError as exc:
@@ -3487,8 +3484,8 @@ class StageController(QObject):
                 self.homing_action_started.emit("A")
                 try:
                     self.status_message.emit("A axis not homed. Homing needles on startup.")
-                    with self._serial_session_lock:
-                        self._perform_home_command(serial_connection, "$HA")
+                    with self._serial_session():
+                        self._perform_home_command("$HA")
                     self.movement_finished.emit(True, "Startup A homing complete.")
                     self.homing_action_finished.emit(
                         True, "Startup A homing complete.", "A"
@@ -6519,11 +6516,10 @@ class StageController(QObject):
         self._last_a_position_read_failure = reason
         logger.debug("A position read failed: %s", reason)
 
-    def _perform_home_command(
-        self, serial_connection: serial.Serial, command: str
-    ) -> None:
-        """Execute a homing command while the caller owns serial access."""
+    def _perform_home_command(self, command: str) -> None:
+        """Execute a homing command using the current serial session."""
 
+        serial_connection = self._current_serial()
         self.status_message.emit(f"Homing: {command}")
         self._write_command(serial_connection, command)
         self._wait_for_ok(serial_connection, timeout=30.0)

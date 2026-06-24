@@ -3321,7 +3321,7 @@ class StageControllerStartupSyncTest(unittest.TestCase):
         )
         performed = []
         controller._perform_home_command = (
-            lambda _serial, command: performed.append(command)
+            lambda command: performed.append(command)
         )
         controller.status_message = types.SimpleNamespace(
             emit=lambda *_args, **_kwargs: None
@@ -3358,7 +3358,7 @@ class StageControllerStartupSyncTest(unittest.TestCase):
         )
         performed = []
         controller._perform_home_command = (
-            lambda _serial, command: performed.append(command)
+            lambda command: performed.append(command)
         )
         controller.status_message = types.SimpleNamespace(
             emit=lambda *_args, **_kwargs: None
@@ -3399,7 +3399,7 @@ class StageControllerStartupSyncTest(unittest.TestCase):
         )
         performed = []
         controller._perform_home_command = (
-            lambda _serial, command: performed.append(command)
+            lambda command: performed.append(command)
         )
         controller.status_message = types.SimpleNamespace(
             emit=lambda *_args, **_kwargs: None
@@ -3734,7 +3734,7 @@ class StageControllerReconnectStateTest(unittest.TestCase):
         controller._wait_for_idle = lambda *_args, **_kwargs: None
 
         controller.set_serial(_FakeSerial())
-        controller._perform_home_command(controller._serial, "$HA")
+        controller._perform_home_command("$HA")
 
         self.assertIn("A", controller._homed_axes)
         self.assertFalse(controller._controller_state_stale)
