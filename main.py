@@ -152,6 +152,7 @@ from probe_station_gui.route_measurement import (
     route_measurement_sample_from_raw,
     summarize_route_contact_quality,
 )
+from probe_station_gui.route_control_state import ApiRouteControlState
 from probe_station_gui.route_formatting import (
     csv_bool as _csv_bool,
     csv_float as _csv_float,
@@ -489,13 +490,7 @@ class Main(QMainWindow):
         self._api_route_lcr_controller: object | None = None
         self._api_route_artifacts: dict[str, dict[str, object]] = {}
         self._api_route_artifacts_lock = threading.Lock()
-        self._api_route_control_active = False
-        self._api_route_control_pause_requested = False
-        self._api_route_control_paused = False
-        self._api_route_control_stop_requested = False
-        self._api_route_control_pending_action = ""
-        self._api_route_control_label = ""
-        self._api_route_control_updated_utc = ""
+        self._set_api_route_control_state(ApiRouteControlState())
         self._api_route_offset_xy: tuple[float, float] = (0.0, 0.0)
         self._microscope_scan_thread: threading.Thread | None = None
         self._microscope_scan_stop_requested = threading.Event()
@@ -1946,18 +1941,52 @@ class Main(QMainWindow):
     def _api_contact_seek(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._api_measure_current_contact(payload, seek=True)
 
+    def _api_route_control_state_snapshot(self) -> ApiRouteControlState:
+        state = getattr(self, "_api_route_control_state", ApiRouteControlState())
+        if not isinstance(state, ApiRouteControlState):
+            state = ApiRouteControlState()
+        return ApiRouteControlState(
+            active=bool(getattr(self, "_api_route_control_active", state.active)),
+            pause_requested=bool(
+                getattr(
+                    self,
+                    "_api_route_control_pause_requested",
+                    state.pause_requested,
+                )
+            ),
+            paused=bool(getattr(self, "_api_route_control_paused", state.paused)),
+            stop_requested=bool(
+                getattr(self, "_api_route_control_stop_requested", state.stop_requested)
+            ),
+            pending_action=str(
+                getattr(
+                    self,
+                    "_api_route_control_pending_action",
+                    state.pending_action,
+                )
+                or ""
+            ),
+            label=str(getattr(self, "_api_route_control_label", state.label) or ""),
+            updated_utc=str(
+                getattr(self, "_api_route_control_updated_utc", state.updated_utc)
+                or ""
+            ),
+        )
+
+    def _set_api_route_control_state(self, state: ApiRouteControlState) -> None:
+        self._api_route_control_state = state
+        self._api_route_control_active = bool(state.active)
+        self._api_route_control_pause_requested = bool(state.pause_requested)
+        self._api_route_control_paused = bool(state.paused)
+        self._api_route_control_stop_requested = bool(state.stop_requested)
+        self._api_route_control_pending_action = str(state.pending_action or "")
+        self._api_route_control_label = str(state.label or "")
+        self._api_route_control_updated_utc = str(state.updated_utc or "")
+
     def _api_route_control_status(self) -> dict[str, Any]:
-        return {
-            "accepted": True,
-            "active": bool(self._api_route_control_active),
-            "pause_requested": bool(self._api_route_control_pause_requested),
-            "paused": bool(self._api_route_control_paused),
-            "stop_requested": bool(self._api_route_control_stop_requested),
-            "pending_action": str(self._api_route_control_pending_action or ""),
-            "label": str(self._api_route_control_label or ""),
-            "updated_utc": str(self._api_route_control_updated_utc or ""),
-            "route_control_window_open": self._route_control_window_is_open(),
-        }
+        return self._api_route_control_state_snapshot().status_payload(
+            route_control_window_open=self._route_control_window_is_open()
+        )
 
     def _api_route_control_action(self, payload: dict[str, Any]) -> dict[str, Any]:
         action = str(payload.get("action", payload.get("command", "status"))).strip().lower()
@@ -1969,38 +1998,29 @@ class Main(QMainWindow):
             )
             if existing_route_result is not None:
                 return existing_route_result
-            self._api_route_control_active = True
-            self._api_route_control_pause_requested = False
-            self._api_route_control_paused = False
-            self._api_route_control_stop_requested = False
-            self._api_route_control_pending_action = ""
-            if label:
-                self._api_route_control_label = label
-            elif not self._api_route_control_label:
-                self._api_route_control_label = "API route control"
-            message = f"{self._api_route_control_label}: running."
+            state, message = self._api_route_control_state_snapshot().start(
+                label=label,
+                updated_utc=self._api_timestamp_utc(),
+            )
+            self._set_api_route_control_state(state)
         elif action == "pause":
-            if not self._api_route_control_active:
+            if not self._api_route_control_state_snapshot().active:
                 return {
                     "accepted": False,
                     "status_code": 409,
                     "message": "No API route control run is active.",
                 }
-            return self._request_api_route_control_pause(
-                f"{self._api_route_control_label or 'API route control'}: pause requested."
-            )
+            return self._request_api_route_control_pause("")
         elif action in {"paused", "pause_ack", "ack_pause"}:
-            if not self._api_route_control_active:
+            if not self._api_route_control_state_snapshot().active:
                 return {
                     "accepted": False,
                     "status_code": 409,
                     "message": "No API route control run is active.",
                 }
-            return self._ack_api_route_control_pause(
-                f"{self._api_route_control_label or 'API route control'}: paused."
-            )
+            return self._ack_api_route_control_pause("")
         elif action == "interrupt":
-            if not self._api_route_control_active:
+            if not self._api_route_control_state_snapshot().active:
                 return {
                     "accepted": False,
                     "status_code": 409,
@@ -2010,7 +2030,7 @@ class Main(QMainWindow):
                 "API route control interrupt requested."
             )
         elif action in {"resume", "continue", "measure", "remeasure", "skip", "next"} or action.startswith("jump:"):
-            if not self._api_route_control_active:
+            if not self._api_route_control_state_snapshot().active:
                 return {
                     "accepted": False,
                     "status_code": 409,
@@ -2021,46 +2041,37 @@ class Main(QMainWindow):
                     "api_route_control_resume",
                     {"route_action": action},
                 )
-            pending_action = action
-            if pending_action == "continue":
-                pending_action = "resume"
             explicit_action = str(
                 payload.get("pending_action", payload.get("next_action", "")) or ""
             ).strip().lower()
-            if explicit_action:
-                pending_action = explicit_action
-            self._api_route_control_pending_action = pending_action
-            self._api_route_control_pause_requested = False
-            self._api_route_control_paused = False
-            action_label = "resumed" if pending_action == "resume" else pending_action
-            message = (
-                f"{self._api_route_control_label or 'API route control'}: "
-                f"{action_label}."
+            state, message = self._api_route_control_state_snapshot().resume(
+                action=action,
+                explicit_action=explicit_action,
+                updated_utc=self._api_timestamp_utc(),
             )
+            self._set_api_route_control_state(state)
         elif action == "stop":
-            if not self._api_route_control_active:
+            if not self._api_route_control_state_snapshot().active:
                 return {
                     "accepted": False,
                     "status_code": 409,
                     "message": "No API route control run is active.",
                 }
-            self._api_route_control_stop_requested = True
-            self._api_route_control_pause_requested = False
-            self._api_route_control_paused = False
-            self._api_route_control_pending_action = ""
-            message = f"{self._api_route_control_label or 'API route control'}: stop requested."
+            state, message = self._api_route_control_state_snapshot().stop(
+                updated_utc=self._api_timestamp_utc(),
+            )
+            self._set_api_route_control_state(state)
         elif action in {"finish", "complete", "clear", "done"}:
-            self._api_route_control_active = False
-            self._api_route_control_pause_requested = False
-            self._api_route_control_paused = False
-            self._api_route_control_stop_requested = False
-            self._api_route_control_pending_action = ""
-            if label:
-                self._api_route_control_label = label
-            message = f"{self._api_route_control_label or 'API route control'}: finished."
+            state, message = self._api_route_control_state_snapshot().finish(
+                label=label,
+                updated_utc=self._api_timestamp_utc(),
+            )
+            self._set_api_route_control_state(state)
         elif action in {"ack", "clear_action"}:
-            self._api_route_control_pending_action = ""
-            self._api_route_control_updated_utc = self._api_timestamp_utc()
+            state, _message = self._api_route_control_state_snapshot().clear_action(
+                updated_utc=self._api_timestamp_utc(),
+            )
+            self._set_api_route_control_state(state)
             return self._api_route_control_status()
         elif action == "status":
             return self._api_route_control_status()
@@ -2070,17 +2081,11 @@ class Main(QMainWindow):
                 "status_code": 400,
                 "message": f"Unknown API route control action: {action}",
             }
-        self._api_route_control_updated_utc = self._api_timestamp_utc()
         if route_control_start and not self._show_route_measurement_dialog_for_api_session():
-            self._api_route_control_active = False
-            self._api_route_control_pause_requested = False
-            self._api_route_control_paused = False
-            self._api_route_control_stop_requested = False
-            self._api_route_control_pending_action = ""
-            message = (
-                f"{self._api_route_control_label or 'API route control'}: "
-                "route control window did not open."
+            state, message = (
+                self._api_route_control_state_snapshot().start_failed_window_not_open()
             )
+            self._set_api_route_control_state(state)
             self._update_api_route_control_ui(message)
             status = self._api_route_control_status()
             status.update(
@@ -2156,22 +2161,24 @@ class Main(QMainWindow):
         return None
 
     def _request_api_route_control_pause(self, message: str) -> dict[str, Any]:
-        self._api_route_control_pause_requested = True
-        self._api_route_control_paused = False
-        self._api_route_control_stop_requested = False
-        self._api_route_control_pending_action = ""
-        self._api_route_control_updated_utc = self._api_timestamp_utc()
+        state, transition_message = (
+            self._api_route_control_state_snapshot().request_pause(
+                updated_utc=self._api_timestamp_utc(),
+            )
+        )
+        self._set_api_route_control_state(state)
+        message = message or transition_message
         self._update_api_route_control_ui(message)
         status = self._api_route_control_status()
         status["message"] = message
         return status
 
     def _ack_api_route_control_pause(self, message: str) -> dict[str, Any]:
-        self._api_route_control_pause_requested = False
-        self._api_route_control_paused = True
-        self._api_route_control_stop_requested = False
-        self._api_route_control_pending_action = ""
-        self._api_route_control_updated_utc = self._api_timestamp_utc()
+        state, transition_message = self._api_route_control_state_snapshot().ack_pause(
+            updated_utc=self._api_timestamp_utc(),
+        )
+        self._set_api_route_control_state(state)
+        message = message or transition_message
         self._update_api_route_control_ui(message)
         status = self._api_route_control_status()
         status["message"] = message
@@ -2179,11 +2186,6 @@ class Main(QMainWindow):
 
     def _interrupt_api_route_controlled_operation(self, reason: str) -> dict[str, Any]:
         self._pending_route_measure_point = None
-        self._api_route_control_pause_requested = False
-        self._api_route_control_paused = True
-        self._api_route_control_stop_requested = False
-        self._api_route_control_pending_action = ""
-        self._api_route_control_updated_utc = self._api_timestamp_utc()
         self._contact_seek_stop_requested.set()
         try:
             self.stage_controller.cancel_active_task(reason)
@@ -2200,9 +2202,14 @@ class Main(QMainWindow):
         except Exception:
             logger.exception("Failed to clear planned move prediction after API route control interrupt.")
         self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
-        return self._ack_api_route_control_pause(
-            f"{self._api_route_control_label or 'API route control'}: interrupted; paused."
+        state, message = self._api_route_control_state_snapshot().interrupt(
+            updated_utc=self._api_timestamp_utc(),
         )
+        self._set_api_route_control_state(state)
+        self._update_api_route_control_ui(message)
+        status = self._api_route_control_status()
+        status["message"] = message
+        return status
 
     def _update_api_route_control_ui(self, message: str) -> None:
         active = bool(self._api_route_control_active)
