@@ -4424,10 +4424,9 @@ class StageController(QObject):
     def _run_oscillation(
         self, mode: str, amplitude_mm: float, feedrate: float, turns_per_sweep: float
     ) -> None:
+        serial_connection: serial.Serial | None = None
         try:
-            serial_connection = self._serial
-            if serial_connection is None or not serial_connection.is_open:
-                raise StageControllerError("Serial connection is not available.")
+            serial_connection = self._require_open_serial()
             if mode not in {"X", "Y", "SPIRAL"}:
                 raise StageControllerError(
                     f"Oscillation mode {mode} is not supported."
@@ -4458,7 +4457,7 @@ class StageController(QObject):
                     f"{self.SPIRAL_MIN_TURNS_PER_SWEEP:.2f} and "
                     f"{self.SPIRAL_MAX_TURNS_PER_SWEEP:.2f}."
                 )
-            with self._serial_session_lock:
+            with self._serial_session() as serial_connection:
                 self._oscillation_active = True
                 self.oscillation_state_changed.emit(True, mode)
                 self.status_message.emit(
@@ -4471,14 +4470,12 @@ class StageController(QObject):
                 self._wait_for_ok(serial_connection)
                 if mode == "SPIRAL":
                     self._run_spiral_pattern(
-                        serial_connection,
                         amplitude_mm=amplitude_mm,
                         feedrate=feedrate,
                         turns_per_sweep=turns_per_sweep,
                     )
                 else:
                     self._run_linear_pattern(
-                        serial_connection,
                         axis=mode,
                         amplitude_mm=amplitude_mm,
                         feedrate=feedrate,
@@ -5088,7 +5085,6 @@ class StageController(QObject):
 
     def _write_relative_g1_unchecked(
         self,
-        serial_connection: serial.Serial,
         move: MoveVector,
         *,
         feedrate: Optional[float] = None,
@@ -5107,6 +5103,7 @@ class StageController(QObject):
         effective_feedrate = (
             self.DEFAULT_FEEDRATE if feedrate is None else max(self.MIN_FEEDRATE, float(feedrate))
         )
+        serial_connection = self._current_serial()
         self._write_command(
             serial_connection,
             "G1 "
@@ -6563,7 +6560,6 @@ class StageController(QObject):
 
     def _run_linear_pattern(
         self,
-        serial_connection: serial.Serial,
         *,
         axis: str,
         amplitude_mm: float,
@@ -6579,7 +6575,7 @@ class StageController(QObject):
         )
         while not self._cancel_event.is_set():
             self._check_cancelled()
-            self._apply_pending_oscillation_needles_actions(serial_connection)
+            self._apply_pending_oscillation_needles_actions()
             remaining = target_offset - current_offset
             if abs(remaining) < 1e-6:
                 direction *= -1.0
@@ -6587,7 +6583,6 @@ class StageController(QObject):
                 continue
             step = float(np.sign(remaining)) * min(abs(remaining), segment_length)
             self._write_relative_g1_unchecked(
-                serial_connection,
                 self._move_vector_for_axis(axis, step),
                 feedrate=feedrate,
             )
@@ -6595,7 +6590,6 @@ class StageController(QObject):
 
     def _run_spiral_pattern(
         self,
-        serial_connection: serial.Serial,
         *,
         amplitude_mm: float,
         feedrate: float,
@@ -6610,23 +6604,20 @@ class StageController(QObject):
         last_y = 0.0
         while not self._cancel_event.is_set():
             self._check_cancelled()
-            self._apply_pending_oscillation_needles_actions(serial_connection)
+            self._apply_pending_oscillation_needles_actions()
             phase += phase_step
             radius = amplitude_mm * 0.5 * (1.0 - float(np.cos(phase)))
             angle = start_angle + (2.0 * turns_per_sweep * phase)
             next_x = radius * float(np.cos(angle))
             next_y = radius * float(np.sin(angle))
             self._write_relative_g1_unchecked(
-                serial_connection,
                 MoveVector(x=next_x - last_x, y=next_y - last_y),
                 feedrate=feedrate,
             )
             last_x = next_x
             last_y = next_y
 
-    def _apply_pending_oscillation_needles_actions(
-        self, serial_connection: serial.Serial
-    ) -> None:
+    def _apply_pending_oscillation_needles_actions(self) -> None:
         """Apply queued A-axis actions inline while oscillation continues."""
 
         pending: list[tuple[str, float | None, float | None]] = []
@@ -6635,7 +6626,6 @@ class StageController(QObject):
                 pending.append(self._oscillation_needles_actions.popleft())
         for action, step_mm, feedrate in pending:
             self._execute_oscillation_needles_action(
-                serial_connection,
                 action,
                 step_mm,
                 feedrate,
@@ -6643,7 +6633,6 @@ class StageController(QObject):
 
     def _execute_oscillation_needles_action(
         self,
-        serial_connection: serial.Serial,
         action: str,
         step_mm: float | None,
         feedrate: float | None,
@@ -6698,7 +6687,6 @@ class StageController(QObject):
                         )
                         try:
                             self._write_relative_g1_unchecked(
-                                serial_connection,
                                 MoveVector(a=relative_a_move),
                                 feedrate=programmed_feedrate,
                             )
@@ -6706,7 +6694,6 @@ class StageController(QObject):
                             self._end_needles_feedrate_control()
                     else:
                         self._write_relative_g1_unchecked(
-                            serial_connection,
                             MoveVector(a=relative_a_move),
                             feedrate=segment_feedrate,
                         )
@@ -6743,7 +6730,6 @@ class StageController(QObject):
                 raise StageControllerError(f"Unknown needle action: {action}.")
 
             self._write_relative_g1_unchecked(
-                serial_connection,
                 MoveVector(a=relative_a_move),
                 feedrate=self._needle_programmed_feedrate(feedrate),
             )
