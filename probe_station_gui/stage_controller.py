@@ -571,9 +571,7 @@ class StageController(QObject):
     def check_motion_safety(self) -> None:
         """Public motion safety gate; raises StageControllerError when unsafe."""
 
-        serial_connection = self._serial
-        if serial_connection is None or not serial_connection.is_open:
-            raise StageControllerError("Serial connection is not available.")
+        self._require_open_serial()
         self._move_safety_check()
 
     # Jog stop confirmation is handled in the joystick layer to avoid serial contention.
@@ -996,15 +994,12 @@ class StageController(QObject):
     def query_axis_max_feedrates(self) -> dict[str, float]:
         """Query the live FluidNC configuration for per-axis maximum feedrates."""
 
-        serial_connection = self._serial
-        if serial_connection is None or not serial_connection.is_open:
-            raise StageControllerError("Serial connection is not available.")
         with self._task_lock:
             if self._active_thread and self._active_thread.is_alive():
                 raise StageControllerError(
                     "Stage is busy. Cannot read controller feedrate limits."
                 )
-            with self._serial_session_lock:
+            with self._serial_session() as serial_connection:
                 rates = self._query_axis_max_feedrates_locked(serial_connection)
         self.apply_axis_max_feedrates(rates)
         self.axis_max_feedrates_changed.emit(dict(rates))
@@ -3309,9 +3304,7 @@ class StageController(QObject):
     def _run_startup_sync(self, auto_home_a: bool) -> None:
         success = False
         try:
-            serial_connection = self._serial
-            if serial_connection is None or not serial_connection.is_open:
-                raise StageControllerError("Serial connection is not available.")
+            serial_connection = self._require_open_serial()
 
             self.status_message.emit("Loading controller startup state...")
             with self._serial_session_lock:
