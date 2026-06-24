@@ -7,6 +7,10 @@ from typing import Any
 
 
 _LAZY_EXPORTS = {
+    "ClickCalibrationDialog": (
+        "probe_station_gui.dialogs.click_calibration_dialog",
+        "ClickCalibrationDialog",
+    ),
     "SerialScannerDialog": (
         "probe_station_gui.dialogs.serial_scanner",
         "SerialScannerDialog",
