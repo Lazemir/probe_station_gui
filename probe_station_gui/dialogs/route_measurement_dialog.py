@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -54,6 +54,7 @@ from probe_station_gui.route_measurement import (
     ROUTE_OPERATION_MEASURE,
     ROUTE_OPERATION_PHOTO,
     ROUTE_OPERATION_PHOTO_THEN_MEASURE,
+    RouteContactQualityLimits,
 )
 from probe_station_gui.settings_manager import (
     LCR_APERTURE_RATES,
@@ -64,7 +65,8 @@ from probe_station_gui.settings_manager import (
 )
 
 
-ROUTE_MEASUREMENT_PROFILE_VERSION = 6
+ROUTE_MEASUREMENT_PROFILE_VERSION = 7
+KEITHLEY_DEFAULTS_PROFILE_VERSION = 6
 DEFAULT_ROUTE_INITIAL_MEASUREMENT_COUNT = 10
 DEFAULT_ROUTE_FOLLOWUP_MEASUREMENT_COUNT = 240
 DEFAULT_ROUTE_PHOTO_AUTOFOCUS_RANGE_MM = 0.030
@@ -79,6 +81,7 @@ DEFAULT_KEITHLEY_USE_BUFFER = True
 DEFAULT_KEITHLEY_USE_TRIGGER_LINK = True
 DEFAULT_ROUTE_CONTACT_SEEK_RANGE_MM = 0.010
 DEFAULT_ROUTE_CONTACT_SEEK_STEP_MM = 0.001
+DEFAULT_ROUTE_CONTACT_QUALITY_LIMITS = RouteContactQualityLimits()
 
 VOLTAGE_PREFIXES = (
     ("uV", 1e-6),
@@ -123,6 +126,9 @@ class RouteMeasurementRunConfiguration:
     contact_seek_step_mm: float
     previous_ok_only: bool
     meter: RouteMeterConfiguration
+    contact_quality_limits: RouteContactQualityLimits = field(
+        default_factory=RouteContactQualityLimits
+    )
 
     @property
     def measurement_count(self) -> int:
@@ -483,6 +489,58 @@ class RouteMeasurementDialog(QDialog):
         common_layout.addRow(
             QLabel("Contact seek step", common_group),
             self._contact_seek_step_spin,
+        )
+
+        self._contact_max_mad_sigma_spin = _SIPrefixSpinBox(
+            prefixes=RESISTANCE_PREFIXES,
+            base_minimum=0.0,
+            base_maximum=1e12,
+            base_value=DEFAULT_ROUTE_CONTACT_QUALITY_LIMITS.max_mad_sigma_ohm,
+            parent=common_group,
+        )
+        common_layout.addRow(
+            QLabel("MAD limit", common_group),
+            self._contact_max_mad_sigma_spin,
+        )
+
+        self._contact_max_p95_step_spin = _SIPrefixSpinBox(
+            prefixes=RESISTANCE_PREFIXES,
+            base_minimum=0.0,
+            base_maximum=1e12,
+            base_value=DEFAULT_ROUTE_CONTACT_QUALITY_LIMITS.max_p95_abs_step_ohm,
+            parent=common_group,
+        )
+        common_layout.addRow(
+            QLabel("P95 step limit", common_group),
+            self._contact_max_p95_step_spin,
+        )
+
+        self._contact_max_relative_mad_spin = QDoubleSpinBox(common_group)
+        self._contact_max_relative_mad_spin.setLocale(QLocale.c())
+        self._contact_max_relative_mad_spin.setDecimals(3)
+        self._contact_max_relative_mad_spin.setRange(0.0, 100.0)
+        self._contact_max_relative_mad_spin.setSingleStep(0.1)
+        self._contact_max_relative_mad_spin.setSuffix(" %")
+        self._contact_max_relative_mad_spin.setValue(
+            DEFAULT_ROUTE_CONTACT_QUALITY_LIMITS.max_relative_mad_sigma * 100.0
+        )
+        common_layout.addRow(
+            QLabel("Rel MAD limit", common_group),
+            self._contact_max_relative_mad_spin,
+        )
+
+        self._contact_max_relative_p95_step_spin = QDoubleSpinBox(common_group)
+        self._contact_max_relative_p95_step_spin.setLocale(QLocale.c())
+        self._contact_max_relative_p95_step_spin.setDecimals(3)
+        self._contact_max_relative_p95_step_spin.setRange(0.0, 100.0)
+        self._contact_max_relative_p95_step_spin.setSingleStep(0.1)
+        self._contact_max_relative_p95_step_spin.setSuffix(" %")
+        self._contact_max_relative_p95_step_spin.setValue(
+            DEFAULT_ROUTE_CONTACT_QUALITY_LIMITS.max_relative_p95_abs_step * 100.0
+        )
+        common_layout.addRow(
+            QLabel("Rel P95 step limit", common_group),
+            self._contact_max_relative_p95_step_spin,
         )
 
         profile_row = QHBoxLayout()
@@ -1048,6 +1106,10 @@ class RouteMeasurementDialog(QDialog):
             self._contact_settle_spin,
             self._contact_seek_range_spin,
             self._contact_seek_step_spin,
+            self._contact_max_mad_sigma_spin,
+            self._contact_max_p95_step_spin,
+            self._contact_max_relative_mad_spin,
+            self._contact_max_relative_p95_step_spin,
             self._photo_settle_spin,
         ):
             widget.setEnabled(bool(enabled))
@@ -1329,6 +1391,10 @@ class RouteMeasurementDialog(QDialog):
             self._contact_settle_spin,
             self._contact_seek_range_spin,
             self._contact_seek_step_spin,
+            self._contact_max_mad_sigma_spin,
+            self._contact_max_p95_step_spin,
+            self._contact_max_relative_mad_spin,
+            self._contact_max_relative_p95_step_spin,
         ):
             widget.setEnabled(measure_enabled and can_edit)
 
@@ -1470,6 +1536,7 @@ class RouteMeasurementDialog(QDialog):
                 }
             ),
             meter=self._meter_configuration(),
+            contact_quality_limits=self._contact_quality_limits(),
         )
 
     def _emit_pause_requested(self) -> None:
@@ -1560,6 +1627,7 @@ class RouteMeasurementDialog(QDialog):
             "contact_settle_s": float(self._contact_settle_spin.value()),
             "contact_seek_range_mm": float(self._contact_seek_range_spin.value()),
             "contact_seek_step_mm": float(self._contact_seek_step_spin.value()),
+            "contact_quality_limits": self._contact_quality_limits().as_dict(),
             "previous_ok_only": bool(self._previous_ok_only_checkbox.isChecked()),
             "meter": {
                 "meter_type": meter.meter_type,
@@ -1622,6 +1690,7 @@ class RouteMeasurementDialog(QDialog):
             self._contact_seek_step_spin,
             data.get("contact_seek_step_mm"),
         )
+        self._apply_contact_quality_limits_profile(data)
         meter = data.get("meter")
         if isinstance(meter, dict):
             meter_type = meter.get("meter_type")
@@ -1641,7 +1710,7 @@ class RouteMeasurementDialog(QDialog):
             version = int(data.get("version", 0))
         except (TypeError, ValueError):
             version = 0
-        if version >= ROUTE_MEASUREMENT_PROFILE_VERSION:
+        if version >= KEITHLEY_DEFAULTS_PROFILE_VERSION:
             return False
         meter = data.get("meter")
         if not isinstance(meter, dict):
@@ -1693,6 +1762,70 @@ class RouteMeasurementDialog(QDialog):
         return int(self._initial_measurement_count_spin.value()) + int(
             self._followup_measurement_count_spin.value()
         )
+
+    def _contact_quality_limits(self) -> RouteContactQualityLimits:
+        return RouteContactQualityLimits(
+            max_mad_sigma_ohm=self._contact_max_mad_sigma_spin.base_value(),
+            max_p95_abs_step_ohm=self._contact_max_p95_step_spin.base_value(),
+            max_relative_mad_sigma=(
+                float(self._contact_max_relative_mad_spin.value()) / 100.0
+            ),
+            max_relative_p95_abs_step=(
+                float(self._contact_max_relative_p95_step_spin.value()) / 100.0
+            ),
+        ).normalized()
+
+    def _apply_contact_quality_limits_profile(self, data: dict[str, Any]) -> None:
+        nested = data.get("contact_quality_limits", data.get("contact_quality"))
+        nested_data = nested if isinstance(nested, dict) else {}
+        self._set_spinbox_value(
+            self._contact_max_mad_sigma_spin,
+            self._first_profile_value(
+                nested_data,
+                data,
+                "max_mad_sigma_ohm",
+                "contact_max_mad_sigma_ohm",
+            ),
+        )
+        self._set_spinbox_value(
+            self._contact_max_p95_step_spin,
+            self._first_profile_value(
+                nested_data,
+                data,
+                "max_p95_abs_step_ohm",
+                "contact_max_p95_abs_step_ohm",
+            ),
+        )
+        self._set_ratio_percent_spinbox_value(
+            self._contact_max_relative_mad_spin,
+            self._first_profile_value(
+                nested_data,
+                data,
+                "max_relative_mad_sigma",
+                "contact_max_relative_mad_sigma",
+            ),
+        )
+        self._set_ratio_percent_spinbox_value(
+            self._contact_max_relative_p95_step_spin,
+            self._first_profile_value(
+                nested_data,
+                data,
+                "max_relative_p95_abs_step",
+                "contact_max_relative_p95_abs_step",
+            ),
+        )
+
+    @staticmethod
+    def _first_profile_value(
+        primary: dict[str, Any],
+        secondary: dict[str, Any],
+        *keys: str,
+    ) -> object | None:
+        for source in (primary, secondary):
+            for key in keys:
+                if key in source:
+                    return source.get(key)
+        return None
 
     def _apply_gwinstek_profile(self, data: object) -> None:
         if not isinstance(data, dict):
@@ -1768,6 +1901,15 @@ class RouteMeasurementDialog(QDialog):
                 spinbox.setValue(int(round(numeric)))
             else:
                 spinbox.setValue(numeric)
+
+    @staticmethod
+    def _set_ratio_percent_spinbox_value(spinbox, value: object) -> None:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return
+        if math.isfinite(numeric):
+            spinbox.setValue(numeric * 100.0)
 
     @staticmethod
     def _positive_int_or_none(value: object) -> int | None:

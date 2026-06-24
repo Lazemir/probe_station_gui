@@ -41,6 +41,7 @@ from probe_station_gui.dialogs.route_measurement_dialog import (
 from probe_station_gui.route_measurement import (
     RouteExternalMeasurementSessionRunner,
     RouteContactHeightRecord,
+    RouteContactQualityLimits,
     RouteContactQuality,
     RouteContactSeekResult,
     RouteMeasurementPoint,
@@ -2581,6 +2582,10 @@ assert image.height() == 4
         dialog._contact_settle_spin = _FakeEnabledWidget()
         dialog._contact_seek_range_spin = _FakeEnabledWidget()
         dialog._contact_seek_step_spin = _FakeEnabledWidget()
+        dialog._contact_max_mad_sigma_spin = _FakeEnabledWidget()
+        dialog._contact_max_p95_step_spin = _FakeEnabledWidget()
+        dialog._contact_max_relative_mad_spin = _FakeEnabledWidget()
+        dialog._contact_max_relative_p95_step_spin = _FakeEnabledWidget()
         dialog._pause_button = _FakeButton()
         dialog._interrupt_button = _FakeButton()
         dialog._stop_button = _FakeButton()
@@ -2856,6 +2861,12 @@ assert image.height() == 4
             contact_seek_step_mm=0.001,
             previous_ok_only=False,
             meter=RouteMeterConfiguration(),
+            contact_quality_limits=RouteContactQualityLimits(
+                max_mad_sigma_ohm=1_500.0,
+                max_p95_abs_step_ohm=2_500.0,
+                max_relative_mad_sigma=0.08,
+                max_relative_p95_abs_step=0.12,
+            ),
         )
         original_thread = main_module.threading.Thread
         _FakeThread.instances = []
@@ -2873,6 +2884,15 @@ assert image.height() == 4
         self.assertEqual(len(_FakeThread.instances), 1)
         self.assertTrue(_FakeThread.instances[0].started)
         self.assertIsNotNone(window._route_measurement_runner)
+        self.assertEqual(
+            window._route_measurement_runner.contact_quality_limits().as_dict(),
+            {
+                "max_mad_sigma_ohm": 1_500.0,
+                "max_p95_abs_step_ohm": 2_500.0,
+                "max_relative_mad_sigma": 0.08,
+                "max_relative_p95_abs_step": 0.12,
+            },
+        )
         self.assertEqual(dialog_calls[0], ("running", True))
         self.assertFalse(
             any("Camera frame is unavailable" in status for status in statuses)
@@ -2885,12 +2905,14 @@ assert image.height() == 4
                 self.updated = False
                 self.applied = False
                 self.confirmations: list[str] = []
+                self.runtime_settings: dict[str, object] = {}
 
             def route_offset_xy(self):
                 return self.offset
 
-            def update_runtime_settings(self, **_kwargs) -> None:
+            def update_runtime_settings(self, **kwargs) -> None:
                 self.updated = True
+                self.runtime_settings = dict(kwargs)
 
             def apply_meter_configuration(self, _configuration) -> None:
                 self.applied = True
@@ -2921,6 +2943,12 @@ assert image.height() == 4
                 contact_seek_step_mm=0.001,
                 previous_ok_only=previous_ok_only,
                 meter=RouteMeterConfiguration(),
+                contact_quality_limits=RouteContactQualityLimits(
+                    max_mad_sigma_ohm=1_200.0,
+                    max_p95_abs_step_ohm=1_800.0,
+                    max_relative_mad_sigma=0.07,
+                    max_relative_p95_abs_step=0.11,
+                ),
             )
 
         previous = configuration(
@@ -2964,6 +2992,15 @@ assert image.height() == 4
         self.assertEqual(restart_calls, [(current, (0.125, -0.25))])
         self.assertEqual(old_runner.confirmations, [])
         self.assertTrue(new_runner.updated)
+        self.assertEqual(
+            new_runner.runtime_settings["contact_quality_limits"].as_dict(),
+            {
+                "max_mad_sigma_ohm": 1_200.0,
+                "max_p95_abs_step_ohm": 1_800.0,
+                "max_relative_mad_sigma": 0.07,
+                "max_relative_p95_abs_step": 0.11,
+            },
+        )
         self.assertTrue(new_runner.applied)
         self.assertEqual(new_runner.confirmations, ["next"])
 

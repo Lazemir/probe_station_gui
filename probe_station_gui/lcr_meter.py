@@ -47,6 +47,12 @@ ROUTE_METER_LABELS: dict[str, str] = {
     ROUTE_METER_KEITHLEY: "Keithley 2400 + 2182A",
 }
 DEFAULT_METER_TIMEOUT_MS = 10000
+KEITHLEY_LIVE_MEASUREMENT_VOLTAGE_V = 0.03
+KEITHLEY_LIVE_SOURCE_VOLTAGE_RANGE_V = 0.21
+KEITHLEY_LIVE_VOLTMETER_RANGE_V = 1.0
+KEITHLEY_LIVE_CURRENT_RANGE_A = 10e-6
+KEITHLEY_LIVE_COMPLIANCE_CURRENT_A = 9.5e-6
+KEITHLEY_LIVE_NPLC = 1.0
 COM_RESOURCE_PATTERN = re.compile(r"^COM(?P<port>\d+)$", re.IGNORECASE)
 GPIB_RESOURCE_PATTERN = re.compile(r"^GPIB(?P<board>\d*)::", re.IGNORECASE)
 
@@ -1976,6 +1982,8 @@ class LCRMeterController(QObject):
             )
             if self._meter_type == ROUTE_METER_GWINSTEK:
                 self._configure_session(session)
+            elif self._meter_type == ROUTE_METER_KEITHLEY:
+                self._configure_keithley_live_session(session)
         except Exception:
             closer = getattr(session, "close", None)
             if callable(closer):
@@ -2034,6 +2042,23 @@ class LCRMeterController(QObject):
             monitor1=self._monitor1,
             monitor2=self._monitor2,
             alc_enabled=self._alc_enabled,
+        )
+
+    def _configure_keithley_live_session(self, session: object) -> None:
+        configure = getattr(session, "configure_measurement", None)
+        if not callable(configure):
+            raise LCRMeterError("Connected instrument is not a Keithley pair.")
+        configure(
+            keithley_measurement_voltage_v=KEITHLEY_LIVE_MEASUREMENT_VOLTAGE_V,
+            keithley_range_mode=OHMMETER_RANGE_MANUAL,
+            keithley_source_voltage_range_v=KEITHLEY_LIVE_SOURCE_VOLTAGE_RANGE_V,
+            keithley_voltmeter_range_v=KEITHLEY_LIVE_VOLTMETER_RANGE_V,
+            keithley_current_range_a=KEITHLEY_LIVE_CURRENT_RANGE_A,
+            keithley_compliance_current_a=KEITHLEY_LIVE_COMPLIANCE_CURRENT_A,
+            keithley_nplc=KEITHLEY_LIVE_NPLC,
+            keithley_terminals="rear",
+            keithley_use_buffer=False,
+            keithley_use_trigger_link=False,
         )
 
     def _open_configured_session(self) -> object:

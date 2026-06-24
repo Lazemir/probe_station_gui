@@ -250,7 +250,9 @@ class KeithleyDriverTest(unittest.TestCase):
         self.assertIn(":SOUR:VOLT 0.03", source.writes)
         self.assertNotIn(":INIT:CONT OFF", source.writes)
         self.assertIn(":TRIG:SOUR IMM", source.writes)
-        self.assertIn(":OUTP OFF", source.writes)
+        self.assertIn(":OUTP ON", source.writes)
+        self.assertNotIn(":OUTP OFF", source.writes)
+        self.assertEqual(source.writes[-2:], [":SOUR:VOLT 0", ":OUTP ON"])
         self.assertEqual(reading.negative.resistance_ohm, 29.0)
         self.assertEqual(reading.positive.resistance_ohm, 31.0)
 
@@ -289,20 +291,14 @@ class KeithleyDriverTest(unittest.TestCase):
         output_commands = [
             command for command in source.writes if command.startswith(":OUTP")
         ]
-        self.assertEqual(output_commands, [":OUTP ON", ":OUTP OFF"])
-        self.assertEqual(
-            source.writes[source.writes.index(":OUTP ON") - 1],
-            ":SOUR:VOLT -0.03",
-        )
-        active_commands = _commands_between_output_on_off(source.writes)
-        self.assertNotIn(":SOUR:VOLT 0", active_commands)
+        self.assertEqual(output_commands, [])
+        self.assertNotIn(":SOUR:VOLT 0", source.writes)
         self.assertEqual(
             [
-                command
-                for command in active_commands
-                if command.startswith(":SOUR:VOLT ")
+                command for command in source.writes if command.startswith(":SOUR:VOLT ")
             ],
             [
+                ":SOUR:VOLT -0.03",
                 ":SOUR:VOLT -0.03",
                 ":SOUR:VOLT 0.03",
                 ":SOUR:VOLT -0.03",
@@ -390,9 +386,8 @@ class KeithleyDriverTest(unittest.TestCase):
         output_commands = [
             command for command in source.writes if command.startswith(":OUTP")
         ]
-        self.assertEqual(output_commands, [":OUTP ON", ":OUTP OFF"])
-        active_commands = _commands_between_output_on_off(source.writes)
-        self.assertNotIn(":SOUR:VOLT 0", active_commands)
+        self.assertEqual(output_commands, [])
+        self.assertNotIn(":SOUR:VOLT 0", source.writes)
 
     def test_prepared_route_batch_reuses_covering_source_list(self) -> None:
         source = _FakeHandle(
