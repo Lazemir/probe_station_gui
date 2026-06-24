@@ -1626,16 +1626,13 @@ class StageController(QObject):
         self.movement_started.emit()
         try:
             self._check_cancelled()
-            serial_connection = self._serial
-            if serial_connection is None or not serial_connection.is_open:
-                raise StageControllerError("Serial connection is not available.")
-            self._move_safety_check()
-            message = self._move_to_xy_locked(
-                serial_connection,
-                float(target_x_mm),
-                float(target_y_mm),
-                feedrate=feedrate,
-            )
+            with self._serial_session():
+                self._move_safety_check()
+                message = self._move_to_xy_locked(
+                    float(target_x_mm),
+                    float(target_y_mm),
+                    feedrate=feedrate,
+                )
             self.movement_finished.emit(True, message)
             return message
         except StageControllerError as exc:
@@ -1797,11 +1794,8 @@ class StageController(QObject):
         with self._task_lock:
             if self._active_thread and self._active_thread.is_alive():
                 raise StageControllerError("Stage is busy. Wait for the current operation to finish.")
-            with self._serial_session() as serial_connection:
-                status = self._query_synced_status_for_absolute_motion(
-                    serial_connection,
-                    min_axes=3,
-                )
+            with self._serial_session():
+                status = self._query_synced_status_for_absolute_motion(min_axes=3)
         if status is None or status.display_position is None:
             raise StageControllerError("Unable to read stage position.")
         if len(status.display_position) < 3:
@@ -2548,15 +2542,9 @@ class StageController(QObject):
         self.movement_started.emit()
         try:
             self._check_cancelled()
-            serial_connection = self._serial
-            if serial_connection is None or not serial_connection.is_open:
-                raise StageControllerError("Serial connection is not available.")
-            self._move_safety_check()
-            message = self._move_to_xy_locked(
-                serial_connection,
-                target_x_mm,
-                target_y_mm,
-            )
+            with self._serial_session():
+                self._move_safety_check()
+                message = self._move_to_xy_locked(target_x_mm, target_y_mm)
             self.movement_finished.emit(True, message)
         except StageControllerError as exc:
             self.movement_finished.emit(False, str(exc))
@@ -2575,18 +2563,15 @@ class StageController(QObject):
         self.movement_started.emit()
         try:
             self._check_cancelled()
-            serial_connection = self._serial
-            if serial_connection is None or not serial_connection.is_open:
-                raise StageControllerError("Serial connection is not available.")
-            self._move_safety_check()
-            message = self._move_to_xyz_locked(
-                serial_connection,
-                target_x_mm,
-                target_y_mm,
-                target_z_mm,
-                transit_z_mm=transit_z_mm,
-                label=label,
-            )
+            with self._serial_session():
+                self._move_safety_check()
+                message = self._move_to_xyz_locked(
+                    target_x_mm,
+                    target_y_mm,
+                    target_z_mm,
+                    transit_z_mm=transit_z_mm,
+                    label=label,
+                )
             self.movement_finished.emit(True, message)
         except StageControllerError as exc:
             self.movement_finished.emit(False, str(exc))
@@ -2596,15 +2581,14 @@ class StageController(QObject):
 
     def _move_to_xy_locked(
         self,
-        serial_connection: serial.Serial,
         target_x_mm: float,
         target_y_mm: float,
         *,
         feedrate: float | None = None,
     ) -> str:
+        serial_connection = self._current_serial()
         with self._serial_session_lock:
             status = self._query_synced_status_for_absolute_motion(
-                serial_connection,
                 refresh_coordinate_state=False,
                 min_axes=2,
             )
@@ -2643,7 +2627,6 @@ class StageController(QObject):
 
     def _move_to_xyz_locked(
         self,
-        serial_connection: serial.Serial,
         target_x_mm: float,
         target_y_mm: float,
         target_z_mm: float,
@@ -2651,9 +2634,9 @@ class StageController(QObject):
         transit_z_mm: float | None,
         label: str,
     ) -> str:
+        serial_connection = self._current_serial()
         with self._serial_session_lock:
             status = self._query_synced_status_for_absolute_motion(
-                serial_connection,
                 refresh_coordinate_state=False,
                 min_axes=3,
             )
@@ -2723,7 +2706,6 @@ class StageController(QObject):
 
     def _query_synced_status_for_absolute_motion(
         self,
-        serial_connection: serial.Serial,
         *,
         refresh_coordinate_state: bool = True,
         axes: Iterable[str] | None = None,
@@ -2731,6 +2713,7 @@ class StageController(QObject):
     ) -> Optional[_Status]:
         """Refresh coordinate-system state before absolute position reads and moves."""
 
+        serial_connection = self._current_serial()
         if not refresh_coordinate_state:
             state_was_stale = self._controller_state_stale
             status = self._query_status_with_required_coordinates(
@@ -3032,10 +3015,7 @@ class StageController(QObject):
         if fine_step <= 0:
             raise StageControllerError("Autofocus parameters are invalid.")
 
-        status = self._query_synced_status_for_absolute_motion(
-            serial_connection,
-            axes=("Z",),
-        )
+        status = self._query_synced_status_for_absolute_motion(axes=("Z",))
         position = self._position_for_configured_mode(status)
         if status is None or position is None or len(position) < 3:
             raise StageControllerError("Unable to read Z position for autofocus.")
