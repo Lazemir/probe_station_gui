@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 from serial.tools import list_ports
 
+from probe_station_gui.fluidnc_protocol import line_indicates_controller_startup
 from probe_station_gui.wheel_guard import GuardedComboBox as QComboBox
 
 
@@ -513,8 +514,7 @@ class _SerialConnectWorker(QObject):
                     continue
                 startup_lines.append(line)
                 quiet_deadline = time.monotonic() + 0.25
-                upper = line.upper()
-                if self._line_indicates_controller_reboot(upper):
+                if line_indicates_controller_startup(line):
                     reboot_detected = True
         except Exception:
             logger.debug("Initial serial banner probe failed", exc_info=True)
@@ -548,23 +548,6 @@ class _SerialConnectWorker(QObject):
                 connection.close()
         except _SERIAL_IO_EXCEPTIONS:
             pass
-
-    @staticmethod
-    def _line_indicates_controller_reboot(upper_line: str) -> bool:
-        return any(
-            token in upper_line
-            for token in (
-                "[VER:",
-                "FLUIDNC",
-                "GRBL",
-                "[MSG:RST",
-                "FAST_FLASH_BOOT",
-                "ESP-ROM",
-                "LOAD:",
-                "ENTRY ",
-                "RST:",
-            )
-        )
 
 
 __all__ = ["SerialConnectionPanel"]

@@ -18,6 +18,7 @@ import serial
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QImage
 
+from probe_station_gui.fluidnc_protocol import line_indicates_controller_reboot
 from probe_station_gui.motion_prediction import interpolate_position
 from probe_station_gui.settings_manager import parse_fluidnc_axis_max_feedrates
 from probe_station_gui.stage_types import (
@@ -150,13 +151,6 @@ class StageController(QObject):
     FEED_OVERRIDE_MIN_PERCENT = 10
     FEED_OVERRIDE_MAX_PERCENT = 200
     LIMIT_HIT_TOLERANCE = 0.05
-    CONTROLLER_REBOOT_TOKENS = (
-        "[MSG:RST",
-        "FAST_FLASH_BOOT",
-        "ESP-ROM",
-    )
-    CONTROLLER_REBOOT_LINE_PREFIXES = ("RST:", "LOAD:", "ENTRY ")
-
     STATUS_PATTERN = re.compile(r"^<(?P<body>[^>]*)>")
     STATUS_FIELD_PATTERN = re.compile(r"(?P<key>[A-Za-z]+):(?P<value>.+)")
     SOFT_LIMIT_AXIS_PATTERN = re.compile(r"Soft limit on\s+(?P<axis>[A-Za-z])\b")
@@ -501,13 +495,6 @@ class StageController(QObject):
         self._set_needles_state(False, known=False)
         self.stage_position_changed.emit(None)
 
-    @classmethod
-    def _line_indicates_controller_reboot(cls, line: str) -> bool:
-        upper = line.strip().upper()
-        return upper.startswith(cls.CONTROLLER_REBOOT_LINE_PREFIXES) or any(
-            token in upper for token in cls.CONTROLLER_REBOOT_TOKENS
-        )
-
     def _handle_controller_reboot_detected(self, line: str, source: str) -> None:
         already_pending = self._controller_reboot_recovery_pending
         self._controller_reboot_recovery_pending = True
@@ -530,7 +517,7 @@ class StageController(QObject):
         self.controller_reboot_detected.emit()
 
     def _raise_if_controller_reboot_line(self, line: str, source: str) -> None:
-        if not self._line_indicates_controller_reboot(line):
+        if not line_indicates_controller_reboot(line):
             return
         self._handle_controller_reboot_detected(line, source)
         raise StageControllerError(
@@ -544,7 +531,7 @@ class StageController(QObject):
         for line in text.splitlines():
             line = line.strip()
             self._handle_limit_line(line)
-            if self._line_indicates_controller_reboot(line):
+            if line_indicates_controller_reboot(line):
                 self._handle_controller_reboot_detected(line, source)
                 return
 
