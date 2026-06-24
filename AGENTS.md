@@ -55,6 +55,20 @@
 - When changing serial behavior, check both `StageController` and `SerialTerminalWindow` for coordination.
 - When updating controls or feedrates, keep `SettingsManager`, `settings_dialog.py`, and `joystick_window.py` in sync.
 
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs are tracked as local markdown files under `.scratch/`; external PRs are not a triage surface. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the default five-label triage vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout: repo-root `CONTEXT.md` and `docs/adr/`. See `docs/agents/domain.md`.
+
 ## How to run (local)
 - Install deps from `pyproject.toml` (PySide6, numpy, opencv-python, rotpy).
 - Run `.venv\Scripts\python.exe main.py`.
