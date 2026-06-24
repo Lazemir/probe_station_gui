@@ -2133,7 +2133,7 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
             controller._send_absolute_axis_move = (
                 lambda _serial, axis, value, **_kwargs: targets.append((axis, value))
             )
-            controller._read_current_a_position = lambda _serial: targets[-1][1]
+            controller._read_current_a_position = lambda: targets[-1][1]
             controller.needles_action_finished = types.SimpleNamespace(
                 emit=lambda *_args, **_kwargs: None
             )

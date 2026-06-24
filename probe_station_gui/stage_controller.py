@@ -1490,8 +1490,8 @@ class StageController(QObject):
                 )
                 self._record_a_position_read_failure(reason)
                 return None
-        with self._serial_session_lock:
-            a_position = self._read_current_a_position(serial_connection)
+        with self._serial_session():
+            a_position = self._read_current_a_position()
         if a_position is None:
             return None
         self.needle_height_changed.emit(
@@ -4431,7 +4431,7 @@ class StageController(QObject):
                 )
             finally:
                 self._end_needles_feedrate_control()
-            current_a = self._read_current_a_position(serial_connection)
+            current_a = self._read_current_a_position()
             if current_a is None:
                 raise StageControllerError("Unable to confirm A position after move.")
             self._update_needles_from_a_position(current_a)
@@ -6536,11 +6536,10 @@ class StageController(QObject):
             zone=zone,
         )
 
-    def _read_current_a_position(
-        self, serial_connection: serial.Serial
-    ) -> Optional[float]:
+    def _read_current_a_position(self) -> Optional[float]:
         """Read the current A coordinate from the configured controller report mode."""
 
+        serial_connection = self._current_serial()
         status = self._query_status_with_required_coordinates(
             serial_connection,
             axes=("A",),
