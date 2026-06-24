@@ -404,7 +404,7 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
         controller._move_safety_check = lambda: None
         controller._ensure_axis_limits = lambda _serial, **_kwargs: None
         controller._check_relative_move_limits = lambda *_args, **_kwargs: None
-        controller._reset_feed_override_for_serial = lambda _serial: None
+        controller._reset_feed_override = lambda: None
 
         controller._send_relative_move(
             MoveVector(x=0.1),
@@ -1778,7 +1778,7 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
         controller._write_command = lambda _serial, command: commands.append(command)
         controller._wait_for_ok = lambda *_args, **_kwargs: None
         controller._wait_for_idle = lambda *_args, **_kwargs: None
-        controller._reset_feed_override_for_serial = lambda _serial: None
+        controller._reset_feed_override = lambda: None
 
         controller._send_absolute_axis_targets_move(
             {"X": 10.0, "Y": -5.0},
@@ -1934,7 +1934,7 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
         controller._write_command = lambda _serial, command: commands.append(command)
         controller._wait_for_ok = lambda *_args, **_kwargs: None
         controller._wait_for_idle = lambda *_args, **_kwargs: None
-        controller._reset_feed_override_for_serial = lambda _serial: None
+        controller._reset_feed_override = lambda: None
 
         controller._send_absolute_axis_targets_move(
             {"X": 37.0},

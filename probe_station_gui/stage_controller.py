@@ -4407,7 +4407,7 @@ class StageController(QObject):
             + " ".join(move_parts)
             + f" F{self._format_gcode_value(effective_feedrate)}"
         )
-        self._reset_feed_override_for_serial(serial_connection)
+        self._reset_feed_override()
         if as_jog:
             command = (
                 "$J=G91 G21 "
@@ -4531,7 +4531,7 @@ class StageController(QObject):
         self._wait_for_ok(serial_connection)
         self._write_command(serial_connection, "G90")
         self._wait_for_ok(serial_connection)
-        self._reset_feed_override_for_serial(serial_connection)
+        self._reset_feed_override()
         self._write_command(
             serial_connection,
             "G1 "
@@ -5548,7 +5548,8 @@ class StageController(QObject):
         except _SERIAL_IO_EXCEPTIONS as exc:  # pragma: no cover - hardware interaction
             raise StageControllerError(f"Serial write failed: {exc}") from exc
 
-    def _reset_feed_override_for_serial(self, serial_connection: serial.Serial) -> None:
+    def _reset_feed_override(self) -> None:
+        serial_connection = self._current_serial()
         self._write_realtime_payload(
             serial_connection,
             self.FEED_OVERRIDE_RESET,
