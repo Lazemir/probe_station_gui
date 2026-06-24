@@ -4502,39 +4502,6 @@ class StageController(QObject):
                 self._active_thread = None
             self._start_next_queued_needles_action()
 
-    def _update_calibration_from_measurement(
-        self,
-        expected_pixels: np.ndarray,
-        measured_pixels: np.ndarray,
-        mm_vector: np.ndarray,
-    ) -> str:
-        message = "Move complete."
-        if self._pixels_to_mm is None:
-            return message
-        if np.linalg.norm(expected_pixels) < self.CALIBRATION_MIN_VERIFY_PIXELS:
-            return message
-        if np.linalg.norm(measured_pixels) < 1e-6:
-            return message
-
-        predicted_mm = self._pixels_to_mm @ measured_pixels
-        error = mm_vector - predicted_mm
-        denom = float(measured_pixels @ measured_pixels)
-        if abs(denom) < 1e-6:
-            return message
-        correction = np.outer(error, measured_pixels) / denom
-        updated_matrix = self._pixels_to_mm + correction
-        if not np.isfinite(updated_matrix).all():
-            return message
-        self._pixels_to_mm = updated_matrix
-        mm_per_pixel_x, mm_per_pixel_y = self._calibration_magnitudes()
-        self.calibration_changed.emit(mm_per_pixel_x, mm_per_pixel_y)
-        self.objective_calibration_updated.emit(
-            self._active_objective_name,
-            self._pixels_to_mm.tolist(),
-        )
-        message += " Calibration refined."
-        return message
-
     def _calibration_magnitudes(self) -> tuple[float, float]:
         if self._pixels_to_mm is None:
             return (0.0, 0.0)
@@ -5000,14 +4967,6 @@ class StageController(QObject):
                 high = mid
         return (low + high) * 0.5
 
-    def _axis_a_commanded_lowering_for_physical(
-        self,
-        physical_lowering_mm: float,
-    ) -> float:
-        return self._axis_a_commanded_lowering_for_calibrated_coordinate(
-            -float(physical_lowering_mm)
-        )
-
     def _axis_a_gcode_coordinate_for_lowering_step(
         self,
         current_a: float,
@@ -5162,17 +5121,6 @@ class StageController(QObject):
                     f"{axis} move {delta:+.3f} exceeds limits ({min_value:.3f}, {max_value:.3f})."
                 )
 
-    def _software_axis_limits_ready(self, status: _Status | None) -> bool:
-        """Return True only when every limited linear axis is homed."""
-
-        limited_axes = set(self._axis_limits).difference({"B"})
-        if not limited_axes:
-            return False
-        effective_homed = self._effective_homed_axes(status)
-        if effective_homed is None:
-            return False
-        return limited_axes.issubset(effective_homed)
-
     def _axis_software_limit_ready(
         self, status: _Status | None, axis: str
     ) -> bool:
@@ -5201,27 +5149,6 @@ class StageController(QObject):
         # FluidNC RtStatus::Position bit selects MPos; without it reports WPos.
         # Keep buffer reporting enabled in both modes.
         return 3 if position_mode.strip().lower() == "machine" else 2
-
-    @staticmethod
-    def _parse_controller_coordinate_offsets(
-        raw_offsets: object,
-    ) -> dict[str, tuple[float, ...]]:
-        offsets: dict[str, tuple[float, ...]] = {}
-        if not isinstance(raw_offsets, dict):
-            return offsets
-        for system_raw, values_raw in raw_offsets.items():
-            if not isinstance(system_raw, str):
-                continue
-            if not isinstance(values_raw, (list, tuple)):
-                continue
-            system = system_raw.strip().upper()
-            try:
-                values = tuple(float(value) for value in values_raw)
-            except (TypeError, ValueError):
-                continue
-            if values:
-                offsets[system] = values
-        return offsets
 
     def _ensure_status_report_mask(
         self,
@@ -6744,23 +6671,6 @@ class StageController(QObject):
         except StageControllerError as exc:
             self.needles_action_finished.emit(False, str(exc), action)
 
-    def _ensure_oscillation_limits(
-        self, axis: str, center_position: float, amplitude_mm: float
-    ) -> None:
-        """Validate that the oscillation window stays inside the known soft limits."""
-
-        limits = self._axis_limits.get(axis)
-        if not limits:
-            return
-        min_value, max_value = limits
-        lower = center_position - amplitude_mm
-        upper = center_position + amplitude_mm
-        if lower < min_value or upper > max_value:
-            raise StageControllerError(
-                f"Oscillation window for {axis} exceeds limits "
-                f"({min_value:.3f}, {max_value:.3f})."
-            )
-
     def _require_homed_axes(
         self, status: _Status, axes: set[str], *, allow_relative: bool = False
     ) -> None:
@@ -6863,28 +6773,6 @@ class StageController(QObject):
     def _check_cancelled(self) -> None:
         if self._cancel_event.is_set():
             raise StageControllerError("Operation cancelled.")
-
-    def _queue_needles_action_locked(
-        self,
-        action: str,
-        step_mm: float | None = None,
-        *,
-        feedrate: float | None = None,
-    ) -> None:
-        """Queue a needle command so it runs immediately after oscillation stops."""
-
-        self._queued_needles_actions.append((action, step_mm, feedrate))
-        self._cancel_event.set()
-        if action == "raise":
-            label = "Needle raise"
-        elif action == "lift":
-            label = "Needle lift"
-        elif action == "lower":
-            label = "Needle lower"
-        else:
-            direction = "lower" if (step_mm or 0.0) < 0 else "raise"
-            label = f"Needle {direction} step"
-        self.status_message.emit(f"{label} queued with priority. Stopping oscillation.")
 
     def _queue_oscillation_needles_action_locked(
         self,
