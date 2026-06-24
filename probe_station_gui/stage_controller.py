@@ -1353,10 +1353,7 @@ class StageController(QObject):
                 raise StageControllerError(
                     "Stage is busy. Wait for the current operation to finish."
                 )
-            serial_connection = self._serial
-            if serial_connection is None or not serial_connection.is_open:
-                raise StageControllerError("Serial connection is not available.")
-            with self._serial_session_lock:
+            with self._serial_session() as serial_connection:
                 self._set_current_axis_work_coordinate_locked(
                     serial_connection,
                     axis_key,
@@ -1681,9 +1678,6 @@ class StageController(QObject):
         self.movement_started.emit()
         try:
             self._check_cancelled()
-            serial_connection = self._serial
-            if serial_connection is None or not serial_connection.is_open:
-                raise StageControllerError("Serial connection is not available.")
             feedrate_text = (
                 self.DEFAULT_FEEDRATE
                 if feedrate is None
@@ -1696,7 +1690,7 @@ class StageController(QObject):
                 "Coordinate move (G90): "
                 f"{target_text} F{self._format_gcode_value(feedrate_text)}."
             )
-            with self._serial_session_lock:
+            with self._serial_session() as serial_connection:
                 self._send_absolute_axis_targets_move(
                     serial_connection,
                     ordered_targets,
@@ -1803,10 +1797,7 @@ class StageController(QObject):
         with self._task_lock:
             if self._active_thread and self._active_thread.is_alive():
                 raise StageControllerError("Stage is busy. Wait for the current operation to finish.")
-            serial_connection = self._serial
-            if serial_connection is None or not serial_connection.is_open:
-                raise StageControllerError("Serial connection is not available.")
-            with self._serial_session_lock:
+            with self._serial_session() as serial_connection:
                 status = self._query_synced_status_for_absolute_motion(
                     serial_connection,
                     min_axes=3,
