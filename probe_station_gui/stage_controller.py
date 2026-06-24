@@ -4088,7 +4088,6 @@ class StageController(QObject):
 
     def _send_needle_motion_profile_locked(
         self,
-        serial_connection: serial.Serial,
         *,
         action: str,
         current_a: float,
@@ -4096,6 +4095,7 @@ class StageController(QObject):
         feedrate: float | None,
         status: _Status | None,
     ) -> bool:
+        serial_connection = self._current_serial()
         target_a = self._axis_a_configured_coordinate_for_lowering(
             target_lowering,
             status,
@@ -4169,10 +4169,7 @@ class StageController(QObject):
         feedrate: float | None = None,
     ) -> str:
         action = str(action).strip().lower()
-        serial_connection = self._serial
-        if serial_connection is None or not serial_connection.is_open:
-            raise StageControllerError("Serial connection is not available.")
-        with self._serial_session_lock:
+        with self._serial_session() as serial_connection:
             if action in {"raise", "lift", "lower"}:
                 status = self._query_status_with_required_coordinates(
                     serial_connection,
@@ -4188,7 +4185,6 @@ class StageController(QObject):
                     status,
                 )
                 moved = self._send_needle_motion_profile_locked(
-                    serial_connection,
                     action=action,
                     current_a=current_a,
                     target_lowering=target_lowering,
@@ -4215,13 +4211,10 @@ class StageController(QObject):
         depth_mm: float,
         feedrate: float | None = None,
     ) -> str:
-        serial_connection = self._serial
-        if serial_connection is None or not serial_connection.is_open:
-            raise StageControllerError("Serial connection is not available.")
-        if not math.isfinite(depth_mm):
-            raise StageControllerError("Needle search depth must be finite.")
-        depth_mm = max(0.0, float(depth_mm))
-        with self._serial_session_lock:
+        with self._serial_session() as serial_connection:
+            if not math.isfinite(depth_mm):
+                raise StageControllerError("Needle search depth must be finite.")
+            depth_mm = max(0.0, float(depth_mm))
             status = self._query_status_with_required_coordinates(
                 serial_connection,
                 axes=("A",),
@@ -4233,7 +4226,6 @@ class StageController(QObject):
             down_lowering = self._needle_target_lowering_for_action("lower")
             target_lowering = down_lowering + depth_mm
             moved = self._send_needle_motion_profile_locked(
-                serial_connection,
                 action="lower",
                 current_a=current_a,
                 target_lowering=target_lowering,
@@ -4257,18 +4249,14 @@ class StageController(QObject):
         self.movement_started.emit()
         try:
             self._check_cancelled()
-            serial_connection = self._serial
-            if serial_connection is None or not serial_connection.is_open:
-                raise StageControllerError("Serial connection is not available.")
-            if mode == "G91" and abs(distance_mm) < 1e-6:
-                self.movement_finished.emit(True, "Manual axis move skipped.")
-                return
-            feedrate_text = (
-                self.DEFAULT_FEEDRATE if feedrate is None else max(self.MIN_FEEDRATE, float(feedrate))
-            )
-            with self._serial_session_lock:
+            with self._serial_session() as serial_connection:
+                if mode == "G91" and abs(distance_mm) < 1e-6:
+                    self.movement_finished.emit(True, "Manual axis move skipped.")
+                    return
+                feedrate_text = (
+                    self.DEFAULT_FEEDRATE if feedrate is None else max(self.MIN_FEEDRATE, float(feedrate))
+                )
                 target_value = self._manual_axis_absolute_target(
-                    serial_connection,
                     axis,
                     distance_mm,
                     mode,
@@ -4349,7 +4337,6 @@ class StageController(QObject):
 
     def _manual_axis_absolute_target(
         self,
-        serial_connection: serial.Serial,
         axis: str,
         value_mm: float,
         mode: str,
@@ -4362,7 +4349,6 @@ class StageController(QObject):
             raise StageControllerError(f"Unsupported manual move mode: {mode}")
 
         current_value = self._current_axis_value_for_manual_move(
-            serial_connection,
             axis,
         )
         if current_value is None:
@@ -4373,9 +4359,9 @@ class StageController(QObject):
 
     def _current_axis_value_for_manual_move(
         self,
-        serial_connection: serial.Serial,
         axis: str,
     ) -> float | None:
+        serial_connection = self._current_serial()
         status = self._query_status_with_required_coordinates(
             serial_connection,
             axes=(axis,),
@@ -4417,12 +4403,9 @@ class StageController(QObject):
         step_mm: float,
         feedrate: float | None = None,
     ) -> str:
-        serial_connection = self._serial
-        if serial_connection is None or not serial_connection.is_open:
-            raise StageControllerError("Serial connection is not available.")
-        if abs(step_mm) < 1e-6:
-            return "Needle position unchanged."
-        with self._serial_session_lock:
+        with self._serial_session() as serial_connection:
+            if abs(step_mm) < 1e-6:
+                return "Needle position unchanged."
             status = self._query_status_with_required_coordinates(
                 serial_connection,
                 axes=("A",),

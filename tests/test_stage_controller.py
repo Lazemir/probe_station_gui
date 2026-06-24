@@ -2550,6 +2550,7 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
     def test_manual_axis_a_relative_move_keeps_raw_gcode_sign(self) -> None:
         controller = StageController()
         try:
+            controller._serial = _FakeSerial()
             controller.apply_axis_a_calibration(
                 types.SimpleNamespace(
                     configured=True,
@@ -2572,7 +2573,6 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
             )
 
             target = controller._manual_axis_absolute_target(
-                _FakeSerial(),
                 "A",
                 -0.02,
                 "G91",
