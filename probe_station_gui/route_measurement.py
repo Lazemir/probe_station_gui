@@ -25,6 +25,10 @@ from probe_station_gui.route_contact_quality import (
     route_measurement_sample_from_raw,
     summarize_route_contact_quality,
 )
+from probe_station_gui.route_measurement_csv import (
+    CSV_FIELDS,
+    RouteMeasurementCsvWriter,
+)
 
 
 Point2D = tuple[float, float]
@@ -192,69 +196,6 @@ class RoutePhotoRecord:
     design_center: Point2D
     stage_xy: Point2D
     focus: dict[str, object] | None = None
-
-
-CSV_FIELDS = [
-    "timestamp",
-    "structure_number",
-    "nplc",
-    "measurement_type",
-    "n_measurements",
-    "resistance_ohm",
-    "resistance_rms_ohm",
-    "relative_rms",
-    "status",
-    "contact_quality",
-    "contact_median_ohm",
-    "contact_mad_sigma_ohm",
-    "contact_p95_abs_step_ohm",
-    "contact_span_ohm",
-    "contact_compliance_hits",
-    "contact_polarity_sign_mismatches",
-]
-
-
-class RouteMeasurementCsvWriter:
-    """Write route measurements after each point so partial runs are preserved."""
-
-    def __init__(self, path: str | Path) -> None:
-        self._path = Path(path).expanduser().resolve()
-        self._lock = threading.Lock()
-
-    @property
-    def path(self) -> Path:
-        with self._lock:
-            return self._path
-
-    def set_path(self, path: str | Path) -> None:
-        resolved = Path(path).expanduser().resolve()
-        with self._lock:
-            self._path = resolved
-
-    def write_header(self) -> None:
-        with self._lock:
-            path = self._path
-        self._write_header(path)
-
-    def _write_header(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists() and path.stat().st_size > 0:
-            return
-        with path.open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
-            writer.writeheader()
-            handle.flush()
-            os.fsync(handle.fileno())
-
-    def append(self, record: RouteMeasurementRecord) -> None:
-        with self._lock:
-            path = self._path
-        self._write_header(path)
-        with path.open("a", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
-            writer.writerow(_record_to_csv_row(record))
-            handle.flush()
-            os.fsync(handle.fileno())
 
 
 class RouteMeasurementRunner:
@@ -3595,12 +3536,6 @@ def _focus_result_to_dict(result: object | None) -> dict[str, object] | None:
     return data or None
 
 
-def _format_float(value: float) -> str:
-    if not math.isfinite(value):
-        return ""
-    return f"{float(value):.12g}"
-
-
 def _format_percent(value: float) -> str:
     if not math.isfinite(value):
         return "nan%"
@@ -3622,37 +3557,3 @@ def _format_ohm(value: float) -> str:
         if abs_value >= scale:
             return f"{value / scale:.3g} {unit}"
     return f"{value:.3g} Ohm"
-
-
-def _record_to_csv_row(record: RouteMeasurementRecord) -> dict[str, str]:
-    contact = record.contact_quality
-    return {
-        "timestamp": record.timestamp,
-        "structure_number": str(record.structure_number),
-        "nplc": str(record.nplc),
-        "measurement_type": str(record.measurement_type),
-        "n_measurements": str(record.n_measurements),
-        "resistance_ohm": _format_float(record.resistance_ohm),
-        "resistance_rms_ohm": _format_float(record.resistance_rms_ohm),
-        "relative_rms": _format_float(record.relative_rms),
-        "status": record.status,
-        "contact_quality": "" if contact is None else contact.status,
-        "contact_median_ohm": ""
-        if contact is None
-        else _format_float(contact.median_ohm),
-        "contact_mad_sigma_ohm": ""
-        if contact is None
-        else _format_float(contact.mad_sigma_ohm),
-        "contact_p95_abs_step_ohm": ""
-        if contact is None
-        else _format_float(contact.p95_abs_step_ohm),
-        "contact_span_ohm": ""
-        if contact is None
-        else _format_float(contact.span_ohm),
-        "contact_compliance_hits": ""
-        if contact is None
-        else str(contact.compliance_hits),
-        "contact_polarity_sign_mismatches": ""
-        if contact is None
-        else str(contact.polarity_sign_mismatch_count),
-    }
