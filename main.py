@@ -153,6 +153,7 @@ from probe_station_gui.route_measurement import (
     summarize_route_contact_quality,
 )
 from probe_station_gui.route_control_state import ApiRouteControlState
+from probe_station_gui.route_measurement_settings import RouteMeasurementSettingsStore
 from probe_station_gui.route_formatting import (
     csv_bool as _csv_bool,
     csv_float as _csv_float,
@@ -8065,7 +8066,7 @@ class Main(QMainWindow):
                 default_meter_type=self.lcr_controller.meter_type(),
                 settings_path=(
                     self.settings_manager.config_dir()
-                    / "route-measurement-settings.json"
+                    / RouteMeasurementSettingsStore.FILENAME
                 ),
                 parent=self,
             )
@@ -8159,61 +8160,29 @@ class Main(QMainWindow):
             QTimer.singleShot(0, self._open_route_measurement_dialog)
 
     def _load_route_measurement_settings(self) -> dict[str, object]:
-        settings_path = (
-            self.settings_manager.config_dir() / "route-measurement-settings.json"
-        )
-        if not settings_path.exists():
-            return {}
-        try:
-            with settings_path.open("r", encoding="utf-8") as handle:
-                loaded = json.load(handle)
-        except (OSError, json.JSONDecodeError):
-            return {}
-        return dict(loaded) if isinstance(loaded, dict) else {}
+        return self._route_measurement_settings_store().load()
+
+    def _route_measurement_settings_store(self) -> RouteMeasurementSettingsStore:
+        return RouteMeasurementSettingsStore(self.settings_manager.config_dir())
 
     @staticmethod
     def _route_measurement_current_point_from_settings(
         state: dict[str, object],
     ) -> int | None:
-        value = state.get("current_point", state.get("start_point"))
-        try:
-            point_number = int(value)
-        except (TypeError, ValueError):
-            return None
-        return point_number if point_number >= 1 else None
+        return RouteMeasurementSettingsStore.current_point(state)
 
     @staticmethod
     def _route_measurement_session_active_from_settings(
         state: dict[str, object],
     ) -> bool:
-        return bool(
-            state.get(
-                "measurement_session_active",
-                state.get("measurement_pending", False),
-            )
-        )
+        return RouteMeasurementSettingsStore.session_active(state)
 
     def _route_measurement_settings_match_route(
         self,
         state: dict[str, object],
         route: MeasurementRoute,
     ) -> bool:
-        stored_count = state.get("session_route_point_count")
-        try:
-            if stored_count is not None and int(stored_count) != len(route.points):
-                return False
-        except (TypeError, ValueError):
-            return False
-        stored_path = state.get("session_route_path")
-        if isinstance(stored_path, str) and stored_path.strip() and route.path is not None:
-            try:
-                return Path(stored_path).expanduser().resolve() == route.path.resolve()
-            except OSError:
-                return str(stored_path).strip() == str(route.path)
-        stored_name = state.get("session_route_name")
-        if isinstance(stored_name, str) and stored_name.strip():
-            return stored_name.strip() == route.name
-        return True
+        return RouteMeasurementSettingsStore.settings_match_route(state, route)
 
     def _clear_route_measurement_dialog(self) -> None:
         self._route_measurement_dialog = None
@@ -10188,28 +10157,11 @@ class Main(QMainWindow):
         self._persist_controller_state_if_available()
 
     def _save_route_measurement_current_point(self, point_number: int) -> None:
-        settings_path = (
-            self.settings_manager.config_dir() / "route-measurement-settings.json"
-        )
-        data: dict[str, object] = {}
-        if settings_path.exists():
-            try:
-                with settings_path.open("r", encoding="utf-8") as handle:
-                    loaded = json.load(handle)
-                if isinstance(loaded, dict):
-                    data = dict(loaded)
-            except (OSError, json.JSONDecodeError):
-                data = {}
-        data["current_point"] = int(point_number)
-        data["start_point"] = int(point_number)
-        data["measurement_session_active"] = bool(
-            self._route_measurement_session_active
-        )
-        data["measurement_pending"] = bool(self._route_measurement_session_active)
         try:
-            settings_path.parent.mkdir(parents=True, exist_ok=True)
-            with settings_path.open("w", encoding="utf-8") as handle:
-                json.dump(data, handle, indent=2, ensure_ascii=False)
+            self._route_measurement_settings_store().save_current_point(
+                int(point_number),
+                session_active=bool(self._route_measurement_session_active),
+            )
         except OSError:
             logger.exception("Failed to persist route measurement resume point.")
 
@@ -10221,24 +10173,8 @@ class Main(QMainWindow):
         self._save_route_measurement_pending(bool(pending))
 
     def _save_route_measurement_pending(self, pending: bool) -> None:
-        settings_path = (
-            self.settings_manager.config_dir() / "route-measurement-settings.json"
-        )
-        data: dict[str, object] = {}
-        if settings_path.exists():
-            try:
-                with settings_path.open("r", encoding="utf-8") as handle:
-                    loaded = json.load(handle)
-                if isinstance(loaded, dict):
-                    data = dict(loaded)
-            except (OSError, json.JSONDecodeError):
-                data = {}
-        data["measurement_session_active"] = bool(pending)
-        data["measurement_pending"] = bool(pending)
         try:
-            settings_path.parent.mkdir(parents=True, exist_ok=True)
-            with settings_path.open("w", encoding="utf-8") as handle:
-                json.dump(data, handle, indent=2, ensure_ascii=False)
+            self._route_measurement_settings_store().save_pending(bool(pending))
         except OSError:
             logger.exception("Failed to persist route measurement pending state.")
 
@@ -10246,30 +10182,12 @@ class Main(QMainWindow):
         self,
         configuration: RouteMeasurementRunConfiguration | None,
     ) -> None:
-        settings_path = (
-            self.settings_manager.config_dir() / "route-measurement-settings.json"
-        )
-        data = self._load_route_measurement_settings()
-        route = self._design_session.route
-        if route is not None:
-            data["session_route_name"] = route.name
-            data["session_route_point_count"] = len(route.points)
-            if route.path is not None:
-                data["session_route_path"] = str(route.path)
-        if configuration is not None:
-            data["csv_path"] = configuration.csv_path
-            data["operation_mode"] = configuration.operation_mode
-            data["photo_output_dir"] = configuration.photo_output_dir
-            data["current_point"] = int(configuration.current_point)
-            data["start_point"] = int(configuration.current_point)
-        data["measurement_session_active"] = bool(
-            self._route_measurement_session_active
-        )
-        data["measurement_pending"] = bool(self._route_measurement_session_active)
         try:
-            settings_path.parent.mkdir(parents=True, exist_ok=True)
-            with settings_path.open("w", encoding="utf-8") as handle:
-                json.dump(data, handle, indent=2, ensure_ascii=False)
+            self._route_measurement_settings_store().save_session_metadata(
+                route=self._design_session.route,
+                configuration=configuration,
+                session_active=bool(self._route_measurement_session_active),
+            )
         except OSError:
             logger.exception("Failed to persist route measurement session metadata.")
 
