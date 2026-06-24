@@ -50,3 +50,14 @@ packages = [
 
 [tool.setuptools.package-data]
 "probe_station_gui" = ["default_settings.json", "assets/*.ico", "assets/*.png"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = [
+    ".git",
+    ".venv",
+    "_rotpy_src",
+    ".claude",
+    "build",
+    "dist",
+]
