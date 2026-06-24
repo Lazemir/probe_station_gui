@@ -5267,47 +5267,6 @@ class StageController(QObject):
         self._wait_for_ok(serial_connection, check_cancelled=check_cancelled)
         self._current_status_report_mask = int(mask)
 
-    def _read_response_lines(
-        self,
-        serial_connection: serial.Serial,
-        *,
-        timeout: float,
-        description: str,
-    ) -> list[str]:
-        deadline = time.monotonic() + timeout
-        lines: list[str] = []
-        while time.monotonic() < deadline:
-            self._check_cancelled()
-            try:
-                raw = serial_connection.readline()
-            except _SERIAL_IO_EXCEPTIONS as exc:  # pragma: no cover - hardware interaction
-                raise StageControllerError(f"Serial read failed: {exc}") from exc
-            line = raw.decode("ascii", errors="ignore").strip()
-            if not line:
-                continue
-            logger.debug("SERIAL TRACE stage_readline %s line=%r", description, line)
-            self._raise_if_controller_reboot_line(line, description)
-            self._handle_limit_line(line)
-            homed_msg = self.HOMED_MSG_PATTERN.match(line)
-            if homed_msg:
-                axes = set(homed_msg.group("axes").upper())
-                if self._homed_axes:
-                    axes = set(self._homed_axes).union(axes)
-                self._update_homing_status(axes)
-                continue
-            self._handle_coordinate_state_line(line)
-            lower = line.lower()
-            if lower == "ok":
-                return lines
-            if lower.startswith("alarm"):
-                raise StageControllerError(f"Controller alarm: {line}")
-            if lower.startswith("error") or line.startswith("[MSG:ERR:"):
-                raise StageControllerError(f"Controller reported: {line}")
-            lines.append(line)
-        raise StageControllerError(
-            f"Timeout waiting for controller response: {description}."
-        )
-
     def _query_active_coordinate_system(
         self, serial_connection: serial.Serial, timeout: float = 2.0
     ) -> str | None:
@@ -6874,25 +6833,6 @@ class StageController(QObject):
         if effective_homed is None and self._homed_axes:
             effective_homed = set(self._homed_axes)
         return effective_homed
-
-    def _ensure_axis_a_zero(
-        self,
-        serial_connection: serial.Serial,
-        *,
-        allow_missing_homing: bool = False,
-        allow_relative: bool = False,
-    ) -> None:
-        status = self._query_status_with_required_coordinates(
-            serial_connection,
-            axes=("A",),
-        )
-        a_position = self._axis_value_for_configured_mode(status, "A")
-        if status is None or a_position is None:
-            raise AxisStateError("Unable to read A axis position.")
-        if not allow_missing_homing:
-            self._require_homed_axes(status, {"A"}, allow_relative=allow_relative)
-        if abs(a_position) > self.A_ZERO_TOLERANCE:
-            raise AxisStateError(f"A axis not at zero (A={a_position:.3f}).")
 
     def _get_frame_snapshot(
         self, timeout: float = 2.0
