@@ -441,7 +441,7 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
         ]
 
         controller._move_safety_check = lambda: None
-        controller._wait_for_idle = lambda _serial: None
+        controller._wait_for_idle = lambda: None
         controller._query_status = lambda _serial: statuses.pop(0)
         started_moves = []
 
@@ -516,7 +516,7 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
                 apply_preference
             )
         )
-        controller._wait_for_idle = lambda _serial: None
+        controller._wait_for_idle = lambda: None
         controller._query_status = lambda _serial: statuses.pop(0)
         started_moves = []
 
@@ -719,7 +719,7 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
         ]
 
         controller._move_safety_check = lambda: None
-        controller._wait_for_idle = lambda _serial: None
+        controller._wait_for_idle = lambda: None
         controller._query_status = lambda _serial: statuses.pop(0)
         controller._send_relative_move = (
             lambda move, **_kwargs: sent_moves.append(move)
@@ -1232,7 +1232,7 @@ class StageControllerAutofocusTest(unittest.TestCase):
         controller._position_for_configured_mode = (
             lambda status: status.display_position
         )
-        controller._wait_for_idle = lambda _serial, timeout=10.0: None
+        controller._wait_for_idle = lambda timeout=10.0: None
         controller._send_relative_move = _send_relative_move
 
         with self.assertRaisesRegex(StageControllerError, "Operation cancelled"):
@@ -1812,7 +1812,7 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
             AssertionError("waited for idle")
         )
         controller._wait_for_idle_at_targets = (
-            lambda _serial, targets, **kwargs: target_idle_calls.append(
+            lambda targets, **kwargs: target_idle_calls.append(
                 (dict(targets), dict(kwargs))
             )
         )
@@ -1850,7 +1850,7 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
             AssertionError("waited for plain idle")
         )
         controller._wait_for_idle_at_targets = (
-            lambda _serial, targets, **kwargs: idle_calls.append(
+            lambda targets, **kwargs: idle_calls.append(
                 (dict(targets), dict(kwargs))
             )
         )
@@ -3244,11 +3244,9 @@ class StageControllerStatusRefreshTest(unittest.TestCase):
         original_sleep = _stage_controller_module.time.sleep
         _stage_controller_module.time.sleep = lambda _seconds: None
         try:
-            controller._wait_for_idle_at_targets(
-                _FakeSerial(),
-                {"A": -0.010},
-                timeout=1.0,
-            )
+            controller._serial = _FakeSerial()
+            with controller._serial_session():
+                controller._wait_for_idle_at_targets({"A": -0.010}, timeout=1.0)
         finally:
             _stage_controller_module.time.sleep = original_sleep
 

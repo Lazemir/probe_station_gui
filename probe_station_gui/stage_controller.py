@@ -2479,7 +2479,7 @@ class StageController(QObject):
                     )
                 ),
             )
-            self._wait_for_idle(serial_connection)
+            self._wait_for_idle()
             self._query_status(serial_connection)
             return f"Arrived at X={target_x_mm:.3f} mm, Y={target_y_mm:.3f} mm."
 
@@ -2550,7 +2550,7 @@ class StageController(QObject):
                 )
                 moved = True
 
-            self._wait_for_idle(serial_connection)
+            self._wait_for_idle()
             self._query_status(serial_connection)
 
             if not moved:
@@ -2807,7 +2807,7 @@ class StageController(QObject):
                 "autofocus cancel jog stop 0x85",
             )
             try:
-                self._wait_for_idle(serial_connection, timeout=5.0)
+                self._wait_for_idle(timeout=5.0)
             except StageControllerError:
                 logger.warning(
                     "Could not confirm idle before restoring autofocus start Z.",
@@ -2847,7 +2847,7 @@ class StageController(QObject):
             self.status_message.emit("Autofocus: homing A axis.")
             self._write_command(serial_connection, "$HA")
             self._wait_for_ok(serial_connection, timeout=30.0)
-            self._wait_for_idle(serial_connection, timeout=30.0)
+            self._wait_for_idle(timeout=30.0)
             self._set_needles_state(True, known=True, zone="raise")
         self._move_safety_check()
 
@@ -4424,7 +4424,6 @@ class StageController(QObject):
                 motion_started_callback(move, effective_feedrate)
             if wait_for_completion:
                 self._wait_for_idle(
-                    serial_connection,
                     timeout=self._idle_timeout_for_distance(
                         move_distance, effective_feedrate
                     ),
@@ -4442,7 +4441,6 @@ class StageController(QObject):
         self._wait_for_ok(serial_connection)
         if wait_for_completion:
             self._wait_for_idle(
-                serial_connection,
                 timeout=self._idle_timeout_for_distance(
                     move_distance, effective_feedrate
                 ),
@@ -4527,7 +4525,6 @@ class StageController(QObject):
                     current_values,
                 )
                 self._wait_for_idle_at_targets(
-                    serial_connection,
                     ordered_targets,
                     timeout=self._idle_timeout_for_distance(
                         move_distance, effective_feedrate
@@ -4552,7 +4549,6 @@ class StageController(QObject):
                 current_values,
             )
             self._wait_for_idle(
-                serial_connection,
                 timeout=self._idle_timeout_for_distance(
                     move_distance, effective_feedrate
                 ),
@@ -5646,7 +5642,8 @@ class StageController(QObject):
                 raise StageControllerError(f"Controller reported: {line}")
         raise StageControllerError("Timeout waiting for controller acknowledgement.")
 
-    def _wait_for_idle(self, serial_connection: serial.Serial, timeout: float = 10.0) -> None:
+    def _wait_for_idle(self, timeout: float = 10.0) -> None:
+        serial_connection = self._current_serial()
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             self._check_cancelled()
@@ -5665,11 +5662,11 @@ class StageController(QObject):
 
     def _wait_for_idle_at_targets(
         self,
-        serial_connection: serial.Serial,
         targets: dict[str, float],
         *,
         timeout: float,
     ) -> None:
+        serial_connection = self._current_serial()
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             self._check_cancelled()
@@ -6312,7 +6309,7 @@ class StageController(QObject):
         self.status_message.emit(f"Homing: {command}")
         self._write_command(serial_connection, command)
         self._wait_for_ok(serial_connection, timeout=30.0)
-        self._wait_for_idle(serial_connection, timeout=30.0)
+        self._wait_for_idle(timeout=30.0)
         if command.upper() in ("$H", "$HA"):
             axes = set(self._homed_axes)
             if command.upper() == "$H":
