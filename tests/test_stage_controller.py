@@ -1035,6 +1035,7 @@ class StageControllerAutofocusTest(unittest.TestCase):
     def test_static_autofocus_refinement_corrects_sweep_z_bias(self) -> None:
         controller = StageController()
         serial_connection = _FakeSerial()
+        controller._serial = serial_connection
         current_z = [10.040]
         true_focus_z = 9.980
 
@@ -1067,7 +1068,6 @@ class StageControllerAutofocusTest(unittest.TestCase):
         )
 
         result = controller._run_static_focus_refinement_locked(
-            serial_connection,
             10.000,
             min_z=0.0,
             max_z=20.0,
@@ -1085,6 +1085,7 @@ class StageControllerAutofocusTest(unittest.TestCase):
     def test_static_autofocus_refinement_expands_from_edge_peak(self) -> None:
         controller = StageController()
         serial_connection = _FakeSerial()
+        controller._serial = serial_connection
         current_z = [10.000]
         true_focus_z = 10.060
 
@@ -1116,7 +1117,6 @@ class StageControllerAutofocusTest(unittest.TestCase):
         )
 
         result = controller._run_static_focus_refinement_locked(
-            serial_connection,
             10.000,
             min_z=0.0,
             max_z=20.0,
@@ -1140,7 +1140,7 @@ class StageControllerAutofocusTest(unittest.TestCase):
             emit=lambda success, message: finished.append((success, message))
         )
 
-        def _prepare(_serial, *, range_mm, step_mm):
+        def _prepare(*, range_mm, step_mm):
             calls.append(("prepare", range_mm, step_mm))
             return AutofocusContext(
                 objective_name="X20",
@@ -1153,7 +1153,7 @@ class StageControllerAutofocusTest(unittest.TestCase):
                 fine_step_mm=0.010,
             )
 
-        def _static(_serial, center_z, *, min_z, max_z, step_mm):
+        def _static(center_z, *, min_z, max_z, step_mm):
             calls.append(("static", center_z, min_z, max_z, step_mm))
             return FocusSweepResult(
                 best_z=10.012,
@@ -1162,7 +1162,7 @@ class StageControllerAutofocusTest(unittest.TestCase):
                 edge_peak=False,
             )
 
-        def _approach(_serial, target_z, *, min_z, fine_step_mm):
+        def _approach(target_z, *, min_z, fine_step_mm):
             calls.append(("approach", target_z, min_z, fine_step_mm))
 
         controller._prepare_autofocus_context_locked = _prepare
@@ -1196,7 +1196,7 @@ class StageControllerAutofocusTest(unittest.TestCase):
             emit=lambda message: statuses.append(str(message))
         )
 
-        def _prepare(_serial, *, range_mm, step_mm):
+        def _prepare(*, range_mm, step_mm):
             return AutofocusContext(
                 objective_name="X20",
                 start_z=10.000,
@@ -1208,7 +1208,7 @@ class StageControllerAutofocusTest(unittest.TestCase):
                 fine_step_mm=0.010,
             )
 
-        def _static(_serial, center_z, *, min_z, max_z, step_mm):
+        def _static(center_z, *, min_z, max_z, step_mm):
             controller._cancel_event.set()
             raise StageControllerError("Operation cancelled.")
 
@@ -1246,6 +1246,18 @@ class StageControllerAutofocusTest(unittest.TestCase):
         self.assertIn(b"\x85", serial_connection.writes)
         self.assertTrue(controller._cancel_event.is_set())
         self.assertIn("returning to start Z", statuses[-1])
+
+    def test_serial_session_pins_active_connection(self) -> None:
+        controller = StageController()
+        original = _FakeSerial()
+        replacement = _FakeSerial()
+        controller._serial = original
+
+        with controller._serial_session():
+            controller._serial = replacement
+            self.assertIs(controller._current_serial(), original)
+
+        self.assertIs(controller._current_serial(), replacement)
 
 
 class StageControllerObjectiveTest(unittest.TestCase):

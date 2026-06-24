@@ -5,8 +5,9 @@ from __future__ import annotations
 import logging
 import math
 import importlib
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from collections import deque
+from contextlib import contextmanager
 from queue import Empty, PriorityQueue
 import re
 import threading
@@ -366,6 +367,7 @@ class StageController(QObject):
         ] = deque()
         self._b_axis_zero_position: Optional[float] = None
         self._serial_session_lock = threading.RLock()
+        self._serial_session_state = threading.local()
         self._feed_override_lock = threading.Lock()
         self._queued_write_sequence = 0
         self._queued_jog_generation = 0
@@ -394,6 +396,35 @@ class StageController(QObject):
             daemon=True,
         )
         self._async_write_thread.start()
+
+    def _require_open_serial(self) -> serial.Serial:
+        serial_connection = self._serial
+        if serial_connection is None or not serial_connection.is_open:
+            raise StageControllerError("Serial connection is not available.")
+        return serial_connection
+
+    @contextmanager
+    def _serial_session(self) -> Iterator[serial.Serial]:
+        serial_connection = self._require_open_serial()
+        with self._serial_session_lock:
+            stack = getattr(self._serial_session_state, "serial_stack", None)
+            if stack is None:
+                stack = []
+                self._serial_session_state.serial_stack = stack
+            stack.append(serial_connection)
+            try:
+                yield serial_connection
+            finally:
+                stack.pop()
+
+    def _current_serial(self) -> serial.Serial:
+        stack = getattr(self._serial_session_state, "serial_stack", ())
+        if stack:
+            serial_connection = stack[-1]
+            if serial_connection is None or not serial_connection.is_open:
+                raise StageControllerError("Serial connection is not available.")
+            return serial_connection
+        return self._require_open_serial()
 
     def set_serial(self, serial_connection: Optional[serial.Serial]) -> None:
         """Assign or clear the serial connection used for stage control."""
@@ -1751,12 +1782,8 @@ class StageController(QObject):
         self.movement_started.emit()
         try:
             self._check_cancelled()
-            serial_connection = self._serial
-            if serial_connection is None or not serial_connection.is_open:
-                raise StageControllerError("Serial connection is not available.")
-            with self._serial_session_lock:
+            with self._serial_session():
                 result = self._run_local_autofocus_locked(
-                    serial_connection,
                     range_mm=range_mm,
                     step_mm=step_mm,
                 )
@@ -2816,22 +2843,18 @@ class StageController(QObject):
     def _run_autofocus(self) -> None:
         self.movement_started.emit()
         try:
-            serial_connection = self._serial
-            if serial_connection is None or not serial_connection.is_open:
-                raise StageControllerError("Serial connection is not available.")
-            with self._serial_session_lock:
-                self._run_autofocus_locked(serial_connection)
+            with self._serial_session():
+                self._run_autofocus_locked()
         except StageControllerError as exc:
             self.autofocus_finished.emit(False, str(exc))
         finally:
             with self._task_lock:
                 self._active_thread = None
 
-    def _run_autofocus_locked(self, serial_connection: serial.Serial) -> None:
+    def _run_autofocus_locked(self) -> None:
         """Run autofocus while the caller owns serial access."""
 
         context = self._prepare_autofocus_context_locked(
-            serial_connection,
             range_mm=self._objective_autofocus_range_mm,
             step_mm=self._objective_autofocus_fine_step_mm,
         )
@@ -2853,7 +2876,6 @@ class StageController(QObject):
             f"Autofocus {objective_name}: continuous sweep within +/-{local_range:.3f} mm."
         )
         coarse = self._run_focus_sweep_locked(
-            serial_connection,
             context.lower_z,
             context.upper_z,
             feedrate=sweep_feedrate,
@@ -2870,7 +2892,6 @@ class StageController(QObject):
                 f"Autofocus {objective_name}: fine sweep."
             )
             best = self._run_focus_sweep_locked(
-                serial_connection,
                 fine_lower,
                 fine_upper,
                 feedrate=sweep_feedrate,
@@ -2880,14 +2901,12 @@ class StageController(QObject):
             f"Autofocus {objective_name}: static verification."
         )
         best = self._run_static_focus_refinement_locked(
-            serial_connection,
             best.best_z,
             min_z=context.min_z,
             max_z=context.max_z,
             step_mm=fine_step,
         )
         self._approach_z_from_below_locked(
-            serial_connection,
             best.best_z,
             min_z=context.min_z,
             fine_step_mm=fine_step,
@@ -2903,13 +2922,11 @@ class StageController(QObject):
 
     def _run_local_autofocus_locked(
         self,
-        serial_connection: serial.Serial,
         *,
         range_mm: float,
         step_mm: float | None = None,
     ) -> AutofocusResult:
         context = self._prepare_autofocus_context_locked(
-            serial_connection,
             range_mm=range_mm,
             step_mm=step_mm,
         )
@@ -2920,14 +2937,12 @@ class StageController(QObject):
         )
         try:
             best = self._run_static_focus_refinement_locked(
-                serial_connection,
                 context.start_z,
                 min_z=context.lower_z,
                 max_z=context.upper_z,
                 step_mm=context.fine_step_mm,
             )
             self._approach_z_from_below_locked(
-                serial_connection,
                 best.best_z,
                 min_z=context.min_z,
                 fine_step_mm=context.fine_step_mm,
@@ -2936,7 +2951,6 @@ class StageController(QObject):
             if str(exc) != "Operation cancelled.":
                 raise
             self._restore_autofocus_start_z_after_cancel_locked(
-                serial_connection,
                 context,
             )
             raise
@@ -2956,11 +2970,11 @@ class StageController(QObject):
 
     def _restore_autofocus_start_z_after_cancel_locked(
         self,
-        serial_connection: serial.Serial,
         context: _AutofocusContext,
     ) -> None:
         """Return local autofocus to its starting Z after a user interrupt."""
 
+        serial_connection = self._current_serial()
         was_cancelled = self._cancel_event.is_set()
         self._cancel_event.clear()
         self._queued_jog_generation += 1
@@ -3005,11 +3019,11 @@ class StageController(QObject):
 
     def _prepare_autofocus_context_locked(
         self,
-        serial_connection: serial.Serial,
         *,
         range_mm: float,
         step_mm: float | None,
     ) -> _AutofocusContext:
+        serial_connection = self._current_serial()
         self._relative_warning_emitted = False
         objective_name = str(self._active_objective_name)
         if not self._needles_up:
@@ -3068,12 +3082,12 @@ class StageController(QObject):
 
     def _run_focus_sweep_locked(
         self,
-        serial_connection: serial.Serial,
         lower_z: float,
         upper_z: float,
         *,
         feedrate: float,
     ) -> _FocusSweepResult:
+        serial_connection = self._current_serial()
         lower_z = float(lower_z)
         upper_z = float(upper_z)
         if upper_z <= lower_z:
@@ -3220,7 +3234,6 @@ class StageController(QObject):
 
     def _run_static_focus_refinement_locked(
         self,
-        serial_connection: serial.Serial,
         center_z: float,
         *,
         min_z: float,
@@ -3251,7 +3264,6 @@ class StageController(QObject):
                     continue
                 self._check_cancelled()
                 self._approach_z_from_below_locked(
-                    serial_connection,
                     target_z,
                     min_z=min_z,
                     fine_step_mm=step_mm,
@@ -3370,12 +3382,12 @@ class StageController(QObject):
 
     def _approach_z_from_below_locked(
         self,
-        serial_connection: serial.Serial,
         target_z: float,
         *,
         min_z: float,
         fine_step_mm: float | None = None,
     ) -> None:
+        serial_connection = self._current_serial()
         status = self._query_status_with_required_coordinates(
             serial_connection,
             axes=("Z",),
