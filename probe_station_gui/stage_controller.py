@@ -1353,19 +1353,18 @@ class StageController(QObject):
                 raise StageControllerError(
                     "Stage is busy. Wait for the current operation to finish."
                 )
-            with self._serial_session() as serial_connection:
+            with self._serial_session():
                 self._set_current_axis_work_coordinate_locked(
-                    serial_connection,
                     axis_key,
                     target_value,
                 )
 
     def _set_current_axis_work_coordinate_locked(
         self,
-        serial_connection: serial.Serial,
         axis: str,
         value: float,
     ) -> None:
+        serial_connection = self._current_serial()
         status = self._query_status_with_required_coordinates(
             serial_connection,
             axes=(axis,),
