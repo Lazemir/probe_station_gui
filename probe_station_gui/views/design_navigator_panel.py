@@ -42,6 +42,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from probe_station_gui.route_run_ui import (
+    route_run_control_presentation,
+    route_run_pause_action,
+)
 from probe_station_gui.wheel_guard import (
     GuardedComboBox as QComboBox,
     GuardedDoubleSpinBox as QDoubleSpinBox,
@@ -2187,32 +2191,21 @@ class DesignNavigatorPanel(QWidget):
         )
         self._route_run_button.setEnabled(has_route_selection)
         self._route_stop_button.setEnabled(route_running)
-        route_external_waiting = (
-            self._route_measurement_waiting
-            and self._route_measurement_waiting_reason == "external_measurement"
+        route_control = route_run_control_presentation(
+            running=route_running,
+            waiting=self._route_measurement_waiting,
+            waiting_reason=self._route_measurement_waiting_reason,
+            pause_request_pending=self._route_pause_request_pending,
+            interrupt_request_pending=self._route_interrupt_request_pending,
         )
         route_confirm_waiting = (
-            self._route_measurement_waiting and not route_external_waiting
+            self._route_measurement_waiting
+            and not route_control.external_measurement_waiting
         )
-        route_resume = route_running and route_confirm_waiting
-        if route_resume:
-            self._route_pause_button.setText("Resume")
-            route_control_enabled = route_running
-        elif route_running and (
-            self._route_pause_request_pending
-            or self._route_interrupt_request_pending
-            or route_external_waiting
-        ):
-            self._route_pause_button.setText("Interrupt")
-            route_control_enabled = (
-                route_running and not self._route_interrupt_request_pending
-            )
-        else:
-            self._route_pause_button.setText("Pause")
-            route_control_enabled = route_running
-        self._route_interrupt_button.setText("Interrupt")
-        self._route_pause_button.setEnabled(route_control_enabled)
-        self._route_interrupt_button.setEnabled(False)
+        self._route_pause_button.setText(route_control.pause_text)
+        self._route_pause_button.setEnabled(route_control.pause_enabled)
+        self._route_interrupt_button.setText(route_control.interrupt_text)
+        self._route_interrupt_button.setEnabled(route_control.interrupt_enabled)
         self._route_save_shift_button.setEnabled(
             has_route_selection and route_confirm_waiting
         )
@@ -2944,17 +2937,16 @@ class DesignNavigatorPanel(QWidget):
         )
 
     def _emit_route_measurement_pause_or_resume(self) -> None:
-        route_external_waiting = (
-            self._route_measurement_waiting
-            and self._route_measurement_waiting_reason == "external_measurement"
+        action = route_run_pause_action(
+            running=self._route_measurement_running,
+            waiting=self._route_measurement_waiting,
+            waiting_reason=self._route_measurement_waiting_reason,
+            pause_request_pending=self._route_pause_request_pending,
         )
-        if self._route_measurement_waiting and not route_external_waiting:
+        if action == "resume":
             self.route_measurement_confirmation_requested.emit("next")
             return
-        if (
-            self._route_measurement_running
-            and (self._route_pause_request_pending or route_external_waiting)
-        ):
+        if action == "interrupt":
             self.set_route_measurement_interrupt_request_pending(True)
             self.route_measurement_interrupt_requested.emit()
             return

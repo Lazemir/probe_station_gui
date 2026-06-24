@@ -56,6 +56,10 @@ from probe_station_gui.route_measurement import (
     ROUTE_OPERATION_PHOTO_THEN_MEASURE,
     RouteContactQualityLimits,
 )
+from probe_station_gui.route_run_ui import (
+    route_run_control_presentation,
+    route_run_pause_action,
+)
 from probe_station_gui.settings_manager import (
     LCR_APERTURE_RATES,
     LCR_LEVEL_MODES,
@@ -1052,26 +1056,11 @@ class RouteMeasurementDialog(QDialog):
         self._update_pause_interrupt_buttons()
 
     def _update_pause_interrupt_buttons(self) -> None:
-        if self._running and self._can_confirm_waiting():
-            self._pause_button.setText("Resume")
-            self._pause_button.setEnabled(True)
-            self._interrupt_button.setText("Resume")
-            self._interrupt_button.setEnabled(False)
-            return
-        if self._running and (
-            self._pause_request_pending
-            or self._interrupt_request_pending
-            or self._external_measurement_waiting()
-        ):
-            self._pause_button.setText("Interrupt")
-            self._pause_button.setEnabled(not self._interrupt_request_pending)
-            self._interrupt_button.setText("Interrupt")
-            self._interrupt_button.setEnabled(False)
-            return
-        self._pause_button.setText("Pause")
-        self._interrupt_button.setText("Interrupt")
-        self._pause_button.setEnabled(self._running)
-        self._interrupt_button.setEnabled(False)
+        presentation = self._route_run_control_presentation()
+        self._pause_button.setText(presentation.pause_text)
+        self._pause_button.setEnabled(presentation.pause_enabled)
+        self._interrupt_button.setText(presentation.interrupt_text)
+        self._interrupt_button.setEnabled(presentation.interrupt_enabled)
 
     def _update_session_buttons(self) -> None:
         can_change_session = not self._running
@@ -1086,16 +1075,18 @@ class RouteMeasurementDialog(QDialog):
         )
 
     def _external_measurement_waiting(self) -> bool:
-        return bool(
-            self._waiting
-            and str(getattr(self, "_waiting_reason", "")) == "external_measurement"
-        )
+        return self._route_run_control_presentation().external_measurement_waiting
 
     def _can_confirm_waiting(self) -> bool:
-        return bool(
-            self._running
-            and self._waiting
-            and not self._external_measurement_waiting()
+        return self._route_run_control_presentation().can_confirm_waiting
+
+    def _route_run_control_presentation(self):
+        return route_run_control_presentation(
+            running=self._running,
+            waiting=self._waiting,
+            waiting_reason=str(getattr(self, "_waiting_reason", "")),
+            pause_request_pending=self._pause_request_pending,
+            interrupt_request_pending=self._interrupt_request_pending,
         )
 
     def _set_runtime_settings_enabled(self, enabled: bool) -> None:
@@ -1540,12 +1531,16 @@ class RouteMeasurementDialog(QDialog):
         )
 
     def _emit_pause_requested(self) -> None:
-        if self._can_confirm_waiting():
+        action = route_run_pause_action(
+            running=self._running,
+            waiting=self._waiting,
+            waiting_reason=str(getattr(self, "_waiting_reason", "")),
+            pause_request_pending=self._pause_request_pending,
+        )
+        if action == "resume":
             self.next_requested.emit()
             return
-        if self._running and (
-            self._pause_request_pending or self._external_measurement_waiting()
-        ):
+        if action == "interrupt":
             self.set_interrupt_request_pending(True)
             self.interrupt_requested.emit()
             return
