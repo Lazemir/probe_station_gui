@@ -1258,9 +1258,7 @@ class StageController(QObject):
         self._active_work_coordinate_system = coordinate_system
         if self._position_reporting_mode != "machine":
             try:
-                self._controller_coordinate_offsets = (
-                    self._query_work_coordinate_offsets(serial_connection)
-                )
+                self._controller_coordinate_offsets = self._query_work_coordinate_offsets()
             except StageControllerError as exc:
                 logger.warning("Unable to refresh work coordinate offsets: %s", exc)
         refreshed = self._query_status_with_required_coordinates(
@@ -5209,8 +5207,9 @@ class StageController(QObject):
         return 100 + (time.monotonic_ns() % 900)
 
     def _query_work_coordinate_offsets(
-        self, serial_connection: serial.Serial, timeout: float = 2.5
+        self, timeout: float = 2.5
     ) -> dict[str, tuple[float, ...]]:
+        serial_connection = self._current_serial()
         self._write_command(serial_connection, "$#")
         deadline = time.monotonic() + timeout
         offsets: dict[str, tuple[float, ...]] = {}
@@ -5347,8 +5346,8 @@ class StageController(QObject):
         )
         if self._position_reporting_mode != "machine":
             try:
-                self._controller_coordinate_offsets = self._query_work_coordinate_offsets(
-                    serial_connection
+                self._controller_coordinate_offsets = (
+                    self._query_work_coordinate_offsets()
                 )
             except StageControllerError as exc:
                 logger.warning("Unable to load work coordinate offsets: %s", exc)

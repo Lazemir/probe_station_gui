@@ -574,10 +574,9 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
             ]
         )
 
-        offsets = controller._query_work_coordinate_offsets(
-            serial_connection,
-            timeout=0.5,
-        )
+        controller._serial = serial_connection
+        with controller._serial_session():
+            offsets = controller._query_work_coordinate_offsets(timeout=0.5)
 
         self.assertEqual(serial_connection.writes, [b"$#\n"])
         self.assertIn("G54", offsets)
