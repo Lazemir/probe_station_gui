@@ -152,6 +152,12 @@ from probe_station_gui.route_measurement import (
     route_measurement_sample_from_raw,
     summarize_route_contact_quality,
 )
+from probe_station_gui.route_formatting import (
+    csv_bool as _csv_bool,
+    csv_float as _csv_float,
+    format_route_ohm as _format_route_ohm,
+    format_route_percent as _format_route_percent,
+)
 from probe_station_gui.microscope_imaging import (
     MicroscopeCaptureResult,
     MicroscopeImageMetadata,
@@ -13052,43 +13058,6 @@ class Main(QMainWindow):
         settings.oscillation.turns_per_sweep = float(turns_per_sweep)
         self.settings_manager.replace(settings)
         self.settings_manager.save()
-
-
-def _csv_float(value: object) -> str:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return ""
-    if not math.isfinite(number):
-        return ""
-    return f"{number:.12g}"
-
-
-def _csv_bool(value: object) -> str:
-    return "true" if bool(value) else "false"
-
-
-def _format_route_ohm(value: float) -> str:
-    if not math.isfinite(value):
-        return "nan Ohm"
-    abs_value = abs(value)
-    for scale, unit in (
-        (1e9, "GOhm"),
-        (1e6, "MOhm"),
-        (1e3, "kOhm"),
-        (1.0, "Ohm"),
-        (1e-3, "mOhm"),
-        (1e-6, "uOhm"),
-    ):
-        if abs_value >= scale:
-            return f"{value / scale:.3g} {unit}"
-    return f"{value:.3g} Ohm"
-
-
-def _format_route_percent(value: float) -> str:
-    if not math.isfinite(value):
-        return "nan%"
-    return f"{value * 100.0:.3g}%"
 
 
 def _screen_available_geometry(window: QMainWindow):
