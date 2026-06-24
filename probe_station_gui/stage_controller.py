@@ -441,9 +441,7 @@ class StageController(QObject):
             with self._serial_session_lock:
                 for attempt in range(1, attempts + 1):
                     used_attempts = attempt
-                    current_marker = self._read_controller_session_marker(
-                        serial_connection
-                    )
+                    current_marker = self._read_controller_session_marker()
                     if current_marker is not None:
                         break
                     if attempt < attempts:
@@ -3357,7 +3355,7 @@ class StageController(QObject):
                     self.homing_action_finished.emit(False, str(exc), "A")
                     raise
             with self._serial_session_lock:
-                self._ensure_controller_session_marker(serial_connection)
+                self._ensure_controller_session_marker()
             if self._last_stage_position is not None:
                 self.stage_position_changed.emit(tuple(self._last_stage_position))
             success = True
@@ -5025,19 +5023,16 @@ class StageController(QObject):
         self._wait_for_ok(serial_connection, check_cancelled=check_cancelled)
         self._current_status_report_mask = int(mask)
 
-    def _query_active_coordinate_system(
-        self, serial_connection: serial.Serial, timeout: float = 2.0
-    ) -> str | None:
-        tokens = self._query_modal_state_tokens(serial_connection, timeout=timeout)
+    def _query_active_coordinate_system(self, timeout: float = 2.0) -> str | None:
+        tokens = self._query_modal_state_tokens(timeout=timeout)
         for token in tokens:
             candidate = token.strip().upper()
             if candidate in self.WORK_COORDINATE_SYSTEMS:
                 return candidate
         return None
 
-    def _query_modal_state_tokens(
-        self, serial_connection: serial.Serial, timeout: float = 2.0
-    ) -> list[str]:
+    def _query_modal_state_tokens(self, timeout: float = 2.0) -> list[str]:
+        serial_connection = self._current_serial()
         self._write_command(serial_connection, "$G")
         deadline = time.monotonic() + timeout
         saw_ack = False
@@ -5110,10 +5105,8 @@ class StageController(QObject):
         system = offset_match.group("system").upper()
         self._controller_coordinate_offsets[system] = coords
 
-    def _read_controller_session_marker(
-        self, serial_connection: serial.Serial
-    ) -> int | None:
-        for token in self._query_modal_state_tokens(serial_connection):
+    def _read_controller_session_marker(self) -> int | None:
+        for token in self._query_modal_state_tokens():
             token = token.strip().upper()
             if not token.startswith("T"):
                 continue
@@ -5124,9 +5117,8 @@ class StageController(QObject):
             return marker if marker > 0 else None
         return None
 
-    def _ensure_controller_session_marker(
-        self, serial_connection: serial.Serial
-    ) -> None:
+    def _ensure_controller_session_marker(self) -> None:
+        serial_connection = self._current_serial()
         marker = self._controller_session_marker
         if marker is None:
             marker = self._new_controller_session_marker()
@@ -5339,7 +5331,7 @@ class StageController(QObject):
         detected_system = None if self._position_reporting_mode == "machine" else None
         try:
             if self._position_reporting_mode != "machine":
-                detected_system = self._query_active_coordinate_system(serial_connection)
+                detected_system = self._query_active_coordinate_system()
         except StageControllerError as exc:
             logger.warning("Unable to query active coordinate system: %s", exc)
         if (
@@ -6321,7 +6313,7 @@ class StageController(QObject):
             self._controller_state_stale = False
             self._set_needles_state(True, known=True, zone="raise")
             if self._controller_session_marker is None:
-                self._ensure_controller_session_marker(serial_connection)
+                self._ensure_controller_session_marker()
 
     def _move_vector_for_axis(self, axis: str, delta: float) -> MoveVector:
         """Create a single-axis move vector."""

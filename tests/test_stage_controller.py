@@ -555,10 +555,9 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
             ]
         )
 
-        tokens = controller._query_modal_state_tokens(
-            serial_connection,
-            timeout=0.2,
-        )
+        controller._serial = serial_connection
+        with controller._serial_session():
+            tokens = controller._query_modal_state_tokens(timeout=0.2)
 
         self.assertIn("G54", tokens)
         self.assertEqual(serial_connection.writes, [b"$G\n"])
@@ -3311,7 +3310,7 @@ class StageControllerStartupSyncTest(unittest.TestCase):
             lambda _serial, apply_preference=True: None
         )
         controller._ensure_axis_limits = lambda _serial, **_kwargs: None
-        controller._ensure_controller_session_marker = lambda _serial: None
+        controller._ensure_controller_session_marker = lambda: None
         controller._query_status = lambda _serial: types.SimpleNamespace(
             state="Idle",
             position=(0.0, 0.0, 0.0, 0.0),
@@ -3348,7 +3347,7 @@ class StageControllerStartupSyncTest(unittest.TestCase):
             lambda _serial, apply_preference=True: None
         )
         controller._ensure_axis_limits = lambda _serial, **_kwargs: None
-        controller._ensure_controller_session_marker = lambda _serial: None
+        controller._ensure_controller_session_marker = lambda: None
         controller._query_status = lambda _serial: types.SimpleNamespace(
             state="Idle",
             position=(0.0, 0.0, 0.0, 0.0),
@@ -3386,7 +3385,7 @@ class StageControllerStartupSyncTest(unittest.TestCase):
             lambda _serial, apply_preference=True: None
         )
         controller._ensure_axis_limits = lambda _serial, **_kwargs: None
-        controller._ensure_controller_session_marker = lambda _serial: None
+        controller._ensure_controller_session_marker = lambda: None
         controller._query_status = lambda _serial: types.SimpleNamespace(
             state="Idle",
             position=(1.0, 2.0, 3.0, 0.0),
@@ -3427,7 +3426,7 @@ class StageControllerStartupSyncTest(unittest.TestCase):
             lambda _serial, apply_preference=True: None
         )
         controller._ensure_axis_limits = lambda _serial, **_kwargs: None
-        controller._ensure_controller_session_marker = lambda _serial: None
+        controller._ensure_controller_session_marker = lambda: None
         controller._query_axis_max_feedrates_locked = (
             lambda _serial: (_ for _ in ()).throw(AssertionError("$CD should be skipped"))
         )
