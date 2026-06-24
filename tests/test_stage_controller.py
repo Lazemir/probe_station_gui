@@ -237,7 +237,6 @@ class StageControllerStartupLimitsTest(unittest.TestCase):
 
         with self.assertRaises(StageControllerError):
             controller._send_absolute_axis_move(
-                controller._serial,
                 "Z",
                 -0.1,
                 ignore_needle_safety=True,
@@ -1752,7 +1751,6 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
         controller._wait_for_idle = lambda *_args, **_kwargs: None
 
         controller._send_absolute_axis_move(
-            controller._serial,
             "B",
             0.25,
             ignore_needle_safety=True,
@@ -1786,7 +1784,6 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
         controller._reset_feed_override_for_serial = lambda _serial: None
 
         controller._send_absolute_axis_targets_move(
-            controller._serial,
             {"X": 10.0, "Y": -5.0},
             feedrate=123.4,
         )
@@ -1886,7 +1883,6 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
         )
 
         controller._send_absolute_axis_targets_move(
-            controller._serial,
             {"X": 4.0},
             ignore_needle_safety=True,
             feedrate=50.0,
@@ -1916,7 +1912,6 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
 
         with self.assertRaises(StageControllerError):
             controller._send_absolute_axis_targets_move(
-                controller._serial,
                 {"X": 37.0},
                 feedrate=100.0,
             )
@@ -1945,7 +1940,6 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
         controller._reset_feed_override_for_serial = lambda _serial: None
 
         controller._send_absolute_axis_targets_move(
-            controller._serial,
             {"X": 37.0},
             feedrate=100.0,
             allow_unhomed=True,
@@ -2131,7 +2125,7 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
             )
             targets = []
             controller._send_absolute_axis_move = (
-                lambda _serial, axis, value, **_kwargs: targets.append((axis, value))
+                lambda axis, value, **_kwargs: targets.append((axis, value))
             )
             controller._read_current_a_position = lambda: targets[-1][1]
             controller.needles_action_finished = types.SimpleNamespace(
@@ -2169,7 +2163,7 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
             )
             observed = []
 
-            def _send_absolute_axis_move(_serial, axis, value, **kwargs) -> None:
+            def _send_absolute_axis_move(axis, value, **kwargs) -> None:
                 observed.append(
                     (
                         axis,
@@ -2229,7 +2223,7 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
             observed = []
             states = []
 
-            def _send_absolute_axis_move(_serial, axis, value, **kwargs) -> None:
+            def _send_absolute_axis_move(axis, value, **kwargs) -> None:
                 observed.append(
                     (
                         axis,
@@ -2288,7 +2282,7 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
             )
             observed = []
 
-            def _send_absolute_axis_move(_serial, axis, value, **kwargs) -> None:
+            def _send_absolute_axis_move(axis, value, **kwargs) -> None:
                 observed.append(
                     (
                         axis,
@@ -2344,7 +2338,7 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
             observed = []
             messages = []
 
-            def _send_absolute_axis_move(_serial, axis, value, **kwargs) -> None:
+            def _send_absolute_axis_move(axis, value, **kwargs) -> None:
                 observed.append(
                     (
                         axis,
@@ -2407,7 +2401,7 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
             )
             observed = []
 
-            def _send_absolute_axis_move(_serial, axis, value, **kwargs) -> None:
+            def _send_absolute_axis_move(axis, value, **kwargs) -> None:
                 observed.append((axis, value, kwargs.get("feedrate")))
 
             controller._send_absolute_axis_move = _send_absolute_axis_move
@@ -2454,7 +2448,7 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
             )
             observed = []
 
-            def _send_absolute_axis_move(_serial, axis, value, **kwargs) -> None:
+            def _send_absolute_axis_move(axis, value, **kwargs) -> None:
                 observed.append((axis, value, kwargs.get("feedrate")))
 
             controller._send_absolute_axis_move = _send_absolute_axis_move
@@ -2513,7 +2507,7 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
             controller._query_status = _query_status
             observed = []
 
-            def _send_absolute_axis_move(_serial, axis, value, **kwargs) -> None:
+            def _send_absolute_axis_move(axis, value, **kwargs) -> None:
                 observed.append((axis, value, kwargs.get("feedrate")))
 
             controller._send_absolute_axis_move = _send_absolute_axis_move

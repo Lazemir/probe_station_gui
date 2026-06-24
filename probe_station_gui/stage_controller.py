@@ -1688,7 +1688,6 @@ class StageController(QObject):
             )
             with self._serial_session() as serial_connection:
                 self._send_absolute_axis_targets_move(
-                    serial_connection,
                     ordered_targets,
                     ignore_needle_safety=self._motion_safety_disabled,
                     feedrate=feedrate,
@@ -4108,7 +4107,6 @@ class StageController(QObject):
                 )
                 try:
                     self._send_absolute_axis_move(
-                        serial_connection,
                         "A",
                         segment_target_a,
                         ignore_needle_safety=True,
@@ -4119,7 +4117,6 @@ class StageController(QObject):
                     self._end_needles_feedrate_control()
             else:
                 self._send_absolute_axis_move(
-                    serial_connection,
                     "A",
                     segment_target_a,
                     ignore_needle_safety=True,
@@ -4251,7 +4248,6 @@ class StageController(QObject):
                     f"F{self._format_gcode_value(feedrate_text)}."
                 )
                 self._send_absolute_axis_move(
-                    serial_connection,
                     axis,
                     target_value,
                     ignore_needle_safety=self._motion_safety_disabled,
@@ -4297,7 +4293,6 @@ class StageController(QObject):
                     f"{target_text} F{self._format_gcode_value(feedrate_text)}."
                 )
                 self._send_absolute_axis_targets_move(
-                    serial_connection,
                     ordered_targets,
                     ignore_needle_safety=self._motion_safety_disabled,
                     feedrate=feedrate,
@@ -4411,7 +4406,6 @@ class StageController(QObject):
             )
             try:
                 self._send_absolute_axis_move(
-                    serial_connection,
                     "A",
                     target_a,
                     ignore_needle_safety=True,
@@ -4635,7 +4629,6 @@ class StageController(QObject):
 
     def _send_absolute_axis_targets_move(
         self,
-        serial_connection: serial.Serial,
         targets: dict[str, float],
         *,
         ignore_needle_safety: bool = False,
@@ -4661,6 +4654,7 @@ class StageController(QObject):
             raise StageControllerError(f"Unsupported axis: {', '.join(unsupported)}")
         if not ordered_targets:
             return
+        serial_connection = self._current_serial()
         if not ignore_needle_safety:
             self._move_safety_check()
         current_values: dict[str, float] = {}
@@ -4745,7 +4739,6 @@ class StageController(QObject):
 
     def _send_absolute_axis_move(
         self,
-        serial_connection: serial.Serial,
         axis: str,
         value: float,
         *,
@@ -4757,7 +4750,6 @@ class StageController(QObject):
     ) -> None:
         axis = axis.upper().strip()
         self._send_absolute_axis_targets_move(
-            serial_connection,
             {axis: float(value)},
             ignore_needle_safety=ignore_needle_safety,
             feedrate=feedrate,
