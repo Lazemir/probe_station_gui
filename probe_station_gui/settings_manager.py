@@ -35,7 +35,7 @@ from probe_station_gui.settings.feedrate_config import (
     parse_feedrate_list,
     select_feedrate_default,
 )
-from probe_station_gui.fluidnc_protocol import parse_fluidnc_axis_max_feedrates
+from probe_station_gui.stage.fluidnc_protocol import parse_fluidnc_axis_max_feedrates
 from probe_station_gui.settings.jog_config import (
     JogSettings,
     JogSettingsDefaults,

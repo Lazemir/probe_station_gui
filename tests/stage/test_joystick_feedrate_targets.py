@@ -1,7 +1,7 @@
 import math
 import unittest
 
-from probe_station_gui.joystick_feedrate_targets import (
+from probe_station_gui.stage.joystick_feedrate_targets import (
     bounded_feedrate_setting,
     clean_axis_feedrate_limits,
     feedrate_from_slider_value,

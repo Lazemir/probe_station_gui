@@ -35,7 +35,7 @@ from probe_station_gui.qt_compat import (
     keyboard_modifiers_to_int,
     native_scan_code_to_int,
 )
-from probe_station_gui.joystick_feedrate_targets import (
+from probe_station_gui.stage.joystick_feedrate_targets import (
     bounded_feedrate_setting,
     clean_axis_feedrate_limits,
     feedrate_from_slider_value,
@@ -55,7 +55,7 @@ from probe_station_gui.wheel_guard import (
 )
 
 if TYPE_CHECKING:
-    from probe_station_gui.stage_controller import StageController
+    from probe_station_gui.stage.controller import StageController
 
 logger = logging.getLogger(__name__)
 

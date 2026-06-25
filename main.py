@@ -124,9 +124,9 @@ from probe_station_gui.lcr_meter import (
     ROUTE_METER_KEITHLEY,
     RouteMeterConfiguration,
 )
-from probe_station_gui.motion_prediction import interpolate_position, motion_progress
+from probe_station_gui.stage.motion_prediction import interpolate_position, motion_progress
 from probe_station_gui.wheel_guard import GuardedComboBox as QComboBox
-from probe_station_gui.stage_controller import StageControllerError
+from probe_station_gui.stage.controller import StageControllerError
 from probe_station_gui.objective_offsets import (
     ObjectiveOffsetReference,
     base_objective_name,

@@ -26,7 +26,7 @@ _LAZY_EXPORTS = {
         "SerialTerminalWindow",
     ),
     "MoveVector": ("probe_station_gui.stage.types", "MoveVector"),
-    "StageController": ("probe_station_gui.stage_controller", "StageController"),
+    "StageController": ("probe_station_gui.stage.controller", "StageController"),
 }
 
 __all__ = list(_LAZY_EXPORTS)

@@ -68,7 +68,12 @@ def _install_pyside6_stubs() -> None:
 
 def _load_stage_controller():
     _install_pyside6_stubs()
-    module_path = Path(__file__).resolve().parents[1] / "probe_station_gui" / "stage_controller.py"
+    module_path = (
+        Path(__file__).resolve().parents[2]
+        / "probe_station_gui"
+        / "stage"
+        / "controller.py"
+    )
     spec = importlib.util.spec_from_file_location("stage_controller_test", module_path)
     module = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
@@ -78,7 +83,11 @@ def _load_stage_controller():
 
 
 def _load_settings_manager():
-    module_path = Path(__file__).resolve().parents[1] / "probe_station_gui" / "settings_manager.py"
+    module_path = (
+        Path(__file__).resolve().parents[2]
+        / "probe_station_gui"
+        / "settings_manager.py"
+    )
     spec = importlib.util.spec_from_file_location("settings_manager_stage_test", module_path)
     module = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
@@ -2644,7 +2653,7 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
 
 
 class StageControllerAxisMotionFitTest(unittest.TestCase):
-    CALIBRATIONS = Path(__file__).resolve().parents[1] / "calibrations"
+    CALIBRATIONS = Path(__file__).resolve().parents[2] / "calibrations"
 
     @staticmethod
     def _rmse(values: np.ndarray) -> float:

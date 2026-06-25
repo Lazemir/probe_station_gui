@@ -1,4 +1,4 @@
-from probe_station_gui.needle_motion_profile import (
+from probe_station_gui.stage.needle_motion_profile import (
     build_needle_motion_profile_segments,
 )
 

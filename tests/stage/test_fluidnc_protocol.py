@@ -1,4 +1,4 @@
-from probe_station_gui.fluidnc_protocol import (
+from probe_station_gui.stage.fluidnc_protocol import (
     line_indicates_controller_reboot,
     line_indicates_controller_startup,
     parse_fluidnc_axis_max_feedrates,
