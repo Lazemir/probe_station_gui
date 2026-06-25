@@ -48,6 +48,7 @@ from probe_station_gui.stage.jog_commands import (
     JOG_FEEDRATE_WORD_PATTERN,
     format_gcode_value as format_gcode_value,
 )
+from probe_station_gui.stage.homing_startup import StageControllerHomingStartupMixin
 from probe_station_gui.stage.jog_queue import StageControllerJogQueueMixin
 from probe_station_gui.stage.motion_commands import StageControllerMotionCommandsMixin
 from probe_station_gui.stage.motion_timing import (
@@ -96,6 +97,7 @@ np = _LazyModule("numpy")
 
 class StageController(
     StageControllerConnectionMixin,
+    StageControllerHomingStartupMixin,
     StageControllerSerialWriteQueueMixin,
     StageControllerStatusIOMixin,
     StageControllerFluidNCConfigIOMixin,
@@ -306,26 +308,6 @@ class StageController(
         )
         self._async_write_thread.start()
 
-    def request_startup_sync(
-        self, *, auto_home_a: bool = True, clear_unverified_state: bool = False
-    ) -> None:
-        """Load controller state after connect and optionally home A."""
-
-        with self._task_lock:
-            if self._active_thread and self._active_thread.is_alive():
-                self.status_message.emit("Stage is busy. Skipping startup sync.")
-                return
-            if clear_unverified_state:
-                self._clear_unverified_controller_state_locked()
-            self._cancel_event.clear()
-            thread = threading.Thread(
-                target=self._run_startup_sync,
-                args=(bool(auto_home_a),),
-                daemon=True,
-            )
-            self._active_thread = thread
-            thread.start()
-
     # Jog stop confirmation is handled in the joystick layer to avoid serial contention.
     def shutdown(self) -> None:
         """Stop any outstanding background task before application exit."""
@@ -367,41 +349,6 @@ class StageController(
         finally:
             with self._task_lock:
                 self._status_refresh_thread = None
-
-    def request_home_axis(self, axis: str) -> bool:
-        """Home a specific axis via a background task."""
-
-        axis = axis.upper().strip()
-        if not axis:
-            return False
-        with self._task_lock:
-            if self._active_thread and self._active_thread.is_alive():
-                self.status_message.emit("Stage is busy. Ignoring home request.")
-                return False
-            self._cancel_event.clear()
-            thread = threading.Thread(
-                target=self._run_home, args=(f"$H{axis}", axis), daemon=True
-            )
-            self._active_thread = thread
-            self.homing_action_started.emit(axis)
-            thread.start()
-            return True
-
-    def request_home_all(self) -> bool:
-        """Home all axes via a background task."""
-
-        with self._task_lock:
-            if self._active_thread and self._active_thread.is_alive():
-                self.status_message.emit("Stage is busy. Ignoring home request.")
-                return False
-            self._cancel_event.clear()
-            thread = threading.Thread(
-                target=self._run_home, args=("$H", "ALL"), daemon=True
-            )
-            self._active_thread = thread
-            self.homing_action_started.emit("ALL")
-            thread.start()
-            return True
 
     def request_needles_raise(self, feedrate: float | None = None) -> None:
         """Raise the needles by homing the A axis."""
@@ -1050,102 +997,6 @@ class StageController(
             min_axes=min_axes,
         )
 
-    def _run_home(self, command: str, axis_key: str) -> None:
-        self.movement_started.emit()
-        try:
-            with self._serial_session():
-                self._perform_home_command(command)
-            self.movement_finished.emit(True, "Homing complete.")
-            self.homing_action_finished.emit(True, "Homing complete.", axis_key)
-        except StageControllerError as exc:
-            self.movement_finished.emit(False, str(exc))
-            self.homing_action_finished.emit(False, str(exc), axis_key)
-        finally:
-            with self._task_lock:
-                self._active_thread = None
-
-    def _run_startup_sync(self, auto_home_a: bool) -> None:
-        success = False
-        try:
-            serial_connection = self._require_open_serial()
-
-            self.status_message.emit("Loading controller startup state...")
-            with self._serial_session_lock:
-                axis_feedrates = dict(self._axis_max_feedrates)
-                if axis_feedrates:
-                    logger.info(
-                        "Using cached controller axis max feedrates for unchanged controller session."
-                    )
-                else:
-                    try:
-                        axis_feedrates = self._query_axis_max_feedrates_locked(
-                            serial_connection
-                        )
-                    except StageControllerError as exc:
-                        axis_feedrates = {}
-                        logger.warning(
-                            "Unable to read axis max feedrates from controller: %s",
-                            exc,
-                        )
-                if axis_feedrates:
-                    self.apply_axis_max_feedrates(axis_feedrates)
-                    self.axis_max_feedrates_changed.emit(dict(axis_feedrates))
-                self._ensure_axis_limits(
-                    serial_connection, required_axes=self.CONTROLLER_LIMIT_AXES
-                )
-                self._refresh_coordinate_system_state(
-                    serial_connection, apply_preference=True
-                )
-                status = self._query_status(serial_connection)
-            if status is None:
-                raise StageControllerError("Unable to read startup controller status.")
-
-            self.status_message.emit(
-                "Axis limits loaded from controller. B uses app soft limit ±45 deg."
-            )
-
-            self._emit_coordinate_system_status(status)
-            effective_homed = status.homed_axes
-            if effective_homed is None and self._homed_axes:
-                effective_homed = set(self._homed_axes)
-            if effective_homed:
-                ordered = ", ".join(sorted(effective_homed))
-                self.status_message.emit(f"Homed axes: {ordered}.")
-            else:
-                self.status_message.emit("Controller did not report any homed axes.")
-
-            self._controller_state_stale = False
-            self._refresh_axis_a_ready_from_state()
-
-            if auto_home_a and (effective_homed is None or "A" not in effective_homed):
-                self.movement_started.emit()
-                self.homing_action_started.emit("A")
-                try:
-                    self.status_message.emit("A axis not homed. Homing needles on startup.")
-                    with self._serial_session():
-                        self._perform_home_command("$HA")
-                    self.movement_finished.emit(True, "Startup A homing complete.")
-                    self.homing_action_finished.emit(
-                        True, "Startup A homing complete.", "A"
-                    )
-                except StageControllerError as exc:
-                    self.movement_finished.emit(False, str(exc))
-                    self.homing_action_finished.emit(False, str(exc), "A")
-                    raise
-            with self._serial_session_lock:
-                self._ensure_controller_session_marker()
-            if self._last_stage_position is not None:
-                self.stage_position_changed.emit(tuple(self._last_stage_position))
-            success = True
-        except StageControllerError as exc:
-            self.status_message.emit(str(exc))
-        finally:
-            with self._task_lock:
-                if success:
-                    self._controller_reboot_recovery_pending = False
-                    self._controller_reboot_ready_notified = False
-                self._active_thread = None
-
     def _update_cached_positions(self, status: _Status) -> None:
         if status.coordinate_system:
             self._active_work_coordinate_system = status.coordinate_system
@@ -1163,25 +1014,6 @@ class StageController(
             self._controller_coordinate_offsets[status.coordinate_system] = tuple(
                 float(v) for v in status.work_offset
             )
-
-    def _perform_home_command(self, command: str) -> None:
-        """Execute a homing command using the current serial session."""
-
-        self.status_message.emit(f"Homing: {command}")
-        self._write_current_command_and_wait(command, timeout=30.0)
-        self._wait_for_idle(timeout=30.0)
-        if command.upper() in ("$H", "$HA"):
-            axes = set(self._homed_axes)
-            if command.upper() == "$H":
-                axes.update({"X", "Y", "Z", "A"})
-            else:
-                axes.add("A")
-            self._update_homing_status(axes)
-            self._update_limit_axes(self._limit_axes.difference(axes))
-            self._controller_state_stale = False
-            self._set_needles_state(True, known=True, zone="raise")
-            if self._controller_session_marker is None:
-                self._ensure_controller_session_marker()
 
     def _check_cancelled(self) -> None:
         if self._cancel_event.is_set():
