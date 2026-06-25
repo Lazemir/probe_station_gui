@@ -9108,7 +9108,7 @@ class Main(QMainWindow):
         self._update_stage_coordinate_apply_state()
 
     def _request_stop_route_measurement(self) -> None:
-        if bool(getattr(self, "_api_route_control_active", False)):
+        if self._api_route_control_state_snapshot().active:
             self._api_route_control_action({"action": "stop"})
             return
         runner = self._route_measurement_runner
@@ -9134,7 +9134,7 @@ class Main(QMainWindow):
         self,
         pending_point_number: int | None = None,
     ) -> None:
-        if bool(getattr(self, "_api_route_control_active", False)):
+        if self._api_route_control_state_snapshot().active:
             self._interrupt_api_route_controlled_operation(
                 "API route control interrupt requested."
             )
@@ -9163,12 +9163,10 @@ class Main(QMainWindow):
             self._route_measurement_dialog.set_status(message)
 
     def _submit_route_measurement_confirmation(self, action: str) -> None:
-        if bool(getattr(self, "_api_route_control_active", False)) and bool(
-            getattr(self, "_api_route_control_paused", False)
-        ):
-            api_action = str(action).strip().lower()
-            if api_action == "next":
-                api_action = "resume"
+        api_action = self._api_route_control_state_snapshot().confirmation_api_action(
+            action
+        )
+        if api_action is not None:
             self._api_route_control_action({"action": api_action})
             return
         runner = self._route_measurement_runner
@@ -9251,15 +9249,14 @@ class Main(QMainWindow):
             return
         route_thread = self._route_measurement_thread
         route_active = route_thread is not None and route_thread.is_alive()
-        api_route_active = bool(getattr(self, "_api_route_control_active", False))
-        api_route_paused = bool(getattr(self, "_api_route_control_paused", False))
+        api_route_control = self._api_route_control_state_snapshot()
         if route_active and not self._route_measurement_waiting:
             self._show_status(
                 "Pause or wait for route measurement before moving to a contact.",
                 5000,
             )
             return
-        if api_route_active and not api_route_paused:
+        if api_route_control.blocks_route_adjustment:
             self._show_status(
                 "Pause API route control before moving to a contact.",
                 5000,
@@ -9355,10 +9352,13 @@ class Main(QMainWindow):
             self._route_measurement_dialog.set_status(message)
 
     def _request_pause_route_measurement(self) -> None:
-        if bool(getattr(self, "_api_route_control_active", False)):
-            if bool(getattr(self, "_api_route_control_paused", False)):
+        api_route_pause_action = (
+            self._api_route_control_state_snapshot().pause_control_action()
+        )
+        if api_route_pause_action:
+            if api_route_pause_action == "resume":
                 self._api_route_control_action({"action": "resume"})
-            elif bool(getattr(self, "_api_route_control_pause_requested", False)):
+            elif api_route_pause_action == "interrupt":
                 self._interrupt_api_route_controlled_operation(
                     "API route control interrupt requested."
                 )
@@ -9393,11 +9393,10 @@ class Main(QMainWindow):
         runner = self._route_measurement_runner
         thread = self._route_measurement_thread
         runner_active = runner is not None and thread is not None and thread.is_alive()
-        api_route_active = bool(getattr(self, "_api_route_control_active", False))
-        api_route_paused = bool(getattr(self, "_api_route_control_paused", False))
-        if api_route_active:
+        api_route_control = self._api_route_control_state_snapshot()
+        if api_route_control.active:
             runner_active = False
-        if not runner_active and not api_route_active:
+        if not runner_active and not api_route_control.active:
             message = "Route measurement is not ready."
             self._show_status(message, 5000)
             if self.design_navigator_panel is not None:
@@ -9413,7 +9412,7 @@ class Main(QMainWindow):
             if self._route_measurement_dialog is not None:
                 self._route_measurement_dialog.set_status(message)
             return
-        if not runner_active and not api_route_paused:
+        if not runner_active and not api_route_control.paused:
             message = "Pause API route control before saving shift."
             self._show_status(message, 5000)
             if self.design_navigator_panel is not None:

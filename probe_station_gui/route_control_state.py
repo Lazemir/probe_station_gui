@@ -370,6 +370,27 @@ class ApiRouteControlState:
     def accepts_route_confirmation(self) -> bool:
         return bool(self.active and self.paused)
 
+    @property
+    def blocks_route_adjustment(self) -> bool:
+        return bool(self.active and not self.paused)
+
+    def confirmation_api_action(self, action: str) -> str | None:
+        if not self.accepts_route_confirmation:
+            return None
+        api_action = str(action).strip().lower()
+        if api_action == "next":
+            return "resume"
+        return api_action
+
+    def pause_control_action(self) -> str:
+        if not self.active:
+            return ""
+        if self.paused:
+            return "resume"
+        if self.pause_requested:
+            return "interrupt"
+        return "pause"
+
     def telegram_status_text(self) -> str:
         if not self.active:
             return ""

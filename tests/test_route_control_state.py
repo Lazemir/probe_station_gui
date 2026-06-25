@@ -242,18 +242,38 @@ def test_api_route_control_legacy_attrs_round_trips_state() -> None:
 
 
 def test_api_route_control_accepts_confirmation_only_when_paused() -> None:
+    paused = ApiRouteControlState(active=True, paused=True)
+    pause_pending = ApiRouteControlState(
+        active=True,
+        pause_requested=True,
+        paused=False,
+    )
+
+    assert paused.accepts_route_confirmation is True
+    assert paused.confirmation_api_action("next") == "resume"
+    assert paused.confirmation_api_action("skip") == "skip"
+    assert pause_pending.accepts_route_confirmation is False
+    assert pause_pending.confirmation_api_action("next") is None
+
+
+def test_api_route_control_blocks_route_adjustment_until_paused() -> None:
+    assert ApiRouteControlState().blocks_route_adjustment is False
+    assert ApiRouteControlState(active=True).blocks_route_adjustment is True
     assert (
-        ApiRouteControlState(active=True, paused=True).accepts_route_confirmation
+        ApiRouteControlState(active=True, pause_requested=True).blocks_route_adjustment
         is True
     )
+    assert ApiRouteControlState(active=True, paused=True).blocks_route_adjustment is False
+
+
+def test_api_route_control_pause_control_action_tracks_state() -> None:
+    assert ApiRouteControlState().pause_control_action() == ""
+    assert ApiRouteControlState(active=True).pause_control_action() == "pause"
     assert (
-        ApiRouteControlState(
-            active=True,
-            pause_requested=True,
-            paused=False,
-        ).accepts_route_confirmation
-        is False
+        ApiRouteControlState(active=True, pause_requested=True).pause_control_action()
+        == "interrupt"
     )
+    assert ApiRouteControlState(active=True, paused=True).pause_control_action() == "resume"
 
 
 def test_api_route_control_telegram_status_text_matches_external_states() -> None:
