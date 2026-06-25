@@ -1,6 +1,6 @@
 import pytest
 
-from probe_station_gui.stage_axis_mapping import (
+from probe_station_gui.stage.axis_mapping import (
     axis_a_gcode_coordinate_for_lowering,
     axis_a_lowering_for_gcode_coordinate,
     axis_a_model_calibrated_coordinate_for_commanded,

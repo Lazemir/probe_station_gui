@@ -1,4 +1,4 @@
-from probe_station_gui.stage_needle_state import (
+from probe_station_gui.stage.needle_state import (
     axis_a_ready_from_state,
     needle_contact_boundary_lowering,
     needle_zone_for_lowering,

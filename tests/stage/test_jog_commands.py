@@ -1,4 +1,4 @@
-from probe_station_gui.stage_jog_commands import (
+from probe_station_gui.stage.jog_commands import (
     absolute_axis_targets_jog_command,
     format_gcode_value,
     jog_command_feedrate,
@@ -6,7 +6,7 @@ from probe_station_gui.stage_jog_commands import (
     move_vector_from_jog_command,
     relative_jog_command_to_absolute,
 )
-from probe_station_gui.stage_types import MoveVector
+from probe_station_gui.stage.types import MoveVector
 
 
 AXIS_INDEX = {"X": 0, "Y": 1, "Z": 2, "A": 3, "B": 4, "C": 5}

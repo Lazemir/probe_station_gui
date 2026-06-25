@@ -1,4 +1,4 @@
-from probe_station_gui.stage_feed_override import (
+from probe_station_gui.stage.feed_override import (
     clamp_feed_override_percent,
     feed_override_payload_for_percent_change,
     feed_override_percent_for_feedrates,

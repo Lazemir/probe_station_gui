@@ -1,7 +1,7 @@
 import math
 import unittest
 
-from probe_station_gui.stage_feedrate_limits import (
+from probe_station_gui.stage.feedrate_limits import (
     axis_max_feedrate,
     clean_axis_max_feedrates,
     max_feedrate_for_axes,

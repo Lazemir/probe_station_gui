@@ -1,6 +1,6 @@
 import math
 
-from probe_station_gui.stage_controller_cache import (
+from probe_station_gui.stage.controller_cache import (
     parse_cached_axis_limits,
     parse_cached_axis_max_feedrates,
     parse_cached_controller_session_marker,

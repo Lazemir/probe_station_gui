@@ -6,7 +6,7 @@ import math
 import re
 from collections.abc import Iterable, Mapping
 
-from probe_station_gui.stage_types import _Status
+from probe_station_gui.stage.types import _Status
 
 CONTROLLER_REBOOT_TOKENS = (
     "[MSG:RST",

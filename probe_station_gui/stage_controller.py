@@ -29,9 +29,9 @@ from probe_station_gui.motion_prediction import interpolate_position
 from probe_station_gui.needle_motion_profile import (
     build_needle_motion_profile_segments,
 )
-from probe_station_gui.stage_axis_calibration import StageAxisCalibrationMapper
-from probe_station_gui.stage_axis_mapping import evaluate_polynomial
-from probe_station_gui.stage_autofocus_math import (
+from probe_station_gui.stage.axis_calibration import StageAxisCalibrationMapper
+from probe_station_gui.stage.axis_mapping import evaluate_polynomial
+from probe_station_gui.stage.autofocus_math import (
     autofocus_sweep_feedrate_mm_min,
     estimate_shift,
     estimate_shift_with_response,
@@ -41,23 +41,23 @@ from probe_station_gui.stage_autofocus_math import (
     qimage_to_gray,
     static_focus_candidates,
 )
-from probe_station_gui.stage_controller_cache import (
+from probe_station_gui.stage.controller_cache import (
     parse_cached_axis_limits,
     parse_cached_axis_max_feedrates,
     parse_cached_controller_session_marker,
     parse_cached_coordinate_offsets,
 )
-from probe_station_gui.stage_feed_override import (
+from probe_station_gui.stage.feed_override import (
     clamp_feed_override_percent,
     feed_override_payload_for_percent_change,
     feed_override_percent_for_feedrates,
 )
-from probe_station_gui.stage_feedrate_limits import (
+from probe_station_gui.stage.feedrate_limits import (
     axis_max_feedrate,
     clean_axis_max_feedrates,
     max_feedrate_for_axes,
 )
-from probe_station_gui.stage_jog_commands import (
+from probe_station_gui.stage.jog_commands import (
     JOG_AXIS_WORD_PATTERN,
     JOG_FEEDRATE_WORD_PATTERN,
     absolute_axis_targets_jog_command,
@@ -67,24 +67,24 @@ from probe_station_gui.stage_jog_commands import (
     move_vector_from_jog_command,
     relative_jog_command_to_absolute,
 )
-from probe_station_gui.stage_motion_timing import (
+from probe_station_gui.stage.motion_timing import (
     absolute_move_distance_for_timeout,
     idle_timeout_for_distance,
     move_distance_for_timeout,
 )
-from probe_station_gui.stage_needle_targets import (
+from probe_station_gui.stage.needle_targets import (
     needle_programmed_feedrate,
     needle_target_lowering_for_action,
     normalise_needle_contact_zone,
     normalise_needle_lowering_target,
 )
-from probe_station_gui.stage_needle_state import (
+from probe_station_gui.stage.needle_state import (
     axis_a_ready_from_state,
     needle_contact_boundary_lowering,
     needle_zone_for_lowering,
     normalized_needles_zone,
 )
-from probe_station_gui.stage_types import (
+from probe_station_gui.stage.types import (
     AutofocusResult,
     MoveVector,
     _AutofocusContext,

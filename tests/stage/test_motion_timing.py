@@ -1,9 +1,9 @@
-from probe_station_gui.stage_motion_timing import (
+from probe_station_gui.stage.motion_timing import (
     absolute_move_distance_for_timeout,
     idle_timeout_for_distance,
     move_distance_for_timeout,
 )
-from probe_station_gui.stage_types import MoveVector
+from probe_station_gui.stage.types import MoveVector
 
 
 def test_absolute_move_distance_uses_current_values_when_available() -> None:

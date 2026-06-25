@@ -1,7 +1,7 @@
 import math
 import unittest
 
-from probe_station_gui.stage_needle_targets import (
+from probe_station_gui.stage.needle_targets import (
     needle_programmed_feedrate,
     needle_target_lowering_for_action,
     normalise_needle_contact_zone,

@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from probe_station_gui.stage_autofocus_math import (
+from probe_station_gui.stage.autofocus_math import (
     autofocus_sweep_feedrate_mm_min,
     estimate_shift_with_response,
     focus_metric,
