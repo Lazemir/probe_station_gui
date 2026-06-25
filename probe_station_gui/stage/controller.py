@@ -15,24 +15,24 @@ from typing import Callable, Optional
 
 import serial
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtGui import QImage
 
 from probe_station_gui.stage.autofocus_flow import StageControllerAutofocusMixin
+from probe_station_gui.stage.click_move import StageControllerClickMoveMixin
 from probe_station_gui.stage.axis_coordinates import StageControllerAxisCoordinatesMixin
 from probe_station_gui.stage.connection_state import StageControllerConnectionMixin
 from probe_station_gui.stage.autofocus_math import (
     autofocus_sweep_feedrate_mm_min as autofocus_sweep_feedrate_mm_min,
-    estimate_shift,
-    estimate_shift_with_response,
-    focus_metric,
+    estimate_shift as estimate_shift,
+    estimate_shift_with_response as estimate_shift_with_response,
+    focus_metric as focus_metric,
     frame_rate_from_timestamps as frame_rate_from_timestamps,
     parabolic_focus_peak as parabolic_focus_peak,
-    qimage_to_gray,
+    qimage_to_gray as qimage_to_gray,
     static_focus_candidates as static_focus_candidates,
 )
 from probe_station_gui.stage.motion_prediction import interpolate_position as interpolate_position
 from probe_station_gui.stage.errors import (
-    AxisStateError,
+    AxisStateError as AxisStateError,
     SERIAL_IO_EXCEPTIONS,
     StageControllerError,
 )
@@ -103,6 +103,7 @@ class StageController(
     StageControllerJogQueueMixin,
     StageControllerAxisCoordinatesMixin,
     StageControllerSafetyStateMixin,
+    StageControllerClickMoveMixin,
     StageControllerAutofocusMixin,
     QObject,
 ):
@@ -344,17 +345,6 @@ class StageController(
         if self._async_write_thread.is_alive():
             self._async_write_thread.join(timeout=2.0)
 
-    def on_frame_ready(self, frame: QImage) -> None:
-        """Receive camera frames and cache them as grayscale numpy arrays."""
-
-        gray = self._qimage_to_gray(frame)
-        timestamp = time.monotonic()
-        with self._frame_condition:
-            self._latest_frame = gray
-            self._frame_counter += 1
-            self._frame_history.append((self._frame_counter, timestamp, gray.copy()))
-            self._frame_condition.notify_all()
-
     def _poll_status_once(self) -> None:
         serial_connection = self._serial
         if serial_connection is None or not serial_connection.is_open:
@@ -375,68 +365,6 @@ class StageController(
         finally:
             with self._task_lock:
                 self._status_refresh_thread = None
-
-    def request_move(self, dx_pixels: float, dy_pixels: float) -> bool:
-        """Begin an asynchronous move so the clicked point aligns with the cross."""
-
-        with self._task_lock:
-            if self._active_thread and self._active_thread.is_alive():
-                self.status_message.emit("Stage is busy. Ignoring the new click.")
-                return False
-            self._cancel_event.clear()
-            thread = threading.Thread(
-                target=self._run_move,
-                args=(dx_pixels, dy_pixels),
-                daemon=True,
-            )
-            self._active_thread = thread
-            thread.start()
-            return True
-
-    def request_move_to_xy(self, target_x_mm: float, target_y_mm: float) -> None:
-        """Move to an absolute X/Y coordinate in the configured report mode."""
-
-        with self._task_lock:
-            if self._active_thread and self._active_thread.is_alive():
-                self.status_message.emit("Stage is busy. Ignoring absolute move request.")
-                return
-            self._cancel_event.clear()
-            thread = threading.Thread(
-                target=self._run_move_to_xy,
-                args=(float(target_x_mm), float(target_y_mm)),
-                daemon=True,
-            )
-            self._active_thread = thread
-            thread.start()
-
-    def request_move_to_xyz(
-        self,
-        target_x_mm: float,
-        target_y_mm: float,
-        target_z_mm: float,
-        transit_z_mm: float | None = None,
-        label: str = "saved position",
-    ) -> None:
-        """Move to an absolute X/Y/Z point using a safe intermediate Z level."""
-
-        with self._task_lock:
-            if self._active_thread and self._active_thread.is_alive():
-                self.status_message.emit("Stage is busy. Ignoring XYZ move request.")
-                return
-            self._cancel_event.clear()
-            thread = threading.Thread(
-                target=self._run_move_to_xyz,
-                args=(
-                    float(target_x_mm),
-                    float(target_y_mm),
-                    float(target_z_mm),
-                    None if transit_z_mm is None else float(transit_z_mm),
-                    str(label),
-                ),
-                daemon=True,
-            )
-            self._active_thread = thread
-            thread.start()
 
     def request_rotate_b(self, delta_deg: float) -> None:
         """Rotate the B axis by a relative angle in the background."""
@@ -1336,60 +1264,6 @@ class StageController(
             self._status_refresh_thread = thread
             thread.start()
 
-    def current_fov_size_mm(self) -> tuple[float, float] | None:
-        """Estimate the camera field of view in millimeters from click calibration."""
-
-        if self._pixels_to_mm is None:
-            return None
-        with self._frame_condition:
-            frame = self._latest_frame
-            if frame is None:
-                return None
-            height_px, width_px = frame.shape[:2]
-        column_x = self._pixels_to_mm[:, 0]
-        column_y = self._pixels_to_mm[:, 1]
-        width_mm = float(np.linalg.norm(column_x) * float(width_px))
-        height_mm = float(np.linalg.norm(column_y) * float(height_px))
-        return (width_mm, height_mm)
-
-    def resolve_clicked_point_xy(
-        self, dx_pixels: float, dy_pixels: float
-    ) -> tuple[tuple[float, float], tuple[float, float]]:
-        """Resolve the center and clicked image point to absolute FluidNC XY."""
-
-        with self._task_lock:
-            if self._active_thread and self._active_thread.is_alive():
-                raise StageControllerError(
-                    "Stage is busy. Wait for the current operation to finish."
-                )
-            with self._serial_session():
-                status = self._query_current_status_with_required_coordinates(
-                    axes=("X", "Y"),
-                )
-                if status is None or status.display_position is None:
-                    raise StageControllerError("Unable to read stage position.")
-                self._ensure_calibration()
-        if self._pixels_to_mm is None:
-            raise StageControllerError("Calibration failed. Cannot resolve clicked position.")
-        return self._resolve_xy_from_center(
-            tuple(float(value) for value in status.display_position),
-            dx_pixels,
-            dy_pixels,
-        )
-
-    def preview_clicked_point_xy(
-        self, dx_pixels: float, dy_pixels: float
-    ) -> tuple[tuple[float, float], tuple[float, float]] | None:
-        """Project a hovered image point using cached position/calibration only."""
-
-        if self._pixels_to_mm is None or self._last_stage_position is None:
-            return None
-        return self._resolve_xy_from_center(
-            self._last_stage_position,
-            dx_pixels,
-            dy_pixels,
-        )
-
     def zero_b_axis(self) -> None:
         """Set the current B coordinate as the application zero reference."""
 
@@ -1405,209 +1279,6 @@ class StageController(
         if status is None or self._axis_value_for_configured_mode(status, "B") is None:
             raise StageControllerError("Unable to read B axis position.")
         self._set_b_axis_zero_reference(status)
-
-    def reset_calibration(self, reason: str = "Click calibration reset.") -> None:
-        """Clear the click-to-move calibration so it is rebuilt on next use."""
-
-        with self._task_lock:
-            if self._active_thread and self._active_thread.is_alive():
-                raise StageControllerError(
-                    "Stage is busy. Wait for the current operation to finish."
-                )
-            self._pixels_to_mm = None
-            self._objective_matrices.pop(self._active_objective_name, None)
-            self._objective_calibration_verified[self._active_objective_name] = False
-        self.objective_calibration_updated.emit(self._active_objective_name, [])
-        self.status_message.emit(reason)
-
-    def _run_move(self, dx_pixels: float, dy_pixels: float) -> None:
-        self.movement_started.emit()
-        try:
-            self._check_cancelled()
-            with self._serial_session():
-                self._move_safety_check()
-                before_counter = self._prepare_click_move_without_status_locked(
-                    dx_pixels,
-                    dy_pixels,
-                )
-            if before_counter is None:
-                self.movement_finished.emit(True, "Target already centered.")
-                return
-            after_frame, _ = self._wait_for_new_frame(before_counter, timeout=4.0)
-            if after_frame is None:
-                self.movement_finished.emit(
-                    False,
-                    "Movement command sent but camera did not provide an updated frame.",
-                )
-                return
-
-            self.movement_finished.emit(True, "Move complete.")
-        except StageControllerError as exc:
-            self.movement_finished.emit(False, str(exc))
-        finally:
-            with self._task_lock:
-                self._active_thread = None
-
-    def _run_move_to_xy(self, target_x_mm: float, target_y_mm: float) -> None:
-        self.movement_started.emit()
-        try:
-            self._check_cancelled()
-            with self._serial_session():
-                self._move_safety_check()
-                message = self._move_to_xy_locked(target_x_mm, target_y_mm)
-            self.movement_finished.emit(True, message)
-        except StageControllerError as exc:
-            self.movement_finished.emit(False, str(exc))
-        finally:
-            with self._task_lock:
-                self._active_thread = None
-
-    def _run_move_to_xyz(
-        self,
-        target_x_mm: float,
-        target_y_mm: float,
-        target_z_mm: float,
-        transit_z_mm: float | None,
-        label: str,
-    ) -> None:
-        self.movement_started.emit()
-        try:
-            self._check_cancelled()
-            with self._serial_session():
-                self._move_safety_check()
-                message = self._move_to_xyz_locked(
-                    target_x_mm,
-                    target_y_mm,
-                    target_z_mm,
-                    transit_z_mm=transit_z_mm,
-                    label=label,
-                )
-            self.movement_finished.emit(True, message)
-        except StageControllerError as exc:
-            self.movement_finished.emit(False, str(exc))
-        finally:
-            with self._task_lock:
-                self._active_thread = None
-
-    def _move_to_xy_locked(
-        self,
-        target_x_mm: float,
-        target_y_mm: float,
-        *,
-        feedrate: float | None = None,
-    ) -> str:
-        with self._serial_session_lock:
-            status = self._query_synced_status_for_absolute_motion(
-                refresh_coordinate_state=False,
-                min_axes=2,
-            )
-            if status is None:
-                raise StageControllerError("Unable to read current stage position.")
-            self._require_homed_axes(status, {"X", "Y"})
-            current_position = self._require_position_for_absolute_motion(
-                status,
-                required_axes=2,
-            )
-            target_position = (float(target_x_mm), float(target_y_mm))
-            delta_x = float(target_position[0]) - float(current_position[0])
-            delta_y = float(target_position[1]) - float(current_position[1])
-            move = MoveVector(x=delta_x, y=delta_y)
-            if move.is_zero(tol=1e-5):
-                return "Target already at requested X/Y."
-            self.status_message.emit(
-                f"Moving to X={target_x_mm:.3f} mm, Y={target_y_mm:.3f} mm"
-            )
-            self._send_relative_move(
-                move,
-                feedrate=feedrate,
-                as_jog=True,
-                motion_started_callback=lambda _move, feedrate: (
-                    self.absolute_xy_move_started.emit(
-                        float(target_x_mm),
-                        float(target_y_mm),
-                        float(feedrate),
-                    )
-                ),
-            )
-            self._wait_for_idle()
-            self._query_current_status()
-            return f"Arrived at X={target_x_mm:.3f} mm, Y={target_y_mm:.3f} mm."
-
-    def _move_to_xyz_locked(
-        self,
-        target_x_mm: float,
-        target_y_mm: float,
-        target_z_mm: float,
-        *,
-        transit_z_mm: float | None,
-        label: str,
-    ) -> str:
-        with self._serial_session_lock:
-            status = self._query_synced_status_for_absolute_motion(
-                refresh_coordinate_state=False,
-                min_axes=3,
-            )
-            if status is None:
-                raise StageControllerError("Unable to read current stage position.")
-            self._require_homed_axes(status, {"X", "Y", "Z"})
-            current_position = self._require_position_for_absolute_motion(
-                status,
-                required_axes=3,
-            )
-            current_x = float(current_position[0])
-            current_y = float(current_position[1])
-            current_z = float(current_position[2])
-            target_position = (float(target_x_mm), float(target_y_mm), float(target_z_mm))
-            transit_z = (
-                float(target_position[2])
-                if transit_z_mm is None
-                else float(transit_z_mm)
-            )
-            moved = False
-
-            if abs(transit_z - current_z) >= 1e-5:
-                self.status_message.emit(
-                    f"Moving Z to safe transfer level {transit_z:.3f} mm before {label}."
-                )
-                self._send_relative_move(
-                    MoveVector(z=transit_z - current_z),
-                    as_jog=True,
-                )
-                current_z = transit_z
-                moved = True
-
-            delta_x = float(target_position[0]) - current_x
-            delta_y = float(target_position[1]) - current_y
-            xy_move = MoveVector(x=delta_x, y=delta_y)
-            if not xy_move.is_zero(tol=1e-5):
-                self.status_message.emit(
-                    f"Moving to {label} X={target_x_mm:.3f} mm, Y={target_y_mm:.3f} mm"
-                )
-                self._send_relative_move(xy_move, as_jog=True)
-                current_x = float(target_position[0])
-                current_y = float(target_position[1])
-                moved = True
-
-            delta_z = float(target_position[2]) - current_z
-            if abs(delta_z) >= 1e-5:
-                self.status_message.emit(
-                    f"Moving Z to {label} focus height {target_z_mm:.3f} mm"
-                )
-                self._send_relative_move(
-                    MoveVector(z=delta_z),
-                    as_jog=True,
-                )
-                moved = True
-
-            self._wait_for_idle()
-            self._query_current_status()
-
-            if not moved:
-                return f"{label.capitalize()} already reached."
-            return (
-                f"Arrived at {label}: X={target_x_mm:.3f} mm, "
-                f"Y={target_y_mm:.3f} mm, Z={target_z_mm:.3f} mm."
-            )
 
     def _query_synced_status_for_absolute_motion(
         self,
@@ -1643,50 +1314,11 @@ class StageController(
             min_axes=min_axes,
         )
 
-    def _prepare_click_move_without_status_locked(
-        self,
-        dx_pixels: float,
-        dy_pixels: float,
-    ) -> int | None:
-        with self._serial_session_lock:
-            pixel_vector = np.array([dx_pixels, dy_pixels], dtype=float)
-            target_handled, before_counter = self._ensure_calibration(
-                target_pixels=pixel_vector,
-            )
-            self._check_cancelled()
-            if target_handled:
-                return before_counter
-            if self._pixels_to_mm is None:
-                raise StageControllerError("Calibration failed. Cannot move stage.")
-
-            if abs(dx_pixels) < 1e-3 and abs(dy_pixels) < 1e-3:
-                return None
-
-            _, before_counter = self._get_frame_snapshot()
-            mm_vector = -(self._pixels_to_mm @ pixel_vector)
-            move = MoveVector(x=float(mm_vector[0]), y=float(mm_vector[1]))
-            move_magnitude = float(np.linalg.norm(mm_vector))
-            if move_magnitude > self.MAX_CLICK_MOVE_MM:
-                self._pixels_to_mm = None
-                raise StageControllerError(
-                    "Predicted click move is too large; calibration was reset. Recalibrate and try again."
-                )
-
-            self.status_message.emit(
-                f"Jogging stage dX={move.x:.3f} mm dY={move.y:.3f} mm"
-            )
-            self._send_relative_move(
-                move,
-                as_jog=True,
-                motion_started_callback=self._emit_click_move_started,
-            )
-            return before_counter
-
     def _run_rotate_b(self, delta_deg: float) -> None:
         self.movement_started.emit()
         try:
             self._check_cancelled()
-            with self._serial_session() as serial_connection:
+            with self._serial_session():
                 if abs(delta_deg) < 1e-3:
                     self.movement_finished.emit(True, "Chip is already aligned.")
                     return
@@ -1802,414 +1434,6 @@ class StageController(
                     self._controller_reboot_ready_notified = False
                 self._active_thread = None
 
-    def _ensure_calibration(
-        self,
-        target_pixels: np.ndarray | None = None,
-    ) -> tuple[bool, int | None]:
-        if self._pixels_to_mm is not None:
-            if not self._objective_calibration_verified.get(
-                self._active_objective_name,
-                False,
-            ):
-                return self._verify_active_objective_calibration(
-                    target_pixels=target_pixels,
-                )
-            return (False, None)
-        self.status_message.emit(
-            f"Starting {self._active_objective_name} click calibration sequence..."
-        )
-        before_frame, _ = self._get_frame_snapshot(timeout=3.0)
-        if before_frame is None:
-            raise StageControllerError("Camera frames are unavailable for calibration.")
-
-        start_status = self._query_current_status_with_required_coordinates(
-            axes=("X", "Y"),
-        )
-        origin = self._position_for_configured_mode(start_status)
-        if start_status is None or origin is None:
-            raise StageControllerError("Unable to read position for calibration.")
-        self._require_homed_axes(start_status, {"X", "Y"})
-
-        observations: list[tuple[np.ndarray, np.ndarray]] = []
-        try:
-            observations.extend(
-                self._calibrate_axis_series(
-                    before_frame, origin, axis="X"
-                )
-            )
-            latest_frame, _ = self._get_frame_snapshot(timeout=2.0)
-            reference_for_y = latest_frame if latest_frame is not None else before_frame
-            observations.extend(
-                self._calibrate_axis_series(
-                    reference_for_y, origin, axis="Y"
-                )
-            )
-            calibration_matrix = self._calibration_matrix_from_observations(observations)
-            if not np.isfinite(calibration_matrix).all():
-                raise StageControllerError("Calibration produced invalid values.")
-            determinant = float(np.linalg.det(calibration_matrix))
-            if abs(determinant) < 1e-9:
-                raise StageControllerError("Calibration matrix is singular.")
-            self._pixels_to_mm = np.linalg.inv(calibration_matrix)
-            mm_per_pixel_x, mm_per_pixel_y = self._calibration_magnitudes()
-            self.calibration_changed.emit(mm_per_pixel_x, mm_per_pixel_y)
-            self.objective_calibration_updated.emit(
-                self._active_objective_name,
-                self._pixels_to_mm.tolist(),
-            )
-            self._objective_matrices[self._active_objective_name] = self._pixels_to_mm
-            self._objective_calibration_verified[self._active_objective_name] = True
-            target_handled, before_counter = self._move_from_calibration_to_target(
-                origin,
-                target_pixels,
-            )
-        except Exception:
-            self._return_to_origin(origin)
-            raise
-
-        self.status_message.emit(
-            f"{self._active_objective_name} calibration updated: dX {mm_per_pixel_x:.6f} mm/px, dY {mm_per_pixel_y:.6f} mm/px"
-        )
-        return (target_handled, before_counter)
-
-    def _verify_active_objective_calibration(
-        self,
-        target_pixels: np.ndarray | None = None,
-    ) -> tuple[bool, int | None]:
-        if self._pixels_to_mm is None:
-            return (False, None)
-        before_frame, frame_counter = self._get_frame_snapshot(timeout=3.0)
-        if before_frame is None:
-            raise StageControllerError("Camera frames are unavailable for calibration check.")
-        status = self._query_current_status_with_required_coordinates(
-            axes=("X", "Y"),
-        )
-        origin = self._position_for_configured_mode(status)
-        if status is None or origin is None:
-            raise StageControllerError("Unable to read position for calibration check.")
-        self._require_homed_axes(status, {"X", "Y"})
-        step_mm = self._calibration_verify_step_mm()
-        self.status_message.emit(
-            f"Checking {self._active_objective_name} click calibration..."
-        )
-        try:
-            self._send_relative_move(MoveVector(x=step_mm))
-            after_frame, _frame_counter = self._wait_for_new_frame(
-                frame_counter,
-                timeout=2.0,
-            )
-            if after_frame is None:
-                raise StageControllerError(
-                    "Camera did not update during calibration check."
-                )
-            measured_pixels = np.asarray(
-                self._estimate_shift(before_frame, after_frame),
-                dtype=float,
-            )
-            if np.linalg.norm(measured_pixels) < 1e-6:
-                raise StageControllerError("Calibration check saw no image motion.")
-            expected_mm = np.asarray([step_mm, 0.0], dtype=float)
-            active_error = float(
-                np.linalg.norm(self._pixels_to_mm @ measured_pixels - expected_mm)
-            )
-            tolerance = max(
-                self.CALIBRATION_VERIFY_MIN_ERROR_MM,
-                abs(step_mm) * self.CALIBRATION_VERIFY_ERROR_RATIO,
-            )
-            if active_error <= tolerance:
-                self._objective_calibration_verified[self._active_objective_name] = True
-                target_handled, before_counter = self._move_from_calibration_to_target(
-                    origin,
-                    target_pixels,
-                )
-                self.status_message.emit(
-                    f"{self._active_objective_name} click calibration verified."
-                )
-                return (target_handled, before_counter)
-
-            suggestion = self._best_objective_for_measurement(
-                measured_pixels,
-                expected_mm,
-                tolerance=tolerance,
-            )
-            if suggestion and suggestion != self._active_objective_name:
-                message = (
-                    f"Selected objective appears to be {suggestion}, not "
-                    f"{self._active_objective_name}. Objective switched; click again."
-                )
-                self.objective_mismatch_detected.emit(suggestion, message)
-                raise StageControllerError(message)
-            raise StageControllerError(
-                "Click calibration does not match the selected objective. "
-                "Select the correct objective in the GUI or recalibrate this objective."
-            )
-        except Exception:
-            self._return_to_origin(origin)
-            raise
-
-    def _best_objective_for_measurement(
-        self,
-        measured_pixels: np.ndarray,
-        expected_mm: np.ndarray,
-        *,
-        tolerance: float,
-    ) -> str | None:
-        best_name: str | None = None
-        best_error = math.inf
-        for name, matrix in self._objective_matrices.items():
-            try:
-                error = float(np.linalg.norm(matrix @ measured_pixels - expected_mm))
-            except (TypeError, ValueError):
-                continue
-            if error < best_error:
-                best_error = error
-                best_name = name
-        if best_name is None or best_error > tolerance:
-            return None
-        return best_name
-
-    def _calibrate_axis_series(
-        self,
-        reference_frame: np.ndarray,
-        _origin: tuple[float, float, float],
-        axis: str,
-    ) -> list[tuple[np.ndarray, np.ndarray]]:
-        if reference_frame is None:
-            raise StageControllerError("Reference frame unavailable for calibration.")
-        index = 0 if axis == "X" else 1
-        observations: list[tuple[np.ndarray, np.ndarray]] = []
-        step_mm = float(self.CALIBRATION_PROBE_STEP_MM)
-        target_pixels = float(self._objective_calibration_target_pixels)
-        reference_status = self._query_current_status_with_required_coordinates(
-            axes=("X", "Y"),
-        )
-        reference_position = self._position_for_configured_mode(reference_status)
-        if reference_status is None or reference_position is None:
-            raise StageControllerError("Unable to read reference position for calibration.")
-        self._require_homed_axes(reference_status, {axis})
-        with self._frame_condition:
-            frame_counter = self._frame_counter
-        for _ in range(self.CALIBRATION_MAX_OBSERVATIONS_PER_AXIS):
-            if axis == "X":
-                move = MoveVector(x=step_mm)
-            else:
-                move = MoveVector(y=step_mm)
-            self._send_relative_move(move)
-            new_frame, frame_counter = self._wait_for_new_frame(frame_counter, timeout=2.0)
-            if new_frame is None:
-                raise StageControllerError("Camera did not update during calibration.")
-            status = self._query_current_status_with_required_coordinates(
-                axes=("X", "Y"),
-            )
-            current = self._position_for_configured_mode(status)
-            if status is None or current is None:
-                raise StageControllerError("Unable to query position during calibration.")
-            self._require_homed_axes(status, {axis})
-            mm_vector = np.array(
-                [
-                    float(current[0] - reference_position[0]),
-                    float(current[1] - reference_position[1]),
-                ],
-                dtype=float,
-            )
-            shift_x, shift_y, response = self._estimate_shift_with_response(
-                reference_frame,
-                new_frame,
-            )
-            shift_pixels = math.hypot(float(shift_x), float(shift_y))
-            reliable_shift = (
-                response >= self.CALIBRATION_MIN_RESPONSE
-                and shift_pixels >= self.CALIBRATION_MIN_OBSERVATION_PIXELS
-            )
-            if reliable_shift:
-                pixel_vector = np.array([shift_x, shift_y], dtype=float)
-                observations.append((mm_vector, pixel_vector))
-            if abs(current[index] - reference_position[index]) < 1e-6:
-                continue
-            if (
-                len(observations) >= self.CALIBRATION_MIN_OBSERVATIONS
-                and shift_pixels >= target_pixels
-            ):
-                break
-            if not reliable_shift:
-                if step_mm >= self.CALIBRATION_MAX_UNVERIFIED_STEP_MM - 1e-12:
-                    raise StageControllerError(
-                        f"Unable to measure reliable image motion for {axis} calibration."
-                    )
-                step_mm = min(
-                    step_mm * 2.0,
-                    self.CALIBRATION_MAX_UNVERIFIED_STEP_MM,
-                )
-                continue
-            axis_delta = abs(float(current[index] - reference_position[index]))
-            step_mm = self._next_calibration_probe_step_mm(
-                axis_delta_mm=axis_delta,
-                shift_pixels=shift_pixels,
-                observations_count=len(observations),
-                target_pixels=target_pixels,
-            )
-
-        if not observations:
-            raise StageControllerError(
-                f"Pixel shift too small to compute {axis} calibration."
-            )
-        return observations
-
-    def _next_calibration_probe_step_mm(
-        self,
-        *,
-        axis_delta_mm: float,
-        shift_pixels: float,
-        observations_count: int,
-        target_pixels: float,
-    ) -> float:
-        min_step = float(self.CALIBRATION_PROBE_STEP_MM)
-        max_step = float(self.CALIBRATION_MAX_ADAPTIVE_STEP_MM)
-        if axis_delta_mm <= 1e-9 or shift_pixels <= 1e-9:
-            return min_step
-        px_per_mm = shift_pixels / axis_delta_mm
-        if px_per_mm <= 1e-9 or not math.isfinite(px_per_mm):
-            return min_step
-        target_distance_mm = max(axis_delta_mm, float(target_pixels) / px_per_mm)
-        remaining_distance = max(0.0, target_distance_mm - axis_delta_mm)
-        remaining_observations = max(
-            1,
-            self.CALIBRATION_MIN_OBSERVATIONS - int(observations_count),
-        )
-        step = remaining_distance / remaining_observations
-        if step <= 0.0:
-            step = min_step
-        return min(max(step, min_step), max_step)
-
-    def _calibration_verify_step_mm(self) -> float:
-        if self._pixels_to_mm is None:
-            return self.CALIBRATION_VERIFY_STEP_MM
-        try:
-            stage_to_pixels = np.linalg.inv(self._pixels_to_mm)
-            pixels_for_x_mm = stage_to_pixels @ np.array([1.0, 0.0], dtype=float)
-            px_per_mm = float(np.linalg.norm(pixels_for_x_mm))
-        except (TypeError, ValueError, np.linalg.LinAlgError):
-            px_per_mm = 0.0
-        if not math.isfinite(px_per_mm) or px_per_mm <= 1e-9:
-            return self.CALIBRATION_VERIFY_STEP_MM
-        step = float(self.CALIBRATION_VERIFY_TARGET_PIXELS) / px_per_mm
-        return min(
-            max(step, float(self.CALIBRATION_PROBE_STEP_MM)),
-            float(self.CALIBRATION_VERIFY_STEP_MM),
-        )
-
-    def _calibration_matrix_from_observations(
-        self,
-        observations: list[tuple[np.ndarray, np.ndarray]],
-    ) -> np.ndarray:
-        if len(observations) < self.CALIBRATION_MIN_OBSERVATIONS:
-            raise StageControllerError("Not enough calibration observations.")
-        stage_vectors = np.vstack([item[0] for item in observations])
-        pixel_vectors = np.vstack([item[1] for item in observations])
-        if np.linalg.matrix_rank(stage_vectors) < 2:
-            raise StageControllerError("Calibration observations are degenerate.")
-        coefficients, _residuals, _rank, _singular = np.linalg.lstsq(
-            stage_vectors,
-            pixel_vectors,
-            rcond=None,
-        )
-        calibration_matrix = coefficients.T
-        if not np.isfinite(calibration_matrix).all():
-            raise StageControllerError("Calibration produced invalid values.")
-        predicted = stage_vectors @ coefficients
-        errors = np.linalg.norm(predicted - pixel_vectors, axis=1)
-        if len(errors) >= self.CALIBRATION_MIN_OBSERVATIONS + 2:
-            median_error = float(np.median(errors))
-            keep = errors <= max(2.0, median_error * 3.0)
-            if int(np.count_nonzero(keep)) >= self.CALIBRATION_MIN_OBSERVATIONS:
-                coefficients, _residuals, _rank, _singular = np.linalg.lstsq(
-                    stage_vectors[keep],
-                    pixel_vectors[keep],
-                    rcond=None,
-                )
-                calibration_matrix = coefficients.T
-        return calibration_matrix
-
-    def _move_from_calibration_to_target(
-        self,
-        origin: tuple[float, float, float],
-        target_pixels: np.ndarray | None,
-    ) -> tuple[bool, int | None]:
-        if target_pixels is None:
-            self._return_to_origin(origin)
-            return (False, None)
-        if self._pixels_to_mm is None:
-            raise StageControllerError("Calibration failed. Cannot move stage.")
-        pixel_vector = np.asarray(target_pixels, dtype=float)
-        if pixel_vector.shape != (2,):
-            raise StageControllerError("Invalid click target for calibration move.")
-        if float(np.linalg.norm(pixel_vector)) < 1e-3:
-            self._return_to_origin(origin)
-            return (False, None)
-
-        click_delta_mm = -(self._pixels_to_mm @ pixel_vector)
-        move_magnitude = float(np.linalg.norm(click_delta_mm))
-        if move_magnitude > self.MAX_CLICK_MOVE_MM:
-            self._pixels_to_mm = None
-            raise StageControllerError(
-                "Predicted click move is too large; calibration was reset. Recalibrate and try again."
-            )
-
-        status = self._query_current_status_with_required_coordinates(
-            axes=("X", "Y"),
-        )
-        current = self._position_for_configured_mode(status)
-        if status is None or current is None:
-            raise StageControllerError("Unable to read position after calibration.")
-        self._require_homed_axes(status, {"X", "Y"})
-        target_x = float(origin[0]) + float(click_delta_mm[0])
-        target_y = float(origin[1]) + float(click_delta_mm[1])
-        move = MoveVector(
-            x=target_x - float(current[0]),
-            y=target_y - float(current[1]),
-        )
-        if move.is_zero(tol=1e-5):
-            return (True, None)
-        with self._frame_condition:
-            before_counter = self._frame_counter
-        self.status_message.emit(
-            f"Jogging stage dX={move.x:.3f} mm dY={move.y:.3f} mm"
-        )
-        self._send_relative_move(
-            move,
-            as_jog=True,
-            motion_started_callback=self._emit_click_move_started,
-        )
-        return (True, before_counter)
-
-    def _emit_click_move_started(
-        self,
-        move: MoveVector,
-        feedrate: Optional[float] = None,
-    ) -> None:
-        effective_feedrate = (
-            self.DEFAULT_FEEDRATE if feedrate is None else max(self.MIN_FEEDRATE, float(feedrate))
-        )
-        self.click_move_started.emit(float(move.x), float(move.y), effective_feedrate)
-
-    def _return_to_origin(
-        self, origin: tuple[float, float, float]
-    ) -> None:
-        status = self._query_current_status_with_required_coordinates(
-            axes=("X", "Y"),
-        )
-        current = self._position_for_configured_mode(status)
-        if status is None or current is None:
-            return
-        self._require_homed_axes(status, {"X", "Y"})
-        delta_x = origin[0] - current[0]
-        delta_y = origin[1] - current[1]
-        move = MoveVector(x=delta_x, y=delta_y)
-        if move.is_zero(tol=1e-5):
-            return
-        self.status_message.emit("Returning stage to calibration origin…")
-        self._send_relative_move(move)
-
     def _run_manual_axis_move(
         self,
         axis: str,
@@ -2221,7 +1445,7 @@ class StageController(
         self.movement_started.emit()
         try:
             self._check_cancelled()
-            with self._serial_session() as serial_connection:
+            with self._serial_session():
                 if mode == "G91" and abs(distance_mm) < 1e-6:
                     self.movement_finished.emit(True, "Manual axis move skipped.")
                     return
@@ -2268,7 +1492,7 @@ class StageController(
         self.movement_started.emit()
         try:
             self._check_cancelled()
-            with self._serial_session() as serial_connection:
+            with self._serial_session():
                 feedrate_text = (
                     self.DEFAULT_FEEDRATE if feedrate is None else max(self.MIN_FEEDRATE, float(feedrate))
                 )
@@ -2377,7 +1601,7 @@ class StageController(
                     f"{self.SPIRAL_MIN_TURNS_PER_SWEEP:.2f} and "
                     f"{self.SPIRAL_MAX_TURNS_PER_SWEEP:.2f}."
                 )
-            with self._serial_session() as serial_connection:
+            with self._serial_session():
                 self._oscillation_active = True
                 self.oscillation_state_changed.emit(True, mode)
                 self.status_message.emit(
@@ -2421,13 +1645,6 @@ class StageController(
             with self._task_lock:
                 self._active_thread = None
             self._start_next_queued_needles_action()
-
-    def _calibration_magnitudes(self) -> tuple[float, float]:
-        if self._pixels_to_mm is None:
-            return (0.0, 0.0)
-        column_x = self._pixels_to_mm[:, 0]
-        column_y = self._pixels_to_mm[:, 1]
-        return (float(np.linalg.norm(column_x)), float(np.linalg.norm(column_y)))
 
     def _send_relative_move(
         self,
@@ -2783,25 +2000,6 @@ class StageController(
             raise StageControllerError("B zero reference is not initialized.")
         return b_position - zero
 
-    def _resolve_xy_from_center(
-        self,
-        center_position: tuple[float, ...],
-        dx_pixels: float,
-        dy_pixels: float,
-    ) -> tuple[tuple[float, float], tuple[float, float]]:
-        if self._pixels_to_mm is None:
-            raise StageControllerError("Calibration is unavailable.")
-        if len(center_position) < 2:
-            raise StageControllerError("X/Y coordinates are unavailable.")
-        center_xy = (float(center_position[0]), float(center_position[1]))
-        pixel_vector = np.array([dx_pixels, dy_pixels], dtype=float)
-        mm_vector = -(self._pixels_to_mm @ pixel_vector)
-        target_xy = (
-            center_xy[0] + float(mm_vector[0]),
-            center_xy[1] + float(mm_vector[1]),
-        )
-        return center_xy, target_xy
-
     def _perform_home_command(self, command: str) -> None:
         """Execute a homing command using the current serial session."""
 
@@ -2897,54 +2095,8 @@ class StageController(
             last_x = next_x
             last_y = next_y
 
-    def _get_frame_snapshot(
-        self, timeout: float = 2.0
-    ) -> tuple[Optional[np.ndarray], int]:
-        with self._frame_condition:
-            if self._latest_frame is None:
-                if not self._frame_condition.wait(timeout):
-                    return (None, self._frame_counter)
-            if self._latest_frame is None:
-                return (None, self._frame_counter)
-            return (self._latest_frame.copy(), self._frame_counter)
-
-    def _wait_for_new_frame(
-        self, previous_counter: int, timeout: float = 2.0
-    ) -> tuple[Optional[np.ndarray], int]:
-        with self._frame_condition:
-            deadline = time.monotonic() + timeout
-            while self._frame_counter <= previous_counter:
-                self._check_cancelled()
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return (None, self._frame_counter)
-                self._frame_condition.wait(remaining)
-            if self._latest_frame is None:
-                return (None, self._frame_counter)
-            return (self._latest_frame.copy(), self._frame_counter)
-
-    @staticmethod
-    def _estimate_shift(frame_a: np.ndarray, frame_b: np.ndarray) -> tuple[float, float]:
-        return estimate_shift(frame_a, frame_b)
-
-    @staticmethod
-    def _estimate_shift_with_response(
-        frame_a: np.ndarray,
-        frame_b: np.ndarray,
-    ) -> tuple[float, float, float]:
-        return estimate_shift_with_response(frame_a, frame_b)
-
-    @staticmethod
-    def _focus_metric(frame: np.ndarray) -> float:
-        return focus_metric(frame)
-
     def _check_cancelled(self) -> None:
         if self._cancel_event.is_set():
             raise StageControllerError("Operation cancelled.")
-
-    @staticmethod
-    def _qimage_to_gray(image: QImage) -> np.ndarray:
-        return qimage_to_gray(image, QImage.Format_RGB888)
-
 
 __all__ = ["StageController", "MoveVector"]
