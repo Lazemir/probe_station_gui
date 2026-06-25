@@ -170,6 +170,11 @@ from probe_station_gui.route_measurement_payloads import (
     route_external_result_payload,
 )
 from probe_station_gui.route_api_window_guard import probe_route_api_requires_window
+from probe_station_gui.route_runtime_settings import (
+    route_external_runtime_settings,
+    route_measurement_runtime_settings,
+    route_runtime_requires_meter_configuration,
+)
 from probe_station_gui.route_measurement_settings import RouteMeasurementSettingsStore
 from probe_station_gui.route_session_actions import (
     route_confirmation_action,
@@ -9201,31 +9206,13 @@ class Main(QMainWindow):
             self._save_route_measurement_session_metadata(configuration)
             if isinstance(runner, RouteExternalMeasurementSessionRunner):
                 runner.update_runtime_settings(
-                    measurement_count=configuration.measurement_count,
-                    initial_measurement_count=configuration.initial_measurement_count,
-                    max_relative_rms=configuration.max_relative_rms,
-                    contact_quality_limits=configuration.contact_quality_limits,
-                    auto_contact_seek_step_mm=configuration.contact_seek_step_mm,
-                    auto_contact_seek_max_total_mm=configuration.contact_seek_range_mm,
-                    contact_settle_s=configuration.contact_settle_s,
-                    photo_settle_s=configuration.photo_settle_s,
+                    **route_external_runtime_settings(configuration),
                 )
             else:
                 runner.update_runtime_settings(
-                    measurement_count=configuration.measurement_count,
-                    initial_measurement_count=configuration.initial_measurement_count,
-                    max_relative_rms=configuration.max_relative_rms,
-                    contact_quality_limits=configuration.contact_quality_limits,
-                    auto_contact_seek_step_mm=configuration.contact_seek_step_mm,
-                    auto_contact_seek_max_total_mm=configuration.contact_seek_range_mm,
-                    contact_settle_s=configuration.contact_settle_s,
-                    photo_settle_s=configuration.photo_settle_s,
-                    photo_focus_enabled=configuration.photo_autofocus_enabled,
-                    csv_path=configuration.csv_path,
-                    nplc_label=configuration.meter.nplc_label(),
-                    measurement_type=configuration.meter.measurement_type_label(),
+                    **route_measurement_runtime_settings(configuration),
                 )
-                if route_operation_measure_enabled(configuration.operation_mode):
+                if route_runtime_requires_meter_configuration(configuration):
                     try:
                         runner.apply_meter_configuration(configuration.meter)
                     except LCRMeterError as exc:
