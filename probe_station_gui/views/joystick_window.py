@@ -46,7 +46,7 @@ from probe_station_gui.joystick_feedrate_targets import (
     linear_feedrate_min_max,
     slider_value_from_feedrate,
 )
-from probe_station_gui.settings_manager import CONTROL_ACTIONS, KeyBinding
+from probe_station_gui.controls_config import CONTROL_ACTIONS, KeyBinding
 from probe_station_gui.wheel_guard import (
     GuardedComboBox as QComboBox,
     GuardedDoubleSpinBox as QDoubleSpinBox,
