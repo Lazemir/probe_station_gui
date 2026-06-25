@@ -36,9 +36,15 @@ from probe_station_gui.qt_compat import (
     native_scan_code_to_int,
 )
 from probe_station_gui.joystick_feedrate_targets import (
+    bounded_feedrate_setting,
     clean_axis_feedrate_limits,
+    feedrate_from_slider_value,
     feedrate_key,
+    feedrate_limit_known_for_target,
+    feedrate_max_for_target,
     feedrate_target_for_axis,
+    linear_feedrate_min_max,
+    slider_value_from_feedrate,
 )
 from probe_station_gui.settings_manager import CONTROL_ACTIONS, KeyBinding
 from probe_station_gui.wheel_guard import (
@@ -867,87 +873,50 @@ class JoystickWindow(QWidget):
         )
 
     def _feedrate_max_for_target(self, target: str) -> float:
-        def axis_limit(axis: str) -> float | None:
-            value = self._axis_feedrate_limits.get(axis)
-            if value is None:
-                return None
-            try:
-                value = float(value)
-            except (TypeError, ValueError):
-                return None
-            if not math.isfinite(value) or value <= 0:
-                return None
-            return value
-
-        if target == self.FEED_TARGET_XY:
-            limits = [
-                value
-                for axis in ("X", "Y")
-                if (value := axis_limit(axis)) is not None
-            ]
-            if limits:
-                return max(limits)
-        elif target == self.FEED_TARGET_FOCUS:
-            limit = axis_limit("Z")
-            if limit is not None:
-                return limit
-        elif target == self.FEED_TARGET_NEEDLES:
-            limit = axis_limit("A")
-            if limit is not None:
-                return limit
-        elif target == self.FEED_TARGET_TURNTABLE:
-            limit = axis_limit("B")
-            if limit is not None:
-                return limit
-        elif target == self.FEED_TARGET_COMMON:
-            if self._common_feedrate_max is not None:
-                try:
-                    value = float(self._common_feedrate_max)
-                except (TypeError, ValueError):
-                    value = self.MIN_LINEAR_FEEDRATE
-                if math.isfinite(value) and value > 0:
-                    return value
-        fallback_values = [
-            self.MIN_LINEAR_FEEDRATE,
-            float(self._linear_feedrate_value),
-            float(self._linear_default),
-            *(float(value) for value in self._linear_presets),
-        ]
-        return min(
-            self.MAX_LINEAR_FEEDRATE,
-            max(value for value in fallback_values if math.isfinite(value)),
+        return feedrate_max_for_target(
+            target,
+            axis_limits=self._axis_feedrate_limits,
+            common_feedrate_max=getattr(self, "_common_feedrate_max", None),
+            linear_feedrate_value=self._linear_feedrate_value,
+            linear_default=self._linear_default,
+            linear_presets=self._linear_presets,
+            min_linear_feedrate=self.MIN_LINEAR_FEEDRATE,
+            max_linear_feedrate=self.MAX_LINEAR_FEEDRATE,
+            xy_target=self.FEED_TARGET_XY,
+            focus_target=self.FEED_TARGET_FOCUS,
+            needles_target=self.FEED_TARGET_NEEDLES,
+            turntable_target=self.FEED_TARGET_TURNTABLE,
+            common_target=self.FEED_TARGET_COMMON,
         )
 
     def _feedrate_limit_known_for_target(self, target: str) -> bool:
-        if target == self.FEED_TARGET_XY:
-            return any(axis in self._axis_feedrate_limits for axis in ("X", "Y"))
-        if target == self.FEED_TARGET_FOCUS:
-            return "Z" in self._axis_feedrate_limits
-        if target == self.FEED_TARGET_NEEDLES:
-            return "A" in self._axis_feedrate_limits
-        if target == self.FEED_TARGET_TURNTABLE:
-            return "B" in self._axis_feedrate_limits
-        if target == self.FEED_TARGET_COMMON:
-            return self._common_feedrate_max is not None
-        return False
+        return feedrate_limit_known_for_target(
+            target,
+            axis_limits=self._axis_feedrate_limits,
+            common_feedrate_max=getattr(self, "_common_feedrate_max", None),
+            xy_target=self.FEED_TARGET_XY,
+            focus_target=self.FEED_TARGET_FOCUS,
+            needles_target=self.FEED_TARGET_NEEDLES,
+            turntable_target=self.FEED_TARGET_TURNTABLE,
+            common_target=self.FEED_TARGET_COMMON,
+        )
 
     def _bounded_feedrate_setting(self, target: str, value: float) -> float:
-        bounded = max(self.MIN_LINEAR_FEEDRATE, float(value))
-        if self._feedrate_limit_known_for_target(target):
-            bounded = min(self._feedrate_max_for_target(target), bounded)
-        return bounded
+        limit_known = self._feedrate_limit_known_for_target(target)
+        return bounded_feedrate_setting(
+            target,
+            value,
+            limit_known=limit_known,
+            target_max=self._feedrate_max_for_target(target) if limit_known else 0.0,
+            min_linear_feedrate=self.MIN_LINEAR_FEEDRATE,
+        )
 
     def _linear_feedrate_min_max(self) -> tuple[float, float]:
-        target_max = max(
-            self.MIN_LINEAR_FEEDRATE,
-            float(self._feedrate_max_for_target(self._active_feedrate_target)),
+        return linear_feedrate_min_max(
+            target_max=self._feedrate_max_for_target(self._active_feedrate_target),
+            bounds=self._linear_feedrate_bounds,
+            min_linear_feedrate=self.MIN_LINEAR_FEEDRATE,
         )
-        if self._linear_feedrate_bounds is None:
-            return (self.MIN_LINEAR_FEEDRATE, target_max)
-        min_value, max_value = self._linear_feedrate_bounds
-        minimum = max(self.MIN_LINEAR_FEEDRATE, float(min_value))
-        maximum = min(target_max, max(self.MIN_LINEAR_FEEDRATE, float(max_value)))
-        return (minimum, max(minimum, maximum))
 
     def _update_linear_feedrate_slider_range(self) -> None:
         minimum = int(round(self.MIN_LINEAR_FEEDRATE * self.LINEAR_FEEDRATE_SCALE))
@@ -985,11 +954,18 @@ class JoystickWindow(QWidget):
 
     def _slider_value_from_feedrate(self, value: float) -> int:
         min_value, max_value = self._linear_feedrate_min_max()
-        bounded = min(max_value, max(min_value, float(value)))
-        return int(round(bounded * self.LINEAR_FEEDRATE_SCALE))
+        return slider_value_from_feedrate(
+            value,
+            min_value=min_value,
+            max_value=max_value,
+            scale=self.LINEAR_FEEDRATE_SCALE,
+        )
 
     def _feedrate_from_slider_value(self, slider_value: int) -> float:
-        return float(slider_value) / float(self.LINEAR_FEEDRATE_SCALE)
+        return feedrate_from_slider_value(
+            slider_value,
+            scale=self.LINEAR_FEEDRATE_SCALE,
+        )
 
     def _set_linear_feedrate(
         self,

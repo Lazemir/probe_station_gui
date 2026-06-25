@@ -59,3 +59,139 @@ def clean_axis_feedrate_limits(
         if math.isfinite(feedrate) and feedrate > 0.0:
             cleaned[axis_name] = feedrate
     return cleaned
+
+
+def feedrate_max_for_target(
+    target: str,
+    *,
+    axis_limits: Mapping[str, float],
+    common_feedrate_max: float | None,
+    linear_feedrate_value: float,
+    linear_default: float,
+    linear_presets: list[float],
+    min_linear_feedrate: float,
+    max_linear_feedrate: float,
+    xy_target: str,
+    focus_target: str,
+    needles_target: str,
+    turntable_target: str,
+    common_target: str,
+) -> float:
+    def axis_limit(axis: str) -> float | None:
+        value = axis_limits.get(axis)
+        if value is None:
+            return None
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(value) or value <= 0:
+            return None
+        return value
+
+    if target == xy_target:
+        limits = [
+            value
+            for axis in ("X", "Y")
+            if (value := axis_limit(axis)) is not None
+        ]
+        if limits:
+            return max(limits)
+    elif target == focus_target:
+        limit = axis_limit("Z")
+        if limit is not None:
+            return limit
+    elif target == needles_target:
+        limit = axis_limit("A")
+        if limit is not None:
+            return limit
+    elif target == turntable_target:
+        limit = axis_limit("B")
+        if limit is not None:
+            return limit
+    elif target == common_target:
+        if common_feedrate_max is not None:
+            try:
+                value = float(common_feedrate_max)
+            except (TypeError, ValueError):
+                value = min_linear_feedrate
+            if math.isfinite(value) and value > 0:
+                return value
+    fallback_values = [
+        min_linear_feedrate,
+        float(linear_feedrate_value),
+        float(linear_default),
+        *(float(value) for value in linear_presets),
+    ]
+    return min(
+        max_linear_feedrate,
+        max(value for value in fallback_values if math.isfinite(value)),
+    )
+
+
+def feedrate_limit_known_for_target(
+    target: str,
+    *,
+    axis_limits: Mapping[str, float],
+    common_feedrate_max: float | None,
+    xy_target: str,
+    focus_target: str,
+    needles_target: str,
+    turntable_target: str,
+    common_target: str,
+) -> bool:
+    if target == xy_target:
+        return any(axis in axis_limits for axis in ("X", "Y"))
+    if target == focus_target:
+        return "Z" in axis_limits
+    if target == needles_target:
+        return "A" in axis_limits
+    if target == turntable_target:
+        return "B" in axis_limits
+    if target == common_target:
+        return common_feedrate_max is not None
+    return False
+
+
+def bounded_feedrate_setting(
+    target: str,
+    value: float,
+    *,
+    limit_known: bool,
+    target_max: float,
+    min_linear_feedrate: float,
+) -> float:
+    bounded = max(min_linear_feedrate, float(value))
+    if limit_known:
+        bounded = min(target_max, bounded)
+    return bounded
+
+
+def linear_feedrate_min_max(
+    *,
+    target_max: float,
+    bounds: tuple[float, float] | None,
+    min_linear_feedrate: float,
+) -> tuple[float, float]:
+    target_max = max(min_linear_feedrate, float(target_max))
+    if bounds is None:
+        return (min_linear_feedrate, target_max)
+    min_value, max_value = bounds
+    minimum = max(min_linear_feedrate, float(min_value))
+    maximum = min(target_max, max(min_linear_feedrate, float(max_value)))
+    return (minimum, max(minimum, maximum))
+
+
+def slider_value_from_feedrate(
+    value: float,
+    *,
+    min_value: float,
+    max_value: float,
+    scale: int,
+) -> int:
+    bounded = min(max_value, max(min_value, float(value)))
+    return int(round(bounded * scale))
+
+
+def feedrate_from_slider_value(slider_value: int, *, scale: int) -> float:
+    return float(slider_value) / float(scale)
