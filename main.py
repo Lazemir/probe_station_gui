@@ -190,6 +190,10 @@ from probe_station_gui.route_session_actions import (
     route_confirmation_action,
     route_session_action_from_payload,
 )
+from probe_station_gui.route.session_start import (
+    route_contact_quality_limits_from_payload,
+    route_external_session_start_settings_from_payload,
+)
 from probe_station_gui.route_shift import route_shift_from_stage_xy
 from probe_station_gui.route_formatting import (
     csv_bool as _csv_bool,
@@ -2883,129 +2887,35 @@ class Main(QMainWindow):
                 "message": "Route has no enabled points.",
             }
         try:
-            start_point = self._api_int(
+            start_settings = route_external_session_start_settings_from_payload(
                 payload,
-                "start_point",
-                "current_point",
-                "contact_number",
-                default=int(self._route_measurement_current_point or 1),
-                minimum=1,
+                default_start_point=int(self._route_measurement_current_point or 1),
+                default_contact_seek_range_mm=(
+                    RouteMeasurementRunner.AUTO_CONTACT_SEEK_MAX_TOTAL_MM
+                ),
+                default_contact_seek_step_mm=(
+                    RouteMeasurementRunner.AUTO_CONTACT_SEEK_STEP_MM
+                ),
+                default_contact_settle_s=(
+                    RouteMeasurementRunner.DEFAULT_CONTACT_SETTLE_S
+                ),
             )
-            initial_count = self._api_int(
-                payload,
-                "initial_measurement_count",
-                "initial_samples",
-                "check_sample_count",
-                default=10,
-                minimum=1,
-            )
-            followup_count = self._api_int(
-                payload,
-                "followup_measurement_count",
-                "followup_samples",
-                default=240,
-                minimum=0,
-            )
-            measurement_count = self._api_int(
-                payload,
-                "measurement_count",
-                "sample_count",
-                "samples",
-                default=initial_count + followup_count,
-                minimum=initial_count,
-            )
-            contact_seek_range_mm = self._api_float(
-                payload,
-                "contact_seek_range_mm",
-                "contact_seek_max_total_mm",
-                "seek_range_mm",
-                default=RouteMeasurementRunner.AUTO_CONTACT_SEEK_MAX_TOTAL_MM,
-                minimum=0.0,
-            )
-            contact_seek_step_mm = self._api_float(
-                payload,
-                "contact_seek_step_mm",
-                "seek_step_mm",
-                default=abs(RouteMeasurementRunner.AUTO_CONTACT_SEEK_STEP_MM),
-                minimum=0.0,
-            )
-            contact_settle_s = self._api_float(
-                payload,
-                "contact_settle_s",
-                "settle_s",
-                default=RouteMeasurementRunner.DEFAULT_CONTACT_SETTLE_S,
-                minimum=0.0,
-            )
-            photo_settle_s = self._api_float(
-                payload,
-                "photo_settle_s",
-                default=0.2,
-                minimum=0.0,
-            )
-            photo_enabled = self._api_bool(
-                payload,
-                "photo_enabled",
-                "photo",
-                default=True,
-            )
-            photo_focus_enabled = self._api_bool(
-                payload,
-                "photo_autofocus_enabled",
-                "autofocus",
-                "focus",
-                default=True,
-            )
-            photo_focus_range_mm = self._api_float(
-                payload,
-                "photo_autofocus_range_mm",
-                "focus_range_mm",
-                default=0.03,
-                minimum=0.001,
-            )
-            contact_quality_limits = self._api_contact_quality_limits(payload)
         except ValueError as exc:
             return {
                 "accepted": False,
                 "status_code": 400,
                 "message": str(exc),
             }
-        max_relative_rms = None
-        if any(
-            key in payload
-            for key in ("max_relative_rms", "max_rel_rms", "max_relative_rms_percent")
-        ):
-            try:
-                if "max_relative_rms_percent" in payload:
-                    max_relative_rms = (
-                        self._api_float(
-                            payload,
-                            "max_relative_rms_percent",
-                            default=math.nan,
-                            minimum=0.0,
-                        )
-                        / 100.0
-                    )
-                else:
-                    max_relative_rms = self._api_float(
-                        payload,
-                        "max_relative_rms",
-                        "max_rel_rms",
-                        default=math.nan,
-                        minimum=0.0,
-                    )
-            except ValueError as exc:
-                return {
-                    "accepted": False,
-                    "status_code": 400,
-                    "message": str(exc),
-                }
-        selected_point = self._api_find_contact_point(points, start_point)
+        selected_point = self._api_find_contact_point(
+            points,
+            start_settings.start_point,
+        )
         if selected_point is None:
             return {
                 "accepted": False,
                 "status_code": 409,
                 "message": (
-                    f"Contact {start_point} is not enabled or not included "
+                    f"Contact {start_settings.start_point} is not enabled or not included "
                     "by the current route filter."
                 ),
             }
@@ -3039,14 +2949,14 @@ class Main(QMainWindow):
             stage_controller=self.stage_controller,
             lcr_controller=route_lcr_controller,
             needle_feedrate=self._api_needle_feedrate(payload),
-            measurement_count=measurement_count,
-            initial_measurement_count=initial_count,
+            measurement_count=start_settings.measurement_count,
+            initial_measurement_count=start_settings.initial_measurement_count,
             start_point_number=int(selected_point.index),
-            max_relative_rms=max_relative_rms,
-            contact_quality_limits=contact_quality_limits,
-            auto_contact_seek_step_mm=contact_seek_step_mm,
-            auto_contact_seek_max_total_mm=contact_seek_range_mm,
-            contact_settle_s=contact_settle_s,
+            max_relative_rms=start_settings.max_relative_rms,
+            contact_quality_limits=start_settings.contact_quality_limits,
+            auto_contact_seek_step_mm=start_settings.contact_seek_step_mm,
+            auto_contact_seek_max_total_mm=start_settings.contact_seek_range_mm,
+            contact_settle_s=start_settings.contact_settle_s,
             nplc_label=meter_configuration.nplc_label(),
             measurement_type=meter_configuration.measurement_type_label(),
             status_callback=self.route_measurement_status.emit,
@@ -3056,15 +2966,15 @@ class Main(QMainWindow):
                 point,
                 position,
                 total,
-                range_mm=photo_focus_range_mm,
+                range_mm=start_settings.photo_focus_range_mm,
             ),
             contact_photo_callback=self._capture_route_contact_photo,
             pre_contact_photo_callback=self._capture_route_pre_contact_photo,
             result_callback=self.route_measurement_result.emit,
             waiting_callback=self.route_measurement_waiting_changed.emit,
-            photo_enabled=photo_enabled,
-            photo_focus_enabled=photo_focus_enabled,
-            photo_settle_s=photo_settle_s,
+            photo_enabled=start_settings.photo_enabled,
+            photo_focus_enabled=start_settings.photo_focus_enabled,
+            photo_settle_s=start_settings.photo_settle_s,
             wait_before_first_point=True,
         )
         runner.set_route_offset_xy(route_offset_xy)
@@ -3073,7 +2983,7 @@ class Main(QMainWindow):
         self._route_measurement_waiting_reason = ""
         self._pending_route_measure_point = None
         self._route_measurement_session_active = True
-        self._route_measurement_photo_enabled = photo_enabled
+        self._route_measurement_photo_enabled = start_settings.photo_enabled
         self._route_measurement_measure_enabled = True
         self._route_measurement_point_numbers = [int(point.index) for point in points]
         self._last_telegram_attention_message = ""
@@ -3632,46 +3542,8 @@ class Main(QMainWindow):
         cls,
         payload: dict[str, Any],
     ) -> RouteContactQualityLimits:
-        nested = payload.get("contact_quality", payload.get("contact_quality_limits"))
-        if nested is None:
-            nested_payload: dict[str, Any] = {}
-        elif isinstance(nested, dict):
-            nested_payload = dict(nested)
-        else:
-            raise ValueError("contact_quality must be an object.")
-        combined = dict(payload)
-        combined.update(nested_payload)
-        defaults = RouteContactQualityLimits()
-        return RouteContactQualityLimits(
-            max_mad_sigma_ohm=cls._api_float(
-                combined,
-                "max_mad_sigma_ohm",
-                "contact_max_mad_sigma_ohm",
-                default=defaults.max_mad_sigma_ohm,
-                minimum=0.0,
-            ),
-            max_p95_abs_step_ohm=cls._api_float(
-                combined,
-                "max_p95_abs_step_ohm",
-                "contact_max_p95_abs_step_ohm",
-                default=defaults.max_p95_abs_step_ohm,
-                minimum=0.0,
-            ),
-            max_relative_mad_sigma=cls._api_float(
-                combined,
-                "max_relative_mad_sigma",
-                "contact_max_relative_mad_sigma",
-                default=defaults.max_relative_mad_sigma,
-                minimum=0.0,
-            ),
-            max_relative_p95_abs_step=cls._api_float(
-                combined,
-                "max_relative_p95_abs_step",
-                "contact_max_relative_p95_abs_step",
-                default=defaults.max_relative_p95_abs_step,
-                minimum=0.0,
-            ),
-        ).normalized()
+        _ = cls
+        return route_contact_quality_limits_from_payload(payload)
 
     @staticmethod
     def _api_structure_number_for_measurement_point(

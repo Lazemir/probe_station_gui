@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import math
 
 from probe_station_measure import OHMMETER_RANGE_MANUAL
+
+from probe_station_gui.route.payload_parsing import (
+    payload_bool as _payload_bool,
+    payload_float as _payload_float,
+    payload_optional_float as _payload_optional_float,
+)
 
 
 ROUTE_METER_GWINSTEK = "gwinstek_lcr_76200"
@@ -507,66 +512,6 @@ def _gwinstek_settings_from_payload(
             gw_payload, "alc_enabled", default=defaults.alc_enabled
         ),
     )
-
-
-def _payload_bool(
-    payload: dict[str, object],
-    *keys: str,
-    default: bool,
-) -> bool:
-    for key in keys:
-        if key not in payload:
-            continue
-        value = payload.get(key)
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, (int, float)):
-            return bool(value)
-        if isinstance(value, str):
-            text = value.strip().lower()
-            if text in {"1", "true", "yes", "y", "on"}:
-                return True
-            if text in {"0", "false", "no", "n", "off"}:
-                return False
-    return default
-
-
-def _payload_float(
-    payload: dict[str, object],
-    *keys: str,
-    default: float,
-    minimum: float | None = None,
-) -> float:
-    value: object = default
-    for key in keys:
-        if key in payload and payload.get(key) is not None:
-            value = payload.get(key)
-            break
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"Invalid numeric value for {keys[0]}.") from exc
-    if not math.isfinite(parsed):
-        raise ValueError(f"Invalid numeric value for {keys[0]}.")
-    if minimum is not None and parsed < minimum:
-        raise ValueError(f"{keys[0]} must be at least {minimum}.")
-    return parsed
-
-
-def _payload_optional_float(
-    payload: dict[str, object],
-    *keys: str,
-    minimum: float | None = None,
-) -> float | None:
-    for key in keys:
-        if key in payload and payload.get(key) is not None:
-            return _payload_float(
-                payload,
-                key,
-                default=0.0,
-                minimum=minimum,
-            )
-    return None
 
 
 __all__ = [
