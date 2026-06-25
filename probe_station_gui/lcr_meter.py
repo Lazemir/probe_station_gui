@@ -10,12 +10,12 @@ import threading
 import time
 import weakref
 from contextlib import contextmanager
-from dataclasses import dataclass
 from typing import Callable, Iterator, Optional
 
 from PySide6.QtCore import QObject, Signal
 
 from probe_station_measure import OHMMETER_RANGE_MANUAL
+from probe_station_gui.lcr_meter_worker import MeterWorkerCall as _MeterWorkerCall
 from probe_station_gui.lcr_meter_helpers import (
     callable_accepts_keyword as _callable_accepts_keyword,
     format_source_level_value,
@@ -62,14 +62,6 @@ KEITHLEY_LIVE_VOLTMETER_RANGE_V = 1.0
 KEITHLEY_LIVE_CURRENT_RANGE_A = 10e-6
 KEITHLEY_LIVE_COMPLIANCE_CURRENT_A = 9.5e-6
 KEITHLEY_LIVE_NPLC = 1.0
-
-
-@dataclass
-class _MeterWorkerCall:
-    func: Callable[[], object]
-    done: threading.Event | None = None
-    result: object = None
-    error: BaseException | None = None
 
 
 def _reset_gpib_interfaces_for_resources(*resources: str | None) -> None:
