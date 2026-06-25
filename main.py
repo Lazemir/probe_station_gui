@@ -167,7 +167,10 @@ from probe_station_gui.route_measurement_payloads import (
 )
 from probe_station_gui.route_api_window_guard import probe_route_api_requires_window
 from probe_station_gui.route_measurement_settings import RouteMeasurementSettingsStore
-from probe_station_gui.route_session_actions import route_session_action_from_payload
+from probe_station_gui.route_session_actions import (
+    route_confirmation_action,
+    route_session_action_from_payload,
+)
 from probe_station_gui.route_formatting import (
     csv_bool as _csv_bool,
     csv_float as _csv_float,
@@ -9236,37 +9239,22 @@ class Main(QMainWindow):
                         self._show_status(message, 8000)
                         self._route_measurement_dialog.set_status(message)
                         return
-        action_to_submit = str(action)
-        action_key = action_to_submit.strip().lower()
         pending_point_number = getattr(self, "_pending_route_measure_point", None)
-        if (
-            self._route_measurement_waiting
-            and pending_point_number is not None
-            and action_key in {"next", "resume", "continue"}
-        ):
-            action_to_submit = f"jump:{int(pending_point_number)}"
-            action_key = action_to_submit.strip().lower()
-        if not runner.submit_confirmation(action_to_submit):
+        confirmation = route_confirmation_action(
+            action,
+            waiting=self._route_measurement_waiting,
+            pending_point_number=pending_point_number,
+        )
+        if not runner.submit_confirmation(confirmation.action):
             self._show_status("Unknown route measurement action.", 3000)
             return
-        if action_to_submit != str(action):
+        if confirmation.replaced_pending_point:
             self._pending_route_measure_point = None
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_route_measurement_waiting(False)
         if self._route_measurement_dialog is not None:
             self._route_measurement_dialog.set_waiting(False)
-        if action_key == "measure":
-            action_label = "measure"
-        elif action_key == "remeasure":
-            action_label = "remeasure"
-        elif action_key == "skip":
-            action_label = "skip"
-        elif action_key.startswith("jump:") or action_key.isdigit():
-            point_number = action_key.split(":", 1)[-1]
-            action_label = f"measure from point {point_number}"
-        else:
-            action_label = "next"
-        self._show_status(f"Route measurement: {action_label}.")
+        self._show_status(f"Route measurement: {confirmation.status_label}.")
 
     def _submit_route_measurement_jump(self, point_number: int) -> None:
         self._submit_route_measurement_confirmation(f"jump:{int(point_number)}")
