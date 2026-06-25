@@ -165,6 +165,7 @@ from probe_station_gui.route_measurement_payloads import (
     route_artifact_record,
     route_external_result_payload,
 )
+from probe_station_gui.route_api_window_guard import probe_route_api_requires_window
 from probe_station_gui.route_measurement_settings import RouteMeasurementSettingsStore
 from probe_station_gui.route_session_actions import route_session_action_from_payload
 from probe_station_gui.route_formatting import (
@@ -1218,39 +1219,7 @@ class Main(QMainWindow):
         action: str,
         payload: dict[str, Any],
     ) -> bool:
-        if action in {
-            "api_route_control_resume",
-            "move_to_contact",
-            "contact_needles",
-            "check_contact",
-            "route_contact_focus",
-            "route_contact_photo",
-            "contact_seek",
-            "start_route_session",
-            "route_session_result",
-            "route_session_seek",
-        }:
-            return True
-        if action == "route_session_action":
-            route_action = str(
-                payload.get("action", payload.get("command", "next"))
-            ).strip().lower()
-            return route_action not in {"pause", "interrupt", "stop", "status"}
-        if action == "raw_voltage_sweep":
-            route_contact_keys = {
-                "contact_number",
-                "contact",
-                "structure_number",
-                "point_number",
-            }
-            if any(key in payload for key in route_contact_keys):
-                return True
-            return (
-                self._api_bool(payload, "move_to_contact", "move", default=False)
-                or self._api_bool(payload, "lower_needles", "lower", default=False)
-                or self._api_bool(payload, "lift_after", default=False)
-            )
-        return False
+        return probe_route_api_requires_window(action, payload)
 
     def _route_control_window_is_open(self) -> bool:
         dialog = getattr(self, "_route_measurement_dialog", None)
