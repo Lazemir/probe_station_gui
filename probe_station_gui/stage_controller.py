@@ -29,20 +29,8 @@ from probe_station_gui.motion_prediction import interpolate_position
 from probe_station_gui.needle_motion_profile import (
     build_needle_motion_profile_segments,
 )
-from probe_station_gui.stage_axis_mapping import (
-    axis_a_calibrated_coordinate_for_gcode_coordinate,
-    axis_a_commanded_lowering_for_calibrated_coordinate,
-    axis_a_gcode_coordinate_for_calibrated_coordinate,
-    axis_a_gcode_coordinate_for_lowering,
-    axis_a_lowering_for_gcode_coordinate,
-    axis_a_model_calibrated_coordinate_for_commanded,
-    axis_a_model_lowering_for_commanded,
-    axis_a_model_parameters,
-    axis_z_coefficients,
-    axis_z_display_for_gcode_coordinate,
-    axis_z_gcode_coordinate_for_display,
-    evaluate_polynomial,
-)
+from probe_station_gui.stage_axis_calibration import StageAxisCalibrationMapper
+from probe_station_gui.stage_axis_mapping import evaluate_polynomial
 from probe_station_gui.stage_autofocus_math import (
     autofocus_sweep_feedrate_mm_min,
     estimate_shift,
@@ -4498,15 +4486,25 @@ class StageController(QObject):
             return self._axis_z_gcode_coordinate_for_display(display_value)
         return float(display_value)
 
+    def _axis_calibration_mapper(self) -> StageAxisCalibrationMapper:
+        return StageAxisCalibrationMapper(
+            axis_a_calibration=self._axis_a_calibration,
+            axis_z_calibration=self._axis_z_calibration,
+            position_reporting_mode=self._position_reporting_mode,
+            active_work_coordinate_system=self._active_work_coordinate_system,
+            controller_coordinate_offsets=self._controller_coordinate_offsets,
+            axis_index=self.AXIS_INDEX,
+        )
+
     def _axis_a_model_parameters(self) -> tuple[float, float, float, float] | None:
-        return axis_a_model_parameters(self._axis_a_calibration)
+        return self._axis_calibration_mapper().axis_a_model_parameters()
 
     def _axis_a_model_calibrated_coordinate_for_commanded(
         self,
         commanded_lowering_mm: float,
     ) -> float:
-        return axis_a_model_calibrated_coordinate_for_commanded(
-            self._axis_a_calibration,
+        mapper = self._axis_calibration_mapper()
+        return mapper.axis_a_model_calibrated_coordinate_for_commanded(
             commanded_lowering_mm,
         )
 
@@ -4514,22 +4512,20 @@ class StageController(QObject):
         self,
         commanded_lowering_mm: float,
     ) -> float:
-        return axis_a_model_lowering_for_commanded(
-            self._axis_a_calibration,
+        return self._axis_calibration_mapper().axis_a_model_lowering_for_commanded(
             commanded_lowering_mm,
         )
 
     def _axis_a_calibrated_coordinate_for_gcode_coordinate(
         self, a_coordinate_mm: float
     ) -> float:
-        return axis_a_calibrated_coordinate_for_gcode_coordinate(
-            self._axis_a_calibration,
+        mapper = self._axis_calibration_mapper()
+        return mapper.axis_a_calibrated_coordinate_for_gcode_coordinate(
             a_coordinate_mm,
         )
 
     def _axis_a_lowering_for_gcode_coordinate(self, a_coordinate_mm: float) -> float:
-        return axis_a_lowering_for_gcode_coordinate(
-            self._axis_a_calibration,
+        return self._axis_calibration_mapper().axis_a_lowering_for_gcode_coordinate(
             a_coordinate_mm,
         )
 
@@ -4538,40 +4534,29 @@ class StageController(QObject):
         axis: str,
         status: _Status | None = None,
     ) -> float:
-        if self._position_reporting_mode == "machine":
-            return 0.0
-        idx = self.AXIS_INDEX.get(axis.upper().strip())
-        if idx is None:
-            return 0.0
-        work_offset = None if status is None else getattr(status, "work_offset", None)
-        coordinate_system = (
-            None if status is None else getattr(status, "coordinate_system", None)
-        ) or self._active_work_coordinate_system
-        if work_offset is None and coordinate_system:
-            work_offset = self._controller_coordinate_offsets.get(coordinate_system)
-        if work_offset is None or idx >= len(work_offset):
-            return 0.0
-        return float(work_offset[idx])
+        return self._axis_calibration_mapper().axis_work_offset_for_configured_mode(
+            axis,
+            status,
+        )
 
     def _axis_a_lowering_for_configured_coordinate(
         self,
         a_coordinate_mm: float,
         status: _Status | None = None,
     ) -> float:
-        machine_coordinate = (
-            float(a_coordinate_mm)
-            + self._axis_work_offset_for_configured_mode("A", status)
+        mapper = self._axis_calibration_mapper()
+        return mapper.axis_a_lowering_for_configured_coordinate(
+            a_coordinate_mm,
+            status,
         )
-        return self._axis_a_lowering_for_gcode_coordinate(machine_coordinate)
 
     def _axis_a_configured_coordinate_for_lowering(
         self,
         lowering_mm: float,
         status: _Status | None = None,
     ) -> float:
-        machine_coordinate = self._axis_a_gcode_coordinate_for_lowering(lowering_mm)
-        return machine_coordinate - self._axis_work_offset_for_configured_mode(
-            "A",
+        return self._axis_calibration_mapper().axis_a_configured_coordinate_for_lowering(
+            lowering_mm,
             status,
         )
 
@@ -4579,14 +4564,13 @@ class StageController(QObject):
         self,
         calibrated_coordinate_mm: float,
     ) -> float:
-        return axis_a_gcode_coordinate_for_calibrated_coordinate(
-            self._axis_a_calibration,
+        mapper = self._axis_calibration_mapper()
+        return mapper.axis_a_gcode_coordinate_for_calibrated_coordinate(
             calibrated_coordinate_mm,
         )
 
     def _axis_a_gcode_coordinate_for_lowering(self, lowering_mm: float) -> float:
-        return axis_a_gcode_coordinate_for_lowering(
-            self._axis_a_calibration,
+        return self._axis_calibration_mapper().axis_a_gcode_coordinate_for_lowering(
             lowering_mm,
         )
 
@@ -4594,8 +4578,8 @@ class StageController(QObject):
         self,
         calibrated_coordinate_mm: float,
     ) -> float:
-        return axis_a_commanded_lowering_for_calibrated_coordinate(
-            self._axis_a_calibration,
+        mapper = self._axis_calibration_mapper()
+        return mapper.axis_a_commanded_lowering_for_calibrated_coordinate(
             calibrated_coordinate_mm,
         )
 
@@ -4604,26 +4588,25 @@ class StageController(QObject):
         current_a: float,
         requested_step_mm: float,
     ) -> float:
-        current_physical = self._axis_a_lowering_for_configured_coordinate(current_a)
-        target_physical = current_physical - float(requested_step_mm)
-        return self._axis_a_configured_coordinate_for_lowering(target_physical)
+        return self._axis_calibration_mapper().axis_a_gcode_coordinate_for_lowering_step(
+            current_a,
+            requested_step_mm,
+        )
 
     @staticmethod
     def _evaluate_polynomial(coefficients: tuple[float, ...], x_value: float) -> float:
         return evaluate_polynomial(coefficients, x_value)
 
     def _axis_z_coefficients(self) -> tuple[float, ...] | None:
-        return axis_z_coefficients(self._axis_z_calibration)
+        return self._axis_calibration_mapper().axis_z_coefficients()
 
     def _axis_z_display_for_gcode_coordinate(self, z_coordinate_mm: float) -> float:
-        return axis_z_display_for_gcode_coordinate(
-            self._axis_z_calibration,
+        return self._axis_calibration_mapper().axis_z_display_for_gcode_coordinate(
             z_coordinate_mm,
         )
 
     def _axis_z_gcode_coordinate_for_display(self, display_mm: float) -> float:
-        return axis_z_gcode_coordinate_for_display(
-            self._axis_z_calibration,
+        return self._axis_calibration_mapper().axis_z_gcode_coordinate_for_display(
             display_mm,
         )
 
