@@ -47,8 +47,8 @@ from probe_station_gui.api_keys import (
 )
 from probe_station_gui.dialogs.camera_settings_dialog import CameraSettingsWidget
 from probe_station_gui.qt_compat import keyboard_modifiers_to_int, native_scan_code_to_int
-from probe_station_gui.controls_config import CONTROL_ACTIONS, KeyBinding
-from probe_station_gui.settings_sections import WORK_COORDINATE_SYSTEMS
+from probe_station_gui.settings.controls_config import CONTROL_ACTIONS, KeyBinding
+from probe_station_gui.settings.sections import WORK_COORDINATE_SYSTEMS
 from probe_station_gui.wheel_guard import (
     GuardedComboBox as QComboBox,
     GuardedDoubleSpinBox as QDoubleSpinBox,

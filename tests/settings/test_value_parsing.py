@@ -1,7 +1,7 @@
 import math
 import unittest
 
-from probe_station_gui.settings_value_parsing import (
+from probe_station_gui.settings.value_parsing import (
     coerce_bool,
     coerce_float,
     coerce_int,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from probe_station_gui.settings_value_parsing import coerce_bool
+from probe_station_gui.settings.value_parsing import coerce_bool
 
 
 TELEGRAM_ALERT_TYPES: tuple[tuple[str, str], ...] = (

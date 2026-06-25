@@ -1,4 +1,4 @@
-from probe_station_gui.controls_config import CONTROL_ACTIONS, KeyBinding
+from probe_station_gui.settings.controls_config import CONTROL_ACTIONS, KeyBinding
 
 
 def test_key_binding_round_trip_preserves_native_scan_code() -> None:

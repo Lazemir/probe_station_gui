@@ -1,4 +1,4 @@
-from probe_station_gui.objective_config import (
+from probe_station_gui.settings.objective_config import (
     ObjectiveCalibrationSettings,
     ObjectivesSettings,
     normalize_objective_name,

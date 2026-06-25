@@ -1,6 +1,6 @@
 import unittest
 
-from probe_station_gui.axis_calibration_config import (
+from probe_station_gui.settings.axis_calibration_config import (
     AxisACalibrationConfig,
     AxisACalibrationSettings,
     AxisZCalibrationConfig,

@@ -12,7 +12,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
-from probe_station_gui.axis_calibration_config import (
+from probe_station_gui.settings.axis_calibration_config import (
     AxisACalibrationConfig,
     AxisACalibrationSettings,
     AxisZCalibrationConfig,
@@ -20,12 +20,12 @@ from probe_station_gui.axis_calibration_config import (
     parse_axis_a_calibration,
     parse_axis_z_calibration,
 )
-from probe_station_gui.controls_config import (
+from probe_station_gui.settings.controls_config import (
     CONTROL_ACTIONS,
     ControlAction,
     KeyBinding,
 )
-from probe_station_gui.feedrate_config import (
+from probe_station_gui.settings.feedrate_config import (
     FeedrateGroup,
     FeedrateGroupConfig,
     FeedrateSettings,
@@ -36,13 +36,13 @@ from probe_station_gui.feedrate_config import (
     select_feedrate_default,
 )
 from probe_station_gui.fluidnc_protocol import parse_fluidnc_axis_max_feedrates
-from probe_station_gui.jog_config import (
+from probe_station_gui.settings.jog_config import (
     JogSettings,
     JogSettingsDefaults,
     parse_jog_settings,
 )
 from probe_station_gui.logging_config import configure_logging
-from probe_station_gui.needle_calibration_config import (
+from probe_station_gui.settings.needle_calibration_config import (
     LCR_APERTURE_RATES,
     LCR_LEVEL_MODES,
     LCR_MEASUREMENT_FUNCTIONS,
@@ -60,7 +60,7 @@ from probe_station_gui.needle_calibration_config import (
     parse_needle_calibration_settings,
     parse_saved_stage_position,
 )
-from probe_station_gui.objective_config import (
+from probe_station_gui.settings.objective_config import (
     DEFAULT_ACTIVE_OBJECTIVE,
     OBJECTIVE_NAMES,
     ObjectiveCalibrationSettings,
@@ -70,12 +70,12 @@ from probe_station_gui.objective_config import (
     ordered_objective_names,
     parse_pixels_to_mm_matrix,
 )
-from probe_station_gui.oscillation_config import (
+from probe_station_gui.settings.oscillation_config import (
     OscillationSettings,
     OscillationSettingsDefaults,
     parse_oscillation_settings,
 )
-from probe_station_gui.settings_value_parsing import (
+from probe_station_gui.settings.value_parsing import (
     coerce_bool,
     coerce_float,
     coerce_int,
@@ -83,12 +83,12 @@ from probe_station_gui.settings_value_parsing import (
     normalise_choice,
     positive_float,
 )
-from probe_station_gui.settings_section_parsing import (
+from probe_station_gui.settings.section_parsing import (
     parse_api_settings,
     parse_coordinate_system_settings,
     parse_logging_settings,
 )
-from probe_station_gui.settings_sections import (
+from probe_station_gui.settings.sections import (
     ApiSettings,
     ClickToMoveSettings,
     CoordinateSystemSettings,

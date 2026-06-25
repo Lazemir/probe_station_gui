@@ -1,6 +1,6 @@
 import unittest
 
-from probe_station_gui.jog_config import (
+from probe_station_gui.settings.jog_config import (
     JogSettings,
     JogSettingsDefaults,
     parse_jog_settings,

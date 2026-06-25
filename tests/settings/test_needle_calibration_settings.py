@@ -1,6 +1,6 @@
 import unittest
 
-from probe_station_gui.needle_calibration_config import (
+from probe_station_gui.settings.needle_calibration_config import (
     LCR_METER_TYPE_KEITHLEY,
     NeedleCalibrationSettings,
     SavedStagePositionSettings,

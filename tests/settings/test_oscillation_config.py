@@ -1,6 +1,6 @@
 import unittest
 
-from probe_station_gui.oscillation_config import (
+from probe_station_gui.settings.oscillation_config import (
     OscillationSettings,
     OscillationSettingsDefaults,
     parse_oscillation_settings,

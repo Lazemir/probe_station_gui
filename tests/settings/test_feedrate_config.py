@@ -1,6 +1,6 @@
 import unittest
 
-from probe_station_gui.feedrate_config import (
+from probe_station_gui.settings.feedrate_config import (
     FeedrateGroup,
     FeedrateSettings,
     parse_feedrate_groups,

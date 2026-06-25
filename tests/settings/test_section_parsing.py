@@ -1,9 +1,9 @@
-from probe_station_gui.settings_section_parsing import (
+from probe_station_gui.settings.section_parsing import (
     parse_api_settings,
     parse_coordinate_system_settings,
     parse_logging_settings,
 )
-from probe_station_gui.settings_sections import WORK_COORDINATE_SYSTEMS
+from probe_station_gui.settings.sections import WORK_COORDINATE_SYSTEMS
 
 
 def test_parse_logging_settings_uppercases_level_and_keeps_string_file() -> None:
