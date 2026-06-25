@@ -23,6 +23,11 @@ from probe_station_gui.feedrate_config import (
 )
 from probe_station_gui.jog_config import JogSettingsDefaults, parse_jog_settings
 from probe_station_gui.logging_config import configure_logging
+from probe_station_gui.needle_calibration_config import (
+    NeedleCalibrationDefaults,
+    parse_needle_calibration_settings,
+    parse_saved_stage_position,
+)
 from probe_station_gui.oscillation_config import (
     OscillationSettingsDefaults,
     parse_oscillation_settings,
@@ -1939,285 +1944,87 @@ class SettingsManager:
     ) -> NeedleCalibrationSettings:
         """Normalise persisted needle calibration settings."""
 
-        visa_resource = self.DEFAULT_LCR_VISA_RESOURCE
-        meter_type = self.DEFAULT_LCR_METER_TYPE
-        keithley_source_resource = self.DEFAULT_KEITHLEY_SOURCE_RESOURCE
-        keithley_voltmeter_resource = self.DEFAULT_KEITHLEY_VOLTMETER_RESOURCE
-        measurement_function = self.DEFAULT_LCR_MEASUREMENT_FUNCTION
-        range_mode = self.DEFAULT_LCR_RANGE_MODE
-        auto_range_enabled = self.DEFAULT_LCR_AUTO_RANGE_ENABLED
-        impedance_range = self.DEFAULT_LCR_IMPEDANCE_RANGE
-        dcr_range = self.DEFAULT_LCR_DCR_RANGE
-        frequency_hz = self.DEFAULT_LCR_FREQUENCY_HZ
-        level_mode = self.DEFAULT_LCR_LEVEL_MODE
-        voltage_level_v = self.DEFAULT_LCR_VOLTAGE_LEVEL_V
-        current_level_a = self.DEFAULT_LCR_CURRENT_LEVEL_A
-        source_resistance_ohm = self.DEFAULT_LCR_SOURCE_RESISTANCE_OHM
-        aperture_rate = self.DEFAULT_LCR_APERTURE_RATE
-        aperture_averages = self.DEFAULT_LCR_APERTURE_AVERAGES
-        trigger_source = self.DEFAULT_LCR_TRIGGER_SOURCE
-        trigger_delay_s = self.DEFAULT_LCR_TRIGGER_DELAY_S
-        bias_enabled = self.DEFAULT_LCR_BIAS_ENABLED
-        bias_level_v = self.DEFAULT_LCR_BIAS_LEVEL_V
-        monitor1 = self.DEFAULT_LCR_MONITOR
-        monitor2 = self.DEFAULT_LCR_MONITOR
-        alc_enabled = self.DEFAULT_LCR_ALC_ENABLED
-        short_threshold_ohm = self.DEFAULT_SHORT_THRESHOLD_OHM
-        poll_interval_ms = self.DEFAULT_LCR_POLL_INTERVAL_MS
-        feedrate_mm_min = self.DEFAULT_NEEDLE_FEEDRATE_MM_MIN
-        contact_zone_mm = self.DEFAULT_NEEDLE_CONTACT_ZONE_MM
-        raise_position_mm = 0.0
-        raise_position_configured = False
-        down_position_mm = 0.0
-        down_position_configured = False
-        chip_position = SavedStagePositionSettings()
-        stone_position = SavedStagePositionSettings()
-        if isinstance(raw_needle_calibration, dict):
-            meter_type = self._normalise_choice(
-                raw_needle_calibration.get("meter_type", meter_type),
-                choices=LCR_METER_TYPES,
-                default=meter_type,
-            )
-            resource_raw = raw_needle_calibration.get("visa_resource", visa_resource)
-            if isinstance(resource_raw, str):
-                visa_resource = resource_raw.strip()
-            source_resource_raw = raw_needle_calibration.get(
-                "keithley_source_resource", keithley_source_resource
-            )
-            if isinstance(source_resource_raw, str):
-                keithley_source_resource = source_resource_raw.strip()
-            voltmeter_resource_raw = raw_needle_calibration.get(
-                "keithley_voltmeter_resource", keithley_voltmeter_resource
-            )
-            if isinstance(voltmeter_resource_raw, str):
-                keithley_voltmeter_resource = voltmeter_resource_raw.strip()
-            measurement_function = self._normalise_choice(
-                raw_needle_calibration.get(
-                    "measurement_function", measurement_function
-                ),
-                choices=LCR_MEASUREMENT_FUNCTIONS,
-                default=measurement_function,
-            )
-            range_mode = self._normalise_choice(
-                raw_needle_calibration.get("range_mode", range_mode),
-                choices=LCR_RANGE_MODES,
-                default=range_mode,
-            )
-            auto_range_raw = raw_needle_calibration.get(
-                "auto_range_enabled", auto_range_enabled
-            )
-            if isinstance(auto_range_raw, str):
-                auto_range_enabled = auto_range_raw.strip().lower() not in {
-                    "",
-                    "0",
-                    "false",
-                    "off",
-                    "no",
-                }
-            else:
-                auto_range_enabled = bool(auto_range_raw)
-            auto_range_enabled = range_mode == "AUTO"
-            impedance_range = self._coerce_int(
-                raw_needle_calibration.get("impedance_range", impedance_range),
-                default=self.DEFAULT_LCR_IMPEDANCE_RANGE,
-            )
-            candidate = raw_needle_calibration.get("dcr_range", dcr_range)
-            try:
-                dcr_range = int(float(candidate))
-            except (TypeError, ValueError):
-                dcr_range = self.DEFAULT_LCR_DCR_RANGE
-            frequency_hz = self._coerce_float(
-                raw_needle_calibration.get("frequency_hz", frequency_hz),
-                default=self.DEFAULT_LCR_FREQUENCY_HZ,
-            )
-            level_mode = self._normalise_choice(
-                raw_needle_calibration.get("level_mode", level_mode),
-                choices=LCR_LEVEL_MODES,
-                default=level_mode,
-            )
-            voltage_level_v = self._coerce_float(
-                raw_needle_calibration.get("voltage_level_v", voltage_level_v),
-                default=self.DEFAULT_LCR_VOLTAGE_LEVEL_V,
-            )
-            current_level_a = self._coerce_float(
-                raw_needle_calibration.get("current_level_a", current_level_a),
-                default=self.DEFAULT_LCR_CURRENT_LEVEL_A,
-            )
-            source_resistance_ohm = self._coerce_int(
-                raw_needle_calibration.get(
-                    "source_resistance_ohm", source_resistance_ohm
-                ),
-                default=self.DEFAULT_LCR_SOURCE_RESISTANCE_OHM,
-            )
-            aperture_rate = self._normalise_choice(
-                raw_needle_calibration.get("aperture_rate", aperture_rate),
-                choices=LCR_APERTURE_RATES,
-                default=aperture_rate,
-            )
-            aperture_averages = self._coerce_int(
-                raw_needle_calibration.get("aperture_averages", aperture_averages),
-                default=self.DEFAULT_LCR_APERTURE_AVERAGES,
-            )
-            trigger_source = self._normalise_choice(
-                raw_needle_calibration.get("trigger_source", trigger_source),
-                choices=LCR_TRIGGER_SOURCES,
-                default=trigger_source,
-            )
-            trigger_delay_s = self._coerce_float(
-                raw_needle_calibration.get("trigger_delay_s", trigger_delay_s),
-                default=self.DEFAULT_LCR_TRIGGER_DELAY_S,
-            )
-            bias_enabled = self._coerce_bool(
-                raw_needle_calibration.get("bias_enabled", bias_enabled),
-                default=self.DEFAULT_LCR_BIAS_ENABLED,
-            )
-            bias_level_v = self._coerce_float(
-                raw_needle_calibration.get("bias_level_v", bias_level_v),
-                default=self.DEFAULT_LCR_BIAS_LEVEL_V,
-            )
-            monitor1 = self._normalise_choice(
-                raw_needle_calibration.get("monitor1", monitor1),
-                choices=LCR_MONITOR_PARAMETERS,
-                default=monitor1,
-            )
-            monitor2 = self._normalise_choice(
-                raw_needle_calibration.get("monitor2", monitor2),
-                choices=LCR_MONITOR_PARAMETERS,
-                default=monitor2,
-            )
-            alc_enabled = self._coerce_bool(
-                raw_needle_calibration.get("alc_enabled", alc_enabled),
-                default=self.DEFAULT_LCR_ALC_ENABLED,
-            )
-            candidate = raw_needle_calibration.get(
-                "short_threshold_ohm", short_threshold_ohm
-            )
-            try:
-                if isinstance(candidate, (int, float, str)):
-                    short_threshold_ohm = float(candidate)
-            except (TypeError, ValueError):
-                short_threshold_ohm = self.DEFAULT_SHORT_THRESHOLD_OHM
-            candidate = raw_needle_calibration.get(
-                "poll_interval_ms", poll_interval_ms
-            )
-            try:
-                if isinstance(candidate, (int, float, str)):
-                    poll_interval_ms = int(float(candidate))
-            except (TypeError, ValueError):
-                poll_interval_ms = self.DEFAULT_LCR_POLL_INTERVAL_MS
-            candidate = raw_needle_calibration.get(
-                "feedrate_mm_min", feedrate_mm_min
-            )
-            try:
-                if isinstance(candidate, (int, float, str)):
-                    feedrate_mm_min = float(candidate)
-            except (TypeError, ValueError):
-                feedrate_mm_min = self.DEFAULT_NEEDLE_FEEDRATE_MM_MIN
-            candidate = raw_needle_calibration.get(
-                "contact_zone_mm", contact_zone_mm
-            )
-            try:
-                if isinstance(candidate, (int, float, str)):
-                    contact_zone_mm = float(candidate)
-            except (TypeError, ValueError):
-                contact_zone_mm = self.DEFAULT_NEEDLE_CONTACT_ZONE_MM
-            candidate = raw_needle_calibration.get(
-                "raise_position_mm", raise_position_mm
-            )
-            try:
-                if isinstance(candidate, (int, float, str)):
-                    raise_position_mm = float(candidate)
-            except (TypeError, ValueError):
-                raise_position_mm = 0.0
-            raise_position_configured = bool(
-                raw_needle_calibration.get(
-                    "raise_position_configured", raise_position_configured
-                )
-            )
-            candidate = raw_needle_calibration.get(
-                "down_position_mm", down_position_mm
-            )
-            try:
-                if isinstance(candidate, (int, float, str)):
-                    down_position_mm = float(candidate)
-            except (TypeError, ValueError):
-                down_position_mm = 0.0
-            down_position_configured = bool(
-                raw_needle_calibration.get(
-                    "down_position_configured", down_position_configured
-                )
-            )
-            chip_position = self._parse_saved_stage_position(
-                raw_needle_calibration.get("chip_position")
-            )
-            stone_position = self._parse_saved_stage_position(
-                raw_needle_calibration.get("stone_position")
-            )
-        if impedance_range < 0 or impedance_range > 8:
-            impedance_range = self.DEFAULT_LCR_IMPEDANCE_RANGE
-        if dcr_range < 0 or dcr_range > 8:
-            dcr_range = self.DEFAULT_LCR_DCR_RANGE
-        if frequency_hz < 10:
-            frequency_hz = self.DEFAULT_LCR_FREQUENCY_HZ
-        if voltage_level_v < 0.01 or voltage_level_v > 2.0:
-            voltage_level_v = self.DEFAULT_LCR_VOLTAGE_LEVEL_V
-        if current_level_a < 0.0001 or current_level_a > 0.02:
-            current_level_a = self.DEFAULT_LCR_CURRENT_LEVEL_A
-        if source_resistance_ohm not in LCR_SOURCE_RESISTANCES_OHM:
-            source_resistance_ohm = self.DEFAULT_LCR_SOURCE_RESISTANCE_OHM
-        if aperture_averages < 1 or aperture_averages > 256:
-            aperture_averages = self.DEFAULT_LCR_APERTURE_AVERAGES
-        if trigger_delay_s < 0 or trigger_delay_s > 60:
-            trigger_delay_s = self.DEFAULT_LCR_TRIGGER_DELAY_S
-        if bias_level_v < -2.5 or bias_level_v > 2.5:
-            bias_level_v = self.DEFAULT_LCR_BIAS_LEVEL_V
-        if short_threshold_ohm < 0:
-            short_threshold_ohm = self.DEFAULT_SHORT_THRESHOLD_OHM
-        if poll_interval_ms < 50:
-            poll_interval_ms = self.DEFAULT_LCR_POLL_INTERVAL_MS
-        if feedrate_mm_min <= 0:
-            feedrate_mm_min = self.DEFAULT_NEEDLE_FEEDRATE_MM_MIN
-        feedrate_mm_min = max(self.MIN_FEEDRATE_MM_MIN, feedrate_mm_min)
-        if contact_zone_mm < 0:
-            contact_zone_mm = self.DEFAULT_NEEDLE_CONTACT_ZONE_MM
-        auto_range_enabled = range_mode == "AUTO"
-        if not raise_position_configured and down_position_configured:
-            raise_position_mm = down_position_mm
-            raise_position_configured = True
+        config = parse_needle_calibration_settings(
+            raw_needle_calibration,
+            self._needle_calibration_defaults(),
+        )
         return NeedleCalibrationSettings(
-            meter_type=meter_type,
-            visa_resource=visa_resource,
-            keithley_source_resource=keithley_source_resource,
-            keithley_voltmeter_resource=keithley_voltmeter_resource,
-            measurement_function=measurement_function,
-            range_mode=range_mode,
-            auto_range_enabled=auto_range_enabled,
-            impedance_range=impedance_range,
-            dcr_range=dcr_range,
-            frequency_hz=frequency_hz,
-            level_mode=level_mode,
-            voltage_level_v=voltage_level_v,
-            current_level_a=current_level_a,
-            source_resistance_ohm=source_resistance_ohm,
-            aperture_rate=aperture_rate,
-            aperture_averages=aperture_averages,
-            trigger_source=trigger_source,
-            trigger_delay_s=trigger_delay_s,
-            bias_enabled=bias_enabled,
-            bias_level_v=bias_level_v,
-            monitor1=monitor1,
-            monitor2=monitor2,
-            alc_enabled=alc_enabled,
-            short_threshold_ohm=short_threshold_ohm,
-            poll_interval_ms=poll_interval_ms,
-            feedrate_mm_min=feedrate_mm_min,
-            contact_zone_mm=contact_zone_mm,
-            raise_position_mm=raise_position_mm,
-            raise_position_configured=raise_position_configured,
-            down_position_mm=down_position_mm,
-            down_position_configured=down_position_configured,
-            chip_position=chip_position,
-            stone_position=stone_position,
+            meter_type=config.meter_type,
+            visa_resource=config.visa_resource,
+            keithley_source_resource=config.keithley_source_resource,
+            keithley_voltmeter_resource=config.keithley_voltmeter_resource,
+            measurement_function=config.measurement_function,
+            range_mode=config.range_mode,
+            auto_range_enabled=config.auto_range_enabled,
+            impedance_range=config.impedance_range,
+            dcr_range=config.dcr_range,
+            frequency_hz=config.frequency_hz,
+            level_mode=config.level_mode,
+            voltage_level_v=config.voltage_level_v,
+            current_level_a=config.current_level_a,
+            source_resistance_ohm=config.source_resistance_ohm,
+            aperture_rate=config.aperture_rate,
+            aperture_averages=config.aperture_averages,
+            trigger_source=config.trigger_source,
+            trigger_delay_s=config.trigger_delay_s,
+            bias_enabled=config.bias_enabled,
+            bias_level_v=config.bias_level_v,
+            monitor1=config.monitor1,
+            monitor2=config.monitor2,
+            alc_enabled=config.alc_enabled,
+            short_threshold_ohm=config.short_threshold_ohm,
+            poll_interval_ms=config.poll_interval_ms,
+            feedrate_mm_min=config.feedrate_mm_min,
+            contact_zone_mm=config.contact_zone_mm,
+            raise_position_mm=config.raise_position_mm,
+            raise_position_configured=config.raise_position_configured,
+            down_position_mm=config.down_position_mm,
+            down_position_configured=config.down_position_configured,
+            chip_position=self._saved_stage_position_from_config(
+                config.chip_position
+            ),
+            stone_position=self._saved_stage_position_from_config(
+                config.stone_position
+            ),
+        )
+
+    def _needle_calibration_defaults(self) -> NeedleCalibrationDefaults:
+        return NeedleCalibrationDefaults(
+            meter_type=self.DEFAULT_LCR_METER_TYPE,
+            visa_resource=self.DEFAULT_LCR_VISA_RESOURCE,
+            keithley_source_resource=self.DEFAULT_KEITHLEY_SOURCE_RESOURCE,
+            keithley_voltmeter_resource=self.DEFAULT_KEITHLEY_VOLTMETER_RESOURCE,
+            measurement_function=self.DEFAULT_LCR_MEASUREMENT_FUNCTION,
+            range_mode=self.DEFAULT_LCR_RANGE_MODE,
+            auto_range_enabled=self.DEFAULT_LCR_AUTO_RANGE_ENABLED,
+            impedance_range=self.DEFAULT_LCR_IMPEDANCE_RANGE,
+            dcr_range=self.DEFAULT_LCR_DCR_RANGE,
+            frequency_hz=self.DEFAULT_LCR_FREQUENCY_HZ,
+            level_mode=self.DEFAULT_LCR_LEVEL_MODE,
+            voltage_level_v=self.DEFAULT_LCR_VOLTAGE_LEVEL_V,
+            current_level_a=self.DEFAULT_LCR_CURRENT_LEVEL_A,
+            source_resistance_ohm=self.DEFAULT_LCR_SOURCE_RESISTANCE_OHM,
+            aperture_rate=self.DEFAULT_LCR_APERTURE_RATE,
+            aperture_averages=self.DEFAULT_LCR_APERTURE_AVERAGES,
+            trigger_source=self.DEFAULT_LCR_TRIGGER_SOURCE,
+            trigger_delay_s=self.DEFAULT_LCR_TRIGGER_DELAY_S,
+            bias_enabled=self.DEFAULT_LCR_BIAS_ENABLED,
+            bias_level_v=self.DEFAULT_LCR_BIAS_LEVEL_V,
+            monitor=self.DEFAULT_LCR_MONITOR,
+            alc_enabled=self.DEFAULT_LCR_ALC_ENABLED,
+            short_threshold_ohm=self.DEFAULT_SHORT_THRESHOLD_OHM,
+            poll_interval_ms=self.DEFAULT_LCR_POLL_INTERVAL_MS,
+            feedrate_mm_min=self.DEFAULT_NEEDLE_FEEDRATE_MM_MIN,
+            contact_zone_mm=self.DEFAULT_NEEDLE_CONTACT_ZONE_MM,
+            min_feedrate_mm_min=self.MIN_FEEDRATE_MM_MIN,
+            meter_types=LCR_METER_TYPES,
+            measurement_functions=LCR_MEASUREMENT_FUNCTIONS,
+            range_modes=LCR_RANGE_MODES,
+            level_modes=LCR_LEVEL_MODES,
+            source_resistances_ohm=LCR_SOURCE_RESISTANCES_OHM,
+            aperture_rates=LCR_APERTURE_RATES,
+            trigger_sources=LCR_TRIGGER_SOURCES,
+            monitor_parameters=LCR_MONITOR_PARAMETERS,
         )
 
     def _parse_axis_a_calibration(self, raw_calibration) -> AxisACalibrationSettings:
@@ -2457,32 +2264,17 @@ class SettingsManager:
     def _parse_saved_stage_position(self, raw_position) -> SavedStagePositionSettings:
         """Normalise a persisted XYZ bookmark used by calibration workflows."""
 
-        x_mm = 0.0
-        y_mm = 0.0
-        z_mm = 0.0
-        configured = False
-        if isinstance(raw_position, dict):
-            for key, default in (("x_mm", 0.0), ("y_mm", 0.0), ("z_mm", 0.0)):
-                candidate = raw_position.get(key, default)
-                try:
-                    if isinstance(candidate, (int, float, str)):
-                        value = float(candidate)
-                    else:
-                        value = default
-                except (TypeError, ValueError):
-                    value = default
-                if key == "x_mm":
-                    x_mm = value
-                elif key == "y_mm":
-                    y_mm = value
-                else:
-                    z_mm = value
-            configured = bool(raw_position.get("configured", configured))
+        return self._saved_stage_position_from_config(
+            parse_saved_stage_position(raw_position)
+        )
+
+    @staticmethod
+    def _saved_stage_position_from_config(config) -> SavedStagePositionSettings:
         return SavedStagePositionSettings(
-            x_mm=x_mm,
-            y_mm=y_mm,
-            z_mm=z_mm,
-            configured=configured,
+            x_mm=config.x_mm,
+            y_mm=config.y_mm,
+            z_mm=config.z_mm,
+            configured=config.configured,
         )
 
     def _parse_coordinate_system(self, raw_coordinate_system) -> CoordinateSystemSettings:
