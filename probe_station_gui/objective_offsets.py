@@ -6,7 +6,7 @@ import math
 from dataclasses import dataclass
 from typing import Mapping
 
-from .settings_manager import normalize_objective_name, ordered_objective_names
+from .objective_config import normalize_objective_name, ordered_objective_names
 
 
 Point2D = tuple[float, float]
