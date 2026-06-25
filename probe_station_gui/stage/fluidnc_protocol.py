@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 
 from probe_station_gui.stage.types import _Status
 
@@ -21,11 +22,26 @@ CONTROLLER_STARTUP_BANNER_TOKENS = (
 )
 FLUIDNC_AXIS_INDEX = {"X": 0, "Y": 1, "Z": 2, "A": 3, "B": 4, "C": 5}
 FLUIDNC_AXIS_NAMES: tuple[str, ...] = ("X", "Y", "Z", "A", "B", "C")
+MIN_STATUS_COORDINATES = 3
 STATUS_PATTERN = re.compile(r"^<(?P<body>[^>]*)>")
 STATUS_FIELD_PATTERN = re.compile(r"(?P<key>[A-Za-z]+):(?P<value>.+)")
 AXIS_RANGE_PATTERN = re.compile(
     r"^\[MSG:INFO: Axis (?P<axis>[A-Za-z]) \((?P<min>-?\d+\.?\d*),(?P<max>-?\d+\.?\d*)\)\]"
 )
+
+
+@dataclass(frozen=True)
+class _StatusFrame:
+    state: str
+    fields: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _StatusFields:
+    machine_position: tuple[float, ...] | None = None
+    work_position: tuple[float, ...] | None = None
+    work_offset: tuple[float, ...] | None = None
+    pins: set[str] | None = None
 
 
 def _normalized_line(line: str) -> str:
@@ -56,6 +72,43 @@ def parse_fluidnc_status_line(
 ) -> _Status | None:
     """Parse a FluidNC real-time status frame for the configured position mode."""
 
+    frame = _parse_status_frame(line)
+    if frame is None:
+        return None
+    fields = _parse_status_fields(
+        frame.fields,
+        position_reporting_mode=position_reporting_mode,
+        axis_index=axis_index or FLUIDNC_AXIS_INDEX,
+    )
+    if not _status_fields_are_complete(fields, position_reporting_mode):
+        return None
+
+    coordinate_system = _status_coordinate_system(
+        position_reporting_mode,
+        active_work_coordinate_system,
+    )
+    work_offset = _status_work_offset(
+        fields,
+        coordinate_system=coordinate_system,
+        controller_coordinate_offsets=controller_coordinate_offsets,
+    )
+
+    return _Status(
+        state=frame.state,
+        position=fields.machine_position,
+        display_position=(
+            fields.machine_position
+            if position_reporting_mode == "machine"
+            else fields.work_position
+        ),
+        work_position=fields.work_position,
+        work_offset=work_offset,
+        coordinate_system=coordinate_system,
+        pins=fields.pins,
+    )
+
+
+def _parse_status_frame(line: str) -> _StatusFrame | None:
     match = STATUS_PATTERN.search(line)
     if not match:
         return None
@@ -66,13 +119,20 @@ def parse_fluidnc_status_line(
     state = parts[0].strip()
     if not state:
         return None
+    return _StatusFrame(state=state, fields=tuple(parts[1:]))
 
+
+def _parse_status_fields(
+    parts: tuple[str, ...],
+    *,
+    position_reporting_mode: str,
+    axis_index: Mapping[str, int],
+) -> _StatusFields:
     machine_position: tuple[float, ...] | None = None
     work_position: tuple[float, ...] | None = None
     work_offset: tuple[float, ...] | None = None
     pins: set[str] = set()
-    axes = axis_index or FLUIDNC_AXIS_INDEX
-    for part in parts[1:]:
+    for part in parts:
         field_match = STATUS_FIELD_PATTERN.match(part)
         if not field_match:
             continue
@@ -88,45 +148,57 @@ def parse_fluidnc_status_line(
             pins = {
                 pin.upper()
                 for pin in value.strip()
-                if pin.strip() and pin.upper() in axes
+                if pin.strip() and pin.upper() in axis_index
             }
 
-    if machine_position is not None and len(machine_position) < 3:
-        return None
-    if work_position is not None and len(work_position) < 3:
-        return None
-    if work_offset is not None and len(work_offset) < 3:
-        return None
-    if position_reporting_mode == "machine" and machine_position is None:
-        return None
-    if position_reporting_mode != "machine" and work_position is None:
-        return None
-
-    coordinate_system = active_work_coordinate_system
-    if position_reporting_mode != "machine":
-        offsets = controller_coordinate_offsets or {}
-        if (
-            work_offset is None
-            and coordinate_system
-            and coordinate_system in offsets
-        ):
-            work_offset = offsets.get(coordinate_system)
-    else:
-        coordinate_system = None
-
-    return _Status(
-        state=state,
-        position=machine_position,
-        display_position=(
-            machine_position
-            if position_reporting_mode == "machine"
-            else work_position
-        ),
+    return _StatusFields(
+        machine_position=machine_position,
         work_position=work_position,
         work_offset=work_offset,
-        coordinate_system=coordinate_system,
         pins=pins or None,
     )
+
+
+def _status_fields_are_complete(
+    fields: _StatusFields,
+    position_reporting_mode: str,
+) -> bool:
+    if not _status_tuple_is_complete(fields.machine_position):
+        return False
+    if not _status_tuple_is_complete(fields.work_position):
+        return False
+    if not _status_tuple_is_complete(fields.work_offset):
+        return False
+    if position_reporting_mode == "machine":
+        return fields.machine_position is not None
+    return fields.work_position is not None
+
+
+def _status_tuple_is_complete(values: tuple[float, ...] | None) -> bool:
+    return values is None or len(values) >= MIN_STATUS_COORDINATES
+
+
+def _status_coordinate_system(
+    position_reporting_mode: str,
+    active_work_coordinate_system: str | None,
+) -> str | None:
+    if position_reporting_mode == "machine":
+        return None
+    return active_work_coordinate_system
+
+
+def _status_work_offset(
+    fields: _StatusFields,
+    *,
+    coordinate_system: str | None,
+    controller_coordinate_offsets: Mapping[str, tuple[float, ...]] | None,
+) -> tuple[float, ...] | None:
+    if fields.work_offset is not None:
+        return fields.work_offset
+    offsets = controller_coordinate_offsets or {}
+    if coordinate_system and coordinate_system in offsets:
+        return offsets.get(coordinate_system)
+    return None
 
 
 def parse_float_tuple(raw: str) -> tuple[float, ...] | None:

@@ -67,6 +67,31 @@ def test_parse_fluidnc_status_line_captures_limit_pins() -> None:
     assert status.pins == {"X", "Y"}
 
 
+def test_parse_fluidnc_status_line_filters_limit_pins_to_known_axes() -> None:
+    status = parse_fluidnc_status_line(
+        "<Alarm|WPos:0.000,10.000,1.000,0.000|Pn:xyq|FS:0,0>",
+        position_reporting_mode="work",
+    )
+
+    assert status is not None
+    assert status.pins == {"X", "Y"}
+
+
+def test_parse_fluidnc_status_line_uses_machine_position_in_machine_mode() -> None:
+    status = parse_fluidnc_status_line(
+        "<Idle|MPos:1.000,2.000,3.000|WPos:4.000,5.000,6.000|WCO:3.000,3.000,3.000>",
+        position_reporting_mode="machine",
+        active_work_coordinate_system="G54",
+    )
+
+    assert status is not None
+    assert status.position == (1.0, 2.0, 3.0)
+    assert status.display_position == (1.0, 2.0, 3.0)
+    assert status.work_position is None
+    assert status.work_offset == (3.0, 3.0, 3.0)
+    assert status.coordinate_system is None
+
+
 def test_parse_fluidnc_status_line_ignores_wrong_position_mode() -> None:
     status = parse_fluidnc_status_line(
         "<Idle|MPos:25.106,25.401,9.207,0.000,2.170|Bf:15,127|FS:0,0>",
@@ -80,6 +105,24 @@ def test_parse_fluidnc_status_line_rejects_truncated_machine_position() -> None:
     status = parse_fluidnc_status_line(
         "<Idle|MPos:29.459,31.4|FS:0,0>",
         position_reporting_mode="machine",
+    )
+
+    assert status is None
+
+
+def test_parse_fluidnc_status_line_rejects_malformed_required_work_position() -> None:
+    status = parse_fluidnc_status_line(
+        "<Idle|WPos:0.000,bad,1.000|FS:0,0>",
+        position_reporting_mode="work",
+    )
+
+    assert status is None
+
+
+def test_parse_fluidnc_status_line_rejects_truncated_work_offset() -> None:
+    status = parse_fluidnc_status_line(
+        "<Idle|WPos:0.000,1.000,2.000|WCO:0.000,1.000|FS:0,0>",
+        position_reporting_mode="work",
     )
 
     assert status is None
