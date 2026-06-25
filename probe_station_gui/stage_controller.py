@@ -24,6 +24,9 @@ from probe_station_gui.fluidnc_protocol import (
     parse_fluidnc_status_line,
 )
 from probe_station_gui.motion_prediction import interpolate_position
+from probe_station_gui.needle_motion_profile import (
+    build_needle_motion_profile_segments,
+)
 from probe_station_gui.settings_manager import parse_fluidnc_axis_max_feedrates
 from probe_station_gui.stage_types import (
     AutofocusResult,
@@ -3879,50 +3882,14 @@ class StageController(QObject):
             current_a,
             status,
         )
-        fast_feedrate = self._axis_max_feedrate("A")
-        slow_feedrate = self._needle_programmed_feedrate(feedrate)
-        boundary_lowering = self._needle_contact_boundary_lowering()
-        segments: list[tuple[float, float, bool]] = []
-
-        def append_segment(
-            segment_target_lowering: float,
-            segment_feedrate: float,
-            slow_zone: bool,
-        ) -> None:
-            nonlocal current_lowering
-            segment_target_lowering = float(segment_target_lowering)
-            if abs(segment_target_lowering - current_lowering) < 1e-9:
-                return
-            segments.append(
-                (
-                    segment_target_lowering,
-                    max(self.MIN_FEEDRATE, float(segment_feedrate)),
-                    bool(slow_zone),
-                )
-            )
-            current_lowering = segment_target_lowering
-
-        if boundary_lowering is None:
-            append_segment(target_lowering, fast_feedrate, False)
-            return segments
-
-        if target_lowering > current_lowering:
-            if current_lowering < boundary_lowering:
-                append_segment(
-                    min(boundary_lowering, target_lowering),
-                    fast_feedrate,
-                    False,
-                )
-            append_segment(target_lowering, slow_feedrate, True)
-        else:
-            if current_lowering > boundary_lowering:
-                append_segment(
-                    max(boundary_lowering, target_lowering),
-                    slow_feedrate,
-                    True,
-                )
-            append_segment(target_lowering, fast_feedrate, False)
-        return segments
+        return build_needle_motion_profile_segments(
+            current_lowering=current_lowering,
+            target_lowering=target_lowering,
+            boundary_lowering=self._needle_contact_boundary_lowering(),
+            fast_feedrate=self._axis_max_feedrate("A"),
+            slow_feedrate=self._needle_programmed_feedrate(feedrate),
+            min_feedrate=self.MIN_FEEDRATE,
+        )
 
     def _send_needle_motion_profile_locked(
         self,
