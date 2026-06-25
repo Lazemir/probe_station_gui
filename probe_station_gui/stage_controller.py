@@ -5640,46 +5640,25 @@ class StageController(QObject):
         return tuple(float(value) for value in position[:required_axes])
 
     def _position_for_configured_mode(self, status: _Status | None) -> tuple[float, ...] | None:
-        if status is None:
-            return None
-        return (
-            status.position
-            if self._position_reporting_mode == "machine"
-            else status.work_position
-        )
+        return self._axis_calibration_mapper().position_for_configured_mode(status)
 
     def _axis_value_for_configured_mode(
         self, status: _Status | None, axis: str
     ) -> float | None:
-        position = self._position_for_configured_mode(status)
-        if position is None:
-            return None
-        idx = self.AXIS_INDEX.get(axis.upper())
-        if idx is None or idx >= len(position):
-            return None
-        return float(position[idx])
+        return self._axis_calibration_mapper().axis_value_for_configured_mode(
+            status,
+            axis,
+        )
 
     def _axis_limits_for_configured_mode(
         self, axis: str, status: _Status | None
     ) -> tuple[float, float] | None:
         limits = self._axis_limits.get(axis)
-        if not limits:
-            return None
-        if self._position_reporting_mode == "machine":
-            return limits
-        idx = self.AXIS_INDEX.get(axis.upper())
-        if idx is None:
-            return limits
-        work_offset = None if status is None else status.work_offset
-        if work_offset is None and self._active_work_coordinate_system:
-            work_offset = self._controller_coordinate_offsets.get(
-                self._active_work_coordinate_system
-            )
-        if work_offset is None or idx >= len(work_offset):
-            return None
-        min_value, max_value = limits
-        offset = float(work_offset[idx])
-        return (float(min_value) - offset, float(max_value) - offset)
+        return self._axis_calibration_mapper().axis_limits_for_configured_mode(
+            axis,
+            limits,
+            status,
+        )
 
     def _handle_limit_line(self, line: str) -> None:
         soft_limit_match = self.SOFT_LIMIT_AXIS_PATTERN.search(line)

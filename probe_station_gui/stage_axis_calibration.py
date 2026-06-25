@@ -87,6 +87,58 @@ class StageAxisCalibrationMapper:
             return 0.0
         return float(work_offset[idx])
 
+    def position_for_configured_mode(
+        self,
+        status: object | None,
+    ) -> tuple[float, ...] | None:
+        if status is None:
+            return None
+        position = (
+            getattr(status, "position", None)
+            if self.position_reporting_mode == "machine"
+            else getattr(status, "work_position", None)
+        )
+        if position is None:
+            return None
+        return tuple(float(value) for value in position)
+
+    def axis_value_for_configured_mode(
+        self,
+        status: object | None,
+        axis: str,
+    ) -> float | None:
+        position = self.position_for_configured_mode(status)
+        if position is None:
+            return None
+        idx = self.axis_index.get(axis.upper())
+        if idx is None or idx >= len(position):
+            return None
+        return float(position[idx])
+
+    def axis_limits_for_configured_mode(
+        self,
+        axis: str,
+        limits: tuple[float, float] | None,
+        status: object | None,
+    ) -> tuple[float, float] | None:
+        if not limits:
+            return None
+        if self.position_reporting_mode == "machine":
+            return limits
+        idx = self.axis_index.get(axis.upper())
+        if idx is None:
+            return limits
+        work_offset = None if status is None else getattr(status, "work_offset", None)
+        if work_offset is None and self.active_work_coordinate_system:
+            work_offset = self.controller_coordinate_offsets.get(
+                self.active_work_coordinate_system
+            )
+        if work_offset is None or idx >= len(work_offset):
+            return None
+        min_value, max_value = limits
+        offset = float(work_offset[idx])
+        return (float(min_value) - offset, float(max_value) - offset)
+
     def axis_a_lowering_for_configured_coordinate(
         self,
         a_coordinate_mm: float,

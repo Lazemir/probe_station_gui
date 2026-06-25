@@ -70,6 +70,29 @@ def test_axis_work_offset_uses_status_before_cached_coordinate_system() -> None:
     assert mapper.axis_work_offset_for_configured_mode("A", status) == 6.0
 
 
+def test_position_and_axis_value_follow_configured_position_mode() -> None:
+    status = SimpleNamespace(
+        position=(1.0, 2.0, 3.0),
+        work_position=(4.0, 5.0, 6.0),
+    )
+
+    assert _mapper(mode="machine").position_for_configured_mode(status) == (
+        1.0,
+        2.0,
+        3.0,
+    )
+    assert _mapper(mode="work").axis_value_for_configured_mode(status, "Y") == 5.0
+
+
+def test_axis_limits_for_configured_mode_subtracts_work_offset() -> None:
+    mapper = _mapper(mode="work", active_system="G54", offsets={"G54": (1.0, 2.0)})
+
+    assert mapper.axis_limits_for_configured_mode("Y", (0.0, 10.0), None) == (
+        -2.0,
+        8.0,
+    )
+
+
 def test_axis_a_configured_coordinate_applies_active_work_offset() -> None:
     mapper = _mapper(mode="work", active_system="G54", offsets={"G54": (0, 0, 0, 2)})
     lowering = 0.2
