@@ -931,6 +931,7 @@ class RouteMeasurementRunner:
                 record_saved = False
                 quality_rejected = False
                 result_emitted = False
+                save_exhausted_bad_contact = False
                 try:
                     if not point_interrupted:
                         if measurement_prepare_task is not None:
@@ -987,32 +988,19 @@ class RouteMeasurementRunner:
                                 needles_lowered = False
                                 needs_final_lift = False
                     if not point_interrupted and record is not None:
-                        save_exhausted_bad_contact = (
-                            self._should_save_exhausted_bad_contact(record)
-                        )
-                        if (
-                            self._confirm_each_point
-                            and self._record_exceeds_quality_limit(record)
-                            and not save_exhausted_bad_contact
-                        ):
-                            if not (
-                                record.contact_quality is not None
-                                and record.contact_quality.good is False
-                            ):
-                                record = replace(record, status="unstable")
-                            quality_rejected = True
-                        else:
-                            self._csv_writer.append(record)
-                            measurements_saved += 1
-                            record_saved = True
-                        self._emit_contact_photo(
-                            point,
+                        (
                             record,
-                            position,
-                            total,
                             record_saved,
+                            quality_rejected,
+                            save_exhausted_bad_contact,
+                            saved_count,
+                        ) = self._record_route_point_measurement(
+                            point=point,
+                            record=record,
+                            position=position,
+                            total=total,
                         )
-                        self._emit_result(record, position, total, record_saved)
+                        measurements_saved += saved_count
                         result_emitted = True
                 except Exception as exc:
                     if self._point_interrupt_cancelled_exception(exc):
@@ -1262,6 +1250,44 @@ class RouteMeasurementRunner:
         if decision == "skip" or (default_advances and decision != "remeasure"):
             return _RoutePointLoopDecision(position_index=position_index + 1), 0
         return _RoutePointLoopDecision(position_index=position_index), 0
+
+    def _record_route_point_measurement(
+        self,
+        *,
+        point: RouteMeasurementPoint,
+        record: RouteMeasurementRecord,
+        position: int,
+        total: int,
+    ) -> tuple[RouteMeasurementRecord, bool, bool, bool, int]:
+        save_exhausted_bad_contact = self._should_save_exhausted_bad_contact(record)
+        record_saved = False
+        quality_rejected = False
+        if (
+            self._confirm_each_point
+            and self._record_exceeds_quality_limit(record)
+            and not save_exhausted_bad_contact
+        ):
+            if not self._record_has_failed_contact_quality(record):
+                record = replace(record, status="unstable")
+            quality_rejected = True
+        else:
+            self._csv_writer.append(record)
+            record_saved = True
+        self._emit_contact_photo(
+            point,
+            record,
+            position,
+            total,
+            record_saved,
+        )
+        self._emit_result(record, position, total, record_saved)
+        return (
+            record,
+            record_saved,
+            quality_rejected,
+            save_exhausted_bad_contact,
+            1 if record_saved else 0,
+        )
 
     def _prepare_route_point_for_measurement(
         self,
@@ -2407,7 +2433,8 @@ class RouteMeasurementRunner:
         if emit_result:
             self._emit_result(record, position, total, False)
         contact_quality = record.contact_quality
-        if contact_quality is not None and contact_quality.good is False:
+        if self._record_has_failed_contact_quality(record):
+            assert contact_quality is not None
             self._status(
                 f"Route measurement: point {position}/{total} contact check failed "
                 f"({contact_quality.status}"
@@ -2525,8 +2552,7 @@ class RouteMeasurementRunner:
     def _record_exceeds_quality_limit(self, record: RouteMeasurementRecord) -> bool:
         if record.status == "short":
             return False
-        contact_quality = record.contact_quality
-        if contact_quality is not None and contact_quality.good is False:
+        if self._record_has_failed_contact_quality(record):
             return True
         if self._max_relative_rms is None or record.status != "ok":
             return False
@@ -2536,6 +2562,11 @@ class RouteMeasurementRunner:
         )
 
     @staticmethod
+    def _record_has_failed_contact_quality(record: RouteMeasurementRecord) -> bool:
+        contact_quality = record.contact_quality
+        return contact_quality is not None and contact_quality.good is False
+
+    @staticmethod
     def _contact_placement_record_is_success(record: RouteMeasurementRecord) -> bool:
         return str(record.status).strip().lower() in {"ok", "short"}
 
@@ -2543,8 +2574,7 @@ class RouteMeasurementRunner:
         self,
         record: RouteMeasurementRecord,
     ) -> bool:
-        contact_quality = record.contact_quality
-        if contact_quality is None or contact_quality.good is not False:
+        if not self._record_has_failed_contact_quality(record):
             return False
         contact_seek = self._current_contact_seek_result
         if (
