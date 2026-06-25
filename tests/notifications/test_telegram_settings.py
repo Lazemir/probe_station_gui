@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from probe_station_gui.telegram_settings import (
+from probe_station_gui.notifications.telegram_settings import (
     TELEGRAM_ALERT_TYPES,
     TelegramSettings,
     default_telegram_alerts,

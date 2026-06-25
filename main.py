@@ -216,7 +216,7 @@ from probe_station_gui.settings.manager import (
     normalize_objective_name,
     ordered_objective_names,
 )
-from probe_station_gui.telegram_notifications import (
+from probe_station_gui.notifications.telegram import (
     TelegramBotCommandService,
     TelegramBotRequest,
     TelegramBotResponse,

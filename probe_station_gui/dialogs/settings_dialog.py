@@ -81,7 +81,7 @@ from probe_station_gui.settings.manager import (
     TelegramSettings,
     ordered_objective_names,
 )
-from probe_station_gui.telegram_notifications import (
+from probe_station_gui.notifications.telegram import (
     LinkedTelegramChat,
     TELEGRAM_BOT_TOKEN_ENV,
     TelegramNotificationError,

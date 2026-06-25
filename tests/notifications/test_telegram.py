@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from probe_station_gui.shared import logging_config
-from probe_station_gui import telegram_notifications
+from probe_station_gui.notifications import telegram as telegram_notifications
 
 
 def test_global_bot_token_store_round_trip(tmp_path, monkeypatch) -> None:

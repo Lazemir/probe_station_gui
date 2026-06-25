@@ -95,13 +95,13 @@ from probe_station_gui.settings.sections import (
     LoggingSettings,
     WORK_COORDINATE_SYSTEMS,
 )
-from probe_station_gui.telegram_settings import (
+from probe_station_gui.notifications.telegram_settings import (
     TELEGRAM_ALERT_TYPES,
     TelegramSettings,
     default_telegram_alerts,
     parse_telegram_alerts,
 )
-from probe_station_gui.telegram_notifications import (
+from probe_station_gui.notifications.telegram import (
     load_global_bot_token,
     save_global_bot_token,
 )
