@@ -4267,8 +4267,7 @@ class StageController(QObject):
                 + " ".join(move_parts)
                 + f" F{self._format_gcode_value(effective_feedrate)}"
             )
-            self._write_command(serial_connection, command)
-            self._wait_for_ok(serial_connection)
+            self._write_current_command_and_wait(command)
             if motion_started_callback is not None:
                 motion_started_callback(move, effective_feedrate)
             if wait_for_completion:
@@ -4278,16 +4277,12 @@ class StageController(QObject):
                     ),
                 )
             return
-        self._write_command(serial_connection, "G21")
-        self._wait_for_ok(serial_connection)
-        self._write_command(serial_connection, "G91")
-        self._wait_for_ok(serial_connection)
-        self._write_command(serial_connection, command)
-        self._wait_for_ok(serial_connection)
+        self._write_current_command_and_wait("G21")
+        self._write_current_command_and_wait("G91")
+        self._write_current_command_and_wait(command)
         if motion_started_callback is not None:
             motion_started_callback(move, effective_feedrate)
-        self._write_command(serial_connection, "G90")
-        self._wait_for_ok(serial_connection)
+        self._write_current_command_and_wait("G90")
         if wait_for_completion:
             self._wait_for_idle(
                 timeout=self._idle_timeout_for_distance(
@@ -5343,16 +5338,24 @@ class StageController(QObject):
         check_cancelled: bool = True,
     ) -> None:
         serial_connection = self._current_serial()
-        self._write_command(
-            serial_connection,
-            command,
-            check_cancelled=check_cancelled,
-        )
-        self._wait_for_ok(
-            serial_connection,
-            timeout=timeout,
-            check_cancelled=check_cancelled,
-        )
+        if check_cancelled:
+            self._write_command(serial_connection, command)
+        else:
+            self._write_command(
+                serial_connection,
+                command,
+                check_cancelled=check_cancelled,
+            )
+        if timeout == 5.0 and check_cancelled:
+            self._wait_for_ok(serial_connection)
+        elif check_cancelled:
+            self._wait_for_ok(serial_connection, timeout=timeout)
+        else:
+            self._wait_for_ok(
+                serial_connection,
+                timeout=timeout,
+                check_cancelled=check_cancelled,
+            )
 
     def _wait_for_idle(self, timeout: float = 10.0) -> None:
         deadline = time.monotonic() + timeout
