@@ -229,6 +229,12 @@ class _RoutePointPhotoPreparation:
     stop_message: str | None = None
 
 
+@dataclass(frozen=True)
+class _RoutePointLoopDecision:
+    position_index: int
+    stop_message: str | None = None
+
+
 class RouteMeasurementRunner:
     """Run a saved probe route using direct stage and LCR controller methods."""
 
@@ -990,23 +996,17 @@ class RouteMeasurementRunner:
                     break
                 if not self._measure_enabled:
                     if point_interrupted:
-                        self._point_interrupt_requested.clear()
-                        decision = self._wait_after_interrupted_point(
+                        loop_decision = self._interrupted_route_point_loop_decision(
                             point=point,
                             position=position,
                             total=total,
+                            position_index=position_index,
+                            clear_stage_cancel=False,
                         )
-                        if decision == "stop":
-                            message = "Route measurement stopped by user."
+                        if loop_decision.stop_message is not None:
+                            message = loop_decision.stop_message
                             break
-                        self._begin_stage_task()
-                        jump_index = self._jump_target_index(decision)
-                        if jump_index is not None:
-                            position_index = jump_index
-                            continue
-                        if decision == "skip":
-                            position_index += 1
-                            continue
+                        position_index = loop_decision.position_index
                         continue
                     position_index += 1
                     continue
@@ -1136,24 +1136,17 @@ class RouteMeasurementRunner:
                     if measurement_prepare_task is not None:
                         measurement_prepare_task.wait()
                 if point_interrupted:
-                    self._clear_stage_cancel_after_point_interrupt()
-                    self._point_interrupt_requested.clear()
-                    decision = self._wait_after_interrupted_point(
+                    loop_decision = self._interrupted_route_point_loop_decision(
                         point=point,
                         position=position,
                         total=total,
+                        position_index=position_index,
+                        clear_stage_cancel=True,
                     )
-                    if decision == "stop":
-                        message = "Route measurement stopped by user."
+                    if loop_decision.stop_message is not None:
+                        message = loop_decision.stop_message
                         break
-                    self._begin_stage_task()
-                    jump_index = self._jump_target_index(decision)
-                    if jump_index is not None:
-                        position_index = jump_index
-                        continue
-                    if decision == "skip":
-                        position_index += 1
-                        continue
+                    position_index = loop_decision.position_index
                     continue
                 if record is None:
                     continue
@@ -1551,6 +1544,36 @@ class RouteMeasurementRunner:
             )
         )
         return point_interrupted or self._point_interrupt_requested.is_set()
+
+    def _interrupted_route_point_loop_decision(
+        self,
+        *,
+        point: RouteMeasurementPoint,
+        position: int,
+        total: int,
+        position_index: int,
+        clear_stage_cancel: bool,
+    ) -> _RoutePointLoopDecision:
+        if clear_stage_cancel:
+            self._clear_stage_cancel_after_point_interrupt()
+        self._point_interrupt_requested.clear()
+        decision = self._wait_after_interrupted_point(
+            point=point,
+            position=position,
+            total=total,
+        )
+        if decision == "stop":
+            return _RoutePointLoopDecision(
+                position_index=position_index,
+                stop_message="Route measurement stopped by user.",
+            )
+        self._begin_stage_task()
+        jump_index = self._jump_target_index(decision)
+        if jump_index is not None:
+            return _RoutePointLoopDecision(position_index=jump_index)
+        if decision == "skip":
+            return _RoutePointLoopDecision(position_index=position_index + 1)
+        return _RoutePointLoopDecision(position_index=position_index)
 
     def _begin_stage_task(self) -> None:
         if self._stage_task_active:
