@@ -9,6 +9,12 @@ from pathlib import Path
 
 import numpy as np
 
+_ORIGINAL_PYSIDE6 = {
+    name: module
+    for name, module in sys.modules.items()
+    if name == "PySide6" or name.startswith("PySide6.")
+}
+
 
 def _install_pyside6_stubs() -> None:
     qtcore = types.ModuleType("PySide6.QtCore")
@@ -66,6 +72,13 @@ def _install_pyside6_stubs() -> None:
         sys.modules["serial"] = serial_stub
 
 
+def _restore_pyside6_modules() -> None:
+    for name in list(sys.modules):
+        if name == "PySide6" or name.startswith("PySide6."):
+            del sys.modules[name]
+    sys.modules.update(_ORIGINAL_PYSIDE6)
+
+
 def _load_stage_controller():
     _install_pyside6_stubs()
     module_path = (
@@ -98,6 +111,7 @@ def _load_settings_manager():
 
 _stage_controller_module = _load_stage_controller()
 _settings_manager_module = _load_settings_manager()
+_restore_pyside6_modules()
 StageController = _stage_controller_module.StageController
 StageControllerError = _stage_controller_module.StageControllerError
 QueuedSerialWrite = _stage_controller_module._QueuedSerialWrite

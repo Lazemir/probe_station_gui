@@ -10,6 +10,8 @@ from pathlib import Path
 
 _ORIGINAL_PROBE_STATION_GUI = sys.modules.get("probe_station_gui")
 _ORIGINAL_LOGGING_CONFIG = sys.modules.get("probe_station_gui.shared.logging_config")
+_PYSIDE6_MODULES = ("PySide6", "PySide6.QtCore")
+_ORIGINAL_PYSIDE6 = {name: sys.modules.get(name) for name in _PYSIDE6_MODULES}
 
 
 def _install_pyside6_stubs() -> None:
@@ -37,7 +39,7 @@ def _install_pyside6_stubs() -> None:
 
 def _install_probe_station_stubs() -> None:
     package = types.ModuleType("probe_station_gui")
-    package.__path__ = [str(Path(__file__).resolve().parents[1] / "probe_station_gui")]
+    package.__path__ = [str(Path(__file__).resolve().parents[2] / "probe_station_gui")]
     logging_config = types.ModuleType("probe_station_gui.shared.logging_config")
 
     def configure_logging(*_args, **_kwargs) -> None:
@@ -61,8 +63,17 @@ def _restore_probe_station_modules() -> None:
         sys.modules["probe_station_gui.shared.logging_config"] = _ORIGINAL_LOGGING_CONFIG
 
 
+def _restore_pyside6_modules() -> None:
+    for name in _PYSIDE6_MODULES:
+        original = _ORIGINAL_PYSIDE6[name]
+        if original is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = original
+
+
 def _load_module(module_name: str, relative_path: str):
-    module_path = Path(__file__).resolve().parents[1] / relative_path
+    module_path = Path(__file__).resolve().parents[2] / relative_path
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     module = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
@@ -73,11 +84,12 @@ def _load_module(module_name: str, relative_path: str):
 
 _install_pyside6_stubs()
 _install_probe_station_stubs()
-qt_compat = _load_module("qt_compat_test", "probe_station_gui/qt_compat.py")
+qt_compat = _load_module("qt_compat_test", "probe_station_gui/shared/qt_compat.py")
 settings_manager = _load_module(
-    "settings_manager_test", "probe_station_gui/settings_manager.py"
+    "settings_manager_test", "probe_station_gui/settings/manager.py"
 )
 _restore_probe_station_modules()
+_restore_pyside6_modules()
 KeyBinding = settings_manager.KeyBinding
 ApiSettings = settings_manager.ApiSettings
 TelegramSettings = settings_manager.TelegramSettings

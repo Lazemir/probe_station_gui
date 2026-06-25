@@ -837,7 +837,7 @@ assert image.height() == 4
 """
         result = subprocess.run(
             [sys.executable, "-c", script],
-            cwd=Path(__file__).resolve().parents[1],
+            cwd=Path(__file__).resolve().parents[2],
             timeout=20,
             capture_output=True,
             text=True,

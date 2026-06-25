@@ -4,6 +4,12 @@ import sys
 import threading
 import time
 
+_ORIGINAL_PYSIDE6 = {
+    name: module
+    for name, module in sys.modules.items()
+    if name == "PySide6" or name.startswith("PySide6.")
+}
+
 
 def _restore_real_imports() -> None:
     for name in list(sys.modules):
@@ -14,6 +20,13 @@ def _restore_real_imports() -> None:
         for name in list(sys.modules):
             if name == "probe_station_gui" or name.startswith("probe_station_gui."):
                 del sys.modules[name]
+
+
+def _restore_pyside6_modules() -> None:
+    for name in list(sys.modules):
+        if name == "PySide6" or name.startswith("PySide6."):
+            del sys.modules[name]
+    sys.modules.update(_ORIGINAL_PYSIDE6)
 
 
 def _install_pyside6_stubs_if_missing() -> None:
@@ -65,6 +78,8 @@ from probe_station_gui.instruments.meters.lcr import (
     RouteMeterConfiguration,
     _LCRSession,
 )
+
+_restore_pyside6_modules()
 
 
 def _connect_direct(signal, slot) -> None:

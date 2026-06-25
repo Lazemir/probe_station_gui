@@ -2,6 +2,9 @@ import sys
 import types
 import unittest
 
+_PYSIDE6_MODULES = ("PySide6", "PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets")
+_ORIGINAL_PYSIDE6 = {name: sys.modules.get(name) for name in _PYSIDE6_MODULES}
+
 
 def _install_pyside6_stubs() -> None:
     qtcore = types.ModuleType("PySide6.QtCore")
@@ -134,10 +137,21 @@ def _clear_probe_station_stubs() -> None:
                 del sys.modules[name]
 
 
+def _restore_pyside6_modules() -> None:
+    for name in _PYSIDE6_MODULES:
+        original = _ORIGINAL_PYSIDE6[name]
+        if original is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = original
+
+
 _clear_probe_station_stubs()
 _install_pyside6_stubs()
 
 from probe_station_gui.views.joystick_window import JoystickWindow
+
+_restore_pyside6_modules()
 
 
 class _SignalRecorder:
