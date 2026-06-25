@@ -5,7 +5,7 @@ from probe_station_gui.settings.needle_calibration_config import (
     NeedleCalibrationSettings,
     SavedStagePositionSettings,
 )
-from probe_station_gui.settings_manager import (
+from probe_station_gui.settings.manager import (
     SettingsManager,
 )
 

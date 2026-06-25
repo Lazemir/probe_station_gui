@@ -83,7 +83,7 @@ from probe_station_gui.route.run_ui import (
     route_run_control_presentation,
     route_run_pause_action,
 )
-from probe_station_gui.settings_manager import (
+from probe_station_gui.settings.manager import (
     LCR_APERTURE_RATES,
     LCR_LEVEL_MODES,
     LCR_MEASUREMENT_FUNCTIONS,

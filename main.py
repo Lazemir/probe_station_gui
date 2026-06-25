@@ -209,7 +209,7 @@ from probe_station_gui.microscope_imaging import (
     stitch_scan_tiles,
     utc_timestamp,
 )
-from probe_station_gui.settings_manager import (
+from probe_station_gui.settings.manager import (
     Settings,
     SettingsManager,
     default_objective,

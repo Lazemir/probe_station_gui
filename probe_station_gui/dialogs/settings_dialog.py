@@ -54,7 +54,7 @@ from probe_station_gui.wheel_guard import (
     GuardedDoubleSpinBox as QDoubleSpinBox,
     GuardedSpinBox as QSpinBox,
 )
-from probe_station_gui.settings_manager import (
+from probe_station_gui.settings.manager import (
     ApiSettings,
     CoordinateSystemSettings,
     FeedrateGroup,

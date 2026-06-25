@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from probe_station_gui.settings_manager import SavedStagePositionSettings
+from probe_station_gui.settings.manager import SavedStagePositionSettings
 from probe_station_gui.views.oscillation_panel import OscillationPanel
 
 

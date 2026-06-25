@@ -9,7 +9,7 @@ from probe_station_gui.design.objective_offsets import (
     objective_xy_offset_is_configured,
     raw_stage_to_camera_stage,
 )
-from probe_station_gui.settings_manager import ObjectiveCalibrationSettings
+from probe_station_gui.settings.manager import ObjectiveCalibrationSettings
 
 
 class ObjectiveOffsetTest(unittest.TestCase):

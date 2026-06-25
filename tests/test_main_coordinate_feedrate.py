@@ -50,7 +50,7 @@ from probe_station_gui.route.measurement import (
     RoutePhotoRecord,
 )
 from probe_station_gui.instruments.meters.lcr import RouteMeterConfiguration
-from probe_station_gui.settings_manager import ObjectiveCalibrationSettings, Settings
+from probe_station_gui.settings.manager import ObjectiveCalibrationSettings, Settings
 
 
 class _FakeTimer:
