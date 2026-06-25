@@ -353,6 +353,44 @@ class JoystickWindow(QWidget):
         FEED_TARGET_TURNTABLE: "B Turntable",
         FEED_TARGET_COMMON: "Common",
     }
+    FEEDRATE_VALUE_STORAGE = {
+        (FEED_TARGET_XY, MODE_JOG): ("_linear_default", "linear_feedrate_changed"),
+        (FEED_TARGET_XY, MODE_STEP): (
+            "_manual_axis_feedrate_mm_min",
+            "step_feedrate_changed",
+        ),
+        (FEED_TARGET_FOCUS, MODE_JOG): (
+            "_focus_feedrate_value",
+            "focus_feedrate_changed",
+        ),
+        (FEED_TARGET_FOCUS, MODE_STEP): (
+            "_focus_step_feedrate_value",
+            "focus_step_feedrate_changed",
+        ),
+        (FEED_TARGET_NEEDLES, MODE_JOG): (
+            "_needle_feedrate_value",
+            "needle_feedrate_changed",
+        ),
+        (FEED_TARGET_NEEDLES, MODE_STEP): (
+            "_needle_step_feedrate_value",
+            "needle_step_feedrate_changed",
+        ),
+        (FEED_TARGET_TURNTABLE, MODE_JOG): (
+            "_turntable_feedrate_value",
+            "turntable_feedrate_changed",
+        ),
+        (FEED_TARGET_TURNTABLE, MODE_STEP): (
+            "_turntable_step_feedrate_value",
+            "turntable_step_feedrate_changed",
+        ),
+        (FEED_TARGET_COMMON, MODE_JOG): (
+            "_common_feedrate_value",
+            "common_feedrate_changed",
+        ),
+    }
+    FEEDRATE_SPIN_STORAGE = {
+        (FEED_TARGET_NEEDLES, MODE_JOG): "needle_feedrate_spin",
+    }
     HOMED_STYLE = (
         "QPushButton { padding: 2px 6px; border-radius: 4px; background: #1565c0; color: #f5f5f5; }"
         "QPushButton:pressed { background: #0d47a1; }"
@@ -1006,51 +1044,23 @@ class JoystickWindow(QWidget):
     def _store_feedrate_value(
         self, target: str, mode: str, value: float, *, emit_changed: bool
     ) -> None:
-        is_step = mode == self.MODE_STEP
-        if target == self.FEED_TARGET_XY:
-            if is_step:
-                self._manual_axis_feedrate_mm_min = value
-                if emit_changed:
-                    self.step_feedrate_changed.emit(value)
-            else:
-                self._linear_default = value
-                if emit_changed:
-                    self.linear_feedrate_changed.emit(value)
-        elif target == self.FEED_TARGET_FOCUS:
-            if is_step:
-                self._focus_step_feedrate_value = value
-                if emit_changed:
-                    self.focus_step_feedrate_changed.emit(value)
-            else:
-                self._focus_feedrate_value = value
-                if emit_changed:
-                    self.focus_feedrate_changed.emit(value)
-        elif target == self.FEED_TARGET_NEEDLES:
-            if is_step:
-                self._needle_step_feedrate_value = value
-                if emit_changed:
-                    self.needle_step_feedrate_changed.emit(value)
-            else:
-                self._needle_feedrate_value = value
-                if hasattr(self, "needle_feedrate_spin"):
-                    self.needle_feedrate_spin.blockSignals(True)
-                    self.needle_feedrate_spin.setValue(value)
-                    self.needle_feedrate_spin.blockSignals(False)
-                if emit_changed:
-                    self.needle_feedrate_changed.emit(value)
-        elif target == self.FEED_TARGET_TURNTABLE:
-            if is_step:
-                self._turntable_step_feedrate_value = value
-                if emit_changed:
-                    self.turntable_step_feedrate_changed.emit(value)
-            else:
-                self._turntable_feedrate_value = value
-                if emit_changed:
-                    self.turntable_feedrate_changed.emit(value)
-        elif target == self.FEED_TARGET_COMMON:
-            self._common_feedrate_value = value
-            if emit_changed:
-                self.common_feedrate_changed.emit(value)
+        mode_key = self.MODE_STEP if mode == self.MODE_STEP else self.MODE_JOG
+        if target == self.FEED_TARGET_COMMON:
+            mode_key = self.MODE_JOG
+        storage = self.FEEDRATE_VALUE_STORAGE.get((target, mode_key))
+        if storage is None:
+            return
+        field_name, signal_name = storage
+        setattr(self, field_name, value)
+
+        spin_name = self.FEEDRATE_SPIN_STORAGE.get((target, mode_key))
+        spin = getattr(self, spin_name, None) if spin_name is not None else None
+        if spin is not None:
+            spin.blockSignals(True)
+            spin.setValue(value)
+            spin.blockSignals(False)
+        if emit_changed:
+            getattr(self, signal_name).emit(value)
 
     def _set_active_feedrate_target(self, target: str) -> None:
         if target not in self.FEED_TARGET_LABELS:
