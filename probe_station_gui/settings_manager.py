@@ -19,7 +19,9 @@ from probe_station_gui.axis_calibration_config import (
     parse_axis_z_calibration,
 )
 from probe_station_gui.feedrate_config import (
+    FeedrateGroup,
     FeedrateGroupConfig,
+    FeedrateSettings,
     feedrate_group_from_raw,
     normalise_feedrate_group,
     parse_feedrate_groups,
@@ -240,35 +242,6 @@ class KeyBinding:
             modifiers=int(data.get("modifiers", 0)),
             native_scan_code=int(data.get("native_scan_code", 0)),
             text=str(data.get("text", "")),
-        )
-
-
-@dataclass
-class FeedrateGroup:
-    """Collection of presets and a default value for a motion family."""
-
-    presets: List[float] = field(default_factory=list)
-    default: float = 1.0
-
-    def clone(self) -> "FeedrateGroup":
-        """Return a deep copy of the feedrate group."""
-
-        return FeedrateGroup(presets=list(self.presets), default=self.default)
-
-
-@dataclass
-class FeedrateSettings:
-    """Configuration for linear and rotary feed rates."""
-
-    linear: FeedrateGroup = field(default_factory=FeedrateGroup)
-    rotary: FeedrateGroup = field(default_factory=FeedrateGroup)
-
-    def clone(self) -> "FeedrateSettings":
-        """Return a deep copy of the feedrate configuration."""
-
-        return FeedrateSettings(
-            linear=self.linear.clone(),
-            rotary=self.rotary.clone(),
         )
 
 

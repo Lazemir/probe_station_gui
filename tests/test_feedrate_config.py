@@ -1,6 +1,23 @@
 import unittest
 
-from probe_station_gui.feedrate_config import parse_feedrate_groups
+from probe_station_gui.feedrate_config import (
+    FeedrateGroup,
+    FeedrateSettings,
+    parse_feedrate_groups,
+)
+
+
+def test_feedrate_settings_clone_copies_groups() -> None:
+    settings = FeedrateSettings(
+        linear=FeedrateGroup(presets=[10.0, 20.0], default=10.0),
+        rotary=FeedrateGroup(presets=[5.0], default=5.0),
+    )
+
+    clone = settings.clone()
+    clone.linear.presets.append(30.0)
+
+    assert settings.linear.presets == [10.0, 20.0]
+    assert clone.linear.presets == [10.0, 20.0, 30.0]
 
 
 class FeedrateConfigTest(unittest.TestCase):

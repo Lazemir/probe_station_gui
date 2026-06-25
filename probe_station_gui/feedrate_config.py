@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -12,6 +12,35 @@ class FeedrateGroupConfig:
 
     presets: list[float]
     default: float
+
+
+@dataclass
+class FeedrateGroup:
+    """Collection of presets and a default value for a motion family."""
+
+    presets: list[float] = field(default_factory=list)
+    default: float = 1.0
+
+    def clone(self) -> "FeedrateGroup":
+        """Return a deep copy of the feedrate group."""
+
+        return FeedrateGroup(presets=list(self.presets), default=self.default)
+
+
+@dataclass
+class FeedrateSettings:
+    """Configuration for linear and rotary feed rates."""
+
+    linear: FeedrateGroup = field(default_factory=FeedrateGroup)
+    rotary: FeedrateGroup = field(default_factory=FeedrateGroup)
+
+    def clone(self) -> "FeedrateSettings":
+        """Return a deep copy of the feedrate configuration."""
+
+        return FeedrateSettings(
+            linear=self.linear.clone(),
+            rotary=self.rotary.clone(),
+        )
 
 
 def parse_feedrate_groups(
