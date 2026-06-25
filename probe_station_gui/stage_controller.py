@@ -43,6 +43,15 @@ from probe_station_gui.stage_axis_mapping import (
     axis_z_gcode_coordinate_for_display,
     evaluate_polynomial,
 )
+from probe_station_gui.stage_autofocus_math import (
+    estimate_shift,
+    estimate_shift_with_response,
+    focus_metric,
+    frame_rate_from_timestamps,
+    parabolic_focus_peak,
+    qimage_to_gray,
+    static_focus_candidates,
+)
 from probe_station_gui.stage_controller_cache import (
     parse_cached_axis_limits,
     parse_cached_axis_max_feedrates,
@@ -109,7 +118,6 @@ class _LazyModule:
 
 
 np = _LazyModule("numpy")
-cv2 = _LazyModule("cv2")
 
 
 class StageController(QObject):
@@ -3012,15 +3020,7 @@ class StageController(QObject):
 
     @staticmethod
     def _frame_rate_from_timestamps(timestamps: list[float]) -> float | None:
-        if len(timestamps) < 2:
-            return None
-        duration = float(timestamps[-1]) - float(timestamps[0])
-        if duration <= 0.0:
-            return None
-        frame_rate = (len(timestamps) - 1) / duration
-        if not math.isfinite(frame_rate) or frame_rate <= 0.0:
-            return None
-        return float(frame_rate)
+        return frame_rate_from_timestamps(timestamps)
 
     def _run_static_focus_refinement_locked(
         self,
@@ -3143,32 +3143,13 @@ class StageController(QObject):
         step_mm: float,
         max_points: int,
     ) -> list[float]:
-        step = abs(float(step_mm))
-        if step <= 0.0 or not math.isfinite(step):
-            return []
-        lower_limit = float(min_z)
-        upper_limit = float(max_z)
-        if upper_limit <= lower_limit:
-            return []
-        count = max(3, int(max_points))
-        if count % 2 == 0:
-            count += 1
-        radius = count // 2
-        center = max(lower_limit, min(upper_limit, float(center_z)))
-        candidates: list[float] = []
-        for offset in range(-radius, radius + 1):
-            candidate = max(lower_limit, min(upper_limit, center + offset * step))
-            if not candidates or abs(candidate - candidates[-1]) >= step * 0.25:
-                candidates.append(candidate)
-        if len(candidates) >= 3:
-            return candidates
-
-        lower = max(lower_limit, center - step)
-        upper = min(upper_limit, center + step)
-        fallback = sorted({lower, center, upper})
-        if len(fallback) < 3 or fallback[-1] <= fallback[0]:
-            return []
-        return fallback
+        return static_focus_candidates(
+            center_z,
+            min_z=min_z,
+            max_z=max_z,
+            step_mm=step_mm,
+            max_points=max_points,
+        )
 
     def _approach_z_from_below_locked(
         self,
@@ -3231,26 +3212,7 @@ class StageController(QObject):
         scored: list[tuple[float, float]],
         best_index: int,
     ) -> float | None:
-        if best_index <= 0 or best_index >= len(scored) - 1:
-            return None
-        xs = np.asarray(
-            [scored[best_index - 1][0], scored[best_index][0], scored[best_index + 1][0]],
-            dtype=float,
-        )
-        ys = np.asarray(
-            [scored[best_index - 1][1], scored[best_index][1], scored[best_index + 1][1]],
-            dtype=float,
-        )
-        try:
-            a, b, _c = np.polyfit(xs, ys, 2)
-        except (TypeError, ValueError):
-            return None
-        if not math.isfinite(a) or not math.isfinite(b) or a >= 0.0:
-            return None
-        peak = -b / (2.0 * a)
-        if not math.isfinite(peak):
-            return None
-        return float(peak)
+        return parabolic_focus_peak(scored, best_index)
 
     def _run_home(self, command: str, axis_key: str) -> None:
         self.movement_started.emit()
@@ -6319,42 +6281,18 @@ class StageController(QObject):
 
     @staticmethod
     def _estimate_shift(frame_a: np.ndarray, frame_b: np.ndarray) -> tuple[float, float]:
-        shift_x, shift_y, _response = StageController._estimate_shift_with_response(
-            frame_a,
-            frame_b,
-        )
-        return shift_x, shift_y
+        return estimate_shift(frame_a, frame_b)
 
     @staticmethod
     def _estimate_shift_with_response(
         frame_a: np.ndarray,
         frame_b: np.ndarray,
     ) -> tuple[float, float, float]:
-        a = frame_a.astype(np.float32)
-        b = frame_b.astype(np.float32)
-        window = cv2.createHanningWindow((a.shape[1], a.shape[0]), cv2.CV_32F)
-        (shift_x, shift_y), response = cv2.phaseCorrelate(a, b, window)
-        return float(shift_x), float(-shift_y), float(response)
+        return estimate_shift_with_response(frame_a, frame_b)
 
     @staticmethod
     def _focus_metric(frame: np.ndarray) -> float:
-        height, width = frame.shape[:2]
-        crop_factor = 0.55
-        crop_w = max(16, int(width * crop_factor))
-        crop_h = max(16, int(height * crop_factor))
-        left = max(0, (width - crop_w) // 2)
-        top = max(0, (height - crop_h) // 2)
-        roi = frame[top : top + crop_h, left : left + crop_w]
-        if roi.size == 0:
-            roi = frame
-        filtered = cv2.medianBlur(roi, 3)
-        normalized = filtered.astype(np.float32)
-        mean = float(normalized.mean())
-        if mean > 1e-6:
-            normalized = normalized / mean
-        grad_x = cv2.Sobel(normalized, cv2.CV_32F, 1, 0, ksize=3)
-        grad_y = cv2.Sobel(normalized, cv2.CV_32F, 0, 1, ksize=3)
-        return float(np.mean(grad_x * grad_x + grad_y * grad_y))
+        return focus_metric(frame)
 
     def _check_cancelled(self) -> None:
         if self._cancel_event.is_set():
@@ -6479,16 +6417,7 @@ class StageController(QObject):
 
     @staticmethod
     def _qimage_to_gray(image: QImage) -> np.ndarray:
-        converted = image.convertToFormat(QImage.Format_RGB888)
-        width = converted.width()
-        height = converted.height()
-        ptr = converted.constBits()
-        array = np.frombuffer(
-            ptr, np.uint8, count=converted.sizeInBytes()
-        ).reshape((height, converted.bytesPerLine()))
-        array = array[:, : width * 3].reshape((height, width, 3))
-        gray = cv2.cvtColor(array, cv2.COLOR_RGB2GRAY)
-        return gray
+        return qimage_to_gray(image, QImage.Format_RGB888)
 
 
 __all__ = ["StageController", "MoveVector"]
