@@ -25,6 +25,12 @@ from probe_station_gui.route_contact_quality import (
     route_measurement_sample_from_raw,
     summarize_route_contact_quality,
 )
+from probe_station_gui.route_contact_seek import (
+    contact_seek_attempt_number,
+    contact_seek_depths,
+    normalize_contact_seek_limit,
+    normalize_contact_seek_step,
+)
 from probe_station_gui.route_measurement_csv import (
     CSV_FIELDS,
     RouteMeasurementCsvWriter,
@@ -1741,23 +1747,17 @@ class RouteMeasurementRunner:
 
     @staticmethod
     def _normalized_contact_seek_step(value: object) -> float:
-        try:
-            step = float(value)
-        except (TypeError, ValueError):
-            step = RouteMeasurementRunner.AUTO_CONTACT_SEEK_STEP_MM
-        if not math.isfinite(step) or step == 0.0:
-            step = RouteMeasurementRunner.AUTO_CONTACT_SEEK_STEP_MM
-        return -abs(step)
+        return normalize_contact_seek_step(
+            value,
+            default_step_mm=RouteMeasurementRunner.AUTO_CONTACT_SEEK_STEP_MM,
+        )
 
     @staticmethod
     def _normalized_contact_seek_limit(value: object) -> float:
-        try:
-            limit = float(value)
-        except (TypeError, ValueError):
-            limit = RouteMeasurementRunner.AUTO_CONTACT_SEEK_MAX_TOTAL_MM
-        if not math.isfinite(limit) or limit < 0.0:
-            return 0.0
-        return limit
+        return normalize_contact_seek_limit(
+            value,
+            default_limit_mm=RouteMeasurementRunner.AUTO_CONTACT_SEEK_MAX_TOTAL_MM,
+        )
 
     def _measure_samples(
         self,
@@ -1893,14 +1893,12 @@ class RouteMeasurementRunner:
         adjust: Callable[..., object] | None,
     ) -> list[RouteMeasurementSample] | None:
         step_mm = self._auto_contact_seek_step_mm
-        max_depth_steps = int(
-            math.ceil(self._auto_contact_seek_max_total_mm / abs(step_mm))
-        )
         samples = initial_samples
-        depths_mm = [
-            min((step_index + 1) * abs(step_mm), self._auto_contact_seek_max_total_mm)
-            for step_index in range(max_depth_steps)
-        ]
+        depths_mm = contact_seek_depths(
+            step_mm,
+            self._auto_contact_seek_max_total_mm,
+        )
+        max_depth_steps = len(depths_mm)
         attempts = 0
         previous_depth_mm = 0.0
         last_depth_mm = math.nan
@@ -1912,7 +1910,7 @@ class RouteMeasurementRunner:
                 or self._point_interrupt_requested.is_set()
             ):
                 return None
-            attempt_number = max(1, int(math.ceil(depth_mm / abs(step_mm))))
+            attempt_number = contact_seek_attempt_number(depth_mm, step_mm)
             self._status(
                 f"Route measurement: point {position}/{total} "
                 f"pressing deeper {attempt_number}/{max_depth_steps}, "
