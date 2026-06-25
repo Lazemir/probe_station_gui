@@ -928,7 +928,8 @@ class Main(QMainWindow):
             )
         runner = self._route_measurement_runner
         if runner is None:
-            if bool(self._api_route_control_active) and bool(self._api_route_control_paused):
+            api_route_control = self._api_route_control_state_snapshot()
+            if api_route_control.accepts_route_confirmation:
                 self._submit_route_measurement_confirmation(action_key)
                 return TelegramBotResponse(
                     f"API route control action submitted: {action_key}.",
@@ -995,13 +996,12 @@ class Main(QMainWindow):
                 route_state = (
                     f"{route_state}, point {self._route_measurement_current_point}"
                 )
-        elif self._api_route_control_active:
-            if self._api_route_control_paused:
-                route_state = "API route control paused"
-            elif self._api_route_control_pause_requested:
-                route_state = "API route control pause requested"
-            else:
-                route_state = "API route control running"
+        else:
+            api_route_control_status = (
+                self._api_route_control_state_snapshot().telegram_status_text()
+            )
+            if api_route_control_status:
+                route_state = api_route_control_status
         lines = [
             "Probe Station status",
             f"Current: {self._latest_status_message or 'idle'}",

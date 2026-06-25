@@ -239,3 +239,38 @@ def test_api_route_control_legacy_attrs_round_trips_state() -> None:
     legacy = type("LegacyRouteControl", (), api_route_control_legacy_attrs(state))()
 
     assert api_route_control_state_from_legacy_attrs(legacy) == state
+
+
+def test_api_route_control_accepts_confirmation_only_when_paused() -> None:
+    assert (
+        ApiRouteControlState(active=True, paused=True).accepts_route_confirmation
+        is True
+    )
+    assert (
+        ApiRouteControlState(
+            active=True,
+            pause_requested=True,
+            paused=False,
+        ).accepts_route_confirmation
+        is False
+    )
+
+
+def test_api_route_control_telegram_status_text_matches_external_states() -> None:
+    assert ApiRouteControlState().telegram_status_text() == ""
+    assert (
+        ApiRouteControlState(active=True, paused=True).telegram_status_text()
+        == "API route control paused"
+    )
+    assert (
+        ApiRouteControlState(
+            active=True,
+            pause_requested=True,
+            paused=False,
+        ).telegram_status_text()
+        == "API route control pause requested"
+    )
+    assert (
+        ApiRouteControlState(active=True).telegram_status_text()
+        == "API route control running"
+    )

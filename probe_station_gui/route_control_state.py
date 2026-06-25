@@ -366,6 +366,19 @@ class ApiRouteControlState:
             pause_pending=pause_pending,
         )
 
+    @property
+    def accepts_route_confirmation(self) -> bool:
+        return bool(self.active and self.paused)
+
+    def telegram_status_text(self) -> str:
+        if not self.active:
+            return ""
+        if self.paused:
+            return "API route control paused"
+        if self.pause_requested:
+            return "API route control pause requested"
+        return "API route control running"
+
 
 __all__ = [
     "API_ROUTE_CONTROL_DEFAULT_LABEL",
