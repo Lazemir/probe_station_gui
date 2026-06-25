@@ -47,6 +47,11 @@ from probe_station_gui.settings_value_parsing import (
     normalise_choice,
     positive_float,
 )
+from probe_station_gui.settings_section_parsing import (
+    parse_api_settings,
+    parse_coordinate_system_settings,
+    parse_logging_settings,
+)
 from probe_station_gui.telegram_notifications import (
     load_global_bot_token,
     save_global_bot_token,
@@ -1787,33 +1792,20 @@ class SettingsManager:
     def _parse_logging(self, raw_logging) -> LoggingSettings:
         """Create a logging configuration from persisted data."""
 
-        level = "INFO"
-        file_value = ""
-        if isinstance(raw_logging, dict):
-            level = str(raw_logging.get("level", level))
-            file_raw = raw_logging.get("file", file_value)
-            if isinstance(file_raw, str):
-                file_value = file_raw
-        return LoggingSettings(level=level.upper(), file=file_value)
+        return LoggingSettings(**parse_logging_settings(raw_logging))
 
     def _parse_api(self, raw_api) -> ApiSettings:
         """Normalise local API settings."""
 
-        settings = ApiSettings()
-        if isinstance(raw_api, dict):
-            settings.enabled = bool(raw_api.get("enabled", settings.enabled))
-            host_raw = raw_api.get("host", settings.host)
-            if isinstance(host_raw, str):
-                host = host_raw.strip()
-                if host:
-                    settings.host = host
-            try:
-                port = int(raw_api.get("port", settings.port))
-            except (TypeError, ValueError):
-                port = settings.port
-            if 0 < port <= 65535:
-                settings.port = port
-        return settings
+        defaults = ApiSettings()
+        return ApiSettings(
+            **parse_api_settings(
+                raw_api,
+                default_enabled=defaults.enabled,
+                default_host=defaults.host,
+                default_port=defaults.port,
+            )
+        )
 
     def _parse_telegram(self, raw_telegram) -> TelegramSettings:
         """Normalise Telegram notification settings."""
@@ -2109,33 +2101,14 @@ class SettingsManager:
     def _parse_coordinate_system(self, raw_coordinate_system) -> CoordinateSystemSettings:
         """Normalise persisted coordinate-system settings."""
 
-        startup_mode = self.DEFAULT_COORDINATE_STARTUP_MODE
-        preferred_system = self.DEFAULT_COORDINATE_SYSTEM
-        position_mode = self.DEFAULT_POSITION_MODE
-        if isinstance(raw_coordinate_system, dict):
-            position_mode_raw = raw_coordinate_system.get(
-                "position_mode", position_mode
-            )
-            if isinstance(position_mode_raw, str):
-                position_mode = position_mode_raw.strip().lower()
-            mode_raw = raw_coordinate_system.get("startup_mode", startup_mode)
-            if isinstance(mode_raw, str):
-                startup_mode = mode_raw.strip().lower()
-            system_raw = raw_coordinate_system.get(
-                "preferred_system", preferred_system
-            )
-            if isinstance(system_raw, str):
-                preferred_system = system_raw.strip().upper()
-        if position_mode not in {"work", "machine"}:
-            position_mode = self.DEFAULT_POSITION_MODE
-        if startup_mode not in {"controller", "fixed"}:
-            startup_mode = self.DEFAULT_COORDINATE_STARTUP_MODE
-        if preferred_system not in WORK_COORDINATE_SYSTEMS:
-            preferred_system = self.DEFAULT_COORDINATE_SYSTEM
         return CoordinateSystemSettings(
-            position_mode=position_mode,
-            startup_mode=startup_mode,
-            preferred_system=preferred_system,
+            **parse_coordinate_system_settings(
+                raw_coordinate_system,
+                default_position_mode=self.DEFAULT_POSITION_MODE,
+                default_startup_mode=self.DEFAULT_COORDINATE_STARTUP_MODE,
+                default_coordinate_system=self.DEFAULT_COORDINATE_SYSTEM,
+                work_coordinate_systems=WORK_COORDINATE_SYSTEMS,
+            )
         )
 
     def _parse_objectives(self, raw_objectives) -> ObjectivesSettings:
