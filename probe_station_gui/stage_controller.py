@@ -64,6 +64,11 @@ from probe_station_gui.stage_jog_commands import (
     move_vector_from_jog_command,
     relative_jog_command_to_absolute,
 )
+from probe_station_gui.stage_motion_timing import (
+    absolute_move_distance_for_timeout,
+    idle_timeout_for_distance,
+    move_distance_for_timeout,
+)
 from probe_station_gui.stage_types import (
     AutofocusResult,
     MoveVector,
@@ -4529,18 +4534,11 @@ class StageController(QObject):
         targets: dict[str, float],
         current_values: dict[str, float],
     ) -> float:
-        if not current_values:
-            return math.sqrt(sum(value * value for value in targets.values()))
-        squared = 0.0
-        for axis, value in targets.items():
-            current = current_values.get(axis)
-            delta = float(value) if current is None else float(value) - float(current)
-            squared += delta * delta
-        return math.sqrt(squared)
+        return absolute_move_distance_for_timeout(targets, current_values)
 
     @staticmethod
     def _move_distance_for_timeout(move: MoveVector) -> float:
-        return math.sqrt(sum(value * value for _axis, value in move.items()))
+        return move_distance_for_timeout(move)
 
     @staticmethod
     def _format_gcode_value(value: float, decimals: int = 3) -> str:
@@ -4743,16 +4741,13 @@ class StageController(QObject):
     def _idle_timeout_for_distance(self, distance: float, feedrate: float) -> float:
         """Return an idle wait timeout long enough for slow manual G1 moves."""
 
-        try:
-            distance_value = abs(float(distance))
-            feedrate_value = max(self.MIN_FEEDRATE, float(feedrate))
-        except (TypeError, ValueError):
-            return self.MOVE_IDLE_TIMEOUT_MIN_S
-        travel_time_s = (distance_value / feedrate_value) * 60.0
-        timeout = travel_time_s + self.MOVE_IDLE_TIMEOUT_MARGIN_S
-        return min(
-            self.MOVE_IDLE_TIMEOUT_MAX_S,
-            max(self.MOVE_IDLE_TIMEOUT_MIN_S, timeout),
+        return idle_timeout_for_distance(
+            distance,
+            feedrate,
+            min_feedrate=self.MIN_FEEDRATE,
+            margin_s=self.MOVE_IDLE_TIMEOUT_MARGIN_S,
+            min_timeout_s=self.MOVE_IDLE_TIMEOUT_MIN_S,
+            max_timeout_s=self.MOVE_IDLE_TIMEOUT_MAX_S,
         )
 
     def _write_relative_g1_unchecked(
