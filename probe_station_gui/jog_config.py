@@ -46,6 +46,63 @@ class JogSettingsConfig:
     turntable_step_feedrate_mm_min: float
 
 
+@dataclass
+class JogSettings:
+    """Configuration for joystick jog distances."""
+
+    mode: str = "jog"
+    linear_distance_mm: float = 25.0
+    rotary_distance_deg: float = 5.0
+    motion_safety_disabled: bool = False
+    manual_axis: str = "A"
+    manual_axis_distance_mm: float = 1.0
+    manual_axis_mode: str = "G91"
+    manual_axis_feedrate_mm_min: float = 1.0
+    focus_feedrate_mm_min: float = 1.0
+    focus_step_feedrate_mm_min: float = 1.0
+    needles_step_feedrate_mm_min: float = 1.0
+    turntable_feedrate_mm_min: float = 1.0
+    turntable_step_feedrate_mm_min: float = 1.0
+
+    def clone(self) -> "JogSettings":
+        """Return a copy of the jog preferences."""
+
+        return JogSettings(
+            mode=self.mode,
+            linear_distance_mm=self.linear_distance_mm,
+            rotary_distance_deg=self.rotary_distance_deg,
+            motion_safety_disabled=self.motion_safety_disabled,
+            manual_axis=self.manual_axis,
+            manual_axis_distance_mm=self.manual_axis_distance_mm,
+            manual_axis_mode=self.manual_axis_mode,
+            manual_axis_feedrate_mm_min=self.manual_axis_feedrate_mm_min,
+            focus_feedrate_mm_min=self.focus_feedrate_mm_min,
+            focus_step_feedrate_mm_min=self.focus_step_feedrate_mm_min,
+            needles_step_feedrate_mm_min=self.needles_step_feedrate_mm_min,
+            turntable_feedrate_mm_min=self.turntable_feedrate_mm_min,
+            turntable_step_feedrate_mm_min=self.turntable_step_feedrate_mm_min,
+        )
+
+    def to_dict(self) -> dict[str, float | bool | str]:
+        """Serialize the jog preferences."""
+
+        return {
+            "mode": self.mode,
+            "linear_distance_mm": self.linear_distance_mm,
+            "rotary_distance_deg": self.rotary_distance_deg,
+            "motion_safety_disabled": self.motion_safety_disabled,
+            "manual_axis": self.manual_axis,
+            "manual_axis_distance_mm": self.manual_axis_distance_mm,
+            "manual_axis_mode": self.manual_axis_mode,
+            "manual_axis_feedrate_mm_min": self.manual_axis_feedrate_mm_min,
+            "focus_feedrate_mm_min": self.focus_feedrate_mm_min,
+            "focus_step_feedrate_mm_min": self.focus_step_feedrate_mm_min,
+            "needles_step_feedrate_mm_min": self.needles_step_feedrate_mm_min,
+            "turntable_feedrate_mm_min": self.turntable_feedrate_mm_min,
+            "turntable_step_feedrate_mm_min": self.turntable_step_feedrate_mm_min,
+        }
+
+
 def parse_jog_settings(raw_jog: object, defaults: JogSettingsDefaults) -> JogSettingsConfig:
     """Normalise persisted jog settings supporting legacy field names."""
 

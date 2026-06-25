@@ -1,6 +1,10 @@
 import unittest
 
-from probe_station_gui.jog_config import JogSettingsDefaults, parse_jog_settings
+from probe_station_gui.jog_config import (
+    JogSettings,
+    JogSettingsDefaults,
+    parse_jog_settings,
+)
 
 
 def _defaults() -> JogSettingsDefaults:
@@ -25,6 +29,30 @@ def _defaults() -> JogSettingsDefaults:
 
 
 class JogConfigTest(unittest.TestCase):
+    def test_settings_round_trip_and_clone(self) -> None:
+        settings = JogSettings(
+            mode="step",
+            linear_distance_mm=1.25,
+            rotary_distance_deg=2.5,
+            motion_safety_disabled=True,
+            manual_axis="Z",
+            manual_axis_distance_mm=0.4,
+            manual_axis_mode="G90",
+            manual_axis_feedrate_mm_min=8.0,
+            focus_feedrate_mm_min=9.0,
+            focus_step_feedrate_mm_min=10.0,
+            needles_step_feedrate_mm_min=11.0,
+            turntable_feedrate_mm_min=12.0,
+            turntable_step_feedrate_mm_min=13.0,
+        )
+
+        restored = JogSettings(**settings.to_dict())
+        clone = settings.clone()
+
+        self.assertEqual(restored, settings)
+        self.assertEqual(clone, settings)
+        self.assertIsNot(clone, settings)
+
     def test_legacy_control_mode_and_unsafe_motion_are_supported(self) -> None:
         parsed = parse_jog_settings(
             {
