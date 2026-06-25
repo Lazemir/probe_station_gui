@@ -158,7 +158,10 @@ from probe_station_gui.route_control_state import (
     api_route_control_legacy_attrs,
     api_route_control_state_from_legacy_attrs,
 )
-from probe_station_gui.route_operation_modes import route_operation_measure_enabled
+from probe_station_gui.route_operation_modes import (
+    route_operation_measure_enabled,
+    route_operation_photo_enabled,
+)
 from probe_station_gui.route_measurement_payloads import (
     route_api_contact_seek_payload,
     route_api_measurement_record_payload,
@@ -8201,14 +8204,8 @@ class Main(QMainWindow):
             self._set_route_measurement_pending(True)
         self._route_measurement_runtime_configuration = configuration
         self._save_route_measurement_session_metadata(configuration)
-        photo_enabled = configuration.operation_mode in {
-            ROUTE_OPERATION_PHOTO,
-            ROUTE_OPERATION_PHOTO_THEN_MEASURE,
-        }
-        measure_enabled = configuration.operation_mode in {
-            ROUTE_OPERATION_MEASURE,
-            ROUTE_OPERATION_PHOTO_THEN_MEASURE,
-        }
+        photo_enabled = route_operation_photo_enabled(configuration.operation_mode)
+        measure_enabled = route_operation_measure_enabled(configuration.operation_mode)
         scale = self._active_microscope_scale()
         if photo_enabled and scale is None:
             message = (
