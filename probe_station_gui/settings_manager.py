@@ -13,6 +13,12 @@ from importlib import resources
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
+from probe_station_gui.axis_calibration_config import (
+    AxisACalibrationConfig,
+    AxisZCalibrationConfig,
+    parse_axis_a_calibration,
+    parse_axis_z_calibration,
+)
 from probe_station_gui.feedrate_config import (
     FeedrateGroupConfig,
     feedrate_group_from_raw,
@@ -2030,189 +2036,26 @@ class SettingsManager:
     def _parse_axis_a_calibration(self, raw_calibration) -> AxisACalibrationSettings:
         """Normalise the compact A-axis nonlinear calibration model."""
 
-        defaults = AxisACalibrationSettings()
-        if not isinstance(raw_calibration, dict):
-            return defaults
-
-        model_raw = raw_calibration.get("model", defaults.model)
-        model = model_raw.strip() if isinstance(model_raw, str) else defaults.model
-        if model != self.DEFAULT_AXIS_A_CALIBRATION_MODEL:
-            model = self.DEFAULT_AXIS_A_CALIBRATION_MODEL
-
-        source_raw = raw_calibration.get("source", defaults.source)
-        source = source_raw.strip() if isinstance(source_raw, str) else defaults.source
-        created_at_raw = raw_calibration.get("created_at", defaults.created_at)
-        created_at = (
-            created_at_raw.strip()
-            if isinstance(created_at_raw, str)
-            else defaults.created_at
+        config = parse_axis_a_calibration(
+            raw_calibration,
+            AxisACalibrationConfig(**AxisACalibrationSettings().to_dict()),
+            expected_model=self.DEFAULT_AXIS_A_CALIBRATION_MODEL,
         )
-
-        calibration = AxisACalibrationSettings(
-            configured=self._coerce_bool(
-                raw_calibration.get("configured", defaults.configured),
-                default=defaults.configured,
-            ),
-            model=model,
-            steps_per_mm=self._coerce_float(
-                raw_calibration.get("steps_per_mm", defaults.steps_per_mm),
-                default=defaults.steps_per_mm,
-            ),
-            commanded_lowering_min_mm=self._coerce_float(
-                raw_calibration.get(
-                    "commanded_lowering_min_mm",
-                    defaults.commanded_lowering_min_mm,
-                ),
-                default=defaults.commanded_lowering_min_mm,
-            ),
-            commanded_lowering_max_mm=self._coerce_float(
-                raw_calibration.get(
-                    "commanded_lowering_max_mm",
-                    defaults.commanded_lowering_max_mm,
-                ),
-                default=defaults.commanded_lowering_max_mm,
-            ),
-            offset_mm=-abs(
-                self._coerce_float(
-                    raw_calibration.get("offset_mm", defaults.offset_mm),
-                    default=defaults.offset_mm,
-                )
-            ),
-            amplitude_mm=-abs(
-                self._coerce_float(
-                    raw_calibration.get("amplitude_mm", defaults.amplitude_mm),
-                    default=defaults.amplitude_mm,
-                )
-            ),
-            angular_frequency_rad_per_mm=self._coerce_float(
-                raw_calibration.get(
-                    "angular_frequency_rad_per_mm",
-                    defaults.angular_frequency_rad_per_mm,
-                ),
-                default=defaults.angular_frequency_rad_per_mm,
-            ),
-            phase_rad=self._coerce_float(
-                raw_calibration.get("phase_rad", defaults.phase_rad),
-                default=defaults.phase_rad,
-            ),
-            fit_rmse_mm=self._coerce_float(
-                raw_calibration.get("fit_rmse_mm", defaults.fit_rmse_mm),
-                default=defaults.fit_rmse_mm,
-            ),
-            fit_max_abs_error_mm=self._coerce_float(
-                raw_calibration.get(
-                    "fit_max_abs_error_mm",
-                    defaults.fit_max_abs_error_mm,
-                ),
-                default=defaults.fit_max_abs_error_mm,
-            ),
-            source=source,
-            created_at=created_at,
-        )
-        if (
-            calibration.steps_per_mm <= 0
-            or calibration.commanded_lowering_max_mm
-            <= calibration.commanded_lowering_min_mm
-            or abs(calibration.amplitude_mm) <= 1e-12
-            or calibration.angular_frequency_rad_per_mm <= 0
-        ):
-            calibration.configured = False
-        return calibration
+        return AxisACalibrationSettings(**config.__dict__)
 
     def _parse_axis_z_calibration(self, raw_calibration) -> AxisZCalibrationSettings:
         """Normalise the compact Z-axis nonlinear calibration model."""
 
-        defaults = AxisZCalibrationSettings()
-        if not isinstance(raw_calibration, dict):
-            return defaults
-
-        model_raw = raw_calibration.get("model", defaults.model)
-        model = model_raw.strip() if isinstance(model_raw, str) else defaults.model
-        if model != defaults.model:
-            model = defaults.model
-
-        source_raw = raw_calibration.get("source", defaults.source)
-        source = source_raw.strip() if isinstance(source_raw, str) else defaults.source
-        created_at_raw = raw_calibration.get("created_at", defaults.created_at)
-        created_at = (
-            created_at_raw.strip()
-            if isinstance(created_at_raw, str)
-            else defaults.created_at
+        config = parse_axis_z_calibration(
+            raw_calibration,
+            AxisZCalibrationConfig(**AxisZCalibrationSettings().to_dict()),
         )
-
-        def _coefficients(key: str, fallback: list[float]) -> list[float]:
-            raw_values = raw_calibration.get(key, fallback)
-            if not isinstance(raw_values, Iterable) or isinstance(raw_values, (str, bytes)):
-                return list(fallback)
-            values: list[float] = []
-            for raw_value in raw_values:
-                try:
-                    value = float(raw_value)
-                except (TypeError, ValueError):
-                    return list(fallback)
-                if not math.isfinite(value):
-                    return list(fallback)
-                values.append(value)
-            if len(values) != 6:
-                return list(fallback)
-            return values
-
-        calibration = AxisZCalibrationSettings(
-            configured=self._coerce_bool(
-                raw_calibration.get("configured", defaults.configured),
-                default=defaults.configured,
-            ),
-            model=model,
-            steps_per_mm=self._coerce_float(
-                raw_calibration.get("steps_per_mm", defaults.steps_per_mm),
-                default=defaults.steps_per_mm,
-            ),
-            gcode_min_mm=self._coerce_float(
-                raw_calibration.get("gcode_min_mm", defaults.gcode_min_mm),
-                default=defaults.gcode_min_mm,
-            ),
-            gcode_max_mm=self._coerce_float(
-                raw_calibration.get("gcode_max_mm", defaults.gcode_max_mm),
-                default=defaults.gcode_max_mm,
-            ),
-            coefficients_mm=_coefficients(
-                "coefficients_mm",
-                defaults.coefficients_mm,
-            ),
-            fit_rmse_mm=self._coerce_float(
-                raw_calibration.get("fit_rmse_mm", defaults.fit_rmse_mm),
-                default=defaults.fit_rmse_mm,
-            ),
-            fit_max_abs_error_mm=self._coerce_float(
-                raw_calibration.get(
-                    "fit_max_abs_error_mm",
-                    defaults.fit_max_abs_error_mm,
-                ),
-                default=defaults.fit_max_abs_error_mm,
-            ),
-            section2_indicator_offset_mm=self._coerce_float(
-                raw_calibration.get(
-                    "section2_indicator_offset_mm",
-                    defaults.section2_indicator_offset_mm,
-                ),
-                default=defaults.section2_indicator_offset_mm,
-            ),
-            section3_indicator_offset_mm=self._coerce_float(
-                raw_calibration.get(
-                    "section3_indicator_offset_mm",
-                    defaults.section3_indicator_offset_mm,
-                ),
-                default=defaults.section3_indicator_offset_mm,
-            ),
-            source=source,
-            created_at=created_at,
+        return AxisZCalibrationSettings(
+            **{
+                **config.__dict__,
+                "coefficients_mm": list(config.coefficients_mm),
+            }
         )
-        if (
-            calibration.steps_per_mm <= 0
-            or calibration.gcode_max_mm <= calibration.gcode_min_mm
-        ):
-            calibration.configured = False
-        return calibration
 
     @staticmethod
     def _coerce_bool(value, *, default: bool) -> bool:
