@@ -23,6 +23,10 @@ from probe_station_gui.feedrate_config import (
 )
 from probe_station_gui.jog_config import JogSettingsDefaults, parse_jog_settings
 from probe_station_gui.logging_config import configure_logging
+from probe_station_gui.oscillation_config import (
+    OscillationSettingsDefaults,
+    parse_oscillation_settings,
+)
 from probe_station_gui.telegram_notifications import (
     load_global_bot_token,
     save_global_bot_token,
@@ -1914,46 +1918,20 @@ class SettingsManager:
     def _parse_oscillation(self, raw_oscillation) -> OscillationSettings:
         """Normalise persisted oscillation-panel settings."""
 
-        mode = self.DEFAULT_OSCILLATION_MODE
-        amplitude_mm = self.DEFAULT_OSCILLATION_AMPLITUDE_MM
-        feedrate_mm_min = self.DEFAULT_OSCILLATION_FEEDRATE_MM_MIN
-        turns_per_sweep = self.DEFAULT_OSCILLATION_TURNS_PER_SWEEP
-        if isinstance(raw_oscillation, dict):
-            mode_candidate = raw_oscillation.get("mode", mode)
-            if isinstance(mode_candidate, str):
-                mode = mode_candidate.strip().upper() or mode
-            for key, default in (
-                ("amplitude_mm", amplitude_mm),
-                ("feedrate_mm_min", feedrate_mm_min),
-                ("turns_per_sweep", turns_per_sweep),
-            ):
-                candidate = raw_oscillation.get(key, default)
-                try:
-                    if isinstance(candidate, (int, float, str)):
-                        value = float(candidate)
-                    else:
-                        value = default
-                except (TypeError, ValueError):
-                    value = default
-                if key == "amplitude_mm":
-                    amplitude_mm = value
-                elif key == "feedrate_mm_min":
-                    feedrate_mm_min = value
-                else:
-                    turns_per_sweep = value
-        if mode not in {"X", "Y", "SPIRAL"}:
-            mode = self.DEFAULT_OSCILLATION_MODE
-        if amplitude_mm <= 0:
-            amplitude_mm = self.DEFAULT_OSCILLATION_AMPLITUDE_MM
-        if feedrate_mm_min <= 0:
-            feedrate_mm_min = self.DEFAULT_OSCILLATION_FEEDRATE_MM_MIN
-        if turns_per_sweep <= 0:
-            turns_per_sweep = self.DEFAULT_OSCILLATION_TURNS_PER_SWEEP
+        config = parse_oscillation_settings(
+            raw_oscillation,
+            OscillationSettingsDefaults(
+                mode=self.DEFAULT_OSCILLATION_MODE,
+                amplitude_mm=self.DEFAULT_OSCILLATION_AMPLITUDE_MM,
+                feedrate_mm_min=self.DEFAULT_OSCILLATION_FEEDRATE_MM_MIN,
+                turns_per_sweep=self.DEFAULT_OSCILLATION_TURNS_PER_SWEEP,
+            ),
+        )
         return OscillationSettings(
-            mode=mode,
-            amplitude_mm=amplitude_mm,
-            feedrate_mm_min=feedrate_mm_min,
-            turns_per_sweep=turns_per_sweep,
+            mode=config.mode,
+            amplitude_mm=config.amplitude_mm,
+            feedrate_mm_min=config.feedrate_mm_min,
+            turns_per_sweep=config.turns_per_sweep,
         )
 
     def _parse_needle_calibration(
