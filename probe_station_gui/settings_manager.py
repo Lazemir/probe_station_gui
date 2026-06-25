@@ -13,6 +13,14 @@ from importlib import resources
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
+from probe_station_gui.feedrate_config import (
+    FeedrateGroupConfig,
+    feedrate_group_from_raw,
+    normalise_feedrate_group,
+    parse_feedrate_groups,
+    parse_feedrate_list,
+    select_feedrate_default,
+)
 from probe_station_gui.logging_config import configure_logging
 from probe_station_gui.telegram_notifications import (
     load_global_bot_token,
@@ -2797,105 +2805,63 @@ class SettingsManager:
         raw_feedrates,
         legacy_presets,
     ) -> Tuple[FeedrateGroup, FeedrateGroup]:
-        linear_defaults = self.DEFAULT_LINEAR_FEEDRATE_PRESETS
-        rotary_defaults = self.DEFAULT_ROTARY_FEEDRATE_PRESETS
-        presets_fallback = self._parse_feedrate_list(
+        linear_config, rotary_config = parse_feedrate_groups(
+            raw_feedrates,
             legacy_presets,
-            fallback=linear_defaults,
+            linear_group=self.LINEAR_GROUP,
+            rotary_group=self.ROTARY_GROUP,
+            linear_defaults=self.DEFAULT_LINEAR_FEEDRATE_PRESETS,
+            rotary_defaults=self.DEFAULT_ROTARY_FEEDRATE_PRESETS,
+            default_feedrate=self.DEFAULT_FEEDRATE_DEFAULT,
+            min_feedrate=self.MIN_FEEDRATE_MM_MIN,
         )
-        legacy_raw_present = bool(legacy_presets)
-        rotary_fallback_defaults = (
-            tuple(presets_fallback)
-            if legacy_raw_present
-            else tuple(rotary_defaults)
-        )
-        if not isinstance(raw_feedrates, dict):
-            linear = self._normalise_feedrate_group(
-                FeedrateGroup(
-                    presets=presets_fallback, default=self.DEFAULT_FEEDRATE_DEFAULT
-                ),
-                fallback=linear_defaults,
-            )
-            rotary_source = list(rotary_fallback_defaults)
-            rotary = self._normalise_feedrate_group(
-                FeedrateGroup(
-                    presets=rotary_source, default=self.DEFAULT_FEEDRATE_DEFAULT
-                ),
-                fallback=rotary_defaults,
-            )
-            return linear, rotary
-
-        linear_raw = raw_feedrates.get(self.LINEAR_GROUP)
-        rotary_raw = raw_feedrates.get(self.ROTARY_GROUP)
-        linear = self._normalise_feedrate_group(
-            self._group_from_raw(linear_raw, fallback=linear_defaults),
-            fallback=linear_defaults,
-        )
-        rotary = self._normalise_feedrate_group(
-            self._group_from_raw(
-                rotary_raw, fallback=rotary_fallback_defaults
+        return (
+            FeedrateGroup(
+                presets=linear_config.presets,
+                default=linear_config.default,
             ),
-            fallback=rotary_defaults,
+            FeedrateGroup(
+                presets=rotary_config.presets,
+                default=rotary_config.default,
+            ),
         )
-        return linear, rotary
 
     def _group_from_raw(
         self, raw_group, *, fallback: Tuple[float, ...]
     ) -> FeedrateGroup:
         """Build a feedrate group dataclass from persisted data."""
 
-        presets = []
-        default = self.DEFAULT_FEEDRATE_DEFAULT
-        if isinstance(raw_group, dict):
-            presets = self._parse_feedrate_list(
-                raw_group.get("presets"), fallback=fallback
-            )
-            default_raw = raw_group.get("default")
-            try:
-                if isinstance(default_raw, (int, float, str)):
-                    default = float(default_raw)
-            except (TypeError, ValueError):
-                default = self.DEFAULT_FEEDRATE_DEFAULT
-        else:
-            presets = list(fallback)
-        return FeedrateGroup(presets=presets, default=default)
+        config = feedrate_group_from_raw(
+            raw_group,
+            fallback=fallback,
+            default_feedrate=self.DEFAULT_FEEDRATE_DEFAULT,
+            min_feedrate=self.MIN_FEEDRATE_MM_MIN,
+        )
+        return FeedrateGroup(presets=config.presets, default=config.default)
 
     def _parse_feedrate_list(
         self, raw_presets, *, fallback: Tuple[float, ...]
     ) -> List[float]:
         """Normalise a preset list to positive unique floats preserving order."""
 
-        parsed: List[float] = []
-        seen: set[float] = set()
-        if isinstance(raw_presets, Iterable) and not isinstance(raw_presets, (str, bytes)):
-            for value in raw_presets:
-                try:
-                    number = float(value)
-                except (TypeError, ValueError):
-                    continue
-                if number <= 0:
-                    continue
-                number = max(self.MIN_FEEDRATE_MM_MIN, number)
-                key = round(number, 9)
-                if key in seen:
-                    continue
-                seen.add(key)
-                parsed.append(number)
-        if not parsed:
-            parsed = list(fallback)
-        return parsed
+        return parse_feedrate_list(
+            raw_presets,
+            fallback=fallback,
+            min_feedrate=self.MIN_FEEDRATE_MM_MIN,
+        )
 
     def _normalise_feedrate_group(
         self, group: FeedrateGroup, *, fallback: Tuple[float, ...]
     ) -> FeedrateGroup:
         """Ensure the feedrate group contains valid presets and defaults."""
 
-        presets = self._parse_feedrate_list(group.presets, fallback=fallback)
-        presets.sort()
-        default_value = group.default if group.default > 0 else self.DEFAULT_FEEDRATE_DEFAULT
-        default_value = max(self.MIN_FEEDRATE_MM_MIN, default_value)
-        default_text = self._select_default(default_value, presets, fallback=fallback)
-        return FeedrateGroup(presets=presets, default=default_text)
+        config = normalise_feedrate_group(
+            FeedrateGroupConfig(presets=list(group.presets), default=group.default),
+            fallback=fallback,
+            default_feedrate=self.DEFAULT_FEEDRATE_DEFAULT,
+            min_feedrate=self.MIN_FEEDRATE_MM_MIN,
+        )
+        return FeedrateGroup(presets=config.presets, default=config.default)
 
     def _select_default(
         self, candidate: float, presets: List[float], *, fallback: Tuple[float, ...]
@@ -2906,16 +2872,11 @@ class SettingsManager:
         must not be forced back to one of the preset values.
         """
 
-        try:
-            candidate_value = float(candidate)
-        except (TypeError, ValueError):
-            candidate_value = self.DEFAULT_FEEDRATE_DEFAULT
-
-        if candidate_value <= 0:
-            candidate_value = self.DEFAULT_FEEDRATE_DEFAULT
-        candidate_value = max(self.MIN_FEEDRATE_MM_MIN, candidate_value)
-
-        return candidate_value
+        return select_feedrate_default(
+            candidate,
+            default_feedrate=self.DEFAULT_FEEDRATE_DEFAULT,
+            min_feedrate=self.MIN_FEEDRATE_MM_MIN,
+        )
 
     def _normalise_settings(self, settings: Settings) -> Settings:
         """Return a copy of the settings with runtime values normalised."""
