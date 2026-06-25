@@ -1163,21 +1163,19 @@ class RouteMeasurementRunner:
                         message = "Route measurement stopped by user."
                         break
                     if decision == "measure":
-                        manual_record = self._measure_manual_contact_here(
-                            point=point,
-                            position=position,
-                            total=total,
+                        loop_decision, saved_count = (
+                            self._measure_manual_contact_and_advance(
+                                point=point,
+                                position=position,
+                                total=total,
+                                position_index=position_index,
+                            )
                         )
-                        if manual_record is None:
-                            if self._point_interrupt_requested.is_set():
-                                self._point_interrupt_requested.clear()
-                                continue
-                            message = "Route measurement stopped by user."
+                        measurements_saved += saved_count
+                        if loop_decision.stop_message is not None:
+                            message = loop_decision.stop_message
                             break
-                        measurements_saved += 1
-                        position_index += 1
-                        if position_index < total:
-                            self._begin_stage_task()
+                        position_index = loop_decision.position_index
                         continue
                     self._begin_stage_task()
                     jump_index = self._jump_target_index(decision)
@@ -1247,21 +1245,19 @@ class RouteMeasurementRunner:
                             message = "Route measurement stopped by user."
                             break
                         if decision == "measure":
-                            manual_record = self._measure_manual_contact_here(
-                                point=point,
-                                position=position,
-                                total=total,
+                            loop_decision, saved_count = (
+                                self._measure_manual_contact_and_advance(
+                                    point=point,
+                                    position=position,
+                                    total=total,
+                                    position_index=position_index,
+                                )
                             )
-                            if manual_record is None:
-                                if self._point_interrupt_requested.is_set():
-                                    self._point_interrupt_requested.clear()
-                                    continue
-                                message = "Route measurement stopped by user."
+                            measurements_saved += saved_count
+                            if loop_decision.stop_message is not None:
+                                message = loop_decision.stop_message
                                 break
-                            measurements_saved += 1
-                            position_index += 1
-                            if position_index < total:
-                                self._begin_stage_task()
+                            position_index = loop_decision.position_index
                             continue
                         self._begin_stage_task()
                         jump_index = self._jump_target_index(decision)
@@ -1317,6 +1313,35 @@ class RouteMeasurementRunner:
                     message = f"{message} Instrument close failed: {exc}"
             self._set_waiting(False)
         return success, message
+
+    def _measure_manual_contact_and_advance(
+        self,
+        *,
+        point: RouteMeasurementPoint,
+        position: int,
+        total: int,
+        position_index: int,
+    ) -> tuple[_RoutePointLoopDecision, int]:
+        manual_record = self._measure_manual_contact_here(
+            point=point,
+            position=position,
+            total=total,
+        )
+        if manual_record is None:
+            if self._point_interrupt_requested.is_set():
+                self._point_interrupt_requested.clear()
+                return _RoutePointLoopDecision(position_index=position_index), 0
+            return (
+                _RoutePointLoopDecision(
+                    position_index=position_index,
+                    stop_message="Route measurement stopped by user.",
+                ),
+                0,
+            )
+        next_index = position_index + 1
+        if next_index < total:
+            self._begin_stage_task()
+        return _RoutePointLoopDecision(position_index=next_index), 1
 
     def _prepare_route_point_for_measurement(
         self,
