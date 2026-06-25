@@ -13,6 +13,7 @@ from probe_station_gui.route_measurement_payloads import (
     focus_result_to_dict,
     json_ready,
     route_contact_seek_payload,
+    route_external_result_payload,
     route_measurement_record_payload,
 )
 
@@ -155,4 +156,46 @@ def test_focus_result_to_dict_accepts_existing_shapes() -> None:
         "autofocus_fine_step_mm": 0.01,
         "autofocus_lower_z_mm": 0.9,
         "autofocus_upper_z_mm": 1.1,
+    }
+
+
+def test_route_external_result_payload_preserves_api_shape() -> None:
+    payload = route_external_result_payload(
+        {
+            "status": " OK ",
+            "summary": {"r": 42},
+            "files": ["a.csv"],
+            "message": " done ",
+            "request_id": 7,
+            "external_measurement_request_id": 8,
+        },
+        timestamp_utc="2026-06-25T01:23:45Z",
+    )
+
+    assert payload == {
+        "status": "ok",
+        "summary": {"r": 42},
+        "files": ["a.csv"],
+        "message": "done",
+        "timestamp_utc": "2026-06-25T01:23:45Z",
+        "external_measurement_request_id": 8,
+    }
+
+
+def test_route_external_result_payload_defaults_invalid_shapes() -> None:
+    payload = route_external_result_payload(
+        {
+            "status": "",
+            "summary": "not a dict",
+            "files": "not a list",
+        },
+        timestamp_utc="t1",
+    )
+
+    assert payload == {
+        "status": "ok",
+        "summary": {},
+        "files": [],
+        "message": "",
+        "timestamp_utc": "t1",
     }

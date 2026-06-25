@@ -82,6 +82,26 @@ def route_contact_seek_payload(seek: object | None) -> dict[str, Any] | None:
     }
 
 
+def route_external_result_payload(
+    payload: dict[str, Any],
+    *,
+    timestamp_utc: str,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "status": str(payload.get("status", "ok")).strip().lower() or "ok",
+        "summary": payload.get("summary") if isinstance(payload.get("summary"), dict) else {},
+        "files": payload.get("files") if isinstance(payload.get("files"), list) else [],
+        "message": str(payload.get("message", "")).strip(),
+        "timestamp_utc": str(timestamp_utc or ""),
+    }
+    request_id = payload.get("external_measurement_request_id")
+    if request_id is None:
+        request_id = payload.get("request_id")
+    if request_id is not None:
+        result["external_measurement_request_id"] = request_id
+    return result
+
+
 def json_ready(value: object) -> object:
     if isinstance(value, bool) or value is None or isinstance(value, str):
         return value

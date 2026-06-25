@@ -158,6 +158,7 @@ from probe_station_gui.route_control_state import (
     api_route_control_legacy_attrs,
     api_route_control_state_from_legacy_attrs,
 )
+from probe_station_gui.route_measurement_payloads import route_external_result_payload
 from probe_station_gui.route_measurement_settings import RouteMeasurementSettingsStore
 from probe_station_gui.route_formatting import (
     csv_bool as _csv_bool,
@@ -3204,18 +3205,10 @@ class Main(QMainWindow):
                 "status_code": 404,
                 "message": "No external route session is waiting for a result.",
             }
-        result = {
-            "status": str(payload.get("status", "ok")).strip().lower() or "ok",
-            "summary": payload.get("summary") if isinstance(payload.get("summary"), dict) else {},
-            "files": payload.get("files") if isinstance(payload.get("files"), list) else [],
-            "message": str(payload.get("message", "")).strip(),
-            "timestamp_utc": self._api_timestamp_utc(),
-        }
-        request_id = payload.get("external_measurement_request_id")
-        if request_id is None:
-            request_id = payload.get("request_id")
-        if request_id is not None:
-            result["external_measurement_request_id"] = request_id
+        result = route_external_result_payload(
+            payload,
+            timestamp_utc=self._api_timestamp_utc(),
+        )
         if not runner.submit_external_result(result):
             return {
                 "accepted": False,
