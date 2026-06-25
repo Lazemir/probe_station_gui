@@ -2,7 +2,59 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+
+LCR_MEASUREMENT_FUNCTIONS: tuple[str, ...] = (
+    "Cs-Rs",
+    "Cs-D",
+    "Cp-Rp",
+    "Cp-D",
+    "Lp-Rp",
+    "Lp-Q",
+    "Ls-Rs",
+    "Ls-Q",
+    "Rs-Q",
+    "Rp-Q",
+    "R-X",
+    "DCR",
+    "Z-thr",
+    "Z-thd",
+    "Z-D",
+    "Z-Q",
+)
+LCR_RANGE_MODES: tuple[str, ...] = ("HOLD", "AUTO")
+LCR_LEVEL_MODES: tuple[str, ...] = ("VOLTAGE", "CURRENT")
+LCR_APERTURE_RATES: tuple[str, ...] = ("FAST", "MED", "SLOW")
+LCR_TRIGGER_SOURCES: tuple[str, ...] = ("INT", "MAN", "EXT", "BUS")
+LCR_SOURCE_RESISTANCES_OHM: tuple[int, ...] = (30, 50, 100)
+LCR_MONITOR_PARAMETERS: tuple[str, ...] = (
+    "OFF",
+    "Z",
+    "D",
+    "Q",
+    "THR",
+    "THD",
+    "R",
+    "X",
+    "G",
+    "B",
+    "Y",
+    "ABS",
+    "PER",
+    "VAC",
+    "IAC",
+)
+LCR_METER_TYPE_GWINSTEK = "gwinstek_lcr_76200"
+LCR_METER_TYPE_KEITHLEY = "keithley_2400_2182a"
+LCR_METER_TYPES: tuple[str, ...] = (
+    LCR_METER_TYPE_GWINSTEK,
+    LCR_METER_TYPE_KEITHLEY,
+)
+LCR_METER_TYPE_LABELS: dict[str, str] = {
+    LCR_METER_TYPE_GWINSTEK: "GW Instek LCR-76200",
+    LCR_METER_TYPE_KEITHLEY: "Keithley 2400 + 2182A",
+}
 
 
 @dataclass(frozen=True)
@@ -13,6 +65,157 @@ class SavedStagePositionConfig:
     y_mm: float = 0.0
     z_mm: float = 0.0
     configured: bool = False
+
+
+@dataclass
+class SavedStagePositionSettings:
+    """A persisted XYZ bookmark used by calibration workflows."""
+
+    x_mm: float = 0.0
+    y_mm: float = 0.0
+    z_mm: float = 0.0
+    configured: bool = False
+
+    def clone(self) -> "SavedStagePositionSettings":
+        """Return a copy of the saved XYZ bookmark."""
+
+        return SavedStagePositionSettings(
+            x_mm=self.x_mm,
+            y_mm=self.y_mm,
+            z_mm=self.z_mm,
+            configured=self.configured,
+        )
+
+    def to_dict(self) -> dict[str, float | bool]:
+        """Serialize the saved XYZ bookmark."""
+
+        return {
+            "x_mm": self.x_mm,
+            "y_mm": self.y_mm,
+            "z_mm": self.z_mm,
+            "configured": self.configured,
+        }
+
+
+@dataclass
+class NeedleCalibrationSettings:
+    """Configuration for needle control and the external measurement instrument."""
+
+    meter_type: str = LCR_METER_TYPE_GWINSTEK
+    visa_resource: str = "COM4"
+    keithley_source_resource: str = "GPIB2::1::INSTR"
+    keithley_voltmeter_resource: str = "GPIB2::2::INSTR"
+    measurement_function: str = "R-X"
+    range_mode: str = "AUTO"
+    auto_range_enabled: bool = True
+    impedance_range: int = 3
+    dcr_range: int = 4
+    frequency_hz: float = 50.0
+    level_mode: str = "VOLTAGE"
+    voltage_level_v: float = 0.01
+    current_level_a: float = 0.0001
+    source_resistance_ohm: int = 100
+    aperture_rate: str = "SLOW"
+    aperture_averages: int = 1
+    trigger_source: str = "INT"
+    trigger_delay_s: float = 0.0
+    bias_enabled: bool = False
+    bias_level_v: float = 0.0
+    monitor1: str = "OFF"
+    monitor2: str = "OFF"
+    alc_enabled: bool = False
+    short_threshold_ohm: float = 10.0
+    poll_interval_ms: int = 250
+    feedrate_mm_min: float = 1.0
+    contact_zone_mm: float = 0.05
+    raise_position_mm: float = 0.0
+    raise_position_configured: bool = False
+    down_position_mm: float = 0.0
+    down_position_configured: bool = False
+    chip_position: SavedStagePositionSettings = field(
+        default_factory=SavedStagePositionSettings
+    )
+    stone_position: SavedStagePositionSettings = field(
+        default_factory=SavedStagePositionSettings
+    )
+
+    def clone(self) -> "NeedleCalibrationSettings":
+        """Return a copy of the needle calibration settings."""
+
+        return NeedleCalibrationSettings(
+            meter_type=self.meter_type,
+            visa_resource=self.visa_resource,
+            keithley_source_resource=self.keithley_source_resource,
+            keithley_voltmeter_resource=self.keithley_voltmeter_resource,
+            measurement_function=self.measurement_function,
+            range_mode=self.range_mode,
+            auto_range_enabled=self.auto_range_enabled,
+            impedance_range=self.impedance_range,
+            dcr_range=self.dcr_range,
+            frequency_hz=self.frequency_hz,
+            level_mode=self.level_mode,
+            voltage_level_v=self.voltage_level_v,
+            current_level_a=self.current_level_a,
+            source_resistance_ohm=self.source_resistance_ohm,
+            aperture_rate=self.aperture_rate,
+            aperture_averages=self.aperture_averages,
+            trigger_source=self.trigger_source,
+            trigger_delay_s=self.trigger_delay_s,
+            bias_enabled=self.bias_enabled,
+            bias_level_v=self.bias_level_v,
+            monitor1=self.monitor1,
+            monitor2=self.monitor2,
+            alc_enabled=self.alc_enabled,
+            short_threshold_ohm=self.short_threshold_ohm,
+            poll_interval_ms=self.poll_interval_ms,
+            feedrate_mm_min=self.feedrate_mm_min,
+            contact_zone_mm=self.contact_zone_mm,
+            raise_position_mm=self.raise_position_mm,
+            raise_position_configured=self.raise_position_configured,
+            down_position_mm=self.down_position_mm,
+            down_position_configured=self.down_position_configured,
+            chip_position=self.chip_position.clone(),
+            stone_position=self.stone_position.clone(),
+        )
+
+    def to_dict(self) -> dict[str, float | int | str | bool | dict[str, float | bool]]:
+        """Serialize the needle calibration preferences."""
+
+        return {
+            "meter_type": self.meter_type,
+            "visa_resource": self.visa_resource,
+            "keithley_source_resource": self.keithley_source_resource,
+            "keithley_voltmeter_resource": self.keithley_voltmeter_resource,
+            "measurement_function": self.measurement_function,
+            "range_mode": self.range_mode,
+            "auto_range_enabled": self.auto_range_enabled,
+            "impedance_range": self.impedance_range,
+            "dcr_range": self.dcr_range,
+            "frequency_hz": self.frequency_hz,
+            "level_mode": self.level_mode,
+            "voltage_level_v": self.voltage_level_v,
+            "current_level_a": self.current_level_a,
+            "source_resistance_ohm": self.source_resistance_ohm,
+            "aperture_rate": self.aperture_rate,
+            "aperture_averages": self.aperture_averages,
+            "trigger_source": self.trigger_source,
+            "trigger_delay_s": self.trigger_delay_s,
+            "bias_enabled": self.bias_enabled,
+            "bias_level_v": self.bias_level_v,
+            "monitor1": self.monitor1,
+            "monitor2": self.monitor2,
+            "alc_enabled": self.alc_enabled,
+            "short_threshold_ohm": self.short_threshold_ohm,
+            "poll_interval_ms": self.poll_interval_ms,
+            "feedrate_mm_min": self.feedrate_mm_min,
+            "contact_zone_mm": self.contact_zone_mm,
+            "raise_position_mm": self.raise_position_mm,
+            "raise_position_configured": self.raise_position_configured,
+            "down_position_mm": self.down_position_mm,
+            "down_position_configured": self.down_position_configured,
+            "chip_position": self.chip_position.to_dict(),
+            "stone_position": self.stone_position.to_dict(),
+        }
 
 
 @dataclass(frozen=True)

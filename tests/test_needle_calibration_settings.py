@@ -1,9 +1,11 @@
 import unittest
 
-from probe_station_gui.settings_manager import (
+from probe_station_gui.needle_calibration_config import (
     LCR_METER_TYPE_KEITHLEY,
     NeedleCalibrationSettings,
     SavedStagePositionSettings,
+)
+from probe_station_gui.settings_manager import (
     SettingsManager,
 )
 
