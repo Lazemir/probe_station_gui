@@ -35,6 +35,11 @@ from probe_station_gui.qt_compat import (
     keyboard_modifiers_to_int,
     native_scan_code_to_int,
 )
+from probe_station_gui.joystick_feedrate_targets import (
+    clean_axis_feedrate_limits,
+    feedrate_key,
+    feedrate_target_for_axis,
+)
 from probe_station_gui.settings_manager import CONTROL_ACTIONS, KeyBinding
 from probe_station_gui.wheel_guard import (
     GuardedComboBox as QComboBox,
@@ -808,13 +813,14 @@ class JoystickWindow(QWidget):
         logger.debug("Joystick event filter removed")
 
     def _feedrate_key(self, target: str, mode: str | None = None) -> str:
-        target_key = str(target).strip().lower()
-        if target_key not in self.FEED_TARGET_LABELS:
-            target_key = self.FEED_TARGET_XY
-        mode_key = str(mode or self._control_mode).strip().lower()
-        if mode_key not in {self.MODE_JOG, self.MODE_STEP}:
-            mode_key = self.MODE_JOG
-        return f"{mode_key}:{target_key}"
+        return feedrate_key(
+            target,
+            mode or self._control_mode,
+            target_labels=self.FEED_TARGET_LABELS,
+            default_target=self.FEED_TARGET_XY,
+            valid_modes={self.MODE_JOG, self.MODE_STEP},
+            default_mode=self.MODE_JOG,
+        )
 
     def _feedrate_value_for_target(self, target: str, mode: str | None = None) -> float:
         mode_key = str(mode or self._control_mode).strip().lower()
@@ -852,14 +858,13 @@ class JoystickWindow(QWidget):
         return self._linear_default
 
     def _feedrate_target_for_axis(self, axis: str) -> str:
-        axis = axis.upper().strip()
-        if axis == "Z":
-            return self.FEED_TARGET_FOCUS
-        if axis == "A":
-            return self.FEED_TARGET_NEEDLES
-        if axis == "B":
-            return self.FEED_TARGET_TURNTABLE
-        return self.FEED_TARGET_XY
+        return feedrate_target_for_axis(
+            axis,
+            xy_target=self.FEED_TARGET_XY,
+            focus_target=self.FEED_TARGET_FOCUS,
+            needles_target=self.FEED_TARGET_NEEDLES,
+            turntable_target=self.FEED_TARGET_TURNTABLE,
+        )
 
     def _feedrate_max_for_target(self, target: str) -> float:
         def axis_limit(axis: str) -> float | None:
@@ -1299,18 +1304,10 @@ class JoystickWindow(QWidget):
         self._set_needle_feedrate(feedrate_mm_min, emit_changed=False)
 
     def set_axis_feedrate_limits(self, limits: dict[str, float]) -> None:
-        cleaned: dict[str, float] = {}
-        for axis, value in limits.items():
-            axis_name = str(axis).strip().upper()
-            if axis_name not in self.MANUAL_JOG_AXES:
-                continue
-            try:
-                feedrate = float(value)
-            except (TypeError, ValueError):
-                continue
-            if math.isfinite(feedrate) and feedrate > 0.0:
-                cleaned[axis_name] = feedrate
-        self._axis_feedrate_limits = cleaned
+        self._axis_feedrate_limits = clean_axis_feedrate_limits(
+            limits,
+            valid_axes=self.MANUAL_JOG_AXES,
+        )
         self._update_linear_feedrate_slider_range()
         self._set_needle_feedrate(
             self._needle_feedrate_value,
