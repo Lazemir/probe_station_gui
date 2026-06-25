@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import os
 import platform
 import re
@@ -27,6 +26,7 @@ from probe_station_gui.feedrate_config import (
     parse_feedrate_list,
     select_feedrate_default,
 )
+from probe_station_gui.fluidnc_protocol import parse_fluidnc_axis_max_feedrates
 from probe_station_gui.jog_config import JogSettingsDefaults, parse_jog_settings
 from probe_station_gui.logging_config import configure_logging
 from probe_station_gui.needle_calibration_config import (
@@ -80,36 +80,6 @@ CONTROL_ACTIONS: tuple[ControlAction, ...] = (
     ControlAction("move_x_positive", "X", 1, "Move Right"),
     ControlAction("toggle_jog_step", "", 0, "Toggle Jog/Step", 74, "j"),
 )
-
-FLUIDNC_AXIS_NAMES: tuple[str, ...] = ("X", "Y", "Z", "A", "B", "C")
-
-
-def parse_fluidnc_axis_max_feedrates(lines: Iterable[str]) -> dict[str, float]:
-    """Extract per-axis max_rate_mm_per_min values from a FluidNC config dump."""
-
-    axis_headers = {f"{axis}:" for axis in FLUIDNC_AXIS_NAMES}
-    rates: dict[str, float] = {}
-    current_axis: str | None = None
-    for line in lines:
-        stripped = str(line).strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        upper = stripped.upper()
-        if upper in axis_headers:
-            current_axis = upper[0]
-            continue
-        if current_axis is None:
-            continue
-        if not stripped.lower().startswith("max_rate_mm_per_min:"):
-            continue
-        raw_value = stripped.split(":", 1)[1].strip()
-        try:
-            value = float(raw_value)
-        except ValueError:
-            continue
-        if math.isfinite(value) and value > 0.0:
-            rates[current_axis] = value
-    return rates
 
 WORK_COORDINATE_SYSTEMS: tuple[str, ...] = (
     "G54",

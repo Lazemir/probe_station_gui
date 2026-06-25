@@ -1,6 +1,7 @@
 from probe_station_gui.fluidnc_protocol import (
     line_indicates_controller_reboot,
     line_indicates_controller_startup,
+    parse_fluidnc_axis_max_feedrates,
     parse_fluidnc_status_line,
     parse_startup_axis_limits,
 )
@@ -99,3 +100,22 @@ def test_parse_startup_axis_limits() -> None:
         "Y": (0.0, 64.0),
         "A": (-0.1, 0.0),
     }
+
+
+def test_parse_fluidnc_axis_max_feedrates() -> None:
+    rates = parse_fluidnc_axis_max_feedrates(
+        [
+            "x:",
+            "  max_rate_mm_per_min: 1000",
+            "y:",
+            "  max_rate_mm_per_min: bad",
+            "z:",
+            "  max_rate_mm_per_min: 750.5",
+            "a:",
+            "  max_rate_mm_per_min: -1",
+            "b:",
+            "  acceleration: 10",
+        ]
+    )
+
+    assert rates == {"X": 1000.0, "Z": 750.5}

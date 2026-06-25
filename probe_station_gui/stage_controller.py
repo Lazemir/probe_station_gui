@@ -21,6 +21,7 @@ from PySide6.QtGui import QImage
 from probe_station_gui.fluidnc_protocol import (
     line_indicates_controller_reboot,
     parse_float_tuple,
+    parse_fluidnc_axis_max_feedrates,
     parse_fluidnc_status_line,
     parse_startup_axis_limits,
 )
@@ -28,7 +29,6 @@ from probe_station_gui.motion_prediction import interpolate_position
 from probe_station_gui.needle_motion_profile import (
     build_needle_motion_profile_segments,
 )
-from probe_station_gui.settings_manager import parse_fluidnc_axis_max_feedrates
 from probe_station_gui.stage_axis_mapping import (
     axis_a_calibrated_coordinate_for_gcode_coordinate,
     axis_a_commanded_lowering_for_calibrated_coordinate,

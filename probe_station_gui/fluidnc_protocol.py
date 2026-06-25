@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import math
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 
 from probe_station_gui.stage_types import _Status
 
@@ -19,6 +20,7 @@ CONTROLLER_STARTUP_BANNER_TOKENS = (
     "GRBL",
 )
 FLUIDNC_AXIS_INDEX = {"X": 0, "Y": 1, "Z": 2, "A": 3, "B": 4, "C": 5}
+FLUIDNC_AXIS_NAMES: tuple[str, ...] = ("X", "Y", "Z", "A", "B", "C")
 STATUS_PATTERN = re.compile(r"^<(?P<body>[^>]*)>")
 STATUS_FIELD_PATTERN = re.compile(r"(?P<key>[A-Za-z]+):(?P<value>.+)")
 AXIS_RANGE_PATTERN = re.compile(
@@ -135,6 +137,34 @@ def parse_float_tuple(raw: str) -> tuple[float, ...] | None:
     return values if values else None
 
 
+def parse_fluidnc_axis_max_feedrates(lines: Iterable[str]) -> dict[str, float]:
+    """Extract per-axis max_rate_mm_per_min values from a FluidNC config dump."""
+
+    axis_headers = {f"{axis}:" for axis in FLUIDNC_AXIS_NAMES}
+    rates: dict[str, float] = {}
+    current_axis: str | None = None
+    for line in lines:
+        stripped = str(line).strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        upper = stripped.upper()
+        if upper in axis_headers:
+            current_axis = upper[0]
+            continue
+        if current_axis is None:
+            continue
+        if not stripped.lower().startswith("max_rate_mm_per_min:"):
+            continue
+        raw_value = stripped.split(":", 1)[1].strip()
+        try:
+            value = float(raw_value)
+        except ValueError:
+            continue
+        if math.isfinite(value) and value > 0.0:
+            rates[current_axis] = value
+    return rates
+
+
 def parse_startup_axis_limits(lines: list[str]) -> dict[str, tuple[float, float]]:
     """Parse FluidNC startup axis range messages."""
 
@@ -159,11 +189,13 @@ __all__ = [
     "CONTROLLER_REBOOT_TOKENS",
     "CONTROLLER_STARTUP_BANNER_TOKENS",
     "FLUIDNC_AXIS_INDEX",
+    "FLUIDNC_AXIS_NAMES",
     "STATUS_FIELD_PATTERN",
     "STATUS_PATTERN",
     "line_indicates_controller_reboot",
     "line_indicates_controller_startup",
     "parse_float_tuple",
+    "parse_fluidnc_axis_max_feedrates",
     "parse_fluidnc_status_line",
     "parse_startup_axis_limits",
 ]
