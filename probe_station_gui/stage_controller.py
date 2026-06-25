@@ -4355,14 +4355,12 @@ class StageController(QObject):
             for axis, value in ordered_targets.items()
         ]
         if as_jog:
-            self._write_command(
-                serial_connection,
+            self._write_current_command_and_wait(
                 self._absolute_axis_targets_jog_command(
                     ordered_targets,
                     effective_feedrate,
                 ),
             )
-            self._wait_for_ok(serial_connection)
             if wait_for_completion:
                 move_distance = self._absolute_move_distance_for_timeout(
                     ordered_targets,
@@ -4375,18 +4373,14 @@ class StageController(QObject):
                     ),
                 )
             return
-        self._write_command(serial_connection, "G21")
-        self._wait_for_ok(serial_connection)
-        self._write_command(serial_connection, "G90")
-        self._wait_for_ok(serial_connection)
+        self._write_current_command_and_wait("G21")
+        self._write_current_command_and_wait("G90")
         self._reset_feed_override()
-        self._write_command(
-            serial_connection,
+        self._write_current_command_and_wait(
             "G1 "
             + " ".join(move_parts)
             + f" F{self._format_gcode_value(effective_feedrate)}",
         )
-        self._wait_for_ok(serial_connection)
         if wait_for_completion:
             move_distance = self._absolute_move_distance_for_timeout(
                 ordered_targets,
