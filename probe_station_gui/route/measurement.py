@@ -24,8 +24,8 @@ from probe_station_gui.route.contact_quality import (
     summarize_route_contact_quality,
 )
 from probe_station_gui.route.contact_seek import (
-    contact_seek_attempt_number,
-    contact_seek_depths,
+    ContactSeekAttempt,
+    contact_seek_attempts,
     normalize_contact_seek_limit,
     normalize_contact_seek_step,
 )
@@ -148,6 +148,19 @@ class _ResistanceStats:
     rms_ohm: float
     relative_rms: float
     complete_finite_batch: bool
+
+
+@dataclass(frozen=True)
+class _ContactSeekAttemptMeasurement:
+    samples: list[RouteMeasurementSample]
+    axis_a_lowering_mm: float
+
+
+@dataclass(frozen=True)
+class _ContactSeekAttemptResolution:
+    samples: list[RouteMeasurementSample] | None
+    final_status: str
+    found: bool = False
 
 
 class RouteMeasurementRunner:
@@ -2055,123 +2068,63 @@ class RouteMeasurementRunner:
     ) -> list[RouteMeasurementSample] | None:
         step_mm = self._auto_contact_seek_step_mm
         samples = initial_samples
-        depths_mm = contact_seek_depths(
+        attempts = contact_seek_attempts(
             step_mm,
             self._auto_contact_seek_max_total_mm,
         )
-        max_depth_steps = len(depths_mm)
-        attempts = 0
-        previous_depth_mm = 0.0
+        attempts_completed = 0
         last_depth_mm = math.nan
         last_axis_a_lowering_mm = math.nan
         last_status = initial_quality.status
-        for depth_mm in depths_mm:
+        for attempt in attempts:
             if self._route_point_stop_requested():
                 return None
-            attempt_number = contact_seek_attempt_number(depth_mm, step_mm)
             self._status(
                 f"Route measurement: point {position}/{total} "
-                f"pressing deeper {attempt_number}/{max_depth_steps}, "
-                f"{depth_mm:.4f} mm below down."
+                f"pressing deeper {attempt.attempt_number}/{attempt.max_attempts}, "
+                f"{attempt.depth_mm:.4f} mm below down."
             )
             prepare_task = self._start_measurement_prepare_task(
                 self._initial_measurement_count()
             )
             if self._route_point_stop_requested():
                 return None
-            if depth_mm > 0.0 and callable(lower_to_depth):
-                lower_to_depth(depth_mm, self._needle_feedrate)
-            elif callable(adjust):
-                delta_mm = depth_mm - previous_depth_mm
-                adjust(math.copysign(delta_mm, step_mm), self._needle_feedrate)
-            else:
+            if not self._press_contact_seek_attempt(
+                attempt,
+                lower_to_depth=lower_to_depth,
+                adjust=adjust,
+            ):
                 return initial_samples
-            previous_depth_mm = float(depth_mm)
             if self._route_point_stop_requested():
                 return None
-            attempts += 1
-            last_depth_mm = float(depth_mm)
-            if not self._sleep_contact_settle():
+            attempts_completed += 1
+            last_depth_mm = float(attempt.depth_mm)
+            measurement = self._read_contact_seek_attempt_measurement(prepare_task)
+            if measurement is None:
                 return None
-            last_axis_a_lowering_mm = self._latest_axis_a_lowering()
-            samples = self._read_measurement_samples(
-                self._initial_measurement_count(),
-                start_index=1,
-                prepare_task=prepare_task,
+            last_axis_a_lowering_mm = measurement.axis_a_lowering_mm
+            depth_label = f"{attempt.depth_mm:.4f} mm below down"
+            resolution = self._resolve_contact_seek_attempt(
+                samples=measurement.samples,
+                depth_label=depth_label,
+                position=position,
+                total=total,
             )
-            if samples is None:
+            if resolution.samples is None:
                 return None
-            depth_label = f"{depth_mm:.4f} mm below down"
-            if self._samples_are_short(samples):
-                last_status = "short"
-                self._status(
-                    f"Route measurement: point {position}/{total} "
-                    f"{depth_label}, short-circuit detected."
-                )
+            samples = resolution.samples
+            last_status = resolution.final_status
+            if resolution.found:
                 self._set_contact_seek_result(
                     found=True,
-                    status="short",
-                    attempts=attempts,
+                    status="found" if last_status != "short" else "short",
+                    attempts=attempts_completed,
                     initial_status=initial_quality.status,
                     final_status=last_status,
-                    depth_below_down_mm=depth_mm,
+                    depth_below_down_mm=attempt.depth_mm,
                     axis_a_lowering_mm=last_axis_a_lowering_mm,
                 )
                 return samples
-            quality = self._contact_quality_from_samples(samples)
-            last_status = quality.status
-            self._status(
-                f"Route measurement: point {position}/{total} "
-                f"{depth_label}, {quality.status}, "
-                f"median={_format_ohm(quality.median_ohm)}, "
-                f"MAD={_format_ohm(quality.mad_sigma_ohm)}"
-                f"{self._contact_quality_failure_suffix(quality)}."
-            )
-            if quality.good is not False:
-                completed_samples = self._complete_measurement_samples(
-                    samples,
-                )
-                if completed_samples is None:
-                    return None
-                samples = completed_samples
-                if self._completed_measurement_is_acceptable(completed_samples):
-                    last_status = self._contact_status_for_samples(completed_samples)
-                    self._set_contact_seek_result(
-                        found=True,
-                        status="found"
-                        if last_status != "short"
-                        else "short",
-                        attempts=attempts,
-                        initial_status=initial_quality.status,
-                        final_status=last_status,
-                        depth_below_down_mm=depth_mm,
-                        axis_a_lowering_mm=last_axis_a_lowering_mm,
-                    )
-                    return completed_samples
-                if self._samples_have_bad_contact(completed_samples):
-                    full_quality = self._contact_quality_from_samples(
-                        completed_samples
-                    )
-                    last_status = full_quality.status
-                    self._status(
-                        f"Route measurement: point {position}/{total} full "
-                        f"measurement at {depth_label} failed contact check "
-                        f"({full_quality.status}, "
-                        f"median={_format_ohm(full_quality.median_ohm)}, "
-                        f"MAD={_format_ohm(full_quality.mad_sigma_ohm)}"
-                        f"{self._contact_quality_failure_suffix(full_quality)}); "
-                        "trying deeper."
-                    )
-                elif self._samples_exceed_relative_rms_limit(completed_samples):
-                    relative_rms = self._relative_rms_from_samples(completed_samples)
-                    last_status = "unstable"
-                    self._status(
-                        f"Route measurement: point {position}/{total} full "
-                        f"measurement at {depth_label} relative RMS "
-                        f"{_format_percent(relative_rms)} exceeds "
-                        f"{_format_percent(self._max_relative_rms or math.nan)}; "
-                        "trying deeper."
-                    )
         self._status(
             f"Route measurement: point {position}/{total} contact seek did not "
             f"find stable contact within {self._auto_contact_seek_max_total_mm:.3f} mm."
@@ -2179,13 +2132,126 @@ class RouteMeasurementRunner:
         self._set_contact_seek_result(
             found=False,
             status="not_found",
-            attempts=attempts,
+            attempts=attempts_completed,
             initial_status=initial_quality.status,
             final_status=last_status,
             depth_below_down_mm=last_depth_mm,
             axis_a_lowering_mm=last_axis_a_lowering_mm,
         )
         return samples
+
+    def _press_contact_seek_attempt(
+        self,
+        attempt: ContactSeekAttempt,
+        *,
+        lower_to_depth: Callable[..., object] | None,
+        adjust: Callable[..., object] | None,
+    ) -> bool:
+        if attempt.depth_mm > 0.0 and callable(lower_to_depth):
+            lower_to_depth(attempt.depth_mm, self._needle_feedrate)
+            return True
+        if callable(adjust):
+            adjust(
+                attempt.adjust_delta_mm(self._auto_contact_seek_step_mm),
+                self._needle_feedrate,
+            )
+            return True
+        return False
+
+    def _read_contact_seek_attempt_measurement(
+        self,
+        prepare_task: _BackgroundRouteTask | None,
+    ) -> _ContactSeekAttemptMeasurement | None:
+        if not self._sleep_contact_settle():
+            return None
+        axis_a_lowering_mm = self._latest_axis_a_lowering()
+        samples = self._read_measurement_samples(
+            self._initial_measurement_count(),
+            start_index=1,
+            prepare_task=prepare_task,
+        )
+        if samples is None:
+            return None
+        return _ContactSeekAttemptMeasurement(
+            samples=samples,
+            axis_a_lowering_mm=axis_a_lowering_mm,
+        )
+
+    def _resolve_contact_seek_attempt(
+        self,
+        *,
+        samples: list[RouteMeasurementSample],
+        depth_label: str,
+        position: int,
+        total: int,
+    ) -> _ContactSeekAttemptResolution:
+        if self._samples_are_short(samples):
+            self._status(
+                f"Route measurement: point {position}/{total} "
+                f"{depth_label}, short-circuit detected."
+            )
+            return _ContactSeekAttemptResolution(
+                samples=samples,
+                final_status="short",
+                found=True,
+            )
+        quality = self._contact_quality_from_samples(samples)
+        self._status(
+            f"Route measurement: point {position}/{total} "
+            f"{depth_label}, {quality.status}, "
+            f"median={_format_ohm(quality.median_ohm)}, "
+            f"MAD={_format_ohm(quality.mad_sigma_ohm)}"
+            f"{self._contact_quality_failure_suffix(quality)}."
+        )
+        if quality.good is False:
+            return _ContactSeekAttemptResolution(
+                samples=samples,
+                final_status=quality.status,
+            )
+        completed_samples = self._complete_measurement_samples(samples)
+        if completed_samples is None:
+            return _ContactSeekAttemptResolution(
+                samples=None,
+                final_status=quality.status,
+            )
+        if self._completed_measurement_is_acceptable(completed_samples):
+            return _ContactSeekAttemptResolution(
+                samples=completed_samples,
+                final_status=self._contact_status_for_samples(completed_samples),
+                found=True,
+            )
+        if self._samples_have_bad_contact(completed_samples):
+            full_quality = self._contact_quality_from_samples(completed_samples)
+            self._status(
+                f"Route measurement: point {position}/{total} full "
+                f"measurement at {depth_label} failed contact check "
+                f"({full_quality.status}, "
+                f"median={_format_ohm(full_quality.median_ohm)}, "
+                f"MAD={_format_ohm(full_quality.mad_sigma_ohm)}"
+                f"{self._contact_quality_failure_suffix(full_quality)}); "
+                "trying deeper."
+            )
+            return _ContactSeekAttemptResolution(
+                samples=completed_samples,
+                final_status=full_quality.status,
+            )
+        if self._samples_exceed_relative_rms_limit(completed_samples):
+            relative_rms = self._relative_rms_from_samples(completed_samples)
+            self._status(
+                f"Route measurement: point {position}/{total} full "
+                f"measurement at {depth_label} relative RMS "
+                f"{_format_percent(relative_rms)} exceeds "
+                f"{_format_percent(self._max_relative_rms or math.nan)}; "
+                "trying deeper."
+            )
+            return _ContactSeekAttemptResolution(
+                samples=completed_samples,
+                final_status="unstable",
+            )
+        return _ContactSeekAttemptResolution(
+            samples=completed_samples,
+            final_status=quality.status,
+        )
 
     def _set_contact_seek_result(
         self,

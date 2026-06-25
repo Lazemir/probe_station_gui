@@ -2,6 +2,7 @@ import math
 import unittest
 
 from probe_station_gui.route.contact_seek import (
+    contact_seek_attempts,
     contact_seek_attempt_number,
     contact_seek_depths,
     normalize_contact_seek_limit,
@@ -68,6 +69,33 @@ class RouteContactSeekTest(unittest.TestCase):
         self.assertEqual(contact_seek_attempt_number(0.0015, -0.001), 2)
         self.assertEqual(contact_seek_attempt_number(0.003, -0.001), 3)
         self.assertEqual(contact_seek_attempt_number(0.003, 0.0), 1)
+
+    def test_contact_seek_attempts_track_depth_and_incremental_adjustment(
+        self,
+    ) -> None:
+        attempts = contact_seek_attempts(-0.001, 0.0025)
+
+        self.assertEqual(
+            [
+                (
+                    attempt.previous_depth_mm,
+                    attempt.depth_mm,
+                    attempt.attempt_number,
+                    attempt.max_attempts,
+                )
+                for attempt in attempts
+            ],
+            [
+                (0.0, 0.001, 1, 3),
+                (0.001, 0.002, 2, 3),
+                (0.002, 0.0025, 3, 3),
+            ],
+        )
+        self.assertEqual(
+            [attempt.adjust_delta_mm(-0.001) for attempt in attempts],
+            [-0.001, -0.001, -0.0005],
+        )
+        self.assertEqual(contact_seek_attempts(-0.001, 0.0), ())
 
 
 if __name__ == "__main__":

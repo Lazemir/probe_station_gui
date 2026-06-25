@@ -3,6 +3,21 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class ContactSeekAttempt:
+    previous_depth_mm: float
+    depth_mm: float
+    attempt_number: int
+    max_attempts: int
+
+    def adjust_delta_mm(self, step_mm: float) -> float:
+        return math.copysign(
+            self.depth_mm - self.previous_depth_mm,
+            float(step_mm),
+        )
 
 
 def normalize_contact_seek_step(value: object, *, default_step_mm: float) -> float:
@@ -42,3 +57,24 @@ def contact_seek_attempt_number(depth_mm: float, step_mm: float) -> int:
     if step <= 0.0 or not math.isfinite(step):
         return 1
     return max(1, int(math.ceil(float(depth_mm) / step)))
+
+
+def contact_seek_attempts(
+    step_mm: float,
+    max_total_mm: float,
+) -> tuple[ContactSeekAttempt, ...]:
+    depths = contact_seek_depths(step_mm, max_total_mm)
+    max_attempts = len(depths)
+    previous_depth_mm = 0.0
+    attempts: list[ContactSeekAttempt] = []
+    for depth_mm in depths:
+        attempts.append(
+            ContactSeekAttempt(
+                previous_depth_mm=previous_depth_mm,
+                depth_mm=depth_mm,
+                attempt_number=contact_seek_attempt_number(depth_mm, step_mm),
+                max_attempts=max_attempts,
+            )
+        )
+        previous_depth_mm = float(depth_mm)
+    return tuple(attempts)
