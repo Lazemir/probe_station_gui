@@ -1,4 +1,7 @@
-from probe_station_gui.route_control_state import ApiRouteControlState
+from probe_station_gui.route_control_state import (
+    ApiRouteControlState,
+    normalize_route_control_action,
+)
 
 
 def test_start_pause_ack_and_status_payload_preserve_api_route_control_semantics() -> None:
@@ -107,3 +110,19 @@ def test_interrupt_marks_api_route_control_paused_without_requesting_stop() -> N
     assert state.stop_requested is False
     assert state.pending_action == ""
     assert state.updated_utc == "t8"
+
+
+def test_normalize_route_control_action_preserves_external_aliases() -> None:
+    assert normalize_route_control_action("resume") == "next"
+    assert normalize_route_control_action(" next ") == "next"
+    assert normalize_route_control_action("continue") == "next"
+    assert normalize_route_control_action("measure") == "measure"
+    assert normalize_route_control_action("remeasure") == "remeasure"
+    assert normalize_route_control_action("skip") == "skip"
+    assert normalize_route_control_action("stop") == "stop"
+    assert normalize_route_control_action("interrupt") == "interrupt"
+    assert normalize_route_control_action("seek") == "seek"
+    assert normalize_route_control_action("7") == "jump:7"
+    assert normalize_route_control_action("jump: 8") == "jump:8"
+    assert normalize_route_control_action("jump:bad") is None
+    assert normalize_route_control_action("unknown") is None

@@ -40,6 +40,7 @@ from probe_station_gui.route_measurement_payloads import (
     route_contact_seek_payload as _route_contact_seek_payload,
     route_measurement_record_payload as _route_measurement_record_payload,
 )
+from probe_station_gui.route_control_state import normalize_route_control_action
 
 
 Point2D = tuple[float, float]
@@ -2853,23 +2854,7 @@ class RouteExternalMeasurementSessionRunner:
 
     @staticmethod
     def _normalize_action(action: str) -> str | None:
-        normalized = str(action or "").strip().lower()
-        if normalized in {"resume", "next", "continue"}:
-            return "next"
-        if normalized == "measure":
-            return "measure"
-        if normalized == "remeasure":
-            return "remeasure"
-        if normalized in {"skip", "stop", "interrupt", "seek"}:
-            return normalized
-        if normalized.isdigit():
-            return f"jump:{int(normalized)}"
-        if normalized.startswith("jump:"):
-            try:
-                return f"jump:{int(normalized.split(':', 1)[1].strip())}"
-            except ValueError:
-                return None
-        return None
+        return normalize_route_control_action(action)
 
     def _start_index(self) -> int:
         start = self._contact_runner._start_point_number

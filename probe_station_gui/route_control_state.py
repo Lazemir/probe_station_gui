@@ -9,6 +9,26 @@ from typing import Any
 API_ROUTE_CONTROL_DEFAULT_LABEL = "API route control"
 
 
+def normalize_route_control_action(action: str) -> str | None:
+    normalized = str(action or "").strip().lower()
+    if normalized in {"resume", "next", "continue"}:
+        return "next"
+    if normalized == "measure":
+        return "measure"
+    if normalized == "remeasure":
+        return "remeasure"
+    if normalized in {"skip", "stop", "interrupt", "seek"}:
+        return normalized
+    if normalized.isdigit():
+        return f"jump:{int(normalized)}"
+    if normalized.startswith("jump:"):
+        try:
+            return f"jump:{int(normalized.split(':', 1)[1].strip())}"
+        except ValueError:
+            return None
+    return None
+
+
 @dataclass(frozen=True)
 class ApiRouteControlState:
     """State machine for the external API route-control workflow."""
@@ -184,4 +204,8 @@ class ApiRouteControlState:
         return self.label or API_ROUTE_CONTROL_DEFAULT_LABEL
 
 
-__all__ = ["API_ROUTE_CONTROL_DEFAULT_LABEL", "ApiRouteControlState"]
+__all__ = [
+    "API_ROUTE_CONTROL_DEFAULT_LABEL",
+    "ApiRouteControlState",
+    "normalize_route_control_action",
+]
