@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 from serial.tools import list_ports
 
 from probe_station_gui.stage.fluidnc_protocol import line_indicates_controller_startup
-from probe_station_gui.wheel_guard import GuardedComboBox as QComboBox
+from probe_station_gui.shared.wheel_guard import GuardedComboBox as QComboBox
 
 
 logger = logging.getLogger(__name__)

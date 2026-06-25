@@ -41,7 +41,7 @@ from probe_station_gui.settings.jog_config import (
     JogSettingsDefaults,
     parse_jog_settings,
 )
-from probe_station_gui.logging_config import configure_logging
+from probe_station_gui.shared.logging_config import configure_logging
 from probe_station_gui.settings.needle_calibration_config import (
     LCR_APERTURE_RATES,
     LCR_LEVEL_MODES,

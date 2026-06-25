@@ -23,7 +23,7 @@ from probe_station_gui.settings.manager import (
     normalize_objective_name,
     ordered_objective_names,
 )
-from probe_station_gui.wheel_guard import GuardedComboBox as QComboBox
+from probe_station_gui.shared.wheel_guard import GuardedComboBox as QComboBox
 
 
 class ClickCalibrationDialog(QDialog):

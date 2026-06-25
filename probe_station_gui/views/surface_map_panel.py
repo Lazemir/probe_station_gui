@@ -31,7 +31,7 @@ try:  # pragma: no cover - depends on installed Qt modules.
 except Exception:  # pragma: no cover
     QWebEngineView = None  # type: ignore[assignment]
 
-from probe_station_gui.wheel_guard import (
+from probe_station_gui.shared.wheel_guard import (
     GuardedComboBox as QComboBox,
     GuardedDoubleSpinBox as QDoubleSpinBox,
     GuardedSpinBox as QSpinBox,

@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from probe_station_gui.qt_compat import (
+from probe_station_gui.shared.qt_compat import (
     derive_native_scan_code_from_qt_key,
     keyboard_modifiers_to_int,
     native_scan_code_to_int,
@@ -47,7 +47,7 @@ from probe_station_gui.stage.joystick_feedrate_targets import (
     slider_value_from_feedrate,
 )
 from probe_station_gui.settings.controls_config import CONTROL_ACTIONS, KeyBinding
-from probe_station_gui.wheel_guard import (
+from probe_station_gui.shared.wheel_guard import (
     GuardedComboBox as QComboBox,
     GuardedDoubleSpinBox as QDoubleSpinBox,
     GuardedSlider as QSlider,

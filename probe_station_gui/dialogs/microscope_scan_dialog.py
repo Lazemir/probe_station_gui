@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from probe_station_gui.wheel_guard import GuardedDoubleSpinBox as QDoubleSpinBox
+from probe_station_gui.shared.wheel_guard import GuardedDoubleSpinBox as QDoubleSpinBox
 
 
 @dataclass(frozen=True)

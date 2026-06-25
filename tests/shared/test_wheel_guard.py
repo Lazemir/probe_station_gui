@@ -7,7 +7,7 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtWidgets import QApplication
 
-from probe_station_gui.wheel_guard import (
+from probe_station_gui.shared.wheel_guard import (
     GuardedComboBox,
     GuardedDoubleSpinBox,
     GuardedSlider,

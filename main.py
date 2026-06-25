@@ -111,7 +111,7 @@ from probe_station_gui import (
 )
 from probe_station_gui.design_model import DesignDocument, DesignModelError
 from probe_station_gui.design_session import AlignmentPreparation, DesignSession
-from probe_station_gui.diagnostics import configure_crash_diagnostics
+from probe_station_gui.shared.diagnostics import configure_crash_diagnostics
 from probe_station_gui.api.request_bridge import ApiRequestBridge
 from probe_station_gui.api.server import ProbeStationApiServer
 from probe_station_gui.api.keys import API_KEY_FILENAME, ApiKeyStore
@@ -125,7 +125,7 @@ from probe_station_gui.lcr_meter import (
     RouteMeterConfiguration,
 )
 from probe_station_gui.stage.motion_prediction import interpolate_position, motion_progress
-from probe_station_gui.wheel_guard import GuardedComboBox as QComboBox
+from probe_station_gui.shared.wheel_guard import GuardedComboBox as QComboBox
 from probe_station_gui.stage.controller import StageControllerError
 from probe_station_gui.objective_offsets import (
     ObjectiveOffsetReference,

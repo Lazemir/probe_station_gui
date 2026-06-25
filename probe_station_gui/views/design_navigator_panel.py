@@ -59,7 +59,7 @@ from probe_station_gui.design.navigation_geometry import (
     vector_from_length_angle,
     vector_length_angle,
 )
-from probe_station_gui.wheel_guard import (
+from probe_station_gui.shared.wheel_guard import (
     GuardedComboBox as QComboBox,
     GuardedDoubleSpinBox as QDoubleSpinBox,
     GuardedSpinBox as QSpinBox,

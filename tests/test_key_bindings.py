@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 _ORIGINAL_PROBE_STATION_GUI = sys.modules.get("probe_station_gui")
-_ORIGINAL_LOGGING_CONFIG = sys.modules.get("probe_station_gui.logging_config")
+_ORIGINAL_LOGGING_CONFIG = sys.modules.get("probe_station_gui.shared.logging_config")
 
 
 def _install_pyside6_stubs() -> None:
@@ -38,7 +38,7 @@ def _install_pyside6_stubs() -> None:
 def _install_probe_station_stubs() -> None:
     package = types.ModuleType("probe_station_gui")
     package.__path__ = [str(Path(__file__).resolve().parents[1] / "probe_station_gui")]
-    logging_config = types.ModuleType("probe_station_gui.logging_config")
+    logging_config = types.ModuleType("probe_station_gui.shared.logging_config")
 
     def configure_logging(*_args, **_kwargs) -> None:
         return None
@@ -46,7 +46,7 @@ def _install_probe_station_stubs() -> None:
     logging_config.configure_logging = configure_logging
     package.logging_config = logging_config
     sys.modules["probe_station_gui"] = package
-    sys.modules["probe_station_gui.logging_config"] = logging_config
+    sys.modules["probe_station_gui.shared.logging_config"] = logging_config
 
 
 def _restore_probe_station_modules() -> None:
@@ -56,9 +56,9 @@ def _restore_probe_station_modules() -> None:
         sys.modules["probe_station_gui"] = _ORIGINAL_PROBE_STATION_GUI
 
     if _ORIGINAL_LOGGING_CONFIG is None:
-        sys.modules.pop("probe_station_gui.logging_config", None)
+        sys.modules.pop("probe_station_gui.shared.logging_config", None)
     else:
-        sys.modules["probe_station_gui.logging_config"] = _ORIGINAL_LOGGING_CONFIG
+        sys.modules["probe_station_gui.shared.logging_config"] = _ORIGINAL_LOGGING_CONFIG
 
 
 def _load_module(module_name: str, relative_path: str):

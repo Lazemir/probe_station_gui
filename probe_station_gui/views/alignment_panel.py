@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from probe_station_gui.wheel_guard import GuardedComboBox as QComboBox
+from probe_station_gui.shared.wheel_guard import GuardedComboBox as QComboBox
 
 from ..design_model import Point2D
 

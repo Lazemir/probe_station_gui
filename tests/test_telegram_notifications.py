@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 from types import SimpleNamespace
 
-from probe_station_gui import logging_config
+from probe_station_gui.shared import logging_config
 from probe_station_gui import telegram_notifications
 
 

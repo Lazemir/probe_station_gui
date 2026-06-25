@@ -45,7 +45,7 @@ from probe_station_gui.instruments.meters.lcr import (
     ROUTE_METER_TYPES,
     RouteMeterConfiguration,
 )
-from probe_station_gui.wheel_guard import (
+from probe_station_gui.shared.wheel_guard import (
     GuardedComboBox as QComboBox,
     GuardedDoubleSpinBox as QDoubleSpinBox,
     GuardedSpinBox as QSpinBox,
