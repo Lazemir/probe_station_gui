@@ -6,7 +6,6 @@ import atexit
 import logging
 import math
 import queue
-import re
 import threading
 import time
 import weakref
@@ -19,7 +18,9 @@ from PySide6.QtCore import QObject, Signal
 from probe_station_measure import OHMMETER_RANGE_MANUAL
 from probe_station_gui.lcr_meter_helpers import (
     callable_accepts_keyword as _callable_accepts_keyword,
+    gpib_interface_resources_for as _gpib_interface_resources_for,
     normalize_visa_role as _normalize_visa_role,
+    normalize_resource_name,
     prepare_route_measurement_batch as _prepare_route_measurement_batch,
     read_route_measurement_batch as _read_route_measurement_batch,
     session_visa_resource_roles as _session_visa_resource_roles,
@@ -60,8 +61,6 @@ KEITHLEY_LIVE_VOLTMETER_RANGE_V = 1.0
 KEITHLEY_LIVE_CURRENT_RANGE_A = 10e-6
 KEITHLEY_LIVE_COMPLIANCE_CURRENT_A = 9.5e-6
 KEITHLEY_LIVE_NPLC = 1.0
-COM_RESOURCE_PATTERN = re.compile(r"^COM(?P<port>\d+)$", re.IGNORECASE)
-GPIB_RESOURCE_PATTERN = re.compile(r"^GPIB(?P<board>\d*)::", re.IGNORECASE)
 
 
 @dataclass
@@ -70,36 +69,6 @@ class _MeterWorkerCall:
     done: threading.Event | None = None
     result: object = None
     error: BaseException | None = None
-
-
-def normalize_resource_name(resource_name: str) -> str:
-    """Translate ``COM4``-style names into VISA ASRL resources."""
-
-    candidate = (resource_name or "").strip()
-    match = COM_RESOURCE_PATTERN.fullmatch(candidate)
-    if match:
-        return f"ASRL{int(match.group('port'))}::INSTR"
-    return candidate
-
-
-def _gpib_interface_resources_for(
-    resources: tuple[str | None, ...],
-) -> tuple[str, ...]:
-    interfaces: list[str] = []
-    seen: set[str] = set()
-    for resource in resources:
-        normalized = normalize_resource_name(resource or "")
-        match = GPIB_RESOURCE_PATTERN.match(normalized)
-        if match is None:
-            continue
-        board = match.group("board")
-        interface = f"GPIB{board}::INTFC" if board else "GPIB::INTFC"
-        key = interface.upper()
-        if key in seen:
-            continue
-        seen.add(key)
-        interfaces.append(interface)
-    return tuple(interfaces)
 
 
 def _reset_gpib_interfaces_for_resources(*resources: str | None) -> None:

@@ -3,6 +3,41 @@
 from __future__ import annotations
 
 import inspect
+import re
+
+
+COM_RESOURCE_PATTERN = re.compile(r"^COM(?P<port>\d+)$", re.IGNORECASE)
+GPIB_RESOURCE_PATTERN = re.compile(r"^GPIB(?P<board>\d*)::", re.IGNORECASE)
+
+
+def normalize_resource_name(resource_name: str) -> str:
+    """Translate ``COM4``-style names into VISA ASRL resources."""
+
+    candidate = (resource_name or "").strip()
+    match = COM_RESOURCE_PATTERN.fullmatch(candidate)
+    if match:
+        return f"ASRL{int(match.group('port'))}::INSTR"
+    return candidate
+
+
+def gpib_interface_resources_for(
+    resources: tuple[str | None, ...],
+) -> tuple[str, ...]:
+    interfaces: list[str] = []
+    seen: set[str] = set()
+    for resource in resources:
+        normalized = normalize_resource_name(resource or "")
+        match = GPIB_RESOURCE_PATTERN.match(normalized)
+        if match is None:
+            continue
+        board = match.group("board")
+        interface = f"GPIB{board}::INTFC" if board else "GPIB::INTFC"
+        key = interface.upper()
+        if key in seen:
+            continue
+        seen.add(key)
+        interfaces.append(interface)
+    return tuple(interfaces)
 
 
 def callable_accepts_keyword(function: object, name: str) -> bool:

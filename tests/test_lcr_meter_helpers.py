@@ -2,6 +2,8 @@ from types import SimpleNamespace
 
 from probe_station_gui.lcr_meter_helpers import (
     callable_accepts_keyword,
+    gpib_interface_resources_for,
+    normalize_resource_name,
     normalize_visa_role,
     prepare_route_measurement_batch,
     read_route_measurement_batch,
@@ -24,6 +26,19 @@ def test_callable_accepts_keyword_detects_named_and_variadic_keywords() -> None:
     assert callable_accepts_keyword(variadic, "trigger")
     assert not callable_accepts_keyword(positional, "trigger")
     assert not callable_accepts_keyword(object(), "trigger")
+
+
+def test_resource_helpers_normalize_com_and_unique_gpib_interfaces() -> None:
+    assert normalize_resource_name("COM4") == "ASRL4::INSTR"
+    assert normalize_resource_name(" ASRL9::INSTR ") == "ASRL9::INSTR"
+    assert gpib_interface_resources_for(
+        (
+            "GPIB0::12::INSTR",
+            "GPIB0::13::INSTR",
+            "GPIB1::7::INSTR",
+            "COM4",
+        )
+    ) == ("GPIB0::INTFC", "GPIB1::INTFC")
 
 
 def test_prepare_route_measurement_batch_passes_source_list_count_when_supported() -> None:
