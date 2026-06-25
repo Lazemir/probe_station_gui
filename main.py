@@ -158,6 +158,7 @@ from probe_station_gui.route_control_state import (
     api_route_control_legacy_attrs,
     api_route_control_state_from_legacy_attrs,
 )
+from probe_station_gui.route_operation_modes import route_operation_measure_enabled
 from probe_station_gui.route_measurement_payloads import (
     route_api_contact_seek_payload,
     route_api_measurement_record_payload,
@@ -9227,11 +9228,7 @@ class Main(QMainWindow):
                     nplc_label=configuration.meter.nplc_label(),
                     measurement_type=configuration.meter.measurement_type_label(),
                 )
-                measure_enabled = configuration.operation_mode in {
-                    ROUTE_OPERATION_MEASURE,
-                    ROUTE_OPERATION_PHOTO_THEN_MEASURE,
-                }
-                if measure_enabled:
+                if route_operation_measure_enabled(configuration.operation_mode):
                     try:
                         runner.apply_meter_configuration(configuration.meter)
                     except LCRMeterError as exc:
