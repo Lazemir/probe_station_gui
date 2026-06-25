@@ -41,6 +41,10 @@ from probe_station_gui.route_measurement_payloads import (
     route_measurement_record_payload as _route_measurement_record_payload,
 )
 from probe_station_gui.route_control_state import normalize_route_control_action
+from probe_station_gui.route_formatting import (
+    format_route_ohm,
+    format_route_percent,
+)
 
 
 Point2D = tuple[float, float]
@@ -3408,23 +3412,8 @@ def filter_route_points_by_previous_status(
 
 
 def _format_percent(value: float) -> str:
-    if not math.isfinite(value):
-        return "nan%"
-    return f"{float(value) * 100.0:.3g}%"
+    return format_route_percent(value)
 
 
 def _format_ohm(value: float) -> str:
-    if not math.isfinite(value):
-        return "nan Ohm"
-    abs_value = abs(value)
-    for scale, unit in (
-        (1e9, "GOhm"),
-        (1e6, "MOhm"),
-        (1e3, "kOhm"),
-        (1.0, "Ohm"),
-        (1e-3, "mOhm"),
-        (1e-6, "uOhm"),
-    ):
-        if abs_value >= scale:
-            return f"{value / scale:.3g} {unit}"
-    return f"{value:.3g} Ohm"
+    return format_route_ohm(value)
