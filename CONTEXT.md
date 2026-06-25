@@ -2,6 +2,10 @@
 
 This context describes the probe-station control language and the maintenance language used when refactoring the application without changing external behaviour.
 
+## Refactoring Workflow
+
+For the current architecture refactoring branch, the user has explicitly requested subagents. Use `subagent-driven-development` as the main execution workflow for independent refactor tasks: dispatch a focused implementer subagent per task, run a task-scoped reviewer subagent after each implementation, and run a broad whole-branch review before finishing. This is an explicit authorization to use subagents for this refactoring work without asking again for each independent task, while still keeping conflicting implementation edits sequential and review-gated.
+
 ## Language
 
 **Probe Station**:
