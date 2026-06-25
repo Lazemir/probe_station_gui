@@ -39,6 +39,14 @@ from probe_station_gui.oscillation_config import (
     OscillationSettingsDefaults,
     parse_oscillation_settings,
 )
+from probe_station_gui.settings_value_parsing import (
+    coerce_bool,
+    coerce_float,
+    coerce_int,
+    finite_float,
+    normalise_choice,
+    positive_float,
+)
 from probe_station_gui.telegram_notifications import (
     load_global_bot_token,
     save_global_bot_token,
@@ -2060,50 +2068,27 @@ class SettingsManager:
 
     @staticmethod
     def _coerce_bool(value, *, default: bool) -> bool:
-        if isinstance(value, str):
-            return value.strip().lower() not in {"", "0", "false", "off", "no"}
-        if value is None:
-            return default
-        return bool(value)
+        return coerce_bool(value, default=default)
 
     @staticmethod
     def _coerce_float(value, *, default: float) -> float:
-        try:
-            if isinstance(value, (int, float, str)):
-                return float(value)
-        except (TypeError, ValueError):
-            pass
-        return default
+        return coerce_float(value, default=default)
 
     @staticmethod
     def _coerce_int(value, *, default: int) -> int:
-        try:
-            if isinstance(value, (int, float, str)):
-                return int(float(value))
-        except (TypeError, ValueError):
-            pass
-        return default
+        return coerce_int(value, default=default)
 
-    def _finite_float(self, value, *, default: float) -> float:
-        result = self._coerce_float(value, default=default)
-        if not math.isfinite(result):
-            return default
-        return result
+    @staticmethod
+    def _finite_float(value, *, default: float) -> float:
+        return finite_float(value, default=default)
 
-    def _positive_float(self, value, *, default: float) -> float:
-        result = self._finite_float(value, default=default)
-        if result <= 0.0:
-            return default
-        return result
+    @staticmethod
+    def _positive_float(value, *, default: float) -> float:
+        return positive_float(value, default=default)
 
     @staticmethod
     def _normalise_choice(value, *, choices: tuple, default: str) -> str:
-        if isinstance(value, str):
-            candidate = value.strip()
-            for choice in choices:
-                if candidate.upper() == str(choice).upper():
-                    return str(choice)
-        return default
+        return normalise_choice(value, choices=choices, default=default)
 
     def _parse_saved_stage_position(self, raw_position) -> SavedStagePositionSettings:
         """Normalise a persisted XYZ bookmark used by calibration workflows."""
