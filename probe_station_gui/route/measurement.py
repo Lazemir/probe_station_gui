@@ -1066,32 +1066,21 @@ class RouteMeasurementRunner:
                         total=total,
                         emit_result=not result_emitted,
                     )
-                    if decision == "stop":
-                        message = "Route measurement stopped by user."
-                        break
-                    if decision == "measure":
-                        loop_decision, saved_count = (
-                            self._measure_manual_contact_and_advance(
-                                point=point,
-                                position=position,
-                                total=total,
-                                position_index=position_index,
-                            )
+                    loop_decision, saved_count = (
+                        self._route_point_confirmation_loop_decision(
+                            decision,
+                            point=point,
+                            position=position,
+                            total=total,
+                            position_index=position_index,
+                            default_advances=False,
                         )
-                        measurements_saved += saved_count
-                        if loop_decision.stop_message is not None:
-                            message = loop_decision.stop_message
-                            break
-                        position_index = loop_decision.position_index
-                        continue
-                    self._begin_stage_task()
-                    jump_index = self._jump_target_index(decision)
-                    if jump_index is not None:
-                        position_index = jump_index
-                        continue
-                    if decision == "skip":
-                        position_index += 1
-                        continue
+                    )
+                    measurements_saved += saved_count
+                    if loop_decision.stop_message is not None:
+                        message = loop_decision.stop_message
+                        break
+                    position_index = loop_decision.position_index
                     continue
                 auto_next = (
                     self._confirm_each_point
@@ -1148,31 +1137,22 @@ class RouteMeasurementRunner:
                         )
                         decision = self._wait_for_valid_confirmation()
                         self._set_waiting(False)
-                        if decision == "stop":
-                            message = "Route measurement stopped by user."
-                            break
-                        if decision == "measure":
-                            loop_decision, saved_count = (
-                                self._measure_manual_contact_and_advance(
-                                    point=point,
-                                    position=position,
-                                    total=total,
-                                    position_index=position_index,
-                                )
+                        loop_decision, saved_count = (
+                            self._route_point_confirmation_loop_decision(
+                                decision,
+                                point=point,
+                                position=position,
+                                total=total,
+                                position_index=position_index,
+                                default_advances=True,
                             )
-                            measurements_saved += saved_count
-                            if loop_decision.stop_message is not None:
-                                message = loop_decision.stop_message
-                                break
-                            position_index = loop_decision.position_index
-                            continue
-                        self._begin_stage_task()
-                        jump_index = self._jump_target_index(decision)
-                        if jump_index is not None:
-                            position_index = jump_index
-                            continue
-                        if decision == "remeasure":
-                            continue
+                        )
+                        measurements_saved += saved_count
+                        if loop_decision.stop_message is not None:
+                            message = loop_decision.stop_message
+                            break
+                        position_index = loop_decision.position_index
+                        continue
                 position_index += 1
             if position_index >= total:
                 success = True
@@ -1249,6 +1229,39 @@ class RouteMeasurementRunner:
         if next_index < total:
             self._begin_stage_task()
         return _RoutePointLoopDecision(position_index=next_index), 1
+
+    def _route_point_confirmation_loop_decision(
+        self,
+        decision: str,
+        *,
+        point: RouteMeasurementPoint,
+        position: int,
+        total: int,
+        position_index: int,
+        default_advances: bool,
+    ) -> tuple[_RoutePointLoopDecision, int]:
+        if decision == "stop":
+            return (
+                _RoutePointLoopDecision(
+                    position_index=position_index,
+                    stop_message="Route measurement stopped by user.",
+                ),
+                0,
+            )
+        if decision == "measure":
+            return self._measure_manual_contact_and_advance(
+                point=point,
+                position=position,
+                total=total,
+                position_index=position_index,
+            )
+        self._begin_stage_task()
+        jump_index = self._jump_target_index(decision)
+        if jump_index is not None:
+            return _RoutePointLoopDecision(position_index=jump_index), 0
+        if decision == "skip" or (default_advances and decision != "remeasure"):
+            return _RoutePointLoopDecision(position_index=position_index + 1), 0
+        return _RoutePointLoopDecision(position_index=position_index), 0
 
     def _prepare_route_point_for_measurement(
         self,
