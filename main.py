@@ -9421,20 +9421,12 @@ class Main(QMainWindow):
                 int(point_number)
             )
             if not point_selected:
-                self._show_status(message, 6000)
-                if self.design_navigator_panel is not None:
-                    self.design_navigator_panel.set_route_measurement_status(message)
-                if self._route_measurement_dialog is not None:
-                    self._route_measurement_dialog.set_status(message)
+                self._show_route_measurement_status(message, 6000)
                 return
         elif not runner_active:
             if point_number is None:
                 message = "Select a route point before saving shift."
-                self._show_status(message, 5000)
-                if self.design_navigator_panel is not None:
-                    self.design_navigator_panel.set_route_measurement_status(message)
-                if self._route_measurement_dialog is not None:
-                    self._route_measurement_dialog.set_status(message)
+                self._show_route_measurement_status(message, 5000)
                 return
             context_result = self._api_contact_context(int(point_number))
             if not context_result.get("accepted", False):
@@ -9442,11 +9434,7 @@ class Main(QMainWindow):
                     context_result.get("message")
                     or "Route point is unavailable for saving shift."
                 )
-                self._show_status(message, 6000)
-                if self.design_navigator_panel is not None:
-                    self.design_navigator_panel.set_route_measurement_status(message)
-                if self._route_measurement_dialog is not None:
-                    self._route_measurement_dialog.set_status(message)
+                self._show_route_measurement_status(message, 6000)
                 return
             adjustment_point = context_result["point"]
         try:
