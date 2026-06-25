@@ -14,7 +14,9 @@ from typing import Dict, Iterable, List, Tuple
 
 from probe_station_gui.axis_calibration_config import (
     AxisACalibrationConfig,
+    AxisACalibrationSettings,
     AxisZCalibrationConfig,
+    AxisZCalibrationSettings,
     parse_axis_a_calibration,
     parse_axis_z_calibration,
 )
@@ -210,126 +212,6 @@ class KeyBinding:
             native_scan_code=int(data.get("native_scan_code", 0)),
             text=str(data.get("text", "")),
         )
-
-@dataclass
-class AxisACalibrationSettings:
-    """Compact signed calibrated model for the nonlinear A-axis linkage."""
-
-    configured: bool = False
-    model: str = "cosine_displacement"
-    steps_per_mm: float = 2600.0
-    commanded_lowering_min_mm: float = 0.0
-    commanded_lowering_max_mm: float = 5.5
-    offset_mm: float = -0.18025492860701603
-    amplitude_mm: float = -4.256281153779931
-    angular_frequency_rad_per_mm: float = 0.2560331555269034
-    phase_rad: float = 0.9304927419233507
-    fit_rmse_mm: float = 0.03390421874833405
-    fit_max_abs_error_mm: float = 0.044862806662900656
-    source: str = "calibrations/axis_a_spm2600_pulloff0p25_forward_reverse_settle1p0_20260504.png"
-    created_at: str = "2026-05-06T00:00:00+03:00"
-
-    def clone(self) -> "AxisACalibrationSettings":
-        """Return a copy of the A-axis calibration model."""
-
-        return AxisACalibrationSettings(
-            configured=self.configured,
-            model=self.model,
-            steps_per_mm=self.steps_per_mm,
-            commanded_lowering_min_mm=self.commanded_lowering_min_mm,
-            commanded_lowering_max_mm=self.commanded_lowering_max_mm,
-            offset_mm=self.offset_mm,
-            amplitude_mm=self.amplitude_mm,
-            angular_frequency_rad_per_mm=self.angular_frequency_rad_per_mm,
-            phase_rad=self.phase_rad,
-            fit_rmse_mm=self.fit_rmse_mm,
-            fit_max_abs_error_mm=self.fit_max_abs_error_mm,
-            source=self.source,
-            created_at=self.created_at,
-        )
-
-    def to_dict(self) -> dict[str, bool | float | str]:
-        """Serialize the A-axis calibration model."""
-
-        return {
-            "configured": self.configured,
-            "model": self.model,
-            "steps_per_mm": self.steps_per_mm,
-            "commanded_lowering_min_mm": self.commanded_lowering_min_mm,
-            "commanded_lowering_max_mm": self.commanded_lowering_max_mm,
-            "offset_mm": self.offset_mm,
-            "amplitude_mm": self.amplitude_mm,
-            "angular_frequency_rad_per_mm": self.angular_frequency_rad_per_mm,
-            "phase_rad": self.phase_rad,
-            "fit_rmse_mm": self.fit_rmse_mm,
-            "fit_max_abs_error_mm": self.fit_max_abs_error_mm,
-            "source": self.source,
-            "created_at": self.created_at,
-        }
-
-
-@dataclass
-class AxisZCalibrationSettings:
-    """Smooth calibrated model for the measured Z-axis branches."""
-
-    configured: bool = False
-    model: str = "quintic_polynomial"
-    steps_per_mm: float = 6335.0
-    gcode_min_mm: float = 0.02
-    gcode_max_mm: float = 23.4
-    coefficients_mm: List[float] = field(
-        default_factory=lambda: [
-            -1.1689194871855767e-06,
-            6.252947738309964e-05,
-            -0.0006221022578588869,
-            0.015449946058775076,
-            0.5416754463041403,
-            0.00910614542389841,
-        ]
-    )
-    fit_rmse_mm: float = 0.006126947872349345
-    fit_max_abs_error_mm: float = 0.020464954405667868
-    section2_indicator_offset_mm: float = 8.661368914604154
-    section3_indicator_offset_mm: float = 13.56547962940159
-    source: str = "calibrations/axis_z_spm6335_full_hysteresis_precise_s1_s2_s3_honest_stitches_20260505.png"
-    created_at: str = "2026-05-06T00:00:00+03:00"
-
-    def clone(self) -> "AxisZCalibrationSettings":
-        """Return a copy of the Z-axis calibration model."""
-
-        return AxisZCalibrationSettings(
-            configured=self.configured,
-            model=self.model,
-            steps_per_mm=self.steps_per_mm,
-            gcode_min_mm=self.gcode_min_mm,
-            gcode_max_mm=self.gcode_max_mm,
-            coefficients_mm=list(self.coefficients_mm),
-            fit_rmse_mm=self.fit_rmse_mm,
-            fit_max_abs_error_mm=self.fit_max_abs_error_mm,
-            section2_indicator_offset_mm=self.section2_indicator_offset_mm,
-            section3_indicator_offset_mm=self.section3_indicator_offset_mm,
-            source=self.source,
-            created_at=self.created_at,
-        )
-
-    def to_dict(self) -> dict[str, bool | float | str | list[float]]:
-        """Serialize the Z-axis calibration model."""
-
-        return {
-            "configured": self.configured,
-            "model": self.model,
-            "steps_per_mm": self.steps_per_mm,
-            "gcode_min_mm": self.gcode_min_mm,
-            "gcode_max_mm": self.gcode_max_mm,
-            "coefficients_mm": list(self.coefficients_mm),
-            "fit_rmse_mm": self.fit_rmse_mm,
-            "fit_max_abs_error_mm": self.fit_max_abs_error_mm,
-            "section2_indicator_offset_mm": self.section2_indicator_offset_mm,
-            "section3_indicator_offset_mm": self.section3_indicator_offset_mm,
-            "source": self.source,
-            "created_at": self.created_at,
-        }
-
 
 @dataclass
 class ObjectiveCalibrationSettings:
