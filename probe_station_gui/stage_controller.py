@@ -43,6 +43,12 @@ from probe_station_gui.stage_axis_mapping import (
     axis_z_gcode_coordinate_for_display,
     evaluate_polynomial,
 )
+from probe_station_gui.stage_controller_cache import (
+    parse_cached_axis_limits,
+    parse_cached_axis_max_feedrates,
+    parse_cached_controller_session_marker,
+    parse_cached_coordinate_offsets,
+)
 from probe_station_gui.stage_feed_override import (
     clamp_feed_override_percent,
     feed_override_payload_for_percent_change,
@@ -4985,78 +4991,35 @@ class StageController(QObject):
     def _parse_cached_controller_session_marker(
         data: dict[str, object]
     ) -> int | None:
-        raw_marker = data.get("controller_session_marker")
-        try:
-            marker = int(raw_marker)  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            return None
-        return marker if marker > 0 else None
+        return parse_cached_controller_session_marker(data)
 
     @classmethod
     def _parse_cached_axis_limits(
         cls, raw_limits: object
     ) -> dict[str, tuple[float, float]]:
-        limits: dict[str, tuple[float, float]] = {}
-        if not isinstance(raw_limits, dict):
-            return limits
-        for raw_axis, raw_values in raw_limits.items():
-            axis = str(raw_axis).strip().upper()
-            if axis not in cls.AXIS_INDEX or axis == "B":
-                continue
-            if not isinstance(raw_values, (list, tuple)) or len(raw_values) < 2:
-                continue
-            try:
-                min_value = float(raw_values[0])
-                max_value = float(raw_values[1])
-            except (TypeError, ValueError):
-                continue
-            if not math.isfinite(min_value) or not math.isfinite(max_value):
-                continue
-            if max_value < min_value:
-                continue
-            limits[axis] = (min_value, max_value)
-        return limits
+        return parse_cached_axis_limits(
+            raw_limits,
+            axis_names=cls.AXIS_INDEX,
+        )
 
     @classmethod
     def _parse_cached_axis_max_feedrates(
         cls, raw_feedrates: object
     ) -> dict[str, float]:
-        feedrates: dict[str, float] = {}
-        if not isinstance(raw_feedrates, dict):
-            return feedrates
-        for raw_axis, raw_rate in raw_feedrates.items():
-            axis = str(raw_axis).strip().upper()
-            if axis not in cls.AXIS_INDEX:
-                continue
-            try:
-                rate = float(raw_rate)
-            except (TypeError, ValueError):
-                continue
-            if math.isfinite(rate) and rate > 0.0:
-                feedrates[axis] = max(cls.MIN_FEEDRATE, rate)
-        return feedrates
+        return parse_cached_axis_max_feedrates(
+            raw_feedrates,
+            axis_names=cls.AXIS_INDEX,
+            min_feedrate=cls.MIN_FEEDRATE,
+        )
 
     @classmethod
     def _parse_cached_coordinate_offsets(
         cls, raw_offsets: object
     ) -> dict[str, tuple[float, ...]]:
-        offsets: dict[str, tuple[float, ...]] = {}
-        if not isinstance(raw_offsets, dict):
-            return offsets
-        for raw_system, raw_values in raw_offsets.items():
-            system = str(raw_system).strip().upper()
-            if system not in cls.WORK_COORDINATE_SYSTEMS:
-                continue
-            if not isinstance(raw_values, (list, tuple)):
-                continue
-            try:
-                values = tuple(float(value) for value in raw_values)
-            except (TypeError, ValueError):
-                continue
-            if len(values) < 3 or not all(math.isfinite(value) for value in values):
-                continue
-            offsets[system] = values
-        return offsets
+        return parse_cached_coordinate_offsets(
+            raw_offsets,
+            coordinate_systems=cls.WORK_COORDINATE_SYSTEMS,
+        )
 
     @staticmethod
     def _new_controller_session_marker() -> int:
