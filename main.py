@@ -2035,12 +2035,7 @@ class Main(QMainWindow):
         if runner is None and not thread_alive:
             return None
         if runner is not None and not thread_alive:
-            self._route_measurement_runner = None
-            self._route_measurement_thread = None
-            self._route_measurement_waiting = False
-            self._route_measurement_waiting_reason = ""
-            self._route_measurement_session_active = False
-            self._pending_route_measure_point = None
+            self._clear_waiting_route_measurement_state()
             return None
         can_clear_waiting_gui_route = (
             runner is not None
@@ -2076,13 +2071,16 @@ class Main(QMainWindow):
                     "control start."
                 ),
             }
+        self._clear_waiting_route_measurement_state()
+        return None
+
+    def _clear_waiting_route_measurement_state(self) -> None:
         self._route_measurement_runner = None
         self._route_measurement_thread = None
         self._route_measurement_waiting = False
         self._route_measurement_waiting_reason = ""
         self._route_measurement_session_active = False
         self._pending_route_measure_point = None
-        return None
 
     def _request_api_route_control_pause(self, message: str) -> dict[str, Any]:
         state, transition_message = (
