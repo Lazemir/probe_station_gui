@@ -1295,8 +1295,7 @@ class StageController(QObject):
             f"G10 L20 P{p_value} {axis}"
             f"{self._format_gcode_value(value, decimals=4)}"
         )
-        self._write_command(serial_connection, command)
-        self._wait_for_ok(serial_connection)
+        self._write_current_command_and_wait(command)
         self._active_work_coordinate_system = coordinate_system
         if self._position_reporting_mode != "machine":
             try:
@@ -2821,8 +2820,7 @@ class StageController(QObject):
         objective_name = str(self._active_objective_name)
         if not self._needles_up:
             self.status_message.emit("Autofocus: homing A axis.")
-            self._write_command(serial_connection, "$HA")
-            self._wait_for_ok(serial_connection, timeout=30.0)
+            self._write_current_command_and_wait("$HA", timeout=30.0)
             self._wait_for_idle(timeout=30.0)
             self._set_needles_state(True, known=True, zone="raise")
         self._move_safety_check()
@@ -4859,12 +4857,10 @@ class StageController(QObject):
         return None
 
     def _ensure_controller_session_marker(self) -> None:
-        serial_connection = self._current_serial()
         marker = self._controller_session_marker
         if marker is None:
             marker = self._new_controller_session_marker()
-        self._write_command(serial_connection, f"T{marker}")
-        self._wait_for_ok(serial_connection)
+        self._write_current_command_and_wait(f"T{marker}")
         self._controller_session_marker = marker
         logger.info("Controller volatile session marker set to T%s.", marker)
 
