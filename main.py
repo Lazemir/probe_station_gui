@@ -116,12 +116,10 @@ from probe_station_gui.api.request_bridge import ApiRequestBridge
 from probe_station_gui.api.server import ProbeStationApiServer
 from probe_station_gui.api.keys import API_KEY_FILENAME, ApiKeyStore
 from probe_station_gui.lcr_meter import (
-    GWInstekRouteMeterSettings,
-    KeithleyRouteMeterSettings,
     LCRMeterController,
     LCRMeterError,
-    ROUTE_METER_GWINSTEK,
-    ROUTE_METER_KEITHLEY,
+    ROUTE_METER_GWINSTEK,  # noqa: F401 - re-exported for legacy callers/tests
+    ROUTE_METER_KEITHLEY,  # noqa: F401 - re-exported for legacy callers/tests
     RouteMeterConfiguration,
 )
 from probe_station_gui.stage.motion_prediction import interpolate_position, motion_progress
@@ -182,6 +180,10 @@ from probe_station_gui.route_runtime_settings import (
     route_measurement_runtime_settings,
     route_runtime_requires_meter_configuration,
     route_waiting_restart_required,
+)
+from probe_station_gui.route_meter_config import (
+    route_meter_configuration_from_payload,
+    route_meter_type_from_payload,
 )
 from probe_station_gui.route_measurement_settings import RouteMeasurementSettingsStore
 from probe_station_gui.route_session_actions import (
@@ -3503,251 +3505,21 @@ class Main(QMainWindow):
         *,
         voltages_v: list[float] | None,
     ) -> RouteMeterConfiguration:
-        meter_payload = payload if isinstance(payload, dict) else {}
-        meter_type = self._api_meter_type(meter_payload.get("meter_type", meter_payload.get("type")))
-        if meter_type is None:
-            meter_type = self.lcr_controller.meter_type()
-        if meter_type == ROUTE_METER_KEITHLEY:
-            keithley_payload = meter_payload.get("keithley")
-            if not isinstance(keithley_payload, dict):
-                keithley_payload = meter_payload
-            range_payload = dict(keithley_payload)
-            nested_ranges = keithley_payload.get("ranges")
-            if isinstance(nested_ranges, dict):
-                range_payload.update(nested_ranges)
-            defaults = KeithleyRouteMeterSettings()
-            max_voltage = (
-                max(abs(float(value)) for value in voltages_v)
-                if voltages_v
-                else defaults.measurement_voltage_v
+        settings_manager = getattr(self, "settings_manager", None)
+        gwinstek_resource_name = None
+        if settings_manager is not None:
+            gwinstek_resource_name = (
+                settings_manager.needle_calibration_configuration().visa_resource
             )
-            measurement_voltage = self._api_float(
-                range_payload,
-                "measurement_voltage_v",
-                "voltage_v",
-                default=max(max_voltage, 1e-12),
-                minimum=1e-12,
-            )
-            range_mode = str(
-                range_payload.get(
-                    "range_mode",
-                    range_payload.get("mode", defaults.range_mode),
-                )
-            )
-            voltage_range = self._api_optional_float(
-                range_payload,
-                "voltage_range_v",
-                minimum=1e-12,
-            )
-            source_voltage_range = self._api_optional_float(
-                range_payload,
-                "source_voltage_range_v",
-                "source_range_v",
-                "keithley_source_voltage_range_v",
-                minimum=1e-12,
-            )
-            voltmeter_range = self._api_optional_float(
-                range_payload,
-                "voltmeter_range_v",
-                "meter_voltage_range_v",
-                "nanovoltmeter_range_v",
-                "keithley_voltmeter_range_v",
-                minimum=1e-12,
-            )
-            if voltage_range is not None:
-                source_voltage_range = voltage_range
-                voltmeter_range = voltage_range
-            if (
-                voltage_range is None
-                and source_voltage_range is None
-                and voltmeter_range is None
-                and range_mode.strip().lower() not in {
-                "code_auto",
-                "auto",
-                "software_auto",
-                "computed_auto",
-                }
-            ):
-                voltage_range = max(measurement_voltage, max_voltage)
-                source_voltage_range = voltage_range
-                voltmeter_range = voltage_range
-            settings = KeithleyRouteMeterSettings(
-                measurement_voltage_v=measurement_voltage,
-                range_mode=range_mode,
-                expected_resistance_ohm=self._api_optional_float(
-                    range_payload,
-                    "expected_resistance_ohm",
-                    "resistance_ohm",
-                    minimum=1e-12,
-                ),
-                minimum_resistance_ohm=self._api_optional_float(
-                    range_payload,
-                    "minimum_resistance_ohm",
-                    "min_resistance_ohm",
-                    "resistance_floor_ohm",
-                    minimum=1e-12,
-                ),
-                maximum_current_a=self._api_optional_float(
-                    range_payload,
-                    "maximum_current_a",
-                    "max_current_a",
-                    "current_limit_a",
-                    minimum=1e-12,
-                ),
-                voltage_range_v=voltage_range,
-                source_voltage_range_v=(
-                    source_voltage_range
-                    if source_voltage_range is not None
-                    else defaults.source_voltage_range_v
-                ),
-                voltmeter_range_v=(
-                    voltmeter_range
-                    if voltmeter_range is not None
-                    else defaults.voltmeter_range_v
-                ),
-                current_range_a=self._api_float(
-                    range_payload,
-                    "current_range_a",
-                    default=defaults.current_range_a,
-                    minimum=1e-12,
-                ),
-                compliance_current_a=self._api_float(
-                    range_payload,
-                    "compliance_current_a",
-                    "current_limit_a",
-                    "max_current_a",
-                    default=defaults.compliance_current_a,
-                    minimum=1e-12,
-                ),
-                range_voltage_headroom=self._api_float(
-                    range_payload,
-                    "range_voltage_headroom",
-                    "voltage_headroom",
-                    default=defaults.range_voltage_headroom,
-                    minimum=1.0,
-                ),
-                range_current_headroom=self._api_float(
-                    range_payload,
-                    "range_current_headroom",
-                    "current_headroom",
-                    default=defaults.range_current_headroom,
-                    minimum=1.0,
-                ),
-                nplc=self._api_float(
-                    keithley_payload,
-                    "nplc",
-                    default=defaults.nplc,
-                    minimum=0.01,
-                ),
-                terminals=str(
-                    keithley_payload.get(
-                        "terminals",
-                        defaults.terminals,
-                    )
-                ),
-                trigger_delay_s=self._api_float(
-                    keithley_payload,
-                    "trigger_delay_s",
-                    "delay_s",
-                    default=defaults.trigger_delay_s,
-                    minimum=0.0,
-                ),
-            )
-            return RouteMeterConfiguration(
-                meter_type=ROUTE_METER_KEITHLEY,
-                keithley=settings,
-            )
-        if meter_type == ROUTE_METER_GWINSTEK:
-            gw_payload = meter_payload.get("gwinstek")
-            if not isinstance(gw_payload, dict):
-                gw_payload = meter_payload
-            defaults = GWInstekRouteMeterSettings(
-                resource_name=self.settings_manager.needle_calibration_configuration().visa_resource
-            )
-            settings = GWInstekRouteMeterSettings(
-                resource_name=str(gw_payload.get("resource_name", defaults.resource_name)),
-                measurement_function=str(
-                    gw_payload.get("measurement_function", defaults.measurement_function)
-                ),
-                range_mode=str(gw_payload.get("range_mode", defaults.range_mode)),
-                impedance_range=int(
-                    self._api_float(
-                        gw_payload,
-                        "impedance_range",
-                        default=defaults.impedance_range,
-                    )
-                ),
-                dcr_range=int(
-                    self._api_float(gw_payload, "dcr_range", default=defaults.dcr_range)
-                ),
-                frequency_hz=self._api_float(
-                    gw_payload,
-                    "frequency_hz",
-                    default=defaults.frequency_hz,
-                    minimum=10.0,
-                ),
-                level_mode=str(gw_payload.get("level_mode", defaults.level_mode)),
-                voltage_level_v=self._api_float(
-                    gw_payload,
-                    "voltage_level_v",
-                    default=defaults.voltage_level_v,
-                    minimum=0.0,
-                ),
-                current_level_a=self._api_float(
-                    gw_payload,
-                    "current_level_a",
-                    default=defaults.current_level_a,
-                    minimum=0.0,
-                ),
-                source_resistance_ohm=int(
-                    self._api_float(
-                        gw_payload,
-                        "source_resistance_ohm",
-                        default=defaults.source_resistance_ohm,
-                    )
-                ),
-                aperture_rate=str(gw_payload.get("aperture_rate", defaults.aperture_rate)),
-                aperture_averages=int(
-                    self._api_float(
-                        gw_payload,
-                        "aperture_averages",
-                        default=defaults.aperture_averages,
-                        minimum=1.0,
-                    )
-                ),
-                trigger_delay_s=self._api_float(
-                    gw_payload,
-                    "trigger_delay_s",
-                    default=defaults.trigger_delay_s,
-                    minimum=0.0,
-                ),
-                bias_enabled=self._api_bool(gw_payload, "bias_enabled", default=defaults.bias_enabled),
-                bias_level_v=self._api_float(
-                    gw_payload,
-                    "bias_level_v",
-                    default=defaults.bias_level_v,
-                ),
-                monitor1=str(gw_payload.get("monitor1", defaults.monitor1)),
-                monitor2=str(gw_payload.get("monitor2", defaults.monitor2)),
-                alc_enabled=self._api_bool(gw_payload, "alc_enabled", default=defaults.alc_enabled),
-            )
-            return RouteMeterConfiguration(
-                meter_type=ROUTE_METER_GWINSTEK,
-                gwinstek=settings,
-            )
-        raise ValueError(f"Unsupported meter_type: {meter_type!r}")
+        return route_meter_configuration_from_payload(
+            payload,
+            voltages_v=voltages_v,
+            current_meter_type=self.lcr_controller.meter_type(),
+            default_gwinstek_resource_name=gwinstek_resource_name,
+        )
 
     def _api_meter_type(self, value: object) -> str | None:
-        if value is None:
-            return None
-        text = str(value).strip().lower()
-        if text in {"", "current", "configured"}:
-            return None
-        if text in {"keithley", "keithley_2400_2182a", "2400_2182a"}:
-            return ROUTE_METER_KEITHLEY
-        if text in {"gwinstek", "lcr", "gwinstek_lcr_76200"}:
-            return ROUTE_METER_GWINSTEK
-        return text
+        return route_meter_type_from_payload(value)
 
     def _api_contact_number(
         self,
