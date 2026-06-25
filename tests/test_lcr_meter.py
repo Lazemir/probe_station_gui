@@ -263,6 +263,11 @@ class _ExplodingReadSession(_FakeSession):
         self.closed = True
 
 
+class _DeletedSignalSource:
+    def emit(self, *_args) -> None:
+        raise RuntimeError("Signal source has been deleted")
+
+
 class _FailingConfigureKeithleySession(_FakeKeithleySession):
     def configure_measurement(self, **kwargs) -> None:
         self.configurations.append(dict(kwargs))
@@ -581,6 +586,18 @@ class LCRMeterTest(unittest.TestCase):
         self.assertEqual(session.read_triggers, [True])
         self.assertEqual(updates, [])
         self.assertEqual(summaries, [])
+
+    def test_deleted_qt_signal_source_stops_worker_polling(self) -> None:
+        controller = LCRMeterController()
+        controller.reading_updated = _DeletedSignalSource()
+        controller._stop_polling.clear()
+        controller._worker_shutdown.clear()
+
+        controller._emit_reading_summary(42.0, 1)
+
+        self.assertTrue(controller._shutdown_started)
+        self.assertTrue(controller._stop_polling.is_set())
+        self.assertTrue(controller._worker_shutdown.is_set())
 
     def test_controller_polling_disconnects_on_unexpected_driver_error(self) -> None:
         controller = LCRMeterController()

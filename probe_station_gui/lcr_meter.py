@@ -1508,8 +1508,22 @@ class LCRMeterController(QObject):
     def _emit_reading_summary(self, primary_value: float, sample_count: int) -> None:
         count = max(1, int(sample_count))
         is_short = self._is_short_reading(primary_value)
-        self.reading_updated.emit(primary_value, is_short)
-        self.reading_summary_updated.emit(primary_value, is_short, count)
+        try:
+            self.reading_updated.emit(primary_value, is_short)
+            self.reading_summary_updated.emit(primary_value, is_short, count)
+        except RuntimeError as exc:
+            if "Signal source has been deleted" not in str(exc):
+                raise
+            self._stop_worker_after_deleted_signal_source()
+
+    def _stop_worker_after_deleted_signal_source(self) -> None:
+        _LCR_METER_CONTROLLERS.discard(self)
+        self._shutdown_started = True
+        self._stop_polling.set()
+        self._worker_shutdown.set()
+        self._worker_queue.put(None)
+        with self._worker_state:
+            self._worker_state.notify_all()
 
     @staticmethod
     def _mean_resistance_from_measurements(measurements: object) -> float:
