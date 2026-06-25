@@ -78,6 +78,11 @@ from probe_station_gui.stage_motion_timing import (
     idle_timeout_for_distance,
     move_distance_for_timeout,
 )
+from probe_station_gui.stage_needle_targets import (
+    needle_target_lowering_for_action,
+    normalise_needle_contact_zone,
+    normalise_needle_lowering_target,
+)
 from probe_station_gui.stage_needle_state import (
     axis_a_ready_from_state,
     needle_contact_boundary_lowering,
@@ -976,13 +981,10 @@ class StageController(QObject):
             down_position_mm
         )
         if contact_zone_mm is not None:
-            try:
-                zone_mm = float(contact_zone_mm)
-            except (TypeError, ValueError):
-                zone_mm = self.DEFAULT_NEEDLE_CONTACT_ZONE_MM
-            if not math.isfinite(zone_mm) or zone_mm < 0.0:
-                zone_mm = self.DEFAULT_NEEDLE_CONTACT_ZONE_MM
-            self._needle_contact_zone_mm = zone_mm
+            self._needle_contact_zone_mm = normalise_needle_contact_zone(
+                contact_zone_mm,
+                default=self.DEFAULT_NEEDLE_CONTACT_ZONE_MM,
+            )
 
     def apply_axis_max_feedrates(self, rates: dict[str, float] | None) -> None:
         """Apply axis maximum feedrates parsed from the active FluidNC config."""
@@ -3773,26 +3775,12 @@ class StageController(QObject):
         return max(self.MIN_FEEDRATE, float(value))
 
     def _needle_target_lowering_for_action(self, action: str) -> float:
-        if action not in {"raise", "lift", "lower"}:
-            raise StageControllerError(f"Unknown needle action: {action}.")
-        if action == "raise":
-            return 0.0
-        if action == "lift":
-            boundary_lowering = self._needle_contact_boundary_lowering()
-            if boundary_lowering is None:
-                if self._needle_down_lowering_mm is None:
-                    raise StageControllerError(
-                        "Needle down calibration missing; cannot lift."
-                    )
-                raise StageControllerError(
-                    "Needle contact zone is zero; cannot lift."
-                )
-            return boundary_lowering
-        if self._needle_down_lowering_mm is None:
-            raise StageControllerError(
-                "Needle down calibration missing; cannot lower."
-            )
-        return max(0.0, float(self._needle_down_lowering_mm))
+        return needle_target_lowering_for_action(
+            action,
+            down_lowering_mm=self._needle_down_lowering_mm,
+            boundary_lowering=self._needle_contact_boundary_lowering(),
+            error_factory=StageControllerError,
+        )
 
     def _needle_contact_boundary_lowering(self) -> float | None:
         return needle_contact_boundary_lowering(
@@ -4540,12 +4528,10 @@ class StageController(QObject):
         self,
         position_mm: Optional[float],
     ) -> Optional[float]:
-        if position_mm is None:
-            return None
-        lowering_mm = float(position_mm)
-        if lowering_mm < 0.0:
-            lowering_mm = self._axis_a_lowering_for_gcode_coordinate(lowering_mm)
-        return max(0.0, lowering_mm)
+        return normalise_needle_lowering_target(
+            position_mm,
+            lowering_for_gcode_coordinate=self._axis_a_lowering_for_gcode_coordinate,
+        )
 
     def calibrated_axis_display_value(
         self,
