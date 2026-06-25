@@ -15,7 +15,10 @@ from typing import Callable, Iterator, Optional
 from PySide6.QtCore import QObject, Signal
 
 from probe_station_measure import OHMMETER_RANGE_MANUAL
-from probe_station_gui.lcr_meter_worker import MeterWorkerCall as _MeterWorkerCall
+from probe_station_gui.lcr_meter_worker import (
+    MeterWorkerCall as _MeterWorkerCall,
+    meter_worker_poll_timeout,
+)
 from probe_station_gui.lcr_meter_helpers import (
     callable_accepts_keyword as _callable_accepts_keyword,
     format_source_level_value,
@@ -1073,13 +1076,12 @@ class LCRMeterController(QObject):
                     self._worker_state.notify_all()
 
     def _meter_worker_poll_timeout(self) -> float | None:
-        if (
-            not self._live_polling_enabled
-            or self._stop_polling.is_set()
-            or self._session is None
-        ):
-            return None
-        return max(0.05, self._poll_interval_ms / 1000.0)
+        return meter_worker_poll_timeout(
+            live_polling_enabled=self._live_polling_enabled,
+            stop_polling=self._stop_polling.is_set(),
+            has_session=self._session is not None,
+            poll_interval_ms=self._poll_interval_ms,
+        )
 
     def meter_type(self) -> str:
         """Return the currently configured meter type."""
