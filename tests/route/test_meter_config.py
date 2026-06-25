@@ -1,4 +1,4 @@
-from probe_station_gui.route_meter_config import (
+from probe_station_gui.route.meter_config import (
     GWInstekRouteMeterSettings,
     KeithleyRouteMeterSettings,
     ROUTE_METER_GWINSTEK,

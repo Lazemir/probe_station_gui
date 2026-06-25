@@ -1,4 +1,4 @@
-from probe_station_gui.route_control_state import (
+from probe_station_gui.route.control_state import (
     ApiRouteControlState,
     api_route_control_command_from_payload,
     api_route_control_legacy_attrs,

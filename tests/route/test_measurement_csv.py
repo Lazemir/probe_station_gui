@@ -1,7 +1,7 @@
 import csv
 from types import SimpleNamespace
 
-from probe_station_gui.route_measurement_csv import (
+from probe_station_gui.route.measurement_csv import (
     CSV_FIELDS,
     RouteMeasurementCsvWriter,
     route_measurement_record_csv_row,

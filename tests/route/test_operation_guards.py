@@ -1,5 +1,5 @@
-from probe_station_gui.route_control_state import ApiRouteControlState
-from probe_station_gui.route_operation_guards import (
+from probe_station_gui.route.control_state import ApiRouteControlState
+from probe_station_gui.route.operation_guards import (
     route_contact_move_block_message,
     route_shift_save_block_message,
 )

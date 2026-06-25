@@ -50,26 +50,26 @@ from probe_station_gui.wheel_guard import (
     GuardedDoubleSpinBox as QDoubleSpinBox,
     GuardedSpinBox as QSpinBox,
 )
-from probe_station_gui.route_measurement import (
+from probe_station_gui.route.measurement import (
     ROUTE_OPERATION_MEASURE,
     ROUTE_OPERATION_PHOTO,
     ROUTE_OPERATION_PHOTO_THEN_MEASURE,
     RouteContactQualityLimits,
 )
-from probe_station_gui.route_measurement_config import (
+from probe_station_gui.route.measurement_config import (
     RouteMeasurementRunConfiguration,
     route_measurement_count_profile,
 )
-from probe_station_gui.route_operation_modes import (
+from probe_station_gui.route.operation_modes import (
     route_operation_measure_enabled,
     route_operation_photo_enabled,
 )
-from probe_station_gui.route_formatting import (
+from probe_station_gui.route.formatting import (
     csv_float as _format_number,
     format_route_ohm as _format_ohm,
     format_route_percent as _format_percent,
 )
-from probe_station_gui.route_measurement_display import (
+from probe_station_gui.route.measurement_display import (
     axis_tick_decimals as _axis_tick_decimals,
     count_axis_ticks as _count_axis_ticks,
     histogram_counts as _histogram_counts,
@@ -79,7 +79,7 @@ from probe_station_gui.route_measurement_display import (
     resistance_x_axis_label as _resistance_x_axis_label,
     sample_values as _sample_values,
 )
-from probe_station_gui.route_run_ui import (
+from probe_station_gui.route.run_ui import (
     route_run_control_presentation,
     route_run_pause_action,
 )

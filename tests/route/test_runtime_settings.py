@@ -1,10 +1,10 @@
 from types import SimpleNamespace
 
-from probe_station_gui.route_operation_modes import (
+from probe_station_gui.route.operation_modes import (
     ROUTE_OPERATION_MEASURE,
     ROUTE_OPERATION_PHOTO,
 )
-from probe_station_gui.route_runtime_settings import (
+from probe_station_gui.route.runtime_settings import (
     route_external_runtime_settings,
     route_measurement_runtime_settings,
     route_runtime_requires_meter_configuration,

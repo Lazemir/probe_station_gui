@@ -1,4 +1,4 @@
-from probe_station_gui.route_api_window_guard import probe_route_api_requires_window
+from probe_station_gui.route.api_window_guard import probe_route_api_requires_window
 
 
 def test_probe_route_api_requires_window_for_contact_workflows() -> None:

@@ -38,7 +38,7 @@ from probe_station_gui.dialogs.route_measurement_dialog import (
     RouteMeasurementDialog,
     RouteMeasurementRunConfiguration,
 )
-from probe_station_gui.route_measurement import (
+from probe_station_gui.route.measurement import (
     RouteExternalMeasurementSessionRunner,
     RouteContactHeightRecord,
     RouteContactQualityLimits,

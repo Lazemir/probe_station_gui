@@ -7,7 +7,7 @@ import time
 import unittest
 from pathlib import Path
 
-from probe_station_gui.route_measurement import (
+from probe_station_gui.route.measurement import (
     CSV_FIELDS,
     ROUTE_OPERATION_MEASURE,
     ROUTE_OPERATION_PHOTO,

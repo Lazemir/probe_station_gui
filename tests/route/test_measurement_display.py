@@ -1,7 +1,7 @@
 import math
 from types import SimpleNamespace
 
-from probe_station_gui.route_measurement_display import (
+from probe_station_gui.route.measurement_display import (
     axis_tick_decimals,
     count_axis_ticks,
     histogram_counts,

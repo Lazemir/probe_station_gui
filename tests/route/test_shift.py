@@ -1,4 +1,4 @@
-from probe_station_gui.route_shift import (
+from probe_station_gui.route.shift import (
     route_shift_from_stage_xy,
     route_shift_saved_message,
 )

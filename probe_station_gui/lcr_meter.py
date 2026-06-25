@@ -31,7 +31,7 @@ from probe_station_gui.lcr_meter_helpers import (
     session_visa_resource_roles as _session_visa_resource_roles,
     voltage_sweep_point_to_dict as _voltage_sweep_point_to_dict,
 )
-from probe_station_gui.route_meter_config import (
+from probe_station_gui.route.meter_config import (
     GWInstekRouteMeterSettings,
     KeithleyRouteMeterSettings,
     ROUTE_METER_GWINSTEK,

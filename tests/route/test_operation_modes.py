@@ -1,4 +1,4 @@
-from probe_station_gui.route_operation_modes import (
+from probe_station_gui.route.operation_modes import (
     ROUTE_OPERATION_MEASURE,
     ROUTE_OPERATION_PHOTO,
     ROUTE_OPERATION_PHOTO_THEN_MEASURE,

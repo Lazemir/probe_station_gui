@@ -2,7 +2,7 @@ import json
 import types
 from pathlib import Path
 
-from probe_station_gui.route_measurement_settings import RouteMeasurementSettingsStore
+from probe_station_gui.route.measurement_settings import RouteMeasurementSettingsStore
 
 
 def test_load_returns_empty_for_missing_invalid_or_non_object_settings(tmp_path: Path) -> None:

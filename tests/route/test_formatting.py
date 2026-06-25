@@ -1,6 +1,6 @@
 import math
 
-from probe_station_gui.route_formatting import (
+from probe_station_gui.route.formatting import (
     csv_bool,
     csv_float,
     format_route_ohm,

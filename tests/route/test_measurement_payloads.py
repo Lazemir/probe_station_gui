@@ -1,15 +1,15 @@
 import math
 from types import SimpleNamespace
 
-from probe_station_gui.route_contact_quality import (
+from probe_station_gui.route.contact_quality import (
     RouteContactQuality,
     RouteMeasurementSample,
 )
-from probe_station_gui.route_measurement import (
+from probe_station_gui.route.measurement import (
     RouteContactSeekResult,
     RouteMeasurementRecord,
 )
-from probe_station_gui.route_measurement_payloads import (
+from probe_station_gui.route.measurement_payloads import (
     focus_result_to_dict,
     json_ready,
     route_api_contact_seek_payload,

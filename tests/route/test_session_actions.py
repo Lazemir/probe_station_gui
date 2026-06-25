@@ -1,4 +1,4 @@
-from probe_station_gui.route_session_actions import (
+from probe_station_gui.route.session_actions import (
     route_confirmation_action,
     route_session_action_from_payload,
 )

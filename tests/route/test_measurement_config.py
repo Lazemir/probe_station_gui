@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from probe_station_gui.route_measurement_config import (
+from probe_station_gui.route.measurement_config import (
     RouteMeasurementRunConfiguration,
     route_measurement_count_profile,
 )
-from probe_station_gui.route_meter_config import RouteMeterConfiguration
+from probe_station_gui.route.meter_config import RouteMeterConfiguration
 
 
 def _configuration(

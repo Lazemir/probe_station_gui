@@ -5,13 +5,13 @@ from pathlib import Path
 import numpy as np
 
 from probe_station_gui.design_model import DesignDocument
-from probe_station_gui.route_model import (
+from probe_station_gui.route.model import (
     MeasurementRoute,
     RouteModelError,
     structure_number_from_labels,
 )
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class MeasurementRouteTest(unittest.TestCase):

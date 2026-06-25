@@ -1,4 +1,4 @@
-from probe_station_gui.route_contact_quality import (
+from probe_station_gui.route.contact_quality import (
     RouteContactQualityLimits,
     RouteMeasurementSample,
     route_measurement_sample_from_raw,

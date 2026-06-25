@@ -1,7 +1,7 @@
 import math
 import unittest
 
-from probe_station_gui.route_contact_seek import (
+from probe_station_gui.route.contact_seek import (
     contact_seek_attempt_number,
     contact_seek_depths,
     normalize_contact_seek_limit,

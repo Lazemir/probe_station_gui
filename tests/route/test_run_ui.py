@@ -1,4 +1,4 @@
-from probe_station_gui.route_run_ui import (
+from probe_station_gui.route.run_ui import (
     route_run_control_presentation,
     route_run_pause_action,
 )
