@@ -3467,15 +3467,13 @@ class StageController(QObject):
         _origin: tuple[float, float, float],
         axis: str,
     ) -> list[tuple[np.ndarray, np.ndarray]]:
-        serial_connection = self._current_serial()
         if reference_frame is None:
             raise StageControllerError("Reference frame unavailable for calibration.")
         index = 0 if axis == "X" else 1
         observations: list[tuple[np.ndarray, np.ndarray]] = []
         step_mm = float(self.CALIBRATION_PROBE_STEP_MM)
         target_pixels = float(self._objective_calibration_target_pixels)
-        reference_status = self._query_status_with_required_coordinates(
-            serial_connection,
+        reference_status = self._query_current_status_with_required_coordinates(
             axes=("X", "Y"),
         )
         reference_position = self._position_for_configured_mode(reference_status)
@@ -3493,8 +3491,7 @@ class StageController(QObject):
             new_frame, frame_counter = self._wait_for_new_frame(frame_counter, timeout=2.0)
             if new_frame is None:
                 raise StageControllerError("Camera did not update during calibration.")
-            status = self._query_status_with_required_coordinates(
-                serial_connection,
+            status = self._query_current_status_with_required_coordinates(
                 axes=("X", "Y"),
             )
             current = self._position_for_configured_mode(status)
@@ -4705,9 +4702,7 @@ class StageController(QObject):
             if abs(delta) >= 1e-6
             and (axis == "B" or axis in self._axis_limits)
         )
-        serial_connection = self._current_serial()
-        status = self._query_status_with_required_coordinates(
-            serial_connection,
+        status = self._query_current_status_with_required_coordinates(
             axes=moved_limited_axes,
         )
         positions = self._position_for_configured_mode(status)
