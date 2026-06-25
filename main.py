@@ -157,6 +157,8 @@ from probe_station_gui.route_control_state import (
     api_route_control_command_from_payload,
     api_route_control_legacy_attrs,
     api_route_control_state_from_legacy_attrs,
+)
+from probe_station_gui.route_operation_guards import (
     route_contact_move_block_message,
     route_shift_save_block_message,
 )
