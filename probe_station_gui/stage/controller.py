@@ -47,6 +47,11 @@ from probe_station_gui.stage.controller_cache import (
     parse_cached_controller_session_marker,
     parse_cached_coordinate_offsets,
 )
+from probe_station_gui.stage.errors import (
+    AxisStateError,
+    SERIAL_IO_EXCEPTIONS,
+    StageControllerError,
+)
 from probe_station_gui.stage.feed_override import (
     clamp_feed_override_percent,
     feed_override_payload_for_percent_change,
@@ -96,20 +101,7 @@ from probe_station_gui.stage.types import (
 
 logger = logging.getLogger(__name__)
 
-_SERIAL_IO_EXCEPTIONS = (
-    serial.SerialException,
-    OSError,
-    AttributeError,
-    TypeError,
-)
-
-
-class StageControllerError(RuntimeError):
-    """Raised when the stage controller cannot complete an operation."""
-
-
-class AxisStateError(StageControllerError):
-    """Raised when axis state prevents the requested operation."""
+_SERIAL_IO_EXCEPTIONS = SERIAL_IO_EXCEPTIONS
 
 
 class _LazyModule:
