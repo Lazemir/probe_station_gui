@@ -2188,32 +2188,33 @@ class Main(QMainWindow):
         return status
 
     def _update_api_route_control_ui(self, message: str) -> None:
-        active = bool(self._api_route_control_active)
-        pause_requested = bool(self._api_route_control_pause_requested)
-        paused = bool(self._api_route_control_paused)
-        waiting = active and paused
-        pause_pending = active and pause_requested and not paused
-        self._route_measurement_waiting = waiting
-        self._route_measurement_waiting_reason = "paused" if waiting else ""
+        ui_state = self._api_route_control_state_snapshot().ui_state()
+        self._route_measurement_waiting = ui_state.waiting
+        self._route_measurement_waiting_reason = ui_state.waiting_reason
         if self.design_navigator_panel is not None:
-            self.design_navigator_panel.set_route_measurement_running(active)
+            self.design_navigator_panel.set_route_measurement_running(ui_state.active)
             if hasattr(
                 self.design_navigator_panel,
                 "set_route_measurement_pause_request_pending",
             ):
                 self.design_navigator_panel.set_route_measurement_pause_request_pending(
-                    pause_pending
+                    ui_state.pause_pending
                 )
             self.design_navigator_panel.set_route_measurement_waiting(
-                waiting,
-                reason="paused",
+                ui_state.waiting,
+                reason=ui_state.control_waiting_reason,
             )
             self.design_navigator_panel.set_route_measurement_status(message)
         if self._route_measurement_dialog is not None:
-            self._route_measurement_dialog.set_running(active)
+            self._route_measurement_dialog.set_running(ui_state.active)
             if hasattr(self._route_measurement_dialog, "set_pause_request_pending"):
-                self._route_measurement_dialog.set_pause_request_pending(pause_pending)
-            self._route_measurement_dialog.set_waiting(waiting, reason="paused")
+                self._route_measurement_dialog.set_pause_request_pending(
+                    ui_state.pause_pending
+                )
+            self._route_measurement_dialog.set_waiting(
+                ui_state.waiting,
+                reason=ui_state.control_waiting_reason,
+            )
             self._route_measurement_dialog.set_status(message)
         self._show_status(message, 5000)
 

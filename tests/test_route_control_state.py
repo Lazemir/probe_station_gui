@@ -170,3 +170,31 @@ def test_api_route_control_command_from_payload_marks_active_only_commands() -> 
     for action in ["status", "start", "finish", "ack", "unknown"]:
         command = api_route_control_command_from_payload({"action": action})
         assert command.requires_active_control is False
+
+
+def test_api_route_control_ui_state_marks_pause_request_as_pending() -> None:
+    ui_state = ApiRouteControlState(
+        active=True,
+        pause_requested=True,
+        paused=False,
+    ).ui_state()
+
+    assert ui_state.active is True
+    assert ui_state.waiting is False
+    assert ui_state.waiting_reason == ""
+    assert ui_state.control_waiting_reason == "paused"
+    assert ui_state.pause_pending is True
+
+
+def test_api_route_control_ui_state_marks_paused_control_as_waiting() -> None:
+    ui_state = ApiRouteControlState(
+        active=True,
+        pause_requested=False,
+        paused=True,
+    ).ui_state()
+
+    assert ui_state.active is True
+    assert ui_state.waiting is True
+    assert ui_state.waiting_reason == "paused"
+    assert ui_state.control_waiting_reason == "paused"
+    assert ui_state.pause_pending is False

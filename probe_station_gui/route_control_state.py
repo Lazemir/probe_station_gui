@@ -57,6 +57,15 @@ class ApiRouteControlCommand:
         return self.kind in API_ROUTE_CONTROL_REQUIRES_ACTIVE_KINDS
 
 
+@dataclass(frozen=True)
+class ApiRouteControlUiState:
+    active: bool
+    waiting: bool
+    waiting_reason: str
+    control_waiting_reason: str
+    pause_pending: bool
+
+
 def api_route_control_command_from_payload(
     payload: dict[str, Any],
 ) -> ApiRouteControlCommand:
@@ -265,11 +274,23 @@ class ApiRouteControlState:
     def display_label(self) -> str:
         return self.label or API_ROUTE_CONTROL_DEFAULT_LABEL
 
+    def ui_state(self) -> ApiRouteControlUiState:
+        waiting = bool(self.active and self.paused)
+        pause_pending = bool(self.active and self.pause_requested and not self.paused)
+        return ApiRouteControlUiState(
+            active=bool(self.active),
+            waiting=waiting,
+            waiting_reason="paused" if waiting else "",
+            control_waiting_reason="paused",
+            pause_pending=pause_pending,
+        )
+
 
 __all__ = [
     "API_ROUTE_CONTROL_DEFAULT_LABEL",
     "ApiRouteControlCommand",
     "ApiRouteControlState",
+    "ApiRouteControlUiState",
     "api_route_control_command_from_payload",
     "normalize_route_control_action",
 ]
