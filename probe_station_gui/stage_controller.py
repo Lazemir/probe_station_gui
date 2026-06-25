@@ -18,7 +18,11 @@ import serial
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QImage
 
-from probe_station_gui.fluidnc_protocol import line_indicates_controller_reboot
+from probe_station_gui.fluidnc_protocol import (
+    line_indicates_controller_reboot,
+    parse_float_tuple,
+    parse_fluidnc_status_line,
+)
 from probe_station_gui.motion_prediction import interpolate_position
 from probe_station_gui.settings_manager import parse_fluidnc_axis_max_feedrates
 from probe_station_gui.stage_types import (
@@ -151,8 +155,6 @@ class StageController(QObject):
     FEED_OVERRIDE_MIN_PERCENT = 10
     FEED_OVERRIDE_MAX_PERCENT = 200
     LIMIT_HIT_TOLERANCE = 0.05
-    STATUS_PATTERN = re.compile(r"^<(?P<body>[^>]*)>")
-    STATUS_FIELD_PATTERN = re.compile(r"(?P<key>[A-Za-z]+):(?P<value>.+)")
     SOFT_LIMIT_AXIS_PATTERN = re.compile(r"Soft limit on\s+(?P<axis>[A-Za-z])\b")
     JOG_AXIS_WORD_PATTERN = re.compile(
         r"(?<![A-Za-z])(?P<axis>[XYZABC])(?P<value>[+-]?(?:\d+(?:\.\d*)?|\.\d+))",
@@ -5899,83 +5901,17 @@ class StageController(QObject):
         return None
 
     def _parse_status_line(self, line: str) -> Optional[_Status]:
-        match = self.STATUS_PATTERN.search(line)
-        if not match:
-            return None
-        body = match.group("body")
-        parts = body.split("|")
-        if not parts:
-            return None
-        state = parts[0].strip()
-        if not state:
-            return None
-
-        machine_position: tuple[float, ...] | None = None
-        work_position: tuple[float, ...] | None = None
-        work_offset: tuple[float, ...] | None = None
-        pins: set[str] = set()
-        for part in parts[1:]:
-            field_match = self.STATUS_FIELD_PATTERN.match(part)
-            if not field_match:
-                continue
-            key = field_match.group("key")
-            value = field_match.group("value")
-            if key == "MPos" and self._position_reporting_mode == "machine":
-                machine_position = self._parse_float_tuple(value)
-            elif key == "WPos" and self._position_reporting_mode != "machine":
-                work_position = self._parse_float_tuple(value)
-            elif key == "WCO":
-                work_offset = self._parse_float_tuple(value)
-            elif key == "Pn":
-                pins = {
-                    pin.upper()
-                    for pin in value.strip()
-                    if pin.strip() and pin.upper() in self.AXIS_INDEX
-                }
-
-        if machine_position is not None and len(machine_position) < 3:
-            return None
-        if work_position is not None and len(work_position) < 3:
-            return None
-        if work_offset is not None and len(work_offset) < 3:
-            return None
-        if self._position_reporting_mode == "machine" and machine_position is None:
-            return None
-        if self._position_reporting_mode != "machine" and work_position is None:
-            return None
-
-        coordinate_system = self._active_work_coordinate_system
-        if self._position_reporting_mode != "machine":
-            if (
-                work_offset is None
-                and coordinate_system
-                and coordinate_system in self._controller_coordinate_offsets
-            ):
-                work_offset = self._controller_coordinate_offsets.get(coordinate_system)
-        else:
-            coordinate_system = None
-
-        return _Status(
-            state=state,
-            position=machine_position,
-            display_position=(
-                machine_position
-                if self._position_reporting_mode == "machine"
-                else work_position
-            ),
-            work_position=work_position,
-            work_offset=work_offset,
-            coordinate_system=coordinate_system,
-            pins=pins or None,
+        return parse_fluidnc_status_line(
+            line,
+            position_reporting_mode=self._position_reporting_mode,
+            active_work_coordinate_system=self._active_work_coordinate_system,
+            controller_coordinate_offsets=self._controller_coordinate_offsets,
+            axis_index=self.AXIS_INDEX,
         )
 
     @staticmethod
     def _parse_float_tuple(raw: str) -> tuple[float, ...] | None:
-        try:
-            values = tuple(float(part) for part in raw.split(","))
-        except ValueError:
-            return None
-        return values if values else None
+        return parse_float_tuple(raw)
 
     def _require_position_for_absolute_motion(
         self, status: _Status, *, required_axes: int
