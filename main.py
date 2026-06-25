@@ -157,6 +157,7 @@ from probe_station_gui.route_control_state import (
     api_route_control_command_from_payload,
     api_route_control_legacy_attrs,
     api_route_control_state_from_legacy_attrs,
+    route_shift_save_block_message,
 )
 from probe_station_gui.route_operation_modes import (
     route_operation_measure_enabled,
@@ -9394,16 +9395,17 @@ class Main(QMainWindow):
         api_route_control = self._api_route_control_state_snapshot()
         if api_route_control.active:
             runner_active = False
-        if not runner_active and not api_route_control.active:
-            message = "Route measurement is not ready."
-            self._show_route_measurement_status(message, 5000)
-            return
-        if runner_active and not self._route_measurement_waiting:
-            message = "Pause route measurement before saving shift."
-            self._show_route_measurement_status(message, 5000)
-            return
-        if not runner_active and not api_route_control.paused:
-            message = "Pause API route control before saving shift."
+        runner_waiting = (
+            self._route_measurement_waiting
+            if runner_active
+            else False
+        )
+        message = route_shift_save_block_message(
+            runner_active=runner_active,
+            runner_waiting=runner_waiting,
+            api_route_control=api_route_control,
+        )
+        if message is not None:
             self._show_route_measurement_status(message, 5000)
             return
         if point_number is None:

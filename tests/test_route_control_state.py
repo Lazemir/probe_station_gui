@@ -4,6 +4,7 @@ from probe_station_gui.route_control_state import (
     api_route_control_legacy_attrs,
     api_route_control_state_from_legacy_attrs,
     normalize_route_control_action,
+    route_shift_save_block_message,
 )
 
 
@@ -293,4 +294,58 @@ def test_api_route_control_telegram_status_text_matches_external_states() -> Non
     assert (
         ApiRouteControlState(active=True).telegram_status_text()
         == "API route control running"
+    )
+
+
+def test_route_shift_save_block_message_preserves_readiness_guards() -> None:
+    assert (
+        route_shift_save_block_message(
+            runner_active=False,
+            runner_waiting=False,
+            api_route_control=ApiRouteControlState(),
+        )
+        == "Route measurement is not ready."
+    )
+    assert (
+        route_shift_save_block_message(
+            runner_active=True,
+            runner_waiting=False,
+            api_route_control=ApiRouteControlState(),
+        )
+        == "Pause route measurement before saving shift."
+    )
+    assert (
+        route_shift_save_block_message(
+            runner_active=True,
+            runner_waiting=True,
+            api_route_control=ApiRouteControlState(),
+        )
+        is None
+    )
+
+
+def test_route_shift_save_block_message_preserves_api_control_guards() -> None:
+    assert (
+        route_shift_save_block_message(
+            runner_active=True,
+            runner_waiting=True,
+            api_route_control=ApiRouteControlState(active=True),
+        )
+        == "Pause API route control before saving shift."
+    )
+    assert (
+        route_shift_save_block_message(
+            runner_active=False,
+            runner_waiting=False,
+            api_route_control=ApiRouteControlState(active=True),
+        )
+        == "Pause API route control before saving shift."
+    )
+    assert (
+        route_shift_save_block_message(
+            runner_active=False,
+            runner_waiting=False,
+            api_route_control=ApiRouteControlState(active=True, paused=True),
+        )
+        is None
     )
