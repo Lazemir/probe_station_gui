@@ -58,6 +58,12 @@ from probe_station_gui.settings_sections import (
     CoordinateSystemSettings,
     LoggingSettings,
 )
+from probe_station_gui.telegram_settings import (
+    TELEGRAM_ALERT_TYPES,
+    TelegramSettings,
+    default_telegram_alerts,
+    parse_telegram_alerts,
+)
 from probe_station_gui.telegram_notifications import (
     load_global_bot_token,
     save_global_bot_token,
@@ -206,22 +212,6 @@ LCR_METER_TYPE_LABELS: dict[str, str] = {
     LCR_METER_TYPE_KEITHLEY: "Keithley 2400 + 2182A",
 }
 
-TELEGRAM_ALERT_TYPES: tuple[tuple[str, str], ...] = (
-    ("route_attention", "Route needs attention"),
-    ("route_started", "Route measurement started"),
-    ("route_completed", "Route measurement complete"),
-    ("route_failed", "Route measurement stopped or failed"),
-    ("contact_seek_failed", "Contact seek failed"),
-    ("camera_error", "Camera error"),
-)
-
-
-def default_telegram_alerts() -> Dict[str, bool]:
-    """Return default Telegram alert selections."""
-
-    return {key: True for key, _label in TELEGRAM_ALERT_TYPES}
-
-
 @dataclass(eq=True, frozen=True)
 class KeyBinding:
     """Representation of a single captured key binding."""
@@ -251,50 +241,6 @@ class KeyBinding:
             native_scan_code=int(data.get("native_scan_code", 0)),
             text=str(data.get("text", "")),
         )
-
-
-@dataclass
-class TelegramSettings:
-    """Configuration for Telegram notifications."""
-
-    enabled: bool = False
-    bot_token: str = ""
-    bot_username: str = ""
-    chat_id: str = ""
-    chat_title: str = ""
-    linked_at_utc: str = ""
-    alerts: Dict[str, bool] = field(default_factory=default_telegram_alerts)
-
-    def clone(self) -> "TelegramSettings":
-        """Return a copy of the Telegram notification preferences."""
-
-        return TelegramSettings(
-            enabled=self.enabled,
-            bot_token=self.bot_token,
-            bot_username=self.bot_username,
-            chat_id=self.chat_id,
-            chat_title=self.chat_title,
-            linked_at_utc=self.linked_at_utc,
-            alerts=dict(self.alerts),
-        )
-
-    def to_dict(self) -> dict[str, bool | str | dict[str, bool]]:
-        """Serialize Telegram preferences without the machine-wide bot token."""
-
-        return {
-            "enabled": self.enabled,
-            "bot_username": self.bot_username,
-            "chat_id": self.chat_id,
-            "chat_title": self.chat_title,
-            "linked_at_utc": self.linked_at_utc,
-            "alerts": dict(self.alerts),
-        }
-
-    def alert_enabled(self, alert_key: str) -> bool:
-        """Return whether a notification type is enabled."""
-
-        defaults = default_telegram_alerts()
-        return bool(self.alerts.get(alert_key, defaults.get(alert_key, False)))
 
 
 @dataclass
@@ -1732,15 +1678,7 @@ class SettingsManager:
         return settings
 
     def _parse_telegram_alerts(self, raw_alerts) -> Dict[str, bool]:
-        alerts = default_telegram_alerts()
-        if isinstance(raw_alerts, dict):
-            for key, _label in TELEGRAM_ALERT_TYPES:
-                if key in raw_alerts:
-                    alerts[key] = self._coerce_bool(
-                        raw_alerts.get(key),
-                        default=alerts[key],
-                    )
-        return alerts
+        return parse_telegram_alerts(raw_alerts)
 
     def _parse_feedrates(self, raw_feedrates, legacy_presets) -> FeedrateSettings:
         """Normalise persisted feedrate data supporting legacy layouts."""
