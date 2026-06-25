@@ -9130,6 +9130,20 @@ class Main(QMainWindow):
                 "Stopping route measurement."
             )
 
+    def _show_route_measurement_status(
+        self,
+        message: str,
+        timeout_ms: int | None = None,
+    ) -> None:
+        if timeout_ms is None:
+            self._show_status(message)
+        else:
+            self._show_status(message, timeout_ms)
+        if self.design_navigator_panel is not None:
+            self.design_navigator_panel.set_route_measurement_status(message)
+        if self._route_measurement_dialog is not None:
+            self._route_measurement_dialog.set_status(message)
+
     def _request_route_measurement_point_correction(
         self,
         pending_point_number: int | None = None,
@@ -9156,11 +9170,7 @@ class Main(QMainWindow):
                 "Stopping contact measurement, then measuring "
                 f"point {int(pending_point_number)}."
             )
-        self._show_status(message, 5000)
-        if self.design_navigator_panel is not None:
-            self.design_navigator_panel.set_route_measurement_status(message)
-        if self._route_measurement_dialog is not None:
-            self._route_measurement_dialog.set_status(message)
+        self._show_route_measurement_status(message, 5000)
 
     def _submit_route_measurement_confirmation(self, action: str) -> None:
         api_action = self._api_route_control_state_snapshot().confirmation_api_action(
@@ -9265,11 +9275,7 @@ class Main(QMainWindow):
         context_result = self._api_contact_context(int(point_number))
         if not context_result.get("accepted", False):
             message = str(context_result.get("message") or "Route contact move rejected.")
-            self._show_status(message, 6000)
-            if self._route_measurement_dialog is not None:
-                self._route_measurement_dialog.set_status(message)
-            if self.design_navigator_panel is not None:
-                self.design_navigator_panel.set_route_measurement_status(message)
+            self._show_route_measurement_status(message, 6000)
             return
         point = context_result["point"]
         if not route_active or self._route_measurement_waiting:
@@ -9281,11 +9287,7 @@ class Main(QMainWindow):
                     runner.set_current_adjustment_point(int(point.index))
         needle_feedrate = self._current_needle_feedrate()
         message = f"Route contact move: point {int(point.index)} {point.label}."
-        self._show_status(message, 5000)
-        if self._route_measurement_dialog is not None:
-            self._route_measurement_dialog.set_status(message)
-        if self.design_navigator_panel is not None:
-            self.design_navigator_panel.set_route_measurement_status(message)
+        self._show_route_measurement_status(message, 5000)
         thread = threading.Thread(
             target=self._run_route_contact_move,
             args=(point, needle_feedrate),
@@ -9345,11 +9347,7 @@ class Main(QMainWindow):
         self._route_contact_move_thread = None
         self._update_stage_coordinate_apply_state()
         timeout_ms = 5000 if success else 8000
-        self._show_status(message, timeout_ms)
-        if self.design_navigator_panel is not None:
-            self.design_navigator_panel.set_route_measurement_status(message)
-        if self._route_measurement_dialog is not None:
-            self._route_measurement_dialog.set_status(message)
+        self._show_route_measurement_status(message, timeout_ms)
 
     def _request_pause_route_measurement(self) -> None:
         api_route_pause_action = (
@@ -9398,27 +9396,15 @@ class Main(QMainWindow):
             runner_active = False
         if not runner_active and not api_route_control.active:
             message = "Route measurement is not ready."
-            self._show_status(message, 5000)
-            if self.design_navigator_panel is not None:
-                self.design_navigator_panel.set_route_measurement_status(message)
-            if self._route_measurement_dialog is not None:
-                self._route_measurement_dialog.set_status(message)
+            self._show_route_measurement_status(message, 5000)
             return
         if runner_active and not self._route_measurement_waiting:
             message = "Pause route measurement before saving shift."
-            self._show_status(message, 5000)
-            if self.design_navigator_panel is not None:
-                self.design_navigator_panel.set_route_measurement_status(message)
-            if self._route_measurement_dialog is not None:
-                self._route_measurement_dialog.set_status(message)
+            self._show_route_measurement_status(message, 5000)
             return
         if not runner_active and not api_route_control.paused:
             message = "Pause API route control before saving shift."
-            self._show_status(message, 5000)
-            if self.design_navigator_panel is not None:
-                self.design_navigator_panel.set_route_measurement_status(message)
-            if self._route_measurement_dialog is not None:
-                self._route_measurement_dialog.set_status(message)
+            self._show_route_measurement_status(message, 5000)
             return
         if point_number is None:
             if self._route_measurement_dialog is not None:
