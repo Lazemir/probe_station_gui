@@ -43,6 +43,16 @@ from probe_station_gui.stage_axis_mapping import (
     axis_z_gcode_coordinate_for_display,
     evaluate_polynomial,
 )
+from probe_station_gui.stage_jog_commands import (
+    JOG_AXIS_WORD_PATTERN,
+    JOG_FEEDRATE_WORD_PATTERN,
+    absolute_axis_targets_jog_command,
+    format_gcode_value,
+    jog_command_feedrate,
+    move_vector_from_axis_distances,
+    move_vector_from_jog_command,
+    relative_jog_command_to_absolute,
+)
 from probe_station_gui.stage_types import (
     AutofocusResult,
     MoveVector,
@@ -174,14 +184,8 @@ class StageController(QObject):
     FEED_OVERRIDE_MAX_PERCENT = 200
     LIMIT_HIT_TOLERANCE = 0.05
     SOFT_LIMIT_AXIS_PATTERN = re.compile(r"Soft limit on\s+(?P<axis>[A-Za-z])\b")
-    JOG_AXIS_WORD_PATTERN = re.compile(
-        r"(?<![A-Za-z])(?P<axis>[XYZABC])(?P<value>[+-]?(?:\d+(?:\.\d*)?|\.\d+))",
-        re.IGNORECASE,
-    )
-    JOG_FEEDRATE_WORD_PATTERN = re.compile(
-        r"(?<![A-Za-z])F(?P<value>[+-]?(?:\d+(?:\.\d*)?|\.\d+))",
-        re.IGNORECASE,
-    )
+    JOG_AXIS_WORD_PATTERN = JOG_AXIS_WORD_PATTERN
+    JOG_FEEDRATE_WORD_PATTERN = JOG_FEEDRATE_WORD_PATTERN
     HOMED_PATTERN = re.compile(r"\|H:([A-Za-z]+)")
     HOMED_MSG_PATTERN = re.compile(r"^\[MSG:Homed:(?P<axes>[A-Za-z]+)\]")
     MODAL_STATE_PATTERN = re.compile(r"^\[GC:(?P<modal>[^\]]+)\]$")
@@ -2074,77 +2078,32 @@ class StageController(QObject):
         )
 
     def _move_vector_from_jog_command(self, command: str) -> MoveVector | None:
-        stripped = command.strip()
-        if not stripped.upper().startswith("$J="):
-            return None
-        distances: list[tuple[str, float]] = []
-        for match in self.JOG_AXIS_WORD_PATTERN.finditer(stripped):
-            axis = match.group("axis").upper()
-            try:
-                distance = float(match.group("value"))
-            except (TypeError, ValueError):
-                continue
-            distances.append((axis, distance))
-        if not distances:
-            return None
-        return self._move_vector_from_axis_distances(distances)
+        return move_vector_from_jog_command(command, axis_index=self.AXIS_INDEX)
 
     def _jog_command_feedrate(self, command: str) -> float | None:
-        feedrate: float | None = None
-        for match in self.JOG_FEEDRATE_WORD_PATTERN.finditer(command.strip()):
-            try:
-                value = float(match.group("value"))
-            except (TypeError, ValueError):
-                continue
-            if math.isfinite(value):
-                feedrate = max(self.MIN_FEEDRATE, value)
-        return feedrate
+        return jog_command_feedrate(command, min_feedrate=self.MIN_FEEDRATE)
 
     def _absolute_jog_command_for_relative_move(
         self,
         command: str,
         move: MoveVector,
     ) -> str:
-        normalized = command.strip().upper().replace("$J=", " ")
-        tokens = set(normalized.split())
-        if "G91" not in tokens or "G90" in tokens:
-            return command
-        position = self._last_stage_position
-        if position is None:
-            return command
-        targets: dict[str, float] = {}
-        for axis, delta in move.items():
-            if abs(delta) < 1e-6:
-                continue
-            index = self.AXIS_INDEX.get(axis)
-            if index is None or index >= len(position):
-                return command
-            if self._cached_jog_axis_skip_reason(axis, position):
-                return command
-            targets[axis] = float(position[index]) + float(delta)
-        if not targets:
-            return command
-        feedrate = self._jog_command_feedrate(command)
-        if feedrate is None:
-            return command
-        return self._absolute_axis_targets_jog_command(targets, feedrate)
+        return relative_jog_command_to_absolute(
+            command,
+            move,
+            position=self._last_stage_position,
+            axis_index=self.AXIS_INDEX,
+            min_feedrate=self.MIN_FEEDRATE,
+            machine_position_mode=self._position_reporting_mode == "machine",
+            axis_skip_reason=self._cached_jog_axis_skip_reason,
+        )
 
     def _move_vector_from_axis_distances(
         self, distances: list[tuple[str, float]] | tuple[tuple[str, float], ...]
     ) -> MoveVector:
-        values = {axis: 0.0 for axis in self.AXIS_INDEX}
-        for axis, distance in distances:
-            normalized_axis = str(axis).strip().upper()
-            if normalized_axis not in values:
-                continue
-            values[normalized_axis] += float(distance)
-        return MoveVector(
-            x=values["X"],
-            y=values["Y"],
-            z=values["Z"],
-            a=values["A"],
-            b=values["B"],
-            c=values["C"],
+        return move_vector_from_axis_distances(
+            distances,
+            axis_index=self.AXIS_INDEX,
         )
 
     def _clip_relative_move_to_software_limits(
@@ -4556,23 +4515,12 @@ class StageController(QObject):
         targets: dict[str, float],
         feedrate: float,
     ) -> str:
-        ordered_targets = {
-            axis: float(targets[axis])
-            for axis in self.AXIS_INDEX
-            if axis in targets
-        }
-        if not ordered_targets:
-            return ""
-        move_parts = [
-            f"{axis}{value:.4f}"
-            for axis, value in ordered_targets.items()
-        ]
-        command_parts = ["$J=G90", "G21"]
-        if self._position_reporting_mode == "machine":
-            command_parts.append("G53")
-        command_parts.extend(move_parts)
-        command_parts.append(f"F{self._format_gcode_value(feedrate)}")
-        return " ".join(command_parts)
+        return absolute_axis_targets_jog_command(
+            targets,
+            feedrate,
+            axis_order=self.AXIS_INDEX,
+            machine_position_mode=self._position_reporting_mode == "machine",
+        )
 
     @staticmethod
     def _absolute_move_distance_for_timeout(
@@ -4594,9 +4542,7 @@ class StageController(QObject):
 
     @staticmethod
     def _format_gcode_value(value: float, decimals: int = 3) -> str:
-        text = f"{float(value):.{int(decimals)}f}"
-        text = text.rstrip("0").rstrip(".")
-        return text or "0"
+        return format_gcode_value(value, decimals)
 
     def axis_a_gcode_coordinate_for_lowering(self, lowering_mm: float) -> float:
         """Map a physical A-axis lowering in millimeters to an absolute G-code A coordinate."""
