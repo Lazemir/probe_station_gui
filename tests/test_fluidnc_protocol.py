@@ -2,6 +2,7 @@ from probe_station_gui.fluidnc_protocol import (
     line_indicates_controller_reboot,
     line_indicates_controller_startup,
     parse_fluidnc_status_line,
+    parse_startup_axis_limits,
 )
 
 
@@ -81,3 +82,20 @@ def test_parse_fluidnc_status_line_rejects_truncated_machine_position() -> None:
     )
 
     assert status is None
+
+
+def test_parse_startup_axis_limits() -> None:
+    limits = parse_startup_axis_limits(
+        [
+            "[MSG:INFO: Axis X (0.000,64.000)]",
+            "[MSG:INFO: Axis Y (0.000,64.000)]",
+            "[MSG:INFO: Axis A (-0.100,0.000)]",
+            "ok",
+        ]
+    )
+
+    assert limits == {
+        "X": (0.0, 64.0),
+        "Y": (0.0, 64.0),
+        "A": (-0.1, 0.0),
+    }

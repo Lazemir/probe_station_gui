@@ -22,6 +22,7 @@ from probe_station_gui.fluidnc_protocol import (
     line_indicates_controller_reboot,
     parse_float_tuple,
     parse_fluidnc_status_line,
+    parse_startup_axis_limits,
 )
 from probe_station_gui.motion_prediction import interpolate_position
 from probe_station_gui.needle_motion_profile import (
@@ -166,9 +167,6 @@ class StageController(QObject):
     JOG_FEEDRATE_WORD_PATTERN = re.compile(
         r"(?<![A-Za-z])F(?P<value>[+-]?(?:\d+(?:\.\d*)?|\.\d+))",
         re.IGNORECASE,
-    )
-    AXIS_RANGE_PATTERN = re.compile(
-        r"^\[MSG:INFO: Axis (?P<axis>[A-Za-z]) \((?P<min>-?\d+\.?\d*),(?P<max>-?\d+\.?\d*)\)\]"
     )
     HOMED_PATTERN = re.compile(r"\|H:([A-Za-z]+)")
     HOMED_MSG_PATTERN = re.compile(r"^\[MSG:Homed:(?P<axes>[A-Za-z]+)\]")
@@ -5404,19 +5402,7 @@ class StageController(QObject):
 
     @staticmethod
     def _parse_startup_limits(lines: list[str]) -> dict[str, tuple[float, float]]:
-        limits: dict[str, tuple[float, float]] = {}
-        for line in lines:
-            match = StageController.AXIS_RANGE_PATTERN.match(line)
-            if not match:
-                continue
-            axis = match.group("axis").upper()
-            try:
-                min_value = float(match.group("min"))
-                max_value = float(match.group("max"))
-            except ValueError:
-                continue
-            limits[axis] = (min_value, max_value)
-        return limits
+        return parse_startup_axis_limits(lines)
 
     def _next_queued_write_sequence(self) -> int:
         sequence = self._queued_write_sequence

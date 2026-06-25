@@ -21,6 +21,9 @@ CONTROLLER_STARTUP_BANNER_TOKENS = (
 FLUIDNC_AXIS_INDEX = {"X": 0, "Y": 1, "Z": 2, "A": 3, "B": 4, "C": 5}
 STATUS_PATTERN = re.compile(r"^<(?P<body>[^>]*)>")
 STATUS_FIELD_PATTERN = re.compile(r"(?P<key>[A-Za-z]+):(?P<value>.+)")
+AXIS_RANGE_PATTERN = re.compile(
+    r"^\[MSG:INFO: Axis (?P<axis>[A-Za-z]) \((?P<min>-?\d+\.?\d*),(?P<max>-?\d+\.?\d*)\)\]"
+)
 
 
 def _normalized_line(line: str) -> str:
@@ -132,7 +135,26 @@ def parse_float_tuple(raw: str) -> tuple[float, ...] | None:
     return values if values else None
 
 
+def parse_startup_axis_limits(lines: list[str]) -> dict[str, tuple[float, float]]:
+    """Parse FluidNC startup axis range messages."""
+
+    limits: dict[str, tuple[float, float]] = {}
+    for line in lines:
+        match = AXIS_RANGE_PATTERN.match(line)
+        if not match:
+            continue
+        axis = match.group("axis").upper()
+        try:
+            min_value = float(match.group("min"))
+            max_value = float(match.group("max"))
+        except ValueError:
+            continue
+        limits[axis] = (min_value, max_value)
+    return limits
+
+
 __all__ = [
+    "AXIS_RANGE_PATTERN",
     "CONTROLLER_REBOOT_LINE_PREFIXES",
     "CONTROLLER_REBOOT_TOKENS",
     "CONTROLLER_STARTUP_BANNER_TOKENS",
@@ -143,4 +165,5 @@ __all__ = [
     "line_indicates_controller_startup",
     "parse_float_tuple",
     "parse_fluidnc_status_line",
+    "parse_startup_axis_limits",
 ]
