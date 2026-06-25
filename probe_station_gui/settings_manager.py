@@ -21,6 +21,7 @@ from probe_station_gui.feedrate_config import (
     parse_feedrate_list,
     select_feedrate_default,
 )
+from probe_station_gui.jog_config import JogSettingsDefaults, parse_jog_settings
 from probe_station_gui.logging_config import configure_logging
 from probe_station_gui.telegram_notifications import (
     load_global_bot_token,
@@ -1852,151 +1853,47 @@ class SettingsManager:
     def _parse_jog(self, raw_jog) -> JogSettings:
         """Normalise persisted jog settings."""
 
-        mode = self.DEFAULT_JOG_MODE
-        linear_distance = self.DEFAULT_LINEAR_JOG_DISTANCE_MM
-        rotary_distance = self.DEFAULT_ROTARY_JOG_DISTANCE_DEG
-        motion_safety_disabled = self.DEFAULT_MOTION_SAFETY_DISABLED
-        manual_axis = self.DEFAULT_MANUAL_AXIS
-        manual_axis_distance = self.DEFAULT_MANUAL_AXIS_DISTANCE_MM
-        manual_axis_mode = self.DEFAULT_MANUAL_AXIS_MODE
-        manual_axis_feedrate = self.DEFAULT_MANUAL_AXIS_FEEDRATE_MM_MIN
-        focus_feedrate = self.DEFAULT_FOCUS_FEEDRATE_MM_MIN
-        focus_step_feedrate = self.DEFAULT_FOCUS_STEP_FEEDRATE_MM_MIN
-        needles_step_feedrate = self.DEFAULT_NEEDLES_STEP_FEEDRATE_MM_MIN
-        turntable_feedrate = self.DEFAULT_TURNTABLE_FEEDRATE_MM_MIN
-        turntable_step_feedrate = self.DEFAULT_TURNTABLE_STEP_FEEDRATE_MM_MIN
-        if isinstance(raw_jog, dict):
-            legacy_unsafe = self._coerce_bool(
-                raw_jog.get("unsafe_motion_enabled", False),
-                default=False,
-            )
-            candidate = raw_jog.get("mode", raw_jog.get("control_mode", mode))
-            if isinstance(candidate, str):
-                candidate = candidate.strip().lower()
-                if candidate in {"jog", "step"}:
-                    mode = candidate
-            candidate = raw_jog.get("linear_distance_mm", linear_distance)
-            try:
-                if isinstance(candidate, (int, float, str)):
-                    linear_distance = float(candidate)
-            except (TypeError, ValueError):
-                linear_distance = self.DEFAULT_LINEAR_JOG_DISTANCE_MM
-            candidate = raw_jog.get("rotary_distance_deg", rotary_distance)
-            try:
-                if isinstance(candidate, (int, float, str)):
-                    rotary_distance = float(candidate)
-            except (TypeError, ValueError):
-                rotary_distance = self.DEFAULT_ROTARY_JOG_DISTANCE_DEG
-            motion_safety_disabled = self._coerce_bool(
-                raw_jog.get("motion_safety_disabled", legacy_unsafe),
-                default=self.DEFAULT_MOTION_SAFETY_DISABLED,
-            )
-            candidate = raw_jog.get("manual_axis", manual_axis)
-            if isinstance(candidate, str):
-                manual_axis = candidate.strip().upper() or manual_axis
-            candidate = raw_jog.get("manual_axis_mode", manual_axis_mode)
-            if isinstance(candidate, str):
-                manual_axis_mode = candidate.strip().upper() or manual_axis_mode
-            candidate = raw_jog.get("manual_axis_distance_mm", manual_axis_distance)
-            try:
-                if isinstance(candidate, (int, float, str)):
-                    manual_axis_distance = float(candidate)
-            except (TypeError, ValueError):
-                manual_axis_distance = self.DEFAULT_MANUAL_AXIS_DISTANCE_MM
-            candidate = raw_jog.get(
-                "manual_axis_feedrate_mm_min", manual_axis_feedrate
-            )
-            try:
-                if isinstance(candidate, (int, float, str)):
-                    manual_axis_feedrate = float(candidate)
-            except (TypeError, ValueError):
-                manual_axis_feedrate = self.DEFAULT_MANUAL_AXIS_FEEDRATE_MM_MIN
-            candidate = raw_jog.get("focus_feedrate_mm_min", focus_feedrate)
-            try:
-                if isinstance(candidate, (int, float, str)):
-                    focus_feedrate = float(candidate)
-            except (TypeError, ValueError):
-                focus_feedrate = self.DEFAULT_FOCUS_FEEDRATE_MM_MIN
-            candidate = raw_jog.get(
-                "focus_step_feedrate_mm_min",
-                raw_jog.get("focus_feedrate_mm_min", focus_step_feedrate),
-            )
-            try:
-                if isinstance(candidate, (int, float, str)):
-                    focus_step_feedrate = float(candidate)
-            except (TypeError, ValueError):
-                focus_step_feedrate = self.DEFAULT_FOCUS_STEP_FEEDRATE_MM_MIN
-            candidate = raw_jog.get(
-                "needles_step_feedrate_mm_min",
-                needles_step_feedrate,
-            )
-            try:
-                if isinstance(candidate, (int, float, str)):
-                    needles_step_feedrate = float(candidate)
-            except (TypeError, ValueError):
-                needles_step_feedrate = self.DEFAULT_NEEDLES_STEP_FEEDRATE_MM_MIN
-            candidate = raw_jog.get("turntable_feedrate_mm_min", turntable_feedrate)
-            try:
-                if isinstance(candidate, (int, float, str)):
-                    turntable_feedrate = float(candidate)
-            except (TypeError, ValueError):
-                turntable_feedrate = self.DEFAULT_TURNTABLE_FEEDRATE_MM_MIN
-            candidate = raw_jog.get(
-                "turntable_step_feedrate_mm_min",
-                raw_jog.get("turntable_feedrate_mm_min", turntable_step_feedrate),
-            )
-            try:
-                if isinstance(candidate, (int, float, str)):
-                    turntable_step_feedrate = float(candidate)
-            except (TypeError, ValueError):
-                turntable_step_feedrate = (
+        config = parse_jog_settings(
+            raw_jog,
+            JogSettingsDefaults(
+                mode=self.DEFAULT_JOG_MODE,
+                linear_distance_mm=self.DEFAULT_LINEAR_JOG_DISTANCE_MM,
+                rotary_distance_deg=self.DEFAULT_ROTARY_JOG_DISTANCE_DEG,
+                motion_safety_disabled=self.DEFAULT_MOTION_SAFETY_DISABLED,
+                manual_axis=self.DEFAULT_MANUAL_AXIS,
+                manual_axis_distance_mm=self.DEFAULT_MANUAL_AXIS_DISTANCE_MM,
+                manual_axis_mode=self.DEFAULT_MANUAL_AXIS_MODE,
+                manual_axis_feedrate_mm_min=(
+                    self.DEFAULT_MANUAL_AXIS_FEEDRATE_MM_MIN
+                ),
+                focus_feedrate_mm_min=self.DEFAULT_FOCUS_FEEDRATE_MM_MIN,
+                focus_step_feedrate_mm_min=self.DEFAULT_FOCUS_STEP_FEEDRATE_MM_MIN,
+                needles_step_feedrate_mm_min=(
+                    self.DEFAULT_NEEDLES_STEP_FEEDRATE_MM_MIN
+                ),
+                turntable_feedrate_mm_min=self.DEFAULT_TURNTABLE_FEEDRATE_MM_MIN,
+                turntable_step_feedrate_mm_min=(
                     self.DEFAULT_TURNTABLE_STEP_FEEDRATE_MM_MIN
-                )
-        if linear_distance <= 0:
-            linear_distance = self.DEFAULT_LINEAR_JOG_DISTANCE_MM
-        if rotary_distance <= 0:
-            rotary_distance = self.DEFAULT_ROTARY_JOG_DISTANCE_DEG
-        if manual_axis not in self.MANUAL_JOG_AXES:
-            manual_axis = self.DEFAULT_MANUAL_AXIS
-        if manual_axis_distance <= 0:
-            manual_axis_distance = self.DEFAULT_MANUAL_AXIS_DISTANCE_MM
-        if manual_axis_mode not in self.MANUAL_AXIS_MODES:
-            manual_axis_mode = self.DEFAULT_MANUAL_AXIS_MODE
-        if manual_axis_feedrate <= 0:
-            manual_axis_feedrate = self.DEFAULT_MANUAL_AXIS_FEEDRATE_MM_MIN
-        manual_axis_feedrate = max(self.MIN_FEEDRATE_MM_MIN, manual_axis_feedrate)
-        if focus_feedrate <= 0:
-            focus_feedrate = self.DEFAULT_FOCUS_FEEDRATE_MM_MIN
-        focus_feedrate = max(self.MIN_FEEDRATE_MM_MIN, focus_feedrate)
-        if focus_step_feedrate <= 0:
-            focus_step_feedrate = self.DEFAULT_FOCUS_STEP_FEEDRATE_MM_MIN
-        focus_step_feedrate = max(self.MIN_FEEDRATE_MM_MIN, focus_step_feedrate)
-        if needles_step_feedrate <= 0:
-            needles_step_feedrate = self.DEFAULT_NEEDLES_STEP_FEEDRATE_MM_MIN
-        needles_step_feedrate = max(self.MIN_FEEDRATE_MM_MIN, needles_step_feedrate)
-        if turntable_feedrate <= 0:
-            turntable_feedrate = self.DEFAULT_TURNTABLE_FEEDRATE_MM_MIN
-        turntable_feedrate = max(self.MIN_FEEDRATE_MM_MIN, turntable_feedrate)
-        if turntable_step_feedrate <= 0:
-            turntable_step_feedrate = self.DEFAULT_TURNTABLE_STEP_FEEDRATE_MM_MIN
-        turntable_step_feedrate = max(
-            self.MIN_FEEDRATE_MM_MIN,
-            turntable_step_feedrate,
+                ),
+                min_feedrate_mm_min=self.MIN_FEEDRATE_MM_MIN,
+                manual_axes=self.MANUAL_JOG_AXES,
+                manual_axis_modes=self.MANUAL_AXIS_MODES,
+            ),
         )
         return JogSettings(
-            mode=mode,
-            linear_distance_mm=linear_distance,
-            rotary_distance_deg=rotary_distance,
-            motion_safety_disabled=motion_safety_disabled,
-            manual_axis=manual_axis,
-            manual_axis_distance_mm=manual_axis_distance,
-            manual_axis_mode=manual_axis_mode,
-            manual_axis_feedrate_mm_min=manual_axis_feedrate,
-            focus_feedrate_mm_min=focus_feedrate,
-            focus_step_feedrate_mm_min=focus_step_feedrate,
-            needles_step_feedrate_mm_min=needles_step_feedrate,
-            turntable_feedrate_mm_min=turntable_feedrate,
-            turntable_step_feedrate_mm_min=turntable_step_feedrate,
+            mode=config.mode,
+            linear_distance_mm=config.linear_distance_mm,
+            rotary_distance_deg=config.rotary_distance_deg,
+            motion_safety_disabled=config.motion_safety_disabled,
+            manual_axis=config.manual_axis,
+            manual_axis_distance_mm=config.manual_axis_distance_mm,
+            manual_axis_mode=config.manual_axis_mode,
+            manual_axis_feedrate_mm_min=config.manual_axis_feedrate_mm_min,
+            focus_feedrate_mm_min=config.focus_feedrate_mm_min,
+            focus_step_feedrate_mm_min=config.focus_step_feedrate_mm_min,
+            needles_step_feedrate_mm_min=config.needles_step_feedrate_mm_min,
+            turntable_feedrate_mm_min=config.turntable_feedrate_mm_min,
+            turntable_step_feedrate_mm_min=config.turntable_step_feedrate_mm_min,
         )
 
     def _parse_click_to_move(self, raw_click_to_move) -> ClickToMoveSettings:
