@@ -2440,71 +2440,65 @@ class JoystickWindow(QWidget):
 
     def eventFilter(self, obj, event):  # type: ignore[override]
         if event.type() in (QEvent.KeyPress, QEvent.KeyRelease, QEvent.ShortcutOverride):
-            event_type_name = {
-                QEvent.KeyPress: "KeyPress",
-                QEvent.KeyRelease: "KeyRelease",
-                QEvent.ShortcutOverride: "ShortcutOverride",
-            }.get(event.type(), str(int(event.type())))
-            key_value = event.key() if hasattr(event, "key") else None
-            scan_code_value = (
-                native_scan_code_to_int(event.nativeScanCode())
-                if hasattr(event, "nativeScanCode")
-                else 0
-            )
-            text_value = event.text() if hasattr(event, "text") else ""
-            modifiers_value = (
-                keyboard_modifiers_to_int(event.modifiers())
-                if hasattr(event, "modifiers")
-                else 0
-            )
-            source_name = (
-                obj.objectName()
-                if hasattr(obj, "objectName") and obj.objectName()
-                else obj.__class__.__name__ if hasattr(obj, "__class__") else str(obj)
-            )
-            logger.debug(
-                "Global key event: type=%s key=%s scan=%s text=%r modifiers=%s source=%s",
-                event_type_name,
-                key_value,
-                scan_code_value,
-                text_value,
-                modifiers_value,
-                source_name,
-            )
+            self._log_global_key_event(obj, event)
         if event.type() == QEvent.ShortcutOverride:
             if self._should_process_global_event(
                 obj, require_motion_ready=False
             ) and self._is_control_mode_toggle_event(event):
-                event.accept()
-                return True
+                return self._accept_global_event(event)
             if self._should_process_global_event(obj):
                 identifier, mapping = self._mapping_from_event(event)
                 if identifier and mapping:
-                    event.accept()
-                    return True
+                    return self._accept_global_event(event)
         elif event.type() == QEvent.KeyPress:
             if self._should_process_global_event(
                 obj, require_motion_ready=False
             ) and self._handle_control_mode_toggle_press(event):
-                event.accept()
-                return True
+                return self._accept_global_event(event)
             if self._should_process_global_event(obj) and self._handle_key_press_event(event):
-                event.accept()
-                return True
+                return self._accept_global_event(event)
         elif event.type() == QEvent.KeyRelease:
             if self._should_process_global_event(
                 obj, require_motion_ready=False
             ) and self._handle_control_mode_toggle_release(event):
-                event.accept()
-                return True
+                return self._accept_global_event(event)
             if self._should_process_global_event(obj) and self._handle_key_release_event(event):
-                event.accept()
-                return True
+                return self._accept_global_event(event)
         elif event.type() == QEvent.Wheel:
             if self._should_process_global_event(obj) and self._handle_wheel_event(event, obj):
-                event.accept()
-                return True
+                return self._accept_global_event(event)
         return super().eventFilter(obj, event)
+
+    def _log_global_key_event(self, obj, event) -> None:
+        event_type_name = {
+            QEvent.KeyPress: "KeyPress",
+            QEvent.KeyRelease: "KeyRelease",
+            QEvent.ShortcutOverride: "ShortcutOverride",
+        }.get(event.type(), str(int(event.type())))
+        key_value = getattr(event, "key", lambda: None)()
+        scan_code_value = native_scan_code_to_int(
+            getattr(event, "nativeScanCode", lambda: 0)()
+        )
+        text_value = getattr(event, "text", lambda: "")()
+        modifiers_value = keyboard_modifiers_to_int(
+            getattr(event, "modifiers", lambda: 0)()
+        )
+        object_name = getattr(obj, "objectName", lambda: "")()
+        source_name = object_name or obj.__class__.__name__
+        logger.debug(
+            "Global key event: type=%s key=%s scan=%s text=%r modifiers=%s source=%s",
+            event_type_name,
+            key_value,
+            scan_code_value,
+            text_value,
+            modifiers_value,
+            source_name,
+        )
+
+    @staticmethod
+    def _accept_global_event(event) -> bool:
+        event.accept()
+        return True
 
     def _should_process_global_event(self, obj, *, require_motion_ready: bool = True) -> bool:
         if not self.isVisible():
