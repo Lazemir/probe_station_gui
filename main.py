@@ -136,7 +136,10 @@ from probe_station_gui.objective_offsets import (
     objective_xy_offset_is_configured,
     raw_stage_to_camera_stage,
 )
-from probe_station_gui.route_model import MeasurementRoute
+from probe_station_gui.route_model import (
+    MeasurementRoute,
+    structure_number_from_labels,
+)
 from probe_station_gui.route_measurement import (
     ROUTE_OPERATION_MEASURE,
     ROUTE_OPERATION_PHOTO,
@@ -3900,31 +3903,22 @@ class Main(QMainWindow):
     def _api_structure_number_for_measurement_point(
         point: RouteMeasurementPoint,
     ) -> int:
-        for value in (point.label, point.point_id):
-            match = re.search(r"(\d+)\s*$", str(value).strip())
-            if match is not None:
-                try:
-                    return int(match.group(1))
-                except ValueError:
-                    pass
-        return int(point.index)
+        return structure_number_from_labels(
+            point.label,
+            point.point_id,
+            default=point.index,
+        )
 
     @staticmethod
     def _api_structure_number_for_route_point(
         route_index: int,
         route_point: object,
     ) -> int:
-        for value in (
+        return structure_number_from_labels(
             getattr(route_point, "label", ""),
             getattr(route_point, "id", ""),
-        ):
-            match = re.search(r"(\d+)\s*$", str(value).strip())
-            if match is not None:
-                try:
-                    return int(match.group(1))
-                except ValueError:
-                    pass
-        return int(route_index)
+            default=route_index,
+        )
 
     @staticmethod
     def _api_timestamp_utc() -> str:

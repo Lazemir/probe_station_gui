@@ -1,46 +1,17 @@
-import importlib.util
-import sys
 import tempfile
-import types
 import unittest
 from pathlib import Path
 
 import numpy as np
 
+from probe_station_gui.design_model import DesignDocument
+from probe_station_gui.route_model import (
+    MeasurementRoute,
+    RouteModelError,
+    structure_number_from_labels,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-
-
-def _ensure_package_stub() -> None:
-    package_name = "probe_station_gui"
-    if package_name in sys.modules:
-        return
-    package = types.ModuleType(package_name)
-    package.__path__ = [str(REPO_ROOT / package_name)]
-    sys.modules[package_name] = package
-
-
-def _load_module(module_name: str, relative_path: str):
-    _ensure_package_stub()
-    module_path = REPO_ROOT / relative_path
-    spec = importlib.util.spec_from_file_location(module_name, module_path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec and spec.loader
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-design_model = _load_module(
-    "probe_station_gui.design_model", "probe_station_gui/design_model.py"
-)
-route_model = _load_module(
-    "probe_station_gui.route_model", "probe_station_gui/route_model.py"
-)
-
-DesignDocument = design_model.DesignDocument
-MeasurementRoute = route_model.MeasurementRoute
-RouteModelError = route_model.RouteModelError
 
 
 class MeasurementRouteTest(unittest.TestCase):
@@ -144,6 +115,22 @@ class MeasurementRouteTest(unittest.TestCase):
             route.add_grid_points((0.0, 0.0), (0.0, 0.0), 2, (0.0, 1.0), 1)
         with self.assertRaises(RouteModelError):
             route.add_grid_points((0.0, 0.0), (1.0, 0.0), 1, (0.0, 0.0), 2)
+
+    def test_structure_number_from_labels_uses_trailing_number_then_default(
+        self,
+    ) -> None:
+        self.assertEqual(
+            structure_number_from_labels("pad 007", "p001", default=3),
+            7,
+        )
+        self.assertEqual(
+            structure_number_from_labels("pad", "p042", default=3),
+            42,
+        )
+        self.assertEqual(
+            structure_number_from_labels("pad", "", default=3),
+            3,
+        )
 
 
 if __name__ == "__main__":

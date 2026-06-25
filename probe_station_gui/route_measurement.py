@@ -7,7 +7,6 @@ import inspect
 import logging
 import math
 import os
-import re
 import threading
 import time
 from dataclasses import dataclass, replace
@@ -45,6 +44,7 @@ from probe_station_gui.route_formatting import (
     format_route_ohm,
     format_route_percent,
 )
+from probe_station_gui.route_model import structure_number_from_labels
 from probe_station_gui.route_operation_modes import (
     ROUTE_OPERATION_MEASURE,
     ROUTE_OPERATION_MODES,
@@ -3338,14 +3338,11 @@ def _normalize_operation_mode(value: object) -> str:
 
 
 def _structure_number_for_point(point: RouteMeasurementPoint) -> int:
-    for value in (point.label, point.point_id):
-        match = re.search(r"(\d+)\s*$", str(value).strip())
-        if match is not None:
-            try:
-                return int(match.group(1))
-            except ValueError:
-                pass
-    return int(point.index)
+    return structure_number_from_labels(
+        point.label,
+        point.point_id,
+        default=point.index,
+    )
 
 
 def latest_route_measurement_statuses(csv_path: str | Path) -> dict[int, str]:

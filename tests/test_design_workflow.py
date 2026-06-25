@@ -1,50 +1,24 @@
-import importlib.util
-import sys
 import tempfile
+import sys
 import types
 import unittest
 from pathlib import Path
 
 import numpy as np
 
+from probe_station_gui.design_model import (
+    DesignDocument,
+    DesignModelError,
+    DesignRegistration,
+    MeasurementTarget,
+)
+from probe_station_gui.design_session import (
+    AlignmentPreparation,
+    DesignSession,
+    MeasurementRoute,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-
-
-def _ensure_package_stub() -> None:
-    package_name = "probe_station_gui"
-    if package_name in sys.modules:
-        return
-    package = types.ModuleType(package_name)
-    package.__path__ = [str(REPO_ROOT / package_name)]
-    sys.modules[package_name] = package
-
-
-def _load_module(module_name: str, relative_path: str):
-    _ensure_package_stub()
-    module_path = REPO_ROOT / relative_path
-    spec = importlib.util.spec_from_file_location(module_name, module_path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec and spec.loader
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-design_model = _load_module(
-    "probe_station_gui.design_model", "probe_station_gui/design_model.py"
-)
-design_session = _load_module(
-    "probe_station_gui.design_session", "probe_station_gui/design_session.py"
-)
-
-DesignDocument = design_model.DesignDocument
-DesignModelError = design_model.DesignModelError
-DesignRegistration = design_model.DesignRegistration
-MeasurementTarget = design_model.MeasurementTarget
-AlignmentPreparation = design_session.AlignmentPreparation
-DesignSession = design_session.DesignSession
-MeasurementRoute = design_session.MeasurementRoute
 
 
 class _FakeCell:

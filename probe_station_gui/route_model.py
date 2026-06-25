@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -469,6 +470,19 @@ def _coerce_point(value: Any, field_name: str) -> Point2D:
         raise RouteModelError(f"Route point field '{field_name}' is invalid.") from exc
 
 
+def structure_number_from_labels(*values: object, default: int) -> int:
+    """Return trailing numeric structure id from labels, or the route index."""
+
+    for value in values:
+        match = re.search(r"(\d+)\s*$", str(value).strip())
+        if match is not None:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                pass
+    return int(default)
+
+
 def _next_point_id(points: list[RoutePoint]) -> str:
     existing = {point.id for point in points}
     index = len(points) + 1
@@ -491,4 +505,5 @@ __all__ = [
     "RouteDesignBinding",
     "RouteModelError",
     "RoutePoint",
+    "structure_number_from_labels",
 ]
