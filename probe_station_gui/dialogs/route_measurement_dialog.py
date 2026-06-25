@@ -65,8 +65,10 @@ from probe_station_gui.route_measurement_display import (
     axis_tick_decimals as _axis_tick_decimals,
     count_axis_ticks as _count_axis_ticks,
     histogram_counts as _histogram_counts,
+    parse_tqdm_interval as _parse_tqdm_interval,
     raw_data_rows as _raw_data_rows,
     resistance_axis_unit as _resistance_axis_unit,
+    resistance_x_axis_label as _resistance_x_axis_label,
     sample_values as _sample_values,
 )
 from probe_station_gui.route_run_ui import (
@@ -857,37 +859,7 @@ class RouteMeasurementDialog(QDialog):
 
     @staticmethod
     def _parse_tqdm_interval(text: str | None) -> float | None:
-        if text is None:
-            return None
-        interval = str(text).strip()
-        if not interval or "?" in interval:
-            return None
-        days = 0
-        day_marker = " days, "
-        if day_marker in interval:
-            days_text, interval = interval.split(day_marker, 1)
-            try:
-                days = int(days_text.strip())
-            except ValueError:
-                return None
-        parts = interval.split(":")
-        if len(parts) == 2:
-            hours = 0
-            minutes_text, seconds_text = parts
-        elif len(parts) == 3:
-            hours_text, minutes_text, seconds_text = parts
-            try:
-                hours = int(hours_text)
-            except ValueError:
-                return None
-        else:
-            return None
-        try:
-            minutes = int(minutes_text)
-            seconds = int(seconds_text)
-        except ValueError:
-            return None
-        return float(days * 86400 + hours * 3600 + minutes * 60 + seconds)
+        return _parse_tqdm_interval(text)
 
     def set_result(
         self,
@@ -2147,9 +2119,7 @@ class _RouteMeasurementHistogram(QWidget):
         painter.drawLine(plot.bottomLeft(), plot.topLeft())
 
     def _x_axis_label(self, unit: str) -> str:
-        if self._mode == "polarity":
-            return f"V/I resistance ({unit})"
-        return f"dV/dI resistance ({unit})"
+        return _resistance_x_axis_label(self._mode, unit)
 
     def _series(self) -> list[tuple[str, QColor, list[float]]]:
         if self._mode == "polarity":

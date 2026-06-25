@@ -5,8 +5,10 @@ from probe_station_gui.route_measurement_display import (
     axis_tick_decimals,
     count_axis_ticks,
     histogram_counts,
+    parse_tqdm_interval,
     raw_data_rows,
     resistance_axis_unit,
+    resistance_x_axis_label,
     sample_values,
 )
 
@@ -37,6 +39,18 @@ def test_axis_tick_decimals_and_count_ticks() -> None:
     assert axis_tick_decimals(float("nan")) == 3
     assert count_axis_ticks(1) == [0, 1]
     assert count_axis_ticks(7) == [0, 3, 7]
+
+
+def test_tqdm_interval_parser_and_axis_label_helpers() -> None:
+    assert parse_tqdm_interval("01:02") == 62.0
+    assert parse_tqdm_interval("1:02:03") == 3723.0
+    assert parse_tqdm_interval("2 days, 1:02:03") == 176523.0
+    assert parse_tqdm_interval("?") is None
+    assert parse_tqdm_interval("bad") is None
+    assert resistance_x_axis_label("polarity", "kOhm") == "V/I resistance (kOhm)"
+    assert resistance_x_axis_label("differential", "Ohm") == (
+        "dV/dI resistance (Ohm)"
+    )
 
 
 def test_raw_data_rows_expands_polarity_samples_and_formats_numbers() -> None:

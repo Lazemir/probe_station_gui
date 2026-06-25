@@ -68,6 +68,46 @@ def count_axis_ticks(max_count: int) -> list[int]:
     return sorted({0, middle, max_count})
 
 
+def parse_tqdm_interval(text: str | None) -> float | None:
+    if text is None:
+        return None
+    interval = str(text).strip()
+    if not interval or "?" in interval:
+        return None
+    days = 0
+    day_marker = " days, "
+    if day_marker in interval:
+        days_text, interval = interval.split(day_marker, 1)
+        try:
+            days = int(days_text.strip())
+        except ValueError:
+            return None
+    parts = interval.split(":")
+    if len(parts) == 2:
+        hours = 0
+        minutes_text, seconds_text = parts
+    elif len(parts) == 3:
+        hours_text, minutes_text, seconds_text = parts
+        try:
+            hours = int(hours_text)
+        except ValueError:
+            return None
+    else:
+        return None
+    try:
+        minutes = int(minutes_text)
+        seconds = int(seconds_text)
+    except ValueError:
+        return None
+    return float(days * 86400 + hours * 3600 + minutes * 60 + seconds)
+
+
+def resistance_x_axis_label(mode: str, unit: str) -> str:
+    if mode == "polarity":
+        return f"V/I resistance ({unit})"
+    return f"dV/dI resistance ({unit})"
+
+
 def raw_data_rows(samples: tuple[object, ...]) -> list[list[str]]:
     rows: list[list[str]] = []
     for sample in samples:
