@@ -3,6 +3,7 @@ import math
 import pytest
 
 from probe_station_gui.design_navigation_geometry import (
+    array_preview_points,
     count_from_endpoint,
     first_segment_length,
     format_bounds,
@@ -48,6 +49,58 @@ def test_vector_length_angle_round_trips_cardinal_direction() -> None:
 def test_count_from_endpoint_projects_to_nearest_count() -> None:
     assert count_from_endpoint((0.0, 0.0), (2.0, 0.0), (5.1, 0.0)) == 4
     assert count_from_endpoint((0.0, 0.0), (0.0, 0.0), (5.1, 0.0)) == 1
+
+
+def test_array_preview_points_builds_grid_and_serpentine_rows() -> None:
+    assert array_preview_points(
+        (10.0, 20.0),
+        (1.0, 0.0),
+        3,
+        (0.0, 2.0),
+        2,
+        serpentine=False,
+    ) == [
+        (10.0, 20.0),
+        (11.0, 20.0),
+        (12.0, 20.0),
+        (10.0, 22.0),
+        (11.0, 22.0),
+        (12.0, 22.0),
+    ]
+    assert array_preview_points(
+        (10.0, 20.0),
+        (1.0, 0.0),
+        3,
+        (0.0, 2.0),
+        2,
+        serpentine=True,
+    ) == [
+        (10.0, 20.0),
+        (11.0, 20.0),
+        (12.0, 20.0),
+        (12.0, 22.0),
+        (11.0, 22.0),
+        (10.0, 22.0),
+    ]
+
+
+def test_array_preview_points_rejects_repeated_zero_step_direction() -> None:
+    assert array_preview_points(
+        (0.0, 0.0),
+        (0.0, 0.0),
+        2,
+        (0.0, 1.0),
+        1,
+        serpentine=False,
+    ) == []
+    assert array_preview_points(
+        (0.0, 0.0),
+        (1.0, 0.0),
+        1,
+        (0.0, 0.0),
+        2,
+        serpentine=False,
+    ) == []
 
 
 def test_route_labels_and_coordinate_formatting() -> None:

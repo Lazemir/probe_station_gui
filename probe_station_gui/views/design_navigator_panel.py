@@ -47,6 +47,7 @@ from probe_station_gui.route_run_ui import (
     route_run_pause_action,
 )
 from probe_station_gui.design_navigation_geometry import (
+    array_preview_points,
     count_from_endpoint,
     first_segment_length,
     format_bounds,
@@ -2657,32 +2658,14 @@ class DesignNavigatorPanel(QWidget):
         dir2: Point2D,
         count2: int,
     ) -> list[Point2D]:
-        count1 = max(1, int(count1))
-        count2 = max(1, int(count2))
-        dir1_x, dir1_y = float(dir1[0]), float(dir1[1])
-        dir2_x, dir2_y = float(dir2[0]), float(dir2[1])
-        if count1 > 1 and abs(dir1_x) <= 1e-12 and abs(dir1_y) <= 1e-12:
-            return []
-        if count2 > 1 and abs(dir2_x) <= 1e-12 and abs(dir2_y) <= 1e-12:
-            return []
-        points: list[Point2D] = []
-        for row_index in range(count2):
-            if self._route_array_serpentine_checkbox.isChecked() and row_index % 2 == 1:
-                column_indices = range(count1 - 1, -1, -1)
-            else:
-                column_indices = range(count1)
-            for column_index in column_indices:
-                points.append(
-                    (
-                        float(origin[0])
-                        + dir1_x * float(column_index)
-                        + dir2_x * float(row_index),
-                        float(origin[1])
-                        + dir1_y * float(column_index)
-                        + dir2_y * float(row_index),
-                    )
-                )
-        return points
+        return array_preview_points(
+            origin,
+            dir1,
+            count1,
+            dir2,
+            count2,
+            serpentine=self._route_array_serpentine_checkbox.isChecked(),
+        )
 
     def _route_array_origin(self) -> Point2D:
         return (
