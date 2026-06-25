@@ -536,23 +536,17 @@ class RouteMeasurementRunner:
                 )
                 needles_lowered = False
                 self._close_meter_output_context()
-            status = record.status or "unknown"
+            message = self._contact_placement_message(
+                action_label="Contact ready",
+                failure_label="Contact check failed",
+                point=point,
+                record=record,
+                position=position,
+                total=total,
+                success=success,
+            )
             if success:
-                message = (
-                    f"Contact ready: point {position}/{total} {point.label}, "
-                    f"{status}."
-                )
                 placement_succeeded = True
-            else:
-                contact_suffix = (
-                    self._contact_quality_failure_suffix(record.contact_quality)
-                    if record.contact_quality is not None
-                    else ""
-                )
-                message = (
-                    f"Contact check failed: point {position}/{total} "
-                    f"{point.label}, {status}{contact_suffix}."
-                )
             self._emit_contact_photo(point, record, position, total, success)
             self._status(message)
             return RouteContactPlacementResult(
@@ -782,28 +776,17 @@ class RouteMeasurementRunner:
                 raise RuntimeError(f"{action_label} stopped.")
             record = self._record_for_point(point=point, samples=samples)
             success = self._contact_placement_record_is_success(record)
-            status = record.status or "unknown"
             seek = self._current_contact_seek_result
-            contact_suffix = (
-                self._contact_quality_failure_suffix(record.contact_quality)
-                if record.contact_quality is not None
-                else ""
+            message = self._contact_placement_message(
+                action_label=action_label,
+                failure_label=f"{action_label} failed",
+                point=point,
+                record=record,
+                position=position,
+                total=total,
+                success=success,
+                seek=seek if auto_contact_seek else None,
             )
-            if auto_contact_seek and seek is not None:
-                message = (
-                    f"{action_label}: point {position}/{total} {point.label}, "
-                    f"{seek.status}, final={status}{contact_suffix}."
-                )
-            elif success:
-                message = (
-                    f"{action_label}: point {position}/{total} {point.label}, "
-                    f"{status}."
-                )
-            else:
-                message = (
-                    f"{action_label} failed: point {position}/{total} "
-                    f"{point.label}, {status}{contact_suffix}."
-                )
             self._status(message)
             return RouteContactPlacementResult(
                 success=success,
@@ -2592,6 +2575,39 @@ class RouteMeasurementRunner:
             self._contact_quality_limits,
         )
         return f", failed criterion: {detail}" if detail else ""
+
+    def _contact_placement_message(
+        self,
+        *,
+        action_label: str,
+        failure_label: str,
+        point: RouteMeasurementPoint,
+        record: RouteMeasurementRecord,
+        position: int,
+        total: int,
+        success: bool,
+        seek: RouteContactSeekResult | None = None,
+    ) -> str:
+        status = record.status or "unknown"
+        contact_suffix = (
+            self._contact_quality_failure_suffix(record.contact_quality)
+            if record.contact_quality is not None
+            else ""
+        )
+        if seek is not None:
+            return (
+                f"{action_label}: point {position}/{total} {point.label}, "
+                f"{seek.status}, final={status}{contact_suffix}."
+            )
+        if success:
+            return (
+                f"{action_label}: point {position}/{total} {point.label}, "
+                f"{status}."
+            )
+        return (
+            f"{failure_label}: point {position}/{total} "
+            f"{point.label}, {status}{contact_suffix}."
+        )
 
     def _samples_have_bad_contact(
         self,
