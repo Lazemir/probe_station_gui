@@ -1,6 +1,7 @@
 import unittest
 
 from probe_station_gui.oscillation_config import (
+    OscillationSettings,
     OscillationSettingsDefaults,
     parse_oscillation_settings,
 )
@@ -16,6 +17,21 @@ def _defaults() -> OscillationSettingsDefaults:
 
 
 class OscillationConfigTest(unittest.TestCase):
+    def test_settings_round_trip_and_clone(self) -> None:
+        settings = OscillationSettings(
+            mode="SPIRAL",
+            amplitude_mm=1.25,
+            feedrate_mm_min=250.0,
+            turns_per_sweep=4.0,
+        )
+
+        restored = OscillationSettings(**settings.to_dict())
+        clone = settings.clone()
+
+        self.assertEqual(restored, settings)
+        self.assertEqual(clone, settings)
+        self.assertIsNot(clone, settings)
+
     def test_normalises_mode_and_numeric_values(self) -> None:
         parsed = parse_oscillation_settings(
             {

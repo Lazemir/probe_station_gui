@@ -38,6 +38,7 @@ from probe_station_gui.needle_calibration_config import (
 )
 from probe_station_gui.objective_config import parse_pixels_to_mm_matrix
 from probe_station_gui.oscillation_config import (
+    OscillationSettings,
     OscillationSettingsDefaults,
     parse_oscillation_settings,
 )
@@ -243,36 +244,6 @@ class KeyBinding:
             native_scan_code=int(data.get("native_scan_code", 0)),
             text=str(data.get("text", "")),
         )
-
-
-@dataclass
-class OscillationSettings:
-    """Persisted defaults for the oscillation panel."""
-
-    mode: str = "X"
-    amplitude_mm: float = 0.5
-    feedrate_mm_min: float = 120.0
-    turns_per_sweep: float = 3.0
-
-    def clone(self) -> "OscillationSettings":
-        """Return a copy of the oscillation configuration."""
-
-        return OscillationSettings(
-            mode=self.mode,
-            amplitude_mm=self.amplitude_mm,
-            feedrate_mm_min=self.feedrate_mm_min,
-            turns_per_sweep=self.turns_per_sweep,
-        )
-
-    def to_dict(self) -> dict[str, float | str]:
-        """Serialize the oscillation preferences."""
-
-        return {
-            "mode": self.mode,
-            "amplitude_mm": self.amplitude_mm,
-            "feedrate_mm_min": self.feedrate_mm_min,
-            "turns_per_sweep": self.turns_per_sweep,
-        }
 
 
 @dataclass
