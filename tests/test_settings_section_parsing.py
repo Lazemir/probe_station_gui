@@ -3,6 +3,7 @@ from probe_station_gui.settings_section_parsing import (
     parse_coordinate_system_settings,
     parse_logging_settings,
 )
+from probe_station_gui.settings_sections import WORK_COORDINATE_SYSTEMS
 
 
 def test_parse_logging_settings_uppercases_level_and_keeps_string_file() -> None:
@@ -70,3 +71,17 @@ def test_parse_coordinate_system_settings_normalizes_and_validates_choices() -> 
         "startup_mode": "controller",
         "preferred_system": "G54",
     }
+
+
+def test_work_coordinate_systems_include_fluidnc_standard_slots() -> None:
+    assert WORK_COORDINATE_SYSTEMS == (
+        "G54",
+        "G55",
+        "G56",
+        "G57",
+        "G58",
+        "G59",
+        "G59.1",
+        "G59.2",
+        "G59.3",
+    )

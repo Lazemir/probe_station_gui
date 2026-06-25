@@ -93,6 +93,7 @@ from probe_station_gui.settings_sections import (
     ClickToMoveSettings,
     CoordinateSystemSettings,
     LoggingSettings,
+    WORK_COORDINATE_SYSTEMS,
 )
 from probe_station_gui.telegram_settings import (
     TELEGRAM_ALERT_TYPES,
@@ -107,18 +108,6 @@ from probe_station_gui.telegram_notifications import (
 
 logger = logging.getLogger(__name__)
 
-
-WORK_COORDINATE_SYSTEMS: tuple[str, ...] = (
-    "G54",
-    "G55",
-    "G56",
-    "G57",
-    "G58",
-    "G59",
-    "G59.1",
-    "G59.2",
-    "G59.3",
-)
 
 
 @dataclass
