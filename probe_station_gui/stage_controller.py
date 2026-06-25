@@ -43,6 +43,11 @@ from probe_station_gui.stage_axis_mapping import (
     axis_z_gcode_coordinate_for_display,
     evaluate_polynomial,
 )
+from probe_station_gui.stage_feed_override import (
+    clamp_feed_override_percent,
+    feed_override_payload_for_percent_change,
+    feed_override_percent_for_feedrates,
+)
 from probe_station_gui.stage_jog_commands import (
     JOG_AXIS_WORD_PATTERN,
     JOG_FEEDRATE_WORD_PATTERN,
@@ -1937,12 +1942,12 @@ class StageController(QObject):
     def feed_override_percent_for_feedrates(
         cls, programmed_feedrate: float, target_feedrate: float
     ) -> int:
-        programmed = max(cls.MIN_FEEDRATE, float(programmed_feedrate))
-        target = max(cls.MIN_FEEDRATE, float(target_feedrate))
-        percent = int(round((target / programmed) * 100.0))
-        return min(
-            max(percent, cls.FEED_OVERRIDE_MIN_PERCENT),
-            cls.FEED_OVERRIDE_MAX_PERCENT,
+        return feed_override_percent_for_feedrates(
+            programmed_feedrate,
+            target_feedrate,
+            min_feedrate=cls.MIN_FEEDRATE,
+            min_percent=cls.FEED_OVERRIDE_MIN_PERCENT,
+            max_percent=cls.FEED_OVERRIDE_MAX_PERCENT,
         )
 
     @classmethod
@@ -1953,28 +1958,18 @@ class StageController(QObject):
         *,
         reset_first: bool = False,
     ) -> tuple[bytes, int]:
-        current = min(
-            max(int(round(current_percent)), cls.FEED_OVERRIDE_MIN_PERCENT),
-            cls.FEED_OVERRIDE_MAX_PERCENT,
+        return feed_override_payload_for_percent_change(
+            current_percent,
+            target_percent,
+            reset_first=reset_first,
+            min_percent=cls.FEED_OVERRIDE_MIN_PERCENT,
+            max_percent=cls.FEED_OVERRIDE_MAX_PERCENT,
+            reset_payload=cls.FEED_OVERRIDE_RESET,
+            plus_10_payload=cls.FEED_OVERRIDE_PLUS_10,
+            minus_10_payload=cls.FEED_OVERRIDE_MINUS_10,
+            plus_1_payload=cls.FEED_OVERRIDE_PLUS_1,
+            minus_1_payload=cls.FEED_OVERRIDE_MINUS_1,
         )
-        target = min(
-            max(int(round(target_percent)), cls.FEED_OVERRIDE_MIN_PERCENT),
-            cls.FEED_OVERRIDE_MAX_PERCENT,
-        )
-        payload = bytearray()
-        if reset_first:
-            payload.extend(cls.FEED_OVERRIDE_RESET)
-            current = 100
-        delta = target - current
-        if delta > 0:
-            tens, ones = divmod(delta, 10)
-            payload.extend(cls.FEED_OVERRIDE_PLUS_10 * tens)
-            payload.extend(cls.FEED_OVERRIDE_PLUS_1 * ones)
-        elif delta < 0:
-            tens, ones = divmod(abs(delta), 10)
-            payload.extend(cls.FEED_OVERRIDE_MINUS_10 * tens)
-            payload.extend(cls.FEED_OVERRIDE_MINUS_1 * ones)
-        return (bytes(payload), target)
 
     def queue_feed_override_for_feedrate(
         self, programmed_feedrate: float, target_feedrate: float
@@ -2012,9 +2007,10 @@ class StageController(QObject):
         return self._queue_feed_override_percent(100)
 
     def _queue_feed_override_percent(self, target_percent: int) -> int | None:
-        target = min(
-            max(int(round(target_percent)), self.FEED_OVERRIDE_MIN_PERCENT),
-            self.FEED_OVERRIDE_MAX_PERCENT,
+        target = clamp_feed_override_percent(
+            target_percent,
+            min_percent=self.FEED_OVERRIDE_MIN_PERCENT,
+            max_percent=self.FEED_OVERRIDE_MAX_PERCENT,
         )
         with self._feed_override_lock:
             current = self._active_feed_override_percent
