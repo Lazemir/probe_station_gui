@@ -52,6 +52,12 @@ from probe_station_gui.settings_section_parsing import (
     parse_coordinate_system_settings,
     parse_logging_settings,
 )
+from probe_station_gui.settings_sections import (
+    ApiSettings,
+    ClickToMoveSettings,
+    CoordinateSystemSettings,
+    LoggingSettings,
+)
 from probe_station_gui.telegram_notifications import (
     load_global_bot_token,
     save_global_bot_token,
@@ -248,51 +254,6 @@ class KeyBinding:
 
 
 @dataclass
-class LoggingSettings:
-    """Configuration for application logging."""
-
-    level: str = "INFO"
-    file: str = ""
-
-    def clone(self) -> "LoggingSettings":
-        """Return a copy of the logging preferences."""
-
-        return LoggingSettings(level=self.level, file=self.file)
-
-    def to_dict(self) -> dict[str, str]:
-        """Serialize the logging preferences."""
-
-        return {"level": self.level, "file": self.file}
-
-
-@dataclass
-class ApiSettings:
-    """Configuration for the local FastAPI control surface."""
-
-    enabled: bool = True
-    host: str = "127.0.0.1"
-    port: int = 8765
-
-    def clone(self) -> "ApiSettings":
-        """Return a copy of the API preferences."""
-
-        return ApiSettings(
-            enabled=self.enabled,
-            host=self.host,
-            port=self.port,
-        )
-
-    def to_dict(self) -> dict[str, bool | int | float | str]:
-        """Serialize the API preferences."""
-
-        return {
-            "enabled": self.enabled,
-            "host": self.host,
-            "port": self.port,
-        }
-
-
-@dataclass
 class TelegramSettings:
     """Configuration for Telegram notifications."""
 
@@ -450,23 +411,6 @@ class JogSettings:
             "turntable_feedrate_mm_min": self.turntable_feedrate_mm_min,
             "turntable_step_feedrate_mm_min": self.turntable_step_feedrate_mm_min,
         }
-
-
-@dataclass
-class ClickToMoveSettings:
-    """Configuration for click-to-move UI behavior."""
-
-    pending_timeout_s: float = 8.0
-
-    def clone(self) -> "ClickToMoveSettings":
-        """Return a copy of the click-to-move preferences."""
-
-        return ClickToMoveSettings(pending_timeout_s=self.pending_timeout_s)
-
-    def to_dict(self) -> dict[str, float]:
-        """Serialize the click-to-move preferences."""
-
-        return {"pending_timeout_s": self.pending_timeout_s}
 
 
 @dataclass
@@ -737,33 +681,6 @@ class AxisZCalibrationSettings:
             "section3_indicator_offset_mm": self.section3_indicator_offset_mm,
             "source": self.source,
             "created_at": self.created_at,
-        }
-
-
-@dataclass
-class CoordinateSystemSettings:
-    """Configuration for work-coordinate system selection."""
-
-    position_mode: str = "work"
-    startup_mode: str = "controller"
-    preferred_system: str = "G54"
-
-    def clone(self) -> "CoordinateSystemSettings":
-        """Return a copy of the coordinate-system preferences."""
-
-        return CoordinateSystemSettings(
-            position_mode=self.position_mode,
-            startup_mode=self.startup_mode,
-            preferred_system=self.preferred_system,
-        )
-
-    def to_dict(self) -> dict[str, object]:
-        """Serialize coordinate-system preferences."""
-
-        return {
-            "position_mode": self.position_mode,
-            "startup_mode": self.startup_mode,
-            "preferred_system": self.preferred_system,
         }
 
 
