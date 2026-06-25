@@ -14,7 +14,7 @@ for _module_name in (
     if _module is not None and not hasattr(_module, "__file__"):
         del sys.modules[_module_name]
 
-from probe_station_gui.microscope_imaging import (
+from probe_station_gui.camera.imaging import (
     build_design_scan_plan,
 )
 
@@ -27,7 +27,7 @@ class MicroscopeImagingTest(unittest.TestCase):
             import tempfile
             from PySide6.QtGui import QColor, QImage
             from PySide6.QtWidgets import QApplication
-            from probe_station_gui.microscope_imaging import (
+            from probe_station_gui.camera.imaging import (
                 MicroscopeImageMetadata,
                 MicroscopeScaleCalibration,
                 save_microscope_image,
@@ -108,7 +108,7 @@ class MicroscopeImagingTest(unittest.TestCase):
             """
             import json
             from PySide6.QtGui import QColor, QImage
-            from probe_station_gui.microscope_imaging import (
+            from probe_station_gui.camera.imaging import (
                 MicroscopeScaleCalibration,
                 build_design_scan_plan,
                 stitch_scan_tiles,

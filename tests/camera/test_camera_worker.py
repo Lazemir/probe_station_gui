@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import queue
 
-from probe_station_gui.camera_worker import Grabber
+from probe_station_gui.camera.worker import Grabber
 
 
 class FakeEnumEntry:

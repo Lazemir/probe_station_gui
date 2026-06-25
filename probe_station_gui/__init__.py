@@ -7,7 +7,7 @@ from typing import Any
 
 
 _LAZY_EXPORTS = {
-    "Grabber": ("probe_station_gui.camera_worker", "Grabber"),
+    "Grabber": ("probe_station_gui.camera.worker", "Grabber"),
     "DesignDocument": ("probe_station_gui.design.model", "DesignDocument"),
     "DesignNavigatorPanel": (
         "probe_station_gui.views.design_navigator_panel",
