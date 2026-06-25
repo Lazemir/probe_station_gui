@@ -19,6 +19,15 @@ API_ROUTE_CONTROL_CLEAR_ACTIONS = frozenset({"ack", "clear_action"})
 API_ROUTE_CONTROL_REQUIRES_ACTIVE_KINDS = frozenset(
     {"pause", "pause_ack", "interrupt", "resume", "stop"}
 )
+API_ROUTE_CONTROL_LEGACY_ATTRS = {
+    "active": "_api_route_control_active",
+    "pause_requested": "_api_route_control_pause_requested",
+    "paused": "_api_route_control_paused",
+    "stop_requested": "_api_route_control_stop_requested",
+    "pending_action": "_api_route_control_pending_action",
+    "label": "_api_route_control_label",
+    "updated_utc": "_api_route_control_updated_utc",
+}
 
 
 def normalize_route_control_action(action: str) -> str | None:
@@ -98,6 +107,78 @@ def api_route_control_command_from_payload(
     if action == "status":
         return ApiRouteControlCommand("status", action, label=label)
     return ApiRouteControlCommand("unknown", action, label=label)
+
+
+def api_route_control_state_from_legacy_attrs(
+    source: object,
+    *,
+    fallback: ApiRouteControlState | None = None,
+) -> ApiRouteControlState:
+    state = fallback if isinstance(fallback, ApiRouteControlState) else ApiRouteControlState()
+    return ApiRouteControlState(
+        active=bool(
+            getattr(
+                source,
+                API_ROUTE_CONTROL_LEGACY_ATTRS["active"],
+                state.active,
+            )
+        ),
+        pause_requested=bool(
+            getattr(
+                source,
+                API_ROUTE_CONTROL_LEGACY_ATTRS["pause_requested"],
+                state.pause_requested,
+            )
+        ),
+        paused=bool(
+            getattr(
+                source,
+                API_ROUTE_CONTROL_LEGACY_ATTRS["paused"],
+                state.paused,
+            )
+        ),
+        stop_requested=bool(
+            getattr(
+                source,
+                API_ROUTE_CONTROL_LEGACY_ATTRS["stop_requested"],
+                state.stop_requested,
+            )
+        ),
+        pending_action=str(
+            getattr(
+                source,
+                API_ROUTE_CONTROL_LEGACY_ATTRS["pending_action"],
+                state.pending_action,
+            )
+            or ""
+        ),
+        label=str(
+            getattr(source, API_ROUTE_CONTROL_LEGACY_ATTRS["label"], state.label)
+            or ""
+        ),
+        updated_utc=str(
+            getattr(
+                source,
+                API_ROUTE_CONTROL_LEGACY_ATTRS["updated_utc"],
+                state.updated_utc,
+            )
+            or ""
+        ),
+    )
+
+
+def api_route_control_legacy_attrs(state: ApiRouteControlState) -> dict[str, object]:
+    return {
+        API_ROUTE_CONTROL_LEGACY_ATTRS["active"]: bool(state.active),
+        API_ROUTE_CONTROL_LEGACY_ATTRS["pause_requested"]: bool(state.pause_requested),
+        API_ROUTE_CONTROL_LEGACY_ATTRS["paused"]: bool(state.paused),
+        API_ROUTE_CONTROL_LEGACY_ATTRS["stop_requested"]: bool(state.stop_requested),
+        API_ROUTE_CONTROL_LEGACY_ATTRS["pending_action"]: str(
+            state.pending_action or ""
+        ),
+        API_ROUTE_CONTROL_LEGACY_ATTRS["label"]: str(state.label or ""),
+        API_ROUTE_CONTROL_LEGACY_ATTRS["updated_utc"]: str(state.updated_utc or ""),
+    }
 
 
 @dataclass(frozen=True)
@@ -292,5 +373,7 @@ __all__ = [
     "ApiRouteControlState",
     "ApiRouteControlUiState",
     "api_route_control_command_from_payload",
+    "api_route_control_legacy_attrs",
+    "api_route_control_state_from_legacy_attrs",
     "normalize_route_control_action",
 ]

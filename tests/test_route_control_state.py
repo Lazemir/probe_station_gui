@@ -1,6 +1,8 @@
 from probe_station_gui.route_control_state import (
     ApiRouteControlState,
     api_route_control_command_from_payload,
+    api_route_control_legacy_attrs,
+    api_route_control_state_from_legacy_attrs,
     normalize_route_control_action,
 )
 
@@ -198,3 +200,42 @@ def test_api_route_control_ui_state_marks_paused_control_as_waiting() -> None:
     assert ui_state.waiting_reason == "paused"
     assert ui_state.control_waiting_reason == "paused"
     assert ui_state.pause_pending is False
+
+
+def test_api_route_control_state_from_legacy_attrs_preserves_compat_fields() -> None:
+    class LegacyRouteControl:
+        _api_route_control_active = True
+        _api_route_control_pause_requested = True
+        _api_route_control_paused = False
+        _api_route_control_stop_requested = True
+        _api_route_control_pending_action = "skip"
+        _api_route_control_label = "chip 163"
+        _api_route_control_updated_utc = "t9"
+
+    state = api_route_control_state_from_legacy_attrs(LegacyRouteControl())
+
+    assert state == ApiRouteControlState(
+        active=True,
+        pause_requested=True,
+        paused=False,
+        stop_requested=True,
+        pending_action="skip",
+        label="chip 163",
+        updated_utc="t9",
+    )
+
+
+def test_api_route_control_legacy_attrs_round_trips_state() -> None:
+    state = ApiRouteControlState(
+        active=True,
+        pause_requested=False,
+        paused=True,
+        stop_requested=False,
+        pending_action="remeasure",
+        label="chip 163",
+        updated_utc="t10",
+    )
+
+    legacy = type("LegacyRouteControl", (), api_route_control_legacy_attrs(state))()
+
+    assert api_route_control_state_from_legacy_attrs(legacy) == state

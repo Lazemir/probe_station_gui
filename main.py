@@ -155,6 +155,8 @@ from probe_station_gui.route_measurement import (
 from probe_station_gui.route_control_state import (
     ApiRouteControlState,
     api_route_control_command_from_payload,
+    api_route_control_legacy_attrs,
+    api_route_control_state_from_legacy_attrs,
 )
 from probe_station_gui.route_measurement_settings import RouteMeasurementSettingsStore
 from probe_station_gui.route_formatting import (
@@ -1949,43 +1951,12 @@ class Main(QMainWindow):
         state = getattr(self, "_api_route_control_state", ApiRouteControlState())
         if not isinstance(state, ApiRouteControlState):
             state = ApiRouteControlState()
-        return ApiRouteControlState(
-            active=bool(getattr(self, "_api_route_control_active", state.active)),
-            pause_requested=bool(
-                getattr(
-                    self,
-                    "_api_route_control_pause_requested",
-                    state.pause_requested,
-                )
-            ),
-            paused=bool(getattr(self, "_api_route_control_paused", state.paused)),
-            stop_requested=bool(
-                getattr(self, "_api_route_control_stop_requested", state.stop_requested)
-            ),
-            pending_action=str(
-                getattr(
-                    self,
-                    "_api_route_control_pending_action",
-                    state.pending_action,
-                )
-                or ""
-            ),
-            label=str(getattr(self, "_api_route_control_label", state.label) or ""),
-            updated_utc=str(
-                getattr(self, "_api_route_control_updated_utc", state.updated_utc)
-                or ""
-            ),
-        )
+        return api_route_control_state_from_legacy_attrs(self, fallback=state)
 
     def _set_api_route_control_state(self, state: ApiRouteControlState) -> None:
         self._api_route_control_state = state
-        self._api_route_control_active = bool(state.active)
-        self._api_route_control_pause_requested = bool(state.pause_requested)
-        self._api_route_control_paused = bool(state.paused)
-        self._api_route_control_stop_requested = bool(state.stop_requested)
-        self._api_route_control_pending_action = str(state.pending_action or "")
-        self._api_route_control_label = str(state.label or "")
-        self._api_route_control_updated_utc = str(state.updated_utc or "")
+        for name, value in api_route_control_legacy_attrs(state).items():
+            setattr(self, name, value)
 
     def _api_route_control_status(self) -> dict[str, Any]:
         return self._api_route_control_state_snapshot().status_payload(
