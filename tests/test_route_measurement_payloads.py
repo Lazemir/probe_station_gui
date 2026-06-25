@@ -12,6 +12,8 @@ from probe_station_gui.route_measurement import (
 from probe_station_gui.route_measurement_payloads import (
     focus_result_to_dict,
     json_ready,
+    route_artifact_public_payload,
+    route_artifact_record,
     route_contact_seek_payload,
     route_external_result_payload,
     route_measurement_record_payload,
@@ -198,4 +200,50 @@ def test_route_external_result_payload_defaults_invalid_shapes() -> None:
         "files": [],
         "message": "",
         "timestamp_utc": "t1",
+    }
+
+
+def test_route_artifact_record_copies_data_and_metadata() -> None:
+    metadata = {"point": 7}
+    source_data = bytearray(b"abc")
+
+    artifact = route_artifact_record(
+        artifact_id="id1",
+        data=source_data,
+        filename="point.png",
+        content_type="image/png",
+        kind="photo",
+        metadata=metadata,
+        created_at_utc="t2",
+    )
+
+    metadata["point"] = 8
+    source_data[:] = b"changed"
+
+    assert artifact == {
+        "artifact_id": "id1",
+        "filename": "point.png",
+        "content_type": "image/png",
+        "kind": "photo",
+        "metadata": {"point": 7},
+        "created_at_utc": "t2",
+        "size_bytes": 3,
+        "data": b"abc",
+    }
+
+
+def test_route_artifact_public_payload_removes_binary_data() -> None:
+    public = route_artifact_public_payload(
+        {
+            "artifact_id": "id1",
+            "filename": "point.png",
+            "data": b"abc",
+            "size_bytes": 3,
+        }
+    )
+
+    assert public == {
+        "artifact_id": "id1",
+        "filename": "point.png",
+        "size_bytes": 3,
     }

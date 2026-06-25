@@ -158,7 +158,11 @@ from probe_station_gui.route_control_state import (
     api_route_control_legacy_attrs,
     api_route_control_state_from_legacy_attrs,
 )
-from probe_station_gui.route_measurement_payloads import route_external_result_payload
+from probe_station_gui.route_measurement_payloads import (
+    route_artifact_public_payload,
+    route_artifact_record,
+    route_external_result_payload,
+)
 from probe_station_gui.route_measurement_settings import RouteMeasurementSettingsStore
 from probe_station_gui.route_session_actions import route_session_action_from_payload
 from probe_station_gui.route_formatting import (
@@ -3260,11 +3264,7 @@ class Main(QMainWindow):
     def _api_route_artifacts_payload(self) -> list[dict[str, object]]:
         with self._api_route_artifacts_lock:
             artifacts = [
-                {
-                    key: value
-                    for key, value in artifact.items()
-                    if key != "data"
-                }
+                route_artifact_public_payload(artifact)
                 for artifact in self._api_route_artifacts.values()
             ]
         return artifacts
@@ -3279,16 +3279,15 @@ class Main(QMainWindow):
         metadata: dict[str, object],
     ) -> str:
         artifact_id = uuid.uuid4().hex
-        artifact = {
-            "artifact_id": artifact_id,
-            "filename": filename,
-            "content_type": content_type,
-            "kind": kind,
-            "metadata": dict(metadata),
-            "created_at_utc": self._api_timestamp_utc(),
-            "size_bytes": len(data),
-            "data": bytes(data),
-        }
+        artifact = route_artifact_record(
+            artifact_id=artifact_id,
+            data=data,
+            filename=filename,
+            content_type=content_type,
+            kind=kind,
+            metadata=metadata,
+            created_at_utc=self._api_timestamp_utc(),
+        )
         with self._api_route_artifacts_lock:
             self._api_route_artifacts[artifact_id] = artifact
         return artifact_id

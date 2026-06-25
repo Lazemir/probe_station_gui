@@ -102,6 +102,32 @@ def route_external_result_payload(
     return result
 
 
+def route_artifact_record(
+    *,
+    artifact_id: str,
+    data: bytes,
+    filename: str,
+    content_type: str,
+    kind: str,
+    metadata: dict[str, object],
+    created_at_utc: str,
+) -> dict[str, object]:
+    return {
+        "artifact_id": str(artifact_id),
+        "filename": str(filename),
+        "content_type": str(content_type),
+        "kind": str(kind),
+        "metadata": dict(metadata),
+        "created_at_utc": str(created_at_utc),
+        "size_bytes": len(data),
+        "data": bytes(data),
+    }
+
+
+def route_artifact_public_payload(artifact: dict[str, object]) -> dict[str, object]:
+    return {key: value for key, value in artifact.items() if key != "data"}
+
+
 def json_ready(value: object) -> object:
     if isinstance(value, bool) or value is None or isinstance(value, str):
         return value
