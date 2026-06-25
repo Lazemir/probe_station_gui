@@ -4172,10 +4172,8 @@ class StageController(QObject):
                     f"Oscillation started in {mode}: amplitude={amplitude_mm:.3f} mm, "
                     f"feedrate={feedrate:.1f} mm/min."
                 )
-                self._write_command(serial_connection, "G21")
-                self._wait_for_ok(serial_connection)
-                self._write_command(serial_connection, "G91")
-                self._wait_for_ok(serial_connection)
+                self._write_current_command_and_wait("G21")
+                self._write_current_command_and_wait("G91")
                 if mode == "SPIRAL":
                     self._run_spiral_pattern(
                         amplitude_mm=amplitude_mm,
@@ -4188,8 +4186,7 @@ class StageController(QObject):
                         amplitude_mm=amplitude_mm,
                         feedrate=feedrate,
                     )
-                self._write_command(serial_connection, "G90")
-                self._wait_for_ok(serial_connection)
+                self._write_current_command_and_wait("G90")
                 self.status_message.emit("Oscillation stopped.")
         except StageControllerError as exc:
             try:
