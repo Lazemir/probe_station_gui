@@ -2427,7 +2427,6 @@ class StageController(QObject):
         *,
         feedrate: float | None = None,
     ) -> str:
-        serial_connection = self._current_serial()
         with self._serial_session_lock:
             status = self._query_synced_status_for_absolute_motion(
                 refresh_coordinate_state=False,
@@ -2462,7 +2461,7 @@ class StageController(QObject):
                 ),
             )
             self._wait_for_idle()
-            self._query_status(serial_connection)
+            self._query_current_status()
             return f"Arrived at X={target_x_mm:.3f} mm, Y={target_y_mm:.3f} mm."
 
     def _move_to_xyz_locked(
@@ -2474,7 +2473,6 @@ class StageController(QObject):
         transit_z_mm: float | None,
         label: str,
     ) -> str:
-        serial_connection = self._current_serial()
         with self._serial_session_lock:
             status = self._query_synced_status_for_absolute_motion(
                 refresh_coordinate_state=False,
@@ -2533,7 +2531,7 @@ class StageController(QObject):
                 moved = True
 
             self._wait_for_idle()
-            self._query_status(serial_connection)
+            self._query_current_status()
 
             if not moved:
                 return f"{label.capitalize()} already reached."
@@ -5446,6 +5444,9 @@ class StageController(QObject):
             self._controller_reboot_ready_notified = True
             self.controller_reboot_ready.emit()
         return status
+
+    def _query_current_status(self) -> Optional[_Status]:
+        return self._query_status(self._current_serial())
 
     def _query_current_status_with_required_coordinates(
         self,
