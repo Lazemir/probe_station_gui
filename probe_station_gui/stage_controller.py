@@ -2788,7 +2788,6 @@ class StageController(QObject):
                 b"\x85",
                 "autofocus cancel jog stop 0x85",
             )
-            serial_connection = self._current_serial()
             try:
                 self._wait_for_idle(timeout=5.0)
             except StageControllerError:
@@ -2796,8 +2795,7 @@ class StageController(QObject):
                     "Could not confirm idle before restoring autofocus start Z.",
                     exc_info=True,
                 )
-            status = self._query_status_with_required_coordinates(
-                serial_connection,
+            status = self._query_current_status_with_required_coordinates(
                 axes=("Z",),
             )
             position = self._position_for_configured_mode(status)
@@ -2884,14 +2882,12 @@ class StageController(QObject):
         *,
         feedrate: float,
     ) -> _FocusSweepResult:
-        serial_connection = self._current_serial()
         lower_z = float(lower_z)
         upper_z = float(upper_z)
         if upper_z <= lower_z:
             raise StageControllerError("Autofocus sweep range is empty.")
 
-        status = self._query_status_with_required_coordinates(
-            serial_connection,
+        status = self._query_current_status_with_required_coordinates(
             axes=("Z",),
         )
         position = self._position_for_configured_mode(status)
@@ -3153,11 +3149,7 @@ class StageController(QObject):
         min_z: float,
         fine_step_mm: float | None = None,
     ) -> None:
-        serial_connection = self._current_serial()
-        status = self._query_status_with_required_coordinates(
-            serial_connection,
-            axes=("Z",),
-        )
+        status = self._query_current_status_with_required_coordinates(axes=("Z",))
         position = self._position_for_configured_mode(status)
         if status is None or position is None or len(position) < 3:
             raise StageControllerError("Unable to read Z position for autofocus.")
@@ -3309,7 +3301,6 @@ class StageController(QObject):
         self,
         target_pixels: np.ndarray | None = None,
     ) -> tuple[bool, int | None]:
-        serial_connection = self._current_serial()
         if self._pixels_to_mm is not None:
             if not self._objective_calibration_verified.get(
                 self._active_objective_name,
@@ -3326,8 +3317,7 @@ class StageController(QObject):
         if before_frame is None:
             raise StageControllerError("Camera frames are unavailable for calibration.")
 
-        start_status = self._query_status_with_required_coordinates(
-            serial_connection,
+        start_status = self._query_current_status_with_required_coordinates(
             axes=("X", "Y"),
         )
         origin = self._position_for_configured_mode(start_status)
@@ -3381,14 +3371,12 @@ class StageController(QObject):
         self,
         target_pixels: np.ndarray | None = None,
     ) -> tuple[bool, int | None]:
-        serial_connection = self._current_serial()
         if self._pixels_to_mm is None:
             return (False, None)
         before_frame, frame_counter = self._get_frame_snapshot(timeout=3.0)
         if before_frame is None:
             raise StageControllerError("Camera frames are unavailable for calibration check.")
-        status = self._query_status_with_required_coordinates(
-            serial_connection,
+        status = self._query_current_status_with_required_coordinates(
             axes=("X", "Y"),
         )
         origin = self._position_for_configured_mode(status)
@@ -3645,7 +3633,6 @@ class StageController(QObject):
         origin: tuple[float, float, float],
         target_pixels: np.ndarray | None,
     ) -> tuple[bool, int | None]:
-        serial_connection = self._current_serial()
         if target_pixels is None:
             self._return_to_origin(origin)
             return (False, None)
@@ -3666,8 +3653,7 @@ class StageController(QObject):
                 "Predicted click move is too large; calibration was reset. Recalibrate and try again."
             )
 
-        status = self._query_status_with_required_coordinates(
-            serial_connection,
+        status = self._query_current_status_with_required_coordinates(
             axes=("X", "Y"),
         )
         current = self._position_for_configured_mode(status)
@@ -3707,9 +3693,7 @@ class StageController(QObject):
     def _return_to_origin(
         self, origin: tuple[float, float, float]
     ) -> None:
-        serial_connection = self._current_serial()
-        status = self._query_status_with_required_coordinates(
-            serial_connection,
+        status = self._query_current_status_with_required_coordinates(
             axes=("X", "Y"),
         )
         current = self._position_for_configured_mode(status)
@@ -4076,11 +4060,7 @@ class StageController(QObject):
         self,
         axis: str,
     ) -> float | None:
-        serial_connection = self._current_serial()
-        status = self._query_status_with_required_coordinates(
-            serial_connection,
-            axes=(axis,),
-        )
+        status = self._query_current_status_with_required_coordinates(axes=(axis,))
         current_value = self._axis_value_for_configured_mode(status, axis)
         if current_value is not None:
             return current_value
@@ -5479,6 +5459,28 @@ class StageController(QObject):
             self.controller_reboot_ready.emit()
         return status
 
+    def _query_current_status_with_required_coordinates(
+        self,
+        *,
+        axes: Iterable[str] | None = None,
+        min_axes: int | None = None,
+        timeout: float | None = None,
+        attempts: int | None = None,
+    ) -> Optional[_Status]:
+        kwargs: dict[str, object] = {}
+        if axes is not None:
+            kwargs["axes"] = axes
+        if min_axes is not None:
+            kwargs["min_axes"] = min_axes
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        if attempts is not None:
+            kwargs["attempts"] = attempts
+        return self._query_status_with_required_coordinates(
+            self._current_serial(),
+            **kwargs,
+        )
+
     def _query_status_with_required_coordinates(
         self,
         serial_connection: serial.Serial,
@@ -5910,9 +5912,7 @@ class StageController(QObject):
     def _read_current_a_position(self) -> Optional[float]:
         """Read the current A coordinate from the configured controller report mode."""
 
-        serial_connection = self._current_serial()
-        status = self._query_status_with_required_coordinates(
-            serial_connection,
+        status = self._query_current_status_with_required_coordinates(
             axes=("A",),
         )
         if status is None:
