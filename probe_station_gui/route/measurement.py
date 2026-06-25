@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Collection
 
 from probe_station_gui.route.contact_quality import (
     RouteContactQuality,
@@ -212,6 +212,21 @@ class RoutePhotoRecord:
     design_center: Point2D
     stage_xy: Point2D
     focus: dict[str, object] | None = None
+
+
+@dataclass(frozen=True)
+class _RoutePointPreparation:
+    point_interrupted: bool
+    measurement_prepare_task: _BackgroundRouteTask | None
+    photos_saved: int = 0
+    stop_message: str | None = None
+
+
+@dataclass(frozen=True)
+class _RoutePointPhotoPreparation:
+    point_interrupted: bool
+    photos_saved: int = 0
+    stop_message: str | None = None
 
 
 class RouteMeasurementRunner:
@@ -961,103 +976,18 @@ class RouteMeasurementRunner:
                     f"Route measurement: point {position}/{total} "
                     f"{point.label}."
                 )
-                if self._photo_enabled or self._photo_focus_enabled:
-                    self._status(
-                        f"Route measurement: point {position}/{total} "
-                        "raising needles before move."
-                    )
-                    point_interrupted = not self._run_point_interruptible_action(
-                        lambda: self._stage_controller.run_external_needles_action(
-                            "raise",
-                            self._needle_feedrate,
-                        )
-                    )
-                    if self._stop_requested.is_set():
-                        message = "Route measurement stopped by user."
-                        break
-                target_xy = (
-                    self._adjusted_photo_stage_xy(point)
-                    if self._photo_enabled or self._photo_focus_enabled
-                    else self._adjusted_stage_xy(point)
+                preparation = self._prepare_route_point_for_measurement(
+                    point=point,
+                    position=position,
+                    total=total,
+                    point_interrupted=point_interrupted,
                 )
-                if not point_interrupted:
-                    point_interrupted = not self._run_point_interruptible_action(
-                        lambda: self._stage_controller.run_external_move_to_xy(
-                            target_xy[0],
-                            target_xy[1],
-                        )
-                    )
-                if self._stop_requested.is_set():
-                    message = "Route measurement stopped by user."
+                point_interrupted = preparation.point_interrupted
+                measurement_prepare_task = preparation.measurement_prepare_task
+                photos_saved += preparation.photos_saved
+                if preparation.stop_message is not None:
+                    message = preparation.stop_message
                     break
-                measurement_prepare_task = (
-                    self._start_measurement_prepare_task(
-                        self._initial_measurement_count()
-                    )
-                    if self._measure_enabled and not point_interrupted
-                    else None
-                )
-                focus_result: object | None = None
-                point_interrupted = (
-                    point_interrupted or self._point_interrupt_requested.is_set()
-                )
-                if self._photo_focus_enabled and not point_interrupted:
-                    self._status(
-                        f"Route measurement: point {position}/{total} "
-                        "local autofocus."
-                    )
-                    focus_result = self._run_photo_focus(point, position, total)
-                    point_interrupted = self._point_interrupt_requested.is_set()
-                    focus_message = str(focus_result or "")
-                    if focus_message.strip():
-                        self._status(
-                            f"Route measurement: point {position}/{total} "
-                            f"{focus_message}"
-                        )
-                    if self._stop_requested.is_set():
-                        message = "Route measurement stopped by user."
-                        break
-                if not point_interrupted and self._photo_enabled:
-                    if not self._sleep_photo_settle():
-                        message = "Route measurement stopped by user."
-                        break
-                    if self._point_interrupt_requested.is_set():
-                        point_interrupted = True
-                    if not point_interrupted:
-                        photo_path = self._capture_photo(
-                            point,
-                            position,
-                            total,
-                            focus_result=focus_result,
-                        )
-                        photos_saved += 1
-                        self._status(
-                            f"Route measurement: point {position}/{total} "
-                            f"photo saved to {photo_path}."
-                        )
-                    if self._stop_requested.is_set():
-                        message = "Route measurement stopped by user."
-                        break
-                if self._measure_enabled and not point_interrupted:
-                    contact_xy = self._adjusted_stage_xy(point)
-                    if not self._same_stage_xy(target_xy, contact_xy):
-                        self._status(
-                            f"Route measurement: point {position}/{total} "
-                            "moving to contact position."
-                        )
-                        point_interrupted = not self._run_point_interruptible_action(
-                            lambda: self._stage_controller.run_external_move_to_xy(
-                                contact_xy[0],
-                                contact_xy[1],
-                            )
-                        )
-                        if self._stop_requested.is_set():
-                            message = "Route measurement stopped by user."
-                            break
-                        point_interrupted = (
-                            point_interrupted
-                            or self._point_interrupt_requested.is_set()
-                        )
                 if not self._measure_enabled:
                     if point_interrupted:
                         self._point_interrupt_requested.clear()
@@ -1394,6 +1324,233 @@ class RouteMeasurementRunner:
                     message = f"{message} Instrument close failed: {exc}"
             self._set_waiting(False)
         return success, message
+
+    def _prepare_route_point_for_measurement(
+        self,
+        *,
+        point: RouteMeasurementPoint,
+        position: int,
+        total: int,
+        point_interrupted: bool,
+    ) -> _RoutePointPreparation:
+        point_interrupted = self._raise_needles_before_route_point_if_needed(
+            position=position,
+            total=total,
+            point_interrupted=point_interrupted,
+        )
+        if self._stop_requested.is_set():
+            return self._stopped_route_point_preparation(point_interrupted)
+        target_xy = self._route_point_initial_target_xy(point)
+        point_interrupted = self._move_to_route_point_xy(
+            target_xy,
+            point_interrupted=point_interrupted,
+        )
+        if self._stop_requested.is_set():
+            return self._stopped_route_point_preparation(point_interrupted)
+        measurement_prepare_task = self._route_point_measurement_prepare_task(
+            point_interrupted
+        )
+        photo_preparation = self._focus_and_capture_route_point_photo(
+            point=point,
+            position=position,
+            total=total,
+            point_interrupted=point_interrupted,
+        )
+        point_interrupted = photo_preparation.point_interrupted
+        if photo_preparation.stop_message is not None:
+            return self._stopped_route_point_preparation(
+                point_interrupted=point_interrupted,
+                measurement_prepare_task=measurement_prepare_task,
+                photos_saved=photo_preparation.photos_saved,
+            )
+        point_interrupted = self._move_from_photo_to_contact_xy_if_needed(
+            point=point,
+            target_xy=target_xy,
+            position=position,
+            total=total,
+            point_interrupted=point_interrupted,
+        )
+        return _RoutePointPreparation(
+            point_interrupted=point_interrupted,
+            measurement_prepare_task=measurement_prepare_task,
+            photos_saved=photo_preparation.photos_saved,
+        )
+
+    @staticmethod
+    def _stopped_route_point_preparation(
+        point_interrupted: bool,
+        *,
+        measurement_prepare_task: _BackgroundRouteTask | None = None,
+        photos_saved: int = 0,
+    ) -> _RoutePointPreparation:
+        return _RoutePointPreparation(
+            point_interrupted=point_interrupted,
+            measurement_prepare_task=measurement_prepare_task,
+            photos_saved=photos_saved,
+            stop_message="Route measurement stopped by user.",
+        )
+
+    def _route_point_initial_target_xy(self, point: RouteMeasurementPoint) -> Point2D:
+        if self._photo_enabled or self._photo_focus_enabled:
+            return self._adjusted_photo_stage_xy(point)
+        return self._adjusted_stage_xy(point)
+
+    def _route_point_measurement_prepare_task(
+        self,
+        point_interrupted: bool,
+    ) -> _BackgroundRouteTask | None:
+        if not self._measure_enabled or point_interrupted:
+            return None
+        return self._start_measurement_prepare_task(self._initial_measurement_count())
+
+    def _raise_needles_before_route_point_if_needed(
+        self,
+        *,
+        position: int,
+        total: int,
+        point_interrupted: bool,
+    ) -> bool:
+        if not (self._photo_enabled or self._photo_focus_enabled):
+            return point_interrupted
+        self._status(
+            f"Route measurement: point {position}/{total} "
+            "raising needles before move."
+        )
+        return not self._run_point_interruptible_action(
+            lambda: self._stage_controller.run_external_needles_action(
+                "raise",
+                self._needle_feedrate,
+            )
+        )
+
+    def _move_to_route_point_xy(
+        self,
+        target_xy: Point2D,
+        *,
+        point_interrupted: bool,
+    ) -> bool:
+        if point_interrupted:
+            return True
+        return not self._run_point_interruptible_action(
+            lambda: self._stage_controller.run_external_move_to_xy(
+                target_xy[0],
+                target_xy[1],
+            )
+        )
+
+    def _focus_route_point_photo(
+        self,
+        *,
+        point: RouteMeasurementPoint,
+        position: int,
+        total: int,
+        point_interrupted: bool,
+    ) -> tuple[object | None, bool]:
+        point_interrupted = point_interrupted or self._point_interrupt_requested.is_set()
+        if not self._photo_focus_enabled or point_interrupted:
+            return None, point_interrupted
+        self._status(
+            f"Route measurement: point {position}/{total} local autofocus."
+        )
+        focus_result = self._run_photo_focus(point, position, total)
+        point_interrupted = self._point_interrupt_requested.is_set()
+        focus_message = str(focus_result or "")
+        if focus_message.strip():
+            self._status(
+                f"Route measurement: point {position}/{total} {focus_message}"
+            )
+        return focus_result, point_interrupted
+
+    def _focus_and_capture_route_point_photo(
+        self,
+        *,
+        point: RouteMeasurementPoint,
+        position: int,
+        total: int,
+        point_interrupted: bool,
+    ) -> _RoutePointPhotoPreparation:
+        focus_result, point_interrupted = self._focus_route_point_photo(
+            point=point,
+            position=position,
+            total=total,
+            point_interrupted=point_interrupted,
+        )
+        if self._stop_requested.is_set():
+            return _RoutePointPhotoPreparation(
+                point_interrupted=point_interrupted,
+                stop_message="Route measurement stopped by user.",
+            )
+        photos_saved = self._capture_route_point_photo_if_needed(
+            point=point,
+            position=position,
+            total=total,
+            focus_result=focus_result,
+            point_interrupted=point_interrupted,
+        )
+        point_interrupted = point_interrupted or self._point_interrupt_requested.is_set()
+        stop_message = (
+            "Route measurement stopped by user."
+            if self._stop_requested.is_set()
+            else None
+        )
+        return _RoutePointPhotoPreparation(
+            point_interrupted=point_interrupted,
+            photos_saved=photos_saved,
+            stop_message=stop_message,
+        )
+
+    def _capture_route_point_photo_if_needed(
+        self,
+        *,
+        point: RouteMeasurementPoint,
+        position: int,
+        total: int,
+        focus_result: object | None,
+        point_interrupted: bool,
+    ) -> int:
+        if point_interrupted or not self._photo_enabled:
+            return 0
+        if not self._sleep_photo_settle():
+            return 0
+        if self._point_interrupt_requested.is_set():
+            return 0
+        photo_path = self._capture_photo(
+            point,
+            position,
+            total,
+            focus_result=focus_result,
+        )
+        self._status(
+            f"Route measurement: point {position}/{total} "
+            f"photo saved to {photo_path}."
+        )
+        return 1
+
+    def _move_from_photo_to_contact_xy_if_needed(
+        self,
+        *,
+        point: RouteMeasurementPoint,
+        target_xy: Point2D,
+        position: int,
+        total: int,
+        point_interrupted: bool,
+    ) -> bool:
+        if not self._measure_enabled or point_interrupted:
+            return point_interrupted
+        contact_xy = self._adjusted_stage_xy(point)
+        if self._same_stage_xy(target_xy, contact_xy):
+            return self._point_interrupt_requested.is_set()
+        self._status(
+            f"Route measurement: point {position}/{total} "
+            "moving to contact position."
+        )
+        point_interrupted = not self._run_point_interruptible_action(
+            lambda: self._stage_controller.run_external_move_to_xy(
+                contact_xy[0],
+                contact_xy[1],
+            )
+        )
+        return point_interrupted or self._point_interrupt_requested.is_set()
 
     def _begin_stage_task(self) -> None:
         if self._stage_task_active:
