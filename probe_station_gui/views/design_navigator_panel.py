@@ -1385,6 +1385,20 @@ class DesignNavigatorPanel(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._initialize_state()
+        root_layout = self._build_root_layout()
+        self._build_availability_controls(root_layout)
+        self._build_design_file_controls(root_layout)
+        self._build_layer_controls(root_layout)
+        self._build_registration_controls(root_layout)
+        self._build_route_controls(root_layout)
+        self._build_position_controls(root_layout)
+
+        self._update_availability()
+        self._update_enabled_state()
+        self._set_design_tool("select")
+
+    def _initialize_state(self) -> None:
         self._document: DesignDocument | None = None
         self._design_dialog_directory = ""
         self._snap_enabled = True
@@ -1410,10 +1424,13 @@ class DesignNavigatorPanel(QWidget):
         self._ruler_segments: list[tuple[Point2D, Point2D]] = []
         self._updating_route_controls = False
 
+    def _build_root_layout(self) -> QVBoxLayout:
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(8, 8, 8, 8)
         root_layout.setSpacing(8)
+        return root_layout
 
+    def _build_availability_controls(self, root_layout: QVBoxLayout) -> None:
         self._availability_label = QLabel(self)
         self._availability_label.setWordWrap(True)
         root_layout.addWidget(self._availability_label)
@@ -1426,6 +1443,7 @@ class DesignNavigatorPanel(QWidget):
         self._snap_hint_label.setStyleSheet("QLabel { color: #b0bec5; }")
         root_layout.addWidget(self._snap_hint_label)
 
+    def _build_design_file_controls(self, root_layout: QVBoxLayout) -> None:
         file_group = QGroupBox("Design", self)
         file_layout = QGridLayout(file_group)
         self._load_design_button = QPushButton("Load GDS...", file_group)
@@ -1443,6 +1461,7 @@ class DesignNavigatorPanel(QWidget):
         file_layout.addWidget(self._document_label, 2, 0, 1, 2)
         root_layout.addWidget(file_group)
 
+    def _build_layer_controls(self, root_layout: QVBoxLayout) -> None:
         layer_group = QGroupBox("Layers", self)
         layer_layout = QVBoxLayout(layer_group)
         self._layer_list = QListWidget(layer_group)
@@ -1450,6 +1469,7 @@ class DesignNavigatorPanel(QWidget):
         layer_layout.addWidget(self._layer_list)
         root_layout.addWidget(layer_group)
 
+    def _build_registration_controls(self, root_layout: QVBoxLayout) -> None:
         registration_group = QGroupBox("Registration", self)
         registration_layout = QVBoxLayout(registration_group)
         self._registration_hint_label = QLabel(
@@ -1482,9 +1502,25 @@ class DesignNavigatorPanel(QWidget):
         registration_layout.addWidget(self._registration_status_label)
         root_layout.addWidget(registration_group)
 
+    def _build_route_controls(self, root_layout: QVBoxLayout) -> None:
         route_group = QGroupBox("Probe Route", self)
         route_layout = QVBoxLayout(route_group)
         self._route_layout = route_layout
+        self._build_route_file_controls(route_group, route_layout)
+        self._build_route_tool_toolbar(route_group, route_layout)
+        self._build_route_tool_options(route_group, route_layout)
+        self._build_route_offset_controls(route_group, route_layout)
+        self._build_route_table(route_group, route_layout)
+        self._build_route_edit_buttons(route_group, route_layout)
+        self._build_route_run_controls(route_group, route_layout)
+        self._connect_route_controls()
+        root_layout.addWidget(route_group)
+
+    def _build_route_file_controls(
+        self,
+        route_group: QGroupBox,
+        route_layout: QVBoxLayout,
+    ) -> None:
         route_buttons = QHBoxLayout()
         self._route_new_button = QPushButton("New", route_group)
         self._route_open_button = QPushButton("Open...", route_group)
@@ -1499,6 +1535,11 @@ class DesignNavigatorPanel(QWidget):
         self._route_label.setWordWrap(True)
         route_layout.addWidget(self._route_label)
 
+    def _build_route_tool_toolbar(
+        self,
+        route_group: QGroupBox,
+        route_layout: QVBoxLayout,
+    ) -> None:
         self._tool_toolbar_widget = QWidget(route_group)
         tool_buttons = QHBoxLayout(self._tool_toolbar_widget)
         tool_buttons.setContentsMargins(0, 0, 0, 0)
@@ -1537,6 +1578,11 @@ class DesignNavigatorPanel(QWidget):
         tool_buttons.addStretch(1)
         route_layout.addWidget(self._tool_toolbar_widget)
 
+    def _build_route_tool_options(
+        self,
+        route_group: QGroupBox,
+        route_layout: QVBoxLayout,
+    ) -> None:
         self._tool_group = QGroupBox("Tool Options", route_group)
         tool_layout = QVBoxLayout(self._tool_group)
         self._tool_status_label = QLabel("", self._tool_group)
@@ -1544,13 +1590,20 @@ class DesignNavigatorPanel(QWidget):
         self._tool_status_label.setStyleSheet("QLabel { color: #607d8b; }")
         tool_layout.addWidget(self._tool_status_label)
         self._tool_stack = QStackedWidget(self._tool_group)
+        self._build_select_tool_page()
+        self._build_ruler_tool_page()
+        self._build_array_tool_page()
+        tool_layout.addWidget(self._tool_stack)
+        route_layout.addWidget(self._tool_group)
 
+    def _build_select_tool_page(self) -> None:
         select_page = QWidget(self._tool_group)
         select_layout = QVBoxLayout(select_page)
         select_layout.setContentsMargins(0, 0, 0, 0)
         select_layout.addWidget(QLabel("No tool active.", select_page))
         self._tool_stack.addWidget(select_page)
 
+    def _build_ruler_tool_page(self) -> None:
         ruler_page = QWidget(self._tool_group)
         ruler_layout = QGridLayout(ruler_page)
         ruler_layout.setContentsMargins(0, 0, 0, 0)
@@ -1568,9 +1621,16 @@ class DesignNavigatorPanel(QWidget):
         ruler_layout.addWidget(self._ruler_cancel_button, 4, 1)
         self._tool_stack.addWidget(ruler_page)
 
+    def _build_array_tool_page(self) -> None:
         array_page = QWidget(self._tool_group)
         array_layout = QGridLayout(array_page)
         array_layout.setContentsMargins(0, 0, 0, 0)
+        self._build_route_array_spinboxes(array_page)
+        self._build_route_array_buttons(array_page)
+        self._layout_route_array_page(array_layout, array_page)
+        self._tool_stack.addWidget(array_page)
+
+    def _build_route_array_spinboxes(self, array_page: QWidget) -> None:
         self._route_array_origin_x_spin = self._make_route_coordinate_spinbox(array_page)
         self._route_array_origin_y_spin = self._make_route_coordinate_spinbox(array_page)
         self._route_array_dir1_step_x_spin = self._make_route_distance_spinbox(array_page)
@@ -1588,6 +1648,8 @@ class DesignNavigatorPanel(QWidget):
         self._route_array_dir2_count_spin.setValue(1)
         self._route_array_serpentine_checkbox = QCheckBox("Serpentine", array_page)
         self._route_array_replace_checkbox = QCheckBox("Replace", array_page)
+
+    def _build_route_array_buttons(self, array_page: QWidget) -> None:
         self._route_array_pick_origin_button = self._make_icon_button(
             array_page, "Pick Origin", "origin"
         )
@@ -1609,6 +1671,12 @@ class DesignNavigatorPanel(QWidget):
         self._route_array_cancel_button = self._make_icon_button(
             array_page, "Cancel", "cancel"
         )
+
+    def _layout_route_array_page(
+        self,
+        array_layout: QGridLayout,
+        array_page: QWidget,
+    ) -> None:
         array_layout.addWidget(QLabel("Origin X", array_page), 0, 0)
         array_layout.addWidget(self._route_array_origin_x_spin, 0, 1)
         array_layout.addWidget(QLabel("Y", array_page), 0, 2)
@@ -1634,11 +1702,12 @@ class DesignNavigatorPanel(QWidget):
         array_layout.addWidget(self._route_array_replace_checkbox, 7, 0, 1, 2)
         array_layout.addWidget(self._route_array_create_button, 7, 2)
         array_layout.addWidget(self._route_array_cancel_button, 7, 3)
-        self._tool_stack.addWidget(array_page)
 
-        tool_layout.addWidget(self._tool_stack)
-        route_layout.addWidget(self._tool_group)
-
+    def _build_route_offset_controls(
+        self,
+        route_group: QGroupBox,
+        route_layout: QVBoxLayout,
+    ) -> None:
         offset_layout = QGridLayout()
         offset_layout.addWidget(QLabel("Needle", route_group), 0, 0)
         offset_layout.addWidget(QLabel("dx", route_group), 0, 1)
@@ -1655,6 +1724,11 @@ class DesignNavigatorPanel(QWidget):
         offset_layout.addWidget(self._needle_2_dy_spin, 2, 2)
         route_layout.addLayout(offset_layout)
 
+    def _build_route_table(
+        self,
+        route_group: QGroupBox,
+        route_layout: QVBoxLayout,
+    ) -> None:
         self._route_table = QTableWidget(0, 5, route_group)
         self._route_table.setHorizontalHeaderLabels(
             ["#", "Label", "Center", "N1", "N2"]
@@ -1667,6 +1741,11 @@ class DesignNavigatorPanel(QWidget):
         )
         route_layout.addWidget(self._route_table)
 
+    def _build_route_edit_buttons(
+        self,
+        route_group: QGroupBox,
+        route_layout: QVBoxLayout,
+    ) -> None:
         route_edit_buttons = QHBoxLayout()
         self._route_add_current_button = QPushButton("Add Current", route_group)
         self._route_remove_button = QPushButton("Remove", route_group)
@@ -1676,6 +1755,11 @@ class DesignNavigatorPanel(QWidget):
         route_edit_buttons.addWidget(self._route_clear_button)
         route_layout.addLayout(route_edit_buttons)
 
+    def _build_route_run_controls(
+        self,
+        route_group: QGroupBox,
+        route_layout: QVBoxLayout,
+    ) -> None:
         route_run_buttons = QHBoxLayout()
         self._route_run_button = QPushButton("Measure", route_group)
         self._route_pause_button = QPushButton("Pause", route_group)
@@ -1714,10 +1798,21 @@ class DesignNavigatorPanel(QWidget):
         self._route_run_status_label.setWordWrap(True)
         route_layout.addWidget(self._route_run_status_label)
 
+    def _connect_route_controls(self) -> None:
+        self._connect_route_file_controls()
+        self._connect_route_edit_controls()
+        self._connect_route_run_controls()
+        self._connect_route_tool_controls()
+        self._connect_route_array_controls()
+        self._connect_route_offset_controls()
+
+    def _connect_route_file_controls(self) -> None:
         self._route_new_button.clicked.connect(self.route_new_requested.emit)
         self._route_open_button.clicked.connect(self._choose_route_file)
         self._route_save_button.clicked.connect(self.route_save_requested.emit)
         self._route_save_as_button.clicked.connect(self._choose_route_save_file)
+
+    def _connect_route_edit_controls(self) -> None:
         self._route_add_current_button.clicked.connect(
             self.route_add_current_requested.emit
         )
@@ -1725,6 +1820,8 @@ class DesignNavigatorPanel(QWidget):
             self.route_remove_selected_requested.emit
         )
         self._route_clear_button.clicked.connect(self.route_clear_requested.emit)
+
+    def _connect_route_run_controls(self) -> None:
         self._route_run_button.clicked.connect(
             self._emit_route_measurement_measure_selected
         )
@@ -1761,6 +1858,8 @@ class DesignNavigatorPanel(QWidget):
         self._route_move_selected_button.clicked.connect(
             self._emit_route_measurement_move_to_selected
         )
+
+    def _connect_route_tool_controls(self) -> None:
         self._select_tool_button.clicked.connect(
             lambda _checked=False: self._set_design_tool("select")
         )
@@ -1777,6 +1876,8 @@ class DesignNavigatorPanel(QWidget):
         self._ruler_cancel_button.clicked.connect(
             lambda _checked=False: self._set_design_tool("select")
         )
+
+    def _connect_route_array_controls(self) -> None:
         self._route_array_pick_origin_button.clicked.connect(
             lambda _checked=False: self._start_route_pick_mode("array_origin")
         )
@@ -1810,6 +1911,8 @@ class DesignNavigatorPanel(QWidget):
                 widget.valueChanged.connect(self._update_route_array_preview)
             else:
                 widget.toggled.connect(self._update_route_array_preview)
+
+    def _connect_route_offset_controls(self) -> None:
         for spinbox in (
             self._needle_1_dx_spin,
             self._needle_1_dy_spin,
@@ -1817,16 +1920,12 @@ class DesignNavigatorPanel(QWidget):
             self._needle_2_dy_spin,
         ):
             spinbox.valueChanged.connect(self._emit_route_offsets_changed)
-        root_layout.addWidget(route_group)
 
+    def _build_position_controls(self, root_layout: QVBoxLayout) -> None:
         self._current_position_label = QLabel("Stage: unavailable", self)
         self._current_position_label.setWordWrap(True)
         root_layout.addWidget(self._current_position_label)
         root_layout.addStretch(1)
-
-        self._update_availability()
-        self._update_enabled_state()
-        self._set_design_tool("select")
 
     def set_document(self, document: DesignDocument | None) -> None:
         if document is self._document:
