@@ -159,6 +159,8 @@ from probe_station_gui.route_control_state import (
     api_route_control_state_from_legacy_attrs,
 )
 from probe_station_gui.route_measurement_payloads import (
+    route_api_contact_seek_payload,
+    route_api_measurement_record_payload,
     route_artifact_public_payload,
     route_artifact_record,
     route_external_result_payload,
@@ -2352,8 +2354,8 @@ class Main(QMainWindow):
             "contact_seek_range_mm": contact_seek_range_mm,
             "contact_seek_step_mm": contact_seek_step_mm,
             "contact_quality_limits": contact_quality_limits.as_dict(),
-            "measurement": self._api_route_measurement_record_payload(record),
-            "contact_seek": self._api_contact_seek_payload(result.contact_seek),
+            "measurement": route_api_measurement_record_payload(record),
+            "contact_seek": route_api_contact_seek_payload(result.contact_seek),
         }
         if seek:
             contact_seek = result.contact_seek
@@ -3908,100 +3910,6 @@ class Main(QMainWindow):
                 minimum=0.0,
             ),
         ).normalized()
-
-    @classmethod
-    def _api_route_measurement_record_payload(
-        cls,
-        record: RouteMeasurementRecord,
-    ) -> dict[str, Any]:
-        return {
-            "timestamp": record.timestamp,
-            "structure_number": int(record.structure_number),
-            "n_measurements": int(record.n_measurements),
-            "resistance_ohm": cls._api_json_ready(record.resistance_ohm),
-            "resistance_rms_ohm": cls._api_json_ready(record.resistance_rms_ohm),
-            "relative_rms": cls._api_json_ready(record.relative_rms),
-            "status": record.status,
-            "contact_quality": cls._api_contact_quality_payload(
-                record.contact_quality
-            ),
-            "raw_samples": [
-                cls._api_route_sample_payload(sample)
-                for sample in record.raw_samples
-            ],
-        }
-
-    @classmethod
-    def _api_route_sample_payload(cls, sample: object) -> dict[str, Any]:
-        fields = (
-            "sample_index",
-            "differential_resistance_ohm",
-            "compliance_hit",
-            "negative_source_voltage_v",
-            "negative_measured_voltage_v",
-            "negative_current_a",
-            "negative_resistance_ohm",
-            "positive_source_voltage_v",
-            "positive_measured_voltage_v",
-            "positive_current_a",
-            "positive_resistance_ohm",
-        )
-        return {
-            field: cls._api_json_ready(getattr(sample, field, None))
-            for field in fields
-        }
-
-    @classmethod
-    def _api_contact_quality_payload(cls, quality: object | None) -> dict[str, Any] | None:
-        if quality is None:
-            return None
-        return {
-            "assessed": bool(getattr(quality, "assessed", False)),
-            "good": getattr(quality, "good", None),
-            "status": str(getattr(quality, "status", "")),
-            "median_ohm": cls._api_json_ready(
-                getattr(quality, "median_ohm", math.nan)
-            ),
-            "mad_sigma_ohm": cls._api_json_ready(
-                getattr(quality, "mad_sigma_ohm", math.nan)
-            ),
-            "p95_abs_step_ohm": cls._api_json_ready(
-                getattr(quality, "p95_abs_step_ohm", math.nan)
-            ),
-            "span_ohm": cls._api_json_ready(
-                getattr(quality, "span_ohm", math.nan)
-            ),
-            "compliance_hits": int(getattr(quality, "compliance_hits", 0)),
-            "polarity_sign_mismatch_count": int(
-                getattr(quality, "polarity_sign_mismatch_count", 0)
-            ),
-            "reasons": list(getattr(quality, "reasons", ()) or ()),
-            "failure_criteria": list(
-                getattr(quality, "failure_criteria", ()) or ()
-            ),
-        }
-
-    @classmethod
-    def _api_contact_seek_payload(cls, seek: object | None) -> dict[str, Any] | None:
-        if seek is None:
-            return None
-        return {
-            "found": bool(getattr(seek, "found", False)),
-            "status": str(getattr(seek, "status", "")),
-            "attempts": int(getattr(seek, "attempts", 0)),
-            "initial_status": str(getattr(seek, "initial_status", "")),
-            "final_status": str(getattr(seek, "final_status", "")),
-            "depth_below_down_mm": cls._api_json_ready(
-                getattr(seek, "depth_below_down_mm", math.nan)
-            ),
-            "axis_a_lowering_mm": cls._api_json_ready(
-                getattr(seek, "axis_a_lowering_mm", math.nan)
-            ),
-            "step_mm": cls._api_json_ready(getattr(seek, "step_mm", math.nan)),
-            "max_depth_mm": cls._api_json_ready(
-                getattr(seek, "max_depth_mm", math.nan)
-            ),
-        }
 
     @staticmethod
     def _api_structure_number_for_measurement_point(

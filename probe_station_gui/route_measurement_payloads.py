@@ -27,9 +27,47 @@ def route_measurement_record_payload(record: object) -> dict[str, Any]:
     }
 
 
+def route_api_measurement_record_payload(record: object) -> dict[str, Any]:
+    return {
+        "timestamp": getattr(record, "timestamp"),
+        "structure_number": int(getattr(record, "structure_number")),
+        "n_measurements": int(getattr(record, "n_measurements")),
+        "resistance_ohm": json_ready(getattr(record, "resistance_ohm")),
+        "resistance_rms_ohm": json_ready(getattr(record, "resistance_rms_ohm")),
+        "relative_rms": json_ready(getattr(record, "relative_rms")),
+        "status": getattr(record, "status"),
+        "contact_quality": route_api_contact_quality_payload(
+            getattr(record, "contact_quality")
+        ),
+        "raw_samples": [
+            route_api_measurement_sample_payload(sample)
+            for sample in getattr(record, "raw_samples")
+        ],
+    }
+
+
 def route_measurement_sample_payload(sample: object) -> dict[str, Any]:
     return {
         field: json_ready(getattr(sample, field))
+        for field in (
+            "sample_index",
+            "differential_resistance_ohm",
+            "compliance_hit",
+            "negative_source_voltage_v",
+            "negative_measured_voltage_v",
+            "negative_current_a",
+            "negative_resistance_ohm",
+            "positive_source_voltage_v",
+            "positive_measured_voltage_v",
+            "positive_current_a",
+            "positive_resistance_ohm",
+        )
+    }
+
+
+def route_api_measurement_sample_payload(sample: object) -> dict[str, Any]:
+    return {
+        field: json_ready(getattr(sample, field, None))
         for field in (
             "sample_index",
             "differential_resistance_ohm",
@@ -66,6 +104,28 @@ def route_contact_quality_payload(quality: object | None) -> dict[str, Any] | No
     }
 
 
+def route_api_contact_quality_payload(quality: object | None) -> dict[str, Any] | None:
+    if quality is None:
+        return None
+    return {
+        "assessed": bool(getattr(quality, "assessed", False)),
+        "good": getattr(quality, "good", None),
+        "status": str(getattr(quality, "status", "")),
+        "median_ohm": json_ready(getattr(quality, "median_ohm", math.nan)),
+        "mad_sigma_ohm": json_ready(getattr(quality, "mad_sigma_ohm", math.nan)),
+        "p95_abs_step_ohm": json_ready(
+            getattr(quality, "p95_abs_step_ohm", math.nan)
+        ),
+        "span_ohm": json_ready(getattr(quality, "span_ohm", math.nan)),
+        "compliance_hits": int(getattr(quality, "compliance_hits", 0)),
+        "polarity_sign_mismatch_count": int(
+            getattr(quality, "polarity_sign_mismatch_count", 0)
+        ),
+        "reasons": list(getattr(quality, "reasons", ()) or ()),
+        "failure_criteria": list(getattr(quality, "failure_criteria", ()) or ()),
+    }
+
+
 def route_contact_seek_payload(seek: object | None) -> dict[str, Any] | None:
     if seek is None:
         return None
@@ -79,6 +139,26 @@ def route_contact_seek_payload(seek: object | None) -> dict[str, Any] | None:
         "axis_a_lowering_mm": json_ready(getattr(seek, "axis_a_lowering_mm")),
         "step_mm": json_ready(getattr(seek, "step_mm")),
         "max_depth_mm": json_ready(getattr(seek, "max_depth_mm")),
+    }
+
+
+def route_api_contact_seek_payload(seek: object | None) -> dict[str, Any] | None:
+    if seek is None:
+        return None
+    return {
+        "found": bool(getattr(seek, "found", False)),
+        "status": str(getattr(seek, "status", "")),
+        "attempts": int(getattr(seek, "attempts", 0)),
+        "initial_status": str(getattr(seek, "initial_status", "")),
+        "final_status": str(getattr(seek, "final_status", "")),
+        "depth_below_down_mm": json_ready(
+            getattr(seek, "depth_below_down_mm", math.nan)
+        ),
+        "axis_a_lowering_mm": json_ready(
+            getattr(seek, "axis_a_lowering_mm", math.nan)
+        ),
+        "step_mm": json_ready(getattr(seek, "step_mm", math.nan)),
+        "max_depth_mm": json_ready(getattr(seek, "max_depth_mm", math.nan)),
     }
 
 

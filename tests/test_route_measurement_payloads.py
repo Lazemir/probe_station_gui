@@ -12,6 +12,8 @@ from probe_station_gui.route_measurement import (
 from probe_station_gui.route_measurement_payloads import (
     focus_result_to_dict,
     json_ready,
+    route_api_contact_seek_payload,
+    route_api_measurement_record_payload,
     route_artifact_public_payload,
     route_artifact_record,
     route_contact_seek_payload,
@@ -89,6 +91,49 @@ def test_route_measurement_record_payload_matches_status_shape() -> None:
     ]
 
 
+def test_route_api_measurement_record_payload_matches_existing_api_shape() -> None:
+    sample = RouteMeasurementSample(
+        sample_index=2,
+        differential_resistance_ohm=float("inf"),
+        compliance_hit=True,
+        negative_current_a=0.001,
+    )
+    quality = RouteContactQuality(
+        assessed=True,
+        good=False,
+        status="bad_contact",
+        median_ohm=float("nan"),
+        mad_sigma_ohm=12.5,
+        p95_abs_step_ohm=33.0,
+        span_ohm=100.0,
+        compliance_hits=1,
+        polarity_sign_mismatch_count=2,
+        reasons=("unstable",),
+        failure_criteria=("mad_sigma",),
+    )
+    record = RouteMeasurementRecord(
+        timestamp="2026-06-25T01:23:45",
+        structure_number=7,
+        nplc="1",
+        measurement_type="4wire",
+        n_measurements=5,
+        resistance_ohm=float("nan"),
+        resistance_rms_ohm=0.2,
+        relative_rms=0.01,
+        status="bad_contact",
+        contact_quality=quality,
+        raw_samples=(sample,),
+    )
+
+    payload = route_api_measurement_record_payload(record)
+
+    assert "nplc" not in payload
+    assert "measurement_type" not in payload
+    assert payload["resistance_ohm"] is None
+    assert payload["contact_quality"]["median_ohm"] is None
+    assert payload["raw_samples"][0]["differential_resistance_ohm"] is None
+
+
 def test_route_contact_seek_payload_normalizes_nonfinite_fields() -> None:
     seek = RouteContactSeekResult(
         found=True,
@@ -116,6 +161,22 @@ def test_route_contact_seek_payload_normalizes_nonfinite_fields() -> None:
         "max_depth_mm": None,
     }
     assert route_contact_seek_payload(None) is None
+
+
+def test_route_api_contact_seek_payload_accepts_missing_fields() -> None:
+    payload = route_api_contact_seek_payload(SimpleNamespace(found=True))
+
+    assert payload == {
+        "found": True,
+        "status": "",
+        "attempts": 0,
+        "initial_status": "",
+        "final_status": "",
+        "depth_below_down_mm": None,
+        "axis_a_lowering_mm": None,
+        "step_mm": None,
+        "max_depth_mm": None,
+    }
 
 
 def test_focus_result_to_dict_accepts_existing_shapes() -> None:
