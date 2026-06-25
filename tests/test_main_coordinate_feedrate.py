@@ -49,7 +49,7 @@ from probe_station_gui.route.measurement import (
     RouteMeasurementRunner,
     RoutePhotoRecord,
 )
-from probe_station_gui.lcr_meter import RouteMeterConfiguration
+from probe_station_gui.instruments.meters.lcr import RouteMeterConfiguration
 from probe_station_gui.settings_manager import ObjectiveCalibrationSettings, Settings
 
 

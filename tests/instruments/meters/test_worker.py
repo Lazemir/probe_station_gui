@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 import unittest
 
-from probe_station_gui.lcr_meter_worker import (
+from probe_station_gui.instruments.meters.worker import (
     MeterWorkerCall,
     meter_worker_poll_timeout,
 )

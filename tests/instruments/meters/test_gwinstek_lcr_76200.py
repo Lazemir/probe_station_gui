@@ -6,8 +6,10 @@ from pathlib import Path
 
 def _load_driver_module():
     module_path = (
-        Path(__file__).resolve().parents[1]
+        Path(__file__).resolve().parents[3]
         / "probe_station_gui"
+        / "instruments"
+        / "meters"
         / "gwinstek_lcr_76200.py"
     )
     spec = importlib.util.spec_from_file_location("gwinstek_lcr_76200_test", module_path)

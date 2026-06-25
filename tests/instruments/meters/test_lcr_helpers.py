@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from probe_station_gui.lcr_meter_helpers import (
+from probe_station_gui.instruments.meters.lcr_helpers import (
     callable_accepts_keyword,
     format_source_level_value,
     gpib_interface_resources_for,
