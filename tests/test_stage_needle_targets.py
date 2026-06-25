@@ -2,6 +2,7 @@ import math
 import unittest
 
 from probe_station_gui.stage_needle_targets import (
+    needle_programmed_feedrate,
     needle_target_lowering_for_action,
     normalise_needle_contact_zone,
     normalise_needle_lowering_target,
@@ -102,6 +103,38 @@ class StageNeedleTargetsTest(unittest.TestCase):
                         down_lowering_mm=down_lowering,
                         boundary_lowering=boundary,
                     )
+
+    def test_needle_programmed_feedrate_uses_default_minimum_and_errors(self) -> None:
+        self.assertEqual(
+            needle_programmed_feedrate(
+                None,
+                default_feedrate=600.0,
+                min_feedrate=1.0,
+            ),
+            600.0,
+        )
+        self.assertEqual(
+            needle_programmed_feedrate(
+                0.1,
+                default_feedrate=600.0,
+                min_feedrate=1.0,
+            ),
+            1.0,
+        )
+        self.assertEqual(
+            needle_programmed_feedrate(
+                "12.5",
+                default_feedrate=600.0,
+                min_feedrate=1.0,
+            ),
+            12.5,
+        )
+        with self.assertRaisesRegex(ValueError, "Unsupported needle feedrate"):
+            needle_programmed_feedrate(
+                "bad",
+                default_feedrate=600.0,
+                min_feedrate=1.0,
+            )
 
 
 if __name__ == "__main__":

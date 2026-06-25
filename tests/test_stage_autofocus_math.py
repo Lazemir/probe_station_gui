@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 from probe_station_gui.stage_autofocus_math import (
+    autofocus_sweep_feedrate_mm_min,
     estimate_shift_with_response,
     focus_metric,
     frame_rate_from_timestamps,
@@ -14,6 +15,31 @@ def test_frame_rate_from_timestamps_requires_increasing_samples() -> None:
     assert frame_rate_from_timestamps([1.0]) is None
     assert frame_rate_from_timestamps([1.0, 1.0]) is None
     assert frame_rate_from_timestamps([0.0, 0.05, 0.10, 0.15]) == pytest.approx(20.0)
+
+
+def test_autofocus_sweep_feedrate_uses_step_frame_rate_and_minimum() -> None:
+    assert autofocus_sweep_feedrate_mm_min(
+        0.002,
+        20.0,
+        min_feedrate_mm_min=1.0,
+    ) == pytest.approx(2.4)
+    assert autofocus_sweep_feedrate_mm_min(
+        0.0001,
+        20.0,
+        min_feedrate_mm_min=1.0,
+    ) == pytest.approx(1.0)
+    with pytest.raises(ValueError, match="enough frames"):
+        autofocus_sweep_feedrate_mm_min(
+            0.002,
+            None,
+            min_feedrate_mm_min=1.0,
+        )
+    with pytest.raises(ValueError, match="speed estimate"):
+        autofocus_sweep_feedrate_mm_min(
+            0.0,
+            20.0,
+            min_feedrate_mm_min=1.0,
+        )
 
 
 def test_static_focus_candidates_are_centered_odd_and_clamped() -> None:

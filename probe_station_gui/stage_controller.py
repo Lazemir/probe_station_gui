@@ -44,6 +44,7 @@ from probe_station_gui.stage_axis_mapping import (
     evaluate_polynomial,
 )
 from probe_station_gui.stage_autofocus_math import (
+    autofocus_sweep_feedrate_mm_min,
     estimate_shift,
     estimate_shift_with_response,
     focus_metric,
@@ -84,6 +85,7 @@ from probe_station_gui.stage_motion_timing import (
     move_distance_for_timeout,
 )
 from probe_station_gui.stage_needle_targets import (
+    needle_programmed_feedrate,
     needle_target_lowering_for_action,
     normalise_needle_contact_zone,
     normalise_needle_lowering_target,
@@ -2967,14 +2969,12 @@ class StageController(QObject):
 
     def _autofocus_sweep_feedrate_mm_min(self, fine_step_mm: float) -> float:
         frame_rate_hz = self._autofocus_frame_rate_hz()
-        if frame_rate_hz is None:
-            raise StageControllerError(
-                "Camera did not provide enough frames to estimate autofocus speed."
-            )
-        feedrate = abs(float(fine_step_mm)) * frame_rate_hz * 60.0
-        if not math.isfinite(feedrate) or feedrate <= 0.0:
-            raise StageControllerError("Autofocus speed estimate is invalid.")
-        feedrate = max(self.AUTOFOCUS_MIN_SWEEP_FEEDRATE_MM_MIN, feedrate)
+        feedrate = autofocus_sweep_feedrate_mm_min(
+            fine_step_mm,
+            frame_rate_hz,
+            min_feedrate_mm_min=self.AUTOFOCUS_MIN_SWEEP_FEEDRATE_MM_MIN,
+            error_factory=StageControllerError,
+        )
         logger.debug(
             "Autofocus dynamic sweep feedrate %.6f mm/min from %.3f fps and %.6f mm step",
             feedrate,
@@ -3744,15 +3744,12 @@ class StageController(QObject):
             self.queue_feed_override_reset()
 
     def _needle_programmed_feedrate(self, feedrate: float | None) -> float:
-        if feedrate is None:
-            return self.DEFAULT_FEEDRATE
-        try:
-            value = float(feedrate)
-        except (TypeError, ValueError) as exc:
-            raise StageControllerError(f"Unsupported needle feedrate: {feedrate}") from exc
-        if not math.isfinite(value):
-            raise StageControllerError(f"Unsupported needle feedrate: {feedrate}")
-        return max(self.MIN_FEEDRATE, value)
+        return needle_programmed_feedrate(
+            feedrate,
+            default_feedrate=self.DEFAULT_FEEDRATE,
+            min_feedrate=self.MIN_FEEDRATE,
+            error_factory=StageControllerError,
+        )
 
     def _axis_max_feedrate(self, axis: str) -> float:
         return axis_max_feedrate(

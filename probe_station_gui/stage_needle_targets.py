@@ -35,6 +35,24 @@ def normalise_needle_contact_zone(
     return zone_mm
 
 
+def needle_programmed_feedrate(
+    feedrate: float | None,
+    *,
+    default_feedrate: float,
+    min_feedrate: float,
+    error_factory: Callable[[str], Exception] = ValueError,
+) -> float:
+    if feedrate is None:
+        return float(default_feedrate)
+    try:
+        value = float(feedrate)
+    except (TypeError, ValueError) as exc:
+        raise error_factory(f"Unsupported needle feedrate: {feedrate}") from exc
+    if not math.isfinite(value):
+        raise error_factory(f"Unsupported needle feedrate: {feedrate}")
+    return max(float(min_feedrate), value)
+
+
 def needle_target_lowering_for_action(
     action: str,
     *,

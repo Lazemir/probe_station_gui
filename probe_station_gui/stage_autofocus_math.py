@@ -17,6 +17,24 @@ def frame_rate_from_timestamps(timestamps: list[float]) -> float | None:
     return float(frame_rate)
 
 
+def autofocus_sweep_feedrate_mm_min(
+    fine_step_mm: float,
+    frame_rate_hz: float | None,
+    *,
+    min_feedrate_mm_min: float,
+    error_factory: type[Exception] = ValueError,
+) -> float:
+    if frame_rate_hz is None:
+        raise error_factory(
+            "Camera did not provide enough frames to estimate autofocus speed."
+        )
+    feedrate = abs(float(fine_step_mm)) * float(frame_rate_hz) * 60.0
+    if not math.isfinite(feedrate) or feedrate <= 0.0:
+        raise error_factory("Autofocus speed estimate is invalid.")
+    feedrate = max(float(min_feedrate_mm_min), feedrate)
+    return float(feedrate)
+
+
 def static_focus_candidates(
     center_z: float,
     *,
