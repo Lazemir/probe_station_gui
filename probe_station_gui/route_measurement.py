@@ -54,6 +54,7 @@ from probe_station_gui.route_operation_modes import (
     route_operation_measure_enabled,
     route_operation_photo_enabled,
 )
+from probe_station_gui.route_shift import route_shift_from_stage_xy
 
 
 Point2D = tuple[float, float]
@@ -518,14 +519,11 @@ class RouteMeasurementRunner:
             point = self._last_recorded_point
             if point is None:
                 return False, "Measure a route point before saving a route shift."
-            offset_x = current_x - float(point.stage_xy[0])
-            offset_y = current_y - float(point.stage_xy[1])
-            self._route_offset_xy = (offset_x, offset_y)
-        return (
-            True,
-            "Route shift saved: "
-            f"dX={offset_x:+.4f} mm, dY={offset_y:+.4f} mm.",
-        )
+            self._route_offset_xy, message = route_shift_from_stage_xy(
+                (current_x, current_y),
+                point.stage_xy,
+            )
+        return True, message
 
     def place_contact(
         self,

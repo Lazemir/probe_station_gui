@@ -185,6 +185,7 @@ from probe_station_gui.route_session_actions import (
     route_confirmation_action,
     route_session_action_from_payload,
 )
+from probe_station_gui.route_shift import route_shift_from_stage_xy
 from probe_station_gui.route_formatting import (
     csv_bool as _csv_bool,
     csv_float as _csv_float,
@@ -9467,14 +9468,11 @@ class Main(QMainWindow):
                 except (TypeError, ValueError, IndexError):
                     pass
         else:
-            offset_x = float(stage_xy[0]) - float(adjustment_point.stage_xy[0])
-            offset_y = float(stage_xy[1]) - float(adjustment_point.stage_xy[1])
-            self._api_route_offset_xy = (offset_x, offset_y)
-            saved = True
-            message = (
-                "Route shift saved: "
-                f"dX={offset_x:+.4f} mm, dY={offset_y:+.4f} mm."
+            self._api_route_offset_xy, message = route_shift_from_stage_xy(
+                stage_xy,
+                adjustment_point.stage_xy,
             )
+            saved = True
         self._show_status(message, 5000)
         if self.design_navigator_panel is not None:
             if runner_active and hasattr(
