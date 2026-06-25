@@ -308,104 +308,14 @@ class RouteExternalMeasurementSessionRunner:
                 lcr.open()
             self._set_state("running", message="Route API session starting.")
             index = self._start_index()
-            if self._wait_before_first_point and index < len(self._points):
-                point = self._points[index]
-                position = index + 1
-                self._set_current(position, point)
-                self._emit_progress(position, len(self._points), int(point.index))
-                decision = self._wait_before_first_point_decision(point, position)
-                action = str(decision.get("action") or "next")
-                if action == "stop":
-                    self.stop()
-                    message = "Route API session stopped by user."
-                    index = len(self._points)
-                else:
-                    jump = self._jump_index(action)
-                    if jump is not None:
-                        index = jump
-                    elif action == "skip":
-                        index += 1
-            while index < len(self._points):
+            index, stop_message = self._handle_initial_pause(index)
+            if stop_message is not None:
+                message = stop_message
+            while stop_message is None and index < len(self._points):
                 if self._stop_requested_now():
                     message = "Route API session stopped by user."
                     break
-                point = self._points[index]
-                position = index + 1
-                self._set_current(position, point)
-                self._emit_progress(position, len(self._points), int(point.index))
-                try:
-                    preparation = self._prepare_point(point, position, len(self._points))
-                except RuntimeError:
-                    if not self._point_interrupted():
-                        raise
-                    decision = self._wait_for_interrupted_point(point, position)
-                    jump = self._handle_interrupted_decision(
-                        decision,
-                        position,
-                        len(self._points),
-                    )
-                    index = position - 1 if jump is None else jump
-                    continue
-                record = preparation.placement.record
-                self._store_preparation(preparation)
-                self._emit_result(record, position, len(self._points), record.status in {"ok", "short"})
-                if record.status == "short":
-                    self._append_history(
-                        point,
-                        position,
-                        "short",
-                        preparation=preparation,
-                        external_result=None,
-                    )
-                    self._status(
-                        f"Route API session: point {position}/{len(self._points)} "
-                        "short-circuit detected; external measurement skipped."
-                    )
-                    self._lift_needles(position, len(self._points))
-                    pause_decision = self._wait_if_pause_requested(point, position)
-                    jump = self._handle_post_point_decision(pause_decision)
-                    if jump is not None:
-                        index = jump
-                        continue
-                    index += 1
-                    continue
-                if record.status != "ok":
-                    decision = self._wait_for_contact_attention(point, position)
-                    jump = self._handle_attention_decision(
-                        decision,
-                        point,
-                        position,
-                        len(self._points),
-                    )
-                    if jump is None:
-                        index += 1
-                    else:
-                        index = jump
-                    continue
-                decision = self._wait_for_external_result(point, position)
-                if "result" in decision:
-                    jump = self._handle_external_result(
-                        dict(decision["result"]),
-                        point,
-                        position,
-                        len(self._points),
-                        preparation=preparation,
-                    )
-                    if jump is not None:
-                        index = jump
-                        continue
-                    index += 1
-                    continue
-                jump = self._handle_attention_decision(
-                    decision,
-                    point,
-                    position,
-                    len(self._points),
-                )
-                if jump is None:
-                    index += 1
-                else:
-                    index = jump
+                index = self._run_route_point(index)
             if index >= len(self._points) and not self._stop_requested_now():
                 success = True
                 message = "Route API session complete."
@@ -426,6 +336,83 @@ class RouteExternalMeasurementSessionRunner:
                 message=message,
             )
         return success, message
+
+    def _handle_initial_pause(self, index: int) -> tuple[int, str | None]:
+        if not self._wait_before_first_point or index >= len(self._points):
+            return index, None
+        point = self._points[index]
+        position = index + 1
+        self._set_current(position, point)
+        self._emit_progress(position, len(self._points), int(point.index))
+        decision = self._wait_before_first_point_decision(point, position)
+        action = self._decision_action(decision, default="next")
+        if action == "stop":
+            self.stop()
+            return len(self._points), "Route API session stopped by user."
+        jump = self._jump_index(action)
+        if jump is not None:
+            return jump, None
+        if action == "skip":
+            return index + 1, None
+        return index, None
+
+    def _run_route_point(self, index: int) -> int:
+        point = self._points[index]
+        position = index + 1
+        total = len(self._points)
+        self._set_current(position, point)
+        self._emit_progress(position, total, int(point.index))
+        try:
+            preparation = self._prepare_point(point, position, total)
+        except RuntimeError:
+            if not self._point_interrupted():
+                raise
+            decision = self._wait_for_interrupted_point(point, position)
+            jump = self._handle_interrupted_decision(decision, position, total)
+            return index if jump is None else jump
+        record = preparation.placement.record
+        self._store_preparation(preparation)
+        self._emit_result(record, position, total, record.status in {"ok", "short"})
+        if record.status == "short":
+            self._append_history(
+                point,
+                position,
+                "short",
+                preparation=preparation,
+                external_result=None,
+            )
+            self._status(
+                f"Route API session: point {position}/{total} "
+                "short-circuit detected; external measurement skipped."
+            )
+            self._lift_needles(position, total)
+            pause_decision = self._wait_if_pause_requested(point, position)
+            jump = self._handle_post_point_decision(pause_decision)
+            return self._advance_after_optional_jump(index, jump)
+        if record.status != "ok":
+            decision = self._wait_for_contact_attention(point, position)
+            jump = self._handle_attention_decision(decision, point, position, total)
+            return self._advance_after_optional_jump(index, jump)
+        decision = self._wait_for_external_result(point, position)
+        if "result" in decision:
+            jump = self._handle_external_result(
+                dict(decision["result"]),
+                point,
+                position,
+                total,
+                preparation=preparation,
+            )
+        else:
+            jump = self._handle_attention_decision(decision, point, position, total)
+        return self._advance_after_optional_jump(index, jump)
+
+    @staticmethod
+    def _advance_after_optional_jump(index: int, jump: int | None) -> int:
+        return index + 1 if jump is None else jump
+
+    @staticmethod
+    def _decision_action(decision: dict[str, Any], *, default: str = "") -> str:
+        return str(decision.get("action") or default)
 
     @staticmethod
     def _normalize_action(action: str) -> str | None:
@@ -596,7 +583,7 @@ class RouteExternalMeasurementSessionRunner:
                 total,
                 preparation=self._last_preparation,
             )
-        action = str(decision.get("action") or "")
+        action = self._decision_action(decision)
         if action == "stop":
             self.stop()
             return len(self._points)
@@ -714,25 +701,19 @@ class RouteExternalMeasurementSessionRunner:
         position: int,
         total: int,
     ) -> int | None:
-        action = str(decision.get("action") or "")
+        action = self._decision_action(decision)
         if action == "stop":
             self.stop()
             return len(self._points)
-        if action == "skip":
-            self._contact_runner.clear_current_point_correction_request()
-            self._lift_needles(position, total)
-            return position
         jump = self._jump_index(action)
-        if jump is not None:
-            self._contact_runner.clear_current_point_correction_request()
-            self._lift_needles(position, total)
-            return jump
+        if action == "skip":
+            jump = position
         self._contact_runner.clear_current_point_correction_request()
         self._lift_needles(position, total)
-        return None
+        return jump
 
     def _handle_post_point_decision(self, decision: dict[str, Any]) -> int | None:
-        action = str(decision.get("action") or "next")
+        action = self._decision_action(decision, default="next")
         if action == "stop":
             self.stop()
             return len(self._points)
