@@ -1881,21 +1881,20 @@ class JoystickWindow(QWidget):
     ) -> int:
         if not axes:
             return 0
-        linear_axes = [axis for axis, _direction in axes if axis in self.LINEAR_AXES]
-        if not (self._active_axes or ()):
-            if len(linear_axes) == 1:
-                return self.KEYBOARD_JOG_DIAGONAL_CHORD_WINDOW_MS
-            return 0
-        active_linear_axes = [
-            axis
-            for axis, _direction in self._active_axes
-            if axis in self.LINEAR_AXES
-        ]
-        for axis, direction in axes:
-            active_direction = self._active_direction_for_axis(axis)
-            if active_direction is not None and active_direction != direction:
-                return self.KEYBOARD_JOG_DIRECTION_CHANGE_CHORD_WINDOW_MS
-        if len(linear_axes) == 1 and len(active_linear_axes) >= 2:
+        linear_axis_count = sum(axis in self.LINEAR_AXES for axis, _direction in axes)
+        active_axes = self._active_axes or ()
+        if not active_axes:
+            return (
+                self.KEYBOARD_JOG_DIAGONAL_CHORD_WINDOW_MS
+                if linear_axis_count == 1
+                else 0
+            )
+        if any(self._axis_direction_changes(axis, direction) for axis, direction in axes):
+            return self.KEYBOARD_JOG_DIRECTION_CHANGE_CHORD_WINDOW_MS
+        active_linear_axis_count = sum(
+            axis in self.LINEAR_AXES for axis, _direction in active_axes
+        )
+        if linear_axis_count == 1 and active_linear_axis_count >= 2:
             return self.KEYBOARD_JOG_AXIS_DROP_CHORD_WINDOW_MS
         return self.KEYBOARD_JOG_SYNC_DEBOUNCE_MS
 
@@ -1904,6 +1903,10 @@ class JoystickWindow(QWidget):
             if active_axis == axis:
                 return active_direction
         return None
+
+    def _axis_direction_changes(self, axis: str, direction: int) -> bool:
+        active_direction = self._active_direction_for_axis(axis)
+        return active_direction is not None and active_direction != direction
 
     def set_homing_status(self, homed_axes: set[str]) -> None:
         active_axes = set(homed_axes).intersection(self.HOMING_AXES)
