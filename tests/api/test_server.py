@@ -1,15 +1,15 @@
 import unittest
 
-from probe_station_gui.api_keys import (
+from probe_station_gui.api.keys import (
     API_PERMISSION_ROUTE_MEASURE,
     API_PERMISSION_STAGE_READ,
     API_PERMISSION_STAGE_WRITE,
 )
-from probe_station_gui.api_server import _axis_targets_from_payload
-from probe_station_gui.api_server import _coordinate_mode_from_payload
-from probe_station_gui.api_server import _feedrate_from_payload
-from probe_station_gui.api_server import _voltage_sweep_from_payload
-from probe_station_gui.api_server import ProbeStationApiServer
+from probe_station_gui.api.server import _axis_targets_from_payload
+from probe_station_gui.api.server import _coordinate_mode_from_payload
+from probe_station_gui.api.server import _feedrate_from_payload
+from probe_station_gui.api.server import _voltage_sweep_from_payload
+from probe_station_gui.api.server import ProbeStationApiServer
 
 
 class ApiServerPayloadTest(unittest.TestCase):

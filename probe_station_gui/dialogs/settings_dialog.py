@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from probe_station_gui.api_keys import (
+from probe_station_gui.api.keys import (
     API_PERMISSION_ROUTE_MEASURE,
     API_PERMISSION_ROUTE_READ,
     API_PERMISSION_STAGE_READ,

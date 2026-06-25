@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from probe_station_gui.api_keys import (
+from probe_station_gui.api.keys import (
     API_PERMISSION_ROUTE_MEASURE,
     API_PERMISSION_STAGE_READ,
     API_PERMISSION_STAGE_WRITE,

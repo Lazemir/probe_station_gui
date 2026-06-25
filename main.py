@@ -112,9 +112,9 @@ from probe_station_gui import (
 from probe_station_gui.design_model import DesignDocument, DesignModelError
 from probe_station_gui.design_session import AlignmentPreparation, DesignSession
 from probe_station_gui.diagnostics import configure_crash_diagnostics
-from probe_station_gui.api_request_bridge import ApiRequestBridge
-from probe_station_gui.api_server import ProbeStationApiServer
-from probe_station_gui.api_keys import API_KEY_FILENAME, ApiKeyStore
+from probe_station_gui.api.request_bridge import ApiRequestBridge
+from probe_station_gui.api.server import ProbeStationApiServer
+from probe_station_gui.api.keys import API_KEY_FILENAME, ApiKeyStore
 from probe_station_gui.lcr_meter import (
     GWInstekRouteMeterSettings,
     KeithleyRouteMeterSettings,
