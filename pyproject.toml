@@ -38,15 +38,15 @@ lcr = [
 ]
 
 [tool.setuptools]
-packages = [
-    "probe_station_client",
-    "probe_station_measure",
-    "probe_station_measure.instrument_drivers",
-    "probe_station_measure.instrument_drivers.Keithley",
-    "probe_station_gui",
-    "probe_station_gui.views",
-    "probe_station_gui.dialogs",
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = [
+    "probe_station_client*",
+    "probe_station_gui*",
+    "probe_station_measure*",
 ]
+exclude = ["tests*"]
 
 [tool.setuptools.package-data]
 "probe_station_gui" = ["default_settings.json", "assets/*.ico", "assets/*.png"]

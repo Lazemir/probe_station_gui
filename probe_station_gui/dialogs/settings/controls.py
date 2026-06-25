@@ -1,0 +1,210 @@
+"""Control binding widgets for the settings dialog."""
+
+from __future__ import annotations
+
+from typing import Dict, List, cast
+
+from PySide6.QtCore import QEvent, QLocale, Qt, Signal
+from PySide6.QtGui import QKeyEvent, QKeySequence
+from PySide6.QtWidgets import (
+    QDialog,
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+from probe_station_gui.settings.controls_config import CONTROL_ACTIONS, KeyBinding
+from probe_station_gui.settings.manager import Settings
+from probe_station_gui.shared.qt_compat import (
+    keyboard_modifiers_to_int,
+    native_scan_code_to_int,
+)
+from probe_station_gui.shared.wheel_guard import GuardedDoubleSpinBox as QDoubleSpinBox
+
+
+class KeyCaptureDialog(QDialog):
+    """Modal dialog that captures a single key press."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Capture Key")
+        self.setModal(True)
+        self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Press a key to assign it to the action."))
+        layout.addWidget(
+            QLabel(
+                "Press Escape to cancel. Modifier keys such as Shift or Ctrl can be held while pressing the key."
+            )
+        )
+        self._binding: KeyBinding | None = None
+
+    def event(self, event) -> bool:  # type: ignore[override]
+        if event.type() == QEvent.ShortcutOverride:
+            event.accept()
+            return True
+
+        if event.type() == QEvent.KeyPress:
+            key_event = cast(QKeyEvent, event)
+            key = key_event.key()
+            if key in (Qt.Key_Escape, Qt.Key_Cancel):
+                self.reject()
+                return True
+            if key in (
+                Qt.Key_Shift,
+                Qt.Key_Control,
+                Qt.Key_Meta,
+                Qt.Key_Alt,
+                Qt.Key_AltGr,
+                Qt.Key_Super_L,
+                Qt.Key_Super_R,
+            ):
+                return True
+            if key == Qt.Key_unknown:
+                return True
+            self._binding = KeyBinding(
+                qt_key=int(key),
+                modifiers=keyboard_modifiers_to_int(key_event.modifiers()),
+                native_scan_code=native_scan_code_to_int(key_event.nativeScanCode()),
+                text=key_event.text(),
+            )
+            self.accept()
+            return True
+
+        return super().event(event)
+
+    def reject(self) -> None:  # type: ignore[override]
+        self._binding = None
+        super().reject()
+
+    def binding(self) -> KeyBinding | None:
+        """Return the captured binding if one was recorded."""
+
+        return self._binding
+
+
+class KeyBindingListEditor(QWidget):
+    """Widget that manages a list of key bindings for a single action."""
+
+    bindings_changed = Signal()
+
+    def __init__(
+        self, bindings: List[KeyBinding], parent: QWidget | None = None
+    ) -> None:
+        super().__init__(parent)
+        self._bindings: List[KeyBinding] = list(bindings)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._list = QListWidget(self)
+        layout.addWidget(self._list)
+
+        button_row = QHBoxLayout()
+        self._add_button = QPushButton("Add", self)
+        self._remove_button = QPushButton("Remove", self)
+        button_row.addWidget(self._add_button)
+        button_row.addWidget(self._remove_button)
+        button_row.addStretch(1)
+        layout.addLayout(button_row)
+
+        self._add_button.clicked.connect(self._add_binding)
+        self._remove_button.clicked.connect(self._remove_selected)
+        self._list.itemSelectionChanged.connect(self._update_buttons)
+
+        self._refresh()
+
+    def bindings(self) -> List[KeyBinding]:
+        """Return the list of configured bindings."""
+
+        return list(self._bindings)
+
+    def _refresh(self) -> None:
+        self._list.clear()
+        for binding in self._bindings:
+            self._list.addItem(QListWidgetItem(self._binding_text(binding)))
+        self._update_buttons()
+
+    def _update_buttons(self) -> None:
+        self._remove_button.setEnabled(bool(self._list.selectedItems()))
+
+    def _add_binding(self) -> None:
+        dialog = KeyCaptureDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        binding = dialog.binding()
+        if not binding:
+            return
+        if binding in self._bindings:
+            return
+        self._bindings.append(binding)
+        self._refresh()
+        self.bindings_changed.emit()
+
+    def _remove_selected(self) -> None:
+        selected = self._list.selectedIndexes()
+        if not selected:
+            return
+        index = selected[0].row()
+        if 0 <= index < len(self._bindings):
+            del self._bindings[index]
+            self._refresh()
+            self.bindings_changed.emit()
+
+    def _binding_text(self, binding: KeyBinding) -> str:
+        if binding.modifiers:
+            sequence = QKeySequence(binding.qt_key | binding.modifiers)
+        else:
+            sequence = QKeySequence(binding.qt_key)
+        sequence_text = sequence.toString(QKeySequence.NativeText)
+        if sequence_text:
+            if binding.native_scan_code:
+                return f"{sequence_text} [physical]"
+            return sequence_text
+        if binding.text:
+            if binding.native_scan_code:
+                return f"{binding.text} [physical]"
+            return binding.text
+        if binding.native_scan_code:
+            return f"Scan {binding.native_scan_code} [physical]"
+        return f"Key {binding.qt_key}"
+
+
+class ControlsSettingsWidget(QWidget):
+    """Tab that exposes control bindings similar to game key bindings."""
+
+    def __init__(self, settings: Settings, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        layout = QFormLayout(self)
+        layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self._pending_timeout_spin = QDoubleSpinBox(self)
+        self._pending_timeout_spin.setLocale(QLocale.c())
+        self._pending_timeout_spin.setDecimals(1)
+        self._pending_timeout_spin.setRange(0.5, 60.0)
+        self._pending_timeout_spin.setSingleStep(0.5)
+        self._pending_timeout_spin.setSuffix(" s")
+        self._pending_timeout_spin.setValue(
+            float(settings.click_to_move.pending_timeout_s)
+        )
+        layout.addRow(QLabel("Click wait timeout", self), self._pending_timeout_spin)
+
+        self._editors: Dict[str, KeyBindingListEditor] = {}
+        for action in CONTROL_ACTIONS:
+            bindings = settings.controls.get(action.key, [])
+            editor = KeyBindingListEditor(bindings, self)
+            self._editors[action.key] = editor
+            layout.addRow(QLabel(action.label, self), editor)
+
+    def to_settings(self, settings: Settings) -> None:
+        """Write the user changes back into the provided settings container."""
+
+        controls: Dict[str, List[KeyBinding]] = {}
+        for key, editor in self._editors.items():
+            controls[key] = editor.bindings()
+        settings.controls = controls
+        settings.click_to_move.pending_timeout_s = float(
+            self._pending_timeout_spin.value()
+        )

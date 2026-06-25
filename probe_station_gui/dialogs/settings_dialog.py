@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import math
 import os
-from typing import Dict, List, Sequence, cast
+from typing import Dict
 
-from PySide6.QtCore import QEvent, QLocale, QObject, Qt, QThread, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QDoubleValidator, QKeyEvent, QKeySequence
+from PySide6.QtCore import QLocale, QObject, Qt, QThread, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -46,8 +45,16 @@ from probe_station_gui.api.keys import (
     normalize_permissions,
 )
 from probe_station_gui.dialogs.camera_settings_dialog import CameraSettingsWidget
-from probe_station_gui.shared.qt_compat import keyboard_modifiers_to_int, native_scan_code_to_int
-from probe_station_gui.settings.controls_config import CONTROL_ACTIONS, KeyBinding
+from probe_station_gui.dialogs.settings.controls import (
+    ControlsSettingsWidget,
+    KeyBindingListEditor,
+    KeyCaptureDialog,
+)
+from probe_station_gui.dialogs.settings.feedrates import (
+    FeedrateGroupEditor,
+    FeedrateSettingsWidget,
+)
+from probe_station_gui.dialogs.settings.jog import JogSettingsWidget
 from probe_station_gui.settings.sections import WORK_COORDINATE_SYSTEMS
 from probe_station_gui.shared.wheel_guard import (
     GuardedComboBox as QComboBox,
@@ -57,11 +64,7 @@ from probe_station_gui.shared.wheel_guard import (
 from probe_station_gui.settings.manager import (
     ApiSettings,
     CoordinateSystemSettings,
-    FeedrateGroup,
-    FeedrateSettings,
-    JogSettings,
     LCR_APERTURE_RATES,
-    LCR_LEVEL_MODES,
     LCR_METER_TYPE_GWINSTEK,
     LCR_METER_TYPE_LABELS,
     LCR_METER_TYPES,
@@ -96,186 +99,15 @@ from probe_station_gui.notifications.telegram import (
     wait_for_telegram_link,
 )
 
-
-class KeyCaptureDialog(QDialog):
-    """Modal dialog that captures a single key press."""
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Capture Key")
-        self.setModal(True)
-        self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
-        layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Press a key to assign it to the action."))
-        layout.addWidget(
-            QLabel(
-                "Press Escape to cancel. Modifier keys such as Shift or Ctrl can be held while pressing the key."
-            )
-        )
-        self._binding: KeyBinding | None = None
-
-    def event(self, event) -> bool:  # type: ignore[override]
-        if event.type() == QEvent.ShortcutOverride:
-            event.accept()
-            return True
-
-        if event.type() == QEvent.KeyPress:
-            key_event = cast(QKeyEvent, event)
-            key = key_event.key()
-            if key in (Qt.Key_Escape, Qt.Key_Cancel):
-                self.reject()
-                return True
-            if key in (
-                Qt.Key_Shift,
-                Qt.Key_Control,
-                Qt.Key_Meta,
-                Qt.Key_Alt,
-                Qt.Key_AltGr,
-                Qt.Key_Super_L,
-                Qt.Key_Super_R,
-            ):
-                return True
-            if key == Qt.Key_unknown:
-                return True
-            self._binding = KeyBinding(
-                qt_key=int(key),
-                modifiers=keyboard_modifiers_to_int(key_event.modifiers()),
-                native_scan_code=native_scan_code_to_int(key_event.nativeScanCode()),
-                text=key_event.text(),
-            )
-            self.accept()
-            return True
-
-        return super().event(event)
-
-    def reject(self) -> None:  # type: ignore[override]
-        self._binding = None
-        super().reject()
-
-    def binding(self) -> KeyBinding | None:
-        """Return the captured binding if one was recorded."""
-
-        return self._binding
-
-
-class KeyBindingListEditor(QWidget):
-    """Widget that manages a list of key bindings for a single action."""
-
-    bindings_changed = Signal()
-
-    def __init__(self, bindings: List[KeyBinding], parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._bindings: List[KeyBinding] = list(bindings)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        self._list = QListWidget(self)
-        layout.addWidget(self._list)
-
-        button_row = QHBoxLayout()
-        self._add_button = QPushButton("Add", self)
-        self._remove_button = QPushButton("Remove", self)
-        button_row.addWidget(self._add_button)
-        button_row.addWidget(self._remove_button)
-        button_row.addStretch(1)
-        layout.addLayout(button_row)
-
-        self._add_button.clicked.connect(self._add_binding)
-        self._remove_button.clicked.connect(self._remove_selected)
-        self._list.itemSelectionChanged.connect(self._update_buttons)
-
-        self._refresh()
-
-    def bindings(self) -> List[KeyBinding]:
-        """Return the list of configured bindings."""
-
-        return list(self._bindings)
-
-    def _refresh(self) -> None:
-        self._list.clear()
-        for binding in self._bindings:
-            self._list.addItem(QListWidgetItem(self._binding_text(binding)))
-        self._update_buttons()
-
-    def _update_buttons(self) -> None:
-        self._remove_button.setEnabled(bool(self._list.selectedItems()))
-
-    def _add_binding(self) -> None:
-        dialog = KeyCaptureDialog(self)
-        if dialog.exec() != QDialog.Accepted:
-            return
-        binding = dialog.binding()
-        if not binding:
-            return
-        if binding in self._bindings:
-            return
-        self._bindings.append(binding)
-        self._refresh()
-        self.bindings_changed.emit()
-
-    def _remove_selected(self) -> None:
-        selected = self._list.selectedIndexes()
-        if not selected:
-            return
-        index = selected[0].row()
-        if 0 <= index < len(self._bindings):
-            del self._bindings[index]
-            self._refresh()
-            self.bindings_changed.emit()
-
-    def _binding_text(self, binding: KeyBinding) -> str:
-        if binding.modifiers:
-            sequence = QKeySequence(binding.qt_key | binding.modifiers)
-        else:
-            sequence = QKeySequence(binding.qt_key)
-        sequence_text = sequence.toString(QKeySequence.NativeText)
-        if sequence_text:
-            if binding.native_scan_code:
-                return f"{sequence_text} [physical]"
-            return sequence_text
-        if binding.text:
-            if binding.native_scan_code:
-                return f"{binding.text} [physical]"
-            return binding.text
-        if binding.native_scan_code:
-            return f"Scan {binding.native_scan_code} [physical]"
-        return f"Key {binding.qt_key}"
-
-
-class ControlsSettingsWidget(QWidget):
-    """Tab that exposes control bindings similar to game key bindings."""
-
-    def __init__(self, settings: Settings, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        layout = QFormLayout(self)
-        layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-        self._pending_timeout_spin = QDoubleSpinBox(self)
-        self._pending_timeout_spin.setLocale(QLocale.c())
-        self._pending_timeout_spin.setDecimals(1)
-        self._pending_timeout_spin.setRange(0.5, 60.0)
-        self._pending_timeout_spin.setSingleStep(0.5)
-        self._pending_timeout_spin.setSuffix(" s")
-        self._pending_timeout_spin.setValue(
-            float(settings.click_to_move.pending_timeout_s)
-        )
-        layout.addRow(QLabel("Click wait timeout", self), self._pending_timeout_spin)
-
-        self._editors: Dict[str, KeyBindingListEditor] = {}
-        for action in CONTROL_ACTIONS:
-            bindings = settings.controls.get(action.key, [])
-            editor = KeyBindingListEditor(bindings, self)
-            self._editors[action.key] = editor
-            layout.addRow(QLabel(action.label, self), editor)
-
-    def to_settings(self, settings: Settings) -> None:
-        """Write the user changes back into the provided settings container."""
-
-        controls: Dict[str, List[KeyBinding]] = {}
-        for key, editor in self._editors.items():
-            controls[key] = editor.bindings()
-        settings.controls = controls
-        settings.click_to_move.pending_timeout_s = float(
-            self._pending_timeout_spin.value()
-        )
+__all__ = [
+    "ControlsSettingsWidget",
+    "FeedrateGroupEditor",
+    "FeedrateSettingsWidget",
+    "JogSettingsWidget",
+    "KeyBindingListEditor",
+    "KeyCaptureDialog",
+    "SettingsDialog",
+]
 
 
 class LoggingSettingsWidget(QWidget):
@@ -283,7 +115,9 @@ class LoggingSettingsWidget(QWidget):
 
     LEVEL_OPTIONS = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
-    def __init__(self, logging_settings: LoggingSettings, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, logging_settings: LoggingSettings, parent: QWidget | None = None
+    ) -> None:
         super().__init__(parent)
         layout = QFormLayout(self)
         layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
@@ -489,9 +323,7 @@ class ApiSettingsWidget(QWidget):
         item.setData(0, self.ITEM_KIND_ROLE, "key")
         item.setData(0, self.RECORD_ID_ROLE, record.id)
         item.setData(0, self.USER_NAME_ROLE, record.user_name)
-        item.setFlags(
-            Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable
-        )
+        item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
         item.setCheckState(2, Qt.Checked if record.enabled else Qt.Unchecked)
         for column, permission in self.PERMISSION_COLUMNS.items():
             item.setCheckState(
@@ -530,8 +362,7 @@ class ApiSettingsWidget(QWidget):
         QMessageBox.information(
             self,
             "API Key Created",
-            "API key copied to clipboard. It will not be shown again.\n\n"
-            f"{api_key}",
+            f"API key copied to clipboard. It will not be shown again.\n\n{api_key}",
         )
 
     def _rename_selected_user(self) -> None:
@@ -692,7 +523,9 @@ class TelegramSettingsWidget(QWidget):
 
     test_finished = Signal(bool, str)
 
-    def __init__(self, telegram_settings: TelegramSettings, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, telegram_settings: TelegramSettings, parent: QWidget | None = None
+    ) -> None:
         super().__init__(parent)
         self._thread: QThread | None = None
         self._worker: TelegramLinkWorker | None = None
@@ -714,9 +547,7 @@ class TelegramSettingsWidget(QWidget):
         self._token_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self._token_edit.setText(token_text)
         if self._token_from_env:
-            self._token_edit.setPlaceholderText(
-                f"Provided by {TELEGRAM_BOT_TOKEN_ENV}"
-            )
+            self._token_edit.setPlaceholderText(f"Provided by {TELEGRAM_BOT_TOKEN_ENV}")
             self._token_edit.setEnabled(False)
         elif not self._can_manage_global_token:
             self._token_edit.setPlaceholderText("Managed by administrator")
@@ -867,7 +698,9 @@ class TelegramSettingsWidget(QWidget):
             self._status_label.setText("Telegram test was not started.")
 
     def _on_test_sent(self, success: bool, message: str) -> None:
-        self._status_label.setText(message if success else f"Telegram test failed: {message}")
+        self._status_label.setText(
+            message if success else f"Telegram test failed: {message}"
+        )
 
     def _forget_link(self) -> None:
         self._linked_chat_id = ""
@@ -901,8 +734,12 @@ class TelegramSettingsWidget(QWidget):
 
     def _set_linking(self, linking: bool) -> None:
         self._link_button.setEnabled(not linking)
-        self._test_button.setEnabled((not linking) and bool(self._linked_chat_id.strip()))
-        self._forget_button.setEnabled((not linking) and bool(self._linked_chat_id.strip()))
+        self._test_button.setEnabled(
+            (not linking) and bool(self._linked_chat_id.strip())
+        )
+        self._forget_button.setEnabled(
+            (not linking) and bool(self._linked_chat_id.strip())
+        )
 
     @staticmethod
     def _linked_text(telegram_settings: TelegramSettings) -> str:
@@ -929,234 +766,6 @@ class TelegramSettingsWidget(QWidget):
         if thread is not None and thread.isRunning():
             thread.quit()
             thread.wait(3000)
-
-
-class FeedrateGroupEditor(QWidget):
-    """Editor for a single feedrate group including presets and default selection."""
-
-    def __init__(
-        self,
-        title: str,
-        units: str,
-        group: FeedrateGroup,
-        fallback_presets: Sequence[float],
-        fallback_default: float,
-        parent: QWidget | None = None,
-    ) -> None:
-        super().__init__(parent)
-        self._fallback_presets = [float(value) for value in fallback_presets]
-        self._fallback_presets.sort()
-        self._fallback_default = float(fallback_default)
-        self._presets: List[float] = sorted(group.presets) if group.presets else list(self._fallback_presets)
-        if not self._presets:
-            self._presets = list(self._fallback_presets)
-        self._default_value: float = group.default
-        if not self._presets:
-            self._default_value = self._fallback_default
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-
-        title_label = QLabel(title, self)
-        title_label.setStyleSheet("font-weight: 600;")
-        layout.addWidget(title_label)
-
-        units_label = QLabel(f"Preset feed rates for {units} (positive values):", self)
-        units_label.setWordWrap(True)
-        layout.addWidget(units_label)
-
-        self._list = QListWidget(self)
-        self._list.setSelectionMode(QListWidget.SingleSelection)
-        layout.addWidget(self._list)
-
-        input_row = QHBoxLayout()
-        self._value_edit = QLineEdit(self)
-        self._value_edit.setPlaceholderText("Enter feed rate (e.g. 1)")
-        validator = QDoubleValidator(1.0, 1000000.0, 6, self)
-        validator.setNotation(QDoubleValidator.StandardNotation)
-        self._value_edit.setValidator(validator)
-        input_row.addWidget(self._value_edit)
-
-        self._add_button = QPushButton("Add", self)
-        input_row.addWidget(self._add_button)
-        layout.addLayout(input_row)
-
-        action_row = QHBoxLayout()
-        self._remove_button = QPushButton("Remove Selected", self)
-        action_row.addWidget(self._remove_button)
-        action_row.addStretch(1)
-        layout.addLayout(action_row)
-
-        default_row = QHBoxLayout()
-        default_row.addWidget(QLabel("Default preset:", self))
-        self._default_combo = QComboBox(self)
-        default_row.addWidget(self._default_combo)
-        default_row.addStretch(1)
-        layout.addLayout(default_row)
-
-        self._add_button.clicked.connect(self._add_value)
-        self._remove_button.clicked.connect(self._remove_selected)
-        self._list.itemSelectionChanged.connect(self._update_buttons)
-        self._default_combo.currentIndexChanged.connect(self._on_default_changed)
-
-        self._refresh_list()
-        self._update_buttons()
-
-    def group(self) -> FeedrateGroup:
-        """Return the configured feedrate group."""
-
-        presets = list(self._presets)
-        if not presets:
-            presets = list(self._fallback_presets)
-        default_value = self._default_value
-        if default_value <= 0:
-            default_value = presets[0] if presets else self._fallback_default
-        return FeedrateGroup(presets=presets, default=default_value)
-
-    def _refresh_list(self) -> None:
-        self._presets.sort()
-        self._list.clear()
-        for value in self._presets:
-            self._list.addItem(self._format_value(value))
-        if self._default_value <= 0:
-            self._default_value = (
-                self._presets[0] if self._presets else self._fallback_default
-            )
-        self._refresh_default_options()
-
-    def _refresh_default_options(self) -> None:
-        values = list(self._presets) if self._presets else list(self._fallback_presets)
-        if not values:
-            values = [self._fallback_default]
-        if self._default_value > 0 and not any(
-            math.isclose(self._default_value, value, rel_tol=1e-9, abs_tol=1e-9)
-            for value in values
-        ):
-            values.append(self._default_value)
-            values.sort()
-        texts = [self._format_value(value) for value in values]
-        desired_text = self._format_value(self._default_value)
-
-        self._default_choices = values
-        self._default_combo.blockSignals(True)
-        self._default_combo.clear()
-        self._default_combo.addItems(texts)
-        if desired_text in texts:
-            self._default_combo.setCurrentText(desired_text)
-        else:
-            self._default_combo.setCurrentIndex(0)
-            self._default_value = values[0]
-        self._default_combo.blockSignals(False)
-
-    def _update_buttons(self) -> None:
-        self._remove_button.setEnabled(bool(self._list.selectedItems()))
-
-    def _add_value(self) -> None:
-        text = self._value_edit.text().strip()
-        if not text:
-            return
-        try:
-            value = float(text)
-        except ValueError:
-            return
-        if value < 1.0:
-            return
-        if any(math.isclose(value, existing, rel_tol=1e-9, abs_tol=1e-9) for existing in self._presets):
-            return
-        insert_index = len(self._presets)
-        for index, existing in enumerate(self._presets):
-            if value < existing:
-                insert_index = index
-                break
-        self._presets.insert(insert_index, value)
-        self._value_edit.clear()
-        self._refresh_list()
-
-    def _remove_selected(self) -> None:
-        selected_indexes = self._list.selectedIndexes()
-        if not selected_indexes:
-            return
-        for index in sorted((idx.row() for idx in selected_indexes), reverse=True):
-            if 0 <= index < len(self._presets):
-                del self._presets[index]
-        self._refresh_list()
-
-    def _on_default_changed(self) -> None:
-        index = self._default_combo.currentIndex()
-        if 0 <= index < len(self._default_choices):
-            self._default_value = self._default_choices[index]
-
-    @staticmethod
-    def _format_value(value: float) -> str:
-        text = f"{value:.6f}".rstrip("0").rstrip(".")
-        return text or "0"
-
-
-class FeedrateSettingsWidget(QWidget):
-    """Tab that lets users manage linear feed rates."""
-
-    DEFAULT_PRESETS = (1.0, 3.0, 10.0, 30.0, 100.0, 300.0)
-    DEFAULT_VALUE = 1.0
-
-    def __init__(self, feedrates: FeedrateSettings, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        self._linear_editor = FeedrateGroupEditor(
-            "Linear feed rates",
-            "mm/min",
-            feedrates.linear,
-            self.DEFAULT_PRESETS,
-            self.DEFAULT_VALUE,
-            self,
-        )
-        layout.addWidget(self._linear_editor)
-
-        layout.addStretch(1)
-
-    def to_settings(self, settings: Settings) -> None:
-        """Write the configured presets back to the settings container."""
-
-        settings.feedrates = FeedrateSettings(
-            linear=self._linear_editor.group(),
-            rotary=settings.feedrates.rotary,
-        )
-
-
-class JogSettingsWidget(QWidget):
-    """Tab that exposes joystick jog distances."""
-
-    def __init__(self, jog_settings: JogSettings, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        layout = QFormLayout(self)
-        layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-
-        self._linear_distance_spin = QDoubleSpinBox(self)
-        self._linear_distance_spin.setLocale(QLocale.c())
-        self._linear_distance_spin.setDecimals(3)
-        self._linear_distance_spin.setRange(0.001, 1000.0)
-        self._linear_distance_spin.setSingleStep(1.0)
-        self._linear_distance_spin.setSuffix(" mm")
-        self._linear_distance_spin.setValue(jog_settings.linear_distance_mm)
-        layout.addRow(QLabel("Linear jog distance", self), self._linear_distance_spin)
-
-        self._motion_safety_checkbox = QCheckBox("Disable motion safety", self)
-        self._motion_safety_checkbox.setChecked(jog_settings.motion_safety_disabled)
-        self._motion_safety_checkbox.setToolTip(
-            "Allows joystick movement when needle state is unknown/down and skips axis limit checks."
-        )
-        layout.addRow(self._motion_safety_checkbox)
-
-    def to_settings(self, settings: Settings) -> None:
-        """Persist the widget state into the provided settings object."""
-
-        jog = settings.jog.clone()
-        jog.linear_distance_mm = self._linear_distance_spin.value()
-        jog.motion_safety_disabled = self._motion_safety_checkbox.isChecked()
-        settings.jog = jog
 
 
 class MeasurementSettingsWidget(QWidget):
@@ -1271,7 +880,9 @@ class MeasurementSettingsWidget(QWidget):
 
         self._source_resistance_combo = QComboBox(self)
         for resistance_ohm in LCR_SOURCE_RESISTANCES_OHM:
-            self._source_resistance_combo.addItem(f"{resistance_ohm} ohm", resistance_ohm)
+            self._source_resistance_combo.addItem(
+                f"{resistance_ohm} ohm", resistance_ohm
+            )
         source_index = self._source_resistance_combo.findData(
             calibration_settings.source_resistance_ohm
         )
@@ -1363,7 +974,9 @@ class MeasurementSettingsWidget(QWidget):
         self._update_lcr_control_state()
 
     def _update_lcr_control_state(self) -> None:
-        meter_type = str(self._meter_type_combo.currentData() or LCR_METER_TYPE_GWINSTEK)
+        meter_type = str(
+            self._meter_type_combo.currentData() or LCR_METER_TYPE_GWINSTEK
+        )
         gwinstek_meter = meter_type == LCR_METER_TYPE_GWINSTEK
         function = self._function_combo.currentText()
         range_mode = str(self._range_mode_combo.currentData() or "HOLD")
@@ -1415,9 +1028,7 @@ class MeasurementSettingsWidget(QWidget):
             self._keithley_voltmeter_resource_edit.text().strip()
         )
         needle_settings.measurement_function = self._function_combo.currentText()
-        needle_settings.range_mode = str(
-            self._range_mode_combo.currentData() or "HOLD"
-        )
+        needle_settings.range_mode = str(self._range_mode_combo.currentData() or "HOLD")
         needle_settings.auto_range_enabled = (
             str(self._range_mode_combo.currentData() or "") == "AUTO"
         )
@@ -1622,8 +1233,7 @@ class ObjectivesSettingsWidget(QWidget):
             active_name=str(self._active_combo.currentData() or "X5"),
             apply_offsets_on_change=self._apply_offsets_checkbox.isChecked(),
             objectives={
-                key: value.clone()
-                for key, value in self._objectives.objectives.items()
+                key: value.clone() for key, value in self._objectives.objectives.items()
             },
         )
 
@@ -1713,12 +1323,8 @@ class CoordinateSystemSettingsWidget(QWidget):
         self._startup_mode_combo.addItem(
             "Follow controller active system", "controller"
         )
-        self._startup_mode_combo.addItem(
-            "Force selected system on connect", "fixed"
-        )
-        mode_index = self._startup_mode_combo.findData(
-            coordinate_settings.startup_mode
-        )
+        self._startup_mode_combo.addItem("Force selected system on connect", "fixed")
+        mode_index = self._startup_mode_combo.findData(coordinate_settings.startup_mode)
         if mode_index >= 0:
             self._startup_mode_combo.setCurrentIndex(mode_index)
         mode_layout.addRow(QLabel("Coordinate mode", self), self._startup_mode_combo)
@@ -1774,9 +1380,7 @@ class CoordinateSystemSettingsWidget(QWidget):
                 "This WCS will be sent to the controller on connect."
             )
             return
-        self._preferred_system_combo.setToolTip(
-            "Controller-selected WCS will be used."
-        )
+        self._preferred_system_combo.setToolTip("Controller-selected WCS will be used.")
 
 
 class AxisCalibrationSettingsWidget(QWidget):
@@ -2007,4 +1611,3 @@ class SettingsDialog(QDialog):
     def closeEvent(self, event) -> None:  # type: ignore[override]
         self._telegram_tab.shutdown()
         super().closeEvent(event)
-
