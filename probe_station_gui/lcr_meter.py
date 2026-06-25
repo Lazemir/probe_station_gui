@@ -10,7 +10,7 @@ import threading
 import time
 import weakref
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, Iterator, Optional
 
 from PySide6.QtCore import QObject, Signal
@@ -27,6 +27,15 @@ from probe_station_gui.lcr_meter_helpers import (
     read_route_measurement_batch as _read_route_measurement_batch,
     session_visa_resource_roles as _session_visa_resource_roles,
     voltage_sweep_point_to_dict as _voltage_sweep_point_to_dict,
+)
+from probe_station_gui.route_meter_config import (
+    GWInstekRouteMeterSettings,
+    KeithleyRouteMeterSettings,
+    ROUTE_METER_GWINSTEK,
+    ROUTE_METER_KEITHLEY,
+    ROUTE_METER_LABELS,
+    ROUTE_METER_TYPES,
+    RouteMeterConfiguration,
 )
 
 
@@ -46,16 +55,6 @@ def _shutdown_lcr_meter_controllers() -> None:
 atexit.register(_shutdown_lcr_meter_controllers)
 
 
-ROUTE_METER_GWINSTEK = "gwinstek_lcr_76200"
-ROUTE_METER_KEITHLEY = "keithley_2400_2182a"
-ROUTE_METER_TYPES: tuple[str, ...] = (
-    ROUTE_METER_GWINSTEK,
-    ROUTE_METER_KEITHLEY,
-)
-ROUTE_METER_LABELS: dict[str, str] = {
-    ROUTE_METER_GWINSTEK: "GW Instek LCR-76200",
-    ROUTE_METER_KEITHLEY: "Keithley 2400 + 2182A",
-}
 DEFAULT_METER_TIMEOUT_MS = 10000
 KEITHLEY_LIVE_MEASUREMENT_VOLTAGE_V = 0.03
 KEITHLEY_LIVE_SOURCE_VOLTAGE_RANGE_V = 0.21
@@ -209,86 +208,6 @@ def _set_temporary_visa_attribute(
         setattr(handle, name, value)
     except Exception:
         logger.debug("VISA handle does not accept %s=%r", name, value, exc_info=True)
-
-
-@dataclass(frozen=True)
-class GWInstekRouteMeterSettings:
-    """Per-run GW Instek LCR settings for route measurements."""
-
-    resource_name: str = "COM4"
-    measurement_function: str = "DCR"
-    range_mode: str = "AUTO"
-    impedance_range: int = 3
-    dcr_range: int = 4
-    frequency_hz: float = 50.0
-    level_mode: str = "VOLTAGE"
-    voltage_level_v: float = 0.03
-    current_level_a: float = 0.0001
-    source_resistance_ohm: int = 100
-    aperture_rate: str = "SLOW"
-    aperture_averages: int = 1
-    trigger_delay_s: float = 0.0
-    bias_enabled: bool = False
-    bias_level_v: float = 0.0
-    monitor1: str = "OFF"
-    monitor2: str = "OFF"
-    alc_enabled: bool = False
-
-
-@dataclass(frozen=True)
-class KeithleyRouteMeterSettings:
-    """Per-run four-wire resistance settings for a Keithley 2400 and 2182A."""
-
-    source_resource: str = "GPIB0::1::INSTR"
-    voltmeter_resource: str = "GPIB0::2::INSTR"
-    measurement_voltage_v: float = 0.03
-    range_mode: str = OHMMETER_RANGE_MANUAL
-    expected_resistance_ohm: float | None = None
-    minimum_resistance_ohm: float | None = None
-    maximum_current_a: float | None = None
-    voltage_range_v: float | None = None
-    source_voltage_range_v: float = 0.21
-    voltmeter_range_v: float = 0.1
-    current_range_a: float = 10e-6
-    compliance_current_a: float = 10e-6
-    range_voltage_headroom: float = 1.2
-    range_current_headroom: float = 2.0
-    nplc: float = 1.0
-    terminals: str = "rear"
-    trigger_delay_s: float = 0.0
-    use_buffer: bool = True
-    use_trigger_link: bool = True
-
-
-@dataclass(frozen=True)
-class RouteMeterConfiguration:
-    """Per-run meter selection and settings from the route measurement dialog."""
-
-    meter_type: str = ROUTE_METER_KEITHLEY
-    gwinstek: GWInstekRouteMeterSettings = field(
-        default_factory=GWInstekRouteMeterSettings
-    )
-    keithley: KeithleyRouteMeterSettings = field(
-        default_factory=KeithleyRouteMeterSettings
-    )
-
-    def nplc_label(self) -> str:
-        """Return the CSV integration-time label for this meter."""
-
-        if self.meter_type == ROUTE_METER_KEITHLEY:
-            return f"{float(self.keithley.nplc):g}"
-        return ""
-
-    def measurement_type_label(self) -> str:
-        """Return a concise CSV label for the route measurement mode."""
-
-        if self.meter_type == ROUTE_METER_KEITHLEY:
-            voltage = float(self.keithley.measurement_voltage_v)
-            return f"Keithley voltage sweep +/-{voltage:g} V"
-        function = str(self.gwinstek.measurement_function or "").strip()
-        if function.upper() == "DCR":
-            return "GW Instek DCR"
-        return f"GW Instek {function or 'measurement'}"
 
 
 class LCRMeterError(RuntimeError):
