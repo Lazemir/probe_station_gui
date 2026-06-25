@@ -45,7 +45,7 @@ A small reviewable structural change with a named current behaviour, structural 
 _Avoid_: rewrite, cleanup batch
 
 **Metrics Gate**:
-The repeatable check used to decide whether a refactor pass improved maintainability without breaking behaviour. A pass is not accepted just because total LOC changed.
+The repeatable check used to decide whether a refactor pass improved maintainability without breaking behaviour. Total LOC is a secondary signal, not an acceptance rule: LOC may grow when cyclomatic complexity, Maintainability Index, function length, locality, or test protection improve enough to justify the extra code.
 _Avoid_: lint run, test run
 
 **Regression Metric**:

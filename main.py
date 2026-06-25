@@ -12,6 +12,7 @@ import re
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
@@ -247,6 +248,13 @@ logger = logging.getLogger(__name__)
 
 APP_ICON_RESOURCE = "assets/app_icon.ico"
 WINDOWS_APP_USER_MODEL_ID = "ProbeStationGUI.ProbeStationGUI"
+
+
+@dataclass(frozen=True)
+class _RouteMeasurementStartPlan:
+    points: list[RouteMeasurementPoint]
+    selected_point: RouteMeasurementPoint
+    previous_ok_skipped_count: int | None
 
 
 def _application_icon() -> QIcon:
@@ -7685,9 +7693,7 @@ class Main(QMainWindow):
         self._set_route_measurement_pending(True)
         self._save_route_measurement_session_metadata(configuration)
         message = f"Route point set to point {point_number}."
-        self._show_status(message, 5000)
-        if self._route_measurement_dialog is not None:
-            self._route_measurement_dialog.set_status(message)
+        self._show_route_measurement_dialog_status(message, 5000)
 
     def _cancel_route_measurement_session(self) -> None:
         thread = self._route_measurement_thread
@@ -7699,9 +7705,7 @@ class Main(QMainWindow):
         self._set_route_measurement_resume_point(1)
         self._set_route_measurement_pending(False)
         message = "Route measurement session cancelled."
-        self._show_status(message, 5000)
-        if self._route_measurement_dialog is not None:
-            self._route_measurement_dialog.set_status(message)
+        self._show_route_measurement_dialog_status(message, 5000)
 
     def _request_route_measurement_for_point(self, point_number: int) -> None:
         point_number = int(point_number)
@@ -7757,9 +7761,7 @@ class Main(QMainWindow):
             old_thread.join(timeout=2.0)
             if old_thread.is_alive():
                 message = "Waiting route measurement did not stop."
-                self._show_status(message, 8000)
-                if self._route_measurement_dialog is not None:
-                    self._route_measurement_dialog.set_status(message)
+                self._show_route_measurement_dialog_status(message, 8000)
                 return False
         self._route_measurement_thread = None
         self._route_measurement_runner = None
@@ -7778,9 +7780,7 @@ class Main(QMainWindow):
             thread = self._route_measurement_thread
             if thread is not None and thread.is_alive():
                 thread.join(timeout=2.0)
-            self._show_status(message, 8000)
-            if self._route_measurement_dialog is not None:
-                self._route_measurement_dialog.set_status(message)
+            self._show_route_measurement_dialog_status(message, 8000)
             return False
         return True
 
@@ -7797,58 +7797,12 @@ class Main(QMainWindow):
         if self.serial_connection is None or not self.serial_connection.is_open:
             self._show_status("Connect the stage controller before measuring a route.", 5000)
             return
-        route = self._design_session.route
-        if route is None or not route.points:
-            self._show_status("Create or load a probe route before measuring.", 5000)
+        start_plan = self._route_measurement_start_plan(configuration)
+        if start_plan is None:
             return
-        registration = self._design_session.registration
-        if registration is None or not registration.valid:
-            self._show_status(
-                "Design registration is required before measuring a route.",
-                6000,
-            )
-            return
-        try:
-            points = self._route_measurement_points(route)
-        except DesignModelError as exc:
-            self._show_status(str(exc), 6000)
-            return
-        if not points:
-            self._show_status("Route has no enabled points.", 5000)
-            return
-        previous_ok_skipped_count: int | None = None
-        if configuration.previous_ok_only:
-            original_point_count = len(points)
-            try:
-                points = filter_route_points_by_previous_status(
-                    points,
-                    configuration.previous_csv_path,
-                    allowed_statuses={"ok"},
-                )
-            except (OSError, csv.Error) as exc:
-                message = f"Unable to read previous route CSV: {exc}"
-                self._show_status(message, 8000)
-                if self._route_measurement_dialog is not None:
-                    self._route_measurement_dialog.set_status(message)
-                return
-            previous_ok_skipped_count = original_point_count - len(points)
-            if not points:
-                message = "Previous route CSV has no OK points for this route."
-                self._show_status(message, 8000)
-                if self._route_measurement_dialog is not None:
-                    self._route_measurement_dialog.set_status(message)
-                return
-        selected_point_number = int(configuration.current_point)
-        selected_point = self._api_find_contact_point(points, selected_point_number)
-        if selected_point is None:
-            message = (
-                f"Contact {selected_point_number} is not enabled or not included "
-                "by the current route filter."
-            )
-            self._show_status(message, 6000)
-            if self._route_measurement_dialog is not None:
-                self._route_measurement_dialog.set_status(message)
-            return
+        points = start_plan.points
+        selected_point = start_plan.selected_point
+        previous_ok_skipped_count = start_plan.previous_ok_skipped_count
         self._set_route_measurement_resume_point(int(selected_point.index))
         if not self._route_measurement_session_active:
             self._route_measurement_session_active = True
@@ -8039,6 +7993,73 @@ class Main(QMainWindow):
             )
         self._route_measurement_thread.start()
         self._update_stage_coordinate_apply_state()
+
+    def _route_measurement_start_plan(
+        self,
+        configuration: RouteMeasurementRunConfiguration,
+    ) -> _RouteMeasurementStartPlan | None:
+        route = self._design_session.route
+        if route is None or not route.points:
+            self._show_status("Create or load a probe route before measuring.", 5000)
+            return None
+        registration = self._design_session.registration
+        if registration is None or not registration.valid:
+            self._show_status(
+                "Design registration is required before measuring a route.",
+                6000,
+            )
+            return None
+        try:
+            points = self._route_measurement_points(route)
+        except DesignModelError as exc:
+            self._show_status(str(exc), 6000)
+            return None
+        if not points:
+            self._show_status("Route has no enabled points.", 5000)
+            return None
+
+        previous_ok_skipped_count: int | None = None
+        if configuration.previous_ok_only:
+            original_point_count = len(points)
+            try:
+                points = filter_route_points_by_previous_status(
+                    points,
+                    configuration.previous_csv_path,
+                    allowed_statuses={"ok"},
+                )
+            except (OSError, csv.Error) as exc:
+                message = f"Unable to read previous route CSV: {exc}"
+                self._show_route_measurement_dialog_status(message, 8000)
+                return None
+            previous_ok_skipped_count = original_point_count - len(points)
+            if not points:
+                message = "Previous route CSV has no OK points for this route."
+                self._show_route_measurement_dialog_status(message, 8000)
+                return None
+
+        selected_point_number = int(configuration.current_point)
+        selected_point = self._api_find_contact_point(points, selected_point_number)
+        if selected_point is None:
+            message = (
+                f"Contact {selected_point_number} is not enabled or not included "
+                "by the current route filter."
+            )
+            self._show_route_measurement_dialog_status(message, 6000)
+            return None
+        return _RouteMeasurementStartPlan(
+            points=points,
+            selected_point=selected_point,
+            previous_ok_skipped_count=previous_ok_skipped_count,
+        )
+
+    def _show_route_measurement_dialog_status(
+        self,
+        message: str,
+        timeout_ms: int = 5000,
+    ) -> None:
+        self._show_status(message, timeout_ms)
+        if self._route_measurement_dialog is not None:
+            self._route_measurement_dialog.set_status(message)
 
     def _route_measurement_points(
         self,
