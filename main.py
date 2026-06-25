@@ -174,6 +174,7 @@ from probe_station_gui.route_runtime_settings import (
     route_external_runtime_settings,
     route_measurement_runtime_settings,
     route_runtime_requires_meter_configuration,
+    route_waiting_restart_required,
 )
 from probe_station_gui.route_measurement_settings import RouteMeasurementSettingsStore
 from probe_station_gui.route_session_actions import (
@@ -9181,13 +9182,16 @@ class Main(QMainWindow):
         if self._route_measurement_dialog is not None:
             configuration = self._route_measurement_dialog.current_configuration()
             previous_configuration = self._route_measurement_runtime_configuration
-            if (
-                not isinstance(runner, RouteExternalMeasurementSessionRunner)
-                and self._route_measurement_waiting
-                and self._route_measurement_setup_changed(
+            if route_waiting_restart_required(
+                external_session=isinstance(
+                    runner,
+                    RouteExternalMeasurementSessionRunner,
+                ),
+                waiting=self._route_measurement_waiting,
+                setup_changed=self._route_measurement_setup_changed(
                     previous_configuration,
                     configuration,
-                )
+                ),
             ):
                 route_offset_xy = (
                     runner.route_offset_xy()

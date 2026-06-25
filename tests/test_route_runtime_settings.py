@@ -8,6 +8,7 @@ from probe_station_gui.route_runtime_settings import (
     route_external_runtime_settings,
     route_measurement_runtime_settings,
     route_runtime_requires_meter_configuration,
+    route_waiting_restart_required,
 )
 
 
@@ -73,6 +74,41 @@ def test_route_runtime_requires_meter_configuration_tracks_operation_mode() -> N
     assert (
         route_runtime_requires_meter_configuration(
             _configuration(operation_mode=ROUTE_OPERATION_PHOTO)
+        )
+        is False
+    )
+
+
+def test_route_waiting_restart_required_only_for_changed_waiting_gui_run() -> None:
+    assert (
+        route_waiting_restart_required(
+            external_session=False,
+            waiting=True,
+            setup_changed=True,
+        )
+        is True
+    )
+    assert (
+        route_waiting_restart_required(
+            external_session=True,
+            waiting=True,
+            setup_changed=True,
+        )
+        is False
+    )
+    assert (
+        route_waiting_restart_required(
+            external_session=False,
+            waiting=False,
+            setup_changed=True,
+        )
+        is False
+    )
+    assert (
+        route_waiting_restart_required(
+            external_session=False,
+            waiting=True,
+            setup_changed=False,
         )
         is False
     )

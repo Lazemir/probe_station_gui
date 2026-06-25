@@ -51,9 +51,19 @@ def route_runtime_requires_meter_configuration(configuration: object) -> bool:
     return route_operation_measure_enabled(getattr(configuration, "operation_mode"))
 
 
+def route_waiting_restart_required(
+    *,
+    external_session: bool,
+    waiting: bool,
+    setup_changed: bool,
+) -> bool:
+    return bool(not external_session and waiting and setup_changed)
+
+
 __all__ = [
     "route_common_runtime_settings",
     "route_external_runtime_settings",
     "route_measurement_runtime_settings",
     "route_runtime_requires_meter_configuration",
+    "route_waiting_restart_required",
 ]
