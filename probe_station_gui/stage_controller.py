@@ -5339,11 +5339,10 @@ class StageController(QObject):
         raise StageControllerError("Timeout waiting for controller acknowledgement.")
 
     def _wait_for_idle(self, timeout: float = 10.0) -> None:
-        serial_connection = self._current_serial()
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             self._check_cancelled()
-            status = self._query_status(serial_connection)
+            status = self._query_current_status()
             logger.debug(
                 "SERIAL TRACE wait_for_idle status=%s position=%s",
                 None if status is None else status.state,
@@ -5362,11 +5361,10 @@ class StageController(QObject):
         *,
         timeout: float,
     ) -> None:
-        serial_connection = self._current_serial()
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             self._check_cancelled()
-            status = self._query_status(serial_connection)
+            status = self._query_current_status()
             logger.debug(
                 "SERIAL TRACE wait_for_target_idle status=%s position=%s targets=%s",
                 None if status is None else status.state,
