@@ -271,6 +271,8 @@ if TYPE_CHECKING:
     )
     from probe_station_gui.dialogs.route_measurement_dialog import (
         RouteMeasurementDialog,
+    )
+    from probe_station_gui.route_measurement_config import (
         RouteMeasurementRunConfiguration,
     )
     from probe_station_gui.dialogs.settings_dialog import SettingsDialog
