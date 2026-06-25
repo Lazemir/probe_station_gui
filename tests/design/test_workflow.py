@@ -6,19 +6,19 @@ from pathlib import Path
 
 import numpy as np
 
-from probe_station_gui.design_model import (
+from probe_station_gui.design.model import (
     DesignDocument,
     DesignModelError,
     DesignRegistration,
     MeasurementTarget,
 )
-from probe_station_gui.design_session import (
+from probe_station_gui.design.session import (
     AlignmentPreparation,
     DesignSession,
     MeasurementRoute,
 )
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class _FakeCell:

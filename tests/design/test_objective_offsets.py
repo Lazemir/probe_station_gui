@@ -1,6 +1,6 @@
 import unittest
 
-from probe_station_gui.objective_offsets import (
+from probe_station_gui.design.objective_offsets import (
     ObjectiveOffsetReference,
     base_objective_name,
     calibrated_objective_offset,

@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from probe_station_gui.design_model import (
+from probe_station_gui.design.model import (
     DesignDocument,
     DesignModelError,
     MeasurementTarget,

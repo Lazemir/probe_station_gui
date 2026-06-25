@@ -1,7 +1,7 @@
 import math
 import unittest
 
-from probe_station_gui.surface_mapping import (
+from probe_station_gui.design.surface_mapping import (
     SurfaceMapConfig,
     build_surface_route_plan,
     build_surface_route,

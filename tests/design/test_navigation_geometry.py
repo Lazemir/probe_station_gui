@@ -2,7 +2,7 @@ import math
 
 import pytest
 
-from probe_station_gui.design_navigation_geometry import (
+from probe_station_gui.design.navigation_geometry import (
     array_preview_points,
     count_from_endpoint,
     first_segment_length,

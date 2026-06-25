@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from probe_station_gui.objective_offsets import base_objective_name
+from probe_station_gui.design.objective_offsets import base_objective_name
 from probe_station_gui.settings_manager import (
     ObjectiveCalibrationSettings,
     ObjectivesSettings,

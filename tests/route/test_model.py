@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-from probe_station_gui.design_model import DesignDocument
+from probe_station_gui.design.model import DesignDocument
 from probe_station_gui.route.model import (
     MeasurementRoute,
     RouteModelError,

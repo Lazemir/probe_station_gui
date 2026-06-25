@@ -8,14 +8,14 @@ from typing import Any
 
 _LAZY_EXPORTS = {
     "Grabber": ("probe_station_gui.camera_worker", "Grabber"),
-    "DesignDocument": ("probe_station_gui.design_model", "DesignDocument"),
+    "DesignDocument": ("probe_station_gui.design.model", "DesignDocument"),
     "DesignNavigatorPanel": (
         "probe_station_gui.views.design_navigator_panel",
         "DesignNavigatorPanel",
     ),
-    "DesignRegistration": ("probe_station_gui.design_model", "DesignRegistration"),
+    "DesignRegistration": ("probe_station_gui.design.model", "DesignRegistration"),
     "JoystickWindow": ("probe_station_gui.views.joystick_window", "JoystickWindow"),
-    "MeasurementTarget": ("probe_station_gui.design_model", "MeasurementTarget"),
+    "MeasurementTarget": ("probe_station_gui.design.model", "MeasurementTarget"),
     "MicroscopeView": ("probe_station_gui.views.microscope_view", "MicroscopeView"),
     "SerialScannerDialog": (
         "probe_station_gui.dialogs.serial_scanner",
