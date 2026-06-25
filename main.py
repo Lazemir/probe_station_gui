@@ -160,6 +160,7 @@ from probe_station_gui.route_control_state import (
 )
 from probe_station_gui.route_measurement_payloads import route_external_result_payload
 from probe_station_gui.route_measurement_settings import RouteMeasurementSettingsStore
+from probe_station_gui.route_session_actions import route_session_action_from_payload
 from probe_station_gui.route_formatting import (
     csv_bool as _csv_bool,
     csv_float as _csv_float,
@@ -3160,15 +3161,15 @@ class Main(QMainWindow):
                 "status_code": 404,
                 "message": "No route session is active.",
             }
-        action = str(payload.get("action", payload.get("command", "next"))).strip()
-        if action.lower() == "pause":
+        action = route_session_action_from_payload(payload)
+        if action.kind == "pause":
             runner.request_pause_after_current_point()
             return {
                 "accepted": True,
                 "message": "Route session pause requested.",
                 "action": "pause",
             }
-        if action.lower() == "interrupt":
+        if action.kind == "interrupt":
             self._interrupt_route_measurement_runner(
                 runner,
                 reason="Route API session interrupt requested.",
@@ -3178,14 +3179,14 @@ class Main(QMainWindow):
                 "message": "Route session interrupt requested.",
                 "action": "interrupt",
             }
-        if action.lower() == "stop":
+        if action.kind == "stop":
             runner.stop()
             return {
                 "accepted": True,
                 "message": "Route session stop requested.",
                 "action": "stop",
             }
-        if not runner.submit_confirmation(action):
+        if not runner.submit_confirmation(action.action):
             return {
                 "accepted": False,
                 "status_code": 400,
@@ -3193,8 +3194,8 @@ class Main(QMainWindow):
             }
         return {
             "accepted": True,
-            "message": f"Route session action submitted: {action}.",
-            "action": action,
+            "message": f"Route session action submitted: {action.action}.",
+            "action": action.action,
         }
 
     def _api_route_session_result(self, payload: dict[str, Any]) -> dict[str, Any]:
