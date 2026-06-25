@@ -56,6 +56,10 @@ from probe_station_gui.route_measurement import (
     ROUTE_OPERATION_PHOTO_THEN_MEASURE,
     RouteContactQualityLimits,
 )
+from probe_station_gui.route_operation_modes import (
+    route_operation_measure_enabled,
+    route_operation_photo_enabled,
+)
 from probe_station_gui.route_formatting import (
     csv_float as _format_number,
     format_route_ohm as _format_ohm,
@@ -1325,14 +1329,8 @@ class RouteMeasurementDialog(QDialog):
 
     def _update_operation_state(self) -> None:
         mode = str(self._operation_combo.currentData() or ROUTE_OPERATION_MEASURE)
-        photo_enabled = mode in {
-            ROUTE_OPERATION_PHOTO,
-            ROUTE_OPERATION_PHOTO_THEN_MEASURE,
-        }
-        measure_enabled = mode in {
-            ROUTE_OPERATION_MEASURE,
-            ROUTE_OPERATION_PHOTO_THEN_MEASURE,
-        }
+        photo_enabled = route_operation_photo_enabled(mode)
+        measure_enabled = route_operation_measure_enabled(mode)
         route_active = photo_enabled or measure_enabled
         can_edit = not self._running or self._waiting
         self._photo_dir_edit.setEnabled(photo_enabled and can_edit)
@@ -1461,18 +1459,19 @@ class RouteMeasurementDialog(QDialog):
     def _emit_measure_requested(self) -> None:
         mode = str(self._operation_combo.currentData() or ROUTE_OPERATION_MEASURE)
         csv_path = self._csv_path_edit.text().strip()
-        if mode in {ROUTE_OPERATION_MEASURE, ROUTE_OPERATION_PHOTO_THEN_MEASURE} and not csv_path:
+        measure_enabled = route_operation_measure_enabled(mode)
+        if measure_enabled and not csv_path:
             self.set_status("Choose a CSV path before measuring.")
             return
         if (
-            mode in {ROUTE_OPERATION_MEASURE, ROUTE_OPERATION_PHOTO_THEN_MEASURE}
+            measure_enabled
             and self._previous_ok_only_checkbox.isChecked()
             and not self._previous_csv_path_edit.text().strip()
         ):
             self.set_status("Choose a previous CSV before filtering.")
             return
         photo_dir = self._photo_dir_edit.text().strip()
-        if mode in {ROUTE_OPERATION_PHOTO, ROUTE_OPERATION_PHOTO_THEN_MEASURE} and not photo_dir:
+        if route_operation_photo_enabled(mode) and not photo_dir:
             self.set_status("Choose a photo directory before capturing.")
             return
         self.measure_requested.emit(self.current_configuration())
@@ -1505,11 +1504,7 @@ class RouteMeasurementDialog(QDialog):
             contact_seek_step_mm=float(self._contact_seek_step_spin.value()),
             previous_ok_only=(
                 bool(self._previous_ok_only_checkbox.isChecked())
-                and operation_mode
-                in {
-                    ROUTE_OPERATION_MEASURE,
-                    ROUTE_OPERATION_PHOTO_THEN_MEASURE,
-                }
+                and route_operation_measure_enabled(operation_mode)
             ),
             meter=self._meter_configuration(),
             contact_quality_limits=self._contact_quality_limits(),

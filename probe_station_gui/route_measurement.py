@@ -51,6 +51,8 @@ from probe_station_gui.route_operation_modes import (
     ROUTE_OPERATION_PHOTO,
     ROUTE_OPERATION_PHOTO_THEN_MEASURE,
     normalize_route_operation_mode,
+    route_operation_measure_enabled,
+    route_operation_photo_enabled,
 )
 
 
@@ -329,14 +331,8 @@ class RouteMeasurementRunner:
         self._result_callback = result_callback
         self._waiting_callback = waiting_callback
         self._operation_mode = _normalize_operation_mode(operation_mode)
-        self._measure_enabled = self._operation_mode in {
-            ROUTE_OPERATION_MEASURE,
-            ROUTE_OPERATION_PHOTO_THEN_MEASURE,
-        }
-        self._photo_enabled = self._operation_mode in {
-            ROUTE_OPERATION_PHOTO,
-            ROUTE_OPERATION_PHOTO_THEN_MEASURE,
-        }
+        self._measure_enabled = route_operation_measure_enabled(self._operation_mode)
+        self._photo_enabled = route_operation_photo_enabled(self._operation_mode)
         self._photo_settle_s = max(0.0, float(photo_settle_s))
         self._photo_focus_enabled = bool(photo_focus_enabled)
         self._wait_before_first_point = bool(wait_before_first_point)
