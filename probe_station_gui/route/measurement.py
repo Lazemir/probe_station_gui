@@ -78,19 +78,18 @@ def _callable_accepts_keyword(function: object, name: str) -> bool:
         signature = inspect.signature(function)
     except (TypeError, ValueError):
         return False
-    for parameter in signature.parameters.values():
-        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
-            return True
-        if (
+    keyword_kinds = {
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    }
+    return any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        or (
             parameter.name == name
-            and parameter.kind
-            in {
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                inspect.Parameter.KEYWORD_ONLY,
-            }
-        ):
-            return True
-    return False
+            and parameter.kind in keyword_kinds
+        )
+        for parameter in signature.parameters.values()
+    )
 
 
 class _BackgroundRouteTask:
@@ -140,6 +139,15 @@ class _RoutePointPhotoPreparation:
 class _RoutePointLoopDecision:
     position_index: int
     stop_message: str | None = None
+
+
+@dataclass(frozen=True)
+class _ResistanceStats:
+    count: int
+    mean_ohm: float
+    rms_ohm: float
+    relative_rms: float
+    complete_finite_batch: bool
 
 
 class RouteMeasurementRunner:
@@ -478,35 +486,15 @@ class RouteMeasurementRunner:
         self._begin_stage_task()
         needles_lowered = False
         placement_succeeded = False
-        prepare_task: _BackgroundRouteTask | None = None
         try:
-            if lift_before_move:
-                self._status(
-                    f"Route contact: point {position}/{total} lifting needles."
-                )
-                self._stage_controller.run_external_needles_action(
-                    "lift",
-                    self._needle_feedrate,
-                )
-                self._raise_if_point_interrupted()
-            if move_to_point:
-                target_xy = self._adjusted_stage_xy(point)
-                self._status(
-                    f"Route contact: point {position}/{total} moving."
-                )
-                self._stage_controller.run_external_move_to_xy(
-                    target_xy[0],
-                    target_xy[1],
-                )
-                self._raise_if_point_interrupted()
-            self._raise_if_point_interrupted()
-            prepare_task = self._start_measurement_prepare_task(
-                self._initial_measurement_count()
+            self._prepare_contact_placement_move(
+                point,
+                position=position,
+                total=total,
+                move_to_point=move_to_point,
+                lift_before_move=lift_before_move,
             )
-            self._raise_if_point_interrupted()
-            if prepare_task is not None:
-                prepare_task.wait()
-                prepare_task = None
+            self._prepare_contact_measurement_batch()
             self._status(
                 f"Route contact: point {position}/{total} lowering needles."
             )
@@ -514,28 +502,15 @@ class RouteMeasurementRunner:
             self._raise_if_point_interrupted()
             self._lower_needles_for_measurement()
             needles_lowered = True
-            if not self._sleep_contact_settle():
-                raise RuntimeError("Contact placement stopped.")
-            self._status(
-                f"Route contact: point {position}/{total} checking contact."
-            )
-            samples = self._measure_samples(
+            record = self._measure_contact_placement_record(
+                point,
                 position=position,
                 total=total,
-                prepare_task=prepare_task,
             )
-            prepare_task = None
-            if samples is None:
-                raise RuntimeError("Contact placement stopped.")
-            record = self._record_for_point(point=point, samples=samples)
             success = self._contact_placement_record_is_success(record)
             if not success and lift_on_failure and needles_lowered:
-                self._stage_controller.run_external_needles_action(
-                    "lift",
-                    self._needle_feedrate,
-                )
+                self._lift_needles_after_failed_contact()
                 needles_lowered = False
-                self._close_meter_output_context()
             message = self._contact_placement_message(
                 action_label="Contact ready",
                 failure_label="Contact check failed",
@@ -559,17 +534,73 @@ class RouteMeasurementRunner:
         finally:
             if needles_lowered and lift_on_failure and not placement_succeeded:
                 try:
-                    self._stage_controller.run_external_needles_action(
-                        "lift",
-                        self._needle_feedrate,
-                    )
-                    self._close_meter_output_context()
+                    self._lift_needles_after_failed_contact()
                 except Exception:
                     logger.exception("Failed to lift needles after contact check.")
             try:
                 self._wait_for_background_tasks()
             finally:
                 self._finish_stage_task()
+
+    def _prepare_contact_placement_move(
+        self,
+        point: RouteMeasurementPoint,
+        *,
+        position: int,
+        total: int,
+        move_to_point: bool,
+        lift_before_move: bool,
+    ) -> None:
+        if lift_before_move:
+            self._status(f"Route contact: point {position}/{total} lifting needles.")
+            self._stage_controller.run_external_needles_action(
+                "lift",
+                self._needle_feedrate,
+            )
+            self._raise_if_point_interrupted()
+        if move_to_point:
+            target_xy = self._adjusted_stage_xy(point)
+            self._status(f"Route contact: point {position}/{total} moving.")
+            self._stage_controller.run_external_move_to_xy(
+                target_xy[0],
+                target_xy[1],
+            )
+            self._raise_if_point_interrupted()
+        self._raise_if_point_interrupted()
+
+    def _prepare_contact_measurement_batch(self) -> None:
+        prepare_task = self._start_measurement_prepare_task(
+            self._initial_measurement_count()
+        )
+        self._raise_if_point_interrupted()
+        if prepare_task is not None:
+            prepare_task.wait()
+
+    def _measure_contact_placement_record(
+        self,
+        point: RouteMeasurementPoint,
+        *,
+        position: int,
+        total: int,
+    ) -> RouteMeasurementRecord:
+        if not self._sleep_contact_settle():
+            raise RuntimeError("Contact placement stopped.")
+        self._status(f"Route contact: point {position}/{total} checking contact.")
+        samples = self._measure_samples(
+            position=position,
+            total=total,
+            prepare_task=None,
+        )
+        if samples is None:
+            raise RuntimeError("Contact placement stopped.")
+        return self._record_for_point(point=point, samples=samples)
+
+    def _lift_needles_after_failed_contact(self) -> None:
+        self._stage_controller.run_external_needles_action(
+            "lift",
+            self._needle_feedrate,
+        )
+        self._close_meter_output_context()
 
     def prepare_external_contact(
         self,
@@ -2260,21 +2291,54 @@ class RouteMeasurementRunner:
 
     @staticmethod
     def _relative_rms_from_samples(samples: list[RouteMeasurementSample]) -> float:
-        resistances_ohm = [
+        return RouteMeasurementRunner._resistance_stats_from_samples(samples).relative_rms
+
+    def _record_status_for_samples(
+        self,
+        samples: list[RouteMeasurementSample],
+        contact_quality: RouteContactQuality,
+    ) -> str:
+        if self._samples_are_short(samples):
+            return "short"
+        if contact_quality.good is False:
+            return "bad_contact"
+        return "ok"
+
+    @staticmethod
+    def _resistance_stats_from_samples(
+        samples: list[RouteMeasurementSample],
+    ) -> _ResistanceStats:
+        resistances_ohm = tuple(
             sample.differential_resistance_ohm for sample in samples
-        ]
-        finite_resistances = [
+        )
+        finite_resistances = tuple(
             float(value) for value in resistances_ohm if math.isfinite(value)
-        ]
+        )
         if len(finite_resistances) != len(resistances_ohm) or not finite_resistances:
-            return math.nan
+            return _ResistanceStats(
+                count=len(resistances_ohm),
+                mean_ohm=math.inf,
+                rms_ohm=math.nan,
+                relative_rms=math.nan,
+                complete_finite_batch=False,
+            )
         mean_resistance = sum(finite_resistances) / len(finite_resistances)
-        if mean_resistance == 0:
-            return math.nan
         variance = sum(
             (value - mean_resistance) ** 2 for value in finite_resistances
         ) / len(finite_resistances)
-        return math.sqrt(variance) / abs(mean_resistance)
+        rms_resistance = math.sqrt(variance)
+        relative_rms = (
+            rms_resistance / abs(mean_resistance)
+            if mean_resistance
+            else math.nan
+        )
+        return _ResistanceStats(
+            count=len(resistances_ohm),
+            mean_ohm=mean_resistance,
+            rms_ohm=rms_resistance,
+            relative_rms=relative_rms,
+            complete_finite_batch=True,
+        )
 
     def _initial_measurement_count(self) -> int:
         return min(self._measurement_count, self._initial_measurement_count_value)
@@ -2466,35 +2530,11 @@ class RouteMeasurementRunner:
         point: RouteMeasurementPoint,
         samples: list[RouteMeasurementSample],
     ) -> RouteMeasurementRecord:
-        resistances_ohm = [
-            sample.differential_resistance_ohm for sample in samples
-        ]
-        finite_resistances = [
-            float(value) for value in resistances_ohm if math.isfinite(value)
-        ]
-        complete_finite_batch = len(finite_resistances) == len(resistances_ohm)
-        if complete_finite_batch and finite_resistances:
-            mean_resistance = sum(finite_resistances) / len(finite_resistances)
-            variance = sum(
-                (value - mean_resistance) ** 2 for value in finite_resistances
-            ) / len(finite_resistances)
-            rms_resistance = math.sqrt(variance)
-            relative_rms = (
-                rms_resistance / abs(mean_resistance)
-                if mean_resistance
-                else math.nan
-            )
+        stats = self._resistance_stats_from_samples(samples)
+        if stats.complete_finite_batch:
             contact_quality = self._contact_quality_from_samples(samples)
-            if self._samples_are_short(samples):
-                status = "short"
-            elif contact_quality.good is False:
-                status = "bad_contact"
-            else:
-                status = "ok"
+            status = self._record_status_for_samples(samples, contact_quality)
         else:
-            mean_resistance = math.inf
-            rms_resistance = math.nan
-            relative_rms = math.nan
             status = "overload"
             contact_quality = None
         return RouteMeasurementRecord(
@@ -2502,10 +2542,10 @@ class RouteMeasurementRunner:
             structure_number=_structure_number_for_point(point),
             nplc=self._nplc_label,
             measurement_type=self._measurement_type,
-            n_measurements=len(resistances_ohm),
-            resistance_ohm=mean_resistance,
-            resistance_rms_ohm=rms_resistance,
-            relative_rms=relative_rms,
+            n_measurements=stats.count,
+            resistance_ohm=stats.mean_ohm,
+            resistance_rms_ohm=stats.rms_ohm,
+            relative_rms=stats.relative_rms,
             status=status,
             contact_quality=contact_quality,
             raw_samples=tuple(samples),
