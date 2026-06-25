@@ -682,6 +682,12 @@ class RouteMeasurementRunner:
         if self._point_interrupt_requested.is_set():
             raise RuntimeError("Route contact interrupted.")
 
+    def _route_point_stop_requested(self) -> bool:
+        return (
+            self._stop_requested.is_set()
+            or self._point_interrupt_requested.is_set()
+        )
+
     def lift_needles_after_external_measurement(
         self,
         *,
@@ -1593,16 +1599,10 @@ class RouteMeasurementRunner:
 
     def _sleep_contact_settle(self) -> bool:
         if self._contact_settle_s <= 0.0:
-            return (
-                not self._stop_requested.is_set()
-                and not self._point_interrupt_requested.is_set()
-            )
+            return not self._route_point_stop_requested()
         deadline = time.monotonic() + self._contact_settle_s
         while True:
-            if (
-                self._stop_requested.is_set()
-                or self._point_interrupt_requested.is_set()
-            ):
+            if self._route_point_stop_requested():
                 return False
             remaining = deadline - time.monotonic()
             if remaining <= 0.0:
@@ -2052,10 +2052,7 @@ class RouteMeasurementRunner:
         last_axis_a_lowering_mm = math.nan
         last_status = initial_quality.status
         for depth_mm in depths_mm:
-            if (
-                self._stop_requested.is_set()
-                or self._point_interrupt_requested.is_set()
-            ):
+            if self._route_point_stop_requested():
                 return None
             attempt_number = contact_seek_attempt_number(depth_mm, step_mm)
             self._status(
@@ -2066,10 +2063,7 @@ class RouteMeasurementRunner:
             prepare_task = self._start_measurement_prepare_task(
                 self._initial_measurement_count()
             )
-            if (
-                self._stop_requested.is_set()
-                or self._point_interrupt_requested.is_set()
-            ):
+            if self._route_point_stop_requested():
                 return None
             if depth_mm > 0.0 and callable(lower_to_depth):
                 lower_to_depth(depth_mm, self._needle_feedrate)
@@ -2079,10 +2073,7 @@ class RouteMeasurementRunner:
             else:
                 return initial_samples
             previous_depth_mm = float(depth_mm)
-            if (
-                self._stop_requested.is_set()
-                or self._point_interrupt_requested.is_set()
-            ):
+            if self._route_point_stop_requested():
                 return None
             attempts += 1
             last_depth_mm = float(depth_mm)
@@ -2324,10 +2315,7 @@ class RouteMeasurementRunner:
             None,
         )
         if callable(batch_reader) and count > 1:
-            if (
-                self._stop_requested.is_set()
-                or self._point_interrupt_requested.is_set()
-            ):
+            if self._route_point_stop_requested():
                 return None
             if (
                 after_measurement is not None
@@ -2342,24 +2330,15 @@ class RouteMeasurementRunner:
                 _measurement_sample_from_raw(raw, index)
                 for index, raw in enumerate(raw_batch, start=start_index)
             ]
-            if (
-                self._stop_requested.is_set()
-                or self._point_interrupt_requested.is_set()
-            ):
+            if self._route_point_stop_requested():
                 return None
             return samples
         samples: list[RouteMeasurementSample] = []
         for index in range(start_index, start_index + count):
-            if (
-                self._stop_requested.is_set()
-                or self._point_interrupt_requested.is_set()
-            ):
+            if self._route_point_stop_requested():
                 return None
             samples.append(self._read_measurement_sample(index))
-            if (
-                self._stop_requested.is_set()
-                or self._point_interrupt_requested.is_set()
-            ):
+            if self._route_point_stop_requested():
                 return None
         return samples
 
