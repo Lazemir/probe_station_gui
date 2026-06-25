@@ -29,6 +29,11 @@ from probe_station_gui.route_measurement_csv import (
     CSV_FIELDS,
     RouteMeasurementCsvWriter,
 )
+from probe_station_gui.route_measurement_payloads import (
+    focus_result_to_dict as _focus_result_to_dict,
+    route_contact_seek_payload as _route_contact_seek_payload,
+    route_measurement_record_payload as _route_measurement_record_payload,
+)
 
 
 Point2D = tuple[float, float]
@@ -3324,94 +3329,6 @@ class RouteExternalMeasurementSessionRunner:
         }
 
 
-def _route_measurement_record_payload(record: RouteMeasurementRecord) -> dict[str, Any]:
-    return {
-        "timestamp": record.timestamp,
-        "structure_number": int(record.structure_number),
-        "nplc": record.nplc,
-        "measurement_type": record.measurement_type,
-        "n_measurements": int(record.n_measurements),
-        "resistance_ohm": _json_ready(record.resistance_ohm),
-        "resistance_rms_ohm": _json_ready(record.resistance_rms_ohm),
-        "relative_rms": _json_ready(record.relative_rms),
-        "status": record.status,
-        "contact_quality": _route_contact_quality_payload(record.contact_quality),
-        "raw_samples": [
-            _route_measurement_sample_payload(sample)
-            for sample in record.raw_samples
-        ],
-    }
-
-
-def _route_measurement_sample_payload(sample: RouteMeasurementSample) -> dict[str, Any]:
-    return {
-        field: _json_ready(getattr(sample, field))
-        for field in (
-            "sample_index",
-            "differential_resistance_ohm",
-            "compliance_hit",
-            "negative_source_voltage_v",
-            "negative_measured_voltage_v",
-            "negative_current_a",
-            "negative_resistance_ohm",
-            "positive_source_voltage_v",
-            "positive_measured_voltage_v",
-            "positive_current_a",
-            "positive_resistance_ohm",
-        )
-    }
-
-
-def _route_contact_quality_payload(
-    quality: RouteContactQuality | None,
-) -> dict[str, Any] | None:
-    if quality is None:
-        return None
-    return {
-        "assessed": bool(quality.assessed),
-        "good": quality.good,
-        "status": quality.status,
-        "median_ohm": _json_ready(quality.median_ohm),
-        "mad_sigma_ohm": _json_ready(quality.mad_sigma_ohm),
-        "p95_abs_step_ohm": _json_ready(quality.p95_abs_step_ohm),
-        "span_ohm": _json_ready(quality.span_ohm),
-        "compliance_hits": int(quality.compliance_hits),
-        "polarity_sign_mismatch_count": int(
-            quality.polarity_sign_mismatch_count
-        ),
-        "reasons": list(quality.reasons),
-        "failure_criteria": list(quality.failure_criteria),
-    }
-
-
-def _route_contact_seek_payload(
-    seek: RouteContactSeekResult | None,
-) -> dict[str, Any] | None:
-    if seek is None:
-        return None
-    return {
-        "found": bool(seek.found),
-        "status": seek.status,
-        "attempts": int(seek.attempts),
-        "initial_status": seek.initial_status,
-        "final_status": seek.final_status,
-        "depth_below_down_mm": _json_ready(seek.depth_below_down_mm),
-        "axis_a_lowering_mm": _json_ready(seek.axis_a_lowering_mm),
-        "step_mm": _json_ready(seek.step_mm),
-        "max_depth_mm": _json_ready(seek.max_depth_mm),
-    }
-
-
-def _json_ready(value: object) -> object:
-    if isinstance(value, bool) or value is None or isinstance(value, str):
-        return value
-    if isinstance(value, int):
-        return int(value)
-    if isinstance(value, float):
-        return value if math.isfinite(value) else None
-    return value
-
-
 __all__ = [
     "RouteMeasurementCsvWriter",
     "CSV_FIELDS",
@@ -3505,35 +3422,6 @@ def filter_route_points_by_previous_status(
         for point in points
         if statuses.get(_structure_number_for_point(point)) in allowed
     ]
-
-
-def _focus_result_to_dict(result: object | None) -> dict[str, object] | None:
-    if result is None:
-        return None
-    if isinstance(result, dict):
-        return dict(result)
-    to_dict = getattr(result, "to_dict", None)
-    if callable(to_dict):
-        data = to_dict()
-        return dict(data) if isinstance(data, dict) else None
-    data: dict[str, object] = {}
-    for source_name, target_name in (
-        ("objective_name", "objective_name"),
-        ("mode", "mode"),
-        ("start_z_mm", "focus_start_z_mm"),
-        ("best_z_mm", "focus_best_z_mm"),
-        ("delta_um", "focus_delta_um"),
-        ("best_score", "focus_score"),
-        ("sample_count", "focus_sample_count"),
-        ("edge_peak", "focus_edge_peak"),
-        ("range_mm", "autofocus_range_mm"),
-        ("fine_step_mm", "autofocus_fine_step_mm"),
-        ("lower_z_mm", "autofocus_lower_z_mm"),
-        ("upper_z_mm", "autofocus_upper_z_mm"),
-    ):
-        if hasattr(result, source_name):
-            data[target_name] = getattr(result, source_name)
-    return data or None
 
 
 def _format_percent(value: float) -> str:
