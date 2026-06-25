@@ -391,6 +391,17 @@ class JoystickWindow(QWidget):
     FEEDRATE_SPIN_STORAGE = {
         (FEED_TARGET_NEEDLES, MODE_JOG): "needle_feedrate_spin",
     }
+    GLOBAL_EVENT_HANDLER_NAMES = {
+        QEvent.ShortcutOverride: "_handle_shortcut_override_global_event",
+        QEvent.KeyPress: "_handle_key_press_global_event",
+        QEvent.KeyRelease: "_handle_key_release_global_event",
+        QEvent.Wheel: "_handle_wheel_global_event",
+    }
+    GLOBAL_KEY_EVENT_TYPES = (
+        QEvent.KeyPress,
+        QEvent.KeyRelease,
+        QEvent.ShortcutOverride,
+    )
     HOMED_STYLE = (
         "QPushButton { padding: 2px 6px; border-radius: 4px; background: #1565c0; color: #f5f5f5; }"
         "QPushButton:pressed { background: #0d47a1; }"
@@ -2461,35 +2472,40 @@ class JoystickWindow(QWidget):
         super().closeEvent(event)
 
     def eventFilter(self, obj, event):  # type: ignore[override]
-        if event.type() in (QEvent.KeyPress, QEvent.KeyRelease, QEvent.ShortcutOverride):
+        event_type = event.type()
+        if event_type in self.GLOBAL_KEY_EVENT_TYPES:
             self._log_global_key_event(obj, event)
-        if event.type() == QEvent.ShortcutOverride:
-            if self._should_process_global_event(
-                obj, require_motion_ready=False
-            ) and self._is_control_mode_toggle_event(event):
-                return self._accept_global_event(event)
-            if self._should_process_global_event(obj):
-                identifier, mapping = self._mapping_from_event(event)
-                if identifier and mapping:
-                    return self._accept_global_event(event)
-        elif event.type() == QEvent.KeyPress:
-            if self._should_process_global_event(
-                obj, require_motion_ready=False
-            ) and self._handle_control_mode_toggle_press(event):
-                return self._accept_global_event(event)
-            if self._should_process_global_event(obj) and self._handle_key_press_event(event):
-                return self._accept_global_event(event)
-        elif event.type() == QEvent.KeyRelease:
-            if self._should_process_global_event(
-                obj, require_motion_ready=False
-            ) and self._handle_control_mode_toggle_release(event):
-                return self._accept_global_event(event)
-            if self._should_process_global_event(obj) and self._handle_key_release_event(event):
-                return self._accept_global_event(event)
-        elif event.type() == QEvent.Wheel:
-            if self._should_process_global_event(obj) and self._handle_wheel_event(event, obj):
-                return self._accept_global_event(event)
+        handler_name = self.GLOBAL_EVENT_HANDLER_NAMES.get(event_type)
+        if handler_name is not None and getattr(self, handler_name)(obj, event):
+            return self._accept_global_event(event)
         return super().eventFilter(obj, event)
+
+    def _handle_shortcut_override_global_event(self, obj, event) -> bool:
+        if self._should_process_global_event(
+            obj, require_motion_ready=False
+        ) and self._is_control_mode_toggle_event(event):
+            return True
+        if not self._should_process_global_event(obj):
+            return False
+        identifier, mapping = self._mapping_from_event(event)
+        return bool(identifier and mapping)
+
+    def _handle_key_press_global_event(self, obj, event) -> bool:
+        if self._should_process_global_event(
+            obj, require_motion_ready=False
+        ) and self._handle_control_mode_toggle_press(event):
+            return True
+        return self._should_process_global_event(obj) and self._handle_key_press_event(event)
+
+    def _handle_key_release_global_event(self, obj, event) -> bool:
+        if self._should_process_global_event(
+            obj, require_motion_ready=False
+        ) and self._handle_control_mode_toggle_release(event):
+            return True
+        return self._should_process_global_event(obj) and self._handle_key_release_event(event)
+
+    def _handle_wheel_global_event(self, obj, event) -> bool:
+        return self._should_process_global_event(obj) and self._handle_wheel_event(event, obj)
 
     def _log_global_key_event(self, obj, event) -> None:
         event_type_name = {
