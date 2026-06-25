@@ -157,6 +157,7 @@ from probe_station_gui.route_control_state import (
     api_route_control_command_from_payload,
     api_route_control_legacy_attrs,
     api_route_control_state_from_legacy_attrs,
+    route_contact_move_block_message,
     route_shift_save_block_message,
 )
 from probe_station_gui.route_operation_modes import (
@@ -9261,17 +9262,14 @@ class Main(QMainWindow):
         route_thread = self._route_measurement_thread
         route_active = route_thread is not None and route_thread.is_alive()
         api_route_control = self._api_route_control_state_snapshot()
-        if route_active and not self._route_measurement_waiting:
-            self._show_status(
-                "Pause or wait for route measurement before moving to a contact.",
-                5000,
-            )
-            return
-        if api_route_control.blocks_route_adjustment:
-            self._show_status(
-                "Pause API route control before moving to a contact.",
-                5000,
-            )
+        route_waiting = self._route_measurement_waiting if route_active else False
+        message = route_contact_move_block_message(
+            route_active=route_active,
+            route_waiting=route_waiting,
+            api_route_control=api_route_control,
+        )
+        if message is not None:
+            self._show_status(message, 5000)
             return
         context_result = self._api_contact_context(int(point_number))
         if not context_result.get("accepted", False):

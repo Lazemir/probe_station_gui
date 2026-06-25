@@ -4,6 +4,7 @@ from probe_station_gui.route_control_state import (
     api_route_control_legacy_attrs,
     api_route_control_state_from_legacy_attrs,
     normalize_route_control_action,
+    route_contact_move_block_message,
     route_shift_save_block_message,
 )
 
@@ -345,6 +346,52 @@ def test_route_shift_save_block_message_preserves_api_control_guards() -> None:
         route_shift_save_block_message(
             runner_active=False,
             runner_waiting=False,
+            api_route_control=ApiRouteControlState(active=True, paused=True),
+        )
+        is None
+    )
+
+
+def test_route_contact_move_block_message_preserves_route_active_guard() -> None:
+    assert (
+        route_contact_move_block_message(
+            route_active=True,
+            route_waiting=False,
+            api_route_control=ApiRouteControlState(),
+        )
+        == "Pause or wait for route measurement before moving to a contact."
+    )
+    assert (
+        route_contact_move_block_message(
+            route_active=True,
+            route_waiting=False,
+            api_route_control=ApiRouteControlState(active=True),
+        )
+        == "Pause or wait for route measurement before moving to a contact."
+    )
+    assert (
+        route_contact_move_block_message(
+            route_active=True,
+            route_waiting=True,
+            api_route_control=ApiRouteControlState(),
+        )
+        is None
+    )
+
+
+def test_route_contact_move_block_message_preserves_api_control_guard() -> None:
+    assert (
+        route_contact_move_block_message(
+            route_active=False,
+            route_waiting=False,
+            api_route_control=ApiRouteControlState(active=True),
+        )
+        == "Pause API route control before moving to a contact."
+    )
+    assert (
+        route_contact_move_block_message(
+            route_active=False,
+            route_waiting=False,
             api_route_control=ApiRouteControlState(active=True, paused=True),
         )
         is None

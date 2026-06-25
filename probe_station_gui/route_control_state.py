@@ -418,6 +418,19 @@ def route_shift_save_block_message(
     return None
 
 
+def route_contact_move_block_message(
+    *,
+    route_active: bool,
+    route_waiting: bool,
+    api_route_control: ApiRouteControlState,
+) -> str | None:
+    if route_active and not route_waiting:
+        return "Pause or wait for route measurement before moving to a contact."
+    if api_route_control.blocks_route_adjustment:
+        return "Pause API route control before moving to a contact."
+    return None
+
+
 __all__ = [
     "API_ROUTE_CONTROL_DEFAULT_LABEL",
     "ApiRouteControlCommand",
@@ -427,5 +440,6 @@ __all__ = [
     "api_route_control_legacy_attrs",
     "api_route_control_state_from_legacy_attrs",
     "normalize_route_control_action",
+    "route_contact_move_block_message",
     "route_shift_save_block_message",
 ]
