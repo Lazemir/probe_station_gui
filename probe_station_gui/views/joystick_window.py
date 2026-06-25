@@ -886,31 +886,11 @@ class JoystickWindow(QWidget):
             return self._feedrate_values[key]
         if target == self.FEED_TARGET_COMMON:
             return self._common_feedrate_value
-        if target == self.FEED_TARGET_XY:
-            return (
-                self._manual_axis_feedrate_mm_min
-                if mode_key == self.MODE_STEP
-                else self._linear_default
-            )
-        if target == self.FEED_TARGET_FOCUS:
-            return (
-                self._focus_step_feedrate_value
-                if mode_key == self.MODE_STEP
-                else self._focus_feedrate_value
-            )
-        if target == self.FEED_TARGET_NEEDLES:
-            return (
-                self._needle_step_feedrate_value
-                if mode_key == self.MODE_STEP
-                else self._needle_feedrate_value
-            )
-        if target == self.FEED_TARGET_TURNTABLE:
-            return (
-                self._turntable_step_feedrate_value
-                if mode_key == self.MODE_STEP
-                else self._turntable_feedrate_value
-            )
-        return self._linear_default
+        storage = self.FEEDRATE_VALUE_STORAGE.get((target, mode_key))
+        if storage is None:
+            return self._linear_default
+        field_name, _signal_name = storage
+        return getattr(self, field_name)
 
     def _feedrate_target_for_axis(self, axis: str) -> str:
         return feedrate_target_for_axis(
@@ -1719,10 +1699,10 @@ class JoystickWindow(QWidget):
             return
         if self._active_axes is not None:
             self.stop_jog()
-        commanded_distances: list[tuple[str, float]] = []
-        for axis, direction in axes_sorted:
-            distance = direction * self._distance_for_axis(axis)
-            commanded_distances.append((axis, distance))
+        commanded_distances = [
+            (axis, direction * self._distance_for_axis(axis))
+            for axis, direction in axes_sorted
+        ]
         if self.stage_controller is not None:
             try:
                 commanded_distances = list(
@@ -1749,10 +1729,9 @@ class JoystickWindow(QWidget):
         if not self.send_command(command):
             self.jog_command_changed.emit(tuple(), float(feedrate))
             return
+        commanded_axes = {axis for axis, _distance in commanded_distances}
         self._active_axes = tuple(
-            (axis, direction)
-            for axis, direction in axes_sorted
-            if any(command_axis == axis for command_axis, _ in commanded_distances)
+            (axis, direction) for axis, direction in axes_sorted if axis in commanded_axes
         )
         self.jog_command_changed.emit(tuple(commanded_distances), float(feedrate))
         logger.debug("TIMING jog_command_sent command=%s", command.strip())
@@ -2542,15 +2521,28 @@ class JoystickWindow(QWidget):
         if not self.isVisible():
             logger.debug("Ignoring global key event because joystick is hidden")
             return False
+        app = self._global_event_context(obj)
+        if app is None:
+            return False
+        if require_motion_ready and not (
+            self._axis_a_ready or self._motion_safety_disabled
+        ):
+            logger.debug("Ignoring global key event because A axis is not homed/zero")
+            return False
+        if self._global_event_focus_is_blocked(app, obj):
+            return False
+        return True
+
+    def _global_event_context(self, obj):
         window = self.window()
         app = QApplication.instance()
         active_window = app.activeWindow() if app is not None else None
         if window is None:
             logger.debug("Ignoring global key event because joystick window is unavailable")
-            return False
+            return None
         if active_window is None:
             logger.debug("Ignoring global key event because application has no active window")
-            return False
+            return None
         if active_window is not window and obj is not active_window:
             try:
                 obj_window = obj.window() if hasattr(obj, "window") else None
@@ -2560,26 +2552,24 @@ class JoystickWindow(QWidget):
                 logger.debug(
                     "Ignoring global key event because active window does not belong to joystick host"
                 )
-                return False
+                return None
         if not window.isActiveWindow() and active_window is not window:
             logger.debug("Ignoring global key event because joystick host window is not active")
-            return False
-        if require_motion_ready and not (
-            self._axis_a_ready or self._motion_safety_disabled
-        ):
-            logger.debug("Ignoring global key event because A axis is not homed/zero")
-            return False
+            return None
+        return app
+
+    def _global_event_focus_is_blocked(self, app, obj) -> bool:
         focus_widget = app.focusWidget() if app else None
         if self._is_text_entry_widget(focus_widget) or self._is_terminal_widget(focus_widget):
             logger.debug("Ignoring global key event because focus is in terminal/text input")
-            return False
+            return True
         if isinstance(obj, QWidget) and self._is_text_entry_widget(obj):
             logger.debug(
                 "Ignoring global key event originating from text widget %s",
                 obj.objectName() or obj.__class__.__name__,
             )
-            return False
-        return True
+            return True
+        return False
 
     def _is_control_mode_toggle_mapping(
         self, mapping: tuple[str, int] | None
