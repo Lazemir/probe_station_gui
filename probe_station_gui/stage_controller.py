@@ -4675,14 +4675,11 @@ class StageController(QObject):
         effective_feedrate = (
             self.DEFAULT_FEEDRATE if feedrate is None else max(self.MIN_FEEDRATE, float(feedrate))
         )
-        serial_connection = self._current_serial()
-        self._write_command(
-            serial_connection,
+        self._write_current_command_and_wait(
             "G1 "
             + " ".join(move_parts)
             + f" F{self._format_gcode_value(effective_feedrate)}",
         )
-        self._wait_for_ok(serial_connection)
 
     def _check_relative_move_limits(
         self,
@@ -5338,6 +5335,25 @@ class StageController(QObject):
                 raise StageControllerError(f"Controller reported: {line}")
         raise StageControllerError("Timeout waiting for controller acknowledgement.")
 
+    def _write_current_command_and_wait(
+        self,
+        command: str,
+        *,
+        timeout: float = 5.0,
+        check_cancelled: bool = True,
+    ) -> None:
+        serial_connection = self._current_serial()
+        self._write_command(
+            serial_connection,
+            command,
+            check_cancelled=check_cancelled,
+        )
+        self._wait_for_ok(
+            serial_connection,
+            timeout=timeout,
+            check_cancelled=check_cancelled,
+        )
+
     def _wait_for_idle(self, timeout: float = 10.0) -> None:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -5945,10 +5961,8 @@ class StageController(QObject):
     def _perform_home_command(self, command: str) -> None:
         """Execute a homing command using the current serial session."""
 
-        serial_connection = self._current_serial()
         self.status_message.emit(f"Homing: {command}")
-        self._write_command(serial_connection, command)
-        self._wait_for_ok(serial_connection, timeout=30.0)
+        self._write_current_command_and_wait(command, timeout=30.0)
         self._wait_for_idle(timeout=30.0)
         if command.upper() in ("$H", "$HA"):
             axes = set(self._homed_axes)
