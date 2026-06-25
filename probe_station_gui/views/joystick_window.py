@@ -2303,36 +2303,15 @@ class JoystickWindow(QWidget):
         if not self.serial_connection or not self.serial_connection.is_open:
             logger.debug("Discarded command because serial is closed: %s", command)
             return False
-        if self.stage_controller is not None:
-            try:
-                if isinstance(command, bytes) and command == b"\x85":
-                    self.stage_controller.queue_jog_stop()
-                    return True
-                if isinstance(command, bytes) and command == b"\x18":
-                    self.stage_controller.queue_soft_reset(source="joystick_reset_button")
-                    return True
-                if isinstance(command, str) and command.startswith("$J="):
-                    self.stage_controller.queue_jog_command(command)
-                    return True
-                if isinstance(command, str):
-                    self.stage_controller.queue_manual_command(command)
-                    return True
-            except Exception as error:  # pragma: no cover - UI safety guard
-                self._show_warning(str(error))
-                logger.exception("Failed to queue controller command: %s", error)
-                return False
+        queued = self._queue_controller_command(command)
+        if queued is not None:
+            return queued
         try:
             data = command if isinstance(command, bytes) else command.encode("ascii")
-            if isinstance(command, str) and command.startswith("$J="):
-                logger.debug("TIMING jog_serial_write_begin command=%s", command.strip())
-            elif isinstance(command, bytes) and command == b"\x85":
-                logger.debug("TIMING jog_stop_write_begin command=0x85")
+            self._log_serial_write_timing(command, "begin")
             self.serial_connection.write(data)
             self.serial_connection.flush()
-            if isinstance(command, str) and command.startswith("$J="):
-                logger.debug("TIMING jog_serial_write_flushed command=%s", command.strip())
-            elif isinstance(command, bytes) and command == b"\x85":
-                logger.debug("TIMING jog_stop_write_flushed command=0x85")
+            self._log_serial_write_timing(command, "flushed")
             if isinstance(command, bytes):
                 logger.debug("Command written to serial (bytes): %s", command.hex())
             else:
@@ -2343,6 +2322,39 @@ class JoystickWindow(QWidget):
             self.set_serial(None)
             logger.exception("Serial communication error: %s", error)
             return False
+
+    def _queue_controller_command(self, command: str | bytes) -> bool | None:
+        if self.stage_controller is None:
+            return None
+        try:
+            if isinstance(command, bytes) and command == b"\x85":
+                self.stage_controller.queue_jog_stop()
+                return True
+            if isinstance(command, bytes) and command == b"\x18":
+                self.stage_controller.queue_soft_reset(source="joystick_reset_button")
+                return True
+            if isinstance(command, str) and command.startswith("$J="):
+                self.stage_controller.queue_jog_command(command)
+                return True
+            if isinstance(command, str):
+                self.stage_controller.queue_manual_command(command)
+                return True
+        except Exception as error:  # pragma: no cover - UI safety guard
+            self._show_warning(str(error))
+            logger.exception("Failed to queue controller command: %s", error)
+            return False
+        return None
+
+    @staticmethod
+    def _log_serial_write_timing(command: str | bytes, phase: str) -> None:
+        if isinstance(command, str) and command.startswith("$J="):
+            logger.debug(
+                "TIMING jog_serial_write_%s command=%s",
+                phase,
+                command.strip(),
+            )
+        elif isinstance(command, bytes) and command == b"\x85":
+            logger.debug("TIMING jog_stop_write_%s command=0x85", phase)
 
     def _show_warning(self, message: str) -> None:
         QMessageBox.warning(self, "Joystick", message)
