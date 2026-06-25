@@ -1818,9 +1818,8 @@ class StageController(QObject):
                 raise StageControllerError(
                     "Stage is busy. Wait for the current operation to finish."
                 )
-            with self._serial_session() as serial_connection:
-                status = self._query_status_with_required_coordinates(
-                    serial_connection,
+            with self._serial_session():
+                status = self._query_current_status_with_required_coordinates(
                     axes=("X", "Y"),
                 )
                 if status is None or status.display_position is None:
@@ -1855,9 +1854,8 @@ class StageController(QObject):
                 raise StageControllerError(
                     "Stage is busy. Wait for the current operation to finish."
                 )
-            with self._serial_session() as serial_connection:
-                status = self._query_status_with_required_coordinates(
-                    serial_connection,
+            with self._serial_session():
+                status = self._query_current_status_with_required_coordinates(
                     axes=("B",),
                 )
         if status is None or self._axis_value_for_configured_mode(status, "B") is None:
@@ -3873,10 +3871,9 @@ class StageController(QObject):
         feedrate: float | None = None,
     ) -> str:
         action = str(action).strip().lower()
-        with self._serial_session() as serial_connection:
+        with self._serial_session():
             if action in {"raise", "lift", "lower"}:
-                status = self._query_status_with_required_coordinates(
-                    serial_connection,
+                status = self._query_current_status_with_required_coordinates(
                     axes=("A",),
                 )
                 current_a = self._axis_value_for_configured_mode(status, "A")
@@ -3915,12 +3912,11 @@ class StageController(QObject):
         depth_mm: float,
         feedrate: float | None = None,
     ) -> str:
-        with self._serial_session() as serial_connection:
+        with self._serial_session():
             if not math.isfinite(depth_mm):
                 raise StageControllerError("Needle search depth must be finite.")
             depth_mm = max(0.0, float(depth_mm))
-            status = self._query_status_with_required_coordinates(
-                serial_connection,
+            status = self._query_current_status_with_required_coordinates(
                 axes=("A",),
             )
             current_a = self._axis_value_for_configured_mode(status, "A")
@@ -4098,11 +4094,10 @@ class StageController(QObject):
         step_mm: float,
         feedrate: float | None = None,
     ) -> str:
-        with self._serial_session() as serial_connection:
+        with self._serial_session():
             if abs(step_mm) < 1e-6:
                 return "Needle position unchanged."
-            status = self._query_status_with_required_coordinates(
-                serial_connection,
+            status = self._query_current_status_with_required_coordinates(
                 axes=("A",),
             )
             if (
