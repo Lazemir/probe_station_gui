@@ -2581,7 +2581,6 @@ class StageController(QObject):
         dx_pixels: float,
         dy_pixels: float,
     ) -> int | None:
-        serial_connection = self._current_serial()
         with self._serial_session_lock:
             pixel_vector = np.array([dx_pixels, dy_pixels], dtype=float)
             target_handled, before_counter = self._ensure_calibration(
@@ -3796,7 +3795,6 @@ class StageController(QObject):
         feedrate: float | None,
         status: _Status | None,
     ) -> bool:
-        serial_connection = self._current_serial()
         target_a = self._axis_a_configured_coordinate_for_lowering(
             target_lowering,
             status,
