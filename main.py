@@ -152,7 +152,10 @@ from probe_station_gui.route_measurement import (
     route_measurement_sample_from_raw,
     summarize_route_contact_quality,
 )
-from probe_station_gui.route_control_state import ApiRouteControlState
+from probe_station_gui.route_control_state import (
+    ApiRouteControlState,
+    api_route_control_command_from_payload,
+)
 from probe_station_gui.route_measurement_settings import RouteMeasurementSettingsStore
 from probe_station_gui.route_formatting import (
     csv_bool as _csv_bool,
@@ -1990,99 +1993,71 @@ class Main(QMainWindow):
         )
 
     def _api_route_control_action(self, payload: dict[str, Any]) -> dict[str, Any]:
-        action = str(payload.get("action", payload.get("command", "status"))).strip().lower()
-        label = str(payload.get("label", payload.get("name", "")) or "").strip()
-        route_control_start = action in {"start", "begin", "activate"}
-        if action in {"start", "begin", "activate"}:
+        command = api_route_control_command_from_payload(payload)
+        state_snapshot = self._api_route_control_state_snapshot()
+        if command.requires_active_control and not state_snapshot.active:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "No API route control run is active.",
+            }
+        if command.kind == "start":
             existing_route_result = (
                 self._clear_waiting_route_runner_before_api_control()
             )
             if existing_route_result is not None:
                 return existing_route_result
-            state, message = self._api_route_control_state_snapshot().start(
-                label=label,
+            state, message = state_snapshot.start(
+                label=command.label,
                 updated_utc=self._api_timestamp_utc(),
             )
             self._set_api_route_control_state(state)
-        elif action == "pause":
-            if not self._api_route_control_state_snapshot().active:
-                return {
-                    "accepted": False,
-                    "status_code": 409,
-                    "message": "No API route control run is active.",
-                }
+        elif command.kind == "pause":
             return self._request_api_route_control_pause("")
-        elif action in {"paused", "pause_ack", "ack_pause"}:
-            if not self._api_route_control_state_snapshot().active:
-                return {
-                    "accepted": False,
-                    "status_code": 409,
-                    "message": "No API route control run is active.",
-                }
+        elif command.kind == "pause_ack":
             return self._ack_api_route_control_pause("")
-        elif action == "interrupt":
-            if not self._api_route_control_state_snapshot().active:
-                return {
-                    "accepted": False,
-                    "status_code": 409,
-                    "message": "No API route control run is active.",
-                }
+        elif command.kind == "interrupt":
             return self._interrupt_api_route_controlled_operation(
                 "API route control interrupt requested."
             )
-        elif action in {"resume", "continue", "measure", "remeasure", "skip", "next"} or action.startswith("jump:"):
-            if not self._api_route_control_state_snapshot().active:
-                return {
-                    "accepted": False,
-                    "status_code": 409,
-                    "message": "No API route control run is active.",
-                }
+        elif command.kind == "resume":
             if not self._route_control_window_is_open():
                 return self._probe_route_api_window_guard(
                     "api_route_control_resume",
-                    {"route_action": action},
+                    {"route_action": command.action},
                 )
-            explicit_action = str(
-                payload.get("pending_action", payload.get("next_action", "")) or ""
-            ).strip().lower()
-            state, message = self._api_route_control_state_snapshot().resume(
-                action=action,
-                explicit_action=explicit_action,
+            state, message = state_snapshot.resume(
+                action=command.action,
+                explicit_action=command.explicit_action,
                 updated_utc=self._api_timestamp_utc(),
             )
             self._set_api_route_control_state(state)
-        elif action == "stop":
-            if not self._api_route_control_state_snapshot().active:
-                return {
-                    "accepted": False,
-                    "status_code": 409,
-                    "message": "No API route control run is active.",
-                }
-            state, message = self._api_route_control_state_snapshot().stop(
+        elif command.kind == "stop":
+            state, message = state_snapshot.stop(
                 updated_utc=self._api_timestamp_utc(),
             )
             self._set_api_route_control_state(state)
-        elif action in {"finish", "complete", "clear", "done"}:
-            state, message = self._api_route_control_state_snapshot().finish(
-                label=label,
+        elif command.kind == "finish":
+            state, message = state_snapshot.finish(
+                label=command.label,
                 updated_utc=self._api_timestamp_utc(),
             )
             self._set_api_route_control_state(state)
-        elif action in {"ack", "clear_action"}:
-            state, _message = self._api_route_control_state_snapshot().clear_action(
+        elif command.kind == "clear_action":
+            state, _message = state_snapshot.clear_action(
                 updated_utc=self._api_timestamp_utc(),
             )
             self._set_api_route_control_state(state)
             return self._api_route_control_status()
-        elif action == "status":
+        elif command.kind == "status":
             return self._api_route_control_status()
         else:
             return {
                 "accepted": False,
                 "status_code": 400,
-                "message": f"Unknown API route control action: {action}",
+                "message": f"Unknown API route control action: {command.action}",
             }
-        if route_control_start and not self._show_route_measurement_dialog_for_api_session():
+        if command.starts_control and not self._show_route_measurement_dialog_for_api_session():
             state, message = (
                 self._api_route_control_state_snapshot().start_failed_window_not_open()
             )

@@ -1,5 +1,6 @@
 from probe_station_gui.route_control_state import (
     ApiRouteControlState,
+    api_route_control_command_from_payload,
     normalize_route_control_action,
 )
 
@@ -126,3 +127,46 @@ def test_normalize_route_control_action_preserves_external_aliases() -> None:
     assert normalize_route_control_action("jump: 8") == "jump:8"
     assert normalize_route_control_action("jump:bad") is None
     assert normalize_route_control_action("unknown") is None
+
+
+def test_api_route_control_command_from_payload_groups_external_actions() -> None:
+    assert api_route_control_command_from_payload({}).kind == "status"
+    assert api_route_control_command_from_payload({"command": "begin"}).kind == "start"
+    assert (
+        api_route_control_command_from_payload({"action": "pause_ack"}).kind
+        == "pause_ack"
+    )
+    assert (
+        api_route_control_command_from_payload(
+            {
+                "action": "jump: 8",
+                "pending_action": "remeasure",
+                "label": " chip 163 ",
+            }
+        )
+        == api_route_control_command_from_payload(
+            {
+                "action": "jump: 8",
+                "next_action": "remeasure",
+                "name": "chip 163",
+            }
+        )
+    )
+
+
+def test_api_route_control_command_from_payload_marks_active_only_commands() -> None:
+    active_required = [
+        "pause",
+        "pause_ack",
+        "interrupt",
+        "resume",
+        "stop",
+    ]
+
+    for action in active_required:
+        command = api_route_control_command_from_payload({"action": action})
+        assert command.requires_active_control is True
+
+    for action in ["status", "start", "finish", "ack", "unknown"]:
+        command = api_route_control_command_from_payload({"action": action})
+        assert command.requires_active_control is False

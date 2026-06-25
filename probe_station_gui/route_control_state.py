@@ -7,6 +7,18 @@ from typing import Any
 
 
 API_ROUTE_CONTROL_DEFAULT_LABEL = "API route control"
+API_ROUTE_CONTROL_START_ACTIONS = frozenset({"start", "begin", "activate"})
+API_ROUTE_CONTROL_PAUSE_ACK_ACTIONS = frozenset({"paused", "pause_ack", "ack_pause"})
+API_ROUTE_CONTROL_RESUME_ACTIONS = frozenset(
+    {"resume", "continue", "measure", "remeasure", "skip", "next"}
+)
+API_ROUTE_CONTROL_FINISH_ACTIONS = frozenset(
+    {"finish", "complete", "clear", "done"}
+)
+API_ROUTE_CONTROL_CLEAR_ACTIONS = frozenset({"ack", "clear_action"})
+API_ROUTE_CONTROL_REQUIRES_ACTIVE_KINDS = frozenset(
+    {"pause", "pause_ack", "interrupt", "resume", "stop"}
+)
 
 
 def normalize_route_control_action(action: str) -> str | None:
@@ -27,6 +39,56 @@ def normalize_route_control_action(action: str) -> str | None:
         except ValueError:
             return None
     return None
+
+
+@dataclass(frozen=True)
+class ApiRouteControlCommand:
+    kind: str
+    action: str
+    label: str = ""
+    explicit_action: str = ""
+
+    @property
+    def starts_control(self) -> bool:
+        return self.kind == "start"
+
+    @property
+    def requires_active_control(self) -> bool:
+        return self.kind in API_ROUTE_CONTROL_REQUIRES_ACTIVE_KINDS
+
+
+def api_route_control_command_from_payload(
+    payload: dict[str, Any],
+) -> ApiRouteControlCommand:
+    action = str(payload.get("action", payload.get("command", "status"))).strip().lower()
+    label = str(payload.get("label", payload.get("name", "")) or "").strip()
+    explicit_action = str(
+        payload.get("pending_action", payload.get("next_action", "")) or ""
+    ).strip().lower()
+    if action in API_ROUTE_CONTROL_START_ACTIONS:
+        return ApiRouteControlCommand("start", action, label=label)
+    if action == "pause":
+        return ApiRouteControlCommand("pause", action, label=label)
+    if action in API_ROUTE_CONTROL_PAUSE_ACK_ACTIONS:
+        return ApiRouteControlCommand("pause_ack", action, label=label)
+    if action == "interrupt":
+        return ApiRouteControlCommand("interrupt", action, label=label)
+    if action in API_ROUTE_CONTROL_RESUME_ACTIONS or action.startswith("jump:"):
+        return ApiRouteControlCommand(
+            "resume",
+            action,
+            label=label,
+            explicit_action=explicit_action,
+        )
+    if action == "stop":
+        return ApiRouteControlCommand("stop", action, label=label)
+    if action in API_ROUTE_CONTROL_FINISH_ACTIONS:
+        return ApiRouteControlCommand("finish", action, label=label)
+    if action in API_ROUTE_CONTROL_CLEAR_ACTIONS:
+        return ApiRouteControlCommand("clear_action", action, label=label)
+    if action == "status":
+        return ApiRouteControlCommand("status", action, label=label)
+    return ApiRouteControlCommand("unknown", action, label=label)
 
 
 @dataclass(frozen=True)
@@ -206,6 +268,8 @@ class ApiRouteControlState:
 
 __all__ = [
     "API_ROUTE_CONTROL_DEFAULT_LABEL",
+    "ApiRouteControlCommand",
     "ApiRouteControlState",
+    "api_route_control_command_from_payload",
     "normalize_route_control_action",
 ]
