@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from probe_station_gui.route_measurement_config import RouteMeasurementRunConfiguration
+from probe_station_gui.route_measurement_config import (
+    RouteMeasurementRunConfiguration,
+    route_measurement_count_profile,
+)
 from probe_station_gui.route_meter_config import RouteMeterConfiguration
 
 
@@ -56,3 +59,36 @@ def test_start_point_alias_uses_current_point() -> None:
         ).start_point
         == 7
     )
+
+
+def test_route_measurement_count_profile_prefers_split_fields() -> None:
+    assert route_measurement_count_profile(
+        {
+            "measurement_count": 99,
+            "initial_measurement_count": "2.4",
+            "followup_measurement_count": "3.6",
+        },
+        default_initial_count=10,
+    ) == (2, 4)
+
+
+def test_route_measurement_count_profile_splits_legacy_total() -> None:
+    assert route_measurement_count_profile(
+        {"measurement_count": 6},
+        default_initial_count=10,
+    ) == (6, 0)
+    assert route_measurement_count_profile(
+        {"measurement_count": 25},
+        default_initial_count=10,
+    ) == (10, 15)
+
+
+def test_route_measurement_count_profile_ignores_invalid_values() -> None:
+    assert route_measurement_count_profile(
+        {
+            "measurement_count": 0,
+            "initial_measurement_count": -1,
+            "followup_measurement_count": -1,
+        },
+        default_initial_count=10,
+    ) == (None, None)

@@ -56,7 +56,10 @@ from probe_station_gui.route_measurement import (
     ROUTE_OPERATION_PHOTO_THEN_MEASURE,
     RouteContactQualityLimits,
 )
-from probe_station_gui.route_measurement_config import RouteMeasurementRunConfiguration
+from probe_station_gui.route_measurement_config import (
+    RouteMeasurementRunConfiguration,
+    route_measurement_count_profile,
+)
 from probe_station_gui.route_operation_modes import (
     route_operation_measure_enabled,
     route_operation_photo_enabled,
@@ -1681,14 +1684,10 @@ class RouteMeasurementDialog(QDialog):
         )
 
     def _apply_measurement_count_profile(self, data: dict[str, Any]) -> None:
-        initial = self._positive_int_or_none(data.get("initial_measurement_count"))
-        followup = self._nonnegative_int_or_none(
-            data.get("followup_measurement_count")
+        initial, followup = route_measurement_count_profile(
+            data,
+            default_initial_count=DEFAULT_ROUTE_INITIAL_MEASUREMENT_COUNT,
         )
-        total = self._positive_int_or_none(data.get("measurement_count"))
-        if initial is None and followup is None and total is not None:
-            initial = min(total, DEFAULT_ROUTE_INITIAL_MEASUREMENT_COUNT)
-            followup = max(0, total - initial)
         if initial is not None:
             self._initial_measurement_count_spin.setValue(initial)
         if followup is not None:
@@ -1846,22 +1845,6 @@ class RouteMeasurementDialog(QDialog):
             return
         if math.isfinite(numeric):
             spinbox.setValue(numeric * 100.0)
-
-    @staticmethod
-    def _positive_int_or_none(value: object) -> int | None:
-        try:
-            numeric = int(round(float(value)))
-        except (TypeError, ValueError):
-            return None
-        return numeric if numeric > 0 else None
-
-    @staticmethod
-    def _nonnegative_int_or_none(value: object) -> int | None:
-        try:
-            numeric = int(round(float(value)))
-        except (TypeError, ValueError):
-            return None
-        return numeric if numeric >= 0 else None
 
     @staticmethod
     def _set_combo_data(combo: QComboBox, value: object) -> None:

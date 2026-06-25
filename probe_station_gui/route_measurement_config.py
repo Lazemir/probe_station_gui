@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Mapping
 
 from probe_station_gui.route_measurement import RouteContactQualityLimits
 from probe_station_gui.route_meter_config import RouteMeterConfiguration
@@ -46,3 +47,33 @@ class RouteMeasurementRunConfiguration:
         """Backward-compatible alias for older callers."""
 
         return self.current_point
+
+
+def route_measurement_count_profile(
+    data: Mapping[str, object],
+    *,
+    default_initial_count: int,
+) -> tuple[int | None, int | None]:
+    initial = _positive_int_or_none(data.get("initial_measurement_count"))
+    followup = _nonnegative_int_or_none(data.get("followup_measurement_count"))
+    total = _positive_int_or_none(data.get("measurement_count"))
+    if initial is None and followup is None and total is not None:
+        initial = min(total, int(default_initial_count))
+        followup = max(0, total - initial)
+    return initial, followup
+
+
+def _positive_int_or_none(value: object) -> int | None:
+    try:
+        numeric = int(round(float(value)))
+    except (TypeError, ValueError):
+        return None
+    return numeric if numeric > 0 else None
+
+
+def _nonnegative_int_or_none(value: object) -> int | None:
+    try:
+        numeric = int(round(float(value)))
+    except (TypeError, ValueError):
+        return None
+    return numeric if numeric >= 0 else None
