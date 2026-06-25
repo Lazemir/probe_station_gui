@@ -40,6 +40,28 @@ def gpib_interface_resources_for(
     return tuple(interfaces)
 
 
+def format_source_level_value(value: float) -> str:
+    """Format source levels in the form accepted by the LCR-76200 firmware."""
+
+    numeric = float(value)
+    if numeric == 0.0 or abs(numeric) >= 0.1:
+        return f"{numeric:.12g}"
+    for scale, suffix in ((1e3, "m"), (1e6, "u"), (1e9, "n")):
+        scaled = numeric * scale
+        if 1.0 <= abs(scaled) < 1000.0:
+            return f"{scaled:.12g}{suffix}"
+    return f"{numeric:.12g}"
+
+
+def parse_numeric_response(response: str) -> float:
+    value = response.strip().upper()
+    for suffix in ("OHM", "MS", "S", "V", "A"):
+        if value.endswith(suffix):
+            value = value[: -len(suffix)]
+            break
+    return float(value.strip())
+
+
 def callable_accepts_keyword(function: object, name: str) -> bool:
     try:
         signature = inspect.signature(function)

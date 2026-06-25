@@ -2,9 +2,11 @@ from types import SimpleNamespace
 
 from probe_station_gui.lcr_meter_helpers import (
     callable_accepts_keyword,
+    format_source_level_value,
     gpib_interface_resources_for,
     normalize_resource_name,
     normalize_visa_role,
+    parse_numeric_response,
     prepare_route_measurement_batch,
     read_route_measurement_batch,
     session_visa_resource_roles,
@@ -39,6 +41,16 @@ def test_resource_helpers_normalize_com_and_unique_gpib_interfaces() -> None:
             "COM4",
         )
     ) == ("GPIB0::INTFC", "GPIB1::INTFC")
+
+
+def test_source_level_and_numeric_response_format_helpers() -> None:
+    assert format_source_level_value(0.01) == "10m"
+    assert format_source_level_value(0.0001) == "100u"
+    assert format_source_level_value(0.3) == "0.3"
+    assert format_source_level_value(1.0) == "1"
+    assert parse_numeric_response(" 12.5 OHM ") == 12.5
+    assert parse_numeric_response("1.2V") == 1.2
+    assert parse_numeric_response("3.4MS") == 3.4
 
 
 def test_prepare_route_measurement_batch_passes_source_list_count_when_supported() -> None:

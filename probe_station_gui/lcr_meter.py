@@ -18,9 +18,11 @@ from PySide6.QtCore import QObject, Signal
 from probe_station_measure import OHMMETER_RANGE_MANUAL
 from probe_station_gui.lcr_meter_helpers import (
     callable_accepts_keyword as _callable_accepts_keyword,
+    format_source_level_value,
     gpib_interface_resources_for as _gpib_interface_resources_for,
     normalize_visa_role as _normalize_visa_role,
     normalize_resource_name,
+    parse_numeric_response as _parse_numeric_response,
     prepare_route_measurement_batch as _prepare_route_measurement_batch,
     read_route_measurement_batch as _read_route_measurement_batch,
     session_visa_resource_roles as _session_visa_resource_roles,
@@ -107,19 +109,6 @@ def _reset_gpib_interfaces_for_resources(*resources: str | None) -> None:
                 pass
     if reset_any:
         time.sleep(0.25)
-
-
-def format_source_level_value(value: float) -> str:
-    """Format source levels in the form accepted by the LCR-76200 firmware."""
-
-    numeric = float(value)
-    if numeric == 0.0 or abs(numeric) >= 0.1:
-        return f"{numeric:.12g}"
-    for scale, suffix in ((1e3, "m"), (1e6, "u"), (1e9, "n")):
-        scaled = numeric * scale
-        if 1.0 <= abs(scaled) < 1000.0:
-            return f"{scaled:.12g}{suffix}"
-    return f"{numeric:.12g}"
 
 
 def _session_visa_operation(
@@ -605,12 +594,7 @@ class _LCRSession:
 
     @staticmethod
     def _parse_numeric_response(response: str) -> float:
-        value = response.strip().upper()
-        for suffix in ("OHM", "MS", "S", "V", "A"):
-            if value.endswith(suffix):
-                value = value[: -len(suffix)]
-                break
-        return float(value.strip())
+        return _parse_numeric_response(response)
 
     def read_primary_value(self, *, trigger: bool = False) -> float:
         try:
