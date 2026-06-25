@@ -12,7 +12,6 @@ import re
 import threading
 import time
 import uuid
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
@@ -150,15 +149,21 @@ from probe_station_gui.route_measurement import (
     RoutePhotoRecord,
     RouteMeasurementRecord,
     RouteMeasurementRunner,
-    filter_route_points_by_previous_status,
     route_measurement_sample_from_raw,
     summarize_route_contact_quality,
 )
 from probe_station_gui.route_control_state import (
     ApiRouteControlState,
-    api_route_control_command_from_payload,
     api_route_control_legacy_attrs,
     api_route_control_state_from_legacy_attrs,
+)
+from probe_station_gui.route.operation import (
+    ApiRouteControlActionEffect,
+    RouteMeasurementStartPlan,
+    api_route_control_action_plan,
+    find_route_contact_point,
+    route_measurement_points_for_route,
+    route_measurement_start_decision,
 )
 from probe_station_gui.route_operation_guards import (
     route_contact_move_block_message,
@@ -248,13 +253,6 @@ logger = logging.getLogger(__name__)
 
 APP_ICON_RESOURCE = "assets/app_icon.ico"
 WINDOWS_APP_USER_MODEL_ID = "ProbeStationGUI.ProbeStationGUI"
-
-
-@dataclass(frozen=True)
-class _RouteMeasurementStartPlan:
-    points: list[RouteMeasurementPoint]
-    selected_point: RouteMeasurementPoint
-    previous_ok_skipped_count: int | None
 
 
 def _application_icon() -> QIcon:
@@ -1978,71 +1976,43 @@ class Main(QMainWindow):
         )
 
     def _api_route_control_action(self, payload: dict[str, Any]) -> dict[str, Any]:
-        command = api_route_control_command_from_payload(payload)
-        state_snapshot = self._api_route_control_state_snapshot()
-        if command.requires_active_control and not state_snapshot.active:
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": "No API route control run is active.",
-            }
-        if command.kind == "start":
+        plan = api_route_control_action_plan(
+            payload,
+            self._api_route_control_state_snapshot(),
+            updated_utc=self._api_timestamp_utc(),
+        )
+        if plan.effect is ApiRouteControlActionEffect.REJECT:
+            return plan.rejection_payload()
+        if plan.effect is ApiRouteControlActionEffect.STATUS:
+            return self._api_route_control_status()
+        if plan.effect is ApiRouteControlActionEffect.START:
             existing_route_result = (
                 self._clear_waiting_route_runner_before_api_control()
             )
             if existing_route_result is not None:
                 return existing_route_result
-            state, message = state_snapshot.start(
-                label=command.label,
-                updated_utc=self._api_timestamp_utc(),
+        if (
+            plan.requires_control_window_open
+            and not self._route_control_window_is_open()
+        ):
+            return self._probe_route_api_window_guard(
+                "api_route_control_resume",
+                {"route_action": plan.command.action},
             )
-            self._set_api_route_control_state(state)
-        elif command.kind == "pause":
-            return self._request_api_route_control_pause("")
-        elif command.kind == "pause_ack":
-            return self._ack_api_route_control_pause("")
-        elif command.kind == "interrupt":
+        if plan.effect is ApiRouteControlActionEffect.INTERRUPT:
             return self._interrupt_api_route_controlled_operation(
-                "API route control interrupt requested."
+                "API route control interrupt requested.",
+                planned_state=plan.state,
+                planned_message=plan.message,
             )
-        elif command.kind == "resume":
-            if not self._route_control_window_is_open():
-                return self._probe_route_api_window_guard(
-                    "api_route_control_resume",
-                    {"route_action": command.action},
-                )
-            state, message = state_snapshot.resume(
-                action=command.action,
-                explicit_action=command.explicit_action,
-                updated_utc=self._api_timestamp_utc(),
-            )
-            self._set_api_route_control_state(state)
-        elif command.kind == "stop":
-            state, message = state_snapshot.stop(
-                updated_utc=self._api_timestamp_utc(),
-            )
-            self._set_api_route_control_state(state)
-        elif command.kind == "finish":
-            state, message = state_snapshot.finish(
-                label=command.label,
-                updated_utc=self._api_timestamp_utc(),
-            )
-            self._set_api_route_control_state(state)
-        elif command.kind == "clear_action":
-            state, _message = state_snapshot.clear_action(
-                updated_utc=self._api_timestamp_utc(),
-            )
-            self._set_api_route_control_state(state)
+        self._set_api_route_control_state(plan.state)
+        if plan.effect is ApiRouteControlActionEffect.CLEAR_ACTION:
             return self._api_route_control_status()
-        elif command.kind == "status":
-            return self._api_route_control_status()
-        else:
-            return {
-                "accepted": False,
-                "status_code": 400,
-                "message": f"Unknown API route control action: {command.action}",
-            }
-        if command.starts_control and not self._show_route_measurement_dialog_for_api_session():
+        message = plan.message
+        if (
+            plan.effect is ApiRouteControlActionEffect.START
+            and not self._show_route_measurement_dialog_for_api_session()
+        ):
             state, message = (
                 self._api_route_control_state_snapshot().start_failed_window_not_open()
             )
@@ -2143,7 +2113,13 @@ class Main(QMainWindow):
         status["message"] = message
         return status
 
-    def _interrupt_api_route_controlled_operation(self, reason: str) -> dict[str, Any]:
+    def _interrupt_api_route_controlled_operation(
+        self,
+        reason: str,
+        *,
+        planned_state: ApiRouteControlState | None = None,
+        planned_message: str = "",
+    ) -> dict[str, Any]:
         self._pending_route_measure_point = None
         self._contact_seek_stop_requested.set()
         try:
@@ -2161,9 +2137,13 @@ class Main(QMainWindow):
         except Exception:
             logger.exception("Failed to clear planned move prediction after API route control interrupt.")
         self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
-        state, message = self._api_route_control_state_snapshot().interrupt(
-            updated_utc=self._api_timestamp_utc(),
-        )
+        if planned_state is None:
+            state, message = self._api_route_control_state_snapshot().interrupt(
+                updated_utc=self._api_timestamp_utc(),
+            )
+        else:
+            state = planned_state
+            message = planned_message or f"{state.display_label}: interrupted; paused."
         self._set_api_route_control_state(state)
         self._update_api_route_control_ui(message)
         status = self._api_route_control_status()
@@ -3329,13 +3309,11 @@ class Main(QMainWindow):
         points: list[RouteMeasurementPoint],
         contact_number: int,
     ) -> RouteMeasurementPoint | None:
-        for point in points:
-            if int(point.index) == int(contact_number):
-                return point
-        for point in points:
-            if self._api_structure_number_for_measurement_point(point) == int(contact_number):
-                return point
-        return None
+        return find_route_contact_point(
+            points,
+            contact_number,
+            structure_number_for_point=self._api_structure_number_for_measurement_point,
+        )
 
     def _api_route_point_payload(
         self,
@@ -7997,60 +7975,28 @@ class Main(QMainWindow):
     def _route_measurement_start_plan(
         self,
         configuration: RouteMeasurementRunConfiguration,
-    ) -> _RouteMeasurementStartPlan | None:
+    ) -> RouteMeasurementStartPlan | None:
         route = self._design_session.route
-        if route is None or not route.points:
-            self._show_status("Create or load a probe route before measuring.", 5000)
-            return None
         registration = self._design_session.registration
-        if registration is None or not registration.valid:
-            self._show_status(
-                "Design registration is required before measuring a route.",
-                6000,
-            )
-            return None
-        try:
-            points = self._route_measurement_points(route)
-        except DesignModelError as exc:
-            self._show_status(str(exc), 6000)
-            return None
-        if not points:
-            self._show_status("Route has no enabled points.", 5000)
-            return None
-
-        previous_ok_skipped_count: int | None = None
-        if configuration.previous_ok_only:
-            original_point_count = len(points)
-            try:
-                points = filter_route_points_by_previous_status(
-                    points,
-                    configuration.previous_csv_path,
-                    allowed_statuses={"ok"},
-                )
-            except (OSError, csv.Error) as exc:
-                message = f"Unable to read previous route CSV: {exc}"
-                self._show_route_measurement_dialog_status(message, 8000)
-                return None
-            previous_ok_skipped_count = original_point_count - len(points)
-            if not points:
-                message = "Previous route CSV has no OK points for this route."
-                self._show_route_measurement_dialog_status(message, 8000)
-                return None
-
-        selected_point_number = int(configuration.current_point)
-        selected_point = self._api_find_contact_point(points, selected_point_number)
-        if selected_point is None:
-            message = (
-                f"Contact {selected_point_number} is not enabled or not included "
-                "by the current route filter."
-            )
-            self._show_route_measurement_dialog_status(message, 6000)
-            return None
-        return _RouteMeasurementStartPlan(
-            points=points,
-            selected_point=selected_point,
-            previous_ok_skipped_count=previous_ok_skipped_count,
+        decision = route_measurement_start_decision(
+            route=route,
+            registration_valid=bool(registration is not None and registration.valid),
+            points_factory=self._route_measurement_points,
+            current_point=configuration.current_point,
+            previous_ok_only=configuration.previous_ok_only,
+            previous_csv_path=configuration.previous_csv_path,
+            structure_number_for_point=self._api_structure_number_for_measurement_point,
         )
+        if decision.accepted:
+            return decision.plan
+        if decision.dialog_status:
+            self._show_route_measurement_dialog_status(
+                decision.message,
+                decision.timeout_ms,
+            )
+        else:
+            self._show_status(decision.message, decision.timeout_ms)
+        return None
 
     def _show_route_measurement_dialog_status(
         self,
@@ -8065,66 +8011,18 @@ class Main(QMainWindow):
         self,
         route: MeasurementRoute,
     ) -> list[RouteMeasurementPoint]:
-        points: list[RouteMeasurementPoint] = []
         objective_settings = self.settings_manager.objectives_configuration()
         objective_profiles = objective_settings.objectives
         base_objective = base_objective_name(objective_profiles)
         active_objective = objective_settings.active_name
         base_offset = objective_xy_offset(objective_profiles, base_objective)
         active_offset = objective_xy_offset(objective_profiles, active_objective)
-        for route_index, route_point in enumerate(route.points, start=1):
-            if not route_point.enabled:
-                continue
-            camera_stage_xy = self._design_session.stage_from_design(
-                route_point.camera_center
-            )
-            if camera_stage_xy is None:
-                raise DesignModelError(
-                    "Design registration is required before measuring a route."
-                )
-            contact_stage_xy = camera_stage_to_raw_stage(
-                (float(camera_stage_xy[0]), float(camera_stage_xy[1])),
-                base_offset,
-            )
-            photo_stage_xy = camera_stage_to_raw_stage(
-                (float(camera_stage_xy[0]), float(camera_stage_xy[1])),
-                active_offset,
-            )
-            hits = route.needle_hits_for_point(route_point)
-            needle_1_design = (
-                hits[0][1] if len(hits) > 0 else route_point.camera_center
-            )
-            needle_2_design = (
-                hits[1][1] if len(hits) > 1 else route_point.camera_center
-            )
-            points.append(
-                RouteMeasurementPoint(
-                    index=route_index,
-                    point_id=route_point.id,
-                    label=route_point.label,
-                    design_center=(
-                        float(route_point.camera_center[0]),
-                        float(route_point.camera_center[1]),
-                    ),
-                    stage_xy=(
-                        float(contact_stage_xy[0]),
-                        float(contact_stage_xy[1]),
-                    ),
-                    needle_1_design=(
-                        float(needle_1_design[0]),
-                        float(needle_1_design[1]),
-                    ),
-                    needle_2_design=(
-                        float(needle_2_design[0]),
-                        float(needle_2_design[1]),
-                    ),
-                    photo_stage_xy=(
-                        float(photo_stage_xy[0]),
-                        float(photo_stage_xy[1]),
-                    ),
-                )
-            )
-        return points
+        return route_measurement_points_for_route(
+            route,
+            stage_from_design=self._design_session.stage_from_design,
+            contact_objective_offset=base_offset,
+            photo_objective_offset=active_offset,
+        )
 
     def _capture_route_photo(
         self,
