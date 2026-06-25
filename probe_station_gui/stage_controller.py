@@ -78,6 +78,12 @@ from probe_station_gui.stage_motion_timing import (
     idle_timeout_for_distance,
     move_distance_for_timeout,
 )
+from probe_station_gui.stage_needle_state import (
+    axis_a_ready_from_state,
+    needle_contact_boundary_lowering,
+    needle_zone_for_lowering,
+    normalized_needles_zone,
+)
 from probe_station_gui.stage_types import (
     AutofocusResult,
     MoveVector,
@@ -3789,12 +3795,10 @@ class StageController(QObject):
         return max(0.0, float(self._needle_down_lowering_mm))
 
     def _needle_contact_boundary_lowering(self) -> float | None:
-        if self._needle_down_lowering_mm is None:
-            return None
-        contact_zone_mm = max(0.0, float(self._needle_contact_zone_mm))
-        if contact_zone_mm <= 1e-9:
-            return None
-        return max(0.0, float(self._needle_down_lowering_mm) - contact_zone_mm)
+        return needle_contact_boundary_lowering(
+            down_lowering_mm=self._needle_down_lowering_mm,
+            contact_zone_mm=self._needle_contact_zone_mm,
+        )
 
     def _needle_motion_profile_segments(
         self,
@@ -5844,12 +5848,11 @@ class StageController(QObject):
         self.axis_a_ready_changed.emit(ready)
 
     def _refresh_axis_a_ready_from_state(self) -> None:
-        ready = (
-            self._needles_up
-            and self._needles_known
-            and not self._controller_state_stale
-            and self._serial is not None
-            and self._serial.is_open
+        ready = axis_a_ready_from_state(
+            needles_up=self._needles_up,
+            needles_known=self._needles_known,
+            controller_state_stale=self._controller_state_stale,
+            serial_is_open=self._serial is not None and self._serial.is_open,
         )
         self._update_axis_a_ready(bool(ready))
 
@@ -5860,13 +5863,11 @@ class StageController(QObject):
         known: bool,
         zone: str | None = None,
     ) -> None:
-        normalized_zone: str | None = None
-        if known:
-            zone_key = str(zone).strip().lower() if zone is not None else ""
-            if zone_key in {"raise", "lift", "lower"}:
-                normalized_zone = zone_key
-            else:
-                normalized_zone = "raise" if raised else "lower"
+        normalized_zone = normalized_needles_zone(
+            raised,
+            known=known,
+            zone=zone,
+        )
 
         old_raised = self._needles_up
         old_known = self._needles_known
@@ -5889,21 +5890,13 @@ class StageController(QObject):
             float(a_position),
             status,
         )
-        tolerance = self.A_ZERO_TOLERANCE
-        if self._needle_raise_lowering_mm is None:
-            raise_lowering = 0.0
-        else:
-            raise_lowering = float(self._needle_raise_lowering_mm)
-        if current_lowering <= raise_lowering + tolerance:
-            return "raise"
-        boundary_lowering = self._needle_contact_boundary_lowering()
-        if boundary_lowering is not None:
-            if current_lowering <= boundary_lowering + tolerance:
-                return "lift"
-        if self._needle_down_lowering_mm is not None:
-            if current_lowering >= float(self._needle_down_lowering_mm) - tolerance:
-                return "lower"
-        return None
+        return needle_zone_for_lowering(
+            current_lowering,
+            raise_lowering_mm=self._needle_raise_lowering_mm,
+            down_lowering_mm=self._needle_down_lowering_mm,
+            contact_zone_mm=self._needle_contact_zone_mm,
+            tolerance=self.A_ZERO_TOLERANCE,
+        )
 
     def _update_needles_from_a_position(self, a_position: float) -> None:
         """Update the coarse needles state using the current A coordinate."""
