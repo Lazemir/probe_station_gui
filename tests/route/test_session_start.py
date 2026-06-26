@@ -405,16 +405,18 @@ def test_api_route_existing_session_response_attaches_or_rejects() -> None:
         },
     }
 
-    attached = existing_response(
-        payload={"attach_existing_session": True},
-        status=active_status,
-    )
+    for alias in ("attach_existing_session", "attach_existing", "resume_existing"):
+        attached = existing_response(
+            payload={alias: True},
+            status=active_status,
+        )
+        assert attached == active_status
+
     rejected = existing_response(
         payload={},
         status=active_status,
     )
 
-    assert attached == active_status
     assert rejected == {
         "accepted": False,
         "status_code": 409,

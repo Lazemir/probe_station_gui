@@ -3479,16 +3479,18 @@ assert image.height() == 4
             def status_payload(self) -> dict[str, object]:
                 return dict(active_status)
 
-        window = Main.__new__(Main)
-        window._route_measurement_thread = _FakeAliveThread()
-        window._route_measurement_runner = _FakeExternalRunner()
+        for alias in ("attach_existing_session", "attach_existing", "resume_existing"):
+            with self.subTest(alias=alias):
+                window = Main.__new__(Main)
+                window._route_measurement_thread = _FakeAliveThread()
+                window._route_measurement_runner = _FakeExternalRunner()
 
-        response = Main._api_start_route_session(
-            window,
-            {"attach_existing_session": True},
-        )
+                response = Main._api_start_route_session(
+                    window,
+                    {alias: True},
+                )
 
-        self.assertEqual(response, active_status)
+                self.assertEqual(response, active_status)
 
     def test_api_route_start_rejects_existing_external_session_without_attach(self) -> None:
         active_status = {

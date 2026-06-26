@@ -4,7 +4,7 @@
 
 - Task: thin `Main._api_start_route_session` without changing external API/session behavior.
 - Scope touched: [main.py](/C:/Users/Public/code/probe_station_gui/main.py), [probe_station_gui/route/session_start.py](/C:/Users/Public/code/probe_station_gui/probe_station_gui/route/session_start.py), [tests/route/test_session_start.py](/C:/Users/Public/code/probe_station_gui/tests/route/test_session_start.py), [tests/app/test_main_coordinate_feedrate.py](/C:/Users/Public/code/probe_station_gui/tests/app/test_main_coordinate_feedrate.py).
-- Final implementation commit before adding this report: `6224b1f` (`Refactor API route session start orchestration`).
+- Final implementation commit before review follow-up: `1aa6601` (`Refactor API route session start orchestration`).
 
 ## Current Behavior Preserved
 
@@ -59,12 +59,16 @@ Added the new pure-helper test first:
     - `existing_response = _new_helper("api_route_existing_session_response")`
     - `assert None is not None`
 
-Also added app characterization tests for:
+Added app characterization tests before refactoring fragile `Main` paths for:
 
 - active external-session attach;
 - active external-session reject without attach;
 - waiting GUI runner stop-timeout rejection;
 - initial-pause timeout cleanup.
+
+These app tests are behavior-preserving characterization pins: they document existing `Main` behavior and are expected to pass against the pre-refactor implementation. The RED evidence for this task is therefore the new pure helper test above; the app tests are parity coverage for the refactor.
+
+Review follow-up added test-only alias coverage for `attach_existing_session`, `attach_existing`, and `resume_existing` in both the pure helper and `Main._api_start_route_session` path. No production code changed in that follow-up.
 
 ### GREEN
 
@@ -74,6 +78,11 @@ Focused suites after implementation:
   - `18 passed`
 - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\app\test_main_coordinate_feedrate.py -q`
   - `120 passed`
+
+Focused suites after review follow-up:
+
+- `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\route\test_session_start.py tests\app\test_main_coordinate_feedrate.py -q`
+  - `138 passed, 3 subtests passed`
 
 ## Tests And Checks Run
 
@@ -124,7 +133,13 @@ Observed new helpers:
 
 Observed warning count:
 
-- `18`
+- `81` for the same full scope as the baseline command: `main.py probe_station_gui\route`.
+
+Full-scope aggregate after:
+
+- NLOC `19996`, AvgCCN `4.0`, function count `958`, warning count `81`.
+
+The target-only shortened command `main.py probe_station_gui\route\session_start.py` reports warning count `55`; that is useful for local inspection but is not compared against the full-scope baseline.
 
 #### Radon
 
@@ -178,6 +193,7 @@ Observed method-level diff relevant to this task:
 
 - The target method materially improved on every method-level measure required by the brief.
 - File-level Wily totals increased in both touched files because complexity was redistributed into extracted helpers, not removed from the program entirely.
+- Full-scope lizard warning count stayed flat at `81 -> 81`; no new unexplained lizard warning was introduced in the baseline scope.
 - This is consistent with the acceptance criteria: success is based on the target method getting shorter and less complex while preserving behavior, not on total-file LOC alone.
 
 ## Verdict
