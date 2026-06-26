@@ -6,6 +6,8 @@ This context describes the probe-station control language and the maintenance la
 
 For the current architecture refactoring branch, the user has explicitly requested subagents. Use `subagent-driven-development` as the main execution workflow for independent refactor tasks: dispatch a focused implementer subagent per task, run a task-scoped reviewer subagent after each implementation, and run a broad whole-branch review before finishing. This is an explicit authorization to use subagents for this refactoring work without asking again for each independent task, while still keeping conflicting implementation edits sequential and review-gated.
 
+Use `wily` as the primary metrics comparison tool for refactor passes, especially when comparing between commits. On Windows, run it with UTF-8 output enabled, for example `$env:PYTHONIOENCODING='utf-8'; .\.venv\Scripts\python.exe -m wily ...`, because the default cp1251 console can crash on Wily's emoji output. Keep Wily cache outside the repo, such as under `%TEMP%`, unless the user explicitly asks to persist it. Use `radon`/`lizard` as fallback or spot-check tools when Wily cannot produce the required detail.
+
 ## Language
 
 **Probe Station**:
@@ -49,7 +51,7 @@ A small reviewable structural change with a named current behaviour, structural 
 _Avoid_: rewrite, cleanup batch
 
 **Metrics Gate**:
-The repeatable check used to decide whether a refactor pass improved maintainability without breaking behaviour. Total LOC is a secondary signal, not an acceptance rule: LOC may grow when cyclomatic complexity, Maintainability Index, function length, locality, or test protection improve enough to justify the extra code.
+The repeatable check used to decide whether a refactor pass improved maintainability without breaking behaviour. Prefer `wily` for commit-to-commit comparison, with `radon` and `lizard` used for fallback or deeper spot checks. Total LOC is a secondary signal, not an acceptance rule: LOC may grow when cyclomatic complexity, Maintainability Index, function length, locality, or test protection improve enough to justify the extra code.
 _Avoid_: lint run, test run
 
 **Regression Metric**:
