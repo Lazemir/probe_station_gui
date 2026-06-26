@@ -337,7 +337,8 @@ class StageController(
             if not self._serial_session_lock.acquire(blocking=False):
                 return
             try:
-                self._query_status(serial_connection, check_cancelled=False)
+                with self._serial_session(serial_connection):
+                    self._query_status(serial_connection, check_cancelled=False)
             finally:
                 self._serial_session_lock.release()
         except StageControllerError:

@@ -369,7 +369,8 @@ class StageControllerJogQueueMixin:
         if not self._serial_session_lock.acquire(blocking=False):
             return
         try:
-            self._query_status(serial_connection, timeout=0.5)
+            with self._serial_session(serial_connection):
+                self._query_status(serial_connection, timeout=0.5)
         except StageControllerError:
             return
         finally:

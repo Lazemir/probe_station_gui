@@ -431,6 +431,7 @@ class _SwappingLineFakeSerial(_LineFakeSerial):
 
 class _RejectingSerial(_WritableFakeSerial):
     def write(self, payload: bytes) -> None:
+        self.writes.append(payload)
         raise AssertionError(f"replacement serial used for {payload!r}")
 
     def readline(self) -> bytes:
@@ -462,6 +463,20 @@ class _TrackingLock:
 
     def __exit__(self, *_args) -> None:
         self.release()
+
+
+class _SwapOnFirstAcquireLock(_TrackingLock):
+    def __init__(self, on_acquire) -> None:
+        super().__init__()
+        self._on_acquire = on_acquire
+        self._swapped = False
+
+    def acquire(self, blocking: bool = True, timeout: float = -1.0) -> bool:
+        acquired = super().acquire(blocking=blocking, timeout=timeout)
+        if acquired and not self._swapped:
+            self._swapped = True
+            self._on_acquire()
+        return acquired
 
 
 class _LockedLineFakeSerial(_LineFakeSerial):
@@ -1714,6 +1729,33 @@ class StageControllerObjectiveTest(unittest.TestCase):
 
 
 class StageControllerJogQueueTest(unittest.TestCase):
+    def test_cached_jog_status_uses_captured_serial_for_status_mask(self) -> None:
+        controller = StageController()
+        original = _LineFakeSerial(
+            [
+                b"ok\n",
+                b"<Idle|WPos:0.000,0.000,3.840,2.967,0.000|Bf:15,127|FS:0,0>\n",
+            ]
+        )
+        replacement = _RejectingSerial()
+        positions = []
+        try:
+            controller._serial = original
+            controller._serial_session_lock = _SwapOnFirstAcquireLock(
+                lambda: setattr(controller, "_serial", replacement)
+            )
+            controller.stage_position_changed = types.SimpleNamespace(
+                emit=lambda position: positions.append(position)
+            )
+
+            controller._refresh_cached_jog_status_if_missing()
+
+            self.assertEqual(replacement.writes, [])
+            self.assertEqual(original.writes, [b"$10=2\n", b"?\n"])
+            self.assertEqual(positions[-1], (0.0, 0.0, 3.84, 2.967, 0.0))
+        finally:
+            controller.shutdown()
+
     def test_jog_stop_writes_immediately_when_serial_lock_is_free(self) -> None:
         controller = StageController()
         serial_connection = _WritableFakeSerial()
@@ -3328,6 +3370,33 @@ class StageControllerPriorityNeedlesActionTest(unittest.TestCase):
 
 
 class StageControllerStatusRefreshTest(unittest.TestCase):
+    def test_poll_status_once_uses_captured_serial_for_status_mask(self) -> None:
+        controller = StageController()
+        original = _LineFakeSerial(
+            [
+                b"ok\n",
+                b"<Idle|WPos:0.000,0.000,3.840,2.967,0.000|Bf:15,127|FS:0,0>\n",
+            ]
+        )
+        replacement = _RejectingSerial()
+        positions = []
+        try:
+            controller._serial = original
+            controller._serial_session_lock = _SwapOnFirstAcquireLock(
+                lambda: setattr(controller, "_serial", replacement)
+            )
+            controller.stage_position_changed = types.SimpleNamespace(
+                emit=lambda position: positions.append(position)
+            )
+
+            controller._poll_status_once()
+
+            self.assertEqual(replacement.writes, [])
+            self.assertEqual(original.writes, [b"$10=2\n", b"?\n"])
+            self.assertEqual(positions[-1], (0.0, 0.0, 3.84, 2.967, 0.0))
+        finally:
+            controller.shutdown()
+
     def test_status_query_discards_stale_buffered_status_before_query(self) -> None:
         controller = StageController()
         controller._current_status_report_mask = (
