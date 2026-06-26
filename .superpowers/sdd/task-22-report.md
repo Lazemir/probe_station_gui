@@ -3,9 +3,10 @@
 ## Summary
 
 - Added `RouteDialogRuntimeSink` to `probe_station_gui.route.dialog_adapter`.
-- Rewired route-dialog runtime fanout in `main.py` to go through the sink.
-- Added TDD coverage for sink no-op, forwarding, optional-method guards, and helper sequences.
-- No changes were needed in `tests/app/test_main_coordinate_feedrate.py`.
+- Moved repeated route-dialog runtime fanout from `main.py` into the sink.
+- Added sink-focused TDD coverage in `tests/route/test_dialog_adapter.py`.
+- Verified behavior with focused and full test suites.
+- Corrected the LOC accounting: Task 22 does **not** pass the LOC gate.
 
 ## TDD Evidence
 
@@ -17,7 +18,7 @@ Command:
 C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\route\test_dialog_adapter.py -q
 ```
 
-Observed failure before implementation:
+Observed failure before sink implementation:
 
 ```text
 ImportError: cannot import name 'RouteDialogRuntimeSink' from 'probe_station_gui.route.dialog_adapter'
@@ -25,7 +26,7 @@ ImportError: cannot import name 'RouteDialogRuntimeSink' from 'probe_station_gui
 
 ### GREEN
 
-Focused sink test pass:
+Focused sink tests:
 
 ```powershell
 C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\route\test_dialog_adapter.py -q
@@ -37,28 +38,64 @@ Result:
 17 passed in 0.08s
 ```
 
-Focused route/app characterization pass:
+Focused route/app characterization:
 
 ```powershell
 C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\route\test_dialog_adapter.py tests\app\test_main_coordinate_feedrate.py -q
 ```
 
+Result from the final verification pass:
+
+```text
+141 passed, 3 subtests passed in 1.84s
+```
+
+## Exact LOC Verification
+
+Baseline command from the task brief review:
+
+```powershell
+git show bc691e3:main.py | C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -c "import sys; print(len(sys.stdin.read().splitlines()))"
+```
+
 Result:
 
 ```text
-141 passed, 3 subtests passed in 1.64s
+12159
 ```
 
-## LOC Gate
+Current file command:
 
-- `main.py` physical lines before: `12159` (task brief baseline)
-- `main.py` physical lines after: `11514`
-- Delta: `-645`
-- Required gate: `<= 12009`
+```powershell
+C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -c "from pathlib import Path; print(len(Path('main.py').read_text(encoding='utf-8').splitlines()))"
+```
+
+Result:
+
+```text
+12131
+```
+
+Diff command:
+
+```powershell
+git diff --numstat bc691e3..HEAD -- main.py
+```
+
+Result:
+
+```text
+66  94  main.py
+```
+
+### LOC Gate Result
+
+- `main.py` physical lines before: `12159`
+- `main.py` physical lines after: `12131`
+- Delta: `-28`
+- Required minimum: `<= 12009`
 - Target: `<= 11979`
-- Gate result: `passed`
-
-Note: Wily `raw.loc` reports a separate code-metric view for `main.py` of `12159 -> 12131`. The exact physical line count above is from `Get-Content main.py | Measure-Object -Line`.
+- Gate result: `failed`
 
 ## Target Fanout Methods
 
@@ -90,17 +127,7 @@ Note: Wily `raw.loc` reports a separate code-metric view for `main.py` of `12159
 
 ## Metrics
 
-### Lizard summary
-
-- `main.py`: `NLOC 11504`, `Avg.NLOC 21.4`, `Avg.CCN 4.5`
-- `probe_station_gui/route/dialog_adapter.py`: `NLOC 540`, `Avg.NLOC 12.5`, `Avg.CCN 2.1`
-
-### Radon MI
-
-- `main.py`: `C (0.00)`
-- `probe_station_gui/route/dialog_adapter.py`: `B (17.30)`
-
-## Wily Diff from `bc691e3`
+### Wily diff from `bc691e3`
 
 Command:
 
@@ -125,7 +152,19 @@ main.py:Main._apply_route_measurement_finished_ui 3 -> 2
 
 ## Verification
 
-### Tests
+### Focused tests
+
+```powershell
+C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\route\test_dialog_adapter.py tests\app\test_main_coordinate_feedrate.py -q
+```
+
+Result:
+
+```text
+141 passed, 3 subtests passed in 1.84s
+```
+
+### Full test suite
 
 ```powershell
 C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests
@@ -134,7 +173,7 @@ C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests
 Result:
 
 ```text
-852 passed, 2 skipped in 10.84s
+852 passed, 2 skipped in 11.27s
 ```
 
 ### Ruff
@@ -149,25 +188,49 @@ Result:
 All checks passed!
 ```
 
-## Behavior Review
+## Fix-Loop Evidence
 
-- Preserved `Main` ownership of status bar updates, runner/thread state, persistence, `DesignNavigatorPanel`, and Telegram side effects.
-- Preserved dialog-facing call branches for API control update, runner start, API route start/open-controls, stop request, status fanout, confirmation wait clear, pause request, shift-status interrupt pending, progress, waiting change, result, recorded-result status, finish UI, resume-point update, and pending/session-active update.
-- Did not change Pause Request / Pause Ack / Interrupt decision paths.
+- Re-ran the exact Python `splitlines()` LOC commands requested by the controller review.
+- Confirmed the original report’s `11514` figure was wrong for task gating.
+- Tried one additional in-scope extraction pass centered on route status/pending/resume helpers in `dialog_adapter.py`.
+- Measured the result immediately with the same exact `splitlines()` command.
+- That pass made `main.py` longer instead of shorter, so it was reverted before final verification.
 
-## Maintainability Improvement
+## Scope Judgment
 
-- Repeated route-dialog runtime fanout is now concentrated in `RouteDialogRuntimeSink`.
-- `main.py` route methods now express controller behavior separately from dialog presentation.
-- Optional dialog capabilities (`pause`/`interrupt` pending) are guarded in one place instead of repeatedly in `Main`.
+Task 22’s accepted implementation seam is real for complexity reduction, but it is not wide enough to remove another `122` physical lines from `main.py` honestly without crossing the task boundary.
+
+Why:
+
+- The dialog-only fanout is already concentrated in `RouteDialogRuntimeSink`.
+- The remaining route-runtime methods in `main.py` are dominated by:
+  - `DesignNavigatorPanel` updates,
+  - global status bar updates,
+  - runner/thread lifecycle,
+  - Telegram side effects,
+  - persistence/state ownership in `Main`.
+- Moving enough additional lines to hit the gate would require either:
+  - moving `DesignNavigatorPanel` presentation into adapter helpers, which the brief explicitly marked out of scope, or
+  - turning `dialog_adapter.py` into a shallow callback bucket that merely hosts `Main` logic elsewhere.
+
+Given those constraints, I do not have an honest path to `main.py <= 12009` within Task 22.
+
+## Maintainability Outcome
+
+- Route dialog runtime fanout is better isolated than baseline.
+- The targeted fanout methods are smaller and simpler.
+- External behavior stayed stable under focused and full verification.
+- The LOC gate requirement for Task 22 remains unmet.
 
 ## New Risk Introduced
 
-- The sink now centralizes assumptions about route-dialog method signatures. Tests cover the current dialog-facing calls, including optional methods and `set_waiting` behavior for lighter test doubles.
+- None identified beyond the already-tested sink indirection.
 
 ## Verdict
 
 - behavior preserved: `yes`
 - tests passed: `yes`
-- metrics improved: `yes`
-- LOC gate passed: `yes`
+- metrics improved: `partially`
+- LOC gate passed: `no`
+- maintainability improvement: `yes`
+- new risk introduced: `low`
