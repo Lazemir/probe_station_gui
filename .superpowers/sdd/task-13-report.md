@@ -95,3 +95,27 @@ Explicit helper parameters removed: `5`
   - The five refactored FluidNC config helpers still have no explicit `serial_connection` parameters and no compatibility wrappers were added.
 - residual concerns:
   - None from the required focused tests and lint. The pre-existing untracked `.scratch/` directory was left untouched.
+
+## Second fix after re-review
+
+- changed files:
+  - `probe_station_gui/stage/controller.py`
+  - `probe_station_gui/stage/jog_queue.py`
+  - `tests/stage/test_controller.py`
+  - `.superpowers/sdd/task-13-report.md`
+- commit hash(es):
+  - `0d2a5e198a0637b8b03eb727d18181c0cbafdf35` - fix code and regression coverage for manual status serial pinning
+- tests run and exact results:
+  - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\stage\test_controller.py -k "captured_serial or status_mask"`
+    - red step before fix: `2 failed, 2 passed, 123 deselected`
+    - after fix: `4 passed, 123 deselected`
+  - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\stage\test_controller.py tests\stage\test_fluidnc_session.py tests\stage\test_fluidnc_protocol.py`
+    - final: `148 passed`
+  - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m ruff check --ignore E402,F401 .`
+    - final: `All checks passed!`
+- how this closes the status/jog serial pinning issue:
+  - `_poll_status_once` still captures the open serial once and keeps its nonblocking manual lock acquisition, then enters `_serial_session(serial_connection)` before calling `_query_status(...)`. This pins `_ensure_status_report_mask()` and `_read_status_frame(serial_connection)` to the same captured serial.
+  - `_refresh_cached_jog_status_if_missing` now uses the same nested session pattern around its lock-only `_query_status(...)` call, so jog status mask writes and `?` reads cannot split across a replacement `self._serial`.
+  - The fix does not reintroduce explicit `serial_connection` parameters on the five Task 13 FluidNC config helpers and does not add compatibility wrappers.
+- residual concerns:
+  - None from the required focused tests and lint. The pre-existing untracked `.scratch/` directory was left untouched.
