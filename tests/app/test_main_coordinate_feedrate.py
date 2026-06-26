@@ -1420,6 +1420,108 @@ assert image.height() == 4
         self.assertIn("Session total: 2 measurements in CSV.", text)
         self.assertEqual(kwargs["document_path"], csv_path)
 
+    def test_route_completion_stores_final_api_status_payload(self) -> None:
+        class _Runner:
+            def status_payload(self) -> dict[str, object]:
+                return {"state": "completed", "accepted": True}
+
+        runner = _Runner()
+        window = Main.__new__(Main)
+        window._route_measurement_thread = None
+        window._route_measurement_runner = runner
+        window._api_route_session_id = "session-1"
+        window._api_route_last_status = None
+        window._api_route_lcr_controller = object()
+        window._route_measurement_runtime_configuration = object()
+        window._route_measurement_waiting = True
+        window._route_measurement_waiting_reason = "external"
+        window._last_route_measurement_result = object()
+        window._pending_route_measure_point = object()
+        window._route_measurement_photo_enabled = True
+        window._route_measurement_measure_enabled = False
+        window._route_measurement_context_close_requested = False
+        window._route_measurement_point_numbers = [1]
+        window._route_measurement_current_point = 1
+        window._telegram_photo_lock = threading.Lock()
+        window._telegram_route_photo_requested = False
+        window._telegram_contact_photo_requested = False
+        window._telegram_pending_contact_before_photo = None
+        window._telegram_pending_contact_photo = None
+        window._last_route_pre_contact_photo = None
+        window.design_navigator_panel = None
+        window._route_measurement_dialog = None
+        window._resume_resistance_standby_polling = lambda: None
+        window._update_stage_coordinate_apply_state = lambda: None
+        window._set_route_measurement_pending = lambda _pending: None
+        window._show_status = lambda *_args, **_kwargs: None
+        window._send_telegram_alert = lambda *_args, **_kwargs: None
+
+        Main._on_route_measurement_finished(
+            window,
+            runner,
+            True,
+            "Route photo capture complete.",
+            "",
+        )
+
+        self.assertEqual(
+            window._api_route_last_status,
+            {"state": "completed", "accepted": True},
+        )
+
+    def test_context_close_failure_suppresses_route_failure_telegram(self) -> None:
+        window = Main.__new__(Main)
+        alerts: list[tuple[object, ...]] = []
+        pending: list[bool] = []
+        resumed: list[int] = []
+        statuses: list[str] = []
+
+        window._route_measurement_thread = None
+        window._route_measurement_runner = object()
+        window._api_route_session_id = None
+        window._api_route_lcr_controller = None
+        window._route_measurement_runtime_configuration = None
+        window._route_measurement_waiting = True
+        window._route_measurement_waiting_reason = "external"
+        window._last_route_measurement_result = object()
+        window._pending_route_measure_point = object()
+        window._route_measurement_photo_enabled = True
+        window._route_measurement_measure_enabled = True
+        window._route_measurement_context_close_requested = True
+        window._route_measurement_point_numbers = [1, 2]
+        window._route_measurement_current_point = 2
+        window._telegram_photo_lock = threading.Lock()
+        window._telegram_route_photo_requested = False
+        window._telegram_contact_photo_requested = False
+        window._telegram_pending_contact_before_photo = None
+        window._telegram_pending_contact_photo = None
+        window._last_route_pre_contact_photo = None
+        window.design_navigator_panel = None
+        window._route_measurement_dialog = None
+        window._resume_resistance_standby_polling = lambda: None
+        window._update_stage_coordinate_apply_state = lambda: None
+        window._set_route_measurement_resume_point = resumed.append
+        window._set_route_measurement_pending = pending.append
+        window._show_status = (
+            lambda message, _timeout_ms=None: statuses.append(str(message))
+        )
+        window._send_telegram_alert = (
+            lambda *args, **_kwargs: alerts.append(tuple(args))
+        )
+
+        Main._on_route_measurement_finished(
+            window,
+            False,
+            "Route window closed.",
+            "partial.csv",
+        )
+
+        self.assertEqual(resumed, [2])
+        self.assertEqual(pending, [True])
+        self.assertEqual(statuses, ["Route window closed."])
+        self.assertEqual(alerts, [])
+        self.assertFalse(window._route_measurement_context_close_requested)
+
     def test_route_progress_updates_dialog_progress_bar(self) -> None:
         window = Main.__new__(Main)
         resumed: list[int] = []

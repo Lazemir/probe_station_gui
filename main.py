@@ -206,6 +206,12 @@ from probe_station_gui.route.session_start import (
     route_launch_presentation,
     route_contact_quality_limits_from_payload,
 )
+from probe_station_gui.route.finish_flow import (
+    RouteFinishTelegramPlan,
+    route_finish_outcome_plan,
+    route_finish_signal_plan,
+    route_finish_telegram_text,
+)
 from probe_station_gui.route.shift import route_shift_from_stage_xy
 from probe_station_gui.route.formatting import (
     csv_bool as _csv_bool,
@@ -9246,31 +9252,58 @@ class Main(QMainWindow):
         )
 
     def _on_route_measurement_finished(self, *args: object) -> None:
-        if len(args) == 4:
-            finished_runner, success, message, csv_path = args
-        elif len(args) == 3:
-            finished_runner = None
-            success, message, csv_path = args
-        else:
+        finish_signal = route_finish_signal_plan(
+            args,
+            current_runner=self._route_measurement_runner,
+        )
+        if finish_signal.ignored:
             return
-        if (
-            finished_runner is not None
-            and finished_runner is not self._route_measurement_runner
-        ):
-            return
-        success = bool(success)
-        message = str(message)
-        csv_path = str(csv_path)
+        success = finish_signal.success
+        message = finish_signal.message
+        csv_path = finish_signal.csv_path
         measure_enabled = self._route_measurement_measure_enabled
         context_close_requested = bool(
             getattr(self, "_route_measurement_context_close_requested", False)
         )
+        finish_plan = route_finish_outcome_plan(
+            success=success,
+            message=message,
+            csv_path=csv_path,
+            measure_enabled=measure_enabled,
+            context_close_requested=context_close_requested,
+            point_numbers=list(self._route_measurement_point_numbers),
+            current_point=self._route_measurement_current_point,
+        )
         self._route_measurement_context_close_requested = False
+        self._join_finished_route_measurement_thread()
+        runner = self._route_measurement_runner
+        self._store_final_api_route_session_status(runner)
+        self._clear_finished_route_measurement_state()
+        self._apply_route_measurement_finished_ui(success, message)
+
+        session_measurement_count = (
+            self._route_measurement_csv_record_count(csv_path)
+            if finish_plan.needs_csv_record_count
+            else None
+        )
+        if finish_plan.resume_point is not None:
+            self._set_route_measurement_resume_point(finish_plan.resume_point)
+        self._set_route_measurement_pending(finish_plan.pending)
+        if finish_plan.clear_point_numbers:
+            self._route_measurement_point_numbers = []
+        self._show_status(finish_plan.status_text, finish_plan.status_timeout_ms)
+        self._send_route_finish_telegram(
+            finish_plan.telegram,
+            session_measurement_count=session_measurement_count,
+        )
+
+    def _join_finished_route_measurement_thread(self) -> None:
         thread = self._route_measurement_thread
         if thread is not None and not thread.is_alive():
             thread.join(timeout=0.1)
         self._route_measurement_thread = None
-        runner = self._route_measurement_runner
+
+    def _store_final_api_route_session_status(self, runner: object | None) -> None:
         if (
             getattr(self, "_api_route_session_id", None)
             and runner is not None
@@ -9280,6 +9313,8 @@ class Main(QMainWindow):
                 self._api_route_last_status = runner.status_payload()
             except Exception:
                 logger.exception("Failed to store final API route session status.")
+
+    def _clear_finished_route_measurement_state(self) -> None:
         self._route_measurement_runner = None
         self._api_route_lcr_controller = None
         self._route_measurement_runtime_configuration = None
@@ -9296,6 +9331,12 @@ class Main(QMainWindow):
             self._telegram_pending_contact_before_photo = None
             self._telegram_pending_contact_photo = None
             self._last_route_pre_contact_photo = None
+
+    def _apply_route_measurement_finished_ui(
+        self,
+        success: bool,
+        message: str,
+    ) -> None:
         self._update_stage_coordinate_apply_state()
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_route_measurement_running(False)
@@ -9305,53 +9346,30 @@ class Main(QMainWindow):
             self._route_measurement_dialog.set_running(False)
             self._route_measurement_dialog.finish_progress(success)
             self._route_measurement_dialog.set_status(message)
-        if success:
-            session_measurement_count = (
-                self._route_measurement_csv_record_count(csv_path)
-                if measure_enabled and csv_path
-                else None
+
+    def _send_route_finish_telegram(
+        self,
+        telegram: RouteFinishTelegramPlan | None,
+        *,
+        session_measurement_count: int | None,
+    ) -> None:
+        if telegram is not None:
+            telegram_message = route_finish_telegram_text(
+                telegram,
+                csv_record_count=session_measurement_count,
             )
-            if len(self._route_measurement_point_numbers) > 1:
-                self._set_route_measurement_resume_point(1)
-            self._set_route_measurement_pending(False)
-            self._route_measurement_point_numbers = []
-            suffix = (
-                f" CSV: {csv_path}"
-                if "CSV:" not in message
-                and not message.startswith("Route photo capture")
-                and csv_path
-                else ""
-            )
-            self._show_status(f"{message}{suffix}", 8000)
-            completion_message = f"Probe route completed:\n{message}"
-            if session_measurement_count is not None:
-                completion_message = (
-                    f"{completion_message}\n"
-                    f"Session total: {session_measurement_count} measurements in CSV."
+            telegram_kwargs: dict[str, object] = {}
+            if telegram.document_path is not None or telegram.key == "route_completed":
+                telegram_kwargs["document_path"] = (
+                    Path(telegram.document_path) if telegram.document_path else None
                 )
-            if csv_path:
-                completion_message = f"{completion_message}\nCSV: {csv_path}"
+            if telegram.attach_photo:
+                telegram_kwargs["attach_photo"] = True
             self._send_telegram_alert(
-                "route_completed",
-                completion_message,
-                document_path=Path(csv_path) if csv_path else None,
+                telegram.key,
+                telegram_message,
+                **telegram_kwargs,
             )
-        else:
-            if self._route_measurement_current_point is not None:
-                self._set_route_measurement_resume_point(
-                    self._route_measurement_current_point
-                )
-            self._set_route_measurement_pending(True)
-            self._show_status(message, 8000)
-            if not context_close_requested:
-                failure_message = f"Probe route stopped or failed:\n{message}"
-                if csv_path:
-                    failure_message = f"{failure_message}\nCSV: {csv_path}"
-                self._send_telegram_alert(
-                    "route_failed",
-                    failure_message,
-                    attach_photo=True,
-                )
 
     @staticmethod
     def _route_measurement_csv_record_count(csv_path: str | Path) -> int | None:
