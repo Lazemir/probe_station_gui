@@ -226,17 +226,15 @@ from probe_station_gui.route.session_start import (
     route_contact_quality_limits_from_payload,
 )
 from probe_station_gui.route.finish_flow import (
-    RouteFinishTelegramPlan,
     route_finish_outcome_plan,
     route_finish_signal_plan,
 )
 from probe_station_gui.route.telegram_adapter import (
     RouteTelegramPhotoState,
     combine_telegram_contact_photos,
-    route_attention_telegram_text,
-    route_contact_photo_caption,
+    capture_route_photo,
     route_finish_telegram_payload,
-    route_pre_contact_photo_caption,
+    route_photo_focus_payload,
     route_requested_photo_caption,
     route_start_telegram_text,
     telegram_contact_photo_payload,
@@ -1916,7 +1914,7 @@ class Main(QMainWindow):
             "timestamp_utc": self._api_timestamp_utc(),
             "focus_range_mm": focus_range_mm,
             "focus_step_mm": focus_step_mm,
-            "focus": self._route_photo_focus_payload(result),
+            "focus": route_photo_focus_payload(result),
         }
 
     def _api_route_contact_focus(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1995,7 +1993,7 @@ class Main(QMainWindow):
             "contact": contact,
             "focus_range_mm": focus_range_mm,
             "focus_step_mm": focus_step_mm,
-            "focus": self._route_photo_focus_payload(result),
+            "focus": route_photo_focus_payload(result),
         }
 
     def _api_route_contact_photo(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -3230,7 +3228,7 @@ class Main(QMainWindow):
                 "point_index": int(point.index),
                 "contact_number": self._api_structure_number_for_measurement_point(point),
                 "label": point.label,
-                "focus": self._route_photo_focus_payload(focus_result),
+                "focus": route_photo_focus_payload(focus_result),
             },
         )
         if self._route_telegram_adapter().consume_route_photo_request():
@@ -7915,80 +7913,26 @@ class Main(QMainWindow):
         configuration: RouteMeasurementRunConfiguration,
         focus_result: object | None = None,
     ) -> str:
-        scale = self._active_microscope_scale()
-        if scale is None:
-            raise RuntimeError("Active objective has no calibrated microscope scale.")
-        before_counter = self._latest_camera_counter()
-        frame, _counter = self._wait_for_camera_frame(
-            after_counter=before_counter,
-            timeout_s=2.0,
-        )
-        if frame is None:
-            raise RuntimeError("Camera frame is unavailable.")
-        captured_at = utc_timestamp()
-        objective_name, magnification = self._active_objective_metadata()
         route = self._design_session.route
-        route_name = route.name if route is not None else "route"
-        filename = route_photo_filename(
-            route_name=route_name,
-            point_index=int(point.index),
-            point_label=point.label,
-            captured_at=captured_at,
+        return capture_route_photo(
+            point,
+            position,
+            total,
+            photo_only_mode=configuration.operation_mode == ROUTE_OPERATION_PHOTO,
+            photo_output_dir=configuration.photo_output_dir,
+            photo_autofocus_enabled=bool(configuration.photo_autofocus_enabled),
+            photo_autofocus_range_mm=float(configuration.photo_autofocus_range_mm),
+            route_name=(route.name if route is not None else "route"),
+            focus_result=focus_result,
+            active_microscope_scale=self._active_microscope_scale,
+            latest_camera_counter=self._latest_camera_counter,
+            wait_for_camera_frame=self._wait_for_camera_frame,
+            timestamp_utc=utc_timestamp,
+            active_objective_metadata=self._active_objective_metadata,
+            stage_position_for_image_metadata=self._stage_position_for_image_metadata,
+            save_image=save_microscope_image,
+            route_photo_focus_payload=route_photo_focus_payload,
         )
-        photo_stage_xy = (
-            point.photo_stage_xy
-            if point.photo_stage_xy is not None
-            else point.stage_xy
-        )
-        stage_position = self._stage_position_for_image_metadata(
-            stage_xy=photo_stage_xy
-        )
-        focus_data = self._route_photo_focus_payload(focus_result)
-        metadata = MicroscopeImageMetadata(
-            title="Probe Station Microscope",
-            mode="route photo"
-            if configuration.operation_mode == ROUTE_OPERATION_PHOTO
-            else "route photo before measurement",
-            captured_at=captured_at,
-            objective_name=objective_name,
-            magnification=magnification,
-            route_name=route_name,
-            route_point_index=int(point.index),
-            route_point_label=point.label,
-            route_position=int(position),
-            route_total=int(total),
-            design_xy=point.design_center,
-            stage_position=stage_position,
-            stage_xy=photo_stage_xy,
-            notes=(
-                "needles raised before capture",
-                *(
-                    ("local autofocus before capture",)
-                    if configuration.photo_autofocus_enabled
-                    else ()
-                ),
-            ),
-            extra={
-                "point_id": point.point_id,
-                "needle_1_design": list(point.needle_1_design),
-                "needle_2_design": list(point.needle_2_design),
-                "photo_autofocus_enabled": bool(
-                    configuration.photo_autofocus_enabled
-                ),
-                "photo_autofocus_range_mm": float(
-                    configuration.photo_autofocus_range_mm
-                ),
-                "autofocus": focus_data,
-            },
-        )
-        result = save_microscope_image(
-            frame=frame,
-            output_dir=configuration.photo_output_dir,
-            filename_stem=filename,
-            metadata=metadata,
-            scale=scale,
-        )
-        return str(result.image_path)
 
     def _route_photo_autofocus(
         self,
@@ -8008,79 +7952,23 @@ class Main(QMainWindow):
             range_mm=configuration.photo_autofocus_range_mm,
         )
 
-    @staticmethod
-    def _route_photo_focus_payload(focus_result: object | None) -> dict[str, object] | None:
-        if focus_result is None:
-            return None
-        if isinstance(focus_result, dict):
-            return dict(focus_result)
-        to_dict = getattr(focus_result, "to_dict", None)
-        if callable(to_dict):
-            data = to_dict()
-            return dict(data) if isinstance(data, dict) else None
-        return None
-
     def _record_route_photo(
         self,
         record: RoutePhotoRecord,
         position: int,
         total: int,
     ) -> None:
-        self._maybe_send_requested_route_photo(record, position, total)
-        if not record.focus:
-            return
-        try:
-            path = route_photo_focus_map_path(record)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            exists = path.exists() and path.stat().st_size > 0
-            with path.open("a", encoding="utf-8", newline="") as handle:
-                writer = csv.DictWriter(
-                    handle,
-                    fieldnames=ROUTE_PHOTO_FOCUS_MAP_FIELDS,
-                )
-                if not exists:
-                    writer.writeheader()
-                writer.writerow(
-                    route_photo_focus_map_row(
-                        record,
-                        position,
-                        total,
-                        route_name=self._current_route_name(),
-                    )
-                )
-                handle.flush()
-                os.fsync(handle.fileno())
-        except OSError as exc:
-            logger.warning("Unable to write route photo focus map: %s", exc)
-
-    def _maybe_send_requested_route_photo(
-        self,
-        record: RoutePhotoRecord,
-        position: int,
-        total: int,
-    ) -> None:
-        route_telegram = self._route_telegram_adapter()
-        if not route_telegram.consume_route_photo_request():
-            return
-        path = Path(record.path).expanduser()
-        try:
-            photo = (path.read_bytes(), path.name)
-        except OSError as exc:
-            logger.warning("Unable to read route photo for Telegram: %s", exc)
-            self._send_telegram_bot_message(
-                f"Route photo is saved but could not be read for Telegram: {path}",
-                reply_markup=self._telegram_default_markup(),
-            )
-            return
-        self._send_telegram_bot_message(
-            route_requested_photo_caption(
-                position=int(position),
-                total=int(total),
-                structure_number=int(record.structure_number),
-                label=record.label,
+        self._route_telegram_adapter().record_route_photo(
+            record,
+            position,
+            total,
+            route_name=self._current_route_name(),
+            send_bot_message=self._send_telegram_bot_message,
+            default_markup=(
+                self._telegram_default_markup()
+                if hasattr(self, "_route_measurement_waiting")
+                else None
             ),
-            photo=photo,
-            reply_markup=self._telegram_default_markup(),
         )
 
     def _telegram_route_attention_alert_enabled(self) -> bool:
@@ -8098,30 +7986,16 @@ class Main(QMainWindow):
         position: int,
         total: int,
     ) -> None:
-        route_telegram = self._route_telegram_adapter()
-        if not route_telegram.should_capture_pre_contact_photo(
-            route_attention_enabled=self._telegram_route_attention_alert_enabled()
-        ):
-            return
-        before_counter = self._latest_camera_counter()
-        frame, _counter = self._wait_for_camera_frame(
-            after_counter=before_counter,
-            timeout_s=0.5,
-        )
-        photo = self._qimage_telegram_photo(frame) or self._latest_camera_frame_photo()
-        if photo is None:
-            logger.warning("Unable to capture route pre-contact photo for Telegram.")
-            return
-        caption = route_pre_contact_photo_caption(
-            position=int(position),
-            total=int(total),
-            structure_number=self._api_structure_number_for_measurement_point(point),
-            label=point.label,
-        )
-        route_telegram.store_pre_contact_photo(
+        self._route_telegram_adapter().capture_pre_contact_photo(
             point,
             position,
-            (photo[0], photo[1], caption),
+            total,
+            structure_number=self._api_structure_number_for_measurement_point(point),
+            route_attention_enabled=self._telegram_route_attention_alert_enabled(),
+            latest_camera_counter=self._latest_camera_counter,
+            wait_for_camera_frame=self._wait_for_camera_frame,
+            qimage_telegram_photo=self._qimage_telegram_photo,
+            latest_camera_frame_photo=self._latest_camera_frame_photo,
         )
 
     def _capture_route_contact_photo(
@@ -8132,37 +8006,19 @@ class Main(QMainWindow):
         total: int,
         saved: bool,
     ) -> None:
-        route_telegram = self._route_telegram_adapter()
         contact_attention = self._route_record_needs_contact_attention(record)
-        if not route_telegram.should_capture_contact_photo(
-            saved=bool(saved),
-            contact_attention=bool(contact_attention),
-            route_attention_enabled=self._telegram_route_attention_alert_enabled(),
-        ):
-            return
-        before_counter = self._latest_camera_counter()
-        frame, _counter = self._wait_for_camera_frame(
-            after_counter=before_counter,
-            timeout_s=1.0,
-        )
-        photo = self._qimage_telegram_photo(frame) or self._latest_camera_frame_photo()
-        if photo is None:
-            logger.warning("Unable to capture route contact photo for Telegram.")
-            return
-        caption = route_contact_photo_caption(
-            position=int(position),
-            total=int(total),
-            structure_number=int(record.structure_number),
-            label=point.label,
-            status=str(record.status),
-        )
-        route_telegram.store_contact_photo(
+        self._route_telegram_adapter().capture_contact_photo(
             point,
             record,
             position,
+            total,
             saved=bool(saved),
             contact_attention=bool(contact_attention),
-            photo=(photo[0], photo[1], caption),
+            route_attention_enabled=self._telegram_route_attention_alert_enabled(),
+            latest_camera_counter=self._latest_camera_counter,
+            wait_for_camera_frame=self._wait_for_camera_frame,
+            qimage_telegram_photo=self._qimage_telegram_photo,
+            latest_camera_frame_photo=self._latest_camera_frame_photo,
         )
 
     def _matching_route_pre_contact_photo(
@@ -8767,30 +8623,17 @@ class Main(QMainWindow):
         *,
         include_contact_photos: bool = False,
     ) -> None:
-        route_telegram = self._route_telegram_adapter()
-        if not route_telegram.should_send_attention(message):
-            return
-        failure_photos = (
-            self._latest_route_contact_failure_telegram_photos()
-            if include_contact_photos
-            else None
-        )
-        before_photo = failure_photos[0] if failure_photos is not None else None
-        failure_photo = failure_photos[1] if failure_photos is not None else None
-        alert_photo: tuple[bytes, str] | None = None
-        contact_caption = ""
-        if failure_photo is not None:
-            alert_photo, contact_caption = self._telegram_contact_photo_payload(
-                before_photo,
-                failure_photo,
-            )
-        alert_message = route_attention_telegram_text(message, contact_caption)
-        self._send_telegram_alert(
-            "route_attention",
-            alert_message,
-            attach_photo=alert_photo is None,
-            photo=alert_photo,
-            reply_markup=self._telegram_route_actions_markup(),
+        self._route_telegram_adapter().send_route_attention_alert(
+            message,
+            include_contact_photos=include_contact_photos,
+            failure_photos=(
+                self._latest_route_contact_failure_telegram_photos()
+                if include_contact_photos
+                else None
+            ),
+            contact_photo_payload=self._telegram_contact_photo_payload,
+            send_alert=self._send_telegram_alert,
+            route_actions_markup=self._telegram_route_actions_markup(),
         )
 
     def _on_route_measurement_recorded(
@@ -8900,10 +8743,17 @@ class Main(QMainWindow):
         if finish_plan.clear_point_numbers:
             self._route_measurement_point_numbers = []
         self._show_status(finish_plan.status_text, finish_plan.status_timeout_ms)
-        self._send_route_finish_telegram(
+        telegram_payload = route_finish_telegram_payload(
             finish_plan.telegram,
             session_measurement_count=session_measurement_count,
         )
+        if telegram_payload is not None and finish_plan.telegram is not None:
+            telegram_message, telegram_kwargs = telegram_payload
+            self._send_telegram_alert(
+                finish_plan.telegram.key,
+                telegram_message,
+                **telegram_kwargs,
+            )
 
     def _join_finished_route_measurement_thread(self) -> None:
         thread = self._route_measurement_thread
@@ -8934,25 +8784,6 @@ class Main(QMainWindow):
         self._route_measurement_measure_enabled = False
         self._resume_resistance_standby_polling()
         self._route_telegram_adapter().clear_for_route_finish()
-
-    def _send_route_finish_telegram(
-        self,
-        telegram: RouteFinishTelegramPlan | None,
-        *,
-        session_measurement_count: int | None,
-    ) -> None:
-        payload = route_finish_telegram_payload(
-            telegram,
-            session_measurement_count=session_measurement_count,
-        )
-        if payload is None or telegram is None:
-            return
-        telegram_message, telegram_kwargs = payload
-        self._send_telegram_alert(
-            telegram.key,
-            telegram_message,
-            **telegram_kwargs,
-        )
 
     @staticmethod
     def _route_measurement_csv_record_count(csv_path: str | Path) -> int | None:

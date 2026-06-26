@@ -1,4 +1,5 @@
 import struct
+import tempfile
 import threading
 import unittest
 import zlib
@@ -7,16 +8,20 @@ from pathlib import Path
 from PySide6.QtGui import QImage
 
 from main import Main
+from probe_station_gui.camera.imaging import MicroscopeCaptureResult
 from probe_station_gui.route.finish_flow import RouteFinishTelegramPlan
 from probe_station_gui.route.measurement import (
     RouteContactQuality,
     RouteMeasurementPoint,
+    RoutePhotoRecord,
     RouteMeasurementRecord,
 )
 from probe_station_gui.route.telegram_adapter import (
     RouteTelegramPhotoState,
     combine_telegram_contact_photos,
+    capture_route_photo,
     route_finish_telegram_payload,
+    route_photo_focus_payload,
     route_start_telegram_text,
     telegram_contact_photo_payload,
 )
@@ -83,6 +88,68 @@ def _bad_contact_record() -> RouteMeasurementRecord:
 
 
 class RouteTelegramAdapterTest(unittest.TestCase):
+    def test_capture_route_photo_builds_route_metadata_and_returns_saved_path(
+        self,
+    ) -> None:
+        point = RouteMeasurementPoint(
+            index=3,
+            point_id="p003",
+            label="P003",
+            design_center=(10.0, 20.0),
+            stage_xy=(1.0, 2.0),
+            needle_1_design=(9.5, 20.5),
+            needle_2_design=(10.5, 19.5),
+            photo_stage_xy=(1.5, 2.5),
+        )
+        saved: list[tuple[object, object, object, object]] = []
+        frame = QImage(8, 4, QImage.Format.Format_RGB32)
+        frame.fill(0x00FF00)
+
+        path = capture_route_photo(
+            point,
+            1,
+            2,
+            photo_only_mode=True,
+            photo_output_dir="photos",
+            photo_autofocus_enabled=True,
+            photo_autofocus_range_mm=0.03,
+            route_name="route-a",
+            focus_result={"focus_best_z_mm": 10.0},
+            active_microscope_scale=lambda: 1.25,
+            latest_camera_counter=lambda: 4,
+            wait_for_camera_frame=lambda *, after_counter, timeout_s: (frame, 5),
+            timestamp_utc=lambda: "2026-06-26T20:00:00Z",
+            active_objective_metadata=lambda: ("X20", 20.0),
+            stage_position_for_image_metadata=lambda *, stage_xy: (
+                stage_xy[0],
+                stage_xy[1],
+                3.0,
+            ),
+            save_image=lambda *, frame, output_dir, filename_stem, metadata, scale: (
+                saved.append((frame, output_dir, filename_stem, metadata, scale))
+                or MicroscopeCaptureResult(
+                    image_path=Path(output_dir) / f"{filename_stem}.jpg",
+                    metadata_path=Path(output_dir) / f"{filename_stem}.json",
+                    raw_image=frame,
+                    metadata={},
+                )
+            ),
+            route_photo_focus_payload=route_photo_focus_payload,
+        )
+
+        self.assertTrue(path.endswith(".jpg"))
+        self.assertEqual(len(saved), 1)
+        _saved_frame, output_dir, filename_stem, metadata, scale = saved[0]
+        self.assertEqual(output_dir, "photos")
+        self.assertEqual(scale, 1.25)
+        self.assertIn("route-a", filename_stem)
+        self.assertEqual(metadata.route_name, "route-a")
+        self.assertEqual(metadata.route_position, 1)
+        self.assertEqual(metadata.route_total, 2)
+        self.assertEqual(metadata.route_point_label, "P003")
+        self.assertEqual(metadata.stage_xy, (1.5, 2.5))
+        self.assertEqual(metadata.extra["autofocus"]["focus_best_z_mm"], 10.0)
+
     def test_route_start_telegram_text_for_gui_route(self) -> None:
         text = route_start_telegram_text(
             "Point 1/9 ready.",
@@ -297,6 +364,121 @@ class RouteTelegramAdapterTest(unittest.TestCase):
         self.assertIsNone(
             state.matching_pre_contact_photo(_route_point(index=4, label="P004"), 1)
         )
+
+    def test_record_route_photo_writes_focus_map_and_sends_requested_photo(self) -> None:
+        state = RouteTelegramPhotoState(lock=threading.Lock())
+        sent: list[tuple[str, tuple[bytes, str] | None, object | None]] = []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            photo_path = Path(tmpdir) / "photos" / "point-001.png"
+            photo_path.parent.mkdir(parents=True, exist_ok=True)
+            photo_path.write_bytes(b"route-photo")
+            record = RoutePhotoRecord(
+                timestamp="2026-05-29T12:00:00+03:00",
+                path=str(photo_path),
+                structure_number=1,
+                point_index=1,
+                point_id="p001",
+                label="P001",
+                design_center=(10.0, 20.0),
+                stage_xy=(1.0, 2.0),
+                focus={
+                    "objective_name": "X20",
+                    "focus_start_z_mm": 9.98,
+                    "focus_best_z_mm": 10.0,
+                    "focus_delta_um": 20.0,
+                    "focus_score": 12.5,
+                    "focus_sample_count": 7,
+                    "focus_edge_peak": False,
+                    "autofocus_range_mm": 0.03,
+                    "autofocus_fine_step_mm": 0.005,
+                    "autofocus_lower_z_mm": 9.95,
+                    "autofocus_upper_z_mm": 10.01,
+                },
+            )
+
+            state.request_route_photo()
+            state.record_route_photo(
+                record,
+                1,
+                3,
+                route_name="route-a",
+                send_bot_message=lambda message, *, photo=None, reply_markup=None: sent.append(
+                    (message, photo, reply_markup)
+                ),
+                default_markup="markup",
+            )
+
+            focus_map_path = photo_path.parent / "route-photo-focus-map.csv"
+            rows = focus_map_path.read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(len(sent), 1)
+        self.assertIn("Next route structure photo:", sent[0][0])
+        self.assertEqual(sent[0][1], (b"route-photo", "point-001.png"))
+        self.assertEqual(sent[0][2], "markup")
+        self.assertTrue(any("route_name" in line for line in rows))
+        self.assertTrue(any("route-a" in line for line in rows))
+
+    def test_send_route_attention_alert_deduplicates_and_attaches_contact_photo(
+        self,
+    ) -> None:
+        state = RouteTelegramPhotoState(lock=threading.Lock())
+        alerts: list[tuple[str, str, dict[str, object]]] = []
+        point = _route_point()
+        before = (
+            b"before-bytes",
+            "before.jpg",
+            "Route contact before needle press:\nPoint 1/2, structure 3, P003.",
+        )
+        after = (
+            b"after-bytes",
+            "after.jpg",
+            "Route contact attempt photo:\n"
+            "Point 1/2, structure 3, P003, status=bad_contact.",
+        )
+
+        state.request_contact_photo()
+        state.store_pre_contact_photo(point, 1, before)
+        state.store_contact_photo(
+            point,
+            _bad_contact_record(),
+            1,
+            saved=False,
+            contact_attention=True,
+            photo=after,
+        )
+
+        state.send_route_attention_alert(
+            "Measured route point 1/2: status=bad_contact.",
+            include_contact_photos=True,
+            contact_photo_payload=lambda _before, _after: (
+                (b"combined", "route-contact-comparison.jpg"),
+                "Route contact check:\n"
+                "Left: before needle press. Right: contact attempt.\n"
+                "Point 1/2, structure 3, P003, status=bad_contact.",
+            ),
+            send_alert=lambda key, text, **kwargs: alerts.append((key, text, kwargs)),
+            route_actions_markup="actions",
+        )
+        state.send_route_attention_alert(
+            "Measured route point 1/2: status=bad_contact.",
+            include_contact_photos=True,
+            contact_photo_payload=lambda _before, _after: (
+                (b"combined", "route-contact-comparison.jpg"),
+                "ignored",
+            ),
+            send_alert=lambda key, text, **kwargs: alerts.append((key, text, kwargs)),
+            route_actions_markup="actions",
+        )
+
+        self.assertEqual(len(alerts), 1)
+        key, text, kwargs = alerts[0]
+        self.assertEqual(key, "route_attention")
+        self.assertIn("Probe route needs attention:", text)
+        self.assertIn("Left: before needle press. Right: contact attempt.", text)
+        self.assertFalse(kwargs["attach_photo"])
+        self.assertEqual(kwargs["photo"], (b"combined", "route-contact-comparison.jpg"))
+        self.assertEqual(kwargs["reply_markup"], "actions")
 
 
 if __name__ == "__main__":

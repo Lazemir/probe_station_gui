@@ -3,21 +3,34 @@
 ## Scope
 
 - Added `probe_station_gui/route/telegram_adapter.py`.
-- Updated `main.py` to delegate route Telegram/photo state and formatting.
+- Reduced `main.py` by moving route Telegram/photo state, route photo capture/record helpers, contact photo capture, attention alert composition, and related formatting into the route module.
 - Added `tests/route/test_telegram_adapter.py`.
 
-## LOC Gate
+## Exact LOC Gate
 
-- `main.py` physical lines before: `11978` (task brief baseline).
-- `main.py` physical lines after: `11294`.
-- Delta: `-684`.
-- Required gate: `main.py <= 11828`.
-- Target: `main.py <= 11758`.
-- Verdict: passed.
+Source-of-truth commands:
+
+```powershell
+git show 07a1152:main.py | C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -c "import sys; print(len(sys.stdin.read().splitlines()))"
+C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -c "from pathlib import Path; print(len(Path('main.py').read_text(encoding='utf-8').splitlines()))"
+```
+
+Results:
+
+- `main.py` physical lines before: `11978`
+- `main.py` physical lines after: `11740`
+- exact delta: `-238`
+- required minimum: `main.py <= 11828`
+- target: `main.py <= 11758`
+
+Verdict:
+
+- minimum gate: passed
+- task target: passed
 
 ## TDD Evidence
 
-### RED
+### RED 1
 
 Command:
 
@@ -25,21 +38,33 @@ Command:
 C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\route\test_telegram_adapter.py -q
 ```
 
-Result before implementation:
+Result:
 
 - failed during collection with `ModuleNotFoundError: No module named 'probe_station_gui.route.telegram_adapter'`.
 
-### GREEN
+### GREEN 1
 
-Command:
+Same command after the initial adapter implementation:
+
+- `10 passed in 0.75s`
+
+### RED 2
+
+Continuation test-first step for the deeper adapter extraction:
 
 ```powershell
 C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\route\test_telegram_adapter.py -q
 ```
 
-Result after implementation:
+Result before the second refactor:
 
-- `10 passed in 0.75s`.
+- failed during collection with `ImportError: cannot import name 'capture_route_photo' from 'probe_station_gui.route.telegram_adapter'`.
+
+### GREEN 2
+
+Same command after the deeper extraction:
+
+- `13 passed in 0.68s`
 
 Focused integration check:
 
@@ -47,7 +72,7 @@ Focused integration check:
 C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\route\test_telegram_adapter.py tests\app\test_main_coordinate_feedrate.py -q
 ```
 
-- `136 passed, 3 subtests passed in 1.80s`.
+- `139 passed, 3 subtests passed in 1.81s`
 
 ## Validation
 
@@ -57,7 +82,7 @@ Full test run:
 C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests
 ```
 
-- `864 passed, 2 skipped in 10.84s`.
+- `867 passed, 2 skipped in 11.23s`
 
 Ruff:
 
@@ -69,10 +94,10 @@ C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m ruff check --
 
 ## Metrics
 
-### Current line counts
+Exact current file line counts:
 
-- `main.py`: `11294`
-- `probe_station_gui/route/telegram_adapter.py`: `298`
+- `main.py`: `11740`
+- `probe_station_gui/route/telegram_adapter.py`: `653`
 
 ### Lizard
 
@@ -84,21 +109,22 @@ C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m lizard main.p
 
 Summary:
 
-- `main.py`: `NLOC 11284`, `Avg.NLOC 21.0`, `AvgCCN 4.4`, `function_cnt 519`
-- `probe_station_gui/route/telegram_adapter.py`: `NLOC 297`, `Avg.NLOC 11.6`, `AvgCCN 2.8`, `function_cnt 23`
+- `main.py`: `NLOC 11118`, `Avg.NLOC 20.8`, `AvgCCN 4.4`, `function_cnt 516`
+- `probe_station_gui/route/telegram_adapter.py`: `NLOC 602`, `Avg.NLOC 17.9`, `AvgCCN 3.2`, `function_cnt 31`
 
 Relevant extracted/current cluster:
 
-- `route_start_telegram_text`: CCN `4`
+- `capture_route_photo`: CCN `6`
 - `route_finish_telegram_payload`: CCN `6`
-- `telegram_contact_photo_payload`: CCN `4`
 - `combine_telegram_contact_photos`: CCN `9`
-- `RouteTelegramPhotoState.store_contact_photo`: CCN `4`
-- `Main._maybe_send_requested_route_photo`: CCN `3`
-- `Main._capture_route_pre_contact_photo`: CCN `4`
-- `Main._capture_route_contact_photo`: CCN `4`
-- `Main._send_route_attention_alert`: CCN `6`
-- `Main._send_route_finish_telegram`: CCN `3`
+- `RouteTelegramPhotoState.record_route_photo`: CCN `5`
+- `RouteTelegramPhotoState.capture_pre_contact_photo`: CCN `4`
+- `RouteTelegramPhotoState.capture_contact_photo`: CCN `4`
+- `RouteTelegramPhotoState.send_route_attention_alert`: CCN `7`
+- `Main._capture_route_photo`: CCN `2`
+- `Main._record_route_photo`: CCN `2`
+- `Main._send_route_attention_alert`: CCN `2`
+- `Main._on_route_measurement_finished`: CCN `7`
 
 ### Radon CC
 
@@ -110,19 +136,18 @@ C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m radon cc -s m
 
 Relevant extracted/current cluster:
 
-- `combine_telegram_contact_photos`: `B (9)`
-- `_combined_route_contact_caption`: `B (7)`
+- `capture_route_photo`: `B (6)`
 - `route_finish_telegram_payload`: `B (6)`
-- `route_start_telegram_text`: `A (4)`
-- `telegram_contact_photo_payload`: `A (4)`
-- `RouteTelegramPhotoState.should_capture_contact_photo`: `A (4)`
-- `RouteTelegramPhotoState.store_contact_photo`: `A (4)`
-- `Main._route_telegram_adapter`: `A (5)`
-- `Main._capture_api_route_photo_artifact`: `A (5)`
-- `Main._maybe_send_requested_route_photo`: `A (3)`
-- `Main._telegram_contact_photo_payload`: `A (3)`
-- `Main._send_route_attention_alert`: `B (6)`
-- `Main._send_route_finish_telegram`: `A (3)`
+- `combine_telegram_contact_photos`: `B (9)`
+- `RouteTelegramPhotoState.send_route_attention_alert`: `B (7)`
+- `RouteTelegramPhotoState.record_route_photo`: `A (5)`
+- `RouteTelegramPhotoState.capture_pre_contact_photo`: `A (4)`
+- `RouteTelegramPhotoState.capture_contact_photo`: `A (4)`
+- `Main._capture_route_photo`: `A (2)`
+- `Main._record_route_photo`: `A (2)`
+- `Main._capture_route_pre_contact_photo`: `A (1)`
+- `Main._capture_route_contact_photo`: `A (1)`
+- `Main._send_route_attention_alert`: `A (2)`
 
 ### Radon MI
 
@@ -135,70 +160,59 @@ C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m radon mi -s m
 Result:
 
 - `main.py - C (0.00)`
-- `probe_station_gui/route/telegram_adapter.py - A (23.56)`
+- `probe_station_gui/route/telegram_adapter.py - B (13.41)`
 
-### Wily
+## Wily
 
-Commands required by the brief:
-
-```powershell
-C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -X utf8 -m wily -c $env:TEMP\probe_station_gui_wily_task23 build main.py probe_station_gui\route\telegram_adapter.py
-C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -X utf8 -m wily -c $env:TEMP\probe_station_gui_wily_task23 diff main.py probe_station_gui\route\telegram_adapter.py --detail -r 07a1152 --metrics cyclomatic.complexity,raw.loc,maintainability.mi --no-wrap
-```
-
-Status while workspace was dirty:
-
-- `wily build` refused with `Dirty repository, make sure you commit/stash files first`.
-- `wily diff` then could not locate the cache.
-
-Final Wily diff was collected after creating a clean commit and is recorded below.
-
-## Wily Diff From `07a1152`
-
-Successful clean-commit commands:
+Required commands:
 
 ```powershell
 C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -X utf8 -m wily -c $env:TEMP\probe_station_gui_wily_task23 build main.py probe_station_gui\route\telegram_adapter.py
 C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -X utf8 -m wily -c $env:TEMP\probe_station_gui_wily_task23 diff main.py probe_station_gui\route\telegram_adapter.py --detail -r 07a1152 --metrics cyclomatic.complexity,raw.loc,maintainability.mi --no-wrap
 ```
 
-Relevant results:
+Clean-commit results:
 
-- `main.py`: cyclomatic complexity `2331 -> 2298`
-- `main.py`: raw LOC `11978 -> 11909`
+- `main.py`: cyclomatic complexity `2331 -> 2271`
+- `main.py`: raw LOC `11978 -> 11740`
 - `main.py`: maintainability index `0 -> 0`
-- `probe_station_gui/route/telegram_adapter.py`: new file, cyclomatic complexity `67`, raw LOC `338`, maintainability index `23.562636850654737`
-- Extracted wrappers in `main.py` improved:
-  - `_send_route_attention_alert`: `7 -> 6`
-  - `_capture_api_route_photo_artifact`: `6 -> 5`
-  - `_capture_route_pre_contact_photo`: `6 -> 4`
-  - `_capture_route_contact_photo`: `11 -> 4`
-  - `_maybe_send_requested_route_photo`: `4 -> 3`
-  - `_telegram_contact_photo_payload`: `4 -> 3`
-  - `_send_route_finish_telegram`: `6 -> 3`
-  - `_matching_route_pre_contact_photo`: `4 -> 1`
-  - `_take_pending_telegram_contact_photos`: `3 -> 1`
-  - `_latest_route_contact_failure_telegram_photos`: `3 -> 1`
-  - `_combine_telegram_contact_photos`: `9 -> 1`
+- `probe_station_gui/route/telegram_adapter.py`: new file, cyclomatic complexity `102`, raw LOC `653`, maintainability index `13.405573580853957`
+
+Relevant per-function Wily changes:
+
+- `Main._capture_route_photo`: `7 -> 2`
+- `Main._record_route_photo`: `5 -> 2`
+- `Main._send_route_attention_alert`: `7 -> 2`
+- `Main._capture_route_pre_contact_photo`: `6 -> 1`
+- `Main._capture_route_contact_photo`: `11 -> 1`
+- `Main._matching_route_pre_contact_photo`: `4 -> 1`
+- `Main._take_pending_telegram_contact_photos`: `3 -> 1`
+- `Main._latest_route_contact_failure_telegram_photos`: `3 -> 1`
+- `Main._combine_telegram_contact_photos`: `9 -> 1`
+- `Main._telegram_contact_photo_payload`: `4 -> 3`
+- `Main._capture_api_route_photo_artifact`: `6 -> 5`
 
 Notes:
 
-- `wily build` emitted `No data collected` warnings for older revisions that did not contain the compared file set; the final diff still produced usable output for the target comparison.
+- this clean-commit Wily build indexed only the clean revisions needed for the final comparison in the temporary cache
+- one unrelated function moved slightly the other way: `Main._on_route_measurement_finished` changed `5 -> 7` after inlining the finish-payload send
 
 ## Behavior Check
 
-- Telegram bot service setup remained in `Main`: yes.
-- Camera frame acquisition remained in `Main`: yes.
-- Route Pause Request / Pause Ack / Interrupt semantics changed: no.
-- Route finish reused `route_finish_telegram_text(...)`: yes, via `route_finish_telegram_payload(...)`.
-- Requested route photo and contact comparison behavior preserved: yes, covered by focused tests and existing app tests.
+- Telegram bot service setup remained in `Main`: yes
+- Telegram transport remained in `Main`: yes
+- Camera frame acquisition ownership remained in `Main`: yes, through callbacks
+- route Pause Request / Pause Ack / Interrupt semantics changed: no
+- route finish still uses `route_finish_telegram_text(...)` through `route_finish_telegram_payload(...)`: yes
+- requested route photo behavior preserved: yes
+- contact comparison behavior preserved: yes
+- route attention de-duplication preserved: yes
 
 ## Self-Review
 
-- Scope stayed inside the assigned area.
-- The new module owns route Telegram request flags, contact-photo state, attention de-duplication, and Telegram text/photo composition.
-- `Main` keeps camera frame waiting/encoding, Telegram transport, and route-runner callback ownership.
-- A compatibility shim in `Main._route_telegram_adapter()` backfills legacy test-created state for `Main.__new__(Main)` fixtures without changing runtime behavior.
+- The new route module now owns the route-specific Telegram/photo state and most route-specific photo/caption behavior.
+- `Main` still owns only the camera-frame source, Telegram sending transport, and route-runner callback wiring.
+- The compatibility shim in `Main._route_telegram_adapter()` remains to support `Main.__new__(Main)` test fixtures without changing runtime behavior.
 
 ## Verdict
 
@@ -206,5 +220,5 @@ Notes:
 - tests passed: yes
 - metrics improved: yes
 - LOC gate passed: yes
-- maintainability improvement: route Telegram/photo state and formatting are now isolated in `probe_station_gui.route.telegram_adapter`, and the corresponding `main.py` block was reduced by more than the task minimum
-- new risk introduced: low; `Main._route_telegram_adapter()` intentionally bridges legacy attribute-based test fixtures to the new state object
+- maintainability improvement: the remaining route Telegram/photo wrappers in `Main` are now shallow, and the route-specific logic is concentrated in `probe_station_gui.route.telegram_adapter`
+- new risk introduced: low; the adapter now has a wider callback surface, and `Main._route_telegram_adapter()` still bridges legacy attribute-based fixtures
