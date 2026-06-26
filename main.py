@@ -214,8 +214,6 @@ from probe_station_gui.route.finish_flow import (
 )
 from probe_station_gui.route.shift import route_shift_from_stage_xy
 from probe_station_gui.route.formatting import (
-    csv_bool as _csv_bool,
-    csv_float as _csv_float,
     format_route_ohm as _format_route_ohm,
     format_route_percent as _format_route_percent,
 )
@@ -8399,7 +8397,7 @@ class Main(QMainWindow):
         route = getattr(getattr(self, "_design_session", None), "route", None)
         if route is None:
             return ""
-        return str(route.name)
+        return route.name
 
     def _run_route_measurement(self, runner: RouteMeasurementRunner) -> None:
         success, message = runner.run()

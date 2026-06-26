@@ -1132,6 +1132,48 @@ assert image.height() == 4
         self.assertEqual(rows[0]["focus_best_z_mm"], "10.0")
         self.assertEqual(rows[0]["focus_delta_um"], "20.0")
 
+    def test_record_route_photo_keeps_empty_route_name_when_route_name_is_none(
+        self,
+    ) -> None:
+        window = Main.__new__(Main)
+        window._design_session = types.SimpleNamespace(
+            route=types.SimpleNamespace(name=None)
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            photo_path = Path(tmpdir) / "photos" / "point-001.png"
+            record = RoutePhotoRecord(
+                timestamp="2026-05-29T12:00:00+03:00",
+                path=str(photo_path),
+                structure_number=1,
+                point_index=1,
+                point_id="p001",
+                label="P001",
+                design_center=(10.0, 20.0),
+                stage_xy=(1.0, 2.0),
+                focus={
+                    "objective_name": "X20",
+                    "focus_start_z_mm": 9.98,
+                    "focus_best_z_mm": 10.0,
+                    "focus_delta_um": 20.0,
+                    "focus_score": 12.5,
+                    "focus_sample_count": 7,
+                    "focus_edge_peak": False,
+                    "autofocus_range_mm": 0.03,
+                    "autofocus_fine_step_mm": 0.005,
+                    "autofocus_lower_z_mm": 9.95,
+                    "autofocus_upper_z_mm": 10.01,
+                },
+            )
+
+            Main._record_route_photo(window, record, 1, 3)
+
+            focus_map_path = photo_path.parent / "route-photo-focus-map.csv"
+            with focus_map_path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["route_name"], "")
+
     def test_route_points_keep_contact_xy_separate_from_photo_objective_xy(self) -> None:
         window = Main.__new__(Main)
         settings = Settings()

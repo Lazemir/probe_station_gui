@@ -45,3 +45,26 @@ Public API changed            no                no                              
 
 - Commit hash:
   - `6865800`
+
+## Task 16 Follow-up Fix
+
+- Files changed:
+  - `main.py`
+  - `tests/app/test_main_coordinate_feedrate.py`
+  - `.superpowers/sdd/task-16-report.md`
+
+- Fix summary:
+  - Restored `Main._current_route_name()` to the pre-regression adapter contract: no route returns `""`, existing route returns `route.name` unchanged.
+  - Added a Main-level regression test that sets `self._design_session.route.name = None` and verifies `Main._record_route_photo()` writes an empty `route_name` CSV field instead of the string `"None"`.
+  - Removed the unused `_csv_float` and `_csv_bool` imports from `main.py`.
+
+- Tests run:
+  - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\app\test_main_coordinate_feedrate.py -k "record_route_photo_writes_focus_map_csv or record_route_contact_height_writes_height_map_csv or route_name"`
+    - PASS: `3 passed, 98 deselected`
+  - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\route\test_artifact_rows.py tests\app\test_main_coordinate_feedrate.py`
+    - PASS: `104 passed`
+  - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m ruff check --ignore E402,F401 .`
+    - PASS: `All checks passed!`
+
+- Commit hash:
+  - `FINAL_COMMIT_HASH`
