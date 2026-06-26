@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Iterable
 
 
 @dataclass(frozen=True)
@@ -72,6 +72,7 @@ def stage_position_display_plan(
     position: object | None,
     *,
     axis_names: tuple[str, ...] | list[str],
+    available_axes: Iterable[object] | None = None,
     homed_axes: set[str] | frozenset[str],
     limit_axes: set[str] | frozenset[str],
     pending_targets: dict[str, tuple[float, float]],
@@ -79,65 +80,35 @@ def stage_position_display_plan(
     feedrate_mm_min: float,
 ) -> StagePositionDisplayPlan:
     if not isinstance(position, tuple) or len(position) < 2:
-        return StagePositionDisplayPlan(
-            valid=False,
-            homed_axes=frozenset(),
-            axis_updates=(),
-            missing_axes=(),
-            reset_all=True,
-            fields_available=False,
-        )
+        return _invalid_stage_position_display_plan()
 
-    normalized_homed_axes = frozenset(str(axis) for axis in homed_axes)
-    normalized_limit_axes = frozenset(str(axis) for axis in limit_axes)
-    axis_updates: list[AxisFieldPresentation] = []
-    missing_axes: list[str] = []
-
-    for axis_name, axis_value in zip(tuple(axis_names), position):
-        try:
-            raw_value = float(axis_value)
-        except (TypeError, ValueError):
-            missing_axes.append(axis_name)
-            continue
-        display_value = float(display_axis_value(axis_name, raw_value))
-        if axis_name in normalized_homed_axes:
-            background = "#1565c0"
-            foreground = "#f5f5f5"
-        else:
-            background = "#f0b429"
-            foreground = "#1f1f1f"
-        if axis_name in normalized_limit_axes:
-            background = "#c62828"
-            foreground = "#ffffff"
-        pending_target = pending_targets.get(axis_name)
-        visible_value = (
-            float(pending_target[1]) if pending_target is not None else display_value
-        )
-        axis_updates.append(
-            AxisFieldPresentation(
-                axis=axis_name,
-                raw_value=raw_value,
-                display_value=display_value,
-                visible_value=visible_value,
-                base_background=background,
-                base_foreground=foreground,
-                tooltip=(
-                    f"{axis_name} coordinate. Enter targets and press Apply. "
-                    f"Move feedrate: {float(feedrate_mm_min):.1f} mm/min."
-                ),
-            )
-        )
-
+    normalized_axis_names = _normalized_axis_names(axis_names)
+    normalized_homed_axes = _normalized_axes(homed_axes)
+    normalized_limit_axes = _normalized_axes(limit_axes)
+    display_axis_names = _available_axis_names(
+        normalized_axis_names,
+        available_axes,
+    )
+    axis_updates, invalid_axes = _build_axis_updates(
+        display_axis_names,
+        position,
+        homed_axes=normalized_homed_axes,
+        limit_axes=normalized_limit_axes,
+        pending_targets=pending_targets,
+        display_axis_value=display_axis_value,
+        feedrate_mm_min=feedrate_mm_min,
+    )
     updated_axes = {item.axis for item in axis_updates}
-    for axis_name in tuple(axis_names):
-        if axis_name not in updated_axes and axis_name not in missing_axes:
-            missing_axes.append(axis_name)
 
     return StagePositionDisplayPlan(
         valid=True,
         homed_axes=normalized_homed_axes,
         axis_updates=tuple(axis_updates),
-        missing_axes=tuple(missing_axes),
+        missing_axes=_missing_axis_names(
+            display_axis_names,
+            invalid_axes,
+            updated_axes,
+        ),
         reset_all=False,
         fields_available=bool(axis_updates),
     )
@@ -356,3 +327,143 @@ def _coerce_position_tuple(position: object | None) -> tuple[float, ...] | None:
         return tuple(float(value) for value in position)
     except (TypeError, ValueError):
         return None
+
+
+def _invalid_stage_position_display_plan() -> StagePositionDisplayPlan:
+    return StagePositionDisplayPlan(
+        valid=False,
+        homed_axes=frozenset(),
+        axis_updates=(),
+        missing_axes=(),
+        reset_all=True,
+        fields_available=False,
+    )
+
+
+def _normalized_axis_names(axis_names: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+    return tuple(str(axis) for axis in axis_names)
+
+
+def _normalized_axes(axes: Iterable[object] | None) -> frozenset[str]:
+    if axes is None:
+        return frozenset()
+    if isinstance(axes, str):
+        return frozenset({axes})
+    return frozenset(str(axis) for axis in axes)
+
+
+def _available_axis_names(
+    axis_names: tuple[str, ...],
+    available_axes: Iterable[object] | None,
+) -> tuple[str, ...]:
+    if available_axes is None:
+        return axis_names
+    visible_axes = _normalized_axes(available_axes)
+    return tuple(axis for axis in axis_names if axis in visible_axes)
+
+
+def _build_axis_updates(
+    axis_names: tuple[str, ...],
+    position: tuple[float, ...],
+    *,
+    homed_axes: frozenset[str],
+    limit_axes: frozenset[str],
+    pending_targets: dict[str, tuple[float, float]],
+    display_axis_value: Callable[[str, float], float],
+    feedrate_mm_min: float,
+) -> tuple[tuple[AxisFieldPresentation, ...], tuple[str, ...]]:
+    axis_updates: list[AxisFieldPresentation] = []
+    invalid_axes: list[str] = []
+    for axis_name, axis_value in zip(axis_names, position):
+        axis_update = _axis_field_presentation(
+            axis_name,
+            axis_value,
+            homed_axes=homed_axes,
+            limit_axes=limit_axes,
+            pending_targets=pending_targets,
+            display_axis_value=display_axis_value,
+            feedrate_mm_min=feedrate_mm_min,
+        )
+        if axis_update is None:
+            invalid_axes.append(axis_name)
+            continue
+        axis_updates.append(axis_update)
+    return tuple(axis_updates), tuple(invalid_axes)
+
+
+def _axis_field_presentation(
+    axis_name: str,
+    axis_value: object,
+    *,
+    homed_axes: frozenset[str],
+    limit_axes: frozenset[str],
+    pending_targets: dict[str, tuple[float, float]],
+    display_axis_value: Callable[[str, float], float],
+    feedrate_mm_min: float,
+) -> AxisFieldPresentation | None:
+    try:
+        raw_value = float(axis_value)
+    except (TypeError, ValueError):
+        return None
+    display_value = float(display_axis_value(axis_name, raw_value))
+    background, foreground = _axis_base_style(
+        axis_name,
+        homed_axes=homed_axes,
+        limit_axes=limit_axes,
+    )
+    return AxisFieldPresentation(
+        axis=axis_name,
+        raw_value=raw_value,
+        display_value=display_value,
+        visible_value=_visible_axis_value(
+            axis_name,
+            display_value,
+            pending_targets,
+        ),
+        base_background=background,
+        base_foreground=foreground,
+        tooltip=_axis_tooltip(axis_name, feedrate_mm_min),
+    )
+
+
+def _axis_base_style(
+    axis_name: str,
+    *,
+    homed_axes: frozenset[str],
+    limit_axes: frozenset[str],
+) -> tuple[str, str]:
+    if axis_name in limit_axes:
+        return "#c62828", "#ffffff"
+    if axis_name in homed_axes:
+        return "#1565c0", "#f5f5f5"
+    return "#f0b429", "#1f1f1f"
+
+
+def _visible_axis_value(
+    axis_name: str,
+    display_value: float,
+    pending_targets: dict[str, tuple[float, float]],
+) -> float:
+    pending_target = pending_targets.get(axis_name)
+    if pending_target is None:
+        return display_value
+    return float(pending_target[1])
+
+
+def _axis_tooltip(axis_name: str, feedrate_mm_min: float) -> str:
+    return (
+        f"{axis_name} coordinate. Enter targets and press Apply. "
+        f"Move feedrate: {float(feedrate_mm_min):.1f} mm/min."
+    )
+
+
+def _missing_axis_names(
+    axis_names: tuple[str, ...],
+    invalid_axes: tuple[str, ...],
+    updated_axes: set[str],
+) -> tuple[str, ...]:
+    seen_axes = set(updated_axes)
+    seen_axes.update(invalid_axes)
+    missing_axes = list(invalid_axes)
+    missing_axes.extend(axis for axis in axis_names if axis not in seen_axes)
+    return tuple(missing_axes)

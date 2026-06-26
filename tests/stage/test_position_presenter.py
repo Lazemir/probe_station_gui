@@ -113,6 +113,23 @@ def test_invalid_axis_value_is_skipped_and_marked_missing() -> None:
     assert plan.fields_available is True
 
 
+def test_display_plan_ignores_axes_without_fields() -> None:
+    plan = stage_position_display_plan(
+        (1.0, 2.0, 3.0),
+        axis_names=("X", "Y", "Z"),
+        available_axes={"X", "Y"},
+        homed_axes={"X", "Y", "Z"},
+        limit_axes=set(),
+        pending_targets={},
+        display_axis_value=_display_axis_value,
+        feedrate_mm_min=120.0,
+    )
+
+    assert [item.axis for item in plan.axis_updates] == ["X", "Y"]
+    assert plan.missing_axes == ()
+    assert plan.fields_available is True
+
+
 def test_display_plan_with_no_updated_axes_disables_fields() -> None:
     plan = stage_position_display_plan(
         ("bad", object()),

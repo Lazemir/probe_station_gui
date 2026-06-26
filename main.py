@@ -8495,6 +8495,7 @@ class Main(QMainWindow):
         plan = stage_position_display_plan(
             position,
             axis_names=self.STAGE_AXIS_NAMES,
+            available_axes=self._stage_axis_fields,
             homed_axes=self.stage_controller.homed_axes()
             if isinstance(position, tuple) and len(position) >= 2
             else set(),
@@ -8517,9 +8518,7 @@ class Main(QMainWindow):
         self._updating_stage_position_fields = True
         try:
             for axis_plan in plan.axis_updates:
-                field = self._stage_axis_fields.get(axis_plan.axis)
-                if field is None:
-                    continue
+                field = self._stage_axis_fields[axis_plan.axis]
                 self._stage_axis_raw_values[axis_plan.axis] = axis_plan.raw_value
                 if axis_plan.axis not in plan.homed_axes:
                     self._stage_unhomed_display_origins.setdefault(
@@ -8542,9 +8541,7 @@ class Main(QMainWindow):
                 self._apply_stage_axis_field_style(axis_plan.axis, field)
                 field.blockSignals(False)
             for axis_name in plan.missing_axes:
-                field = self._stage_axis_fields.get(axis_name)
-                if field is None:
-                    continue
+                field = self._stage_axis_fields[axis_name]
                 self._stage_axis_base_styles.pop(axis_name, None)
                 self._pending_stage_axis_targets.pop(axis_name, None)
                 field.blockSignals(True)
