@@ -2828,8 +2828,9 @@ assert image.height() == 4
         window._route_measurement_current_point = None
         window._api_route_control_active = True
         window._api_route_control_paused = False
-        window._show_route_measurement_status = (
-            lambda message, _timeout_ms=None: statuses.append(str(message))
+        window._show_status = lambda message, _timeout_ms=0: statuses.append(str(message))
+        window._route_runtime_presenter = lambda: types.SimpleNamespace(
+            set_status=lambda _message: None
         )
 
         Main._save_route_measurement_shift(window)
