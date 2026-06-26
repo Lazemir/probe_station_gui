@@ -4,7 +4,12 @@ import math
 from dataclasses import dataclass
 from typing import Callable
 
-from probe_station_gui.route.api_measurement import api_contact_number_from_payload
+from probe_station_gui.route.api_measurement import (
+    api_contact_context_response,
+    api_contact_number_from_payload,
+)
+from probe_station_gui.route.measurement import RouteMeasurementPoint
+from probe_station_gui.route.operation import find_route_contact_point
 from probe_station_gui.route.payload_parsing import payload_bool, payload_float
 
 
@@ -68,7 +73,7 @@ def api_move_to_contact_request(
             default=0.2,
             minimum=0.0,
         ),
-        needle_feedrate_mm_min=_needle_feedrate_from_payload(
+        needle_feedrate_mm_min=api_needle_feedrate_from_payload(
             payload,
             default_needle_feedrate=default_needle_feedrate,
             min_feedrate=min_feedrate,
@@ -164,7 +169,7 @@ def api_contact_needles_request(
     return ApiContactNeedlesRequest(
         contact_number=contact_number,
         action=action,
-        needle_feedrate_mm_min=_needle_feedrate_from_payload(
+        needle_feedrate_mm_min=api_needle_feedrate_from_payload(
             payload,
             default_needle_feedrate=default_needle_feedrate,
             min_feedrate=min_feedrate,
@@ -223,6 +228,83 @@ def api_contact_needles_stage_error_response(
     }
 
 
+def api_contact_context(
+    contact_number: int,
+    *,
+    serial_available: bool,
+    route: object | None,
+    registration: object | None,
+    points_factory: Callable[[object], list[RouteMeasurementPoint]],
+    route_offset_xy: tuple[float, float],
+    structure_number_for_point: Callable[[RouteMeasurementPoint], int],
+) -> dict[str, object]:
+    return api_contact_context_response(
+        contact_number,
+        serial_available=serial_available,
+        route=route,
+        registration=registration,
+        points_factory=points_factory,
+        point_finder=lambda points, selected_contact_number: find_route_contact_point(
+            points,
+            selected_contact_number,
+            structure_number_for_point=structure_number_for_point,
+        ),
+        route_offset_xy=route_offset_xy,
+        adjusted_stage_xy=lambda point: api_route_adjusted_stage_xy(
+            point,
+            route_offset_xy=route_offset_xy,
+        ),
+        structure_number_for_point=structure_number_for_point,
+    )
+
+
+def api_route_adjusted_stage_xy(
+    point: RouteMeasurementPoint,
+    *,
+    route_offset_xy: tuple[float, float],
+) -> tuple[float, float]:
+    return (
+        float(point.stage_xy[0]) + float(route_offset_xy[0]),
+        float(point.stage_xy[1]) + float(route_offset_xy[1]),
+    )
+
+
+def api_route_point_payload(
+    *,
+    route_index: int,
+    route_point: object,
+    include_stage_xy: bool,
+    resolve_stage_xy: Callable[[tuple[float, float]], tuple[float, float] | None],
+    structure_number_for_route_point: Callable[[int, object], int],
+) -> dict[str, object]:
+    design_center = tuple(getattr(route_point, "camera_center", (0.0, 0.0)))
+    stage_xy = None
+    if include_stage_xy:
+        try:
+            resolved = resolve_stage_xy(
+                (float(design_center[0]), float(design_center[1]))
+            )
+        except (TypeError, ValueError, IndexError):
+            resolved = None
+        if resolved is not None:
+            stage_xy = {"x_mm": float(resolved[0]), "y_mm": float(resolved[1])}
+    return {
+        "contact_number": int(route_index),
+        "structure_number": structure_number_for_route_point(
+            route_index,
+            route_point,
+        ),
+        "point_id": str(getattr(route_point, "id", "")),
+        "label": str(getattr(route_point, "label", "")),
+        "enabled": bool(getattr(route_point, "enabled", True)),
+        "design_center": {
+            "x": float(design_center[0]),
+            "y": float(design_center[1]),
+        },
+        "stage_xy": stage_xy,
+    }
+
+
 def _missing_contact_number_response() -> dict[str, object]:
     return {
         "accepted": False,
@@ -242,7 +324,7 @@ def _normalize_needle_action(payload: dict[str, object]) -> str | None:
     return None
 
 
-def _needle_feedrate_from_payload(
+def api_needle_feedrate_from_payload(
     payload: dict[str, object],
     *,
     default_needle_feedrate: float | None,
@@ -265,6 +347,8 @@ __all__ = [
     "ApiContactNeedlesRequest",
     "ApiMoveToContactPlan",
     "ApiMoveToContactRequest",
+    "api_contact_context",
+    "api_needle_feedrate_from_payload",
     "api_contact_needles_plan",
     "api_contact_needles_request",
     "api_contact_needles_stage_error_response",
@@ -273,4 +357,6 @@ __all__ = [
     "api_move_to_contact_request",
     "api_move_to_contact_stage_error_response",
     "api_move_to_contact_success_response",
+    "api_route_adjusted_stage_xy",
+    "api_route_point_payload",
 ]

@@ -32,6 +32,7 @@ def _restore_real_imports_for_main() -> None:
 _restore_real_imports_for_main()
 import main as main_module
 from main import Main
+from probe_station_gui.design.contact_navigation import api_route_adjusted_stage_xy
 from probe_station_gui.dialogs import (
     route_measurement_dialog as route_measurement_dialog_module,
 )
@@ -3112,7 +3113,7 @@ assert image.height() == 4
 
         self.assertEqual(window._api_route_offset_xy, (0.5, -0.25))
         self.assertEqual(
-            Main._api_route_adjusted_stage_xy(window, point),
+            api_route_adjusted_stage_xy(point, route_offset_xy=window._api_route_offset_xy),
             (1.75, 2.25),
         )
         self.assertEqual(

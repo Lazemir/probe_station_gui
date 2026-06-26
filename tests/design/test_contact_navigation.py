@@ -1,3 +1,5 @@
+import types
+
 import pytest
 
 from probe_station_gui.design.contact_navigation import (
@@ -5,6 +7,8 @@ from probe_station_gui.design.contact_navigation import (
     ApiContactNeedlesRequest,
     ApiMoveToContactPlan,
     ApiMoveToContactRequest,
+    api_contact_context,
+    api_needle_feedrate_from_payload,
     api_contact_needles_plan,
     api_contact_needles_request,
     api_contact_needles_stage_error_response,
@@ -13,6 +17,8 @@ from probe_station_gui.design.contact_navigation import (
     api_move_to_contact_request,
     api_move_to_contact_stage_error_response,
     api_move_to_contact_success_response,
+    api_route_adjusted_stage_xy,
+    api_route_point_payload,
 )
 
 
@@ -313,3 +319,101 @@ def test_contact_needles_plan_success_and_error_helpers() -> None:
         "message": "Limit switch active.",
         "contact": contact,
     }
+
+
+def test_route_adjusted_stage_xy_and_route_point_payload_helpers() -> None:
+    route_point = types.SimpleNamespace(
+        id="p007",
+        label="Pad 107",
+        enabled=True,
+        camera_center=(10.0, 20.0),
+    )
+
+    assert api_route_adjusted_stage_xy(
+        types.SimpleNamespace(stage_xy=(1.25, 2.5)),
+        route_offset_xy=(0.5, -0.25),
+    ) == (1.75, 2.25)
+    assert api_route_point_payload(
+        route_index=7,
+        route_point=route_point,
+        include_stage_xy=True,
+        resolve_stage_xy=lambda _design_xy: (1.0, 2.0),
+        structure_number_for_route_point=lambda route_index, _route_point: route_index + 100,
+    ) == {
+        "contact_number": 7,
+        "structure_number": 107,
+        "point_id": "p007",
+        "label": "Pad 107",
+        "enabled": True,
+        "design_center": {"x": 10.0, "y": 20.0},
+        "stage_xy": {"x_mm": 1.0, "y_mm": 2.0},
+    }
+
+
+def test_route_point_payload_handles_unresolvable_stage_xy() -> None:
+    route_point = types.SimpleNamespace(camera_center=(10.0, 20.0))
+
+    payload = api_route_point_payload(
+        route_index=7,
+        route_point=route_point,
+        include_stage_xy=True,
+        resolve_stage_xy=lambda _design_xy: (_ for _ in ()).throw(ValueError("bad")),
+        structure_number_for_route_point=lambda route_index, _route_point: route_index,
+    )
+
+    assert payload["stage_xy"] is None
+
+
+def test_contact_context_builds_contact_payload_from_route_state() -> None:
+    point = types.SimpleNamespace(
+        index=7,
+        point_id="p007",
+        label="Pad 107",
+        design_center=(10.0, 20.0),
+        stage_xy=(1.25, 2.5),
+        needle_1_design=(11.0, 21.0),
+        needle_2_design=(9.0, 19.0),
+    )
+
+    result = api_contact_context(
+        7,
+        serial_available=True,
+        route=types.SimpleNamespace(points=[object()]),
+        registration=types.SimpleNamespace(valid=True),
+        points_factory=lambda _route: [point],
+        route_offset_xy=(0.5, -0.25),
+        structure_number_for_point=lambda selected_point: selected_point.index + 100,
+    )
+
+    assert result == {
+        "accepted": True,
+        "point": point,
+        "contact": {
+            "contact_number": 7,
+            "route_index": 7,
+            "structure_number": 107,
+            "point_id": "p007",
+            "label": "Pad 107",
+            "design_center": {"x": 10.0, "y": 20.0},
+            "stage_xy": {"x_mm": 1.25, "y_mm": 2.5},
+            "route_offset_xy": {"dx_mm": 0.5, "dy_mm": -0.25},
+            "adjusted_stage_xy": {"x_mm": 1.75, "y_mm": 2.25},
+            "needle_contacts": [
+                {"needle": 1, "design": {"x": 11.0, "y": 21.0}},
+                {"needle": 2, "design": {"x": 9.0, "y": 19.0}},
+            ],
+        },
+    }
+
+
+def test_public_needle_feedrate_helper_applies_default_and_minimum() -> None:
+    assert api_needle_feedrate_from_payload(
+        {},
+        default_needle_feedrate=33.0,
+        min_feedrate=8.0,
+    ) == pytest.approx(33.0)
+    assert api_needle_feedrate_from_payload(
+        {"feedrate": 3.0},
+        default_needle_feedrate=33.0,
+        min_feedrate=8.0,
+    ) == pytest.approx(8.0)

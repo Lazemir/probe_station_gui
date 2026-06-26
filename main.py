@@ -110,12 +110,15 @@ from probe_station_gui import (
 )
 from probe_station_gui.design.model import DesignDocument, DesignModelError
 from probe_station_gui.design.contact_navigation import (
+    api_contact_context,
     api_contact_needles_plan,
     api_contact_needles_stage_error_response,
     api_contact_needles_success_response,
     api_move_to_contact_plan,
     api_move_to_contact_stage_error_response,
     api_move_to_contact_success_response,
+    api_route_adjusted_stage_xy,
+    api_route_point_payload,
 )
 from probe_station_gui.design.session import AlignmentPreparation, DesignSession
 from probe_station_gui.shared.diagnostics import configure_crash_diagnostics
@@ -187,7 +190,6 @@ from probe_station_gui.route.control_operation import (
 )
 from probe_station_gui.route.operation import (
     RouteMeasurementStartPlan,
-    find_route_contact_point,
     route_measurement_points_for_route,
     route_measurement_start_decision,
 )
@@ -230,16 +232,15 @@ from probe_station_gui.route.api_artifacts import (
 )
 from probe_station_gui.route.api_window_guard import probe_route_api_requires_window
 from probe_station_gui.route.api_measurement import (
-    api_contact_context_response,
     api_contact_number_from_payload,
     api_current_contact_error_response,
     api_current_contact_failure_alert,
     api_current_contact_response,
     api_current_contact_settings_from_payload,
 )
+from probe_station_gui.route.payload_parsing import payload_float, payload_optional_float
 from probe_station_gui.route.meter_config import (
     route_meter_configuration_from_payload,
-    route_meter_type_from_payload,
 )
 from probe_station_gui.route.measurement_settings import RouteMeasurementSettingsStore
 from probe_station_gui.route.session_start import (
@@ -1553,10 +1554,12 @@ class Main(QMainWindow):
             and self._design_session.registration.valid
         )
         contacts = [
-            self._api_route_point_payload(
+            api_route_point_payload(
                 route_index=index,
                 route_point=route_point,
                 include_stage_xy=registration_valid,
+                resolve_stage_xy=self._raw_stage_xy_from_design_xy,
+                structure_number_for_route_point=self._api_structure_number_for_route_point,
             )
             for index, route_point in enumerate(route.points, start=1)
         ]
@@ -1661,7 +1664,7 @@ class Main(QMainWindow):
 
     def _api_stage_local_focus(self, payload: dict[str, Any]) -> dict[str, Any]:
         try:
-            focus_range_mm = self._api_float(
+            focus_range_mm = payload_float(
                 payload,
                 "range_mm",
                 "focus_range_mm",
@@ -1669,7 +1672,7 @@ class Main(QMainWindow):
                 default=0.03,
                 minimum=0.001,
             )
-            focus_step_mm = self._api_optional_float(
+            focus_step_mm = payload_optional_float(
                 payload,
                 "step_mm",
                 "focus_step_mm",
@@ -1724,7 +1727,7 @@ class Main(QMainWindow):
         }
 
     def _api_route_contact_focus(self, payload: dict[str, Any]) -> dict[str, Any]:
-        contact_number = self._api_contact_number(payload)
+        contact_number = api_contact_number_from_payload(payload)
         if contact_number is None:
             return {
                 "accepted": False,
@@ -1736,7 +1739,7 @@ class Main(QMainWindow):
             return context_result
         contact = context_result["contact"]
         try:
-            focus_range_mm = self._api_float(
+            focus_range_mm = payload_float(
                 payload,
                 "range_mm",
                 "focus_range_mm",
@@ -1744,7 +1747,7 @@ class Main(QMainWindow):
                 default=0.03,
                 minimum=0.001,
             )
-            focus_step_mm = self._api_optional_float(
+            focus_step_mm = payload_optional_float(
                 payload,
                 "step_mm",
                 "focus_step_mm",
@@ -1803,7 +1806,7 @@ class Main(QMainWindow):
         }
 
     def _api_route_contact_photo(self, payload: dict[str, Any]) -> dict[str, Any]:
-        contact_number = self._api_contact_number(payload)
+        contact_number = api_contact_number_from_payload(payload)
         if contact_number is None:
             return {
                 "accepted": False,
@@ -2765,17 +2768,15 @@ class Main(QMainWindow):
         )
 
     def _api_contact_context(self, contact_number: int) -> dict[str, Any]:
-        return api_contact_context_response(
-            contact_number,
+        return api_contact_context(
+            int(contact_number),
             serial_available=bool(
                 self.serial_connection is not None and self.serial_connection.is_open
             ),
             route=self._design_session.route,
             registration=self._design_session.registration,
             points_factory=self._route_measurement_points,
-            point_finder=self._api_find_contact_point,
             route_offset_xy=getattr(self, "_api_route_offset_xy", (0.0, 0.0)),
-            adjusted_stage_xy=self._api_route_adjusted_stage_xy,
             structure_number_for_point=self._api_structure_number_for_measurement_point,
         )
 
@@ -2783,60 +2784,10 @@ class Main(QMainWindow):
         self,
         point: RouteMeasurementPoint,
     ) -> tuple[float, float]:
-        offset_x, offset_y = getattr(
-            self,
-            "_api_route_offset_xy",
-            (0.0, 0.0),
+        return api_route_adjusted_stage_xy(
+            point,
+            route_offset_xy=getattr(self, "_api_route_offset_xy", (0.0, 0.0)),
         )
-        return (
-            float(point.stage_xy[0]) + float(offset_x),
-            float(point.stage_xy[1]) + float(offset_y),
-        )
-
-    def _api_find_contact_point(
-        self,
-        points: list[RouteMeasurementPoint],
-        contact_number: int,
-    ) -> RouteMeasurementPoint | None:
-        return find_route_contact_point(
-            points,
-            contact_number,
-            structure_number_for_point=self._api_structure_number_for_measurement_point,
-        )
-
-    def _api_route_point_payload(
-        self,
-        *,
-        route_index: int,
-        route_point: object,
-        include_stage_xy: bool,
-    ) -> dict[str, Any]:
-        design_center = tuple(getattr(route_point, "camera_center", (0.0, 0.0)))
-        stage_xy = None
-        if include_stage_xy:
-            try:
-                resolved = self._raw_stage_xy_from_design_xy(
-                    (float(design_center[0]), float(design_center[1]))
-                )
-            except (TypeError, ValueError, IndexError):
-                resolved = None
-            if resolved is not None:
-                stage_xy = {"x_mm": float(resolved[0]), "y_mm": float(resolved[1])}
-        return {
-            "contact_number": int(route_index),
-            "structure_number": self._api_structure_number_for_route_point(
-                route_index,
-                route_point,
-            ),
-            "point_id": str(getattr(route_point, "id", "")),
-            "label": str(getattr(route_point, "label", "")),
-            "enabled": bool(getattr(route_point, "enabled", True)),
-            "design_center": {
-                "x": float(design_center[0]),
-                "y": float(design_center[1]),
-            },
-            "stage_xy": stage_xy,
-        }
 
     def _api_route_meter_configuration(
         self,
@@ -2857,107 +2808,15 @@ class Main(QMainWindow):
             default_gwinstek_resource_name=gwinstek_resource_name,
         )
 
-    def _api_meter_type(self, value: object) -> str | None:
-        return route_meter_type_from_payload(value)
-
-    def _api_contact_number(
-        self,
-        payload: dict[str, Any],
-        *,
-        required: bool = True,
-    ) -> int | None:
-        _ = required
-        return api_contact_number_from_payload(payload)
-
     def _api_needle_feedrate(self, payload: dict[str, Any]) -> float | None:
         for key in ("needle_feedrate_mm_min", "feedrate_mm_min", "feedrate"):
             if key not in payload or payload.get(key) is None:
                 continue
-            value = self._api_float(payload, key, default=math.nan, minimum=0.0)
+            value = payload_float(payload, key, default=math.nan, minimum=0.0)
             return max(self.MIN_FEEDRATE_MM_MIN, value)
         return float(
             self.settings_manager.needle_calibration_configuration().feedrate_mm_min
         )
-
-    @staticmethod
-    def _api_bool(
-        payload: dict[str, Any],
-        *keys: str,
-        default: bool,
-    ) -> bool:
-        for key in keys:
-            if key not in payload:
-                continue
-            value = payload.get(key)
-            if isinstance(value, bool):
-                return value
-            if isinstance(value, (int, float)):
-                return bool(value)
-            if isinstance(value, str):
-                text = value.strip().lower()
-                if text in {"1", "true", "yes", "y", "on"}:
-                    return True
-                if text in {"0", "false", "no", "n", "off"}:
-                    return False
-        return default
-
-    @staticmethod
-    def _api_float(
-        payload: dict[str, Any],
-        *keys: str,
-        default: float,
-        minimum: float | None = None,
-    ) -> float:
-        value: object = default
-        for key in keys:
-            if key in payload and payload.get(key) is not None:
-                value = payload.get(key)
-                break
-        try:
-            parsed = float(value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"Invalid numeric value for {keys[0]}.") from exc
-        if not math.isfinite(parsed):
-            raise ValueError(f"Invalid numeric value for {keys[0]}.")
-        if minimum is not None and parsed < minimum:
-            raise ValueError(f"{keys[0]} must be at least {minimum}.")
-        return parsed
-
-    @staticmethod
-    def _api_optional_float(
-        payload: dict[str, Any],
-        *keys: str,
-        minimum: float | None = None,
-    ) -> float | None:
-        for key in keys:
-            if key in payload and payload.get(key) is not None:
-                return Main._api_float(
-                    payload,
-                    key,
-                    default=0.0,
-                    minimum=minimum,
-                )
-        return None
-
-    @staticmethod
-    def _api_int(
-        payload: dict[str, Any],
-        *keys: str,
-        default: int,
-        minimum: int | None = None,
-    ) -> int:
-        value: object = default
-        for key in keys:
-            if key in payload and payload.get(key) is not None:
-                value = payload.get(key)
-                break
-        try:
-            parsed = int(round(float(value)))
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"Invalid integer value for {keys[0]}.") from exc
-        if minimum is not None and parsed < minimum:
-            raise ValueError(f"{keys[0]} must be at least {minimum}.")
-        return parsed
 
     @staticmethod
     def _api_structure_number_for_measurement_point(
