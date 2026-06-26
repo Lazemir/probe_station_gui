@@ -129,6 +129,11 @@ from probe_station_gui.instruments.meters.lcr import (
     ROUTE_METER_KEITHLEY,  # noqa: F401 - re-exported for legacy callers/tests
     RouteMeterConfiguration,
 )
+from probe_station_gui.stage.api_moves import (
+    api_axis_value_map, api_coordinate_move_busy_response, api_coordinate_move_plan,
+    api_coordinate_move_start_failed_response, api_coordinate_move_success_response,
+    api_move_feedrate, normalize_api_coordinate_input_mode,
+)
 from probe_station_gui.stage.motion_prediction import interpolate_position, motion_progress
 from probe_station_gui.shared.wheel_guard import GuardedComboBox as QComboBox
 from probe_station_gui.stage.controller import StageControllerError
@@ -1403,169 +1408,36 @@ class Main(QMainWindow):
             "message": f"Unsupported API action: {action}",
         }
 
-    def _api_move_to_coordinates(
-        self,
-        targets: object,
-        *,
-        mode: object = "G90",
-        feedrate: object = None,
-    ) -> dict[str, Any]:
-        if not isinstance(targets, dict):
-            return {
-                "accepted": False,
-                "status_code": 400,
-                "message": "Coordinate targets must be an object.",
-            }
-        input_mode = self._normalize_coordinate_input_mode(mode)
-        if input_mode is None:
-            return {
-                "accepted": False,
-                "status_code": 400,
-                "message": f"Unsupported coordinate mode: {mode}.",
-            }
-        move_feedrate = self._api_move_feedrate(feedrate)
-        if move_feedrate is None:
-            return {
-                "accepted": False,
-                "status_code": 400,
-                "message": f"Invalid feedrate: {feedrate}.",
-            }
-
-        parsed_targets: dict[str, tuple[float, float]] = {}
-        invalid_axes: list[str] = []
-        invalid_values: list[str] = []
-        unavailable_axes: list[str] = []
-        limit_errors: list[str] = []
-        for raw_axis, raw_value in targets.items():
-            axis = str(raw_axis).strip().upper()
-            if axis not in self.STAGE_AXIS_NAMES:
-                invalid_axes.append(str(raw_axis))
-                continue
-            try:
-                display_target = float(raw_value)
-            except (TypeError, ValueError):
-                invalid_values.append(axis)
-                continue
-            if not math.isfinite(display_target):
-                invalid_values.append(axis)
-                continue
-            raw_target, resolved_display_target = self._resolve_stage_axis_target(
-                axis,
-                display_target,
-                input_mode,
-            )
-            if raw_target is None:
-                unavailable_axes.append(axis)
-                continue
-            limit_error = self._stage_axis_target_limit_error(
-                axis,
-                resolved_display_target,
-            )
-            if limit_error is not None:
-                limit_errors.append(limit_error)
-                continue
-            parsed_targets[axis] = (
-                float(raw_target),
-                float(resolved_display_target),
-            )
-
-        if invalid_axes:
-            return {
-                "accepted": False,
-                "status_code": 400,
-                "message": f"Unsupported axes: {', '.join(invalid_axes)}.",
-            }
-        if invalid_values:
-            return {
-                "accepted": False,
-                "status_code": 400,
-                "message": f"Invalid coordinate values for: {', '.join(invalid_values)}.",
-            }
-        if unavailable_axes:
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": (
-                    "Coordinates are unavailable in the GUI for: "
-                    f"{', '.join(unavailable_axes)}."
-                ),
-            }
-        if limit_errors:
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": " ".join(limit_errors),
-            }
-        ordered_targets = [
-            (axis, *parsed_targets[axis])
-            for axis in self.STAGE_AXIS_NAMES
-            if axis in parsed_targets
-        ]
-        if not ordered_targets:
-            return {
-                "accepted": False,
-                "status_code": 400,
-                "message": "Provide at least one target coordinate.",
-            }
-
-        current_feedrate = move_feedrate
-        if self._coordinate_move_axis is not None:
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": "Stage is busy. Ignoring API coordinate target.",
-            }
-
-        if self.stage_controller.is_busy():
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": "Stage is busy. Ignoring API coordinate target.",
-            }
-
-        target_map = {
-            axis: (raw_target, display_target)
-            for axis, raw_target, display_target in ordered_targets
-        }
-        if not self._start_coordinate_targets_move(
-            target_map,
-            feedrate_mm_min=current_feedrate,
-            source_label="API",
-        ):
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": "Unable to start coordinate move.",
-            }
-        axes = [axis for axis, _raw, _display in ordered_targets]
-        return {
-            "accepted": True,
-            "message": f"API coordinate move accepted: {', '.join(axes)}.",
-            "started_axes": axes,
-            "queued_axes": [],
-            "mode": input_mode,
-            "current_feedrate_mm_min": current_feedrate,
-            "coordinate_display": self.stage_controller.coordinate_display_name(),
-            "targets": {axis: display for axis, _raw, display in ordered_targets},
-        }
+    def _api_move_to_coordinates(self, targets: object, *, mode: object = "G90", feedrate: object = None) -> dict[str, Any]:
+        move_plan = api_coordinate_move_plan(
+            targets,
+            axis_names=self.STAGE_AXIS_NAMES,
+            mode=mode,
+            feedrate=feedrate,
+            current_feedrate=self._current_linear_feedrate(),
+            min_feedrate=self.MIN_FEEDRATE_MM_MIN,
+            resolve_axis_target=self._resolve_stage_axis_target,
+            axis_target_limit_error=self._stage_axis_target_limit_error,
+        )
+        if isinstance(move_plan, dict):
+            return move_plan
+        if self._coordinate_move_axis is not None or self.stage_controller.is_busy():
+            return api_coordinate_move_busy_response()
+        if not self._start_coordinate_targets_move(move_plan.target_map, feedrate_mm_min=move_plan.feedrate_mm_min, source_label="API"):
+            return api_coordinate_move_start_failed_response()
+        return api_coordinate_move_success_response(move_plan, coordinate_display=self.stage_controller.coordinate_display_name())
 
     def _api_stage_status(self) -> dict[str, Any]:
         latest_position = self.stage_controller.latest_stage_position()
         return {
             "accepted": True,
-            "connected": bool(
-                self.serial_connection is not None
-                and getattr(self.serial_connection, "is_open", False)
-            ),
+            "connected": bool(self.serial_connection is not None and getattr(self.serial_connection, "is_open", False)),
             "busy": self.stage_controller.is_busy(),
             "state": self.stage_controller.latest_stage_state(),
             "coordinate_display": self.stage_controller.coordinate_display_name(),
             "homed_axes": sorted(self.stage_controller.homed_axes()),
-            "position": self._api_axis_value_map(latest_position),
-            "display_position": {
-                axis: float(value)
-                for axis, value in self._stage_axis_display_values.items()
-            },
+            "position": api_axis_value_map(latest_position, axis_names=self.STAGE_AXIS_NAMES),
+            "display_position": {axis: float(value) for axis, value in self._stage_axis_display_values.items()},
             "pending_targets": {
                 axis: float(values[1])
                 for axis, values in self._pending_stage_axis_targets.items()
@@ -1585,15 +1457,12 @@ class Main(QMainWindow):
             for axis, value in zip(self.STAGE_AXIS_NAMES, latest_position):
                 display_position.setdefault(axis, float(value))
         return {
-            "connected": bool(
-                self.serial_connection is not None
-                and getattr(self.serial_connection, "is_open", False)
-            ),
+            "connected": bool(self.serial_connection is not None and getattr(self.serial_connection, "is_open", False)),
             "busy": self.stage_controller.is_busy(),
             "state": self.stage_controller.latest_stage_state(),
             "coordinate_display": self.stage_controller.coordinate_display_name(),
             "homed_axes": sorted(self.stage_controller.homed_axes()),
-            "position": self._api_axis_value_map(latest_position),
+            "position": api_axis_value_map(latest_position, axis_names=self.STAGE_AXIS_NAMES),
             "display_position": display_position,
             "pending_targets": {
                 axis: float(values[1])
@@ -1662,36 +1531,6 @@ class Main(QMainWindow):
             "targets": {"X": float(x_mm), "Y": float(y_mm)},
             "current_feedrate_mm_min": feedrate,
         }
-
-    def _api_axis_value_map(self, position: object) -> dict[str, float] | None:
-        if not isinstance(position, (tuple, list)):
-            return None
-        values: dict[str, float] = {}
-        for axis, value in zip(self.STAGE_AXIS_NAMES, position):
-            try:
-                values[axis] = float(value)
-            except (TypeError, ValueError):
-                continue
-        return values or None
-
-    def _normalize_coordinate_input_mode(self, mode: object) -> str | None:
-        raw_mode = str(mode or "G90").strip().lower()
-        if raw_mode in {"", "absolute", "abs", "g90"}:
-            return "G90"
-        if raw_mode in {"relative", "rel", "g91"}:
-            return "G91"
-        return None
-
-    def _api_move_feedrate(self, feedrate: object) -> float | None:
-        if feedrate is None:
-            return max(self.MIN_FEEDRATE_MM_MIN, float(self._current_linear_feedrate()))
-        try:
-            value = float(feedrate)
-        except (TypeError, ValueError):
-            return None
-        if not math.isfinite(value) or value <= 0.0:
-            return None
-        return max(self.MIN_FEEDRATE_MM_MIN, value)
 
     def _api_list_contacts(self) -> dict[str, Any]:
         route = self._design_session.route
@@ -3832,7 +3671,7 @@ class Main(QMainWindow):
         combo = self._stage_coordinate_mode_combo
         if combo is None:
             return "G90"
-        mode = self._normalize_coordinate_input_mode(combo.currentData())
+        mode = normalize_api_coordinate_input_mode(combo.currentData())
         return mode or "G90"
 
     def _stage_axis_fields_have_modified_text(self) -> bool:
@@ -9374,7 +9213,7 @@ class Main(QMainWindow):
         axis = axis_name.strip().upper()
         if axis not in self.STAGE_AXIS_NAMES:
             return None, float(input_value)
-        mode = self._normalize_coordinate_input_mode(input_mode) or "G90"
+        mode = normalize_api_coordinate_input_mode(input_mode) or "G90"
         if mode == "G91":
             current_display = self._stage_axis_display_values.get(axis)
             if current_display is None:

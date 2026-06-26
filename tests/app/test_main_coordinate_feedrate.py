@@ -59,6 +59,7 @@ from probe_station_gui.route.dialog_adapter import (
 )
 from probe_station_gui.instruments.meters.lcr import LCRMeterError, RouteMeterConfiguration
 from probe_station_gui.settings.manager import ObjectiveCalibrationSettings, Settings
+from probe_station_gui.stage.api_moves import api_move_feedrate
 from probe_station_gui.stage.controller import StageControllerError
 
 
@@ -5282,7 +5283,132 @@ assert image.height() == 4
     def test_api_move_without_feedrate_uses_current_gui_feedrate(self) -> None:
         window, _stage_controller, _joystick, _timer, _statuses = _make_main(77.0)
 
-        self.assertEqual(Main._api_move_feedrate(window, None), 77.0)
+        self.assertEqual(
+            api_move_feedrate(None, current_feedrate=window._current_linear_feedrate(), min_feedrate=window.MIN_FEEDRATE_MM_MIN),
+            77.0,
+        )
+
+    def test_api_move_to_coordinates_rejects_active_coordinate_move_before_stage_busy_check(
+        self,
+    ) -> None:
+        window, stage_controller, _joystick, _timer, _statuses = _make_main(77.0)
+        window._coordinate_move_axis = "X"
+        window._resolve_stage_axis_target = (
+            lambda axis, display_target, input_mode: (
+                display_target,
+                display_target,
+            )
+        )
+        stage_controller.is_busy = mock.Mock(
+            side_effect=AssertionError("stage busy check should not run")
+        )
+        window._start_coordinate_targets_move = mock.Mock(
+            side_effect=AssertionError("start should not run")
+        )
+
+        response = Main._api_move_to_coordinates(window, {"X": 1.0})
+
+        self.assertEqual(
+            response,
+            {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Stage is busy. Ignoring API coordinate target.",
+            },
+        )
+
+    def test_api_move_to_coordinates_rejects_stage_busy_before_start(self) -> None:
+        window, stage_controller, _joystick, _timer, _statuses = _make_main(77.0)
+        window._resolve_stage_axis_target = (
+            lambda axis, display_target, input_mode: (
+                display_target,
+                display_target,
+            )
+        )
+        stage_controller.is_busy = mock.Mock(return_value=True)
+        window._start_coordinate_targets_move = mock.Mock(
+            side_effect=AssertionError("start should not run")
+        )
+
+        response = Main._api_move_to_coordinates(window, {"X": 1.0})
+
+        self.assertEqual(
+            response,
+            {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Stage is busy. Ignoring API coordinate target.",
+            },
+        )
+        stage_controller.is_busy.assert_called_once_with()
+
+    def test_api_move_to_coordinates_returns_start_failure_response(self) -> None:
+        window, stage_controller, _joystick, _timer, _statuses = _make_main(77.0)
+        window._resolve_stage_axis_target = (
+            lambda axis, display_target, input_mode: (
+                display_target + 10.0,
+                display_target + 0.25,
+            )
+        )
+        stage_controller.is_busy = mock.Mock(return_value=False)
+        window._start_coordinate_targets_move = mock.Mock(return_value=False)
+
+        response = Main._api_move_to_coordinates(window, {"X": 1.0})
+
+        self.assertEqual(
+            response,
+            {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Unable to start coordinate move.",
+            },
+        )
+        window._start_coordinate_targets_move.assert_called_once_with(
+            {"X": (11.0, 1.25)},
+            feedrate_mm_min=77.0,
+            source_label="API",
+        )
+
+    def test_api_move_to_coordinates_starts_with_raw_and_display_targets(self) -> None:
+        window, stage_controller, _joystick, _timer, _statuses = _make_main(77.0)
+
+        def resolve_axis_target(
+            _axis: str,
+            display_target: float,
+            input_mode: str,
+        ) -> tuple[float | None, float]:
+            raw_offset = 100.0 if input_mode == "G91" else 0.0
+            return display_target + raw_offset, display_target + 0.5
+
+        window._resolve_stage_axis_target = resolve_axis_target
+        stage_controller.is_busy = mock.Mock(return_value=False)
+        stage_controller.coordinate_display_name = mock.Mock(return_value="Work")
+        window._start_coordinate_targets_move = mock.Mock(return_value=True)
+
+        response = Main._api_move_to_coordinates(
+            window,
+            {"Y": 2.0, "X": 1.0},
+            mode="relative",
+        )
+
+        window._start_coordinate_targets_move.assert_called_once_with(
+            {"X": (101.0, 1.5), "Y": (102.0, 2.5)},
+            feedrate_mm_min=77.0,
+            source_label="API",
+        )
+        self.assertEqual(
+            response,
+            {
+                "accepted": True,
+                "message": "API coordinate move accepted: X, Y.",
+                "started_axes": ["X", "Y"],
+                "queued_axes": [],
+                "mode": "G91",
+                "current_feedrate_mm_min": 77.0,
+                "coordinate_display": "Work",
+                "targets": {"X": 1.5, "Y": 2.5},
+            },
+        )
 
     def test_single_axis_coordinate_move_does_not_show_common_feedrate(self) -> None:
         window, _stage_controller, joystick, _timer, _statuses = _make_main(120.0)
