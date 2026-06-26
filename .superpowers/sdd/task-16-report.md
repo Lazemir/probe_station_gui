@@ -25,11 +25,12 @@
     - PASS: `All checks passed!`
 
 - Metrics notes:
-  - Tried Wily first per brief: `python -m wily --help` crashed and logged `Oh no, Wily crashed!`; used radon/lizard spot checks instead.
-  - After spot checks:
-    - `route_contact_height_map_row` in `probe_station_gui/route/artifact_rows.py`: lizard `56 NLOC / CCN 16`, radon `C (16)`
-    - `route_photo_focus_map_row` in `probe_station_gui/route/artifact_rows.py`: lizard `34 NLOC / CCN 2`, radon `A (2)`
-    - `main.py`: radon MI `C (0.00)`
+  - Initial Wily report crashed after build when run without the full UTF-8 console flags. The stable Windows invocation is: `$env:PYTHONIOENCODING='utf-8'; $env:PYTHONUTF8='1'; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; .\.venv\Scripts\python.exe -X utf8 -m wily ...`.
+  - Wily `main.py` report for this task: cyclomatic complexity `2410 -> 2390`, raw LOC `12330 -> 12167`, MI stayed `0`.
+  - After radon/lizard spot checks:
+    - `route_contact_height_map_row` moved from `Main`: lizard `71 NLOC / CCN 17` -> pure helper `56 NLOC / CCN 16`, radon `C (17)` -> `C (16)`.
+    - `route_photo_focus_map_row` moved from `Main`: lizard `35 NLOC / CCN 3` -> pure helper `34 NLOC / CCN 2`, radon `A (3)` -> `A (2)`.
+    - `main.py`: radon MI `C (0.00)`.
     - `main.py` lizard warnings no longer include the old contact-height row helper; the combined `main.py + artifact_rows.py` spot run still reports `21` warnings because `route_contact_height_map_row` remains above the default lizard threshold in the new pure helper module.
 
 - Verdict:
@@ -44,7 +45,7 @@ Public API changed            no                no                              
 ```
 
 - Commit hash:
-  - `6865800`
+  - `ccf98ca`
 
 ## Task 16 Follow-up Fix
 
@@ -67,4 +68,18 @@ Public API changed            no                no                              
     - PASS: `All checks passed!`
 
 - Commit hash:
-  - `FINAL_COMMIT_HASH`
+  - `78772e5`
+
+## Task 16 Final Verification
+
+- Review result:
+  - Initial task review found an Important route-name adapter regression and a Minor unused-import cleanup.
+  - Re-review confirmed both code findings were resolved; the only remaining issue was this report's placeholder hash.
+
+- Controller verification after the follow-up fix:
+  - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\route tests\app\test_main_coordinate_feedrate.py`
+    - PASS: `315 passed`
+  - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests`
+    - PASS: `800 passed, 2 skipped`
+  - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m ruff check --ignore E402,F401 .`
+    - PASS: `All checks passed!`
