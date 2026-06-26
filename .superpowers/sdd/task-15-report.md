@@ -14,7 +14,7 @@ DONE
 
 ## Commit Hash(es)
 
-- Pending until final commit creation; exact hash is reported in the task response.
+- `f941a4c` - Extract route finish planning.
 
 ## Tests Run and Exact Results
 
@@ -61,3 +61,18 @@ The refactor is justified. The route finish outcome rules now have pure route-mo
 
 - Wily did not provide useful current-tree method-level detail for this pass; radon and lizard were used as exact fallback metrics.
 - No behavior concerns remain from this pass.
+
+## Controller verification
+
+- task review:
+  - approved; no Critical or Important findings.
+  - Minor finding fixed here: report commit hash is now recorded as `f941a4c`.
+- controller-run validation:
+  - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests`
+    - final: `796 passed, 2 skipped`
+  - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m ruff check --ignore E402,F401 .`
+    - final: `All checks passed!`
+- final spot checks:
+  - `main.py:Main._on_route_measurement_finished`: radon `A (5)`, lizard `44 NLOC / CCN 5`
+  - `probe_station_gui/route/finish_flow.py`: MI `A (39.22)`, lizard max helper CCN `5`
+  - final lizard warning count for `main.py` + `finish_flow.py`: `21`; `_on_route_measurement_finished` no longer appears in the warning list.
