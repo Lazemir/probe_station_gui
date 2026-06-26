@@ -69,3 +69,29 @@ Explicit helper parameters removed: `5`
 ## Concerns / residual gaps
 
 - Wily could not produce a clean before/after history report in the dirty working tree, so the exact comparison here relies on the successful validation run plus radon/lizard spot checks.
+
+## Fix after review
+
+- changed files:
+  - `probe_station_gui/stage/connection_state.py`
+  - `probe_station_gui/stage/controller.py`
+  - `probe_station_gui/stage/homing_startup.py`
+  - `tests/stage/test_controller.py`
+  - `.superpowers/sdd/task-13-report.md`
+- commit hash(es):
+  - `edfd7c0` - fix code and regression coverage for serial pinning
+- tests run and exact results:
+  - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\stage\test_controller.py -k "captured_serial"`
+    - red step before fix: `2 failed, 123 deselected`
+    - after fix: `2 passed, 123 deselected`
+  - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\stage\test_controller.py tests\stage\test_fluidnc_session.py tests\stage\test_fluidnc_protocol.py`
+    - final: `146 passed`
+  - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m ruff check --ignore E402,F401 .`
+    - final: `All checks passed!`
+- how the fix preserves serial pinning:
+  - `_serial_session` now accepts an already captured serial object and pushes that object onto the existing thread-local session stack.
+  - `_run_startup_sync` captures the open serial once, then enters `_serial_session(serial_connection)` for startup config/status I/O, optional startup A homing, and the controller session marker, so `_current_serial()` and `_current_fluidnc_session()` resolve to the same serial even if `self._serial` changes.
+  - `_query_synced_status_for_absolute_motion` captures the current serial once and wraps coordinate refresh plus final status reads in `_serial_session(serial_connection)`, preserving the same pin for `$10`, `$G`, `$#`, and `?` in lock-only callers.
+  - The five refactored FluidNC config helpers still have no explicit `serial_connection` parameters and no compatibility wrappers were added.
+- residual concerns:
+  - None from the required focused tests and lint. The pre-existing untracked `.scratch/` directory was left untouched.
