@@ -197,12 +197,19 @@ from probe_station_gui.route.dialog_adapter import (
     route_measurement_session_start_plan,
 )
 from probe_station_gui.route.runtime_presenter import RouteRuntimePresentationSink
+from probe_station_gui.route.api_artifacts import (
+    ApiRouteArtifactsStore,
+    api_route_photo_artifact_metadata,
+    api_route_photo_content_type,
+    api_route_session_action_response,
+    api_route_session_result_response,
+    api_route_session_seek_response,
+    api_route_session_status_response,
+    final_api_route_session_status,
+)
 from probe_station_gui.route.measurement_payloads import (
     route_api_contact_seek_payload,
     route_api_measurement_record_payload,
-    route_artifact_public_payload,
-    route_artifact_record,
-    route_external_result_payload,
 )
 from probe_station_gui.route.api_window_guard import probe_route_api_requires_window
 from probe_station_gui.route.meter_config import (
@@ -210,7 +217,6 @@ from probe_station_gui.route.meter_config import (
     route_meter_type_from_payload,
 )
 from probe_station_gui.route.measurement_settings import RouteMeasurementSettingsStore
-from probe_station_gui.route.session_actions import route_session_action_from_payload
 from probe_station_gui.route.session_start import (
     ApiRouteSessionLaunchState,
     GuiRouteLaunchState,
@@ -2979,8 +2985,7 @@ class Main(QMainWindow):
             return setup_result
         route_lcr_controller: object = self.lcr_controller
         session_id = uuid.uuid4().hex
-        with self._api_route_artifacts_lock:
-            self._api_route_artifacts.clear()
+        self._api_route_artifacts_store().clear()
         self._api_route_session_id = session_id
         self._api_route_lcr_controller = route_lcr_controller
         self._api_route_last_status = None
@@ -3052,198 +3057,36 @@ class Main(QMainWindow):
         return self._route_control_window_is_open()
 
     def _api_route_session_status(self) -> dict[str, Any]:
-        runner = getattr(self, "_route_measurement_runner", None)
-        if runner is not None and hasattr(runner, "status_payload"):
-            status = runner.status_payload()
-        elif self._api_route_last_status is not None:
-            status = dict(self._api_route_last_status)
-        else:
-            return {
-                "accepted": False,
-                "status_code": 404,
-                "message": "No API route session is active.",
-            }
-        status["artifacts"] = self._api_route_artifacts_payload()
-        return status
+        return api_route_session_status_response(getattr(self, "_route_measurement_runner", None), self._api_route_last_status, self._api_route_artifacts_payload())
 
     def _api_route_session_action(self, payload: dict[str, Any]) -> dict[str, Any]:
-        runner = getattr(self, "_route_measurement_runner", None)
-        if runner is None:
-            return {
-                "accepted": False,
-                "status_code": 404,
-                "message": "No route session is active.",
-            }
-        action = route_session_action_from_payload(payload)
-        if action.kind == "pause":
-            runner.request_pause_after_current_point()
-            return {
-                "accepted": True,
-                "message": "Route session pause requested.",
-                "action": "pause",
-            }
-        if action.kind == "interrupt":
-            self._interrupt_route_measurement_runner(
-                runner,
-                reason="Route API session interrupt requested.",
-            )
-            return {
-                "accepted": True,
-                "message": "Route session interrupt requested.",
-                "action": "interrupt",
-            }
-        if action.kind == "stop":
-            runner.stop()
-            return {
-                "accepted": True,
-                "message": "Route session stop requested.",
-                "action": "stop",
-            }
-        if not runner.submit_confirmation(action.action):
-            return {
-                "accepted": False,
-                "status_code": 400,
-                "message": "Unknown route session action.",
-            }
-        return {
-            "accepted": True,
-            "message": f"Route session action submitted: {action.action}.",
-            "action": action.action,
-        }
+        return api_route_session_action_response(payload, runner=getattr(self, "_route_measurement_runner", None), interrupt_runner=self._interrupt_route_measurement_runner)
 
     def _api_route_session_result(self, payload: dict[str, Any]) -> dict[str, Any]:
-        runner = self._route_measurement_runner
-        if runner is None or not hasattr(runner, "submit_external_result"):
-            return {
-                "accepted": False,
-                "status_code": 404,
-                "message": "No external route session is waiting for a result.",
-            }
-        result = route_external_result_payload(
-            payload,
-            timestamp_utc=self._api_timestamp_utc(),
-        )
-        if not runner.submit_external_result(result):
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": "Route session is not waiting for an external result.",
-            }
-        return {
-            "accepted": True,
-            "message": "External result submitted.",
-            "result": result,
-        }
+        return api_route_session_result_response(payload, runner=self._route_measurement_runner, timestamp_utc=self._api_timestamp_utc())
 
     def _api_route_session_seek(self) -> dict[str, Any]:
-        runner = self._route_measurement_runner
-        if runner is None or not hasattr(runner, "request_contact_seek"):
-            return {
-                "accepted": False,
-                "status_code": 404,
-                "message": "No route session is active.",
-            }
-        if not runner.request_contact_seek():
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": "Route session is not waiting for contact seek.",
-            }
-        return {
-            "accepted": True,
-            "message": "Contact seek requested for current route contact.",
-        }
+        return api_route_session_seek_response(self._route_measurement_runner)
 
     def _api_route_session_artifact(self, payload: dict[str, Any]) -> dict[str, Any]:
-        artifact_id = str(payload.get("artifact_id", "")).strip()
-        with self._api_route_artifacts_lock:
-            artifact = dict(self._api_route_artifacts.get(artifact_id) or {})
-        if not artifact:
-            return {
-                "accepted": False,
-                "status_code": 404,
-                "message": "Route session artifact was not found.",
-            }
-        return {
-            "accepted": True,
-            "artifact_id": artifact_id,
-            **artifact,
-        }
+        return self._api_route_artifacts_store().artifact_response(payload)
 
     def _api_route_artifacts_payload(self) -> list[dict[str, object]]:
-        with self._api_route_artifacts_lock:
-            artifacts = [
-                route_artifact_public_payload(artifact)
-                for artifact in self._api_route_artifacts.values()
-            ]
-        return artifacts
+        return self._api_route_artifacts_store().public_payloads()
 
-    def _add_api_route_artifact(
-        self,
-        *,
-        data: bytes,
-        filename: str,
-        content_type: str,
-        kind: str,
-        metadata: dict[str, object],
-    ) -> str:
-        artifact_id = uuid.uuid4().hex
-        artifact = route_artifact_record(
-            artifact_id=artifact_id,
-            data=data,
-            filename=filename,
-            content_type=content_type,
-            kind=kind,
-            metadata=metadata,
-            created_at_utc=self._api_timestamp_utc(),
-        )
-        with self._api_route_artifacts_lock:
-            self._api_route_artifacts[artifact_id] = artifact
-        return artifact_id
+    def _api_route_artifacts_store(self) -> ApiRouteArtifactsStore:
+        return ApiRouteArtifactsStore(artifacts=self._api_route_artifacts, lock=self._api_route_artifacts_lock)
 
-    def _capture_api_route_photo_artifact(
-        self,
-        point: RouteMeasurementPoint,
-        position: int,
-        total: int,
-        focus_result: object | None,
-    ) -> str:
+    def _capture_api_route_photo_artifact(self, point: RouteMeasurementPoint, position: int, total: int, focus_result: object | None) -> str:
         before_counter = self._latest_camera_counter()
-        frame, _counter = self._wait_for_camera_frame(
-            after_counter=before_counter,
-            timeout_s=2.0,
-        )
+        frame, _counter = self._wait_for_camera_frame(after_counter=before_counter, timeout_s=2.0)
         photo = self._qimage_telegram_photo(frame) or self._latest_camera_frame_photo()
         if photo is None:
             raise RuntimeError("Camera frame is unavailable.")
         photo_bytes, photo_name = photo
-        artifact_id = self._add_api_route_artifact(
-            data=photo_bytes,
-            filename=photo_name,
-            content_type="image/jpeg" if photo_name.lower().endswith(".jpg") else "image/png",
-            kind="route_photo",
-            metadata={
-                "position": int(position),
-                "total": int(total),
-                "point_index": int(point.index),
-                "contact_number": self._api_structure_number_for_measurement_point(point),
-                "label": point.label,
-                "focus": route_photo_focus_payload(focus_result),
-            },
-        )
+        artifact_id = self._api_route_artifacts_store().add(data=photo_bytes, filename=photo_name, content_type=api_route_photo_content_type(photo_name), kind="route_photo", metadata=api_route_photo_artifact_metadata(point, position=position, total=total, contact_number=self._api_structure_number_for_measurement_point(point), focus_result=route_photo_focus_payload(focus_result)), created_at_utc=self._api_timestamp_utc())
         if self._route_telegram_adapter().consume_route_photo_request():
-            self._send_telegram_bot_message(
-                route_requested_photo_caption(
-                    position=int(position),
-                    total=int(total),
-                    structure_number=self._api_structure_number_for_measurement_point(
-                        point
-                    ),
-                    label=point.label,
-                ),
-                photo=(photo_bytes, photo_name),
-                reply_markup=self._telegram_default_markup(),
-            )
+            self._send_telegram_bot_message(route_requested_photo_caption(position=int(position), total=int(total), structure_number=self._api_structure_number_for_measurement_point(point), label=point.label), photo=(photo_bytes, photo_name), reply_markup=self._telegram_default_markup())
         return artifact_id
 
     def _api_route_photo_autofocus(
@@ -8762,15 +8605,9 @@ class Main(QMainWindow):
         self._route_measurement_thread = None
 
     def _store_final_api_route_session_status(self, runner: object | None) -> None:
-        if (
-            getattr(self, "_api_route_session_id", None)
-            and runner is not None
-            and hasattr(runner, "status_payload")
-        ):
-            try:
-                self._api_route_last_status = runner.status_payload()
-            except Exception:
-                logger.exception("Failed to store final API route session status.")
+        status = final_api_route_session_status(getattr(self, "_api_route_session_id", None), runner, logger=logger)
+        if status is not None:
+            self._api_route_last_status = status
 
     def _clear_finished_route_measurement_state(self) -> None:
         self._route_measurement_runner = None

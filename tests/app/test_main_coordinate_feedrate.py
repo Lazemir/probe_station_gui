@@ -1722,6 +1722,148 @@ assert image.height() == 4
             {"state": "completed", "accepted": True},
         )
 
+    def test_api_route_session_status_includes_public_artifacts(self) -> None:
+        class _Runner:
+            def status_payload(self) -> dict[str, object]:
+                return {"accepted": True, "state": "running"}
+
+        window = Main.__new__(Main)
+        window._route_measurement_runner = _Runner()
+        window._api_route_last_status = None
+        window._api_route_artifacts = {
+            "artifact-1": {
+                "artifact_id": "artifact-1",
+                "filename": "photo.png",
+                "content_type": "image/png",
+                "kind": "route_photo",
+                "metadata": {"position": 1},
+                "created_at_utc": "2026-06-26T20:00:00Z",
+                "size_bytes": 2,
+                "data": b"\x01\x02",
+            }
+        }
+        window._api_route_artifacts_lock = threading.Lock()
+
+        response = Main._api_route_session_status(window)
+
+        self.assertEqual(response["accepted"], True)
+        self.assertEqual(response["state"], "running")
+        self.assertEqual(
+            response["artifacts"],
+            [
+                {
+                    "artifact_id": "artifact-1",
+                    "filename": "photo.png",
+                    "content_type": "image/png",
+                    "kind": "route_photo",
+                    "metadata": {"position": 1},
+                    "created_at_utc": "2026-06-26T20:00:00Z",
+                    "size_bytes": 2,
+                }
+            ],
+        )
+
+    def test_api_route_session_artifact_returns_binary_payload(self) -> None:
+        window = Main.__new__(Main)
+        window._api_route_artifacts = {
+            "artifact-1": {
+                "artifact_id": "artifact-1",
+                "filename": "photo.png",
+                "content_type": "image/png",
+                "kind": "route_photo",
+                "metadata": {"position": 1},
+                "created_at_utc": "2026-06-26T20:00:00Z",
+                "size_bytes": 2,
+                "data": b"\x01\x02",
+            }
+        }
+        window._api_route_artifacts_lock = threading.Lock()
+
+        response = Main._api_route_session_artifact(
+            window,
+            {"artifact_id": " artifact-1 "},
+        )
+
+        self.assertEqual(response["accepted"], True)
+        self.assertEqual(response["artifact_id"], "artifact-1")
+        self.assertEqual(response["data"], b"\x01\x02")
+
+    def test_api_route_photo_artifact_sends_requested_telegram_photo_once(self) -> None:
+        sent: list[tuple[str, tuple[bytes, str] | None, object | None]] = []
+
+        class _RouteTelegram:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def consume_route_photo_request(self) -> bool:
+                self.calls += 1
+                return self.calls == 1
+
+        route_telegram = _RouteTelegram()
+        point = RouteMeasurementPoint(
+            index=3,
+            point_id="p003",
+            label="P003",
+            design_center=(0.0, 0.0),
+            stage_xy=(1.0, 2.0),
+            needle_1_design=(0.0, 0.0),
+            needle_2_design=(0.0, 0.0),
+        )
+        window = Main.__new__(Main)
+        window._api_route_artifacts = {}
+        window._api_route_artifacts_lock = threading.Lock()
+        window._latest_camera_counter = lambda: 4
+        window._wait_for_camera_frame = (
+            lambda *, after_counter, timeout_s: (object(), after_counter + 1)
+        )
+        window._qimage_telegram_photo = (
+            lambda _frame: (_telegram_test_photo_bytes(3, 2, 0x0000FF00), "route.jpg")
+        )
+        window._latest_camera_frame_photo = lambda: None
+        window._api_timestamp_utc = lambda: "2026-06-26T20:00:00Z"
+        window._api_structure_number_for_measurement_point = lambda _point: 17
+        window._route_telegram_adapter = lambda: route_telegram
+        window._send_telegram_bot_message = (
+            lambda message, *, photo=None, reply_markup=None: sent.append(
+                (message, photo, reply_markup)
+            )
+        )
+        window._telegram_default_markup = lambda: "markup"
+
+        first_artifact = Main._capture_api_route_photo_artifact(
+            window,
+            point,
+            1,
+            2,
+            {"focus_best_z_mm": 1.2},
+        )
+        second_artifact = Main._capture_api_route_photo_artifact(
+            window,
+            point,
+            1,
+            2,
+            {"focus_best_z_mm": 1.2},
+        )
+
+        self.assertNotEqual(first_artifact, second_artifact)
+        self.assertEqual(len(sent), 1)
+        message, photo, reply_markup = sent[0]
+        self.assertIn("Point 1/2", message)
+        self.assertIn("structure 17", message)
+        self.assertEqual(photo, (_telegram_test_photo_bytes(3, 2, 0x0000FF00), "route.jpg"))
+        self.assertEqual(reply_markup, "markup")
+        self.assertEqual(
+            window._api_route_artifacts[first_artifact]["metadata"],
+            {
+                "position": 1,
+                "total": 2,
+                "point_index": 3,
+                "contact_number": 17,
+                "label": "P003",
+                "focus": {"focus_best_z_mm": 1.2},
+            },
+        )
+
     def test_context_close_failure_suppresses_route_failure_telegram(self) -> None:
         window = Main.__new__(Main)
         alerts: list[tuple[object, ...]] = []
