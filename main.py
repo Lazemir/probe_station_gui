@@ -114,6 +114,11 @@ from probe_station_gui.shared.diagnostics import configure_crash_diagnostics
 from probe_station_gui.api.request_bridge import ApiRequestBridge
 from probe_station_gui.api.server import ProbeStationApiServer
 from probe_station_gui.api.keys import API_KEY_FILENAME, ApiKeyStore
+from probe_station_gui.instruments.api_sweep import (
+    api_configure_meter_action,
+    api_prepare_route_meter_controller_action,
+    api_raw_voltage_sweep_action,
+)
 from probe_station_gui.instruments.meters.lcr import (
     LCRMeterController,
     LCRMeterError,
@@ -2373,45 +2378,18 @@ class Main(QMainWindow):
         *,
         prefix: str = "Measurement instrument setup failed",
     ) -> dict[str, Any] | None:
-        wait_until_idle = getattr(self.lcr_controller, "wait_until_idle", None)
-        if callable(wait_until_idle):
-            try:
-                ready = bool(wait_until_idle(45.0))
-            except Exception as exc:
-                logger.exception("API measurement instrument wait failed.")
-                return self._api_instrument_exception_response(
-                    "Measurement instrument wait failed",
-                    exc,
-                )
-            if not ready:
-                return {
-                    "accepted": False,
-                    "status_code": 409,
-                    "message": "Measurement instrument task is still running.",
-                }
-        if not self.lcr_controller.is_connected():
-            runtime_config = getattr(
-                self.lcr_controller,
-                "apply_route_meter_runtime_configuration",
-                None,
-            )
-            if callable(runtime_config):
-                runtime_config(configuration)
-            connect_result = self._api_ensure_measurement_instrument_connected()
-            if connect_result is not None:
-                return connect_result
-        try:
-            self.lcr_controller.apply_route_meter_configuration(configuration)
-        except LCRMeterError as exc:
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": str(exc),
-            }
-        except Exception as exc:
-            logger.exception("%s.", prefix)
-            return self._api_instrument_exception_response(prefix, exc)
-        return None
+        return api_prepare_route_meter_controller_action(
+            configuration=configuration,
+            prefix=prefix,
+            is_connected=self.lcr_controller.is_connected,
+            wait_until_idle=getattr(self.lcr_controller, "wait_until_idle", None),
+            apply_route_meter_runtime_configuration=getattr(self.lcr_controller, "apply_route_meter_runtime_configuration", None),
+            ensure_measurement_instrument_connected=self._api_ensure_measurement_instrument_connected,
+            apply_route_meter_configuration=self.lcr_controller.apply_route_meter_configuration,
+            instrument_exception_response=self._api_instrument_exception_response,
+            log_exception=logger.exception,
+            meter_error_types=(LCRMeterError,),
+        )
 
     @staticmethod
     def _api_instrument_exception_response(
@@ -2430,181 +2408,34 @@ class Main(QMainWindow):
         return response
 
     def _api_configure_meter(self, payload: dict[str, Any]) -> dict[str, Any]:
-        try:
-            configuration = self._api_route_meter_configuration(
-                payload,
-                voltages_v=None,
-            )
-        except ValueError as exc:
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": str(exc),
-            }
-        setup_result = self._api_prepare_route_meter_controller(
-            configuration,
-            prefix="Measurement instrument setup failed",
+        return api_configure_meter_action(
+            payload=payload,
+            route_meter_configuration=lambda meter_payload, voltages_v: self._api_route_meter_configuration(meter_payload, voltages_v=voltages_v),
+            prepare_route_meter_controller=self._api_prepare_route_meter_controller,
+            timestamp_utc=self._api_timestamp_utc,
         )
-        if setup_result is not None:
-            return setup_result
-        return {
-            "accepted": True,
-            "message": "Measurement instrument configured.",
-            "timestamp_utc": self._api_timestamp_utc(),
-            "meter_type": configuration.meter_type,
-            "nplc": configuration.nplc_label(),
-        }
 
     def _api_raw_voltage_sweep(self, payload: dict[str, Any]) -> dict[str, Any]:
-        voltages = payload.get("voltages_v")
-        if not isinstance(voltages, list) or not voltages:
-            return {
-                "accepted": False,
-                "status_code": 400,
-                "message": "Provide voltages_v as a non-empty array.",
-            }
-        try:
-            voltage_values = [float(value) for value in voltages]
-            configuration = self._api_route_meter_configuration(
-                payload.get("meter", payload.get("meter_configuration", {})),
-                voltages_v=voltage_values,
-            )
-        except (TypeError, ValueError) as exc:
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": str(exc),
-            }
-        setup_result = self._api_prepare_route_meter_controller(
-            configuration,
-            prefix="Measurement instrument setup failed",
+        return api_raw_voltage_sweep_action(
+            payload=payload,
+            route_meter_configuration=lambda meter_payload, voltages_v: self._api_route_meter_configuration(meter_payload, voltages_v=voltages_v),
+            prepare_route_meter_controller=self._api_prepare_route_meter_controller,
+            contact_context=self._api_contact_context,
+            needle_feedrate=self._api_needle_feedrate,
+            route_adjusted_stage_xy=self._api_route_adjusted_stage_xy,
+            begin_stage_task=lambda label: self.stage_controller.begin_external_task(label),
+            run_needles_action=lambda action, feedrate: self.stage_controller.run_external_needles_action(action, feedrate),
+            run_move_to_xy=lambda x_mm, y_mm: self.stage_controller.run_external_move_to_xy(x_mm, y_mm),
+            finish_stage_task=lambda: self.stage_controller.finish_external_task(),
+            read_voltage_sweep_now=lambda voltages_v: self.lcr_controller.read_voltage_sweep_now(voltages_v),
+            json_ready=self._api_json_ready,
+            timestamp_utc=self._api_timestamp_utc,
+            monotonic=time.monotonic,
+            sleep=time.sleep,
+            instrument_exception_response=self._api_instrument_exception_response,
+            log_exception=logger.exception,
+            stage_or_meter_error_types=(StageControllerError, LCRMeterError),
         )
-        if setup_result is not None:
-            return setup_result
-
-        contact_number = self._api_contact_number(payload, required=False)
-        move_to_contact = self._api_bool(
-            payload,
-            "move_to_contact",
-            "move",
-            default=contact_number is not None,
-        )
-        lower_needles = self._api_bool(
-            payload,
-            "lower_needles",
-            "lower",
-            default=contact_number is not None,
-        )
-        lift_after = self._api_bool(payload, "lift_after", default=lower_needles)
-        lift_before_move = self._api_bool(
-            payload,
-            "lift_before_move",
-            default=move_to_contact,
-        )
-        contact_settle_s = self._api_float(
-            payload,
-            "contact_settle_s",
-            "settle_s",
-            default=0.2,
-            minimum=0.0,
-        )
-        point: RouteMeasurementPoint | None = None
-        contact: dict[str, Any] | None = None
-        if contact_number is not None:
-            context_result = self._api_contact_context(contact_number)
-            if not context_result.get("accepted", False):
-                return context_result
-            point = context_result["point"]
-            contact = context_result["contact"]
-        if move_to_contact and point is None:
-            return {
-                "accepted": False,
-                "status_code": 400,
-                "message": "move_to_contact requires contact_number.",
-            }
-
-        needle_feedrate = self._api_needle_feedrate(payload)
-        active_stage_task = False
-        needles_lowered = False
-        started_at = time.monotonic()
-        timestamp_utc = self._api_timestamp_utc()
-        try:
-            if move_to_contact or lower_needles or lift_after:
-                self.stage_controller.begin_external_task("API raw voltage sweep")
-                active_stage_task = True
-            if active_stage_task and lift_before_move:
-                self.stage_controller.run_external_needles_action(
-                    "lift",
-                    needle_feedrate,
-                )
-            if move_to_contact and point is not None:
-                target_xy = self._api_route_adjusted_stage_xy(point)
-                self.stage_controller.run_external_move_to_xy(
-                    target_xy[0],
-                    target_xy[1],
-                )
-            if active_stage_task and lower_needles:
-                self.stage_controller.run_external_needles_action(
-                    "lower",
-                    needle_feedrate,
-                )
-                needles_lowered = True
-                if contact_settle_s > 0.0:
-                    time.sleep(contact_settle_s)
-            raw_measurement = self.lcr_controller.read_voltage_sweep_now(voltage_values)
-            elapsed_s = time.monotonic() - started_at
-            result = self._api_json_ready(raw_measurement)
-            points = result.get("points", [])
-            if isinstance(points, list):
-                iv_pairs = [
-                    {
-                        "voltage_v": item.get("measured_voltage_v"),
-                        "current_a": item.get("current_a"),
-                    }
-                    for item in points
-                    if isinstance(item, dict)
-                ]
-            else:
-                iv_pairs = []
-            return {
-                "accepted": True,
-                "message": f"Raw voltage sweep complete: {len(voltage_values)} points.",
-                "timestamp_utc": timestamp_utc,
-                "elapsed_s": elapsed_s,
-                "contact": contact,
-                "meter_type": configuration.meter_type,
-                "measurement_kind": "voltage_sweep",
-                "voltages_v": voltage_values,
-                "iv_pairs": iv_pairs,
-                "result": result,
-                "needles_lowered": lower_needles,
-                "lifted_after": lift_after and needles_lowered,
-            }
-        except (StageControllerError, LCRMeterError) as exc:
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": str(exc),
-                "contact": contact,
-            }
-        except Exception as exc:
-            logger.exception("API raw voltage sweep failed.")
-            return self._api_instrument_exception_response(
-                "Raw voltage sweep failed",
-                exc,
-                contact=contact,
-            )
-        finally:
-            if active_stage_task:
-                if lift_after and needles_lowered:
-                    try:
-                        self.stage_controller.run_external_needles_action(
-                            "lift",
-                            needle_feedrate,
-                        )
-                    except StageControllerError:
-                        logger.exception("API raw voltage sweep failed to lift needles.")
-                self.stage_controller.finish_external_task()
 
     def _api_visa_list_resources(self) -> dict[str, Any]:
         controller = self._api_visa_controller()

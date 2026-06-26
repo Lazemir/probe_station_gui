@@ -962,6 +962,206 @@ class MainCoordinateFeedrateTest(unittest.TestCase):
         self.assertIn("VI_ERROR_TMO", response["message"])
         self.assertIsNone(response["contact"])
 
+    def test_api_raw_voltage_sweep_returns_meter_setup_rejection_before_stage_side_effects(
+        self,
+    ) -> None:
+        calls: list[tuple[object, ...]] = []
+        setup_error = {
+            "accepted": False,
+            "status_code": 409,
+            "message": "Measurement instrument setup failed: bad VISA session.",
+        }
+        window = Main.__new__(Main)
+        window.stage_controller = types.SimpleNamespace(
+            begin_external_task=lambda label: calls.append(("begin", label)),
+            run_external_needles_action=lambda action, feedrate: calls.append(
+                ("needles", action, feedrate)
+            ),
+            run_external_move_to_xy=lambda x_mm, y_mm: calls.append(("move", x_mm, y_mm)),
+            finish_external_task=lambda: calls.append(("finish",)),
+        )
+        window.lcr_controller = types.SimpleNamespace()
+        window._api_route_meter_configuration = (
+            lambda _payload, voltages_v=None: RouteMeterConfiguration()
+        )
+        window._api_prepare_route_meter_controller = (
+            lambda _configuration, prefix="": setup_error
+        )
+
+        response = Main._api_raw_voltage_sweep(window, {"voltages_v": [0.0]})
+
+        self.assertEqual(response, setup_error)
+        self.assertEqual(calls, [])
+
+    def test_api_raw_voltage_sweep_returns_contact_context_rejection_unchanged(self) -> None:
+        context_error = {
+            "accepted": False,
+            "status_code": 409,
+            "message": "Route registration is not valid.",
+        }
+        calls: list[tuple[object, ...]] = []
+        window = Main.__new__(Main)
+        window.stage_controller = types.SimpleNamespace(
+            begin_external_task=lambda label: calls.append(("begin", label)),
+            run_external_needles_action=lambda action, feedrate: calls.append(
+                ("needles", action, feedrate)
+            ),
+            run_external_move_to_xy=lambda x_mm, y_mm: calls.append(("move", x_mm, y_mm)),
+            finish_external_task=lambda: calls.append(("finish",)),
+        )
+        window.lcr_controller = types.SimpleNamespace()
+        window._api_route_meter_configuration = (
+            lambda _payload, voltages_v=None: RouteMeterConfiguration()
+        )
+        window._api_prepare_route_meter_controller = (
+            lambda _configuration, prefix="": None
+        )
+        window._api_contact_context = lambda _contact_number: context_error
+
+        response = Main._api_raw_voltage_sweep(
+            window,
+            {
+                "voltages_v": [0.0],
+                "contact_number": 7,
+            },
+        )
+
+        self.assertEqual(response, context_error)
+        self.assertEqual(calls, [])
+
+    def test_api_raw_voltage_sweep_contact_stage_side_effect_order(self) -> None:
+        calls: list[tuple[object, ...]] = []
+        point = object()
+        contact = {"contact_number": 7, "label": "Pad 7"}
+
+        class _Lcr:
+            def read_voltage_sweep_now(self, voltages_v: list[float]) -> dict[str, object]:
+                calls.append(("read", tuple(voltages_v)))
+                return {
+                    "points": [
+                        {"measured_voltage_v": 0.01, "current_a": 2.0e-6},
+                    ]
+                }
+
+        window = Main.__new__(Main)
+        window.stage_controller = types.SimpleNamespace(
+            begin_external_task=lambda label: calls.append(("begin", label)),
+            run_external_needles_action=lambda action, feedrate: calls.append(
+                ("needles", action, feedrate)
+            ),
+            run_external_move_to_xy=lambda x_mm, y_mm: calls.append(("move", x_mm, y_mm)),
+            finish_external_task=lambda: calls.append(("finish",)),
+        )
+        window.lcr_controller = _Lcr()
+        window._api_route_meter_configuration = (
+            lambda _payload, voltages_v=None: RouteMeterConfiguration()
+        )
+        window._api_prepare_route_meter_controller = (
+            lambda _configuration, prefix="": None
+        )
+        window._api_contact_context = lambda _contact_number: {
+            "accepted": True,
+            "point": point,
+            "contact": contact,
+        }
+        window._api_route_adjusted_stage_xy = lambda selected_point: (
+            1.25,
+            2.5,
+        ) if selected_point is point else (0.0, 0.0)
+        window._api_needle_feedrate = lambda _payload: 75.0
+        window._api_timestamp_utc = lambda: "2026-06-26T12:00:00+00:00"
+        window._api_json_ready = lambda result: result
+        monotonic_values = iter([100.0, 101.25])
+        original_monotonic = main_module.time.monotonic
+        original_sleep = main_module.time.sleep
+        main_module.time.monotonic = lambda: next(monotonic_values)
+        main_module.time.sleep = lambda delay: calls.append(("sleep", delay))
+        try:
+            response = Main._api_raw_voltage_sweep(
+                window,
+                {
+                    "voltages_v": [0.0, "0.1"],
+                    "contact_number": 7,
+                },
+            )
+        finally:
+            main_module.time.monotonic = original_monotonic
+            main_module.time.sleep = original_sleep
+
+        self.assertTrue(response["accepted"], response)
+        self.assertEqual(response["contact"], contact)
+        self.assertEqual(response["voltages_v"], [0.0, 0.1])
+        self.assertEqual(response["iv_pairs"], [{"voltage_v": 0.01, "current_a": 2.0e-6}])
+        self.assertEqual(
+            calls,
+            [
+                ("begin", "API raw voltage sweep"),
+                ("needles", "lift", 75.0),
+                ("move", 1.25, 2.5),
+                ("needles", "lower", 75.0),
+                ("sleep", 0.2),
+                ("read", (0.0, 0.1)),
+                ("needles", "lift", 75.0),
+                ("finish",),
+            ],
+        )
+
+    def test_api_raw_voltage_sweep_with_lift_after_false_leaves_needles_down(self) -> None:
+        calls: list[tuple[object, ...]] = []
+
+        class _Lcr:
+            def read_voltage_sweep_now(self, voltages_v: list[float]) -> dict[str, object]:
+                calls.append(("read", tuple(voltages_v)))
+                return {"points": []}
+
+        window = Main.__new__(Main)
+        window.stage_controller = types.SimpleNamespace(
+            begin_external_task=lambda label: calls.append(("begin", label)),
+            run_external_needles_action=lambda action, feedrate: calls.append(
+                ("needles", action, feedrate)
+            ),
+            run_external_move_to_xy=lambda x_mm, y_mm: calls.append(("move", x_mm, y_mm)),
+            finish_external_task=lambda: calls.append(("finish",)),
+        )
+        window.lcr_controller = _Lcr()
+        window._api_route_meter_configuration = (
+            lambda _payload, voltages_v=None: RouteMeterConfiguration()
+        )
+        window._api_prepare_route_meter_controller = (
+            lambda _configuration, prefix="": None
+        )
+        window._api_needle_feedrate = lambda _payload: 55.0
+        window._api_timestamp_utc = lambda: "2026-06-26T12:00:00+00:00"
+        window._api_json_ready = lambda result: result
+        monotonic_values = iter([200.0, 200.4])
+        original_monotonic = main_module.time.monotonic
+        main_module.time.monotonic = lambda: next(monotonic_values)
+        try:
+            response = Main._api_raw_voltage_sweep(
+                window,
+                {
+                    "voltages_v": [0.0],
+                    "lower_needles": True,
+                    "lift_after": False,
+                    "contact_settle_s": 0.0,
+                },
+            )
+        finally:
+            main_module.time.monotonic = original_monotonic
+
+        self.assertTrue(response["accepted"], response)
+        self.assertTrue(response["needles_lowered"])
+        self.assertFalse(response["lifted_after"])
+        self.assertEqual(
+            calls,
+            [
+                ("begin", "API raw voltage sweep"),
+                ("needles", "lower", 55.0),
+                ("read", (0.0,)),
+                ("finish",),
+            ],
+        )
+
     def test_api_route_session_reports_unexpected_instrument_setup_error(self) -> None:
         class _FailingLcr:
             def is_connected(self) -> bool:
