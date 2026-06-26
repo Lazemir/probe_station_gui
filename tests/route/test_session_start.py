@@ -1,6 +1,7 @@
 import pytest
 import types
 
+from probe_station_gui.design.model import DesignModelError
 from probe_station_gui.route.session_start import (
     DEFAULT_EXTERNAL_SESSION_FOLLOWUP_MEASUREMENT_COUNT,
     DEFAULT_EXTERNAL_SESSION_INITIAL_MEASUREMENT_COUNT,
@@ -223,6 +224,111 @@ def test_api_route_session_start_decision_rejects_invalid_route_context(
     assert decision.plan is None
     assert decision.status_code == expected_status
     assert decision.message == expected_message
+
+
+def test_api_route_session_start_decision_rejects_points_factory_model_error() -> None:
+    def failing_points_factory(_route: object) -> list[RouteMeasurementPoint]:
+        raise DesignModelError("Design registration is required before measuring a route.")
+
+    decision = api_route_session_start_decision(
+        route=types.SimpleNamespace(points=[object()]),
+        registration_valid=True,
+        payload={},
+        current_point=1,
+        points_factory=failing_points_factory,
+        default_contact_seek_range_mm=0.05,
+        default_contact_seek_step_mm=0.002,
+        default_contact_settle_s=0.4,
+    )
+
+    assert decision.accepted is False
+    assert decision.plan is None
+    assert decision.status_code == 409
+    assert (
+        decision.message
+        == "Design registration is required before measuring a route."
+    )
+
+
+def test_api_route_session_start_decision_rejects_empty_resolved_points() -> None:
+    decision = api_route_session_start_decision(
+        route=types.SimpleNamespace(points=[object()]),
+        registration_valid=True,
+        payload={},
+        current_point=1,
+        points_factory=lambda _route: [],
+        default_contact_seek_range_mm=0.05,
+        default_contact_seek_step_mm=0.002,
+        default_contact_settle_s=0.4,
+    )
+
+    assert decision.accepted is False
+    assert decision.plan is None
+    assert decision.status_code == 409
+    assert decision.message == "Route has no enabled points."
+
+
+def test_api_route_session_start_decision_rejects_invalid_payload_with_400() -> None:
+    points = [
+        RouteMeasurementPoint(
+            index=1,
+            point_id="p001",
+            label="P001",
+            design_center=(0.0, 0.0),
+            stage_xy=(1.0, 1.0),
+            needle_1_design=(0.0, 0.0),
+            needle_2_design=(0.0, 0.0),
+        )
+    ]
+
+    decision = api_route_session_start_decision(
+        route=types.SimpleNamespace(points=[object()]),
+        registration_valid=True,
+        payload={"measurement_count": "bad"},
+        current_point=1,
+        points_factory=lambda _route: points,
+        default_contact_seek_range_mm=0.05,
+        default_contact_seek_step_mm=0.002,
+        default_contact_settle_s=0.4,
+    )
+
+    assert decision.accepted is False
+    assert decision.plan is None
+    assert decision.status_code == 400
+    assert decision.message == "Invalid integer value for measurement_count."
+
+
+def test_api_route_session_start_decision_rejects_filtered_out_selected_contact() -> None:
+    points = [
+        RouteMeasurementPoint(
+            index=1,
+            point_id="p001",
+            label="P001",
+            design_center=(0.0, 0.0),
+            stage_xy=(1.0, 1.0),
+            needle_1_design=(0.0, 0.0),
+            needle_2_design=(0.0, 0.0),
+        )
+    ]
+
+    decision = api_route_session_start_decision(
+        route=types.SimpleNamespace(points=[object()]),
+        registration_valid=True,
+        payload={"start_point": 2},
+        current_point=1,
+        points_factory=lambda _route: points,
+        default_contact_seek_range_mm=0.05,
+        default_contact_seek_step_mm=0.002,
+        default_contact_settle_s=0.4,
+    )
+
+    assert decision.accepted is False
+    assert decision.plan is None
+    assert decision.status_code == 409
+    assert (
+        decision.message
+        == "Contact 2 is not enabled or not included by the current route filter."
+    )
 
 
 def test_route_launch_presentation_formats_gui_messages_and_remaining_count() -> None:
