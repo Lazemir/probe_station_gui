@@ -32,19 +32,20 @@ C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\
 
 Results:
 
-- `8 passed in 0.05s`
-- `132 passed, 3 subtests passed in 1.77s`
+- initial GREEN after first adapter pass: `8 passed in 0.05s`
+- fix-pass focused GREEN: `137 passed, 3 subtests passed in 1.64s`
 
 ## LOC
 
-- `main.py` checked-out physical lines before task (`git show e2da4bf:main.py | Measure-Object -Line`): `11688`
-- `main.py` checked-out physical lines after task (`git show HEAD:main.py | Measure-Object -Line`): `11639`
-- delta in checked-out physical lines: `-49`
+- authoritative baseline (`git show e2da4bf:main.py | python -c "import sys; print(len(sys.stdin.read().splitlines()))"`): `12313`
+- authoritative current (`main.py | python -c "import sys; print(len(sys.stdin.read().splitlines()))"`): `12159`
+- authoritative delta: `-154`
 
 Gate note:
 
-- the task brief lists baseline `12313`; Wily `raw.loc` matches that metric family and reports `12313 -> 12262` (`-51`)
-- the checked-out file on this branch was already below the brief's target before Task 21; after this task it remains well below `12130`
+- target `<= 12130`: `not met`
+- fallback minimum `<= 12163`: `met`
+- LOC gate verdict for acceptance: `passed via fallback minimum`
 
 ## Complexity
 
@@ -57,42 +58,47 @@ Gate note:
 
 ### Related `Main` helpers after refactor
 
-- `_create_route_measurement_dialog`: lizard `33 NLOC / CCN 1 / length 34`, radon `A (1)`
 - `_restore_route_measurement_state_after_design_load`: lizard `13 NLOC / CCN 6 / length 13`, radon `B (6)`
 - `_start_route_measurement_session`: lizard `23 NLOC / CCN 4 / length 23`, radon `A (4)`
 - `_cancel_route_measurement_session`: lizard `16 NLOC / CCN 3 / length 16`, radon `A (3)`
+- removed from `Main` in fix pass: `_create_route_measurement_dialog`, `_route_dialog_handlers`, `_request_route_measurement_for_point`, `_restart_waiting_route_measurement_start`
 
 ### New adapter module
 
+- `route_dialog_handlers`: radon `A (1)`
 - `route_dialog_defaults`: radon `A (3)`
 - `route_dialog_restore_plan`: radon `A (3)`
 - `route_measurement_session_start_plan`: radon `A (3)`
 - `route_measurement_session_cancel_plan`: radon `A (2)`
 - `route_dialog_open_state`: radon `A (3)`
-- `open_or_update_route_measurement_dialog`: lizard `45 NLOC / CCN 2 / length 45`, radon `A (2)`
+- `open_or_update_route_measurement_dialog`: lizard `46 NLOC / CCN 2 / length 46`, radon `A (2)`
+- `request_route_measurement_for_point`: radon `A (4)`
+- `route_measurement_point_request_handler_for_owner`: radon `A (2)`
+- `restart_waiting_route_measurement`: lizard/radon `CCN 10`, at threshold but not above warning gate
 
 ## Maintainability
 
 ### Radon MI
 
 - `main.py`: `C (0.00)`
-- `probe_station_gui\route\dialog_adapter.py`: `A (37.21)`
+- `probe_station_gui\route\dialog_adapter.py`: `A (25.62)`
 
 ### Wily diff (`-r e2da4bf`)
 
 - `main.py`
-  - cyclomatic complexity: `2405 -> 2393`
-  - raw.loc: `12313 -> 12262`
+  - cyclomatic complexity: `2405 -> 2371`
+  - raw.loc: `12313 -> 12159`
   - maintainability.mi: `0 -> 0`
 - `probe_station_gui\route\dialog_adapter.py`
-  - cyclomatic complexity: `- -> 25`
-  - raw.loc: `- -> 233`
-  - maintainability.mi: `- -> 37.206706523607416`
+  - cyclomatic complexity: `- -> 51`
+  - raw.loc: `- -> 454`
+  - maintainability.mi: `- -> 25.621876907437407`
 
 Assessment:
 
 - locality and hotspot complexity improved materially
-- `main.py` MI stayed flat at the file level because the file is still oversized; this task still improves maintainability by moving route-dialog policy into a focused route module and dropping the target hotspot below warning thresholds
+- `main.py` MI stayed flat at the file level because the file remains oversized, but file-level Wily cyclomatic improved by `34` and the target hotspot dropped from warning range
+- `dialog_adapter.py` grew more than the first pass because it now owns dialog wiring, point-request control, and waiting-restart orchestration that were previously in `Main`
 
 ## Verification
 
@@ -102,7 +108,7 @@ Focused tests:
 C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\route\test_dialog_adapter.py tests\app\test_main_coordinate_feedrate.py -q
 ```
 
-- `132 passed, 3 subtests passed in 1.77s`
+- `137 passed, 3 subtests passed in 1.64s`
 
 Full suite:
 
@@ -111,6 +117,7 @@ C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests
 ```
 
 - `843 passed, 2 skipped in 10.99s`
+- final full suite: `848 passed, 2 skipped in 11.31s`
 
 Ruff:
 
@@ -135,14 +142,14 @@ C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -X utf8 -m wily 
 
 Wily note:
 
-- `build` succeeded after committing the code changes because Wily's git archiver rejects a dirty repository
-- the build printed historical `No data collected` warnings for many older revisions, but the requested diff against `e2da4bf` completed and produced usable output
+- final `build` succeeded on a clean commit because Wily's git archiver rejects a dirty repository
+- the final cache saw only the baseline commit and current commit, which is enough for the requested `diff -r e2da4bf`
 
 ## Verdict
 
 - behavior preserved: `yes`
 - tests passed: `yes`
 - metrics improved: `yes`
-- LOC gate passed: `yes`
-- maintainability improvement: `yes`, through lower `main.py` complexity and a new focused route adapter seam
+- LOC gate passed: `yes`, via authoritative `12313 -> 12159` and fallback minimum `<= 12163`
+- maintainability improvement: `yes`, through lower `main.py` LOC/cyclomatic totals and a deeper route adapter seam
 - new risk introduced: `low`; the main residual risk is that route dialog behavior now depends on adapter/Main coordination, covered by the new pure tests plus app characterization
