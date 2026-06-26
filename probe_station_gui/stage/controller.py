@@ -732,25 +732,8 @@ class StageController(
         if not self._serial_session_lock.acquire(blocking=False):
             return b""
         try:
-            try:
-                waiting = serial_connection.in_waiting
-            except _SERIAL_IO_EXCEPTIONS as exc:  # pragma: no cover - hardware interaction
-                raise StageControllerError(f"Serial read failed: {exc}") from exc
-            if waiting <= 0:
-                return b""
-            if max_bytes is not None:
-                waiting = min(waiting, max(1, int(max_bytes)))
-            logger.debug("SERIAL TRACE terminal_in_waiting bytes=%s", waiting)
-            try:
-                data = serial_connection.read(waiting)
-            except _SERIAL_IO_EXCEPTIONS as exc:  # pragma: no cover - hardware interaction
-                raise StageControllerError(f"Serial read failed: {exc}") from exc
-            if data:
-                logger.debug("SERIAL TRACE terminal_read bytes=%r", data[:200])
-                self._handle_pending_serial_data_side_effects(
-                    data, "terminal pending read"
-                )
-            return data
+            session = self._fluidnc_session_for(serial_connection)
+            return session.read_pending_output(max_bytes=max_bytes)
         finally:
             self._serial_session_lock.release()
 

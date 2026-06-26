@@ -10,6 +10,10 @@ from typing import Optional
 import serial
 
 from probe_station_gui.stage.errors import StageControllerError
+from probe_station_gui.stage.fluidnc_session import (
+    FluidNCSession,
+    FluidNCSessionCallbacks,
+)
 from probe_station_gui.stage.fluidnc_protocol import line_indicates_controller_reboot
 
 
@@ -47,6 +51,37 @@ class StageControllerConnectionMixin:
                 raise StageControllerError("Serial connection is not available.")
             return serial_connection
         return self._require_open_serial()
+
+    def _fluidnc_session_callbacks(self) -> FluidNCSessionCallbacks:
+        return FluidNCSessionCallbacks(
+            check_cancelled=self._check_cancelled,
+            raise_if_controller_reboot_line=self._raise_if_controller_reboot_line,
+            handle_limit_line=self._handle_limit_line,
+            handle_homing_message_line=self._handle_homing_message_line,
+            handle_coordinate_state_line=self._handle_coordinate_state_line,
+            parse_status_line=self._parse_status_line,
+            extract_status_homed_axes=self._status_homed_axes_from_line,
+            update_homing_status=self._update_homing_status,
+            handle_pending_serial_data_side_effects=(
+                self._handle_pending_serial_data_side_effects
+            ),
+        )
+
+    def _fluidnc_session_for(
+        self, serial_connection: serial.Serial
+    ) -> FluidNCSession:
+        return FluidNCSession(
+            serial_connection=serial_connection,
+            callbacks=self._fluidnc_session_callbacks(),
+        )
+
+    @contextmanager
+    def _fluidnc_session(self) -> Iterator[FluidNCSession]:
+        with self._serial_session() as serial_connection:
+            yield self._fluidnc_session_for(serial_connection)
+
+    def _current_fluidnc_session(self) -> FluidNCSession:
+        return self._fluidnc_session_for(self._current_serial())
 
     def set_serial(self, serial_connection: Optional[serial.Serial]) -> None:
         """Assign or clear the serial connection used for stage control."""

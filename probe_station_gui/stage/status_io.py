@@ -7,9 +7,7 @@ import time
 from collections.abc import Iterable
 from typing import Optional
 
-import serial
-
-from probe_station_gui.stage.errors import SERIAL_IO_EXCEPTIONS, StageControllerError
+from probe_station_gui.stage.errors import StageControllerError
 from probe_station_gui.stage.fluidnc_protocol import (
     parse_float_tuple,
     parse_fluidnc_status_line,
@@ -19,71 +17,33 @@ from probe_station_gui.stage.types import _Status
 
 logger = logging.getLogger(__name__)
 
-_SERIAL_IO_EXCEPTIONS = SERIAL_IO_EXCEPTIONS
-
 
 class StageControllerStatusIOMixin:
     """Internal command acknowledgement and status-query methods."""
 
     def _write_command(
         self,
-        serial_connection: serial.Serial,
+        serial_connection,
         command: str,
         *,
         check_cancelled: bool = True,
     ) -> None:
-        if check_cancelled:
-            self._check_cancelled()
-        self._discard_pending_status_input(
-            serial_connection,
-            reason=f"before command {command.strip()}",
+        self._fluidnc_session_for(serial_connection).write_command(
+            command,
+            check_cancelled=check_cancelled,
         )
-        data = (command.strip() + "\n").encode("ascii")
-        try:
-            logger.debug("SERIAL TRACE stage_write command=%s", command.strip())
-            serial_connection.write(data)
-            serial_connection.flush()
-            logger.debug("SERIAL TRACE stage_write_flushed command=%s", command.strip())
-        except _SERIAL_IO_EXCEPTIONS as exc:  # pragma: no cover - hardware interaction
-            raise StageControllerError(f"Serial write failed: {exc}") from exc
 
     def _wait_for_ok(
         self,
-        serial_connection: serial.Serial,
+        serial_connection,
         timeout: float = 5.0,
         *,
         check_cancelled: bool = True,
     ) -> None:
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if check_cancelled:
-                self._check_cancelled()
-            try:
-                raw = serial_connection.readline()
-            except _SERIAL_IO_EXCEPTIONS as exc:  # pragma: no cover - hardware interaction
-                raise StageControllerError(f"Serial read failed: {exc}") from exc
-            line = raw.decode("ascii", errors="ignore").strip()
-            if not line:
-                continue
-            logger.debug("SERIAL TRACE stage_readline wait_for_ok line=%r", line)
-            self._raise_if_controller_reboot_line(line, "wait_for_ok")
-            self._handle_limit_line(line)
-            homed_msg = self.HOMED_MSG_PATTERN.match(line)
-            if homed_msg:
-                axes = set(homed_msg.group("axes").upper())
-                if self._homed_axes:
-                    axes = set(self._homed_axes).union(axes)
-                self._update_homing_status(axes)
-                continue
-            if line.lower() == "ok":
-                return
-            if line.lower().startswith("alarm"):
-                raise StageControllerError(f"Controller alarm: {line}")
-            if line.startswith("[MSG:ERR:"):
-                raise StageControllerError(f"Controller reported: {line}")
-            if line.lower().startswith("error"):
-                raise StageControllerError(f"Controller reported: {line}")
-        raise StageControllerError("Timeout waiting for controller acknowledgement.")
+        self._fluidnc_session_for(serial_connection).wait_for_ok(
+            timeout=timeout,
+            check_cancelled=check_cancelled,
+        )
 
     def _write_current_command_and_wait(
         self,
@@ -178,7 +138,7 @@ class StageControllerStatusIOMixin:
 
     def _query_status(
         self,
-        serial_connection: serial.Serial,
+        serial_connection,
         timeout: float = 1.5,
         *,
         check_cancelled: bool = True,
@@ -244,7 +204,7 @@ class StageControllerStatusIOMixin:
 
     def _query_status_with_required_coordinates(
         self,
-        serial_connection: serial.Serial,
+        serial_connection,
         *,
         axes: Iterable[str] | None = None,
         min_axes: int | None = None,
@@ -320,86 +280,41 @@ class StageControllerStatusIOMixin:
 
     def _discard_pending_status_input(
         self,
-        serial_connection: serial.Serial,
+        serial_connection,
         *,
         reason: str = "status query",
     ) -> None:
-        try:
-            waiting = int(getattr(serial_connection, "in_waiting", 0) or 0)
-        except (TypeError, ValueError, AttributeError, _SERIAL_IO_EXCEPTIONS):
-            waiting = 0
-        if waiting <= 0:
-            return
-        try:
-            if hasattr(serial_connection, "read"):
-                data = serial_connection.read(waiting)
-                logger.debug(
-                    "SERIAL TRACE discard_pending_input reason=%s bytes=%r",
-                    reason,
-                    data[:200],
-                )
-                self._handle_pending_serial_data_side_effects(data, reason)
-                return
-            serial_connection.reset_input_buffer()
-            logger.debug(
-                "SERIAL TRACE discard_pending_input reason=%s bytes=%d",
-                reason,
-                waiting,
-            )
-        except (AttributeError, _SERIAL_IO_EXCEPTIONS):
-            logger.debug("Serial input buffer reset failed after stale input.")
+        self._fluidnc_session_for(serial_connection).discard_pending_input(
+            reason=reason
+        )
 
     def _read_status_frame(
         self,
-        serial_connection: serial.Serial,
+        serial_connection,
         *,
         timeout: float,
         check_cancelled: bool = True,
     ) -> Optional[_Status]:
-        try:
-            self._discard_pending_status_input(
-                serial_connection,
-                reason="before status query",
-            )
-            logger.debug("SERIAL TRACE stage_query_status write=?")
-            serial_connection.write(b"?\n")
-            serial_connection.flush()
-            logger.debug("SERIAL TRACE stage_query_status flushed=?")
-        except _SERIAL_IO_EXCEPTIONS as exc:  # pragma: no cover - hardware interaction
-            raise StageControllerError(f"Serial query failed: {exc}") from exc
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if check_cancelled:
-                self._check_cancelled()
-            try:
-                raw = serial_connection.readline()
-            except _SERIAL_IO_EXCEPTIONS as exc:  # pragma: no cover - hardware interaction
-                raise StageControllerError(f"Serial read failed: {exc}") from exc
-            line = raw.decode("ascii", errors="ignore").strip()
-            if not line:
-                continue
-            logger.debug("SERIAL TRACE stage_readline query_status line=%r", line)
-            self._raise_if_controller_reboot_line(line, "status query")
-            self._handle_limit_line(line)
-            if line.lower().startswith("alarm"):
-                raise StageControllerError(f"Controller alarm: {line}")
-            homed_msg = self.HOMED_MSG_PATTERN.match(line)
-            if homed_msg:
-                axes = set(homed_msg.group("axes").upper())
-                if self._homed_axes:
-                    axes = set(self._homed_axes).union(axes)
-                self._update_homing_status(axes)
-                continue
-            self._handle_coordinate_state_line(line)
-            status = self._parse_status_line(line)
-            if status is None:
-                continue
-            homed_match = self.HOMED_PATTERN.search(line)
-            if homed_match:
-                status.homed_axes = set(homed_match.group(1).upper())
-                self._update_homing_status(status.homed_axes)
-            return status
-        return None
+        return self._fluidnc_session_for(serial_connection).read_status_frame(
+            timeout=timeout,
+            check_cancelled=check_cancelled,
+        )
+
+    def _handle_homing_message_line(self, line: str) -> bool:
+        homed_msg = self.HOMED_MSG_PATTERN.match(line)
+        if homed_msg is None:
+            return False
+        axes = set(homed_msg.group("axes").upper())
+        if self._homed_axes:
+            axes = set(self._homed_axes).union(axes)
+        self._update_homing_status(axes)
+        return True
+
+    def _status_homed_axes_from_line(self, line: str) -> set[str] | None:
+        homed_match = self.HOMED_PATTERN.search(line)
+        if homed_match is None:
+            return None
+        return set(homed_match.group(1).upper())
 
     def _parse_status_line(self, line: str) -> Optional[_Status]:
         return parse_fluidnc_status_line(
