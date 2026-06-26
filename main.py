@@ -3876,6 +3876,12 @@ class Main(QMainWindow):
         self._show_status(message, timeout_ms)
         self._route_runtime_presenter().set_status(message)
 
+    def _show_route_dialog_status(self, message: str, timeout_ms: int = 0) -> None:
+        self._show_status(message, timeout_ms)
+        dialog = getattr(self, "_route_measurement_dialog", None)
+        if dialog is not None:
+            dialog.set_status(message)
+
     def _create_objective_widget(self) -> QWidget:
         widget = QWidget(self)
         layout = QHBoxLayout(widget)
@@ -7550,7 +7556,7 @@ class Main(QMainWindow):
         self._set_route_measurement_resume_point(plan.point_number)
         self._set_route_measurement_pending(plan.pending)
         self._save_route_measurement_session_metadata(configuration)
-        self._show_route_runtime_status(plan.status_message, plan.status_timeout_ms)
+        self._show_route_dialog_status(plan.status_message, plan.status_timeout_ms)
 
     def _cancel_route_measurement_session(self) -> None:
         thread = self._route_measurement_thread
@@ -7564,7 +7570,7 @@ class Main(QMainWindow):
         self._route_measurement_session_active = plan.session_active
         self._set_route_measurement_resume_point(plan.point_number)
         self._set_route_measurement_pending(plan.pending)
-        self._show_route_runtime_status(plan.status_message, plan.status_timeout_ms)
+        self._show_route_dialog_status(plan.status_message, plan.status_timeout_ms)
 
     def _start_route_measurement(
         self,

@@ -2084,6 +2084,67 @@ assert image.height() == 4
         self.assertEqual(data["current_point"], 1)
         self.assertIn("Route measurement session cancelled.", statuses)
 
+    def test_start_route_measurement_session_keeps_status_dialog_only(self) -> None:
+        window = Main.__new__(Main)
+        dialog = _FakeRouteDialogOpenState(
+            configuration=types.SimpleNamespace(current_point=7)
+        )
+        statuses: list[tuple[str, int | None]] = []
+        panel_statuses: list[str] = []
+
+        window._route_measurement_thread = None
+        window._route_measurement_runner = None
+        window._route_measurement_dialog = dialog
+        window.design_navigator_panel = types.SimpleNamespace(
+            set_route_measurement_status=lambda message: panel_statuses.append(
+                str(message)
+            )
+        )
+        window._route_measurement_session_active = False
+        window._route_measurement_current_point = 3
+        window._select_route_point_for_measurement = lambda _point_number: None
+        window._save_route_measurement_session_metadata = lambda _configuration: None
+        window._show_status = lambda message, timeout_ms=0: statuses.append(
+            (str(message), timeout_ms)
+        )
+
+        Main._start_route_measurement_session(window)
+
+        self.assertEqual(
+            statuses,
+            [("Route point set to point 7.", 5000)],
+        )
+        self.assertEqual(dialog.status_calls, ["Route point set to point 7."])
+        self.assertEqual(panel_statuses, [])
+
+    def test_cancel_route_measurement_session_keeps_status_dialog_only(self) -> None:
+        window = Main.__new__(Main)
+        dialog = _FakeRouteDialogOpenState()
+        statuses: list[tuple[str, int | None]] = []
+        panel_statuses: list[str] = []
+
+        window._route_measurement_thread = None
+        window._route_measurement_runner = None
+        window._route_measurement_dialog = dialog
+        window.design_navigator_panel = types.SimpleNamespace(
+            set_route_measurement_status=lambda message: panel_statuses.append(
+                str(message)
+            )
+        )
+        window._route_measurement_session_active = True
+        window._route_measurement_current_point = 5
+        window._pending_route_measure_point = 11
+        window._select_route_point_for_measurement = lambda _point_number: None
+        window._show_status = lambda message, timeout_ms=0: statuses.append(
+            (str(message), timeout_ms)
+        )
+
+        Main._cancel_route_measurement_session(window)
+
+        self.assertEqual(statuses, [("Route measurement session cancelled.", 5000)])
+        self.assertEqual(dialog.status_calls, ["Route measurement session cancelled."])
+        self.assertEqual(panel_statuses, [])
+
     def test_open_route_measurement_dialog_without_route_shows_status_only(self) -> None:
         window = Main.__new__(Main)
         statuses: list[tuple[str, int | None]] = []
