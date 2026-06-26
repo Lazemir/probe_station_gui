@@ -8,6 +8,7 @@ import time
 import tempfile
 import types
 import unittest
+from unittest import mock
 import zlib
 from pathlib import Path
 
@@ -3460,6 +3461,197 @@ assert image.height() == 4
 
         new_runner.stop()
         window._route_measurement_thread.join(timeout=2.0)
+
+    def test_api_route_start_attaches_existing_external_session(self) -> None:
+        active_status = {
+            "accepted": True,
+            "session_id": "session-123",
+            "state": "waiting_paused",
+            "message": "Route API session ready.",
+            "position": 4,
+            "current_contact": {"label": "P004"},
+        }
+
+        class _FakeExternalRunner(RouteExternalMeasurementSessionRunner):
+            def __init__(self) -> None:
+                pass
+
+            def status_payload(self) -> dict[str, object]:
+                return dict(active_status)
+
+        window = Main.__new__(Main)
+        window._route_measurement_thread = _FakeAliveThread()
+        window._route_measurement_runner = _FakeExternalRunner()
+
+        response = Main._api_start_route_session(
+            window,
+            {"attach_existing_session": True},
+        )
+
+        self.assertEqual(response, active_status)
+
+    def test_api_route_start_rejects_existing_external_session_without_attach(self) -> None:
+        active_status = {
+            "accepted": True,
+            "session_id": "session-123",
+            "state": "waiting_paused",
+            "message": "Route API session ready.",
+            "position": 4,
+            "current_contact": {"label": "P004"},
+        }
+
+        class _FakeExternalRunner(RouteExternalMeasurementSessionRunner):
+            def __init__(self) -> None:
+                pass
+
+            def status_payload(self) -> dict[str, object]:
+                return dict(active_status)
+
+        window = Main.__new__(Main)
+        window._route_measurement_thread = _FakeAliveThread()
+        window._route_measurement_runner = _FakeExternalRunner()
+
+        response = Main._api_start_route_session(window, {})
+
+        self.assertFalse(response["accepted"])
+        self.assertEqual(response["status_code"], 409)
+        self.assertEqual(
+            response["message"],
+            "External route session is already active at P004. Stop it first or pass "
+            "attach_existing_session=true to attach explicitly.",
+        )
+        self.assertEqual(response["active_session"], active_status)
+
+    def test_api_route_start_rejects_when_waiting_gui_runner_does_not_stop(self) -> None:
+        point = _route_start_point()
+        runner = RouteMeasurementRunner(
+            points=[point],
+            csv_path="NUL",
+            stage_controller=types.SimpleNamespace(),
+            lcr_controller=types.SimpleNamespace(),
+            needle_feedrate=None,
+            wait_before_first_point=True,
+        )
+
+        class _NeverStopsThread:
+            def __init__(self) -> None:
+                self.join_calls: list[float | None] = []
+
+            def is_alive(self) -> bool:
+                return True
+
+            def join(self, timeout: float | None = None) -> None:
+                self.join_calls.append(timeout)
+
+        thread = _NeverStopsThread()
+        window = Main.__new__(Main)
+        window._route_measurement_thread = thread
+        window._route_measurement_runner = runner
+        window._route_measurement_waiting = True
+        window._last_route_measurement_result = None
+        window._route_measurement_session_active = True
+
+        response = Main._api_start_route_session(window, {})
+
+        self.assertFalse(response["accepted"])
+        self.assertEqual(response["status_code"], 409)
+        self.assertEqual(response["message"], "Waiting GUI route measurement did not stop.")
+        self.assertEqual(thread.join_calls, [2.0])
+        self.assertIs(window._route_measurement_runner, runner)
+        self.assertTrue(window._route_measurement_waiting)
+        self.assertTrue(window._route_measurement_session_active)
+
+    def test_api_route_start_initial_pause_timeout_cleans_up_session_state(self) -> None:
+        class _FakeApiThread:
+            def __init__(self, *, target, args=(), daemon=None, name=None) -> None:
+                self.target = target
+                self.args = args
+                self.daemon = daemon
+                self.name = name
+                self.started = False
+                self.alive = True
+                self.join_calls: list[float | None] = []
+
+            def start(self) -> None:
+                self.started = True
+
+            def is_alive(self) -> bool:
+                return self.alive
+
+            def join(self, timeout: float | None = None) -> None:
+                self.join_calls.append(timeout)
+                self.alive = False
+
+        class _FakeExternalRunner:
+            def __init__(self, **kwargs) -> None:
+                self.kwargs = kwargs
+                self.route_offset = None
+                self.stop_calls = 0
+
+            def set_route_offset_xy(self, offset_xy: tuple[float, float]) -> None:
+                self.route_offset = tuple(offset_xy)
+
+            def wait_until_initial_pause(self, timeout_s: float) -> bool:
+                return False
+
+            def status_payload(self) -> dict[str, object]:
+                return {
+                    "accepted": True,
+                    "state": "running",
+                    "message": "Initial pause timed out.",
+                }
+
+            def stop(self) -> None:
+                self.stop_calls += 1
+
+        window, _statuses, telegrams, _dialog, lcr, _camera_calls = (
+            _make_route_start_main()
+        )
+        window._route_measurement_current_point = 1
+        window._last_route_measurement_result = None
+        window._route_measurement_point_numbers = [99]
+        window._api_route_meter_configuration = (
+            lambda _payload, voltages_v=None: RouteMeterConfiguration()
+        )
+        window.settings_manager = types.SimpleNamespace(
+            needle_calibration_configuration=lambda: types.SimpleNamespace(
+                feedrate_mm_min=2.0,
+            )
+        )
+        window._api_route_artifacts = {"old": object()}
+        window._api_route_artifacts_lock = threading.Lock()
+        window._telegram_photo_lock = threading.Lock()
+        window._telegram_pending_contact_photo = object()
+        window._telegram_pending_contact_before_photo = object()
+        window._last_route_pre_contact_photo = object()
+        window._last_route_contact_failure_photo = object()
+        window._last_route_contact_failure_before_photo = object()
+
+        with mock.patch.object(
+            main_module,
+            "RouteExternalMeasurementSessionRunner",
+            _FakeExternalRunner,
+        ), mock.patch.object(main_module.threading, "Thread", _FakeApiThread):
+            response = Main._api_start_route_session(window, {})
+
+        self.assertFalse(response["accepted"])
+        self.assertEqual(response["status_code"], 409)
+        self.assertEqual(response["message"], "Initial pause timed out.")
+        self.assertEqual(
+            response["status"],
+            {
+                "accepted": True,
+                "state": "running",
+                "message": "Initial pause timed out.",
+            },
+        )
+        self.assertIsNone(window._route_measurement_thread)
+        self.assertIsNone(window._route_measurement_runner)
+        self.assertIsNone(window._api_route_lcr_controller)
+        self.assertFalse(window._route_measurement_waiting)
+        self.assertFalse(window._route_measurement_session_active)
+        self.assertEqual(telegrams, [])
+        self.assertEqual(lcr.configurations, [RouteMeterConfiguration()])
 
     def test_route_start_rejects_active_thread_with_existing_status_timeout(self) -> None:
         window, statuses, _telegrams, _dialog, lcr, _camera_calls = (

@@ -201,14 +201,17 @@ from probe_station_gui.route.meter_config import (
 from probe_station_gui.route.measurement_settings import RouteMeasurementSettingsStore
 from probe_station_gui.route.session_actions import route_session_action_from_payload
 from probe_station_gui.route.session_start import (
+    ApiRouteSessionLaunchState,
     GuiRouteLaunchState,
     GuiRouteStartPreflight,
+    RouteExternalSessionStartSettings,
+    api_route_existing_session_response,
+    api_route_session_launch_state,
     api_route_session_start_decision,
     gui_route_camera_frame_preflight,
     gui_route_launch_state,
     gui_route_start_availability,
     gui_route_start_preflight,
-    route_launch_presentation,
     route_contact_quality_limits_from_payload,
 )
 from probe_station_gui.route.finish_flow import (
@@ -2785,65 +2788,115 @@ class Main(QMainWindow):
             return None
         return timeout if timeout > 0 else None
 
-    def _api_start_route_session(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _api_route_session_thread_preflight(
+        self,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any] | None, tuple[float, float]]:
+        thread = self._route_measurement_thread
+        if thread is None or not thread.is_alive():
+            return None, (0.0, 0.0)
+        runner = self._route_measurement_runner
+        if isinstance(runner, RouteExternalMeasurementSessionRunner):
+            return (
+                api_route_existing_session_response(
+                    payload=payload,
+                    status=runner.status_payload(),
+                ),
+                (0.0, 0.0),
+            )
+        can_take_over_waiting_gui_runner = (
+            isinstance(runner, RouteMeasurementRunner)
+            and self._route_measurement_waiting
+            and self._last_route_measurement_result is None
+        )
+        if not can_take_over_waiting_gui_runner:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Route measurement is already active.",
+            }, (0.0, 0.0)
+        route_offset_xy = runner.route_offset_xy()
+        runner.stop()
+        thread.join(timeout=2.0)
+        if thread.is_alive():
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Waiting GUI route measurement did not stop.",
+            }, route_offset_xy
+        self._route_measurement_thread = None
+        self._route_measurement_runner = None
+        self._route_measurement_waiting = False
+        self._route_measurement_session_active = False
+        return None, route_offset_xy
+
+    def _build_api_route_session_runner(
+        self,
+        *,
+        session_id: str,
+        points: list[RouteMeasurementPoint],
+        selected_point: RouteMeasurementPoint,
+        start_settings: RouteExternalSessionStartSettings,
+        meter_configuration: RouteMeterConfiguration,
+        needle_feedrate: float | None,
+    ) -> RouteExternalMeasurementSessionRunner:
+        return RouteExternalMeasurementSessionRunner(
+            session_id=session_id,
+            points=points,
+            stage_controller=self.stage_controller,
+            lcr_controller=self._api_route_lcr_controller,
+            needle_feedrate=needle_feedrate,
+            measurement_count=start_settings.measurement_count,
+            initial_measurement_count=start_settings.initial_measurement_count,
+            start_point_number=int(selected_point.index),
+            max_relative_rms=start_settings.max_relative_rms,
+            contact_quality_limits=start_settings.contact_quality_limits,
+            auto_contact_seek_step_mm=start_settings.contact_seek_step_mm,
+            auto_contact_seek_max_total_mm=start_settings.contact_seek_range_mm,
+            contact_settle_s=start_settings.contact_settle_s,
+            nplc_label=meter_configuration.nplc_label(),
+            measurement_type=meter_configuration.measurement_type_label(),
+            status_callback=self.route_measurement_status.emit,
+            progress_callback=self.route_measurement_progress.emit,
+            photo_callback=self._capture_api_route_photo_artifact,
+            photo_focus_callback=lambda point, position, total: self._api_route_photo_autofocus(
+                point,
+                position,
+                total,
+                range_mm=start_settings.photo_focus_range_mm,
+            ),
+            contact_photo_callback=self._capture_route_contact_photo,
+            pre_contact_photo_callback=self._capture_route_pre_contact_photo,
+            result_callback=self.route_measurement_result.emit,
+            waiting_callback=self.route_measurement_waiting_changed.emit,
+            photo_enabled=start_settings.photo_enabled,
+            photo_focus_enabled=start_settings.photo_focus_enabled,
+            photo_settle_s=start_settings.photo_settle_s,
+            wait_before_first_point=True,
+        )
+
+    def _cleanup_failed_api_route_session_start(
+        self,
+        runner: RouteExternalMeasurementSessionRunner,
+    ) -> dict[str, Any]:
+        status = runner.status_payload()
         thread = self._route_measurement_thread
         if thread is not None and thread.is_alive():
-            runner = self._route_measurement_runner
-            if isinstance(runner, RouteExternalMeasurementSessionRunner):
-                if self._api_bool(
-                    payload,
-                    "attach_existing_session",
-                    "attach_existing",
-                    "resume_existing",
-                    default=False,
-                ):
-                    return runner.status_payload()
-                status = runner.status_payload()
-                contact = status.get("current_contact")
-                if isinstance(contact, dict):
-                    point_label = (
-                        contact.get("label")
-                        or contact.get("contact_number")
-                        or contact.get("point_index")
-                    )
-                else:
-                    point_label = status.get("position")
-                return {
-                    "accepted": False,
-                    "status_code": 409,
-                    "message": (
-                        "External route session is already active"
-                        f" at {point_label}. Stop it first or pass "
-                        "attach_existing_session=true to attach explicitly."
-                    ),
-                    "active_session": status,
-                }
-            can_take_over_waiting_gui_runner = (
-                isinstance(runner, RouteMeasurementRunner)
-                and self._route_measurement_waiting
-                and self._last_route_measurement_result is None
-            )
-            if not can_take_over_waiting_gui_runner:
-                return {
-                    "accepted": False,
-                    "status_code": 409,
-                    "message": "Route measurement is already active.",
-                }
-            route_offset_xy = runner.route_offset_xy()
             runner.stop()
             thread.join(timeout=2.0)
-            if thread.is_alive():
-                return {
-                    "accepted": False,
-                    "status_code": 409,
-                    "message": "Waiting GUI route measurement did not stop.",
-                }
-            self._route_measurement_thread = None
-            self._route_measurement_runner = None
-            self._route_measurement_waiting = False
-            self._route_measurement_session_active = False
-        else:
-            route_offset_xy = (0.0, 0.0)
+        self._route_measurement_thread = None
+        self._route_measurement_runner = None
+        self._api_route_lcr_controller = None
+        self._route_measurement_waiting = False
+        self._route_measurement_session_active = False
+        return status
+
+    def _api_start_route_session(self, payload: dict[str, Any]) -> dict[str, Any]:
+        active_response, route_offset_xy = self._api_route_session_thread_preflight(
+            payload
+        )
+        if active_response is not None:
+            return active_response
         if self.serial_connection is None or not self.serial_connection.is_open:
             return {
                 "accepted": False,
@@ -2894,54 +2947,29 @@ class Main(QMainWindow):
         self._api_route_session_id = session_id
         self._api_route_lcr_controller = route_lcr_controller
         self._api_route_last_status = None
-        runner = RouteExternalMeasurementSessionRunner(
+        runner = self._build_api_route_session_runner(
             session_id=session_id,
             points=points,
-            stage_controller=self.stage_controller,
-            lcr_controller=route_lcr_controller,
+            selected_point=selected_point,
+            start_settings=start_settings,
+            meter_configuration=meter_configuration,
             needle_feedrate=self._api_needle_feedrate(payload),
-            measurement_count=start_settings.measurement_count,
-            initial_measurement_count=start_settings.initial_measurement_count,
-            start_point_number=int(selected_point.index),
-            max_relative_rms=start_settings.max_relative_rms,
-            contact_quality_limits=start_settings.contact_quality_limits,
-            auto_contact_seek_step_mm=start_settings.contact_seek_step_mm,
-            auto_contact_seek_max_total_mm=start_settings.contact_seek_range_mm,
-            contact_settle_s=start_settings.contact_settle_s,
-            nplc_label=meter_configuration.nplc_label(),
-            measurement_type=meter_configuration.measurement_type_label(),
-            status_callback=self.route_measurement_status.emit,
-            progress_callback=self.route_measurement_progress.emit,
-            photo_callback=self._capture_api_route_photo_artifact,
-            photo_focus_callback=lambda point, position, total: self._api_route_photo_autofocus(
-                point,
-                position,
-                total,
-                range_mm=start_settings.photo_focus_range_mm,
-            ),
-            contact_photo_callback=self._capture_route_contact_photo,
-            pre_contact_photo_callback=self._capture_route_pre_contact_photo,
-            result_callback=self.route_measurement_result.emit,
-            waiting_callback=self.route_measurement_waiting_changed.emit,
-            photo_enabled=start_settings.photo_enabled,
-            photo_focus_enabled=start_settings.photo_focus_enabled,
-            photo_settle_s=start_settings.photo_settle_s,
-            wait_before_first_point=True,
         )
         runner.set_route_offset_xy(route_offset_xy)
+        launch_state = api_route_session_launch_state(
+            session_id=session_id,
+            points=points,
+            selected_point=selected_point,
+            photo_enabled=start_settings.photo_enabled,
+        )
         self._route_measurement_runner = runner
         self._route_measurement_waiting = False
         self._route_measurement_waiting_reason = ""
         self._pending_route_measure_point = None
         self._route_measurement_session_active = True
-        self._route_measurement_photo_enabled = start_settings.photo_enabled
-        self._route_measurement_measure_enabled = True
-        presentation = route_launch_presentation(
-            points,
-            selected_point,
-            api_session=True,
-        )
-        self._route_measurement_point_numbers = presentation.point_numbers
+        self._route_measurement_photo_enabled = launch_state.photo_enabled
+        self._route_measurement_measure_enabled = launch_state.measure_enabled
+        self._route_measurement_point_numbers = launch_state.point_numbers
         self._last_telegram_attention_message = ""
         with self._telegram_photo_lock:
             self._telegram_pending_contact_photo = None
@@ -2955,19 +2983,10 @@ class Main(QMainWindow):
             name="RouteApiExternalSession",
             daemon=True,
         )
-        start_message = presentation.message
         self._last_route_measurement_result = None
         self._route_measurement_thread.start()
         if not runner.wait_until_initial_pause(timeout_s=10.0):
-            status = runner.status_payload()
-            if self._route_measurement_thread.is_alive():
-                runner.stop()
-                self._route_measurement_thread.join(timeout=2.0)
-            self._route_measurement_thread = None
-            self._route_measurement_runner = None
-            self._api_route_lcr_controller = None
-            self._route_measurement_waiting = False
-            self._route_measurement_session_active = False
+            status = self._cleanup_failed_api_route_session_start(runner)
             return {
                 "accepted": False,
                 "status_code": 409,
@@ -2979,14 +2998,14 @@ class Main(QMainWindow):
             }
         self._route_measurement_waiting = True
         self.route_measurement_started.emit(
-            start_message,
+            launch_state.start_message,
             len(points),
-            int(selected_point.index),
+            launch_state.selected_point_number,
             True,
         )
         self._send_telegram_alert(
             "route_started",
-            f"Probe route API session started:\n{start_message}",
+            f"Probe route API session started:\n{launch_state.start_message}",
         )
         return runner.status_payload()
 

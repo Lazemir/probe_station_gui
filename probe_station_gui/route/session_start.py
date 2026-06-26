@@ -95,6 +95,16 @@ class RouteLaunchPresentation:
 
 
 @dataclass(frozen=True)
+class ApiRouteSessionLaunchState:
+    session_id: str
+    point_numbers: list[int]
+    selected_point_number: int
+    start_message: str
+    photo_enabled: bool
+    measure_enabled: bool = True
+
+
+@dataclass(frozen=True)
 class GuiRouteStartPreflight:
     accepted: bool = True
     message: str = ""
@@ -216,6 +226,61 @@ def route_launch_presentation(
         message=message,
         point_numbers=[int(point.index) for point in point_list],
         remaining_count=remaining_count,
+    )
+
+
+def api_route_existing_session_response(
+    *,
+    payload: dict[str, object],
+    status: dict[str, Any],
+) -> dict[str, Any]:
+    if _payload_bool(
+        payload,
+        "attach_existing_session",
+        "attach_existing",
+        "resume_existing",
+        default=False,
+    ):
+        return status
+    contact = status.get("current_contact")
+    if isinstance(contact, dict):
+        point_label = (
+            contact.get("label")
+            or contact.get("contact_number")
+            or contact.get("point_index")
+        )
+    else:
+        point_label = status.get("position")
+    return {
+        "accepted": False,
+        "status_code": 409,
+        "message": (
+            "External route session is already active"
+            f" at {point_label}. Stop it first or pass "
+            "attach_existing_session=true to attach explicitly."
+        ),
+        "active_session": status,
+    }
+
+
+def api_route_session_launch_state(
+    *,
+    session_id: str,
+    points: Sequence[RouteMeasurementPoint],
+    selected_point: RouteMeasurementPoint,
+    photo_enabled: bool,
+) -> ApiRouteSessionLaunchState:
+    presentation = route_launch_presentation(
+        points,
+        selected_point,
+        api_session=True,
+    )
+    return ApiRouteSessionLaunchState(
+        session_id=str(session_id),
+        point_numbers=presentation.point_numbers,
+        selected_point_number=int(selected_point.index),
+        start_message=presentation.message,
+        photo_enabled=bool(photo_enabled),
     )
 
 
@@ -535,12 +600,15 @@ def _route_session_contact_seek_step(
 
 
 __all__ = [
+    "ApiRouteSessionLaunchState",
     "ApiRouteSessionStartDecision",
     "ApiRouteSessionStartPlan",
     "DEFAULT_EXTERNAL_SESSION_FOLLOWUP_MEASUREMENT_COUNT",
     "DEFAULT_EXTERNAL_SESSION_INITIAL_MEASUREMENT_COUNT",
     "DEFAULT_EXTERNAL_SESSION_PHOTO_FOCUS_RANGE_MM",
     "DEFAULT_EXTERNAL_SESSION_PHOTO_SETTLE_S",
+    "api_route_existing_session_response",
+    "api_route_session_launch_state",
     "GuiRouteLaunchState",
     "GuiRouteStartPreflight",
     "RouteExternalSessionStartSettings",

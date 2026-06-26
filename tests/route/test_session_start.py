@@ -392,6 +392,40 @@ def test_route_launch_presentation_formats_gui_messages_and_remaining_count() ->
     assert api_ready.message == "Route API session ready at point 7 P007; 3 points selected."
 
 
+def test_api_route_existing_session_response_attaches_or_rejects() -> None:
+    existing_response = _new_helper("api_route_existing_session_response")
+    active_status = {
+        "accepted": True,
+        "session_id": "session-123",
+        "state": "waiting_paused",
+        "position": 4,
+        "current_contact": {
+            "label": "P004",
+            "contact_number": 4,
+        },
+    }
+
+    attached = existing_response(
+        payload={"attach_existing_session": True},
+        status=active_status,
+    )
+    rejected = existing_response(
+        payload={},
+        status=active_status,
+    )
+
+    assert attached == active_status
+    assert rejected == {
+        "accepted": False,
+        "status_code": 409,
+        "message": (
+            "External route session is already active at P004. "
+            "Stop it first or pass attach_existing_session=true to attach explicitly."
+        ),
+        "active_session": active_status,
+    }
+
+
 def test_gui_route_start_availability_preserves_rejection_messages() -> None:
     start_availability = _new_helper("gui_route_start_availability")
     active = start_availability(
