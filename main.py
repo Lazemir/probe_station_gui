@@ -1575,7 +1575,7 @@ class Main(QMainWindow):
         contact_plan_result = api_move_to_contact_plan(
             payload,
             contact_context=self._api_contact_context,
-            default_needle_feedrate=self._api_needle_feedrate({}),
+            default_needle_feedrate=lambda: self._api_needle_feedrate({}),
             min_feedrate=self.MIN_FEEDRATE_MM_MIN,
         )
         if isinstance(contact_plan_result, dict):
@@ -1632,7 +1632,7 @@ class Main(QMainWindow):
         contact_plan_result = api_contact_needles_plan(
             payload,
             contact_context=self._api_contact_context,
-            default_needle_feedrate=self._api_needle_feedrate({}),
+            default_needle_feedrate=lambda: self._api_needle_feedrate({}),
             min_feedrate=self.MIN_FEEDRATE_MM_MIN,
         )
         if isinstance(contact_plan_result, dict):

@@ -1345,6 +1345,37 @@ class MainCoordinateFeedrateTest(unittest.TestCase):
             ],
         )
 
+    def test_api_move_to_contact_missing_contact_returns_400_before_default_feedrate(
+        self,
+    ) -> None:
+        window = Main.__new__(Main)
+
+        response = Main._api_move_to_contact(window, {})
+
+        self.assertEqual(
+            response,
+            {
+                "accepted": False,
+                "status_code": 400,
+                "message": "Provide a positive contact_number.",
+            },
+        )
+
+    def test_api_move_to_contact_context_rejection_returns_before_default_feedrate(
+        self,
+    ) -> None:
+        rejection = {
+            "accepted": False,
+            "status_code": 409,
+            "message": "Design registration is required before using contacts.",
+        }
+        window = Main.__new__(Main)
+        window._api_contact_context = lambda _contact_number: rejection
+
+        response = Main._api_move_to_contact(window, {"contact_number": 7})
+
+        self.assertIs(response, rejection)
+
     def test_api_move_to_contact_with_lift_after_false_leaves_needles_down(self) -> None:
         calls: list[tuple[object, ...]] = []
         point = object()
@@ -1576,6 +1607,49 @@ class MainCoordinateFeedrateTest(unittest.TestCase):
                 ("finish",),
             ],
         )
+
+    def test_api_contact_needles_invalid_action_returns_400_before_default_feedrate(
+        self,
+    ) -> None:
+        contact = {"contact_number": 8, "label": "Pad 8"}
+        window = Main.__new__(Main)
+        window._api_contact_context = lambda _contact_number: {
+            "accepted": True,
+            "point": object(),
+            "contact": contact,
+        }
+
+        response = Main._api_contact_needles(
+            window,
+            {
+                "contact_number": 8,
+                "action": "park",
+            },
+        )
+
+        self.assertEqual(
+            response,
+            {
+                "accepted": False,
+                "status_code": 400,
+                "message": "Needle action must be lower, lift, or raise.",
+            },
+        )
+
+    def test_api_contact_needles_context_rejection_returns_before_default_feedrate(
+        self,
+    ) -> None:
+        rejection = {
+            "accepted": False,
+            "status_code": 409,
+            "message": "Design registration is required before using contacts.",
+        }
+        window = Main.__new__(Main)
+        window._api_contact_context = lambda _contact_number: rejection
+
+        response = Main._api_contact_needles(window, {"contact_number": 8})
+
+        self.assertIs(response, rejection)
 
     def test_api_route_session_reports_unexpected_instrument_setup_error(self) -> None:
         class _FailingLcr:

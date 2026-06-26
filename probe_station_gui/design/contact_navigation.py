@@ -43,41 +43,23 @@ class ApiContactNeedlesPlan:
     request: ApiContactNeedlesRequest
 
 
+DefaultNeedleFeedrate = float | None | Callable[[], float | None]
+
+
 def api_move_to_contact_request(
     payload: dict[str, object],
     *,
-    default_needle_feedrate: float | None,
+    default_needle_feedrate: DefaultNeedleFeedrate,
     min_feedrate: float,
 ) -> ApiMoveToContactRequest | dict[str, object]:
     contact_number = api_contact_number_from_payload(payload)
     if contact_number is None:
         return _missing_contact_number_response()
-    return ApiMoveToContactRequest(
+    return _api_move_to_contact_request(
+        payload,
         contact_number=contact_number,
-        lower_needles=payload_bool(
-            payload,
-            "lower_needles",
-            "lower",
-            default=False,
-        ),
-        lift_before_move=payload_bool(
-            payload,
-            "lift_before_move",
-            default=True,
-        ),
-        lift_after=payload_bool(payload, "lift_after", default=False),
-        contact_settle_s=payload_float(
-            payload,
-            "contact_settle_s",
-            "settle_s",
-            default=0.2,
-            minimum=0.0,
-        ),
-        needle_feedrate_mm_min=api_needle_feedrate_from_payload(
-            payload,
-            default_needle_feedrate=default_needle_feedrate,
-            min_feedrate=min_feedrate,
-        ),
+        default_needle_feedrate=default_needle_feedrate,
+        min_feedrate=min_feedrate,
     )
 
 
@@ -85,19 +67,21 @@ def api_move_to_contact_plan(
     payload: dict[str, object],
     *,
     contact_context: Callable[[int], dict[str, object]],
-    default_needle_feedrate: float | None,
+    default_needle_feedrate: DefaultNeedleFeedrate,
     min_feedrate: float,
 ) -> ApiMoveToContactPlan | dict[str, object]:
-    request = api_move_to_contact_request(
+    contact_number = api_contact_number_from_payload(payload)
+    if contact_number is None:
+        return _missing_contact_number_response()
+    context_result = contact_context(contact_number)
+    if not context_result.get("accepted", False):
+        return context_result
+    request = _api_move_to_contact_request(
         payload,
+        contact_number=contact_number,
         default_needle_feedrate=default_needle_feedrate,
         min_feedrate=min_feedrate,
     )
-    if isinstance(request, dict):
-        return request
-    context_result = contact_context(request.contact_number)
-    if not context_result.get("accepted", False):
-        return context_result
     return ApiMoveToContactPlan(
         point=context_result["point"],
         contact=context_result["contact"],
@@ -153,47 +137,44 @@ def api_move_to_contact_stage_error_response(
 def api_contact_needles_request(
     payload: dict[str, object],
     *,
-    default_needle_feedrate: float | None,
+    default_needle_feedrate: DefaultNeedleFeedrate,
     min_feedrate: float,
 ) -> ApiContactNeedlesRequest | dict[str, object]:
     contact_number = api_contact_number_from_payload(payload)
     if contact_number is None:
         return _missing_contact_number_response()
-    action = _normalize_needle_action(payload)
-    if action is None:
-        return {
-            "accepted": False,
-            "status_code": 400,
-            "message": "Needle action must be lower, lift, or raise.",
-        }
-    return ApiContactNeedlesRequest(
+    request = _api_contact_needles_request(
+        payload,
         contact_number=contact_number,
-        action=action,
-        needle_feedrate_mm_min=api_needle_feedrate_from_payload(
-            payload,
-            default_needle_feedrate=default_needle_feedrate,
-            min_feedrate=min_feedrate,
-        ),
+        default_needle_feedrate=default_needle_feedrate,
+        min_feedrate=min_feedrate,
     )
+    if isinstance(request, dict):
+        return request
+    return request
 
 
 def api_contact_needles_plan(
     payload: dict[str, object],
     *,
     contact_context: Callable[[int], dict[str, object]],
-    default_needle_feedrate: float | None,
+    default_needle_feedrate: DefaultNeedleFeedrate,
     min_feedrate: float,
 ) -> ApiContactNeedlesPlan | dict[str, object]:
-    request = api_contact_needles_request(
+    contact_number = api_contact_number_from_payload(payload)
+    if contact_number is None:
+        return _missing_contact_number_response()
+    context_result = contact_context(contact_number)
+    if not context_result.get("accepted", False):
+        return context_result
+    request = _api_contact_needles_request(
         payload,
+        contact_number=contact_number,
         default_needle_feedrate=default_needle_feedrate,
         min_feedrate=min_feedrate,
     )
     if isinstance(request, dict):
         return request
-    context_result = contact_context(request.contact_number)
-    if not context_result.get("accepted", False):
-        return context_result
     return ApiContactNeedlesPlan(
         contact=context_result["contact"],
         request=request,
@@ -327,7 +308,7 @@ def _normalize_needle_action(payload: dict[str, object]) -> str | None:
 def api_needle_feedrate_from_payload(
     payload: dict[str, object],
     *,
-    default_needle_feedrate: float | None,
+    default_needle_feedrate: DefaultNeedleFeedrate,
     min_feedrate: float,
 ) -> float | None:
     for key in ("needle_feedrate_mm_min", "feedrate_mm_min", "feedrate"):
@@ -335,11 +316,77 @@ def api_needle_feedrate_from_payload(
             continue
         value = payload_float(payload, key, default=math.nan, minimum=0.0)
         return max(min_feedrate, value)
-    return (
-        float(default_needle_feedrate)
-        if default_needle_feedrate is not None
-        else None
+    resolved_default = _resolve_default_needle_feedrate(default_needle_feedrate)
+    return float(resolved_default) if resolved_default is not None else None
+
+
+def _api_move_to_contact_request(
+    payload: dict[str, object],
+    *,
+    contact_number: int,
+    default_needle_feedrate: DefaultNeedleFeedrate,
+    min_feedrate: float,
+) -> ApiMoveToContactRequest:
+    return ApiMoveToContactRequest(
+        contact_number=contact_number,
+        lower_needles=payload_bool(
+            payload,
+            "lower_needles",
+            "lower",
+            default=False,
+        ),
+        lift_before_move=payload_bool(
+            payload,
+            "lift_before_move",
+            default=True,
+        ),
+        lift_after=payload_bool(payload, "lift_after", default=False),
+        contact_settle_s=payload_float(
+            payload,
+            "contact_settle_s",
+            "settle_s",
+            default=0.2,
+            minimum=0.0,
+        ),
+        needle_feedrate_mm_min=api_needle_feedrate_from_payload(
+            payload,
+            default_needle_feedrate=default_needle_feedrate,
+            min_feedrate=min_feedrate,
+        ),
     )
+
+
+def _api_contact_needles_request(
+    payload: dict[str, object],
+    *,
+    contact_number: int,
+    default_needle_feedrate: DefaultNeedleFeedrate,
+    min_feedrate: float,
+) -> ApiContactNeedlesRequest | dict[str, object]:
+    action = _normalize_needle_action(payload)
+    if action is None:
+        return {
+            "accepted": False,
+            "status_code": 400,
+            "message": "Needle action must be lower, lift, or raise.",
+        }
+    return ApiContactNeedlesRequest(
+        contact_number=contact_number,
+        action=action,
+        needle_feedrate_mm_min=api_needle_feedrate_from_payload(
+            payload,
+            default_needle_feedrate=default_needle_feedrate,
+            min_feedrate=min_feedrate,
+        ),
+    )
+
+
+def _resolve_default_needle_feedrate(
+    default_needle_feedrate: DefaultNeedleFeedrate,
+) -> float | None:
+    if callable(default_needle_feedrate):
+        return default_needle_feedrate()
+    return default_needle_feedrate
 
 
 __all__ = [
