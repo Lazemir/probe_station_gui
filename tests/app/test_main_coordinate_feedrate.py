@@ -50,6 +50,12 @@ from probe_station_gui.route.measurement import (
     RouteMeasurementRunner,
     RoutePhotoRecord,
 )
+from probe_station_gui.route.measurement_settings import (
+    RouteMeasurementSettingsStore,
+)
+from probe_station_gui.route.dialog_adapter import (
+    request_route_measurement_for_point,
+)
 from probe_station_gui.instruments.meters.lcr import RouteMeterConfiguration
 from probe_station_gui.settings.manager import ObjectiveCalibrationSettings, Settings
 from probe_station_gui.stage.controller import StageControllerError
@@ -1595,17 +1601,17 @@ assert image.height() == 4
 
     def test_route_session_active_reads_new_and_legacy_settings(self) -> None:
         self.assertTrue(
-            Main._route_measurement_session_active_from_settings(
+            RouteMeasurementSettingsStore.session_active(
                 {"measurement_session_active": True}
             )
         )
         self.assertTrue(
-            Main._route_measurement_session_active_from_settings(
+            RouteMeasurementSettingsStore.session_active(
                 {"measurement_pending": True}
             )
         )
         self.assertFalse(
-            Main._route_measurement_session_active_from_settings(
+            RouteMeasurementSettingsStore.session_active(
                 {
                     "measurement_session_active": False,
                     "measurement_pending": True,
@@ -2117,7 +2123,6 @@ assert image.height() == 4
         window.settings_manager = types.SimpleNamespace(
             config_dir=lambda: Path("C:/config")
         )
-        window._create_route_measurement_dialog = lambda **_kwargs: None
 
         Main._open_route_measurement_dialog(window, start_context=False)
 
@@ -2147,7 +2152,6 @@ assert image.height() == 4
         window.settings_manager = types.SimpleNamespace(
             config_dir=lambda: Path("C:/config")
         )
-        window._create_route_measurement_dialog = lambda **_kwargs: None
         window._start_route_measurement = (
             lambda configuration, *, wait_before_first_point=False: started.append(
                 (configuration, bool(wait_before_first_point))
@@ -2189,7 +2193,22 @@ assert image.height() == 4
             lambda message, _timeout_ms=None: statuses.append(str(message))
         )
 
-        Main._request_route_measurement_for_point(window, 91)
+        request_route_measurement_for_point(
+            point_number=91,
+            thread_active=True,
+            waiting=True,
+            open_dialog=window._open_route_measurement_dialog,
+            current_dialog=lambda: window._route_measurement_dialog,
+            submit_confirmation=window._submit_route_measurement_confirmation,
+            request_point_correction=window._request_route_measurement_point_correction,
+            start_measurement=window._start_route_measurement,
+            set_pending_point=lambda point: setattr(
+                window, "_pending_route_measure_point", point
+            ),
+            clear_pending_point=lambda: setattr(
+                window, "_pending_route_measure_point", None
+            ),
+        )
 
         self.assertEqual(runner.confirmations, ["jump:91"])
         self.assertIsNone(window._pending_route_measure_point)
@@ -2242,7 +2261,22 @@ assert image.height() == 4
             lambda message, _timeout_ms=None: statuses.append(str(message))
         )
 
-        Main._request_route_measurement_for_point(window, 91)
+        request_route_measurement_for_point(
+            point_number=91,
+            thread_active=True,
+            waiting=False,
+            open_dialog=window._open_route_measurement_dialog,
+            current_dialog=lambda: window._route_measurement_dialog,
+            submit_confirmation=window._submit_route_measurement_confirmation,
+            request_point_correction=window._request_route_measurement_point_correction,
+            start_measurement=window._start_route_measurement,
+            set_pending_point=lambda point: setattr(
+                window, "_pending_route_measure_point", point
+            ),
+            clear_pending_point=lambda: setattr(
+                window, "_pending_route_measure_point", None
+            ),
+        )
 
         self.assertTrue(runner.correction_requested)
         self.assertEqual(cancellations, ["Route measurement interrupt requested."])
@@ -4076,9 +4110,17 @@ assert image.height() == 4
                 self.applied = False
                 self.confirmations: list[str] = []
                 self.runtime_settings: dict[str, object] = {}
+                self.stop_requested = False
 
             def route_offset_xy(self):
                 return self.offset
+
+            def set_route_offset_xy(self, offset: tuple[float, float]) -> None:
+                self.offset = offset
+
+            def wait_until_waiting(self, timeout_s: float) -> bool:
+                _ = timeout_s
+                return True
 
             def update_runtime_settings(self, **kwargs) -> None:
                 self.updated = True
@@ -4090,6 +4132,9 @@ assert image.height() == 4
             def submit_confirmation(self, action: str) -> bool:
                 self.confirmations.append(str(action))
                 return True
+
+            def stop(self) -> None:
+                self.stop_requested = True
 
         def configuration(
             *,
@@ -4131,9 +4176,10 @@ assert image.height() == 4
         )
         old_runner = _FakeRunner(offset=(0.125, -0.25))
         new_runner = _FakeRunner()
-        restart_calls: list[tuple[RouteMeasurementRunConfiguration, tuple[float, float]]] = []
+        restart_calls: list[tuple[RouteMeasurementRunConfiguration, bool]] = []
         window = Main.__new__(Main)
         window._route_measurement_runner = old_runner
+        window._route_measurement_thread = None
         window._route_measurement_waiting = True
         window._route_measurement_runtime_configuration = previous
         window._route_measurement_dialog = types.SimpleNamespace(
@@ -4149,19 +4195,21 @@ assert image.height() == 4
         def restart(
             config: RouteMeasurementRunConfiguration,
             *,
-            route_offset_xy: tuple[float, float],
-        ) -> bool:
-            restart_calls.append((config, route_offset_xy))
+            wait_before_first_point: bool,
+        ) -> None:
+            restart_calls.append((config, bool(wait_before_first_point)))
             window._route_measurement_runner = new_runner
-            return True
 
-        window._restart_waiting_route_measurement = restart
+        window._start_route_measurement = restart
+        window._clear_waiting_route_measurement_state = lambda: None
 
         Main._submit_route_measurement_confirmation(window, "next")
 
-        self.assertEqual(restart_calls, [(current, (0.125, -0.25))])
+        self.assertEqual(restart_calls, [(current, True)])
         self.assertEqual(old_runner.confirmations, [])
+        self.assertTrue(old_runner.stop_requested)
         self.assertTrue(new_runner.updated)
+        self.assertEqual(new_runner.offset, (0.125, -0.25))
         self.assertEqual(
             new_runner.runtime_settings["contact_quality_limits"].as_dict(),
             {

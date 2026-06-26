@@ -187,8 +187,13 @@ from probe_station_gui.route.confirmation_flow import (
     route_confirmation_submission_plan,
 )
 from probe_station_gui.route.dialog_adapter import (
+    current_route_measurement_configuration,
     open_or_update_route_measurement_dialog,
+    route_dialog_handlers,
+    route_measurement_point_request_handler_for_owner,
+    restart_waiting_route_measurement,
     route_dialog_restore_plan,
+    route_measurement_setup_changed,
     route_measurement_session_cancel_plan,
     route_measurement_session_start_plan,
 )
@@ -7500,7 +7505,7 @@ class Main(QMainWindow):
             current_point=self._route_measurement_current_point,
             thread_active=bool(thread is not None and thread.is_alive()),
             waiting=self._route_measurement_waiting,
-            create_dialog=self._create_route_measurement_dialog,
+            handlers=route_dialog_handlers(self),
         )
         dialog = self._route_measurement_dialog
         if start_context and (thread is None or not thread.is_alive()):
@@ -7509,41 +7514,6 @@ class Main(QMainWindow):
                 configuration,
                 wait_before_first_point=True,
             )
-
-    def _create_route_measurement_dialog(self, **kwargs: object) -> object:
-        from probe_station_gui.dialogs.route_measurement_dialog import (
-            RouteMeasurementDialog,
-        )
-
-        dialog = RouteMeasurementDialog(**kwargs)
-        dialog.measure_requested.connect(self._start_route_measurement)
-        dialog.start_session_requested.connect(self._start_route_measurement_session)
-        dialog.cancel_session_requested.connect(self._cancel_route_measurement_session)
-        dialog.next_requested.connect(
-            lambda: self._submit_route_measurement_confirmation("next")
-        )
-        dialog.remeasure_requested.connect(
-            lambda: self._submit_route_measurement_confirmation("remeasure")
-        )
-        dialog.measure_current_requested.connect(
-            lambda: self._submit_route_measurement_confirmation("measure")
-        )
-        dialog.skip_requested.connect(
-            lambda: self._submit_route_measurement_confirmation("skip")
-        )
-        dialog.save_shift_requested.connect(self._save_route_measurement_shift)
-        dialog.interrupt_requested.connect(
-            self._request_route_measurement_point_correction
-        )
-        dialog.pause_requested.connect(self._request_pause_route_measurement)
-        dialog.stop_requested.connect(self._request_stop_route_measurement)
-        dialog.jump_requested.connect(self._submit_route_measurement_jump)
-        dialog.move_requested.connect(self._request_route_contact_move)
-        dialog.current_point_changed.connect(
-            self._on_route_measurement_current_point_changed
-        )
-        dialog.finished.connect(lambda _result: self._clear_route_measurement_dialog())
-        return dialog
 
     def _restore_route_measurement_state_after_design_load(self) -> None:
         route = self._design_session.route
@@ -7561,12 +7531,6 @@ class Main(QMainWindow):
 
     def _route_measurement_settings_store(self) -> RouteMeasurementSettingsStore:
         return RouteMeasurementSettingsStore(self.settings_manager.config_dir())
-
-    @staticmethod
-    def _route_measurement_session_active_from_settings(
-        state: dict[str, object],
-    ) -> bool:
-        return RouteMeasurementSettingsStore.session_active(state)
 
     def _clear_route_measurement_dialog(self) -> None:
         self._route_measurement_dialog = None
@@ -7616,83 +7580,6 @@ class Main(QMainWindow):
             plan.status_message,
             plan.status_timeout_ms,
         )
-
-    def _request_route_measurement_for_point(self, point_number: int) -> None:
-        point_number = int(point_number)
-        thread = self._route_measurement_thread
-        if thread is not None and thread.is_alive():
-            if self._route_measurement_waiting:
-                self._pending_route_measure_point = None
-                self._submit_route_measurement_confirmation(f"jump:{point_number}")
-                return
-            self._pending_route_measure_point = point_number
-            self._request_route_measurement_point_correction(
-                pending_point_number=point_number
-            )
-            return
-        self._open_route_measurement_dialog(start_context=False)
-        dialog = self._route_measurement_dialog
-        if dialog is None:
-            return
-        dialog.set_current_point(point_number)
-        self._start_route_measurement(dialog.current_configuration())
-
-    def _current_route_measurement_configuration(
-        self,
-        fallback: RouteMeasurementRunConfiguration,
-    ) -> RouteMeasurementRunConfiguration:
-        return self._route_measurement_runtime_configuration or fallback
-
-    @staticmethod
-    def _route_measurement_setup_changed(
-        previous: RouteMeasurementRunConfiguration | None,
-        current: RouteMeasurementRunConfiguration,
-    ) -> bool:
-        if previous is None:
-            return False
-        return (
-            previous.operation_mode != current.operation_mode
-            or bool(previous.previous_ok_only) != bool(current.previous_ok_only)
-            or str(previous.previous_csv_path).strip()
-            != str(current.previous_csv_path).strip()
-        )
-
-    def _restart_waiting_route_measurement(
-        self,
-        configuration: RouteMeasurementRunConfiguration,
-        *,
-        route_offset_xy: tuple[float, float],
-    ) -> bool:
-        old_runner = self._route_measurement_runner
-        old_thread = self._route_measurement_thread
-        if old_runner is not None:
-            old_runner.stop()
-        if old_thread is not None and old_thread.is_alive():
-            old_thread.join(timeout=2.0)
-            if old_thread.is_alive():
-                message = "Waiting route measurement did not stop."
-                self._show_route_measurement_dialog_status(message, 8000)
-                return False
-        self._route_measurement_thread = None
-        self._route_measurement_runner = None
-        self._route_measurement_waiting = False
-        self._start_route_measurement(
-            configuration,
-            wait_before_first_point=True,
-        )
-        new_runner = self._route_measurement_runner
-        if not isinstance(new_runner, RouteMeasurementRunner):
-            return False
-        new_runner.set_route_offset_xy(route_offset_xy)
-        if not new_runner.wait_until_waiting(timeout_s=10.0):
-            message = "Route measurement did not reach waiting state."
-            new_runner.stop()
-            thread = self._route_measurement_thread
-            if thread is not None and thread.is_alive():
-                thread.join(timeout=2.0)
-            self._show_route_measurement_dialog_status(message, 8000)
-            return False
-        return True
 
     def _start_route_measurement(
         self,
@@ -7870,7 +7757,8 @@ class Main(QMainWindow):
             position: int,
             total: int,
         ) -> None:
-            active_configuration = self._current_route_measurement_configuration(
+            active_configuration = current_route_measurement_configuration(
+                self._route_measurement_runtime_configuration,
                 configuration
             )
             self._record_route_contact_height(
@@ -7888,7 +7776,8 @@ class Main(QMainWindow):
                 point,
                 position,
                 total,
-                configuration=self._current_route_measurement_configuration(
+                configuration=current_route_measurement_configuration(
+                    self._route_measurement_runtime_configuration,
                     configuration
                 ),
                 focus_result=focus_result,
@@ -7897,7 +7786,8 @@ class Main(QMainWindow):
                 point,
                 position,
                 total,
-                configuration=self._current_route_measurement_configuration(
+                configuration=current_route_measurement_configuration(
+                    self._route_measurement_runtime_configuration,
                     configuration
                 ),
             ),
@@ -8602,7 +8492,7 @@ class Main(QMainWindow):
             configuration,
             external_session=external_session,
             waiting=self._route_measurement_waiting,
-            setup_changed=self._route_measurement_setup_changed(
+            setup_changed=route_measurement_setup_changed(
                 self._route_measurement_runtime_configuration,
                 configuration,
             ),
@@ -8613,9 +8503,16 @@ class Main(QMainWindow):
                 if hasattr(runner, "route_offset_xy")
                 else (0.0, 0.0)
             )
-            if not self._restart_waiting_route_measurement(
-                configuration,
+            if not restart_waiting_route_measurement(
+                configuration=configuration,
+                old_runner=self._route_measurement_runner,
+                old_thread=self._route_measurement_thread,
                 route_offset_xy=route_offset_xy,
+                clear_waiting_state=self._clear_waiting_route_measurement_state,
+                start_measurement=self._start_route_measurement,
+                current_runner=lambda: self._route_measurement_runner,
+                current_thread=lambda: self._route_measurement_thread,
+                show_status=self._show_route_measurement_dialog_status,
             ):
                 return None
             runner = self._route_measurement_runner
@@ -11438,7 +11335,7 @@ class Main(QMainWindow):
             self._open_route_measurement_dialog
         )
         self.design_navigator_panel.route_measurement_measure_requested.connect(
-            self._request_route_measurement_for_point
+            route_measurement_point_request_handler_for_owner(self)
         )
         self.design_navigator_panel.route_measurement_stop_requested.connect(
             self._request_stop_route_measurement

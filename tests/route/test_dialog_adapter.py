@@ -3,8 +3,12 @@ import unittest
 from pathlib import Path
 
 from probe_station_gui.route.dialog_adapter import (
+    current_route_measurement_configuration,
+    request_route_measurement_for_point,
+    restart_waiting_route_measurement,
     route_dialog_defaults,
     route_dialog_restore_plan,
+    route_measurement_setup_changed,
     route_measurement_session_cancel_plan,
     route_measurement_session_start_plan,
 )
@@ -119,6 +123,101 @@ class RouteDialogAdapterTest(unittest.TestCase):
         self.assertEqual(plan.point_number, 1)
         self.assertEqual(plan.status_message, "Route measurement session cancelled.")
         self.assertEqual(plan.status_timeout_ms, 5000)
+
+    def test_current_route_measurement_configuration_prefers_runtime(self) -> None:
+        fallback = types.SimpleNamespace(csv_path="fallback.csv")
+        runtime = types.SimpleNamespace(csv_path="runtime.csv")
+
+        active = current_route_measurement_configuration(runtime, fallback)
+
+        self.assertIs(active, runtime)
+
+    def test_route_measurement_setup_changed_detects_runtime_relevant_changes(self) -> None:
+        previous = types.SimpleNamespace(
+            operation_mode="measure",
+            previous_ok_only=False,
+            previous_csv_path="old.csv",
+        )
+        current = types.SimpleNamespace(
+            operation_mode="photo",
+            previous_ok_only=False,
+            previous_csv_path="old.csv",
+        )
+
+        changed = route_measurement_setup_changed(previous, current)
+
+        self.assertTrue(changed)
+
+    def test_request_route_measurement_for_point_opens_dialog_when_idle(self) -> None:
+        calls: list[object] = []
+        dialog = types.SimpleNamespace(
+            set_current_point=lambda point: calls.append(("point", int(point))),
+            current_configuration=lambda: "config",
+        )
+
+        request_route_measurement_for_point(
+            point_number=9,
+            thread_active=False,
+            waiting=False,
+            open_dialog=lambda *, start_context: calls.append(("open", start_context)),
+            current_dialog=lambda: dialog,
+            submit_confirmation=lambda _action: None,
+            request_point_correction=lambda **_kwargs: None,
+            start_measurement=lambda config: calls.append(("start", config)),
+            set_pending_point=lambda _point: None,
+            clear_pending_point=lambda: None,
+        )
+
+        self.assertEqual(
+            calls,
+            [("open", False), ("point", 9), ("start", "config")],
+        )
+
+    def test_request_route_measurement_for_point_jumps_when_waiting(self) -> None:
+        calls: list[object] = []
+
+        request_route_measurement_for_point(
+            point_number=11,
+            thread_active=True,
+            waiting=True,
+            open_dialog=lambda *, start_context: calls.append(("open", start_context)),
+            current_dialog=lambda: None,
+            submit_confirmation=lambda action: calls.append(("jump", action)),
+            request_point_correction=lambda **_kwargs: calls.append(("interrupt", _kwargs)),
+            start_measurement=lambda config: calls.append(("start", config)),
+            set_pending_point=lambda point: calls.append(("pending", point)),
+            clear_pending_point=lambda: calls.append(("clear",)),
+        )
+
+        self.assertEqual(calls, [("clear",), ("jump", "jump:11")])
+
+    def test_restart_waiting_route_measurement_reports_stop_timeout(self) -> None:
+        old_runner = types.SimpleNamespace(stop=lambda: None)
+        old_thread = types.SimpleNamespace(
+            is_alive=lambda: True,
+            join=lambda timeout=None: None,
+        )
+        statuses: list[tuple[str, int]] = []
+
+        restarted = restart_waiting_route_measurement(
+            configuration="config",
+            route_offset_xy=(0.5, -0.25),
+            old_runner=old_runner,
+            old_thread=old_thread,
+            clear_waiting_state=lambda: None,
+            start_measurement=lambda config, *, wait_before_first_point: None,
+            current_runner=lambda: None,
+            current_thread=lambda: old_thread,
+            show_status=lambda message, timeout_ms: statuses.append(
+                (str(message), int(timeout_ms))
+            ),
+        )
+
+        self.assertFalse(restarted)
+        self.assertEqual(
+            statuses,
+            [("Waiting route measurement did not stop.", 8000)],
+        )
 
 
 if __name__ == "__main__":
