@@ -105,9 +105,7 @@ class StageControllerHomingStartupMixin:
                     )
                 else:
                     try:
-                        axis_feedrates = self._query_axis_max_feedrates_locked(
-                            serial_connection
-                        )
+                        axis_feedrates = self._query_axis_max_feedrates_locked()
                     except StageControllerError as exc:
                         axis_feedrates = {}
                         logger.warning(
@@ -118,11 +116,9 @@ class StageControllerHomingStartupMixin:
                     self.apply_axis_max_feedrates(axis_feedrates)
                     self.axis_max_feedrates_changed.emit(dict(axis_feedrates))
                 self._ensure_axis_limits(
-                    serial_connection, required_axes=self.CONTROLLER_LIMIT_AXES
+                    required_axes=self.CONTROLLER_LIMIT_AXES
                 )
-                self._refresh_coordinate_system_state(
-                    serial_connection, apply_preference=True
-                )
+                self._refresh_coordinate_system_state(apply_preference=True)
                 status = self._query_status(serial_connection)
             if status is None:
                 raise StageControllerError("Unable to read startup controller status.")

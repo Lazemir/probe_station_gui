@@ -552,12 +552,10 @@ class StageControllerMotionCommandsMixin:
     ) -> None:
         if move.is_zero():
             return
-        serial_connection = self._current_serial()
         if not ignore_needle_safety:
             self._move_safety_check()
         if not self._motion_safety_disabled:
             self._ensure_axis_limits(
-                serial_connection,
                 required_axes=tuple(
                     axis for axis, delta in move.items() if abs(delta) >= 1e-6
                 ),
@@ -630,9 +628,7 @@ class StageControllerMotionCommandsMixin:
             self._move_safety_check()
         current_values: dict[str, float] = {}
         if not self._motion_safety_disabled:
-            self._ensure_axis_limits(
-                serial_connection, required_axes=tuple(ordered_targets)
-            )
+            self._ensure_axis_limits(required_axes=tuple(ordered_targets))
             status = self._query_status_with_required_coordinates(
                 serial_connection,
                 axes=tuple(ordered_targets),

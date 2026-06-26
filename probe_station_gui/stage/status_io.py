@@ -147,7 +147,6 @@ class StageControllerStatusIOMixin:
             self._position_reporting_mode
         )
         self._ensure_status_report_mask(
-            serial_connection,
             desired_mask,
             check_cancelled=check_cancelled,
         )

@@ -449,8 +449,8 @@ class StageController(
                 raise StageControllerError(
                     "Stage is busy. Cannot read controller feedrate limits."
                 )
-            with self._serial_session() as serial_connection:
-                rates = self._query_axis_max_feedrates_locked(serial_connection)
+            with self._serial_session():
+                rates = self._query_axis_max_feedrates_locked()
         self.apply_axis_max_feedrates(rates)
         self.axis_max_feedrates_changed.emit(dict(rates))
         return rates
@@ -970,10 +970,7 @@ class StageController(
                 return status
 
         if self._position_reporting_mode != "machine" or self._controller_state_stale:
-            self._refresh_coordinate_system_state(
-                serial_connection,
-                apply_preference=True,
-            )
+            self._refresh_coordinate_system_state(apply_preference=True)
         return self._query_status_with_required_coordinates(
             serial_connection,
             axes=axes,

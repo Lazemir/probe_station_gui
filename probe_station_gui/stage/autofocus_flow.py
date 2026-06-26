@@ -258,7 +258,6 @@ class StageControllerAutofocusMixin:
         range_mm: float,
         step_mm: float | None,
     ) -> _AutofocusContext:
-        serial_connection = self._current_serial()
         self._relative_warning_emitted = False
         objective_name = str(self._active_objective_name)
         if not self._needles_up:
@@ -268,7 +267,7 @@ class StageControllerAutofocusMixin:
             self._set_needles_state(True, known=True, zone="raise")
         self._move_safety_check()
 
-        self._ensure_axis_limits(serial_connection, required_axes=("Z",))
+        self._ensure_axis_limits(required_axes=("Z",))
         local_range = self._positive_profile_value(
             range_mm,
             self._objective_autofocus_range_mm,

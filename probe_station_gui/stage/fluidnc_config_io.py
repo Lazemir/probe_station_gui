@@ -5,8 +5,6 @@ from __future__ import annotations
 import logging
 import time
 
-import serial
-
 from probe_station_gui.stage.controller_cache import (
     parse_cached_axis_limits,
     parse_cached_axis_max_feedrates,
@@ -34,19 +32,16 @@ class StageControllerFluidNCConfigIOMixin:
 
     def _ensure_status_report_mask(
         self,
-        serial_connection: serial.Serial,
         mask: int,
         *,
         check_cancelled: bool = True,
     ) -> None:
         if self._current_status_report_mask == mask:
             return
-        self._write_command(
-            serial_connection,
+        self._write_current_command_and_wait(
             f"$10={int(mask)}",
             check_cancelled=check_cancelled,
         )
-        self._wait_for_ok(serial_connection, check_cancelled=check_cancelled)
         self._current_status_report_mask = int(mask)
 
     def _query_active_coordinate_system(self, timeout: float = 2.0) -> str | None:
@@ -202,10 +197,9 @@ class StageControllerFluidNCConfigIOMixin:
 
     def _query_axis_max_feedrates_locked(
         self,
-        serial_connection,
         timeout: float = 20.0,
     ) -> dict[str, float]:
-        session = self._fluidnc_session_for(serial_connection)
+        session = self._current_fluidnc_session()
         lines: list[str] = []
         saw_final_ok = False
         for line in session.iter_command_response_lines(
@@ -233,21 +227,19 @@ class StageControllerFluidNCConfigIOMixin:
 
     def _refresh_coordinate_system_state(
         self,
-        serial_connection: serial.Serial,
         *,
         apply_preference: bool,
     ) -> None:
         desired_mask = self._desired_status_report_mask_for_mode(
             self._position_reporting_mode
         )
-        self._ensure_status_report_mask(serial_connection, desired_mask)
+        self._ensure_status_report_mask(desired_mask)
         if (
             self._position_reporting_mode != "machine"
             and apply_preference
             and self._coordinate_startup_mode == "fixed"
         ):
-            self._write_command(serial_connection, self._preferred_work_coordinate_system)
-            self._wait_for_ok(serial_connection)
+            self._write_current_command_and_wait(self._preferred_work_coordinate_system)
         detected_system = None if self._position_reporting_mode == "machine" else None
         try:
             if self._position_reporting_mode != "machine":
@@ -289,10 +281,8 @@ class StageControllerFluidNCConfigIOMixin:
             return
         self.status_message.emit(f"Coordinate system: {coordinate_system}.")
 
-    def _read_startup_limits(
-        self, serial_connection, timeout: float = 3.5
-    ) -> None:
-        session = self._fluidnc_session_for(serial_connection)
+    def _read_startup_limits(self, timeout: float = 3.5) -> None:
+        session = self._current_fluidnc_session()
         lines: list[str] = []
         for line in session.iter_command_response_lines(
             "$Startup/Show",
@@ -312,7 +302,6 @@ class StageControllerFluidNCConfigIOMixin:
 
     def _ensure_axis_limits(
         self,
-        serial_connection: serial.Serial,
         *,
         required_axes: tuple[str, ...] | list[str] | set[str] | None = None,
     ) -> None:
@@ -329,7 +318,7 @@ class StageControllerFluidNCConfigIOMixin:
                 "Controller axis limits missing for %s; reading startup limits.",
                 ", ".join(missing_axes) if missing_axes else "all axes",
             )
-            self._read_startup_limits(serial_connection)
+            self._read_startup_limits()
             missing_axes = [
                 axis
                 for axis in normalized_required
