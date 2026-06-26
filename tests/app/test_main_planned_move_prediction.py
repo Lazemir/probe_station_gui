@@ -156,6 +156,25 @@ def _make_design_restore_main(
 
 
 class MainPlannedMovePredictionTest(unittest.TestCase):
+    def test_invalid_stage_position_only_updates_display(self) -> None:
+        window, published, _reconciles, _smooth_calls = _make_main(state="idle")
+        display_updates: list[object] = []
+        finished: list[object] = []
+        cleared: list[str] = []
+
+        window._update_stage_position_display = lambda position: display_updates.append(
+            position
+        )
+        window._finish_coordinate_move_if_idle = lambda position: finished.append(position)
+        window._clear_stage_motion_axes = lambda: cleared.append("clear")
+
+        Main._on_stage_position_changed(window, ["not", "a", "tuple"])
+
+        self.assertEqual(display_updates, [["not", "a", "tuple"]])
+        self.assertEqual(published, [])
+        self.assertEqual(finished, [])
+        self.assertEqual(cleared, [])
+
     def test_design_coordinate_waits_for_absolute_xy_move_start(self) -> None:
         window, _published, _reconciles, _smooth_calls = _make_main(state="idle")
         stage_controller = window.stage_controller
@@ -219,6 +238,123 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
         self.assertFalse(window._planned_move_waiting_for_fresh_status)
         self.assertEqual(published[-1][:2], (0.0, 0.0))
         self.assertEqual(smooth_calls, [((5.0, 5.0), (0.0, 0.0))])
+
+    def test_unhomed_xy_without_manual_prediction_clears_prediction_and_finishes_when_idle(
+        self,
+    ) -> None:
+        window, published, _reconciles, _smooth_calls = _make_main(state="idle")
+        coordinate_updates: list[tuple[float, float] | None] = []
+        design_updates: list[tuple[float, float] | None] = []
+        finished: list[tuple[float, ...]] = []
+        cleared: list[str] = []
+        displayed: list[tuple[float, ...]] = []
+
+        window.stage_controller.axes_are_homed = lambda axes: False
+        window._manual_jog_stage_position = (9.0, 9.0, 9.0)
+        window._manual_jog_stage_xy = (9.0, 9.0)
+        window._planned_move_stage_xy = (8.0, 8.0)
+        window._update_stage_position_display = lambda position: displayed.append(position)
+        window._update_coordinate_display = (
+            lambda *, center_xy=None, cursor_xy=None: coordinate_updates.append(center_xy)
+        )
+        window._update_design_position = lambda stage_xy: design_updates.append(stage_xy)
+        window._can_display_design_position = lambda: True
+        window._finish_coordinate_move_if_idle = lambda position: finished.append(position)
+        window._clear_stage_motion_axes = lambda: cleared.append("clear")
+
+        Main._on_stage_position_changed(window, (1.0, 2.0, 3.0))
+
+        self.assertEqual(displayed, [(1.0, 2.0, 3.0)])
+        self.assertIsNone(window._manual_jog_stage_position)
+        self.assertIsNone(window._manual_jog_stage_xy)
+        self.assertIsNone(window._planned_move_stage_xy)
+        self.assertEqual(coordinate_updates, [None])
+        self.assertEqual(design_updates, [(1.0, 2.0)])
+        self.assertEqual(finished, [(1.0, 2.0, 3.0)])
+        self.assertEqual(cleared, ["clear"])
+        self.assertEqual(published, [])
+
+    def test_b_axis_motion_invalidates_registration_only_when_conditions_match(self) -> None:
+        window, _published, _reconciles, _smooth_calls = _make_main(state="run")
+        invalidations: list[str] = []
+        window._design_session = types.SimpleNamespace(
+            registration=types.SimpleNamespace(valid=True)
+        )
+        window._invalidate_design_registration = lambda reason: invalidations.append(
+            reason
+        )
+        window._last_reported_b_position = 5.0
+
+        Main._on_stage_position_changed(window, (0.0, 0.0, 4.0, 0.0, 5.5))
+
+        self.assertEqual(
+            invalidations,
+            ["Design registration cleared after B-axis motion."],
+        )
+        self.assertEqual(window._last_reported_b_position, 5.5)
+
+        below_tolerance, _published, _reconciles, _smooth_calls = _make_main(state="run")
+        below_tolerance._design_session = types.SimpleNamespace(
+            registration=types.SimpleNamespace(valid=True)
+        )
+        below_tolerance._invalidate_design_registration = (
+            lambda reason: invalidations.append(f"unexpected:{reason}")
+        )
+        below_tolerance._last_reported_b_position = 5.0
+
+        Main._on_stage_position_changed(below_tolerance, (0.0, 0.0, 4.0, 0.0, 5.0))
+
+        pending_alignment, _published, _reconciles, _smooth_calls = _make_main(
+            state="run"
+        )
+        pending_alignment._design_session = types.SimpleNamespace(
+            registration=types.SimpleNamespace(valid=True)
+        )
+        pending_alignment._pending_alignment_preparation = object()
+        pending_alignment._invalidate_design_registration = (
+            lambda reason: invalidations.append(f"unexpected:{reason}")
+        )
+        pending_alignment._last_reported_b_position = 5.0
+
+        Main._on_stage_position_changed(pending_alignment, (0.0, 0.0, 4.0, 0.0, 5.5))
+
+        invalid_registration, _published, _reconciles, _smooth_calls = _make_main(
+            state="run"
+        )
+        invalid_registration._design_session = types.SimpleNamespace(
+            registration=types.SimpleNamespace(valid=False)
+        )
+        invalid_registration._invalidate_design_registration = (
+            lambda reason: invalidations.append(f"unexpected:{reason}")
+        )
+        invalid_registration._last_reported_b_position = 5.0
+
+        Main._on_stage_position_changed(invalid_registration, (0.0, 0.0, 4.0, 0.0, 5.5))
+
+        self.assertEqual(
+            invalidations,
+            ["Design registration cleared after B-axis motion."],
+        )
+
+    def test_publish_happens_before_idle_finish_and_motion_clear(self) -> None:
+        window, _published, _reconciles, _smooth_calls = _make_main(state="idle")
+        calls: list[str] = []
+        window._planned_move_started_at = None
+        window._planned_move_stage_xy = None
+        window._publish_stage_position_estimate = lambda position: calls.append(
+            f"publish:{position[:2]}"
+        )
+        window._finish_coordinate_move_if_idle = lambda position: calls.append(
+            f"finish:{position[:2]}"
+        )
+        window._clear_stage_motion_axes = lambda: calls.append("clear")
+
+        Main._on_stage_position_changed(window, (1.0, 2.0, 3.0))
+
+        self.assertEqual(
+            calls,
+            ["publish:(1.0, 2.0)", "finish:(1.0, 2.0)", "clear"],
+        )
 
 
 class MainPersistedDesignRestoreTest(unittest.TestCase):

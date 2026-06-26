@@ -249,6 +249,63 @@ class _FakeButton:
         self.enabled = bool(enabled)
 
 
+class _FakeLineEdit:
+    def __init__(
+        self,
+        *,
+        text: str = "",
+        enabled: bool = True,
+        modified: bool = False,
+        has_focus: bool = False,
+    ) -> None:
+        self._text = str(text)
+        self.enabled = bool(enabled)
+        self.modified = bool(modified)
+        self.has_focus = bool(has_focus)
+        self.tool_tip = ""
+        self.blocked_signals: list[bool] = []
+        self.enabled_calls: list[bool] = []
+        self.modified_calls: list[bool] = []
+        self.clear_count = 0
+        self.styles: list[tuple[str, str]] = []
+
+    def blockSignals(self, blocked: bool) -> None:  # noqa: N802 - Qt naming
+        self.blocked_signals.append(bool(blocked))
+
+    def setEnabled(self, enabled: bool) -> None:  # noqa: N802 - Qt naming
+        self.enabled = bool(enabled)
+        self.enabled_calls.append(self.enabled)
+
+    def isEnabled(self) -> bool:  # noqa: N802 - Qt naming
+        return self.enabled
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt naming
+        self._text = str(text)
+
+    def text(self) -> str:
+        return self._text
+
+    def setModified(self, modified: bool) -> None:  # noqa: N802 - Qt naming
+        self.modified = bool(modified)
+        self.modified_calls.append(self.modified)
+
+    def isModified(self) -> bool:  # noqa: N802 - Qt naming
+        return self.modified
+
+    def setToolTip(self, text: str) -> None:  # noqa: N802 - Qt naming
+        self.tool_tip = str(text)
+
+    def hasFocus(self) -> bool:  # noqa: N802 - Qt naming
+        return self.has_focus
+
+    def clear(self) -> None:
+        self._text = ""
+        self.clear_count += 1
+
+    def setStyleSheet(self, _style: str) -> None:  # noqa: N802 - Qt naming
+        pass
+
+
 class _FakeFrame:
     def __init__(self, name: str) -> None:
         self.name = name
@@ -696,6 +753,41 @@ def _make_cancel_main() -> tuple[Main, _FakeStageController, _FakeButton, list[s
     return window, stage_controller, cancel_button, statuses
 
 
+def _make_stage_position_display_main() -> tuple[Main, _FakeStageController]:
+    window = Main.__new__(Main)
+    stage_controller = _FakeStageController()
+
+    window.stage_controller = stage_controller
+    window._stage_axis_fields = {
+        "X": _FakeLineEdit(),
+        "Y": _FakeLineEdit(),
+        "Z": _FakeLineEdit(),
+    }
+    window._stage_unhomed_display_origins = {}
+    window._stage_axis_raw_values = {}
+    window._stage_axis_display_values = {}
+    window._stage_axis_homed = set()
+    window._stage_axis_base_styles = {}
+    window._pending_stage_axis_targets = {}
+    window._stage_limit_axes = set()
+    window._stage_motion_axes = set()
+    window._stage_motion_blink_dimmed = False
+    window._updating_stage_position_fields = False
+    window._clear_stage_motion_axes = lambda: None
+    window._update_stage_coordinate_apply_state = lambda: None
+    window._set_stage_position_fields_available = (
+        lambda available: setattr(window, "_fields_available", bool(available))
+    )
+    window._style_stage_axis_field = (
+        lambda field, background, foreground: field.styles.append(
+            (str(background), str(foreground))
+        )
+    )
+    window._current_linear_feedrate = lambda: 123.0
+    stage_controller.homed_axes = lambda: {"X", "Y"}
+    return window, stage_controller
+
+
 def _telegram_test_photo_bytes(width: int, height: int, fill: int) -> bytes:
     def chunk(kind: bytes, data: bytes) -> bytes:
         return (
@@ -720,6 +812,37 @@ def _telegram_test_photo_bytes(width: int, height: int, fill: int) -> bytes:
 
 
 class MainCoordinateFeedrateTest(unittest.TestCase):
+    def test_stage_position_display_preserves_focused_pending_coordinate_edit(self) -> None:
+        window, _stage_controller = _make_stage_position_display_main()
+        x_field = window._stage_axis_fields["X"]
+        x_field.has_focus = True
+        x_field.setText("7.777")
+        x_field.setModified(True)
+        window._pending_stage_axis_targets["X"] = (7.5, 7.777)
+
+        Main._update_stage_position_display(window, (1.0, 2.0, 3.0))
+
+        self.assertEqual(x_field.text(), "7.777")
+        self.assertTrue(x_field.isModified())
+        self.assertEqual(window._stage_axis_display_values["X"], 1.0)
+        self.assertEqual(
+            x_field.tool_tip,
+            "X coordinate. Enter targets and press Apply. Move feedrate: 123.0 mm/min.",
+        )
+
+    def test_stage_position_display_limit_style_overrides_homed_style(self) -> None:
+        window, stage_controller = _make_stage_position_display_main()
+        stage_controller.homed_axes = lambda: {"X", "Y", "Z"}
+        window._stage_limit_axes = {"X"}
+
+        Main._update_stage_position_display(window, (1.0, 2.0, 3.0))
+
+        self.assertEqual(window._stage_axis_base_styles["X"], ("#c62828", "#ffffff"))
+        self.assertEqual(
+            window._stage_axis_fields["X"].styles[-1],
+            ("#c62828", "#ffffff"),
+        )
+
     def test_api_keithley_meter_configuration_accepts_code_auto_ranges(self) -> None:
         window = Main.__new__(Main)
         window.lcr_controller = types.SimpleNamespace(

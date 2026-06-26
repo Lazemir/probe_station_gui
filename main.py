@@ -146,6 +146,10 @@ from probe_station_gui.stage.api_moves import (
     api_move_feedrate, normalize_api_coordinate_input_mode,
 )
 from probe_station_gui.stage.motion_prediction import interpolate_position, motion_progress
+from probe_station_gui.stage.position_presenter import (
+    stage_position_display_plan,
+    stage_position_signal_plan,
+)
 from probe_station_gui.shared.wheel_guard import GuardedComboBox as QComboBox
 from probe_station_gui.stage.controller import StageControllerError
 from probe_station_gui.design.objective_offsets import (
@@ -8387,65 +8391,57 @@ class Main(QMainWindow):
             self._coordinate_move_seen_active_state = True
         xy_homed = self.stage_controller.axes_are_homed({"X", "Y"})
         xyz_homed = self.stage_controller.axes_are_homed({"X", "Y", "Z"})
-        if self.contact_calibration_window is not None:
-            if len(position) >= 3 and xyz_homed:
-                self.contact_calibration_window.set_current_stage_position(
-                    (float(position[0]), float(position[1]), float(position[2]))
-                )
-            else:
-                self.contact_calibration_window.set_current_stage_position(None)
-        center_xy = (float(position[0]), float(position[1]))
-        if not xy_homed:
-            if not self._manual_jog_prediction_available():
-                self._update_stage_position_display(position)
-                self._manual_jog_stage_position = None
-                self._manual_jog_stage_xy = None
-                self._planned_move_stage_xy = None
-                self._update_coordinate_display(center_xy=None)
-                self._update_design_position(
-                    center_xy if self._can_display_design_position() else None
-                )
-                if latest_state == "idle":
-                    self._finish_coordinate_move_if_idle(position)
-                    self._clear_stage_motion_axes()
-                return
-        if len(position) > 4:
-            current_b = float(position[4])
-            if (
-                self._last_reported_b_position is not None
-                and self._pending_alignment_preparation is None
-                and abs(current_b - self._last_reported_b_position)
-                > self.B_POSITION_CHANGE_TOLERANCE_DEG
-                and self._design_session.registration is not None
-                and self._design_session.registration.valid
-            ):
-                self._invalidate_design_registration(
-                    "Design registration cleared after B-axis motion."
-                )
-            self._last_reported_b_position = current_b
-        predicted_position = None
-        smooth_predicted_status = False
-        if self._manual_jog_prediction_available():
-            predicted_position = self._manual_jog_stage_position
-            smooth_predicted_status = True
-        elif self._coordinate_move_stage_position is not None:
-            predicted_position = self._coordinate_move_stage_position
-        elif (
-            self._planned_move_started_at is not None
-            or self._planned_move_waiting_for_fresh_status
-        ):
-            if self._planned_move_stage_xy is not None:
-                predicted_position = self._position_with_stage_xy(
-                    self._planned_move_stage_xy,
-                    base_position=position,
-                )
-                smooth_predicted_status = True
-        predicted_stage_xy = self._stage_xy_from_position(predicted_position)
-        planned_move_active = (
-            self._planned_move_started_at is not None
-            and predicted_stage_xy is not None
+        manual_prediction_available = self._manual_jog_prediction_available()
+        design_session = getattr(self, "_design_session", None)
+        registration = getattr(design_session, "registration", None)
+        signal_plan = stage_position_signal_plan(
+            position,
+            latest_state=latest_state,
+            coordinate_move_axis_active=(
+                getattr(self, "_coordinate_move_axis", None) is not None
+            ),
+            xy_homed=xy_homed,
+            xyz_homed=xyz_homed,
+            manual_jog_prediction_available=manual_prediction_available,
+            can_display_design_position=(
+                self._can_display_design_position()
+                if not xy_homed and not manual_prediction_available
+                else False
+            ),
+            last_reported_b_position=self._last_reported_b_position,
+            tolerance_deg=self.B_POSITION_CHANGE_TOLERANCE_DEG,
+            pending_alignment_preparation=self._pending_alignment_preparation,
+            registration_valid=bool(
+                registration is not None and getattr(registration, "valid", False)
+            ),
+            manual_jog_stage_position=self._manual_jog_stage_position,
+            coordinate_move_stage_position=self._coordinate_move_stage_position,
+            planned_move_started_at=self._planned_move_started_at,
+            planned_move_waiting_for_fresh_status=(
+                self._planned_move_waiting_for_fresh_status
+            ),
+            planned_move_stage_xy=self._planned_move_stage_xy,
+            manual_jog_waiting_for_fresh_status=(
+                self._manual_jog_waiting_for_fresh_status
+            ),
+            stage_xy_from_position=self._stage_xy_from_position,
+            position_with_stage_xy=self._position_with_stage_xy,
         )
-        if self._manual_jog_waiting_for_fresh_status and latest_state != "idle":
+        if self.contact_calibration_window is not None:
+            self.contact_calibration_window.set_current_stage_position(
+                signal_plan.status.contact_calibration_position
+            )
+        center_xy = signal_plan.status.center_xy
+        if signal_plan.status.use_unhomed_fallback:
+            self._apply_unhomed_stage_position_fallback(
+                position,
+                design_position=signal_plan.status.unhomed_design_position,
+                latest_state=latest_state,
+            )
+            return
+        self._apply_b_axis_registration_plan(signal_plan.b_axis)
+        predicted_position = signal_plan.prediction.predicted_position
+        if signal_plan.defer_manual_jog_stop_sample:
             logger.debug(
                 "MOTION PREDICTION deferred_stop_sample stage=%s state=%s",
                 self._format_optional_point(center_xy),
@@ -8454,19 +8450,79 @@ class Main(QMainWindow):
             return
         if self._should_ignore_manual_jog_status_sample(center_xy):
             return
-        if predicted_stage_xy is not None:
-            self._log_design_position_reconcile(predicted_stage_xy, center_xy)
-            if smooth_predicted_status:
-                if planned_move_active:
-                    center_xy = predicted_stage_xy
-                else:
-                    center_xy = self._smooth_manual_jog_actual_position(
-                        predicted_stage_xy, center_xy
-                    )
+        center_xy = self._reconcile_stage_status_sample(
+            center_xy,
+            signal_plan.reconcile,
+        )
         display_position = self._position_with_stage_xy(
             center_xy,
             base_position=position,
         )
+        self._finalize_stage_position_sample(
+            display_position,
+            center_xy=center_xy,
+            predicted_position=predicted_position,
+            planned_move_active=signal_plan.prediction.planned_move_active,
+            latest_state=latest_state,
+        )
+
+    def _apply_unhomed_stage_position_fallback(
+        self,
+        position: tuple[float, ...],
+        *,
+        design_position: tuple[float, float] | None,
+        latest_state: str,
+    ) -> None:
+        self._update_stage_position_display(position)
+        self._manual_jog_stage_position = None
+        self._manual_jog_stage_xy = None
+        self._planned_move_stage_xy = None
+        self._update_coordinate_display(center_xy=None)
+        self._update_design_position(design_position)
+        if latest_state == "idle":
+            self._finish_coordinate_move_if_idle(position)
+            self._clear_stage_motion_axes()
+
+    def _apply_b_axis_registration_plan(self, plan: object) -> None:
+        invalidate_registration = bool(
+            getattr(plan, "invalidate_registration", False)
+        )
+        invalidate_reason = getattr(plan, "invalidate_reason", None)
+        if invalidate_registration and invalidate_reason is not None:
+            self._invalidate_design_registration(str(invalidate_reason))
+        current_b = getattr(plan, "current_b", None)
+        if current_b is not None:
+            self._last_reported_b_position = float(current_b)
+
+    def _reconcile_stage_status_sample(
+        self,
+        center_xy: tuple[float, float],
+        reconcile_plan: object,
+    ) -> tuple[float, float]:
+        predicted_stage_xy = getattr(reconcile_plan, "predicted_stage_xy", None)
+        if getattr(reconcile_plan, "log_reconcile", False) and predicted_stage_xy is not None:
+            self._log_design_position_reconcile(predicted_stage_xy, center_xy)
+        if (
+            getattr(reconcile_plan, "use_predicted_xy_directly", False)
+            and predicted_stage_xy is not None
+        ):
+            return predicted_stage_xy
+        if getattr(reconcile_plan, "smooth_to_actual", False) and predicted_stage_xy is not None:
+            return self._smooth_manual_jog_actual_position(
+                predicted_stage_xy,
+                center_xy,
+            )
+        return center_xy
+
+    def _finalize_stage_position_sample(
+        self,
+        display_position: tuple[float, ...],
+        *,
+        center_xy: tuple[float, float],
+        predicted_position: tuple[float, ...] | None,
+        planned_move_active: bool,
+        latest_state: str,
+    ) -> None:
         self._manual_jog_stage_position = display_position
         self._manual_jog_stage_xy = center_xy
         if not planned_move_active:
@@ -8491,7 +8547,18 @@ class Main(QMainWindow):
             self._clear_stage_motion_axes()
 
     def _update_stage_position_display(self, position: object | None) -> None:
-        if not isinstance(position, tuple) or len(position) < 2:
+        plan = stage_position_display_plan(
+            position,
+            axis_names=self.STAGE_AXIS_NAMES,
+            homed_axes=self.stage_controller.homed_axes()
+            if isinstance(position, tuple) and len(position) >= 2
+            else set(),
+            limit_axes=self._stage_limit_axes,
+            pending_targets=self._pending_stage_axis_targets,
+            display_axis_value=self._display_axis_value_from_raw,
+            feedrate_mm_min=self._current_linear_feedrate(),
+        )
+        if plan.reset_all:
             self._stage_unhomed_display_origins.clear()
             self._stage_axis_raw_values.clear()
             self._stage_axis_display_values.clear()
@@ -8501,52 +8568,47 @@ class Main(QMainWindow):
             self._clear_stage_motion_axes()
             self._set_stage_position_fields_available(False)
             return
-        homed_axes = self.stage_controller.homed_axes()
-        self._stage_axis_homed = set(homed_axes)
+        self._stage_axis_homed = set(plan.homed_axes)
+        updated_axes = self._apply_stage_position_field_plan(plan)
+        self._reset_missing_stage_axis_fields(updated_axes)
+        if not updated_axes:
+            self._set_stage_position_fields_available(False)
+            return
+        self._update_stage_coordinate_apply_state()
+
+    def _apply_stage_position_field_plan(self, plan: object) -> set[str]:
         updated_axes: set[str] = set()
         self._updating_stage_position_fields = True
-        for axis_name, axis_value in zip(self.STAGE_AXIS_NAMES, position):
-            field = self._stage_axis_fields.get(axis_name)
+        for axis_plan in getattr(plan, "axis_updates", ()):
+            field = self._stage_axis_fields.get(axis_plan.axis)
             if field is None:
                 continue
-            try:
-                raw_value = float(axis_value)
-            except (TypeError, ValueError):
-                continue
-            updated_axes.add(axis_name)
-            self._stage_axis_raw_values[axis_name] = raw_value
-            axis_display_value = self._display_axis_value_from_raw(
-                axis_name,
-                raw_value,
+            updated_axes.add(axis_plan.axis)
+            self._stage_axis_raw_values[axis_plan.axis] = axis_plan.raw_value
+            if axis_plan.axis not in getattr(plan, "homed_axes", frozenset()):
+                self._stage_unhomed_display_origins.setdefault(
+                    axis_plan.axis,
+                    axis_plan.raw_value,
+                )
+            self._stage_axis_base_styles[axis_plan.axis] = (
+                axis_plan.base_background,
+                axis_plan.base_foreground,
             )
-            display_value = axis_display_value
-            if axis_name in homed_axes:
-                background = "#1565c0"
-                foreground = "#f5f5f5"
-            else:
-                self._stage_unhomed_display_origins.setdefault(axis_name, raw_value)
-                background = "#f0b429"
-                foreground = "#1f1f1f"
-            if axis_name in self._stage_limit_axes:
-                background = "#c62828"
-                foreground = "#ffffff"
-            self._stage_axis_base_styles[axis_name] = (background, foreground)
-            self._stage_axis_display_values[axis_name] = display_value
-            pending_target = self._pending_stage_axis_targets.get(axis_name)
-            visible_value = (
-                pending_target[1] if pending_target is not None else display_value
-            )
+            self._stage_axis_display_values[axis_plan.axis] = axis_plan.display_value
             field.blockSignals(True)
             field.setEnabled(True)
             if not field.hasFocus():
-                field.setText(self._format_stage_axis_value(visible_value))
+                field.setText(
+                    self._format_stage_axis_value(axis_plan.visible_value)
+                )
                 field.setModified(False)
-            field.setToolTip(
-                f"{axis_name} coordinate. Enter targets and press Apply. "
-                f"Move feedrate: {self._current_linear_feedrate():.1f} mm/min."
-            )
-            self._apply_stage_axis_field_style(axis_name, field)
+            field.setToolTip(axis_plan.tooltip)
+            self._apply_stage_axis_field_style(axis_plan.axis, field)
             field.blockSignals(False)
+        self._updating_stage_position_fields = False
+        return updated_axes
+
+    def _reset_missing_stage_axis_fields(self, updated_axes: set[str]) -> None:
         for axis_name, field in self._stage_axis_fields.items():
             if axis_name in updated_axes:
                 continue
@@ -8558,11 +8620,6 @@ class Main(QMainWindow):
             field.setModified(False)
             self._style_stage_axis_field(field, "#e6e6e6", "#666666")
             field.blockSignals(False)
-        self._updating_stage_position_fields = False
-        if not updated_axes:
-            self._set_stage_position_fields_available(False)
-            return
-        self._update_stage_coordinate_apply_state()
 
     def _on_stage_axis_editing_finished(self, axis_name: str) -> bool | None:
         if self._updating_stage_position_fields:
