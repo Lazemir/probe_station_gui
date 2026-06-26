@@ -7735,9 +7735,7 @@ class Main(QMainWindow):
         thread = self._route_measurement_thread
         availability = gui_route_start_availability(
             route_thread_active=thread is not None and thread.is_alive(),
-            serial_connected=(
-                self.serial_connection is not None and self.serial_connection.is_open
-            ),
+            serial_connected=self._stage_serial_ready(),
         )
         if not self._apply_gui_route_start_preflight(availability):
             return
@@ -7868,21 +7866,7 @@ class Main(QMainWindow):
         route_lcr_controller: object,
         wait_before_first_point: bool,
     ) -> RouteMeasurementRunner:
-        def on_contact_height_record(
-            record: RouteContactHeightRecord,
-            position: int,
-            total: int,
-        ) -> None:
-            active_configuration = self._current_route_measurement_configuration(
-                configuration
-            )
-            self._record_route_contact_height(
-                record,
-                position,
-                total,
-                csv_path=active_configuration.csv_path,
-            )
-
+        callbacks = self._route_measurement_runner_callbacks(configuration)
         return RouteMeasurementRunner(
             points=points,
             csv_path=configuration.csv_path,
@@ -7902,10 +7886,37 @@ class Main(QMainWindow):
             contact_settle_s=configuration.contact_settle_s,
             nplc_label=configuration.meter.nplc_label(),
             measurement_type=configuration.meter.measurement_type_label(),
-            status_callback=self.route_measurement_status.emit,
-            progress_callback=self.route_measurement_progress.emit,
-            record_callback=self.route_measurement_recorded.emit,
-            photo_callback=lambda point, position, total, focus_result: self._capture_route_photo(
+            operation_mode=configuration.operation_mode,
+            photo_settle_s=configuration.photo_settle_s,
+            photo_focus_enabled=configuration.photo_autofocus_enabled,
+            wait_before_first_point=wait_before_first_point,
+            **callbacks,
+        )
+
+    def _route_measurement_runner_callbacks(
+        self,
+        configuration: RouteMeasurementRunConfiguration,
+    ) -> dict[str, object]:
+        def on_contact_height_record(
+            record: RouteContactHeightRecord,
+            position: int,
+            total: int,
+        ) -> None:
+            active_configuration = self._current_route_measurement_configuration(
+                configuration
+            )
+            self._record_route_contact_height(
+                record,
+                position,
+                total,
+                csv_path=active_configuration.csv_path,
+            )
+
+        return {
+            "status_callback": self.route_measurement_status.emit,
+            "progress_callback": self.route_measurement_progress.emit,
+            "record_callback": self.route_measurement_recorded.emit,
+            "photo_callback": lambda point, position, total, focus_result: self._capture_route_photo(
                 point,
                 position,
                 total,
@@ -7914,7 +7925,7 @@ class Main(QMainWindow):
                 ),
                 focus_result=focus_result,
             ),
-            photo_focus_callback=lambda point, position, total: self._route_photo_autofocus(
+            "photo_focus_callback": lambda point, position, total: self._route_photo_autofocus(
                 point,
                 position,
                 total,
@@ -7922,17 +7933,13 @@ class Main(QMainWindow):
                     configuration
                 ),
             ),
-            photo_record_callback=self._record_route_photo,
-            contact_height_record_callback=on_contact_height_record,
-            contact_photo_callback=self._capture_route_contact_photo,
-            pre_contact_photo_callback=self._capture_route_pre_contact_photo,
-            result_callback=self.route_measurement_result.emit,
-            waiting_callback=self.route_measurement_waiting_changed.emit,
-            operation_mode=configuration.operation_mode,
-            photo_settle_s=configuration.photo_settle_s,
-            photo_focus_enabled=configuration.photo_autofocus_enabled,
-            wait_before_first_point=wait_before_first_point,
-        )
+            "photo_record_callback": self._record_route_photo,
+            "contact_height_record_callback": on_contact_height_record,
+            "contact_photo_callback": self._capture_route_contact_photo,
+            "pre_contact_photo_callback": self._capture_route_pre_contact_photo,
+            "result_callback": self.route_measurement_result.emit,
+            "waiting_callback": self.route_measurement_waiting_changed.emit,
+        }
 
     def _start_route_measurement_runner(
         self,
