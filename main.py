@@ -109,6 +109,14 @@ from probe_station_gui import (
     SerialTerminalWindow,
 )
 from probe_station_gui.design.model import DesignDocument, DesignModelError
+from probe_station_gui.design.contact_navigation import (
+    api_contact_needles_plan,
+    api_contact_needles_stage_error_response,
+    api_contact_needles_success_response,
+    api_move_to_contact_plan,
+    api_move_to_contact_stage_error_response,
+    api_move_to_contact_success_response,
+)
 from probe_station_gui.design.session import AlignmentPreparation, DesignSession
 from probe_station_gui.shared.diagnostics import configure_crash_diagnostics
 from probe_station_gui.api.request_bridge import ApiRequestBridge
@@ -1561,147 +1569,89 @@ class Main(QMainWindow):
         }
 
     def _api_move_to_contact(self, payload: dict[str, Any]) -> dict[str, Any]:
-        contact_number = self._api_contact_number(payload)
-        if contact_number is None:
-            return {
-                "accepted": False,
-                "status_code": 400,
-                "message": "Provide a positive contact_number.",
-            }
-        context_result = self._api_contact_context(contact_number)
-        if not context_result.get("accepted", False):
-            return context_result
-        point = context_result["point"]
-        contact = context_result["contact"]
-        lower_needles = self._api_bool(
+        contact_plan_result = api_move_to_contact_plan(
             payload,
-            "lower_needles",
-            "lower",
-            default=False,
+            contact_context=self._api_contact_context,
+            default_needle_feedrate=self._api_needle_feedrate({}),
+            min_feedrate=self.MIN_FEEDRATE_MM_MIN,
         )
-        lift_before_move = self._api_bool(
-            payload,
-            "lift_before_move",
-            default=True,
-        )
-        lift_after = self._api_bool(payload, "lift_after", default=False)
-        contact_settle_s = self._api_float(
-            payload,
-            "contact_settle_s",
-            "settle_s",
-            default=0.2,
-            minimum=0.0,
-        )
-        needle_feedrate = self._api_needle_feedrate(payload)
+        if isinstance(contact_plan_result, dict):
+            return contact_plan_result
+        contact_plan = contact_plan_result
         active_stage_task = False
         needles_lowered = False
         try:
             self.stage_controller.begin_external_task("API contact move")
             active_stage_task = True
-            if lift_before_move:
+            if contact_plan.request.lift_before_move:
                 self.stage_controller.run_external_needles_action(
                     "lift",
-                    needle_feedrate,
+                    contact_plan.request.needle_feedrate_mm_min,
                 )
-            target_xy = self._api_route_adjusted_stage_xy(point)
+            target_xy = self._api_route_adjusted_stage_xy(contact_plan.point)
             self.stage_controller.run_external_move_to_xy(
                 target_xy[0],
                 target_xy[1],
             )
-            if lower_needles:
+            if contact_plan.request.lower_needles:
                 self.stage_controller.run_external_needles_action(
                     "lower",
-                    needle_feedrate,
+                    contact_plan.request.needle_feedrate_mm_min,
                 )
                 needles_lowered = True
-                if contact_settle_s > 0.0:
-                    time.sleep(contact_settle_s)
-            return {
-                "accepted": True,
-                "message": (
-                    f"Moved to contact {contact['contact_number']}"
-                    + (" and lowered needles." if lower_needles else ".")
-                ),
-                "timestamp_utc": self._api_timestamp_utc(),
-                "contact": contact,
-                "needles_lowered": lower_needles,
-                "lifted_before_move": lift_before_move,
-                "lifted_after": lift_after and needles_lowered,
-                "needle_feedrate_mm_min": needle_feedrate,
-                "route_offset_xy": {
-                    "dx_mm": float(self._api_route_offset_xy[0]),
-                    "dy_mm": float(self._api_route_offset_xy[1]),
-                },
-                "target_stage_xy": {
-                    "x_mm": float(target_xy[0]),
-                    "y_mm": float(target_xy[1]),
-                },
-            }
+                if contact_plan.request.contact_settle_s > 0.0:
+                    time.sleep(contact_plan.request.contact_settle_s)
+            return api_move_to_contact_success_response(
+                contact_plan,
+                timestamp_utc=self._api_timestamp_utc(),
+                route_offset_xy=self._api_route_offset_xy,
+                target_stage_xy=target_xy,
+                needles_lowered=needles_lowered,
+            )
         except StageControllerError as exc:
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": str(exc),
-                "contact": contact,
-            }
+            return api_move_to_contact_stage_error_response(
+                str(exc),
+                contact=contact_plan.contact,
+            )
         finally:
             if active_stage_task:
-                if lift_after and needles_lowered:
+                if contact_plan.request.lift_after and needles_lowered:
                     try:
                         self.stage_controller.run_external_needles_action(
                             "lift",
-                            needle_feedrate,
+                            contact_plan.request.needle_feedrate_mm_min,
                         )
                     except StageControllerError:
                         logger.exception("API contact move failed to lift needles.")
                 self.stage_controller.finish_external_task()
 
     def _api_contact_needles(self, payload: dict[str, Any]) -> dict[str, Any]:
-        contact_number = self._api_contact_number(payload)
-        if contact_number is None:
-            return {
-                "accepted": False,
-                "status_code": 400,
-                "message": "Provide a positive contact_number.",
-            }
-        action = str(payload.get("action", "lower")).strip().lower()
-        context_result = self._api_contact_context(contact_number)
-        if not context_result.get("accepted", False):
-            return context_result
-        contact = context_result["contact"]
-        if action == "raise":
-            action = "raise"
-        elif action in {"lift", "up"}:
-            action = "lift"
-        elif action in {"lower", "down"}:
-            action = "lower"
-        else:
-            return {
-                "accepted": False,
-                "status_code": 400,
-                "message": "Needle action must be lower, lift, or raise.",
-            }
-        needle_feedrate = self._api_needle_feedrate(payload)
+        contact_plan_result = api_contact_needles_plan(
+            payload,
+            contact_context=self._api_contact_context,
+            default_needle_feedrate=self._api_needle_feedrate({}),
+            min_feedrate=self.MIN_FEEDRATE_MM_MIN,
+        )
+        if isinstance(contact_plan_result, dict):
+            return contact_plan_result
+        contact_plan = contact_plan_result
         active_stage_task = False
         try:
             self.stage_controller.begin_external_task("API needle action")
             active_stage_task = True
-            self.stage_controller.run_external_needles_action(action, needle_feedrate)
-            return {
-                "accepted": True,
-                "message": f"Needle action '{action}' completed.",
-                "timestamp_utc": self._api_timestamp_utc(),
-                "contact": contact,
-                "needle_action": action,
-                "needle_feedrate_mm_min": needle_feedrate,
-            }
+            self.stage_controller.run_external_needles_action(
+                contact_plan.request.action,
+                contact_plan.request.needle_feedrate_mm_min,
+            )
+            return api_contact_needles_success_response(
+                contact_plan,
+                timestamp_utc=self._api_timestamp_utc(),
+            )
         except StageControllerError as exc:
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": str(exc),
-                "contact": contact,
-            }
+            return api_contact_needles_stage_error_response(
+                str(exc),
+                contact=contact_plan.contact,
+            )
         finally:
             if active_stage_task:
                 self.stage_controller.finish_external_task()

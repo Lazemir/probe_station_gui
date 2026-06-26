@@ -1278,6 +1278,304 @@ class MainCoordinateFeedrateTest(unittest.TestCase):
         finally:
             main_module.time.monotonic = original_monotonic
 
+    def test_api_move_to_contact_stage_side_effect_order(self) -> None:
+        calls: list[tuple[object, ...]] = []
+        point = object()
+        contact = {"contact_number": 7, "label": "Pad 7"}
+
+        window = Main.__new__(Main)
+        window.stage_controller = types.SimpleNamespace(
+            begin_external_task=lambda label: calls.append(("begin", label)),
+            run_external_needles_action=lambda action, feedrate: calls.append(
+                ("needles", action, feedrate)
+            ),
+            run_external_move_to_xy=lambda x_mm, y_mm: calls.append(("move", x_mm, y_mm)),
+            finish_external_task=lambda: calls.append(("finish",)),
+        )
+        window._api_contact_context = lambda _contact_number: {
+            "accepted": True,
+            "point": point,
+            "contact": contact,
+        }
+        window._api_route_adjusted_stage_xy = lambda selected_point: (
+            1.25,
+            2.5,
+        ) if selected_point is point else (0.0, 0.0)
+        window._api_needle_feedrate = lambda _payload: 75.0
+        window._api_timestamp_utc = lambda: "2026-06-26T12:10:00+00:00"
+        window._api_route_offset_xy = (0.5, -0.25)
+        original_sleep = main_module.time.sleep
+        main_module.time.sleep = lambda delay: calls.append(("sleep", delay))
+        try:
+            response = Main._api_move_to_contact(
+                window,
+                {
+                    "contact_number": 7,
+                    "lower_needles": True,
+                    "lift_after": True,
+                },
+            )
+        finally:
+            main_module.time.sleep = original_sleep
+
+        self.assertTrue(response["accepted"], response)
+        self.assertEqual(response["contact"], contact)
+        self.assertTrue(response["needles_lowered"])
+        self.assertTrue(response["lifted_before_move"])
+        self.assertTrue(response["lifted_after"])
+        self.assertEqual(
+            response["route_offset_xy"],
+            {"dx_mm": 0.5, "dy_mm": -0.25},
+        )
+        self.assertEqual(
+            response["target_stage_xy"],
+            {"x_mm": 1.25, "y_mm": 2.5},
+        )
+        self.assertEqual(
+            calls,
+            [
+                ("begin", "API contact move"),
+                ("needles", "lift", 75.0),
+                ("move", 1.25, 2.5),
+                ("needles", "lower", 75.0),
+                ("sleep", 0.2),
+                ("needles", "lift", 75.0),
+                ("finish",),
+            ],
+        )
+
+    def test_api_move_to_contact_with_lift_after_false_leaves_needles_down(self) -> None:
+        calls: list[tuple[object, ...]] = []
+        point = object()
+
+        window = Main.__new__(Main)
+        window.stage_controller = types.SimpleNamespace(
+            begin_external_task=lambda label: calls.append(("begin", label)),
+            run_external_needles_action=lambda action, feedrate: calls.append(
+                ("needles", action, feedrate)
+            ),
+            run_external_move_to_xy=lambda x_mm, y_mm: calls.append(("move", x_mm, y_mm)),
+            finish_external_task=lambda: calls.append(("finish",)),
+        )
+        window._api_contact_context = lambda _contact_number: {
+            "accepted": True,
+            "point": point,
+            "contact": {"contact_number": 7},
+        }
+        window._api_route_adjusted_stage_xy = lambda _selected_point: (3.0, 4.0)
+        window._api_needle_feedrate = lambda _payload: 55.0
+        window._api_timestamp_utc = lambda: "2026-06-26T12:15:00+00:00"
+        window._api_route_offset_xy = (0.0, 0.0)
+        original_sleep = main_module.time.sleep
+        main_module.time.sleep = lambda delay: calls.append(("sleep", delay))
+        try:
+            response = Main._api_move_to_contact(
+                window,
+                {
+                    "contact_number": 7,
+                    "lower_needles": True,
+                    "lift_after": False,
+                    "contact_settle_s": 0.0,
+                },
+            )
+        finally:
+            main_module.time.sleep = original_sleep
+
+        self.assertTrue(response["accepted"], response)
+        self.assertTrue(response["needles_lowered"])
+        self.assertFalse(response["lifted_after"])
+        self.assertEqual(
+            calls,
+            [
+                ("begin", "API contact move"),
+                ("needles", "lift", 55.0),
+                ("move", 3.0, 4.0),
+                ("needles", "lower", 55.0),
+                ("finish",),
+            ],
+        )
+
+    def test_api_move_to_contact_stage_error_keeps_contact_and_finishes_task(self) -> None:
+        calls: list[tuple[object, ...]] = []
+        point = object()
+        contact = {"contact_number": 7, "label": "Pad 7"}
+
+        def run_move(_x_mm: float, _y_mm: float) -> None:
+            calls.append(("move", 1.25, 2.5))
+            raise StageControllerError("Stage is busy.")
+
+        window = Main.__new__(Main)
+        window.stage_controller = types.SimpleNamespace(
+            begin_external_task=lambda label: calls.append(("begin", label)),
+            run_external_needles_action=lambda action, feedrate: calls.append(
+                ("needles", action, feedrate)
+            ),
+            run_external_move_to_xy=run_move,
+            finish_external_task=lambda: calls.append(("finish",)),
+        )
+        window._api_contact_context = lambda _contact_number: {
+            "accepted": True,
+            "point": point,
+            "contact": contact,
+        }
+        window._api_route_adjusted_stage_xy = lambda _selected_point: (1.25, 2.5)
+        window._api_needle_feedrate = lambda _payload: 40.0
+        window._api_route_offset_xy = (0.0, 0.0)
+
+        response = Main._api_move_to_contact(window, {"contact_number": 7})
+
+        self.assertFalse(response["accepted"], response)
+        self.assertEqual(response["status_code"], 409)
+        self.assertEqual(response["message"], "Stage is busy.")
+        self.assertEqual(response["contact"], contact)
+        self.assertEqual(
+            calls,
+            [
+                ("begin", "API contact move"),
+                ("needles", "lift", 40.0),
+                ("move", 1.25, 2.5),
+                ("finish",),
+            ],
+        )
+
+    def test_api_move_to_contact_final_lift_stage_error_is_logged_and_finishes_task(
+        self,
+    ) -> None:
+        calls: list[tuple[object, ...]] = []
+        logged: list[str] = []
+        point = object()
+
+        def run_needles_action(action: str, feedrate: float | None) -> None:
+            calls.append(("needles", action, feedrate))
+            if action == "lift":
+                raise StageControllerError("lift failed")
+
+        window = Main.__new__(Main)
+        window.stage_controller = types.SimpleNamespace(
+            begin_external_task=lambda label: calls.append(("begin", label)),
+            run_external_needles_action=run_needles_action,
+            run_external_move_to_xy=lambda x_mm, y_mm: calls.append(("move", x_mm, y_mm)),
+            finish_external_task=lambda: calls.append(("finish",)),
+        )
+        window._api_contact_context = lambda _contact_number: {
+            "accepted": True,
+            "point": point,
+            "contact": {"contact_number": 7},
+        }
+        window._api_route_adjusted_stage_xy = lambda _selected_point: (1.0, 2.0)
+        window._api_needle_feedrate = lambda _payload: 55.0
+        window._api_timestamp_utc = lambda: "2026-06-26T12:20:00+00:00"
+        window._api_route_offset_xy = (0.0, 0.0)
+        original_logger_exception = main_module.logger.exception
+        main_module.logger.exception = lambda message, *args: logged.append(
+            str(message) % args if args else str(message)
+        )
+        try:
+            response = Main._api_move_to_contact(
+                window,
+                {
+                    "contact_number": 7,
+                    "lower_needles": True,
+                    "lift_after": True,
+                    "lift_before_move": False,
+                    "contact_settle_s": 0.0,
+                },
+            )
+        finally:
+            main_module.logger.exception = original_logger_exception
+
+        self.assertTrue(response["accepted"], response)
+        self.assertEqual(
+            calls,
+            [
+                ("begin", "API contact move"),
+                ("move", 1.0, 2.0),
+                ("needles", "lower", 55.0),
+                ("needles", "lift", 55.0),
+                ("finish",),
+            ],
+        )
+        self.assertEqual(logged, ["API contact move failed to lift needles."])
+
+    def test_api_move_to_contact_final_lift_non_stage_error_is_not_swallowed(
+        self,
+    ) -> None:
+        point = object()
+
+        def run_needles_action(action: str, _feedrate: float | None) -> None:
+            if action == "lift":
+                raise RuntimeError("unexpected final lift error")
+
+        window = Main.__new__(Main)
+        window.stage_controller = types.SimpleNamespace(
+            begin_external_task=lambda _label: None,
+            run_external_needles_action=run_needles_action,
+            run_external_move_to_xy=lambda _x_mm, _y_mm: None,
+            finish_external_task=lambda: None,
+        )
+        window._api_contact_context = lambda _contact_number: {
+            "accepted": True,
+            "point": point,
+            "contact": {"contact_number": 7},
+        }
+        window._api_route_adjusted_stage_xy = lambda _selected_point: (1.0, 2.0)
+        window._api_needle_feedrate = lambda _payload: 55.0
+        window._api_route_offset_xy = (0.0, 0.0)
+
+        with self.assertRaisesRegex(RuntimeError, "unexpected final lift error"):
+            Main._api_move_to_contact(
+                window,
+                {
+                    "contact_number": 7,
+                    "lower_needles": True,
+                    "lift_after": True,
+                    "lift_before_move": False,
+                    "contact_settle_s": 0.0,
+                },
+            )
+
+    def test_api_contact_needles_stage_side_effect_order_and_response(self) -> None:
+        calls: list[tuple[object, ...]] = []
+        contact = {"contact_number": 8, "label": "Pad 8"}
+
+        window = Main.__new__(Main)
+        window.stage_controller = types.SimpleNamespace(
+            begin_external_task=lambda label: calls.append(("begin", label)),
+            run_external_needles_action=lambda action, feedrate: calls.append(
+                ("needles", action, feedrate)
+            ),
+            finish_external_task=lambda: calls.append(("finish",)),
+        )
+        window._api_contact_context = lambda _contact_number: {
+            "accepted": True,
+            "point": object(),
+            "contact": contact,
+        }
+        window._api_needle_feedrate = lambda _payload: 12.0
+        window._api_timestamp_utc = lambda: "2026-06-26T12:25:00+00:00"
+
+        response = Main._api_contact_needles(
+            window,
+            {
+                "contact_number": 8,
+                "action": "up",
+                "feedrate": 0.2,
+            },
+        )
+
+        self.assertTrue(response["accepted"], response)
+        self.assertEqual(response["contact"], contact)
+        self.assertEqual(response["needle_action"], "lift")
+        self.assertEqual(response["needle_feedrate_mm_min"], 1.0)
+        self.assertEqual(
+            calls,
+            [
+                ("begin", "API needle action"),
+                ("needles", "lift", 1.0),
+                ("finish",),
+            ],
+        )
+
     def test_api_route_session_reports_unexpected_instrument_setup_error(self) -> None:
         class _FailingLcr:
             def is_connected(self) -> bool:
