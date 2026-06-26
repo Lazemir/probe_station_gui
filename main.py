@@ -171,9 +171,10 @@ from probe_station_gui.route.operation import (
     route_measurement_points_for_route,
     route_measurement_start_decision,
 )
-from probe_station_gui.route.operation_guards import (
-    route_contact_move_block_message,
-    route_shift_save_block_message,
+from probe_station_gui.route.adjustment_flow import (
+    route_confirmation_submission_plan,
+    route_contact_move_plan,
+    route_shift_save_plan,
 )
 from probe_station_gui.route.operation_modes import (
     route_operation_measure_enabled,
@@ -198,10 +199,7 @@ from probe_station_gui.route.meter_config import (
     route_meter_type_from_payload,
 )
 from probe_station_gui.route.measurement_settings import RouteMeasurementSettingsStore
-from probe_station_gui.route.session_actions import (
-    route_confirmation_action,
-    route_session_action_from_payload,
-)
+from probe_station_gui.route.session_actions import route_session_action_from_payload
 from probe_station_gui.route.session_start import (
     api_route_session_start_decision,
     route_launch_presentation,
@@ -8666,19 +8664,24 @@ class Main(QMainWindow):
         self._show_route_measurement_status(message, 5000)
 
     def _submit_route_measurement_confirmation(self, action: str) -> None:
-        api_action = self._api_route_control_state_snapshot().confirmation_api_action(
-            action
-        )
-        if api_action is not None:
-            self._api_route_control_action({"action": api_action})
-            return
         runner = self._route_measurement_runner
-        if runner is None:
-            self._show_status("No route measurement is waiting.", 3000)
-            return
         move_thread = getattr(self, "_route_contact_move_thread", None)
-        if move_thread is not None and move_thread.is_alive():
-            self._show_status("Wait for route contact move to finish.", 3000)
+        confirmation_plan = route_confirmation_submission_plan(
+            action,
+            api_route_control=self._api_route_control_state_snapshot(),
+            runner_available=runner is not None,
+            contact_move_active=move_thread is not None and move_thread.is_alive(),
+            waiting=getattr(self, "_route_measurement_waiting", False),
+            pending_point_number=getattr(self, "_pending_route_measure_point", None),
+        )
+        if confirmation_plan.api_action is not None:
+            self._api_route_control_action({"action": confirmation_plan.api_action})
+            return
+        if confirmation_plan.message:
+            self._show_status(
+                confirmation_plan.message,
+                confirmation_plan.timeout_ms,
+            )
             return
         if self._route_measurement_dialog is not None:
             configuration = self._route_measurement_dialog.current_configuration()
@@ -8725,12 +8728,9 @@ class Main(QMainWindow):
                         self._show_status(message, 8000)
                         self._route_measurement_dialog.set_status(message)
                         return
-        pending_point_number = getattr(self, "_pending_route_measure_point", None)
-        confirmation = route_confirmation_action(
-            action,
-            waiting=self._route_measurement_waiting,
-            pending_point_number=pending_point_number,
-        )
+        confirmation = confirmation_plan.confirmation
+        if confirmation is None:
+            return
         if not runner.submit_confirmation(confirmation.action):
             self._show_status("Unknown route measurement action.", 3000)
             return
@@ -8747,20 +8747,15 @@ class Main(QMainWindow):
 
     def _request_route_contact_move(self, point_number: int) -> None:
         move_thread = getattr(self, "_route_contact_move_thread", None)
-        if move_thread is not None and move_thread.is_alive():
-            self._show_status("Route contact move is already active.", 3000)
-            return
         route_thread = self._route_measurement_thread
-        route_active = route_thread is not None and route_thread.is_alive()
-        api_route_control = self._api_route_control_state_snapshot()
-        route_waiting = self._route_measurement_waiting if route_active else False
-        message = route_contact_move_block_message(
-            route_active=route_active,
-            route_waiting=route_waiting,
-            api_route_control=api_route_control,
+        move_plan = route_contact_move_plan(
+            contact_move_active=move_thread is not None and move_thread.is_alive(),
+            route_active=route_thread is not None and route_thread.is_alive(),
+            route_waiting=getattr(self, "_route_measurement_waiting", False),
+            api_route_control=self._api_route_control_state_snapshot(),
         )
-        if message is not None:
-            self._show_status(message, 5000)
+        if move_plan.message:
+            self._show_status(move_plan.message, move_plan.timeout_ms)
             return
         context_result = self._api_contact_context(int(point_number))
         if not context_result.get("accepted", False):
@@ -8768,10 +8763,10 @@ class Main(QMainWindow):
             self._show_route_measurement_status(message, 6000)
             return
         point = context_result["point"]
-        if not route_active or self._route_measurement_waiting:
+        if move_plan.set_resume_point:
             self._set_route_measurement_resume_point(int(point.index))
             runner = self._route_measurement_runner
-            if runner is not None and self._route_measurement_waiting:
+            if runner is not None and move_plan.set_adjustment_point:
                 self._pending_route_measure_point = int(point.index)
                 if hasattr(runner, "set_current_adjustment_point"):
                     runner.set_current_adjustment_point(int(point.index))
@@ -8880,43 +8875,36 @@ class Main(QMainWindow):
     def _save_route_measurement_shift(self, point_number: int | None = None) -> None:
         runner = self._route_measurement_runner
         thread = self._route_measurement_thread
-        runner_active = runner is not None and thread is not None and thread.is_alive()
-        api_route_control = self._api_route_control_state_snapshot()
-        if api_route_control.active:
-            runner_active = False
-        runner_waiting = (
-            self._route_measurement_waiting
-            if runner_active
-            else False
+        dialog_current_point = (
+            int(self._route_measurement_dialog.current_configuration().current_point)
+            if point_number is None and self._route_measurement_dialog is not None
+            else None
         )
-        message = route_shift_save_block_message(
-            runner_active=runner_active,
-            runner_waiting=runner_waiting,
-            api_route_control=api_route_control,
+        shift_plan = route_shift_save_plan(
+            runner_available=runner is not None,
+            route_active=thread is not None and thread.is_alive(),
+            route_waiting=getattr(self, "_route_measurement_waiting", False),
+            api_route_control=self._api_route_control_state_snapshot(),
+            requested_point_number=point_number,
+            dialog_current_point=dialog_current_point,
+            current_point=getattr(self, "_route_measurement_current_point", None),
         )
-        if message is not None:
-            self._show_route_measurement_status(message, 5000)
+        if shift_plan.message:
+            self._show_route_measurement_status(
+                shift_plan.message,
+                shift_plan.timeout_ms,
+            )
             return
-        if point_number is None:
-            if self._route_measurement_dialog is not None:
-                point_number = int(
-                    self._route_measurement_dialog.current_configuration().current_point
-                )
-            elif self._route_measurement_current_point is not None:
-                point_number = int(self._route_measurement_current_point)
+        point_number = shift_plan.point_number
         adjustment_point: RouteMeasurementPoint | None = None
-        if runner_active and point_number is not None:
+        if shift_plan.needs_runner_adjustment and runner is not None:
             point_selected, message = runner.set_current_adjustment_point(
                 int(point_number)
             )
             if not point_selected:
                 self._show_route_measurement_status(message, 6000)
                 return
-        elif not runner_active:
-            if point_number is None:
-                message = "Select a route point before saving shift."
-                self._show_route_measurement_status(message, 5000)
-                return
+        elif shift_plan.needs_api_context:
             context_result = self._api_contact_context(int(point_number))
             if not context_result.get("accepted", False):
                 message = str(
@@ -8944,7 +8932,7 @@ class Main(QMainWindow):
             if self._route_measurement_dialog is not None:
                 self._route_measurement_dialog.set_status(message)
             return
-        if runner_active:
+        if shift_plan.runner_active:
             saved, message = runner.save_current_position_adjustment(stage_xy)
             if saved and hasattr(runner, "route_offset_xy"):
                 try:
@@ -8963,7 +8951,7 @@ class Main(QMainWindow):
             saved = True
         self._show_status(message, 5000)
         if self.design_navigator_panel is not None:
-            if runner_active and hasattr(
+            if shift_plan.runner_active and hasattr(
                 self.design_navigator_panel,
                 "set_route_measurement_interrupt_request_pending",
             ):
@@ -8972,7 +8960,7 @@ class Main(QMainWindow):
                 )
             self.design_navigator_panel.set_route_measurement_status(message)
         if self._route_measurement_dialog is not None:
-            if runner_active and hasattr(
+            if shift_plan.runner_active and hasattr(
                 self._route_measurement_dialog,
                 "set_interrupt_request_pending",
             ):
