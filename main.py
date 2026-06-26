@@ -219,6 +219,14 @@ from probe_station_gui.route.formatting import (
     format_route_ohm as _format_route_ohm,
     format_route_percent as _format_route_percent,
 )
+from probe_station_gui.route.artifact_rows import (
+    ROUTE_CONTACT_HEIGHT_MAP_FIELDS,
+    ROUTE_PHOTO_FOCUS_MAP_FIELDS,
+    route_contact_height_map_path,
+    route_contact_height_map_row,
+    route_photo_focus_map_path,
+    route_photo_focus_map_row,
+)
 from probe_station_gui.camera.imaging import (
     MicroscopeCaptureResult,
     MicroscopeImageMetadata,
@@ -8082,18 +8090,23 @@ class Main(QMainWindow):
         if not record.focus:
             return
         try:
-            path = self._route_photo_focus_map_path(record)
+            path = route_photo_focus_map_path(record)
             path.parent.mkdir(parents=True, exist_ok=True)
             exists = path.exists() and path.stat().st_size > 0
             with path.open("a", encoding="utf-8", newline="") as handle:
                 writer = csv.DictWriter(
                     handle,
-                    fieldnames=self._ROUTE_PHOTO_FOCUS_MAP_FIELDS,
+                    fieldnames=ROUTE_PHOTO_FOCUS_MAP_FIELDS,
                 )
                 if not exists:
                     writer.writeheader()
                 writer.writerow(
-                    self._route_photo_focus_map_row(record, position, total)
+                    route_photo_focus_map_row(
+                        record,
+                        position,
+                        total,
+                        route_name=self._current_route_name(),
+                    )
                 )
                 handle.flush()
                 os.fsync(handle.fileno())
@@ -8350,73 +8363,6 @@ class Main(QMainWindow):
             return None
         return encoded[0], "route-contact-comparison.jpg"
 
-    _ROUTE_PHOTO_FOCUS_MAP_FIELDS = (
-        "timestamp",
-        "route_name",
-        "route_position",
-        "route_total",
-        "structure_number",
-        "point_index",
-        "point_id",
-        "label",
-        "design_x",
-        "design_y",
-        "stage_x",
-        "stage_y",
-        "photo_path",
-        "objective_name",
-        "focus_start_z_mm",
-        "focus_best_z_mm",
-        "focus_delta_um",
-        "focus_score",
-        "focus_sample_count",
-        "focus_edge_peak",
-        "autofocus_range_mm",
-        "autofocus_fine_step_mm",
-        "autofocus_lower_z_mm",
-        "autofocus_upper_z_mm",
-    )
-
-    @staticmethod
-    def _route_photo_focus_map_path(record: RoutePhotoRecord) -> Path:
-        return Path(record.path).expanduser().resolve().parent / "route-photo-focus-map.csv"
-
-    def _route_photo_focus_map_row(
-        self,
-        record: RoutePhotoRecord,
-        position: int,
-        total: int,
-    ) -> dict[str, object]:
-        route = self._design_session.route
-        route_name = route.name if route is not None else ""
-        focus = record.focus or {}
-        return {
-            "timestamp": record.timestamp,
-            "route_name": route_name,
-            "route_position": int(position),
-            "route_total": int(total),
-            "structure_number": int(record.structure_number),
-            "point_index": int(record.point_index),
-            "point_id": record.point_id,
-            "label": record.label,
-            "design_x": float(record.design_center[0]),
-            "design_y": float(record.design_center[1]),
-            "stage_x": float(record.stage_xy[0]),
-            "stage_y": float(record.stage_xy[1]),
-            "photo_path": record.path,
-            "objective_name": focus.get("objective_name", ""),
-            "focus_start_z_mm": focus.get("focus_start_z_mm", ""),
-            "focus_best_z_mm": focus.get("focus_best_z_mm", ""),
-            "focus_delta_um": focus.get("focus_delta_um", ""),
-            "focus_score": focus.get("focus_score", ""),
-            "focus_sample_count": focus.get("focus_sample_count", ""),
-            "focus_edge_peak": focus.get("focus_edge_peak", ""),
-            "autofocus_range_mm": focus.get("autofocus_range_mm", ""),
-            "autofocus_fine_step_mm": focus.get("autofocus_fine_step_mm", ""),
-            "autofocus_lower_z_mm": focus.get("autofocus_lower_z_mm", ""),
-            "autofocus_upper_z_mm": focus.get("autofocus_upper_z_mm", ""),
-        }
-
     def _record_route_contact_height(
         self,
         record: RouteContactHeightRecord,
@@ -8426,143 +8372,34 @@ class Main(QMainWindow):
         csv_path: str | Path,
     ) -> None:
         try:
-            path = self._route_contact_height_map_path(csv_path)
+            path = route_contact_height_map_path(csv_path)
             path.parent.mkdir(parents=True, exist_ok=True)
             exists = path.exists() and path.stat().st_size > 0
             with path.open("a", encoding="utf-8", newline="") as handle:
                 writer = csv.DictWriter(
                     handle,
-                    fieldnames=self._ROUTE_CONTACT_HEIGHT_MAP_FIELDS,
+                    fieldnames=ROUTE_CONTACT_HEIGHT_MAP_FIELDS,
                 )
                 if not exists:
                     writer.writeheader()
                 writer.writerow(
-                    self._route_contact_height_map_row(record, position, total)
+                    route_contact_height_map_row(
+                        record,
+                        position,
+                        total,
+                        route_name=self._current_route_name(),
+                    )
                 )
                 handle.flush()
                 os.fsync(handle.fileno())
         except OSError as exc:
             logger.warning("Unable to write route contact height map: %s", exc)
 
-    _ROUTE_CONTACT_HEIGHT_MAP_FIELDS = (
-        "timestamp",
-        "route_name",
-        "route_position",
-        "route_total",
-        "structure_number",
-        "point_index",
-        "point_id",
-        "label",
-        "design_x",
-        "design_y",
-        "stage_x",
-        "stage_y",
-        "measurement_status",
-        "resistance_ohm",
-        "resistance_rms_ohm",
-        "relative_rms",
-        "contact_quality",
-        "contact_median_ohm",
-        "contact_mad_sigma_ohm",
-        "contact_p95_abs_step_ohm",
-        "contact_span_ohm",
-        "contact_compliance_hits",
-        "contact_found",
-        "contact_depth_below_down_mm",
-        "contact_axis_a_lowering_mm",
-        "contact_seek_used",
-        "contact_seek_found",
-        "contact_seek_status",
-        "contact_seek_attempts",
-        "contact_seek_initial_status",
-        "contact_seek_final_status",
-        "contact_seek_depth_below_down_mm",
-        "contact_seek_axis_a_lowering_mm",
-        "contact_seek_step_mm",
-        "contact_seek_max_depth_mm",
-    )
-
-    @staticmethod
-    def _route_contact_height_map_path(csv_path: str | Path) -> Path:
-        return (
-            Path(csv_path)
-            .expanduser()
-            .resolve()
-            .parent
-            / "route-contact-height-map.csv"
-        )
-
-    def _route_contact_height_map_row(
-        self,
-        record: RouteContactHeightRecord,
-        position: int,
-        total: int,
-    ) -> dict[str, object]:
-        route = self._design_session.route
-        route_name = route.name if route is not None else ""
-        contact = record.contact_quality
-        seek = record.contact_seek
-        return {
-            "timestamp": record.timestamp,
-            "route_name": route_name,
-            "route_position": int(position),
-            "route_total": int(total),
-            "structure_number": int(record.structure_number),
-            "point_index": int(record.point_index),
-            "point_id": record.point_id,
-            "label": record.label,
-            "design_x": float(record.design_center[0]),
-            "design_y": float(record.design_center[1]),
-            "stage_x": float(record.stage_xy[0]),
-            "stage_y": float(record.stage_xy[1]),
-            "measurement_status": record.measurement_status,
-            "resistance_ohm": _csv_float(record.resistance_ohm),
-            "resistance_rms_ohm": _csv_float(record.resistance_rms_ohm),
-            "relative_rms": _csv_float(record.relative_rms),
-            "contact_quality": "" if contact is None else contact.status,
-            "contact_median_ohm": ""
-            if contact is None
-            else _csv_float(contact.median_ohm),
-            "contact_mad_sigma_ohm": ""
-            if contact is None
-            else _csv_float(contact.mad_sigma_ohm),
-            "contact_p95_abs_step_ohm": ""
-            if contact is None
-            else _csv_float(contact.p95_abs_step_ohm),
-            "contact_span_ohm": ""
-            if contact is None
-            else _csv_float(contact.span_ohm),
-            "contact_compliance_hits": ""
-            if contact is None
-            else int(contact.compliance_hits),
-            "contact_found": _csv_bool(record.contact_found),
-            "contact_depth_below_down_mm": _csv_float(
-                record.contact_depth_below_down_mm
-            ),
-            "contact_axis_a_lowering_mm": _csv_float(
-                record.contact_axis_a_lowering_mm
-            ),
-            "contact_seek_used": _csv_bool(seek is not None),
-            "contact_seek_found": "" if seek is None else _csv_bool(seek.found),
-            "contact_seek_status": "" if seek is None else seek.status,
-            "contact_seek_attempts": "" if seek is None else int(seek.attempts),
-            "contact_seek_initial_status": ""
-            if seek is None
-            else seek.initial_status,
-            "contact_seek_final_status": "" if seek is None else seek.final_status,
-            "contact_seek_depth_below_down_mm": ""
-            if seek is None
-            else _csv_float(seek.depth_below_down_mm),
-            "contact_seek_axis_a_lowering_mm": ""
-            if seek is None
-            else _csv_float(seek.axis_a_lowering_mm),
-            "contact_seek_step_mm": ""
-            if seek is None
-            else _csv_float(seek.step_mm),
-            "contact_seek_max_depth_mm": ""
-            if seek is None
-            else _csv_float(seek.max_depth_mm),
-        }
+    def _current_route_name(self) -> str:
+        route = getattr(getattr(self, "_design_session", None), "route", None)
+        if route is None:
+            return ""
+        return str(route.name)
 
     def _run_route_measurement(self, runner: RouteMeasurementRunner) -> None:
         success, message = runner.run()
