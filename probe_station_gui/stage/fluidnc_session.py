@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Callable
 
@@ -16,6 +17,7 @@ from probe_station_gui.stage.types import _Status
 logger = logging.getLogger(__name__)
 
 _SERIAL_IO_EXCEPTIONS = SERIAL_IO_EXCEPTIONS
+_SERIAL_WAITING_EXCEPTIONS = SERIAL_IO_EXCEPTIONS + (ValueError,)
 
 
 @dataclass(frozen=True)
@@ -96,7 +98,7 @@ class FluidNCSession:
     ) -> bytes:
         try:
             waiting = int(getattr(self.serial_connection, "in_waiting", 0) or 0)
-        except (TypeError, ValueError, AttributeError, _SERIAL_IO_EXCEPTIONS):
+        except _SERIAL_WAITING_EXCEPTIONS:
             waiting = 0
         if waiting <= 0:
             return b""
@@ -116,7 +118,7 @@ class FluidNCSession:
                 reason,
                 waiting,
             )
-        except (AttributeError, _SERIAL_IO_EXCEPTIONS):
+        except _SERIAL_IO_EXCEPTIONS:
             logger.debug("Serial input buffer reset failed after stale input.")
         return b""
 
@@ -166,7 +168,7 @@ class FluidNCSession:
     ) -> bytes:
         try:
             waiting = int(getattr(self.serial_connection, "in_waiting", 0) or 0)
-        except (TypeError, ValueError, AttributeError, _SERIAL_IO_EXCEPTIONS) as exc:
+        except _SERIAL_WAITING_EXCEPTIONS as exc:
             raise StageControllerError(f"Serial read failed: {exc}") from exc
         if waiting <= 0:
             return b""
@@ -181,6 +183,58 @@ class FluidNCSession:
             logger.debug("SERIAL TRACE terminal_read bytes=%r", data[:200])
             self.callbacks.handle_pending_serial_data_side_effects(data, reason)
         return data
+
+    def reset_input_buffer(
+        self,
+        *,
+        reason: str = "serial dialogue reset",
+    ) -> None:
+        try:
+            self.serial_connection.reset_input_buffer()
+            logger.debug("SERIAL TRACE reset_input_buffer reason=%s", reason)
+        except _SERIAL_IO_EXCEPTIONS:
+            logger.debug("Serial input buffer reset failed.")
+
+    def iter_command_response_lines(
+        self,
+        command: str,
+        *,
+        timeout: float,
+        source: str,
+        check_cancelled: bool = True,
+        reset_input_before_command: bool = False,
+        reset_input_reason: str | None = None,
+        handle_limit_lines: bool = True,
+        handle_homing_messages: bool = False,
+        handle_coordinate_state: bool = False,
+    ) -> Iterator[str]:
+        if reset_input_before_command:
+            self.reset_input_buffer(
+                reason=reset_input_reason or f"before command {command.strip()}"
+            )
+        self.write_command(command, check_cancelled=check_cancelled)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if check_cancelled:
+                self.callbacks.check_cancelled()
+            line = self._readline(source=source)
+            if not line:
+                continue
+            self.callbacks.raise_if_controller_reboot_line(line, source)
+            if handle_limit_lines:
+                self.callbacks.handle_limit_line(line)
+            if handle_homing_messages and self.callbacks.handle_homing_message_line(
+                line
+            ):
+                continue
+            lower = line.lower()
+            if lower.startswith("alarm"):
+                raise StageControllerError(f"Controller alarm: {line}")
+            if line.startswith("[MSG:ERR:") or lower.startswith("error"):
+                raise StageControllerError(f"Controller reported: {line}")
+            if handle_coordinate_state:
+                self.callbacks.handle_coordinate_state_line(line)
+            yield line
 
     def _readline(self, *, source: str) -> str:
         try:

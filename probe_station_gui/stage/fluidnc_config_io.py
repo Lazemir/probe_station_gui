@@ -13,7 +13,7 @@ from probe_station_gui.stage.controller_cache import (
     parse_cached_controller_session_marker,
     parse_cached_coordinate_offsets,
 )
-from probe_station_gui.stage.errors import SERIAL_IO_EXCEPTIONS, StageControllerError
+from probe_station_gui.stage.errors import StageControllerError
 from probe_station_gui.stage.fluidnc_protocol import (
     parse_fluidnc_axis_max_feedrates,
     parse_startup_axis_limits,
@@ -22,9 +22,6 @@ from probe_station_gui.stage.types import _Status
 
 
 logger = logging.getLogger(__name__)
-
-_SERIAL_IO_EXCEPTIONS = SERIAL_IO_EXCEPTIONS
-
 
 class StageControllerFluidNCConfigIOMixin:
     """Internal FluidNC modal-state and config-query methods."""
@@ -61,24 +58,16 @@ class StageControllerFluidNCConfigIOMixin:
         return None
 
     def _query_modal_state_tokens(self, timeout: float = 2.0) -> list[str]:
-        serial_connection = self._current_serial()
-        self._write_command(serial_connection, "$G")
-        deadline = time.monotonic() + timeout
+        session = self._current_fluidnc_session()
         saw_ack = False
         saw_non_modal_response = False
         tokens: list[str] | None = None
-        while time.monotonic() < deadline:
-            self._check_cancelled()
-            try:
-                raw = serial_connection.readline()
-            except _SERIAL_IO_EXCEPTIONS as exc:  # pragma: no cover - hardware interaction
-                raise StageControllerError(f"Serial read failed: {exc}") from exc
-            line = raw.decode("ascii", errors="ignore").strip()
-            if not line:
-                continue
-            logger.debug("SERIAL TRACE stage_readline $G line=%r", line)
-            self._raise_if_controller_reboot_line(line, "$G")
-            self._handle_limit_line(line)
+        for line in session.iter_command_response_lines(
+            "$G",
+            timeout=timeout,
+            source="$G",
+            handle_coordinate_state=True,
+        ):
             lower = line.lower()
             if lower == "ok":
                 if tokens is not None:
@@ -90,11 +79,6 @@ class StageControllerFluidNCConfigIOMixin:
                     return []
                 saw_ack = True
                 continue
-            if lower.startswith("alarm"):
-                raise StageControllerError(f"Controller alarm: {line}")
-            if lower.startswith("error") or line.startswith("[MSG:ERR:"):
-                raise StageControllerError(f"Controller reported: {line}")
-            self._handle_coordinate_state_line(line)
             modal_match = self.MODAL_STATE_PATTERN.match(line)
             if modal_match:
                 tokens = modal_match.group("modal").split()
@@ -103,16 +87,10 @@ class StageControllerFluidNCConfigIOMixin:
             else:
                 saw_non_modal_response = True
         if tokens is not None:
-            try:
-                serial_connection.reset_input_buffer()
-            except AttributeError:
-                pass
+            session.reset_input_buffer(reason="after truncated $G response")
             return tokens
         if saw_ack:
-            try:
-                serial_connection.reset_input_buffer()
-            except AttributeError:
-                pass
+            session.reset_input_buffer(reason="after empty $G response")
             return []
         raise StageControllerError("Timeout waiting for controller response: $G.")
 
@@ -195,41 +173,22 @@ class StageControllerFluidNCConfigIOMixin:
     def _query_work_coordinate_offsets(
         self, timeout: float = 2.5
     ) -> dict[str, tuple[float, ...]]:
-        serial_connection = self._current_serial()
-        self._write_command(serial_connection, "$#")
-        deadline = time.monotonic() + timeout
+        session = self._current_fluidnc_session()
         offsets: dict[str, tuple[float, ...]] = {}
         saw_final_ok = False
-        while time.monotonic() < deadline:
-            self._check_cancelled()
-            try:
-                raw = serial_connection.readline()
-            except _SERIAL_IO_EXCEPTIONS as exc:  # pragma: no cover - hardware interaction
-                raise StageControllerError(f"Serial read failed: {exc}") from exc
-            line = raw.decode("ascii", errors="ignore").strip()
-            if not line:
-                continue
-            logger.debug("SERIAL TRACE stage_readline $# line=%r", line)
-            self._raise_if_controller_reboot_line(line, "$#")
-            self._handle_limit_line(line)
-            homed_msg = self.HOMED_MSG_PATTERN.match(line)
-            if homed_msg:
-                axes = set(homed_msg.group("axes").upper())
-                if self._homed_axes:
-                    axes = set(self._homed_axes).union(axes)
-                self._update_homing_status(axes)
-                continue
+        for line in session.iter_command_response_lines(
+            "$#",
+            timeout=timeout,
+            source="$#",
+            handle_homing_messages=True,
+            handle_coordinate_state=True,
+        ):
             lower = line.lower()
             if lower == "ok":
                 if offsets:
                     saw_final_ok = True
                     break
                 continue
-            if lower.startswith("alarm"):
-                raise StageControllerError(f"Controller alarm: {line}")
-            if lower.startswith("error") or line.startswith("[MSG:ERR:"):
-                raise StageControllerError(f"Controller reported: {line}")
-            self._handle_coordinate_state_line(line)
             match = self.COORDINATE_OFFSET_PATTERN.match(line)
             if not match:
                 continue
@@ -238,57 +197,33 @@ class StageControllerFluidNCConfigIOMixin:
                 continue
             offsets[match.group("system").upper()] = coords
         if offsets and not saw_final_ok:
-            try:
-                serial_connection.reset_input_buffer()
-            except AttributeError:
-                pass
+            session.reset_input_buffer(reason="after truncated $# response")
         return offsets
 
     def _query_axis_max_feedrates_locked(
         self,
-        serial_connection: serial.Serial,
+        serial_connection,
         timeout: float = 20.0,
     ) -> dict[str, float]:
-        self._write_command(serial_connection, "$CD")
-        deadline = time.monotonic() + timeout
+        session = self._fluidnc_session_for(serial_connection)
         lines: list[str] = []
         saw_final_ok = False
-        while time.monotonic() < deadline:
-            self._check_cancelled()
-            try:
-                raw = serial_connection.readline()
-            except _SERIAL_IO_EXCEPTIONS as exc:  # pragma: no cover - hardware interaction
-                raise StageControllerError(f"Serial read failed: {exc}") from exc
-            line = raw.decode("ascii", errors="ignore").strip()
-            if not line:
-                continue
-            logger.debug("SERIAL TRACE stage_readline $CD line=%r", line)
-            self._raise_if_controller_reboot_line(line, "$CD")
-            self._handle_limit_line(line)
-            homed_msg = self.HOMED_MSG_PATTERN.match(line)
-            if homed_msg:
-                axes = set(homed_msg.group("axes").upper())
-                if self._homed_axes:
-                    axes = set(self._homed_axes).union(axes)
-                self._update_homing_status(axes)
-                continue
-            self._handle_coordinate_state_line(line)
+        for line in session.iter_command_response_lines(
+            "$CD",
+            timeout=timeout,
+            source="$CD",
+            handle_homing_messages=True,
+            handle_coordinate_state=True,
+        ):
             lower = line.lower()
             if lower == "ok":
                 if lines:
                     saw_final_ok = True
                     break
                 continue
-            if lower.startswith("alarm"):
-                raise StageControllerError(f"Controller alarm: {line}")
-            if lower.startswith("error") or line.startswith("[MSG:ERR:"):
-                raise StageControllerError(f"Controller reported: {line}")
             lines.append(line)
         if lines and not saw_final_ok:
-            try:
-                serial_connection.reset_input_buffer()
-            except AttributeError:
-                pass
+            session.reset_input_buffer(reason="after truncated $CD response")
         rates = parse_fluidnc_axis_max_feedrates(lines)
         if not rates:
             raise StageControllerError(
@@ -355,34 +290,21 @@ class StageControllerFluidNCConfigIOMixin:
         self.status_message.emit(f"Coordinate system: {coordinate_system}.")
 
     def _read_startup_limits(
-        self, serial_connection: serial.Serial, timeout: float = 3.5
+        self, serial_connection, timeout: float = 3.5
     ) -> None:
-        try:
-            serial_connection.reset_input_buffer()
-        except AttributeError:
-            pass
-        self._write_command(serial_connection, "$Startup/Show")
-        deadline = time.monotonic() + timeout
-        limits: dict[str, tuple[float, float]] | None = None
+        session = self._fluidnc_session_for(serial_connection)
         lines: list[str] = []
-        while time.monotonic() < deadline:
-            self._check_cancelled()
-            try:
-                raw = serial_connection.readline()
-            except _SERIAL_IO_EXCEPTIONS as exc:  # pragma: no cover - hardware interaction
-                raise StageControllerError(f"Serial read failed: {exc}") from exc
-            line = raw.decode("ascii", errors="ignore").strip()
-            if not line:
-                continue
-            lower = line.lower()
+        for line in session.iter_command_response_lines(
+            "$Startup/Show",
+            timeout=timeout,
+            source="$Startup/Show",
+            reset_input_before_command=True,
+            reset_input_reason="before $Startup/Show",
+            handle_limit_lines=False,
+        ):
             lines.append(line)
-            self._raise_if_controller_reboot_line(line, "$Startup/Show")
-            if lower == "ok":
+            if line.lower() == "ok":
                 break
-            if lower.startswith("alarm"):
-                raise StageControllerError(f"Controller alarm: {line}")
-            if lower.startswith("error") or line.startswith("[MSG:ERR:"):
-                raise StageControllerError(f"Controller reported: {line}")
         limits = self._parse_startup_limits(lines)
         if limits:
             limits.pop("B", None)

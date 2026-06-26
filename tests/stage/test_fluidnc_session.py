@@ -13,6 +13,7 @@ class _BufferedSerial:
         self.data = bytearray(data)
         self.lines = list(lines or [])
         self.writes: list[bytes] = []
+        self.reset_calls: list[bool] = []
 
     @property
     def in_waiting(self) -> int:
@@ -34,10 +35,15 @@ class _BufferedSerial:
     def flush(self) -> None:
         return None
 
+    def reset_input_buffer(self) -> None:
+        self.reset_calls.append(True)
+        self.data.clear()
+
 
 def _session_callbacks(
     *,
     homing_lines: list[str] | None = None,
+    limit_lines: list[str] | None = None,
     pending_reads: list[tuple[bytes, str]] | None = None,
     coordinate_lines: list[str] | None = None,
     updated_homing: list[set[str]] | None = None,
@@ -62,7 +68,9 @@ def _session_callbacks(
     return FluidNCSessionCallbacks(
         check_cancelled=lambda: None,
         raise_if_controller_reboot_line=lambda _line, _source: None,
-        handle_limit_line=lambda _line: None,
+        handle_limit_line=lambda line: (
+            limit_lines.append(line) if limit_lines is not None else None
+        ),
         handle_homing_message_line=handle_homing_message_line,
         handle_coordinate_state_line=lambda line: (
             coordinate_lines.append(line) if coordinate_lines is not None else None
@@ -159,3 +167,53 @@ def test_wait_for_ok_raises_stage_error_on_alarm() -> None:
 
     with pytest.raises(StageControllerError, match="Controller alarm: ALARM:1"):
         session.wait_for_ok(timeout=0.1)
+
+
+def test_iter_command_response_lines_routes_side_effects_and_yields_ok() -> None:
+    homing_lines: list[str] = []
+    limit_lines: list[str] = []
+    coordinate_lines: list[str] = []
+    serial_connection = _BufferedSerial(
+        lines=[
+            b"[MSG:Homed:XA]\n",
+            b"[GC:G1 G54 G17 G21 G90]\n",
+            b"ok\n",
+        ]
+    )
+    session = FluidNCSession(
+        serial_connection=serial_connection,
+        callbacks=_session_callbacks(
+            homing_lines=homing_lines,
+            limit_lines=limit_lines,
+            coordinate_lines=coordinate_lines,
+        ),
+    )
+
+    lines = list(
+        session.iter_command_response_lines(
+            "$G",
+            timeout=0.1,
+            source="$G",
+            handle_homing_messages=True,
+            handle_coordinate_state=True,
+        )
+    )
+
+    assert serial_connection.writes == [b"$G\n"]
+    assert homing_lines == ["[MSG:Homed:XA]"]
+    assert limit_lines == ["[MSG:Homed:XA]", "[GC:G1 G54 G17 G21 G90]", "ok"]
+    assert coordinate_lines == ["[GC:G1 G54 G17 G21 G90]", "ok"]
+    assert lines == ["[GC:G1 G54 G17 G21 G90]", "ok"]
+
+
+def test_reset_input_buffer_uses_serial_method() -> None:
+    serial_connection = _BufferedSerial(data=b"stale\r\n")
+    session = FluidNCSession(
+        serial_connection=serial_connection,
+        callbacks=_session_callbacks(),
+    )
+
+    session.reset_input_buffer(reason="test reset")
+
+    assert serial_connection.reset_calls == [True]
+    assert serial_connection.in_waiting == 0

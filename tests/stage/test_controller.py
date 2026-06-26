@@ -418,6 +418,15 @@ class _BufferedLineFakeSerial(_LineFakeSerial):
         return chunk
 
 
+class _ResetTrackingLineFakeSerial(_LineFakeSerial):
+    def __init__(self, lines: list[bytes]) -> None:
+        super().__init__(lines)
+        self.reset_input_buffer_calls = 0
+
+    def reset_input_buffer(self) -> None:
+        self.reset_input_buffer_calls += 1
+
+
 class StageControllerAbsoluteMoveTest(unittest.TestCase):
     def test_relative_move_callback_runs_after_g1_is_accepted(self) -> None:
         controller = StageController()
@@ -605,6 +614,41 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
         self.assertEqual(serial_connection.writes, [b"$#\n"])
         self.assertIn("G54", offsets)
         self.assertEqual(offsets["G54"], (32.0, 32.0, 0.0, -2.908, 0.0))
+
+    def test_modal_state_query_returns_empty_tokens_after_non_modal_ack(self) -> None:
+        controller = StageController()
+        serial_connection = _ResetTrackingLineFakeSerial(
+            [
+                b"[MSG:INFO: unrelated]\n",
+                b"ok\n",
+            ]
+        )
+
+        controller._serial = serial_connection
+        with controller._serial_session():
+            tokens = controller._query_modal_state_tokens(timeout=0.2)
+
+        self.assertEqual(tokens, [])
+        self.assertEqual(serial_connection.writes, [b"$G\n"])
+
+    def test_work_offset_query_resets_input_after_truncated_offsets(self) -> None:
+        controller = StageController()
+        serial_connection = _ResetTrackingLineFakeSerial(
+            [
+                b"[G54:32.000,32.000,0.000,-2.908,0.000]\n",
+            ]
+        )
+
+        controller._serial = serial_connection
+        with controller._serial_session():
+            offsets = controller._query_work_coordinate_offsets(timeout=0.2)
+
+        self.assertEqual(
+            offsets,
+            {"G54": (32.0, 32.0, 0.0, -2.908, 0.0)},
+        )
+        self.assertEqual(serial_connection.writes, [b"$#\n"])
+        self.assertEqual(serial_connection.reset_input_buffer_calls, 1)
 
     def test_set_current_a_work_coordinate_zeroes_active_wcs(self) -> None:
         controller = StageController()
