@@ -2713,6 +2713,49 @@ assert image.height() == 4
         self.assertEqual(statuses, ["saved by runner"])
         self.assertEqual(window._api_route_offset_xy, (9.0, 8.0))
 
+    def test_runner_route_shift_save_ignores_route_offset_exception(self) -> None:
+        window = Main.__new__(Main)
+        statuses: list[str] = []
+        runner_calls: list[object] = []
+
+        def route_offset_xy() -> tuple[float, float]:
+            raise ValueError("bad offset")
+
+        runner = types.SimpleNamespace(
+            set_current_adjustment_point=lambda point_number: runner_calls.append(
+                ("select", point_number)
+            )
+            or (True, "selected"),
+            save_current_position_adjustment=lambda stage_xy: runner_calls.append(
+                ("save", stage_xy)
+            )
+            or (True, "saved by runner"),
+            route_offset_xy=route_offset_xy,
+        )
+        window._route_measurement_runner = runner
+        window._route_measurement_thread = _FakeAliveThread()
+        window._route_measurement_waiting = True
+        window._route_measurement_current_point = None
+        window._route_measurement_dialog = None
+        window.design_navigator_panel = None
+        window._api_route_control_active = False
+        window._api_route_offset_xy = (9.0, 8.0)
+        window._stage_xy_from_position = lambda _position: (1.75, 2.25)
+        window._show_status = (
+            lambda message, _timeout_ms=None: statuses.append(str(message))
+        )
+        window.stage_controller = types.SimpleNamespace(
+            current_stage_position=lambda: (1.75, 2.25, 0.0),
+            latest_stage_position=lambda: None,
+            is_busy=lambda: False,
+        )
+
+        Main._save_route_measurement_shift(window, 7)
+
+        self.assertEqual(runner_calls, [("select", 7), ("save", (1.75, 2.25))])
+        self.assertEqual(statuses, ["saved by runner"])
+        self.assertEqual(window._api_route_offset_xy, (9.0, 8.0))
+
     def test_runner_route_shift_save_marks_interrupt_pending_in_route_controls(self) -> None:
         window = Main.__new__(Main)
         statuses: list[str] = []

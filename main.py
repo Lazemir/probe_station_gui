@@ -8841,7 +8841,11 @@ class Main(QMainWindow):
     ) -> None:
         if not saved or not hasattr(runner, "route_offset_xy"):
             return
-        offset_xy = route_shift_runner_offset_update(runner.route_offset_xy())
+        try:
+            raw_offset_xy = runner.route_offset_xy()
+        except (TypeError, ValueError, IndexError):
+            return
+        offset_xy = route_shift_runner_offset_update(raw_offset_xy)
         if offset_xy is not None:
             self._api_route_offset_xy = offset_xy
 
