@@ -420,6 +420,7 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
             success, message = runner.run()
 
             self.assertTrue(success, message)
+            self.assertIn("2 measurements saved", message)
             self.assertEqual(len(records), 2)
             with csv_path.open("r", encoding="utf-8", newline="") as handle:
                 rows = list(csv.DictReader(handle))

@@ -141,6 +141,38 @@ class _RoutePointLoopDecision:
     stop_message: str | None = None
 
 
+@dataclass
+class _RouteRunProgress:
+    position_index: int = 0
+    measurements_saved: int = 0
+    photos_saved: int = 0
+    needs_final_lift: bool = False
+
+
+@dataclass(frozen=True)
+class _RoutePointFlowResult:
+    position_index: int
+    measurements_saved: int = 0
+    photos_saved: int = 0
+    stop_message: str | None = None
+
+
+@dataclass
+class _RoutePointMeasurementState:
+    measurement_prepare_task: _BackgroundRouteTask | None
+    point_interrupted: bool
+    needles_lowered: bool = False
+    lift_task: _BackgroundRouteTask | None = None
+    record: RouteMeasurementRecord | None = None
+    contact_height_record: RouteContactHeightRecord | None = None
+    record_saved: bool = False
+    quality_rejected: bool = False
+    result_emitted: bool = False
+    save_exhausted_bad_contact: bool = False
+    measurements_saved: int = 0
+    stop_message: str | None = None
+
+
 @dataclass(frozen=True)
 class _ResistanceStats:
     count: int
@@ -847,380 +879,716 @@ class RouteMeasurementRunner:
                 self._finish_stage_task()
 
     def run(self) -> tuple[bool, str]:
-        needs_final_lift = False
-        measurements_saved = 0
-        photos_saved = 0
+        progress = _RouteRunProgress()
         success = False
         message = "Route measurement stopped."
         try:
-            if not self._points:
-                raise ValueError("Route has no enabled points.")
-            if self._photo_enabled and self._photo_callback is None:
-                raise ValueError("Route photo capture is not configured.")
-            if self._photo_focus_enabled and self._photo_focus_callback is None:
-                raise ValueError("Route autofocus is not configured.")
-            if self._measure_enabled and hasattr(self._lcr_controller, "open"):
-                self._status("Route measurement: connecting meter.")
-                self._lcr_controller.open()
-            self._begin_stage_task()
-            if self._stop_requested.is_set():
-                message = "Route measurement stopped by user."
-                return success, message
-            initial_needle_action = (
-                "raise"
-                if self._photo_enabled or self._photo_focus_enabled
-                else "lift"
-            )
-            self._status(
-                "Route measurement: raising needles."
-                if initial_needle_action == "raise"
-                else "Route measurement: lifting needles."
-            )
-            self._stage_controller.run_external_needles_action(
-                initial_needle_action,
-                self._needle_feedrate,
-            )
-            if self._stop_requested.is_set():
-                message = "Route measurement stopped by user."
+            self._validate_route_run_configuration()
+            self._open_route_meter_if_needed()
+            startup_stop_message = self._start_route_run()
+            if startup_stop_message is not None:
+                message = startup_stop_message
                 return success, message
             total = len(self._points)
-            start_index = self._index_for_point_number(self._start_point_number)
-            if start_index is None and self._start_point_number == 1:
-                start_index = 0
-            if start_index is None:
-                raise ValueError(
-                    "Route start point "
-                    f"{self._start_point_number} is not enabled or not found."
-                )
-            position_index = start_index
+            progress.position_index = self._route_start_index()
             self._progress_started_at = time.monotonic()
             if self._wait_before_first_point:
-                decision = self._wait_before_first_route_point(
-                    point=self._points[position_index],
-                    position=position_index + 1,
+                initial_decision = self._initial_route_point_loop_decision(
+                    position_index=progress.position_index,
                     total=total,
                 )
-                if decision == "stop":
-                    message = "Route measurement stopped by user."
+                if initial_decision.stop_message is not None:
+                    message = initial_decision.stop_message
                     return success, message
-                self._begin_stage_task()
-                jump_index = self._jump_target_index(decision)
-                if jump_index is not None:
-                    position_index = jump_index
-                elif decision == "skip":
-                    position_index += 1
-            while position_index < total:
-                if self._stop_requested.is_set():
-                    message = "Route measurement stopped by user."
-                    break
-                self._point_interrupt_requested.clear()
-                position = position_index + 1
-                point = self._points[position_index]
-                point_interrupted = self._point_interrupt_requested.is_set()
-                self._emit_progress(position, total, int(point.index))
-                self._status(
-                    f"Route measurement: point {position}/{total} "
-                    f"{point.label}."
-                )
-                preparation = self._prepare_route_point_for_measurement(
-                    point=point,
-                    position=position,
+                progress.position_index = initial_decision.position_index
+            while progress.position_index < total:
+                point_result = self._run_route_point(
+                    position_index=progress.position_index,
                     total=total,
-                    point_interrupted=point_interrupted,
+                    progress=progress,
                 )
-                point_interrupted = preparation.point_interrupted
-                measurement_prepare_task = preparation.measurement_prepare_task
-                photos_saved += preparation.photos_saved
-                if preparation.stop_message is not None:
-                    message = preparation.stop_message
+                progress.photos_saved += point_result.photos_saved
+                progress.measurements_saved += point_result.measurements_saved
+                if point_result.stop_message is not None:
+                    message = point_result.stop_message
                     break
-                if not self._measure_enabled:
-                    if point_interrupted:
-                        loop_decision = self._interrupted_route_point_loop_decision(
-                            point=point,
-                            position=position,
-                            total=total,
-                            position_index=position_index,
-                            clear_stage_cancel=False,
-                        )
-                        if loop_decision.stop_message is not None:
-                            message = loop_decision.stop_message
-                            break
-                        position_index = loop_decision.position_index
-                        continue
-                    position_index += 1
-                    continue
-                needles_lowered = False
-                lift_task: _BackgroundRouteTask | None = None
-
-                def start_lift_after_measurement() -> None:
-                    nonlocal lift_task
-                    if not needles_lowered or lift_task is not None:
-                        return
-                    lift_task = self._start_needles_lift_task()
-
-                record: RouteMeasurementRecord | None = None
-                contact_height_record: RouteContactHeightRecord | None = None
-                record_saved = False
-                quality_rejected = False
-                result_emitted = False
-                save_exhausted_bad_contact = False
-                try:
-                    if not point_interrupted:
-                        if measurement_prepare_task is not None:
-                            measurement_prepare_task.wait()
-                            measurement_prepare_task = None
-                        self._emit_pre_contact_photo(point, position, total)
-                        self._lower_needles_for_measurement()
-                        needles_lowered = True
-                        needs_final_lift = True
-                        if not self._sleep_contact_settle():
-                            if self._point_interrupt_requested.is_set():
-                                point_interrupted = True
-                            else:
-                                message = "Route measurement stopped by user."
-                                break
-                    if not point_interrupted:
-                        self._status(
-                            f"Route measurement: point {position}/{total} "
-                            "measuring."
-                        )
-                        samples = self._measure_samples(
-                            position=position,
-                            total=total,
-                            prepare_task=measurement_prepare_task,
-                            after_measurement=start_lift_after_measurement,
-                        )
-                        measurement_prepare_task = None
-                        if samples is None:
-                            if self._point_interrupt_requested.is_set():
-                                point_interrupted = True
-                            else:
-                                message = "Route measurement stopped by user."
-                                break
-                        if not point_interrupted:
-                            if lift_task is not None:
-                                lift_task.wait()
-                                needles_lowered = False
-                                needs_final_lift = False
-                            record = self._record_for_point(
-                                point=point,
-                                samples=samples,
-                            )
-                            contact_height_record = (
-                                self._contact_height_record_for_point(
-                                    point=point,
-                                    record=record,
-                                )
-                            )
-                            if needles_lowered:
-                                self._stage_controller.run_external_needles_action(
-                                    "lift",
-                                    self._needle_feedrate,
-                                )
-                                needles_lowered = False
-                                needs_final_lift = False
-                    if not point_interrupted and record is not None:
-                        (
-                            record,
-                            record_saved,
-                            quality_rejected,
-                            save_exhausted_bad_contact,
-                            saved_count,
-                        ) = self._record_route_point_measurement(
-                            point=point,
-                            record=record,
-                            position=position,
-                            total=total,
-                        )
-                        measurements_saved += saved_count
-                        result_emitted = True
-                except Exception as exc:
-                    if self._point_interrupt_cancelled_exception(exc):
-                        point_interrupted = True
-                    else:
-                        raise
-                finally:
-                    if lift_task is not None and needles_lowered:
-                        try:
-                            if self._point_interrupt_requested.is_set():
-                                self._clear_stage_cancel_after_point_interrupt()
-                            lift_task.wait()
-                            needles_lowered = False
-                            needs_final_lift = False
-                        except Exception:
-                            logger.warning(
-                                "Background route needle lift failed; retrying.",
-                                exc_info=True,
-                            )
-                    if needles_lowered:
-                        if self._point_interrupt_requested.is_set():
-                            self._clear_stage_cancel_after_point_interrupt()
-                        self._stage_controller.run_external_needles_action(
-                            "lift",
-                            self._needle_feedrate,
-                        )
-                        needs_final_lift = False
-                    if measurement_prepare_task is not None:
-                        measurement_prepare_task.wait()
-                if point_interrupted:
-                    loop_decision = self._interrupted_route_point_loop_decision(
-                        point=point,
-                        position=position,
-                        total=total,
-                        position_index=position_index,
-                        clear_stage_cancel=True,
-                    )
-                    if loop_decision.stop_message is not None:
-                        message = loop_decision.stop_message
-                        break
-                    position_index = loop_decision.position_index
-                    continue
-                if record is None:
-                    continue
-                if quality_rejected:
-                    self._consume_pause_request()
-                    decision = self._wait_after_rejected_result(
-                        point=point,
-                        record=record,
-                        position=position,
-                        total=total,
-                        emit_result=not result_emitted,
-                    )
-                    loop_decision, saved_count = (
-                        self._route_point_confirmation_loop_decision(
-                            decision,
-                            point=point,
-                            position=position,
-                            total=total,
-                            position_index=position_index,
-                            default_advances=False,
-                        )
-                    )
-                    measurements_saved += saved_count
-                    if loop_decision.stop_message is not None:
-                        message = loop_decision.stop_message
-                        break
-                    position_index = loop_decision.position_index
-                    continue
-                auto_next = (
-                    self._confirm_each_point
-                    and record_saved
-                    and record.status in {"ok", "short"}
-                    and self._auto_next_ok_or_short_enabled()
-                )
-                if self._confirm_each_point:
-                    with self._confirmation_condition:
-                        self._pending_confirmation = None
-                    with self._route_offset_lock:
-                        self._last_recorded_point = point
-                    pause_after_point = self._consume_pause_request()
-                    auto_next = auto_next and not pause_after_point
-                    if not auto_next:
-                        self._finish_stage_task()
-                        self._set_waiting(True)
-                if not result_emitted:
-                    self._emit_result(record, position, total, record_saved)
-                if (
-                    record_saved
-                    and contact_height_record is not None
-                    and self._contact_height_record_callback is not None
-                ):
-                    self._contact_height_record_callback(
-                        contact_height_record,
-                        position,
-                        total,
-                    )
-                if self._record_callback is not None:
-                    self._record_callback(record, position, total)
-                if self._confirm_each_point:
-                    if save_exhausted_bad_contact:
-                        status_detail = "contact seek exhausted; saved"
-                    elif record.status == "short":
-                        status_detail = "short-circuit detected; saved"
-                    else:
-                        status_detail = "saved"
-                    if auto_next:
-                        self._status(
-                            f"Route measurement: point {position}/{total} "
-                            f"{status_detail}; continuing."
-                        )
-                    else:
-                        action_text = (
-                            "paused"
-                            if pause_after_point
-                            else status_detail
-                        )
-                        self._status(
-                            f"Route measurement: point {position}/{total} "
-                            f"{action_text}; "
-                            "choose Measure or Skip."
-                        )
-                        decision = self._wait_for_valid_confirmation()
-                        self._set_waiting(False)
-                        loop_decision, saved_count = (
-                            self._route_point_confirmation_loop_decision(
-                                decision,
-                                point=point,
-                                position=position,
-                                total=total,
-                                position_index=position_index,
-                                default_advances=True,
-                            )
-                        )
-                        measurements_saved += saved_count
-                        if loop_decision.stop_message is not None:
-                            message = loop_decision.stop_message
-                            break
-                        position_index = loop_decision.position_index
-                        continue
-                position_index += 1
-            if position_index >= total:
+                progress.position_index = point_result.position_index
+            if progress.position_index >= total:
                 success = True
-                if self._measure_enabled and self._photo_enabled:
-                    message = (
-                        "Route measurement complete: "
-                        f"{photos_saved} photos and {measurements_saved} "
-                        f"measurements saved. CSV: {self.csv_path}."
-                    )
-                elif self._photo_enabled:
-                    message = (
-                        "Route photo capture complete: "
-                        f"{photos_saved} photos saved."
-                    )
-                else:
-                    message = (
-                        "Route measurement complete: "
-                        f"{measurements_saved} measurements saved to {self.csv_path}."
-                    )
+                message = self._route_completion_message(progress)
         except Exception as exc:
             message = str(exc)
             self._status(f"Route measurement failed: {message}")
         finally:
-            if self._stage_task_active and needs_final_lift:
-                try:
-                    self._stage_controller.run_external_needles_action(
-                        "lift",
-                        self._needle_feedrate,
-                    )
-                except Exception as exc:
-                    message = f"{message} Needle lift failed: {exc}"
-            try:
-                self._wait_for_background_tasks()
-            except Exception as exc:
-                message = f"{message} Background route task failed: {exc}"
-            try:
-                self._close_meter_output_context()
-            except Exception as exc:
-                message = f"{message} Instrument output disable failed: {exc}"
-            self._finish_stage_task()
-            if self._measure_enabled and hasattr(self._lcr_controller, "close"):
-                try:
-                    self._lcr_controller.close()
-                except Exception as exc:
-                    message = f"{message} Instrument close failed: {exc}"
-            self._set_waiting(False)
+            message = self._finish_route_run(
+                message=message,
+                needs_final_lift=progress.needs_final_lift,
+            )
         return success, message
+
+    def _validate_route_run_configuration(self) -> None:
+        if not self._points:
+            raise ValueError("Route has no enabled points.")
+        if self._photo_enabled and self._photo_callback is None:
+            raise ValueError("Route photo capture is not configured.")
+        if self._photo_focus_enabled and self._photo_focus_callback is None:
+            raise ValueError("Route autofocus is not configured.")
+
+    def _open_route_meter_if_needed(self) -> None:
+        if self._measure_enabled and hasattr(self._lcr_controller, "open"):
+            self._status("Route measurement: connecting meter.")
+            self._lcr_controller.open()
+
+    def _start_route_run(self) -> str | None:
+        self._begin_stage_task()
+        if self._stop_requested.is_set():
+            return "Route measurement stopped by user."
+        initial_needle_action = (
+            "raise"
+            if self._photo_enabled or self._photo_focus_enabled
+            else "lift"
+        )
+        self._status(
+            "Route measurement: raising needles."
+            if initial_needle_action == "raise"
+            else "Route measurement: lifting needles."
+        )
+        self._stage_controller.run_external_needles_action(
+            initial_needle_action,
+            self._needle_feedrate,
+        )
+        if self._stop_requested.is_set():
+            return "Route measurement stopped by user."
+        return None
+
+    def _route_start_index(self) -> int:
+        start_index = self._index_for_point_number(self._start_point_number)
+        if start_index is None and self._start_point_number == 1:
+            return 0
+        if start_index is None:
+            raise ValueError(
+                "Route start point "
+                f"{self._start_point_number} is not enabled or not found."
+            )
+        return start_index
+
+    def _initial_route_point_loop_decision(
+        self,
+        *,
+        position_index: int,
+        total: int,
+    ) -> _RoutePointLoopDecision:
+        decision = self._wait_before_first_route_point(
+            point=self._points[position_index],
+            position=position_index + 1,
+            total=total,
+        )
+        if decision == "stop":
+            return _RoutePointLoopDecision(
+                position_index=position_index,
+                stop_message="Route measurement stopped by user.",
+            )
+        self._begin_stage_task()
+        jump_index = self._jump_target_index(decision)
+        if jump_index is not None:
+            return _RoutePointLoopDecision(position_index=jump_index)
+        if decision == "skip":
+            return _RoutePointLoopDecision(position_index=position_index + 1)
+        return _RoutePointLoopDecision(position_index=position_index)
+
+    def _run_route_point(
+        self,
+        *,
+        position_index: int,
+        total: int,
+        progress: _RouteRunProgress,
+    ) -> _RoutePointFlowResult:
+        if self._stop_requested.is_set():
+            return _RoutePointFlowResult(
+                position_index=position_index,
+                stop_message="Route measurement stopped by user.",
+            )
+        self._point_interrupt_requested.clear()
+        position = position_index + 1
+        point = self._points[position_index]
+        point_interrupted = self._point_interrupt_requested.is_set()
+        self._emit_progress(position, total, int(point.index))
+        self._status(
+            f"Route measurement: point {position}/{total} "
+            f"{point.label}."
+        )
+        preparation = self._prepare_route_point_for_measurement(
+            point=point,
+            position=position,
+            total=total,
+            point_interrupted=point_interrupted,
+        )
+        point_interrupted = preparation.point_interrupted
+        if preparation.stop_message is not None:
+            return _RoutePointFlowResult(
+                position_index=position_index,
+                photos_saved=preparation.photos_saved,
+                stop_message=preparation.stop_message,
+            )
+        if not self._measure_enabled:
+            return self._finish_photo_only_route_point(
+                point=point,
+                position=position,
+                total=total,
+                position_index=position_index,
+                point_interrupted=point_interrupted,
+                photos_saved=preparation.photos_saved,
+            )
+        return self._run_measured_route_point(
+            point=point,
+            position=position,
+            total=total,
+            position_index=position_index,
+            point_interrupted=point_interrupted,
+            measurement_prepare_task=preparation.measurement_prepare_task,
+            photos_saved=preparation.photos_saved,
+            progress=progress,
+        )
+
+    def _finish_photo_only_route_point(
+        self,
+        *,
+        point: RouteMeasurementPoint,
+        position: int,
+        total: int,
+        position_index: int,
+        point_interrupted: bool,
+        photos_saved: int,
+    ) -> _RoutePointFlowResult:
+        if point_interrupted:
+            loop_decision = self._interrupted_route_point_loop_decision(
+                point=point,
+                position=position,
+                total=total,
+                position_index=position_index,
+                clear_stage_cancel=False,
+            )
+            return _RoutePointFlowResult(
+                position_index=loop_decision.position_index,
+                photos_saved=photos_saved,
+                stop_message=loop_decision.stop_message,
+            )
+        return _RoutePointFlowResult(
+            position_index=position_index + 1,
+            photos_saved=photos_saved,
+        )
+
+    def _run_measured_route_point(
+        self,
+        *,
+        point: RouteMeasurementPoint,
+        position: int,
+        total: int,
+        position_index: int,
+        point_interrupted: bool,
+        measurement_prepare_task: _BackgroundRouteTask | None,
+        photos_saved: int,
+        progress: _RouteRunProgress,
+    ) -> _RoutePointFlowResult:
+        measurement = self._perform_route_point_measurement(
+            point=point,
+            position=position,
+            total=total,
+            point_interrupted=point_interrupted,
+            measurement_prepare_task=measurement_prepare_task,
+            progress=progress,
+        )
+        if measurement.stop_message is not None:
+            return _RoutePointFlowResult(
+                position_index=position_index,
+                measurements_saved=measurement.measurements_saved,
+                photos_saved=photos_saved,
+                stop_message=measurement.stop_message,
+            )
+        if measurement.point_interrupted:
+            loop_decision = self._interrupted_route_point_loop_decision(
+                point=point,
+                position=position,
+                total=total,
+                position_index=position_index,
+                clear_stage_cancel=True,
+            )
+            return _RoutePointFlowResult(
+                position_index=loop_decision.position_index,
+                measurements_saved=measurement.measurements_saved,
+                photos_saved=photos_saved,
+                stop_message=loop_decision.stop_message,
+            )
+        if measurement.record is None:
+            return _RoutePointFlowResult(
+                position_index=position_index,
+                measurements_saved=measurement.measurements_saved,
+                photos_saved=photos_saved,
+            )
+        if measurement.quality_rejected:
+            return self._finish_rejected_route_point_measurement(
+                point=point,
+                record=measurement.record,
+                position=position,
+                total=total,
+                position_index=position_index,
+                result_emitted=measurement.result_emitted,
+                photos_saved=photos_saved,
+            )
+        return self._finish_accepted_route_point_measurement(
+            point=point,
+            position=position,
+            total=total,
+            position_index=position_index,
+            measurement=measurement,
+            photos_saved=photos_saved,
+        )
+
+    def _perform_route_point_measurement(
+        self,
+        *,
+        point: RouteMeasurementPoint,
+        position: int,
+        total: int,
+        point_interrupted: bool,
+        measurement_prepare_task: _BackgroundRouteTask | None,
+        progress: _RouteRunProgress,
+    ) -> _RoutePointMeasurementState:
+        state = _RoutePointMeasurementState(
+            measurement_prepare_task=measurement_prepare_task,
+            point_interrupted=point_interrupted,
+        )
+        try:
+            if not state.point_interrupted:
+                self._lower_and_settle_route_point_measurement(
+                    state=state,
+                    point=point,
+                    position=position,
+                    total=total,
+                    progress=progress,
+                )
+            if not state.point_interrupted and state.stop_message is None:
+                self._measure_route_point_record(
+                    state=state,
+                    point=point,
+                    position=position,
+                    total=total,
+                    progress=progress,
+                )
+            if not state.point_interrupted and state.record is not None:
+                self._record_route_point_measurement_state(
+                    state=state,
+                    point=point,
+                    position=position,
+                    total=total,
+                )
+        except Exception as exc:
+            if self._point_interrupt_cancelled_exception(exc):
+                state.point_interrupted = True
+            else:
+                raise
+        finally:
+            self._cleanup_route_point_measurement_state(state, progress)
+        return state
+
+    def _lower_and_settle_route_point_measurement(
+        self,
+        *,
+        state: _RoutePointMeasurementState,
+        point: RouteMeasurementPoint,
+        position: int,
+        total: int,
+        progress: _RouteRunProgress,
+    ) -> None:
+        if state.measurement_prepare_task is not None:
+            state.measurement_prepare_task.wait()
+            state.measurement_prepare_task = None
+        self._emit_pre_contact_photo(point, position, total)
+        self._lower_needles_for_measurement()
+        state.needles_lowered = True
+        progress.needs_final_lift = True
+        if self._sleep_contact_settle():
+            return
+        if self._point_interrupt_requested.is_set():
+            state.point_interrupted = True
+        else:
+            state.stop_message = "Route measurement stopped by user."
+
+    def _measure_route_point_record(
+        self,
+        *,
+        state: _RoutePointMeasurementState,
+        point: RouteMeasurementPoint,
+        position: int,
+        total: int,
+        progress: _RouteRunProgress,
+    ) -> None:
+        self._status(
+            f"Route measurement: point {position}/{total} "
+            "measuring."
+        )
+        samples = self._measure_samples(
+            position=position,
+            total=total,
+            prepare_task=state.measurement_prepare_task,
+            after_measurement=lambda: self._start_route_point_lift_after_measurement(
+                state
+            ),
+        )
+        state.measurement_prepare_task = None
+        if samples is None:
+            if self._point_interrupt_requested.is_set():
+                state.point_interrupted = True
+            else:
+                state.stop_message = "Route measurement stopped by user."
+            return
+        self._wait_for_route_point_lift_before_record(state, progress)
+        state.record = self._record_for_point(
+            point=point,
+            samples=samples,
+        )
+        state.contact_height_record = self._contact_height_record_for_point(
+            point=point,
+            record=state.record,
+        )
+        self._lift_route_needles_after_record_if_needed(state, progress)
+
+    def _start_route_point_lift_after_measurement(
+        self,
+        state: _RoutePointMeasurementState,
+    ) -> None:
+        if not state.needles_lowered or state.lift_task is not None:
+            return
+        state.lift_task = self._start_needles_lift_task()
+
+    def _wait_for_route_point_lift_before_record(
+        self,
+        state: _RoutePointMeasurementState,
+        progress: _RouteRunProgress,
+    ) -> None:
+        if state.lift_task is None:
+            return
+        state.lift_task.wait()
+        state.needles_lowered = False
+        progress.needs_final_lift = False
+
+    def _lift_route_needles_after_record_if_needed(
+        self,
+        state: _RoutePointMeasurementState,
+        progress: _RouteRunProgress,
+    ) -> None:
+        if not state.needles_lowered:
+            return
+        self._stage_controller.run_external_needles_action(
+            "lift",
+            self._needle_feedrate,
+        )
+        state.needles_lowered = False
+        progress.needs_final_lift = False
+
+    def _record_route_point_measurement_state(
+        self,
+        *,
+        state: _RoutePointMeasurementState,
+        point: RouteMeasurementPoint,
+        position: int,
+        total: int,
+    ) -> None:
+        assert state.record is not None
+        (
+            state.record,
+            state.record_saved,
+            state.quality_rejected,
+            state.save_exhausted_bad_contact,
+            state.measurements_saved,
+        ) = self._record_route_point_measurement(
+            point=point,
+            record=state.record,
+            position=position,
+            total=total,
+        )
+        state.result_emitted = True
+
+    def _cleanup_route_point_measurement_state(
+        self,
+        state: _RoutePointMeasurementState,
+        progress: _RouteRunProgress,
+    ) -> None:
+        if state.lift_task is not None and state.needles_lowered:
+            try:
+                if self._point_interrupt_requested.is_set():
+                    self._clear_stage_cancel_after_point_interrupt()
+                state.lift_task.wait()
+                state.needles_lowered = False
+                progress.needs_final_lift = False
+            except Exception:
+                logger.warning(
+                    "Background route needle lift failed; retrying.",
+                    exc_info=True,
+                )
+        if state.needles_lowered:
+            if self._point_interrupt_requested.is_set():
+                self._clear_stage_cancel_after_point_interrupt()
+            self._stage_controller.run_external_needles_action(
+                "lift",
+                self._needle_feedrate,
+            )
+            progress.needs_final_lift = False
+        if state.measurement_prepare_task is not None:
+            state.measurement_prepare_task.wait()
+
+    def _finish_rejected_route_point_measurement(
+        self,
+        *,
+        point: RouteMeasurementPoint,
+        record: RouteMeasurementRecord,
+        position: int,
+        total: int,
+        position_index: int,
+        result_emitted: bool,
+        photos_saved: int,
+    ) -> _RoutePointFlowResult:
+        self._consume_pause_request()
+        decision = self._wait_after_rejected_result(
+            point=point,
+            record=record,
+            position=position,
+            total=total,
+            emit_result=not result_emitted,
+        )
+        loop_decision, saved_count = self._route_point_confirmation_loop_decision(
+            decision,
+            point=point,
+            position=position,
+            total=total,
+            position_index=position_index,
+            default_advances=False,
+        )
+        return _RoutePointFlowResult(
+            position_index=loop_decision.position_index,
+            measurements_saved=saved_count,
+            photos_saved=photos_saved,
+            stop_message=loop_decision.stop_message,
+        )
+
+    def _finish_accepted_route_point_measurement(
+        self,
+        *,
+        point: RouteMeasurementPoint,
+        position: int,
+        total: int,
+        position_index: int,
+        measurement: _RoutePointMeasurementState,
+        photos_saved: int,
+    ) -> _RoutePointFlowResult:
+        assert measurement.record is not None
+        auto_next = self._route_point_auto_next(
+            measurement.record,
+            record_saved=measurement.record_saved,
+        )
+        pause_after_point = False
+        if self._confirm_each_point:
+            auto_next, pause_after_point = self._prepare_saved_route_point_wait(
+                point=point,
+                auto_next=auto_next,
+            )
+        if not measurement.result_emitted:
+            self._emit_result(
+                measurement.record,
+                position,
+                total,
+                measurement.record_saved,
+            )
+        self._emit_route_point_record_callbacks(
+            measurement=measurement,
+            position=position,
+            total=total,
+        )
+        if self._confirm_each_point:
+            confirmation = self._saved_route_point_confirmation_result(
+                point=point,
+                record=measurement.record,
+                position=position,
+                total=total,
+                position_index=position_index,
+                auto_next=auto_next,
+                pause_after_point=pause_after_point,
+                save_exhausted_bad_contact=(
+                    measurement.save_exhausted_bad_contact
+                ),
+            )
+            if confirmation is not None:
+                return _RoutePointFlowResult(
+                    position_index=confirmation.position_index,
+                    measurements_saved=(
+                        measurement.measurements_saved
+                        + confirmation.measurements_saved
+                    ),
+                    photos_saved=photos_saved,
+                    stop_message=confirmation.stop_message,
+                )
+        return _RoutePointFlowResult(
+            position_index=position_index + 1,
+            measurements_saved=measurement.measurements_saved,
+            photos_saved=photos_saved,
+        )
+
+    def _route_point_auto_next(
+        self,
+        record: RouteMeasurementRecord,
+        *,
+        record_saved: bool,
+    ) -> bool:
+        return (
+            self._confirm_each_point
+            and record_saved
+            and record.status in {"ok", "short"}
+            and self._auto_next_ok_or_short_enabled()
+        )
+
+    def _prepare_saved_route_point_wait(
+        self,
+        *,
+        point: RouteMeasurementPoint,
+        auto_next: bool,
+    ) -> tuple[bool, bool]:
+        with self._confirmation_condition:
+            self._pending_confirmation = None
+        with self._route_offset_lock:
+            self._last_recorded_point = point
+        pause_after_point = self._consume_pause_request()
+        auto_next = auto_next and not pause_after_point
+        if not auto_next:
+            self._finish_stage_task()
+            self._set_waiting(True)
+        return auto_next, pause_after_point
+
+    def _emit_route_point_record_callbacks(
+        self,
+        *,
+        measurement: _RoutePointMeasurementState,
+        position: int,
+        total: int,
+    ) -> None:
+        if (
+            measurement.record_saved
+            and measurement.contact_height_record is not None
+            and self._contact_height_record_callback is not None
+        ):
+            self._contact_height_record_callback(
+                measurement.contact_height_record,
+                position,
+                total,
+            )
+        if self._record_callback is not None:
+            assert measurement.record is not None
+            self._record_callback(measurement.record, position, total)
+
+    def _saved_route_point_confirmation_result(
+        self,
+        *,
+        point: RouteMeasurementPoint,
+        record: RouteMeasurementRecord,
+        position: int,
+        total: int,
+        position_index: int,
+        auto_next: bool,
+        pause_after_point: bool,
+        save_exhausted_bad_contact: bool,
+    ) -> _RoutePointFlowResult | None:
+        status_detail = self._saved_route_point_status_detail(
+            record,
+            save_exhausted_bad_contact=save_exhausted_bad_contact,
+        )
+        if auto_next:
+            self._status(
+                f"Route measurement: point {position}/{total} "
+                f"{status_detail}; continuing."
+            )
+            return None
+        action_text = "paused" if pause_after_point else status_detail
+        self._status(
+            f"Route measurement: point {position}/{total} "
+            f"{action_text}; "
+            "choose Measure or Skip."
+        )
+        decision = self._wait_for_valid_confirmation()
+        self._set_waiting(False)
+        loop_decision, saved_count = self._route_point_confirmation_loop_decision(
+            decision,
+            point=point,
+            position=position,
+            total=total,
+            position_index=position_index,
+            default_advances=True,
+        )
+        return _RoutePointFlowResult(
+            position_index=loop_decision.position_index,
+            measurements_saved=saved_count,
+            stop_message=loop_decision.stop_message,
+        )
+
+    @staticmethod
+    def _saved_route_point_status_detail(
+        record: RouteMeasurementRecord,
+        *,
+        save_exhausted_bad_contact: bool,
+    ) -> str:
+        if save_exhausted_bad_contact:
+            return "contact seek exhausted; saved"
+        if record.status == "short":
+            return "short-circuit detected; saved"
+        return "saved"
+
+    def _route_completion_message(self, progress: _RouteRunProgress) -> str:
+        if self._measure_enabled and self._photo_enabled:
+            return (
+                "Route measurement complete: "
+                f"{progress.photos_saved} photos and "
+                f"{progress.measurements_saved} measurements saved. "
+                f"CSV: {self.csv_path}."
+            )
+        if self._photo_enabled:
+            return (
+                "Route photo capture complete: "
+                f"{progress.photos_saved} photos saved."
+            )
+        return (
+            "Route measurement complete: "
+            f"{progress.measurements_saved} measurements saved to "
+            f"{self.csv_path}."
+        )
+
+    def _finish_route_run(
+        self,
+        *,
+        message: str,
+        needs_final_lift: bool,
+    ) -> str:
+        if self._stage_task_active and needs_final_lift:
+            try:
+                self._stage_controller.run_external_needles_action(
+                    "lift",
+                    self._needle_feedrate,
+                )
+            except Exception as exc:
+                message = f"{message} Needle lift failed: {exc}"
+        try:
+            self._wait_for_background_tasks()
+        except Exception as exc:
+            message = f"{message} Background route task failed: {exc}"
+        try:
+            self._close_meter_output_context()
+        except Exception as exc:
+            message = f"{message} Instrument output disable failed: {exc}"
+        self._finish_stage_task()
+        if self._measure_enabled and hasattr(self._lcr_controller, "close"):
+            try:
+                self._lcr_controller.close()
+            except Exception as exc:
+                message = f"{message} Instrument close failed: {exc}"
+        self._set_waiting(False)
+        return message
 
     def _measure_manual_contact_and_advance(
         self,
