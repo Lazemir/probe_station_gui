@@ -3872,6 +3872,10 @@ class Main(QMainWindow):
             self._status_log.appendPlainText(status_text)
             self._append_status_log(status_text)
 
+    def _show_route_runtime_status(self, message: str, timeout_ms: int = 0) -> None:
+        self._show_status(message, timeout_ms)
+        self._route_runtime_presenter().set_status(message)
+
     def _create_objective_widget(self) -> QWidget:
         widget = QWidget(self)
         layout = QHBoxLayout(widget)
@@ -7546,7 +7550,7 @@ class Main(QMainWindow):
         self._set_route_measurement_resume_point(plan.point_number)
         self._set_route_measurement_pending(plan.pending)
         self._save_route_measurement_session_metadata(configuration)
-        self._show_status(plan.status_message, plan.status_timeout_ms) or self._route_runtime_presenter().set_status(plan.status_message)
+        self._show_route_runtime_status(plan.status_message, plan.status_timeout_ms)
 
     def _cancel_route_measurement_session(self) -> None:
         thread = self._route_measurement_thread
@@ -7560,7 +7564,7 @@ class Main(QMainWindow):
         self._route_measurement_session_active = plan.session_active
         self._set_route_measurement_resume_point(plan.point_number)
         self._set_route_measurement_pending(plan.pending)
-        self._show_status(plan.status_message, plan.status_timeout_ms) or self._route_runtime_presenter().set_status(plan.status_message)
+        self._show_route_runtime_status(plan.status_message, plan.status_timeout_ms)
 
     def _start_route_measurement(
         self,
@@ -7839,7 +7843,7 @@ class Main(QMainWindow):
         if decision.accepted:
             return decision.plan
         if decision.dialog_status:
-            self._show_status(decision.message, decision.timeout_ms) or self._route_runtime_presenter().set_status(decision.message)
+            self._show_route_runtime_status(decision.message, decision.timeout_ms)
         else:
             self._show_status(decision.message, decision.timeout_ms)
         return None
@@ -8360,7 +8364,7 @@ class Main(QMainWindow):
                 "Stopping contact measurement, then measuring "
                 f"point {int(pending_point_number)}."
             )
-        self._show_status(message, 5000) or self._route_runtime_presenter().set_status(message)
+        self._show_route_runtime_status(message, 5000)
 
     def _submit_route_measurement_confirmation(self, action: str) -> None:
         runner = self._route_measurement_runner
@@ -8466,7 +8470,7 @@ class Main(QMainWindow):
         context_result = self._api_contact_context(int(point_number))
         if not context_result.get("accepted", False):
             message = str(context_result.get("message") or "Route contact move rejected.")
-            self._show_status(message, 6000) or self._route_runtime_presenter().set_status(message)
+            self._show_route_runtime_status(message, 6000)
             return
         point = context_result["point"]
         if move_plan.set_resume_point:
@@ -8478,7 +8482,7 @@ class Main(QMainWindow):
                     runner.set_current_adjustment_point(int(point.index))
         needle_feedrate = self._current_needle_feedrate()
         message = f"Route contact move: point {int(point.index)} {point.label}."
-        self._show_status(message, 5000) or self._route_runtime_presenter().set_status(message)
+        self._show_route_runtime_status(message, 5000)
         thread = threading.Thread(
             target=self._run_route_contact_move,
             args=(point, needle_feedrate),
@@ -8534,7 +8538,7 @@ class Main(QMainWindow):
         self._route_contact_move_thread = None
         self._update_stage_coordinate_apply_state()
         timeout_ms = 5000 if success else 8000
-        self._show_status(message, timeout_ms) or self._route_runtime_presenter().set_status(message)
+        self._show_route_runtime_status(message, timeout_ms)
 
     def _request_pause_route_measurement(self) -> None:
         api_route_pause_action = (
@@ -8563,7 +8567,7 @@ class Main(QMainWindow):
         runner = self._route_measurement_runner
         shift_plan = self._route_shift_save_plan(runner, point_number)
         if shift_plan.message:
-            self._show_status(shift_plan.message, shift_plan.timeout_ms) or self._route_runtime_presenter().set_status(shift_plan.message)
+            self._show_route_runtime_status(shift_plan.message, shift_plan.timeout_ms)
             return
         adjustment_selected, adjustment_point = self._route_shift_adjustment_point(
             shift_plan,
@@ -8623,7 +8627,7 @@ class Main(QMainWindow):
                 int(point_number)
             )
             if not point_selected:
-                self._show_status(message, 6000) or self._route_runtime_presenter().set_status(message)
+                self._show_route_runtime_status(message, 6000)
                 return False, None
             return True, None
         if not shift_plan.needs_api_context:
@@ -8634,7 +8638,7 @@ class Main(QMainWindow):
                 context_result.get("message")
                 or "Route point is unavailable for saving shift."
             )
-            self._show_status(message, 6000) or self._route_runtime_presenter().set_status(message)
+            self._show_route_runtime_status(message, 6000)
             return False, None
         return True, context_result["point"]
 
@@ -8649,13 +8653,13 @@ class Main(QMainWindow):
                 latest_position_available=latest is not None,
             )
             if position_plan.message:
-                self._show_status(position_plan.message, position_plan.timeout_ms) or self._route_runtime_presenter().set_status(position_plan.message)
+                self._show_route_runtime_status(position_plan.message, position_plan.timeout_ms)
                 return None
             position = latest
         stage_xy = self._stage_xy_from_position(position)
         xy_plan = route_shift_stage_xy_plan(stage_xy_available=stage_xy is not None)
         if xy_plan.message:
-            self._show_status(xy_plan.message, xy_plan.timeout_ms) or self._route_runtime_presenter().set_status(xy_plan.message)
+            self._show_route_runtime_status(xy_plan.message, xy_plan.timeout_ms)
             return None
         return stage_xy
 

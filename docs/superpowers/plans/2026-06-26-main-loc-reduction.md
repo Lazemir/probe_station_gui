@@ -70,13 +70,13 @@
 
 **Validation:** Add pure route tests for defaults/session plans and app characterization for open/update/session start/cancel behavior. Run `tests\route\test_dialog_adapter.py`, focused app tests, full suite, ruff, lizard/radon/Wily.
 
-### Task 22: Route Dialog Runtime State Sink
+### Task 22: Route Runtime Presentation Sink
 
-**Files:** `probe_station_gui/route/dialog_adapter.py`, `main.py`, route/app tests.
+**Files:** create or extend a focused route runtime presentation module, `main.py`, route/app tests.
 
-**Main LOC target:** reduce by at least 180 lines.
+**Main LOC target:** reduce by at least 180 lines from the Task 21 baseline.
 
-**Scope:** Move `Main` route dialog UI update fanout (`set_status`, `set_progress`, `set_result`, running/waiting/session active/current point) into a small adapter object that owns only dialog-facing calls.
+**Scope:** Move `Main` route runtime UI update fanout for both `RouteMeasurementDialog` and `DesignNavigatorPanel` into a focused presentation sink. This includes status/running/waiting/pause-pending/interrupt-pending/progress/result/session/current-point dialog calls and matching navigator presentation calls. Keep route decisions, runner/thread lifecycle, persistence fallback, Telegram, and Pause Request / Pause Ack / Interrupt action selection in `Main`.
 
 ### Task 23: Route Telegram Photo Adapter
 

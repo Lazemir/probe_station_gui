@@ -7,6 +7,7 @@
 - Moved repeated route runtime presentation fanout for `RouteMeasurementDialog` and `DesignNavigatorPanel` out of `Main`.
 - Preserved `Main` ownership of status-bar updates, runner state, persistence fallback, and Pause Request / Pause Ack / Interrupt decisions.
 - Passed the Task 22 LOC gate and target.
+- Final cleanup removed the temporary `_request_route_contact_move` complexity regression introduced during LOC tightening.
 
 ## TDD Evidence
 
@@ -75,14 +76,14 @@ C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -c "from pathlib
 Result:
 
 ```text
-11968
+11972
 ```
 
 ### LOC Gate Result
 
 - `main.py` physical lines before: `12159`
-- `main.py` physical lines after: `11968`
-- Delta: `-191`
+- `main.py` physical lines after: `11972`
+- Delta: `-187`
 - Required minimum: `<= 12009`
 - Target: `<= 11979`
 - Gate result: `passed`
@@ -119,6 +120,7 @@ Baseline values come from the task brief where provided.
 | `_start_route_measurement_runner` | `49 / 4` | `40 / 2` |
 | `_on_route_measurement_started` | `31 / 4` | `17 / 2` |
 | `_request_stop_route_measurement` | not called out | `13 / 3` |
+| `_request_route_contact_move` | baseline warning `10 / 10` | `37 / 10` |
 | `_request_pause_route_measurement` | `37 / 9` | `22 / 5` |
 | `_on_route_measurement_result` | `44 / 6` | `35 / 3` |
 | `_on_route_measurement_recorded` | `20 / 4` | `17 / 2` |
@@ -135,6 +137,7 @@ Baseline values come from the task brief where provided.
 | `_start_route_measurement_runner` | `A (2)` |
 | `_on_route_measurement_started` | `A (2)` |
 | `_request_stop_route_measurement` | `A (3)` |
+| `_request_route_contact_move` | `B (10)` |
 | `_request_pause_route_measurement` | `A (5)` |
 | `_on_route_measurement_result` | `A (3)` |
 | `_on_route_measurement_recorded` | `A (2)` |
@@ -159,7 +162,7 @@ C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m lizard main.p
 Relevant file summary:
 
 ```text
-main.py                                    NLOC 11345  Avg.NLOC 21.2  AvgCCN 4.5
+main.py                                    NLOC 11349  Avg.NLOC 21.2  AvgCCN 4.5
 probe_station_gui\route\dialog_adapter.py  NLOC   404  Avg.NLOC 20.6  AvgCCN 2.9
 probe_station_gui\route\runtime_presenter.py NLOC 268 Avg.NLOC 6.0 AvgCCN 1.8
 ```
@@ -185,7 +188,7 @@ probe_station_gui\route\runtime_presenter.py - A (23.51)
 
 ### Wily diff from `bc691e3`
 
-`wily build` was attempted with the exact brief command, but it refused to archive while the repository also contained an unrelated modified file at `docs/superpowers/plans/2026-06-26-main-loc-reduction.md`. I did not revert or commit that user-owned change. The `wily diff` command still succeeded and provided the comparative metrics below.
+`wily build` succeeded on the clean committed tree with the exact brief command.
 
 Command:
 
@@ -196,18 +199,21 @@ C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -X utf8 -m wily 
 Relevant output:
 
 ```text
-main.py: cyclomatic 2371 -> 2340, raw.loc 12159 -> 11968, MI 0 -> 0
+main.py: cyclomatic 2371 -> 2329, raw.loc 12159 -> 11972, MI 0 -> 0
 probe_station_gui\route\runtime_presenter.py: cyclomatic - -> 82, raw.loc - -> 318, MI - -> 23.514177001044143
 main.py:Main._update_api_route_control_ui 5 -> 1
 main.py:Main._start_route_measurement_runner 4 -> 2
 main.py:Main._on_route_measurement_started 4 -> 2
 main.py:Main._request_stop_route_measurement 5 -> 3
+main.py:Main._request_route_contact_move 10 -> 10
 main.py:Main._request_pause_route_measurement 9 -> 5
 main.py:Main._on_route_measurement_result 6 -> 3
 main.py:Main._on_route_measurement_recorded 4 -> 2
 main.py:Main._apply_route_shift_save_status 7 -> 1
 main.py:Main._on_route_measurement_progress 2 -> 1
 ```
+
+Wily still showed a few adjacent local CC increases during the broader refactor, but the final cleanup removed the only new `>10` warning introduced in Task 22 scope: `_request_route_contact_move` finishes at the baseline warning threshold instead of regressing above it.
 
 ## Verification
 
@@ -255,8 +261,9 @@ All checks passed!
 - Moved the public seam out of `dialog_adapter.py` into the new `runtime_presenter.py` module.
 - Kept the earlier sink work, but narrowed `dialog_adapter.py` back to dialog/session duties.
 - Re-ran the exact Python `splitlines()` LOC commands during each reduction pass.
-- Reduced `main.py` from the rejected `12131` state to `12063`, then to `11991`, then to the final `11968`.
+- Reduced `main.py` from the rejected `12131` state to `12063`, then to `11991`, then to the final `11972`.
 - Updated the one app characterization test that referenced a deleted forwarding helper, without changing runtime behavior.
+- Replaced temporary `status() or presenter.set_status()` fanout expressions with `_show_route_runtime_status(...)` so `_request_route_contact_move` returned to the baseline warning threshold.
 
 ## Maintainability Outcome
 
