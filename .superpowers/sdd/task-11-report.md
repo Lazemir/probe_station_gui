@@ -52,7 +52,7 @@
   - `tests/route/test_session_start.py`
   - `.superpowers/sdd/task-11-report.md`
 - commit:
-  - `4dacfbe` (`Add route session start rejection tests`)
+  - `10bf5e9` (`Add route session start rejection tests`)
 - tests:
   - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\route\test_session_start.py` -> `13 passed in 0.23s`
   - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\route\test_session_start.py tests\app\test_main_coordinate_feedrate.py` -> `110 passed in 1.62s`
