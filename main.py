@@ -203,8 +203,9 @@ from probe_station_gui.route.session_actions import (
     route_session_action_from_payload,
 )
 from probe_station_gui.route.session_start import (
+    api_route_session_start_decision,
+    route_launch_presentation,
     route_contact_quality_limits_from_payload,
-    route_external_session_start_settings_from_payload,
 )
 from probe_station_gui.route.shift import route_shift_from_stage_xy
 from probe_station_gui.route.formatting import (
@@ -2833,67 +2834,26 @@ class Main(QMainWindow):
                 "status_code": 503,
                 "message": "Serial connection is not available.",
             }
-        route = self._design_session.route
-        if route is None or not route.points:
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": "Create or load a probe route before starting a route session.",
-            }
-        registration = self._design_session.registration
-        if registration is None or not registration.valid:
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": "Design registration is required before using contacts.",
-            }
-        try:
-            points = self._route_measurement_points(route)
-        except DesignModelError as exc:
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": str(exc),
-            }
-        if not points:
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": "Route has no enabled points.",
-            }
-        try:
-            start_settings = route_external_session_start_settings_from_payload(
-                payload,
-                default_start_point=int(self._route_measurement_current_point or 1),
-                default_contact_seek_range_mm=(
-                    RouteMeasurementRunner.AUTO_CONTACT_SEEK_MAX_TOTAL_MM
-                ),
-                default_contact_seek_step_mm=(
-                    RouteMeasurementRunner.AUTO_CONTACT_SEEK_STEP_MM
-                ),
-                default_contact_settle_s=(
-                    RouteMeasurementRunner.DEFAULT_CONTACT_SETTLE_S
-                ),
-            )
-        except ValueError as exc:
-            return {
-                "accepted": False,
-                "status_code": 400,
-                "message": str(exc),
-            }
-        selected_point = self._api_find_contact_point(
-            points,
-            start_settings.start_point,
+        start_decision = api_route_session_start_decision(
+            route=self._design_session.route,
+            registration_valid=bool(
+                getattr(self._design_session.registration, "valid", False)
+            ),
+            payload=payload,
+            current_point=int(self._route_measurement_current_point or 1),
+            points_factory=self._route_measurement_points,
+            default_contact_seek_range_mm=(
+                RouteMeasurementRunner.AUTO_CONTACT_SEEK_MAX_TOTAL_MM
+            ),
+            default_contact_seek_step_mm=RouteMeasurementRunner.AUTO_CONTACT_SEEK_STEP_MM,
+            default_contact_settle_s=RouteMeasurementRunner.DEFAULT_CONTACT_SETTLE_S,
         )
-        if selected_point is None:
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": (
-                    f"Contact {start_settings.start_point} is not enabled or not included "
-                    "by the current route filter."
-                ),
-            }
+        if not start_decision.accepted:
+            return start_decision.rejection_payload()
+        assert start_decision.plan is not None
+        points = start_decision.plan.points
+        selected_point = start_decision.plan.selected_point
+        start_settings = start_decision.plan.start_settings
         try:
             meter_configuration = self._api_route_meter_configuration(
                 payload.get("meter", payload.get("meter_configuration", {})),
@@ -2960,7 +2920,12 @@ class Main(QMainWindow):
         self._route_measurement_session_active = True
         self._route_measurement_photo_enabled = start_settings.photo_enabled
         self._route_measurement_measure_enabled = True
-        self._route_measurement_point_numbers = [int(point.index) for point in points]
+        presentation = route_launch_presentation(
+            points,
+            selected_point,
+            api_session=True,
+        )
+        self._route_measurement_point_numbers = presentation.point_numbers
         self._last_telegram_attention_message = ""
         with self._telegram_photo_lock:
             self._telegram_pending_contact_photo = None
@@ -2974,11 +2939,7 @@ class Main(QMainWindow):
             name="RouteApiExternalSession",
             daemon=True,
         )
-        start_message = (
-            "Route API session ready at "
-            f"point {int(selected_point.index)} {selected_point.label}; "
-            f"{len(points)} points selected."
-        )
+        start_message = presentation.message
         self._last_route_measurement_result = None
         self._route_measurement_thread.start()
         if not runner.wait_until_initial_pause(timeout_s=10.0):
@@ -7898,7 +7859,13 @@ class Main(QMainWindow):
         self._pending_route_measure_point = None
         self._route_measurement_photo_enabled = photo_enabled
         self._route_measurement_measure_enabled = measure_enabled
-        self._route_measurement_point_numbers = [int(point.index) for point in points]
+        presentation = route_launch_presentation(
+            points,
+            selected_point,
+            wait_before_first_point=wait_before_first_point,
+            previous_ok_skipped_count=previous_ok_skipped_count,
+        )
+        self._route_measurement_point_numbers = presentation.point_numbers
         self._last_telegram_attention_message = ""
         with self._telegram_photo_lock:
             self._telegram_pending_contact_photo = None
@@ -7913,32 +7880,7 @@ class Main(QMainWindow):
             name="RouteMeasurement",
             daemon=True,
         )
-        try:
-            start_offset = next(
-                index
-                for index, point in enumerate(points)
-                if int(point.index) == int(selected_point.index)
-            )
-        except StopIteration:
-            start_offset = 0
-        remaining_count = max(1, len(points) - start_offset)
-        if wait_before_first_point:
-            start_message = (
-                "Preparing route measurement: "
-                f"point {int(selected_point.index)} {selected_point.label}; "
-                f"{remaining_count} points selected."
-            )
-        else:
-            start_message = (
-                "Route measurement starting at "
-                f"point {int(selected_point.index)} {selected_point.label}; "
-                f"{remaining_count} points remaining."
-            )
-        if previous_ok_skipped_count is not None:
-            start_message = (
-                f"{start_message} Previous filter skipped "
-                f"{previous_ok_skipped_count} points."
-            )
+        start_message = presentation.message
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_route_measurement_running(True)
             self.design_navigator_panel.set_route_measurement_waiting(False)

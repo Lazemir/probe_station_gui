@@ -1,12 +1,16 @@
-"""API route-session start payload parsing."""
+"""Pure route-session start parsing, planning, and presentation."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, Callable, Iterable, Sequence
 
+from probe_station_gui.design.model import DesignModelError
 from probe_station_gui.route.contact_quality import (
     RouteContactQualityLimits as _RouteContactQualityLimits,
 )
+from probe_station_gui.route.measurement_records import RouteMeasurementPoint
+from probe_station_gui.route.operation import find_route_contact_point
 from probe_station_gui.route.payload_parsing import (
     payload_bool as _payload_bool,
     payload_float as _payload_float,
@@ -18,6 +22,8 @@ DEFAULT_EXTERNAL_SESSION_INITIAL_MEASUREMENT_COUNT = 10
 DEFAULT_EXTERNAL_SESSION_FOLLOWUP_MEASUREMENT_COUNT = 240
 DEFAULT_EXTERNAL_SESSION_PHOTO_SETTLE_S = 0.2
 DEFAULT_EXTERNAL_SESSION_PHOTO_FOCUS_RANGE_MM = 0.03
+
+RoutePointsFactory = Callable[[object], Iterable[RouteMeasurementPoint]]
 
 
 @dataclass(frozen=True)
@@ -50,6 +56,144 @@ class _RouteSessionPhotoSettings:
     enabled: bool
     focus_enabled: bool
     focus_range_mm: float
+
+
+@dataclass(frozen=True)
+class ApiRouteSessionStartPlan:
+    points: list[RouteMeasurementPoint]
+    selected_point: RouteMeasurementPoint
+    start_settings: RouteExternalSessionStartSettings
+
+
+@dataclass(frozen=True)
+class ApiRouteSessionStartDecision:
+    plan: ApiRouteSessionStartPlan | None = None
+    message: str = ""
+    status_code: int = 200
+
+    @property
+    def accepted(self) -> bool:
+        return self.plan is not None
+
+    def rejection_payload(self) -> dict[str, Any]:
+        return {
+            "accepted": False,
+            "status_code": int(self.status_code),
+            "message": self.message,
+        }
+
+
+@dataclass(frozen=True)
+class RouteLaunchPresentation:
+    message: str
+    point_numbers: list[int]
+    remaining_count: int
+
+
+def api_route_session_start_decision(
+    *,
+    route: object | None,
+    registration_valid: bool,
+    payload: dict[str, object],
+    current_point: int,
+    points_factory: RoutePointsFactory,
+    default_contact_seek_range_mm: float,
+    default_contact_seek_step_mm: float,
+    default_contact_settle_s: float,
+) -> ApiRouteSessionStartDecision:
+    if route is None or not getattr(route, "points", None):
+        return ApiRouteSessionStartDecision(
+            message="Create or load a probe route before starting a route session.",
+            status_code=409,
+        )
+    if not registration_valid:
+        return ApiRouteSessionStartDecision(
+            message="Design registration is required before using contacts.",
+            status_code=409,
+        )
+    try:
+        points = list(points_factory(route))
+    except DesignModelError as exc:
+        return ApiRouteSessionStartDecision(message=str(exc), status_code=409)
+    if not points:
+        return ApiRouteSessionStartDecision(
+            message="Route has no enabled points.",
+            status_code=409,
+        )
+    try:
+        start_settings = route_external_session_start_settings_from_payload(
+            payload,
+            default_start_point=int(current_point),
+            default_contact_seek_range_mm=default_contact_seek_range_mm,
+            default_contact_seek_step_mm=default_contact_seek_step_mm,
+            default_contact_settle_s=default_contact_settle_s,
+        )
+    except ValueError as exc:
+        return ApiRouteSessionStartDecision(message=str(exc), status_code=400)
+    selected_point = find_route_contact_point(points, start_settings.start_point)
+    if selected_point is None:
+        return ApiRouteSessionStartDecision(
+            message=(
+                f"Contact {start_settings.start_point} is not enabled or not included "
+                "by the current route filter."
+            ),
+            status_code=409,
+        )
+    return ApiRouteSessionStartDecision(
+        plan=ApiRouteSessionStartPlan(
+            points=points,
+            selected_point=selected_point,
+            start_settings=start_settings,
+        )
+    )
+
+
+def route_launch_presentation(
+    points: Sequence[RouteMeasurementPoint],
+    selected_point: RouteMeasurementPoint,
+    *,
+    wait_before_first_point: bool = False,
+    previous_ok_skipped_count: int | None = None,
+    api_session: bool = False,
+) -> RouteLaunchPresentation:
+    point_list = list(points)
+    try:
+        start_offset = next(
+            index
+            for index, point in enumerate(point_list)
+            if int(point.index) == int(selected_point.index)
+        )
+    except StopIteration:
+        start_offset = 0
+    remaining_count = max(1, len(point_list) - start_offset)
+    if api_session:
+        message = (
+            "Route API session ready at "
+            f"point {int(selected_point.index)} {selected_point.label}; "
+            f"{len(point_list)} points selected."
+        )
+    elif wait_before_first_point:
+        message = (
+            "Preparing route measurement: "
+            f"point {int(selected_point.index)} {selected_point.label}; "
+            f"{remaining_count} points selected."
+        )
+    else:
+        message = (
+            "Route measurement starting at "
+            f"point {int(selected_point.index)} {selected_point.label}; "
+            f"{remaining_count} points remaining."
+        )
+    if previous_ok_skipped_count is not None and not api_session:
+        message = (
+            f"{message} Previous filter skipped "
+            f"{previous_ok_skipped_count} points."
+        )
+    return RouteLaunchPresentation(
+        message=message,
+        point_numbers=[int(point.index) for point in point_list],
+        remaining_count=remaining_count,
+    )
 
 
 def route_external_session_start_settings_from_payload(
@@ -279,11 +423,16 @@ def _route_session_contact_seek_step(
 
 
 __all__ = [
+    "ApiRouteSessionStartDecision",
+    "ApiRouteSessionStartPlan",
     "DEFAULT_EXTERNAL_SESSION_FOLLOWUP_MEASUREMENT_COUNT",
     "DEFAULT_EXTERNAL_SESSION_INITIAL_MEASUREMENT_COUNT",
     "DEFAULT_EXTERNAL_SESSION_PHOTO_FOCUS_RANGE_MM",
     "DEFAULT_EXTERNAL_SESSION_PHOTO_SETTLE_S",
     "RouteExternalSessionStartSettings",
+    "RouteLaunchPresentation",
+    "api_route_session_start_decision",
+    "route_launch_presentation",
     "route_contact_quality_limits_from_payload",
     "route_external_session_start_settings_from_payload",
     "route_max_relative_rms_from_payload",
