@@ -104,6 +104,26 @@ Final verification:
 - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m ruff check --ignore E402,F401 .`
   - Result: `All checks passed!`
 
+## Review Follow-up Fixes
+
+Review follow-up scope:
+
+- Added direct module-boundary tests for `api_contact_context_response` guard order, `DesignModelError` propagation, missing-contact handling, and success payload assembly.
+- Added the missing `max_relative_rms` alias case to current-contact settings parsing coverage.
+- No production code changes were required; the existing extracted module already satisfied the reviewed behavior.
+
+Commands run for this follow-up:
+
+```powershell
+C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\route\test_api_measurement.py -q
+C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\route\test_api_measurement.py tests\app\test_main_coordinate_feedrate.py -q
+```
+
+Results:
+
+- `tests\route\test_api_measurement.py -q`: `29 passed in 0.18s`
+- `tests\route\test_api_measurement.py tests\app\test_main_coordinate_feedrate.py -q`: `162 passed, 3 subtests passed in 2.15s`
+
 ## Behavior Preservation Summary
 
 - Contact number alias order and invalid/non-positive handling preserved.

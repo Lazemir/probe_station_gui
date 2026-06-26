@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from probe_station_gui.design.model import DesignModelError
 from probe_station_gui.route.contact_quality import (
     RouteContactQuality,
     RouteContactQualityLimits,
@@ -19,6 +20,7 @@ from probe_station_gui.route.measurement_records import (
 from probe_station_gui.route.api_measurement import (
     ApiCurrentContactFailureAlert,
     ApiCurrentContactSettings,
+    api_contact_context_response,
     api_contact_number_from_payload,
     api_current_contact_failure_alert,
     api_current_contact_response,
@@ -78,13 +80,8 @@ def _record() -> RouteMeasurementRecord:
     )
 
 
-def _result(
-    *,
-    success: bool,
-    message: str,
-    contact_seek: RouteContactSeekResult | None = None,
-) -> RouteContactPlacementResult:
-    point = RouteMeasurementPoint(
+def _point() -> RouteMeasurementPoint:
+    return RouteMeasurementPoint(
         index=7,
         point_id="p007",
         label="Pad 107",
@@ -93,10 +90,18 @@ def _result(
         needle_1_design=(11.0, 21.0),
         needle_2_design=(9.0, 19.0),
     )
+
+
+def _result(
+    *,
+    success: bool,
+    message: str,
+    contact_seek: RouteContactSeekResult | None = None,
+) -> RouteContactPlacementResult:
     return RouteContactPlacementResult(
         success=success,
         message=message,
-        point=point,
+        point=_point(),
         record=_record(),
         contact_seek=contact_seek,
     )
@@ -197,6 +202,7 @@ def test_api_current_contact_settings_require_measurement_count_at_least_check_c
     [
         ({}, None),
         ({"max_rel_rms": 0.02}, 0.02),
+        ({"max_relative_rms": 0.03}, 0.03),
         ({"max_relative_rms_percent": 2.5}, pytest.approx(0.025)),
     ],
 )
@@ -236,6 +242,148 @@ def test_api_current_contact_settings_raise_existing_parser_errors(
             default_contact_seek_step_mm=0.002,
             default_contact_settle_s=0.4,
         )
+
+
+@pytest.mark.parametrize(
+    ("serial_available", "route", "registration", "expected_status", "expected_message"),
+    [
+        (
+            False,
+            None,
+            None,
+            503,
+            "Serial connection is not available.",
+        ),
+        (
+            True,
+            None,
+            SimpleNamespace(valid=False),
+            409,
+            "Create or load a probe route before using contacts.",
+        ),
+        (
+            True,
+            SimpleNamespace(points=[object()]),
+            None,
+            409,
+            "Design registration is required before using contacts.",
+        ),
+    ],
+)
+def test_api_contact_context_response_applies_guard_order(
+    serial_available: bool,
+    route: object | None,
+    registration: object | None,
+    expected_status: int,
+    expected_message: str,
+) -> None:
+    points_factory_calls: list[object] = []
+    point_finder_calls: list[tuple[list[RouteMeasurementPoint], int]] = []
+
+    response = api_contact_context_response(
+        7,
+        serial_available=serial_available,
+        route=route,
+        registration=registration,
+        points_factory=lambda resolved_route: points_factory_calls.append(resolved_route)
+        or [_point()],
+        point_finder=lambda points, contact_number: point_finder_calls.append(
+            (points, contact_number)
+        )
+        or points[0],
+        route_offset_xy=(0.25, -0.5),
+        adjusted_stage_xy=lambda point: (point.stage_xy[0] + 0.25, point.stage_xy[1] - 0.5),
+        structure_number_for_point=lambda point: point.index + 100,
+    )
+
+    assert response == {
+        "accepted": False,
+        "status_code": expected_status,
+        "message": expected_message,
+    }
+    assert points_factory_calls == []
+    assert point_finder_calls == []
+
+
+def test_api_contact_context_response_returns_model_error_from_points_factory() -> None:
+    response = api_contact_context_response(
+        7,
+        serial_available=True,
+        route=SimpleNamespace(points=[object()]),
+        registration=SimpleNamespace(valid=True),
+        points_factory=lambda _route: (_ for _ in ()).throw(
+            DesignModelError("route model failed")
+        ),
+        point_finder=lambda _points, _contact_number: None,
+        route_offset_xy=(0.25, -0.5),
+        adjusted_stage_xy=lambda point: point.stage_xy,
+        structure_number_for_point=lambda point: point.index,
+    )
+
+    assert response == {
+        "accepted": False,
+        "status_code": 409,
+        "message": "route model failed",
+    }
+
+
+def test_api_contact_context_response_returns_missing_contact_error() -> None:
+    point_finder_calls: list[tuple[list[RouteMeasurementPoint], int]] = []
+    point = _point()
+
+    response = api_contact_context_response(
+        7,
+        serial_available=True,
+        route=SimpleNamespace(points=[object()]),
+        registration=SimpleNamespace(valid=True),
+        points_factory=lambda _route: [point],
+        point_finder=lambda points, contact_number: point_finder_calls.append(
+            (points, contact_number)
+        )
+        or None,
+        route_offset_xy=(0.25, -0.5),
+        adjusted_stage_xy=lambda selected_point: selected_point.stage_xy,
+        structure_number_for_point=lambda selected_point: selected_point.index + 100,
+    )
+
+    assert response == {
+        "accepted": False,
+        "status_code": 404,
+        "message": "Contact 7 is not enabled or not found.",
+    }
+    assert point_finder_calls == [([point], 7)]
+
+
+def test_api_contact_context_response_builds_contact_payload_on_success() -> None:
+    point = _point()
+    adjusted_stage_xy_calls: list[RouteMeasurementPoint] = []
+    structure_number_calls: list[RouteMeasurementPoint] = []
+
+    response = api_contact_context_response(
+        7,
+        serial_available=True,
+        route=SimpleNamespace(points=[object()]),
+        registration=SimpleNamespace(valid=True),
+        points_factory=lambda _route: [point],
+        point_finder=lambda points, _contact_number: points[0],
+        route_offset_xy=(0.25, -0.5),
+        adjusted_stage_xy=lambda selected_point: adjusted_stage_xy_calls.append(
+            selected_point
+        )
+        or (1.25, 1.5),
+        structure_number_for_point=lambda selected_point: structure_number_calls.append(
+            selected_point
+        )
+        or 107,
+    )
+
+    assert response == {
+        "accepted": True,
+        "point": point,
+        "contact": _contact_payload(),
+    }
+    assert adjusted_stage_xy_calls == [point]
+    assert structure_number_calls == [point]
 
 
 def test_api_current_contact_response_formats_check_success() -> None:
