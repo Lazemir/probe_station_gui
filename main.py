@@ -186,6 +186,12 @@ from probe_station_gui.route.confirmation_flow import (
     route_confirmation_runtime_plan,
     route_confirmation_submission_plan,
 )
+from probe_station_gui.route.dialog_adapter import (
+    open_or_update_route_measurement_dialog,
+    route_dialog_restore_plan,
+    route_measurement_session_cancel_plan,
+    route_measurement_session_start_plan,
+)
 from probe_station_gui.route.measurement_payloads import (
     route_api_contact_seek_payload,
     route_api_measurement_record_payload,
@@ -7479,103 +7485,24 @@ class Main(QMainWindow):
         if route is None or not route.points:
             self._show_status("Create or load a probe route before measuring.", 5000)
             return
-        from probe_station_gui.dialogs.route_measurement_dialog import (
-            RouteMeasurementDialog,
-        )
-
-        default_path = "probe_route_measurements.csv"
-        default_photo_dir = "probe_route_photos"
-        if route.path is not None:
-            default_path = str(
-                route.path.with_name(f"{route.path.stem}-measurements.csv")
-            )
-            default_photo_dir = str(route.path.with_name(f"{route.path.stem}-photos"))
-        elif self._design_session.document is not None:
-            default_path = str(
-                self._design_session.document.path.parent
-                / "probe_route_measurements.csv"
-            )
-            default_photo_dir = str(
-                self._design_session.document.path.parent / "probe_route_photos"
-            )
-        dialog = self._route_measurement_dialog
-        if dialog is None:
-            dialog = RouteMeasurementDialog(
-                route_name=route.name,
-                route_point_count=len(route.points),
-                default_csv_path=default_path,
-                default_photo_dir=default_photo_dir,
-                default_meter_type=self.lcr_controller.meter_type(),
-                settings_path=(
-                    self.settings_manager.config_dir()
-                    / RouteMeasurementSettingsStore.FILENAME
-                ),
-                parent=self,
-            )
-            dialog.measure_requested.connect(self._start_route_measurement)
-            dialog.start_session_requested.connect(
-                self._start_route_measurement_session
-            )
-            dialog.cancel_session_requested.connect(
-                self._cancel_route_measurement_session
-            )
-            dialog.next_requested.connect(
-                lambda: self._submit_route_measurement_confirmation("next")
-            )
-            dialog.remeasure_requested.connect(
-                lambda: self._submit_route_measurement_confirmation("remeasure")
-            )
-            dialog.measure_current_requested.connect(
-                lambda: self._submit_route_measurement_confirmation("measure")
-            )
-            dialog.skip_requested.connect(
-                lambda: self._submit_route_measurement_confirmation("skip")
-            )
-            dialog.save_shift_requested.connect(self._save_route_measurement_shift)
-            dialog.interrupt_requested.connect(
-                self._request_route_measurement_point_correction
-            )
-            dialog.pause_requested.connect(self._request_pause_route_measurement)
-            dialog.stop_requested.connect(self._request_stop_route_measurement)
-            dialog.jump_requested.connect(self._submit_route_measurement_jump)
-            dialog.move_requested.connect(self._request_route_contact_move)
-            dialog.current_point_changed.connect(
-                self._on_route_measurement_current_point_changed
-            )
-            dialog.finished.connect(
-                lambda _result: self._clear_route_measurement_dialog()
-            )
-            self._route_measurement_dialog = dialog
-        else:
-            dialog.set_route(
-                route_name=route.name,
-                route_point_count=len(route.points),
-                default_csv_path=default_path,
-                default_photo_dir=default_photo_dir,
-            )
-        dialog.set_measurement_session_active(
-            self._route_measurement_session_active,
-            save=False,
-        )
-        if self._route_measurement_current_point is not None:
-            dialog.set_current_point(
-                self._route_measurement_current_point,
-                save=False,
-            )
-        if (
-            self._route_measurement_thread is not None
-            and self._route_measurement_thread.is_alive()
-        ):
-            dialog.set_running(True)
-            dialog.set_waiting(self._route_measurement_waiting)
-        elif dialog.measurement_session_active():
-            dialog.set_status(
-                "Choose a point, then Measure or Move."
-            )
-        dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
         thread = self._route_measurement_thread
+        self._route_measurement_dialog = open_or_update_route_measurement_dialog(
+            dialog=self._route_measurement_dialog,
+            route=route,
+            document=self._design_session.document,
+            meter_type=self.lcr_controller.meter_type(),
+            settings_path=(
+                self.settings_manager.config_dir()
+                / RouteMeasurementSettingsStore.FILENAME
+            ),
+            parent=self,
+            session_active=self._route_measurement_session_active,
+            current_point=self._route_measurement_current_point,
+            thread_active=bool(thread is not None and thread.is_alive()),
+            waiting=self._route_measurement_waiting,
+            create_dialog=self._create_route_measurement_dialog,
+        )
+        dialog = self._route_measurement_dialog
         if start_context and (thread is None or not thread.is_alive()):
             configuration = dialog.current_configuration()
             self._start_route_measurement(
@@ -7583,48 +7510,63 @@ class Main(QMainWindow):
                 wait_before_first_point=True,
             )
 
+    def _create_route_measurement_dialog(self, **kwargs: object) -> object:
+        from probe_station_gui.dialogs.route_measurement_dialog import (
+            RouteMeasurementDialog,
+        )
+
+        dialog = RouteMeasurementDialog(**kwargs)
+        dialog.measure_requested.connect(self._start_route_measurement)
+        dialog.start_session_requested.connect(self._start_route_measurement_session)
+        dialog.cancel_session_requested.connect(self._cancel_route_measurement_session)
+        dialog.next_requested.connect(
+            lambda: self._submit_route_measurement_confirmation("next")
+        )
+        dialog.remeasure_requested.connect(
+            lambda: self._submit_route_measurement_confirmation("remeasure")
+        )
+        dialog.measure_current_requested.connect(
+            lambda: self._submit_route_measurement_confirmation("measure")
+        )
+        dialog.skip_requested.connect(
+            lambda: self._submit_route_measurement_confirmation("skip")
+        )
+        dialog.save_shift_requested.connect(self._save_route_measurement_shift)
+        dialog.interrupt_requested.connect(
+            self._request_route_measurement_point_correction
+        )
+        dialog.pause_requested.connect(self._request_pause_route_measurement)
+        dialog.stop_requested.connect(self._request_stop_route_measurement)
+        dialog.jump_requested.connect(self._submit_route_measurement_jump)
+        dialog.move_requested.connect(self._request_route_contact_move)
+        dialog.current_point_changed.connect(
+            self._on_route_measurement_current_point_changed
+        )
+        dialog.finished.connect(lambda _result: self._clear_route_measurement_dialog())
+        return dialog
+
     def _restore_route_measurement_state_after_design_load(self) -> None:
         route = self._design_session.route
         if route is None or not route.points:
             return
-        state = self._load_route_measurement_settings()
-        current_point = self._route_measurement_current_point_from_settings(state)
-        session_active = self._route_measurement_session_active_from_settings(state)
-        if session_active and not self._route_measurement_settings_match_route(
-            state,
+        plan = route_dialog_restore_plan(
+            self._route_measurement_settings_store().load(),
             route,
-        ):
-            session_active = False
-        self._route_measurement_session_active = session_active
-        if session_active and current_point is not None:
-            self._set_route_measurement_resume_point(current_point)
-        if session_active:
+        )
+        self._route_measurement_session_active = plan.session_active
+        if plan.session_active and plan.current_point is not None:
+            self._set_route_measurement_resume_point(plan.current_point)
+        if plan.open_dialog:
             QTimer.singleShot(0, self._open_route_measurement_dialog)
-
-    def _load_route_measurement_settings(self) -> dict[str, object]:
-        return self._route_measurement_settings_store().load()
 
     def _route_measurement_settings_store(self) -> RouteMeasurementSettingsStore:
         return RouteMeasurementSettingsStore(self.settings_manager.config_dir())
-
-    @staticmethod
-    def _route_measurement_current_point_from_settings(
-        state: dict[str, object],
-    ) -> int | None:
-        return RouteMeasurementSettingsStore.current_point(state)
 
     @staticmethod
     def _route_measurement_session_active_from_settings(
         state: dict[str, object],
     ) -> bool:
         return RouteMeasurementSettingsStore.session_active(state)
-
-    def _route_measurement_settings_match_route(
-        self,
-        state: dict[str, object],
-        route: MeasurementRoute,
-    ) -> bool:
-        return RouteMeasurementSettingsStore.settings_match_route(state, route)
 
     def _clear_route_measurement_dialog(self) -> None:
         self._route_measurement_dialog = None
@@ -7636,37 +7578,44 @@ class Main(QMainWindow):
 
     def _start_route_measurement_session(self) -> None:
         thread = self._route_measurement_thread
-        if thread is not None and thread.is_alive():
-            self._show_status("Route measurement is already active.", 4000)
-            return
         configuration = (
             self._route_measurement_dialog.current_configuration()
             if self._route_measurement_dialog is not None
             else None
         )
-        point_number = (
-            int(configuration.current_point)
-            if configuration is not None
-            else int(self._route_measurement_current_point or 1)
+        plan = route_measurement_session_start_plan(
+            thread_active=bool(thread is not None and thread.is_alive()),
+            dialog_configuration=configuration,
+            current_point=self._route_measurement_current_point,
         )
-        self._route_measurement_session_active = True
-        self._set_route_measurement_resume_point(point_number)
-        self._set_route_measurement_pending(True)
+        if not plan.accepted:
+            self._show_status(plan.status_message, plan.status_timeout_ms)
+            return
+        self._route_measurement_session_active = plan.session_active
+        self._set_route_measurement_resume_point(plan.point_number)
+        self._set_route_measurement_pending(plan.pending)
         self._save_route_measurement_session_metadata(configuration)
-        message = f"Route point set to point {point_number}."
-        self._show_route_measurement_dialog_status(message, 5000)
+        self._show_route_measurement_dialog_status(
+            plan.status_message,
+            plan.status_timeout_ms,
+        )
 
     def _cancel_route_measurement_session(self) -> None:
         thread = self._route_measurement_thread
-        if thread is not None and thread.is_alive():
-            self._show_status("Stop route measurement before canceling the session.", 5000)
+        plan = route_measurement_session_cancel_plan(
+            thread_active=bool(thread is not None and thread.is_alive())
+        )
+        if not plan.accepted:
+            self._show_status(plan.status_message, plan.status_timeout_ms)
             return
         self._pending_route_measure_point = None
-        self._route_measurement_session_active = False
-        self._set_route_measurement_resume_point(1)
-        self._set_route_measurement_pending(False)
-        message = "Route measurement session cancelled."
-        self._show_route_measurement_dialog_status(message, 5000)
+        self._route_measurement_session_active = plan.session_active
+        self._set_route_measurement_resume_point(plan.point_number)
+        self._set_route_measurement_pending(plan.pending)
+        self._show_route_measurement_dialog_status(
+            plan.status_message,
+            plan.status_timeout_ms,
+        )
 
     def _request_route_measurement_for_point(self, point_number: int) -> None:
         point_number = int(point_number)

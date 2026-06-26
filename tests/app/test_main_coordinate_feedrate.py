@@ -158,6 +158,59 @@ class _FakeVisibleDialog:
         self.progress.append(int(total))
 
 
+class _FakeRouteDialogOpenState:
+    def __init__(self, *, configuration: object | None = None) -> None:
+        self.configuration = configuration or types.SimpleNamespace(current_point=4)
+        self.route_updates: list[dict[str, object]] = []
+        self.session_active_calls: list[tuple[bool, bool]] = []
+        self.current_point_calls: list[tuple[int, bool]] = []
+        self.running_calls: list[bool] = []
+        self.waiting_calls: list[bool] = []
+        self.status_calls: list[str] = []
+        self.show_count = 0
+        self.raise_count = 0
+        self.activate_count = 0
+
+    def set_route(self, **kwargs: object) -> None:
+        self.route_updates.append(dict(kwargs))
+
+    def set_measurement_session_active(
+        self,
+        active: bool,
+        *,
+        save: bool = True,
+    ) -> None:
+        self.session_active_calls.append((bool(active), bool(save)))
+
+    def measurement_session_active(self) -> bool:
+        return bool(self.session_active_calls and self.session_active_calls[-1][0])
+
+    def set_current_point(self, point_number: int, *, save: bool = True) -> None:
+        self.current_point_calls.append((int(point_number), bool(save)))
+
+    def set_running(self, running: bool) -> None:
+        self.running_calls.append(bool(running))
+
+    def set_waiting(self, waiting: bool, reason: str = "") -> None:
+        _ = reason
+        self.waiting_calls.append(bool(waiting))
+
+    def set_status(self, message: str) -> None:
+        self.status_calls.append(str(message))
+
+    def show(self) -> None:
+        self.show_count += 1
+
+    def raise_(self) -> None:
+        self.raise_count += 1
+
+    def activateWindow(self) -> None:  # noqa: N802 - Qt naming
+        self.activate_count += 1
+
+    def current_configuration(self) -> object:
+        return self.configuration
+
+
 class _FakeRouteMeasurementRunner:
     def __init__(self) -> None:
         self.confirmations: list[str] = []
@@ -2024,6 +2077,101 @@ assert image.height() == 4
         self.assertFalse(data["measurement_pending"])
         self.assertEqual(data["current_point"], 1)
         self.assertIn("Route measurement session cancelled.", statuses)
+
+    def test_open_route_measurement_dialog_without_route_shows_status_only(self) -> None:
+        window = Main.__new__(Main)
+        statuses: list[tuple[str, int | None]] = []
+
+        window._design_session = types.SimpleNamespace(route=None, document=None)
+        window._route_measurement_dialog = None
+        window._show_status = lambda message, timeout_ms=None: statuses.append(
+            (str(message), timeout_ms)
+        )
+
+        Main._open_route_measurement_dialog(window, start_context=False)
+
+        self.assertEqual(
+            statuses,
+            [("Create or load a probe route before measuring.", 5000)],
+        )
+        self.assertIsNone(window._route_measurement_dialog)
+
+    def test_open_route_measurement_dialog_updates_existing_dialog_before_sync(
+        self,
+    ) -> None:
+        window = Main.__new__(Main)
+        dialog = _FakeRouteDialogOpenState()
+        route = types.SimpleNamespace(
+            name="route-a",
+            path=Path("C:/routes/route-a.json"),
+            points=[object(), object(), object()],
+        )
+
+        window._design_session = types.SimpleNamespace(route=route, document=None)
+        window._route_measurement_dialog = dialog
+        window._route_measurement_session_active = True
+        window._route_measurement_current_point = 6
+        window._route_measurement_thread = None
+        window._route_measurement_waiting = False
+        window.lcr_controller = types.SimpleNamespace(meter_type=lambda: "keysight")
+        window.settings_manager = types.SimpleNamespace(
+            config_dir=lambda: Path("C:/config")
+        )
+        window._create_route_measurement_dialog = lambda **_kwargs: None
+
+        Main._open_route_measurement_dialog(window, start_context=False)
+
+        self.assertEqual(len(dialog.route_updates), 1)
+        self.assertEqual(dialog.route_updates[0]["route_name"], "route-a")
+        self.assertEqual(dialog.session_active_calls, [(True, False)])
+        self.assertEqual(dialog.current_point_calls, [(6, False)])
+        self.assertEqual(dialog.running_calls, [])
+        self.assertEqual(dialog.waiting_calls, [])
+        self.assertEqual(dialog.status_calls, ["Choose a point, then Measure or Move."])
+
+    def test_open_route_measurement_dialog_start_context_launches_waiting_run(self) -> None:
+        window = Main.__new__(Main)
+        dialog = _FakeRouteDialogOpenState(
+            configuration=types.SimpleNamespace(current_point=9)
+        )
+        route = types.SimpleNamespace(name="route-a", path=None, points=[object()])
+        started: list[tuple[object, bool]] = []
+
+        window._design_session = types.SimpleNamespace(route=route, document=None)
+        window._route_measurement_dialog = dialog
+        window._route_measurement_session_active = False
+        window._route_measurement_current_point = None
+        window._route_measurement_thread = None
+        window._route_measurement_waiting = False
+        window.lcr_controller = types.SimpleNamespace(meter_type=lambda: "keysight")
+        window.settings_manager = types.SimpleNamespace(
+            config_dir=lambda: Path("C:/config")
+        )
+        window._create_route_measurement_dialog = lambda **_kwargs: None
+        window._start_route_measurement = (
+            lambda configuration, *, wait_before_first_point=False: started.append(
+                (configuration, bool(wait_before_first_point))
+            )
+        )
+
+        Main._open_route_measurement_dialog(window, start_context=True)
+
+        self.assertEqual(started, [(dialog.configuration, True)])
+
+    def test_clear_route_measurement_dialog_requests_runner_stop_while_active(self) -> None:
+        window = Main.__new__(Main)
+        runner = _FakeRouteMeasurementRunner()
+
+        window._route_measurement_dialog = _FakeRouteDialogOpenState()
+        window._route_measurement_thread = _FakeAliveThread()
+        window._route_measurement_runner = runner
+        window._route_measurement_context_close_requested = False
+
+        Main._clear_route_measurement_dialog(window)
+
+        self.assertIsNone(window._route_measurement_dialog)
+        self.assertTrue(window._route_measurement_context_close_requested)
+        self.assertTrue(runner.stop_requested)
 
     def test_measure_selected_route_point_while_waiting_submits_jump(self) -> None:
         window = Main.__new__(Main)
