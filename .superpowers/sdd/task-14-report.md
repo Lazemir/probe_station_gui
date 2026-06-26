@@ -117,3 +117,32 @@ The refactor is justified. `Main` remains the Qt, runner, and hardware side-effe
 ### Residual Concerns
 
 - No additional concerns from the review fix. The accepted shift-save point precedence remains requested point, dialog current point, then stored current point; blocked shift-save now returns before dialog configuration is read.
+
+## Controller verification and final metrics
+
+- task review:
+  - approved after re-review; no Critical, Important, or Minor findings remained.
+- controller-run validation:
+  - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests`
+    - final: `789 passed, 2 skipped`
+  - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m ruff check --ignore E402,F401 .`
+    - final: `All checks passed!`
+- final Wily comparison, `114d781 -> e66f049`:
+  - `main.py`: cyclomatic `2420 -> 2413`, LOC `12308 -> 12312`, MI `0 -> 0`
+  - `probe_station_gui\route\adjustment_flow.py`: new module, cyclomatic `34`, LOC `210`, MI `35.8751`
+  - `main.py:Main._save_route_measurement_shift`: cyclomatic `32 -> 28`
+  - `main.py:Main._request_route_contact_move`: cyclomatic `13 -> 10`
+  - new route module helpers: `route_confirmation_submission_plan` C(4), `route_contact_move_plan` B(6), `route_shift_save_plan` A(5), `route_shift_save_guard_plan` A(5)
+- final radon/lizard spot checks:
+  - `main.py:Main._submit_route_measurement_confirmation`: radon `C (17)`, lizard `78 NLOC / CCN 17`
+  - `main.py:Main._request_route_contact_move`: radon `B (10)`, lizard `37 NLOC / CCN 10`
+  - `main.py:Main._save_route_measurement_shift`: radon `D (28)`, lizard `109 NLOC / CCN 28`
+  - `main.py:Main._on_route_measurement_finished`: radon `D (26)`, lizard `107 NLOC / CCN 26`
+- final verdict:
+  - This refactor is justified.
+- reason:
+  - behavior preserved: yes
+  - tests passed: yes
+  - metrics improved: yes; two `main.py` route adjustment hotspots have lower cyclomatic complexity, while the new route module exposes directly testable planning interfaces
+  - maintainability improvement: confirmation preflight, contact-move guard planning, and shift-save guard/path planning now have locality in `probe_station_gui.route.adjustment_flow`; `Main` stays the side-effect adapter
+  - new risk introduced: an initial guard-ordering regression was found in review and fixed with an app regression test
