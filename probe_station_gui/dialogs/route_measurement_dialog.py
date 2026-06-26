@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -79,10 +79,7 @@ from probe_station_gui.route.measurement_display import (
     resistance_x_axis_label as _resistance_x_axis_label,
     sample_values as _sample_values,
 )
-from probe_station_gui.route.run_ui import (
-    route_run_control_presentation,
-    route_run_pause_action,
-)
+from probe_station_gui.route.run_ui import RouteRunControlState
 from probe_station_gui.settings.manager import (
     LCR_APERTURE_RATES,
     LCR_LEVEL_MODES,
@@ -294,11 +291,7 @@ class RouteMeasurementDialog(QDialog):
             | Qt.WindowCloseButtonHint
         )
         self.setModal(False)
-        self._running = False
-        self._waiting = False
-        self._waiting_reason = ""
-        self._pause_request_pending = False
-        self._interrupt_request_pending = False
+        self._route_run_control_state = RouteRunControlState()
         self._route_point_count = max(1, int(route_point_count))
         self._default_csv_path = default_csv_path
         self._default_photo_dir = (
@@ -942,11 +935,68 @@ class RouteMeasurementDialog(QDialog):
                     self._photo_dir_edit.setText(default_photo_dir)
                 self._default_photo_dir = default_photo_dir
 
+    def _route_run_control_state_or_default(self) -> RouteRunControlState:
+        state = getattr(self, "_route_run_control_state", None)
+        if isinstance(state, RouteRunControlState):
+            return state
+        state = RouteRunControlState()
+        self._route_run_control_state = state
+        return state
+
+    @property
+    def _running(self) -> bool:
+        return self._route_run_control_state_or_default().running
+
+    @_running.setter
+    def _running(self, value: bool) -> None:
+        self._route_run_control_state = self._route_run_control_state_or_default().with_running(
+            value
+        )
+
+    @property
+    def _waiting(self) -> bool:
+        return self._route_run_control_state_or_default().waiting
+
+    @_waiting.setter
+    def _waiting(self, value: bool) -> None:
+        state = self._route_run_control_state_or_default()
+        self._route_run_control_state = state.with_waiting(value, state.waiting_reason)
+
+    @property
+    def _waiting_reason(self) -> str:
+        return self._route_run_control_state_or_default().waiting_reason
+
+    @_waiting_reason.setter
+    def _waiting_reason(self, value: str) -> None:
+        self._route_run_control_state = replace(
+            self._route_run_control_state_or_default(),
+            waiting_reason=str(value or ""),
+        )
+
+    @property
+    def _pause_request_pending(self) -> bool:
+        return self._route_run_control_state_or_default().pause_request_pending
+
+    @_pause_request_pending.setter
+    def _pause_request_pending(self, value: bool) -> None:
+        self._route_run_control_state = self._route_run_control_state_or_default().with_pause_request_pending(
+            value
+        )
+
+    @property
+    def _interrupt_request_pending(self) -> bool:
+        return self._route_run_control_state_or_default().interrupt_request_pending
+
+    @_interrupt_request_pending.setter
+    def _interrupt_request_pending(self, value: bool) -> None:
+        self._route_run_control_state = self._route_run_control_state_or_default().with_interrupt_request_pending(
+            value
+        )
+
     def set_running(self, running: bool) -> None:
-        self._running = bool(running)
-        if not self._running:
-            self._pause_request_pending = False
-            self._interrupt_request_pending = False
+        self._route_run_control_state = self._route_run_control_state_or_default().with_running(
+            running
+        )
         for widget in (
             self._route_combo,
             self._csv_path_edit,
@@ -976,13 +1026,10 @@ class RouteMeasurementDialog(QDialog):
         self._update_session_buttons()
 
     def set_waiting(self, waiting: bool, reason: str = "") -> None:
-        self._waiting = bool(waiting)
-        if self._waiting:
-            self._waiting_reason = str(reason or "paused")
-            self._pause_request_pending = False
-            self._interrupt_request_pending = False
-        else:
-            self._waiting_reason = ""
+        self._route_run_control_state = self._route_run_control_state_or_default().with_waiting(
+            waiting,
+            reason,
+        )
         can_confirm = self._can_confirm_waiting()
         self._update_pause_interrupt_buttons()
         self._stop_button.setEnabled(self._running)
@@ -999,13 +1046,15 @@ class RouteMeasurementDialog(QDialog):
         self._update_session_buttons()
 
     def set_pause_request_pending(self, pending: bool) -> None:
-        self._pause_request_pending = bool(pending)
-        if self._pause_request_pending:
-            self._interrupt_request_pending = False
+        self._route_run_control_state = self._route_run_control_state_or_default().with_pause_request_pending(
+            pending
+        )
         self._update_pause_interrupt_buttons()
 
     def set_interrupt_request_pending(self, pending: bool) -> None:
-        self._interrupt_request_pending = bool(pending)
+        self._route_run_control_state = self._route_run_control_state_or_default().with_interrupt_request_pending(
+            pending
+        )
         self._update_pause_interrupt_buttons()
 
     def _update_pause_interrupt_buttons(self) -> None:
@@ -1034,13 +1083,7 @@ class RouteMeasurementDialog(QDialog):
         return self._route_run_control_presentation().can_confirm_waiting
 
     def _route_run_control_presentation(self):
-        return route_run_control_presentation(
-            running=self._running,
-            waiting=self._waiting,
-            waiting_reason=str(getattr(self, "_waiting_reason", "")),
-            pause_request_pending=self._pause_request_pending,
-            interrupt_request_pending=self._interrupt_request_pending,
-        )
+        return self._route_run_control_state_or_default().presentation()
 
     def _set_runtime_settings_enabled(self, enabled: bool) -> None:
         for widget in (
@@ -1475,12 +1518,7 @@ class RouteMeasurementDialog(QDialog):
         )
 
     def _emit_pause_requested(self) -> None:
-        action = route_run_pause_action(
-            running=self._running,
-            waiting=self._waiting,
-            waiting_reason=str(getattr(self, "_waiting_reason", "")),
-            pause_request_pending=self._pause_request_pending,
-        )
+        action = self._route_run_control_state_or_default().pause_action()
         if action == "resume":
             self.next_requested.emit()
             return

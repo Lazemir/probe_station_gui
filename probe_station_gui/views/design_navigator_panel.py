@@ -42,10 +42,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from probe_station_gui.route.run_ui import (
-    route_run_control_presentation,
-    route_run_pause_action,
-)
+from probe_station_gui.route.run_ui import RouteRunControlState
 from probe_station_gui.design.navigation_geometry import (
     array_preview_points,
     count_from_endpoint,
@@ -1394,11 +1391,7 @@ class DesignNavigatorPanel(QWidget):
         self._selected_target_id: str | None = None
         self._route: MeasurementRoute | None = None
         self._selected_route_point_index = -1
-        self._route_measurement_running = False
-        self._route_measurement_waiting = False
-        self._route_measurement_waiting_reason = ""
-        self._route_pause_request_pending = False
-        self._route_interrupt_request_pending = False
+        self._route_run_control_state = RouteRunControlState()
         self._design_registration_active = False
         self._current_design_position: Point2D | None = None
         self._active_design_tool = "select"
@@ -1934,13 +1927,71 @@ class DesignNavigatorPanel(QWidget):
         self._update_enabled_state()
         self._update_route_array_preview()
 
+    def _route_measurement_control_state(self) -> RouteRunControlState:
+        state = getattr(self, "_route_run_control_state", None)
+        if isinstance(state, RouteRunControlState):
+            return state
+        state = RouteRunControlState()
+        self._route_run_control_state = state
+        return state
+
+    @property
+    def _route_measurement_running(self) -> bool:
+        return self._route_measurement_control_state().running
+
+    @_route_measurement_running.setter
+    def _route_measurement_running(self, value: bool) -> None:
+        self._route_run_control_state = self._route_measurement_control_state().with_running(
+            value
+        )
+
+    @property
+    def _route_measurement_waiting(self) -> bool:
+        return self._route_measurement_control_state().waiting
+
+    @_route_measurement_waiting.setter
+    def _route_measurement_waiting(self, value: bool) -> None:
+        state = self._route_measurement_control_state()
+        self._route_run_control_state = state.with_waiting(value, state.waiting_reason)
+
+    @property
+    def _route_measurement_waiting_reason(self) -> str:
+        return self._route_measurement_control_state().waiting_reason
+
+    @_route_measurement_waiting_reason.setter
+    def _route_measurement_waiting_reason(self, value: str) -> None:
+        self._route_run_control_state = RouteRunControlState(
+            running=self._route_measurement_running,
+            waiting=self._route_measurement_waiting,
+            waiting_reason=str(value or ""),
+            pause_request_pending=self._route_pause_request_pending,
+            interrupt_request_pending=self._route_interrupt_request_pending,
+        )
+
+    @property
+    def _route_pause_request_pending(self) -> bool:
+        return self._route_measurement_control_state().pause_request_pending
+
+    @_route_pause_request_pending.setter
+    def _route_pause_request_pending(self, value: bool) -> None:
+        self._route_run_control_state = self._route_measurement_control_state().with_pause_request_pending(
+            value
+        )
+
+    @property
+    def _route_interrupt_request_pending(self) -> bool:
+        return self._route_measurement_control_state().interrupt_request_pending
+
+    @_route_interrupt_request_pending.setter
+    def _route_interrupt_request_pending(self, value: bool) -> None:
+        self._route_run_control_state = self._route_measurement_control_state().with_interrupt_request_pending(
+            value
+        )
+
     def set_route_measurement_running(self, running: bool) -> None:
-        self._route_measurement_running = bool(running)
-        if not self._route_measurement_running:
-            self._route_measurement_waiting = False
-            self._route_measurement_waiting_reason = ""
-            self._route_pause_request_pending = False
-            self._route_interrupt_request_pending = False
+        self._route_run_control_state = self._route_measurement_control_state().with_running(
+            running
+        )
         if self._route_measurement_running:
             self._route_run_status_label.setText("Route measurement running.")
         elif self._route_run_status_label.text() == "Route measurement running.":
@@ -1952,23 +2003,22 @@ class DesignNavigatorPanel(QWidget):
         waiting: bool,
         reason: str = "",
     ) -> None:
-        self._route_measurement_waiting = bool(waiting)
-        if self._route_measurement_waiting:
-            self._route_measurement_waiting_reason = str(reason or "paused")
-            self._route_pause_request_pending = False
-            self._route_interrupt_request_pending = False
-        else:
-            self._route_measurement_waiting_reason = ""
+        self._route_run_control_state = self._route_measurement_control_state().with_waiting(
+            waiting,
+            reason,
+        )
         self._update_enabled_state()
 
     def set_route_measurement_pause_request_pending(self, pending: bool) -> None:
-        self._route_pause_request_pending = bool(pending)
-        if self._route_pause_request_pending:
-            self._route_interrupt_request_pending = False
+        self._route_run_control_state = self._route_measurement_control_state().with_pause_request_pending(
+            pending
+        )
         self._update_enabled_state()
 
     def set_route_measurement_interrupt_request_pending(self, pending: bool) -> None:
-        self._route_interrupt_request_pending = bool(pending)
+        self._route_run_control_state = self._route_measurement_control_state().with_interrupt_request_pending(
+            pending
+        )
         self._update_enabled_state()
 
     def set_route_measurement_status(self, text: str) -> None:
@@ -2129,17 +2179,8 @@ class DesignNavigatorPanel(QWidget):
         )
         self._route_run_button.setEnabled(has_route_selection)
         self._route_stop_button.setEnabled(route_running)
-        route_control = route_run_control_presentation(
-            running=route_running,
-            waiting=self._route_measurement_waiting,
-            waiting_reason=self._route_measurement_waiting_reason,
-            pause_request_pending=self._route_pause_request_pending,
-            interrupt_request_pending=self._route_interrupt_request_pending,
-        )
-        route_confirm_waiting = (
-            self._route_measurement_waiting
-            and not route_control.external_measurement_waiting
-        )
+        route_control = self._route_measurement_control_state().presentation()
+        route_confirm_waiting = route_control.can_confirm_waiting
         self._route_pause_button.setText(route_control.pause_text)
         self._route_pause_button.setEnabled(route_control.pause_enabled)
         self._route_interrupt_button.setText(route_control.interrupt_text)
@@ -2836,12 +2877,7 @@ class DesignNavigatorPanel(QWidget):
         )
 
     def _emit_route_measurement_pause_or_resume(self) -> None:
-        action = route_run_pause_action(
-            running=self._route_measurement_running,
-            waiting=self._route_measurement_waiting,
-            waiting_reason=self._route_measurement_waiting_reason,
-            pause_request_pending=self._route_pause_request_pending,
-        )
+        action = self._route_measurement_control_state().pause_action()
         if action == "resume":
             self.route_measurement_confirmation_requested.emit("next")
             return

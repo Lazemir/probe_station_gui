@@ -1,4 +1,5 @@
 from probe_station_gui.route.run_ui import (
+    RouteRunControlState,
     route_run_control_presentation,
     route_run_pause_action,
 )
@@ -112,3 +113,73 @@ def test_route_run_pause_action_interrupts_external_measurement_waiting() -> Non
     )
 
     assert action == "interrupt"
+
+
+def test_route_run_control_state_clears_waiting_and_pending_when_stopped() -> None:
+    state = RouteRunControlState(
+        running=True,
+        waiting=True,
+        waiting_reason="paused",
+        pause_request_pending=True,
+        interrupt_request_pending=True,
+    )
+
+    stopped = state.with_running(False)
+
+    assert stopped.running is False
+    assert stopped.waiting is False
+    assert stopped.waiting_reason == ""
+    assert stopped.pause_request_pending is False
+    assert stopped.interrupt_request_pending is False
+
+
+def test_route_run_control_state_preserves_pending_pause_when_waiting_clears() -> None:
+    state = RouteRunControlState(
+        running=True,
+        waiting=False,
+        pause_request_pending=True,
+    )
+
+    waiting_cleared = state.with_waiting(False)
+
+    assert waiting_cleared.pause_request_pending is True
+    assert waiting_cleared.interrupt_request_pending is False
+
+
+def test_route_run_control_state_waiting_ack_clears_pending_requests() -> None:
+    state = RouteRunControlState(
+        running=True,
+        pause_request_pending=True,
+        interrupt_request_pending=True,
+    )
+
+    waiting = state.with_waiting(True, "paused")
+
+    assert waiting.waiting is True
+    assert waiting.waiting_reason == "paused"
+    assert waiting.pause_request_pending is False
+    assert waiting.interrupt_request_pending is False
+
+
+def test_route_run_control_state_pause_request_clears_interrupt_request() -> None:
+    state = RouteRunControlState(
+        running=True,
+        interrupt_request_pending=True,
+    )
+
+    paused = state.with_pause_request_pending(True)
+
+    assert paused.pause_request_pending is True
+    assert paused.interrupt_request_pending is False
+
+
+def test_route_run_control_state_interrupt_request_preserves_pause_request() -> None:
+    state = RouteRunControlState(
+        running=True,
+        pause_request_pending=True,
+    )
+
+    interrupted = state.with_interrupt_request_pending(True)
+
+    assert interrupted.pause_request_pending is True
+    assert interrupted.interrupt_request_pending is True
