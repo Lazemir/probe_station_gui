@@ -278,6 +278,28 @@ def test_contact_needles_request_rejects_unknown_action() -> None:
     }
 
 
+def test_contact_needles_plan_rejects_invalid_action_before_context_lookup() -> None:
+    context_calls: list[int] = []
+
+    response = api_contact_needles_plan(
+        {"contact_number": 7, "action": "park"},
+        contact_context=lambda contact_number: context_calls.append(contact_number) or {
+            "accepted": False,
+            "status_code": 409,
+            "message": "Design registration is required before using contacts.",
+        },
+        default_needle_feedrate=12.0,
+        min_feedrate=4.0,
+    )
+
+    assert context_calls == []
+    assert response == {
+        "accepted": False,
+        "status_code": 400,
+        "message": "Needle action must be lower, lift, or raise.",
+    }
+
+
 def test_contact_needles_plan_success_and_error_helpers() -> None:
     contact = {"contact_number": 8, "label": "Pad 8"}
     plan = api_contact_needles_plan(

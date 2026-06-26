@@ -164,17 +164,23 @@ def api_contact_needles_plan(
     contact_number = api_contact_number_from_payload(payload)
     if contact_number is None:
         return _missing_contact_number_response()
+    action = _normalize_needle_action(payload)
+    if action is None:
+        return {
+            "accepted": False,
+            "status_code": 400,
+            "message": "Needle action must be lower, lift, or raise.",
+        }
     context_result = contact_context(contact_number)
     if not context_result.get("accepted", False):
         return context_result
-    request = _api_contact_needles_request(
-        payload,
+    request = _api_contact_needles_request_from_action(
         contact_number=contact_number,
+        action=action,
+        payload=payload,
         default_needle_feedrate=default_needle_feedrate,
         min_feedrate=min_feedrate,
     )
-    if isinstance(request, dict):
-        return request
     return ApiContactNeedlesPlan(
         contact=context_result["contact"],
         request=request,
@@ -370,6 +376,23 @@ def _api_contact_needles_request(
             "status_code": 400,
             "message": "Needle action must be lower, lift, or raise.",
         }
+    return _api_contact_needles_request_from_action(
+        contact_number=contact_number,
+        action=action,
+        payload=payload,
+        default_needle_feedrate=default_needle_feedrate,
+        min_feedrate=min_feedrate,
+    )
+
+
+def _api_contact_needles_request_from_action(
+    *,
+    contact_number: int,
+    action: str,
+    payload: dict[str, object],
+    default_needle_feedrate: DefaultNeedleFeedrate,
+    min_feedrate: float,
+) -> ApiContactNeedlesRequest:
     return ApiContactNeedlesRequest(
         contact_number=contact_number,
         action=action,

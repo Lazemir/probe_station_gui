@@ -1651,6 +1651,32 @@ class MainCoordinateFeedrateTest(unittest.TestCase):
 
         self.assertIs(response, rejection)
 
+    def test_api_contact_needles_invalid_action_beats_context_rejection(self) -> None:
+        rejection = {
+            "accepted": False,
+            "status_code": 409,
+            "message": "Design registration is required before using contacts.",
+        }
+        window = Main.__new__(Main)
+        window._api_contact_context = lambda _contact_number: rejection
+
+        response = Main._api_contact_needles(
+            window,
+            {
+                "contact_number": 8,
+                "action": "park",
+            },
+        )
+
+        self.assertEqual(
+            response,
+            {
+                "accepted": False,
+                "status_code": 400,
+                "message": "Needle action must be lower, lift, or raise.",
+            },
+        )
+
     def test_api_route_session_reports_unexpected_instrument_setup_error(self) -> None:
         class _FailingLcr:
             def is_connected(self) -> bool:

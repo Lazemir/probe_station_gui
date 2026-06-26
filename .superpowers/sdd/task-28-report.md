@@ -93,6 +93,11 @@ Regression-order fix verification:
 - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\design\test_contact_navigation.py tests\app\test_main_coordinate_feedrate.py -q`
   - `174 passed, 3 subtests passed in 2.02s`
 
+Reviewer follow-up fix verification:
+
+- `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\design\test_contact_navigation.py tests\app\test_main_coordinate_feedrate.py -q`
+  - `176 passed, 3 subtests passed in 2.14s`
+
 No hardware-dependent automation was run.
 
 ## TDD RED/GREEN evidence
@@ -110,6 +115,7 @@ GREEN:
 - Then thin `Main` adapters and app characterization additions were validated by the focused combined run and full suite.
 - For the LOC-gate follow-up, added failing helper-surface tests first, saw import failure for the missing public helper exports, then implemented the helper moves and revalidated with the focused design/app runs above.
 - For the regression-order follow-up, added failing app characterization tests for missing-contact, context-rejection, and invalid-action early returns on bare `Main.__new__(Main)` objects without `settings_manager`. The failure showed eager `self._api_needle_feedrate({})` access before validation. The fix made default feedrate resolution lazy and moved plan-time feedrate parsing back behind the old validation order.
+- For the reviewer follow-up, added failing mixed-case regressions proving invalid `action="park"` must beat a rejecting contact-context response. The failure showed `api_contact_needles_plan()` still called `contact_context()` before action validation. The fix validates/normalizes action first, then runs contact-context lookup, then resolves feedrate afterward.
 
 ## Behavior preservation summary
 
@@ -122,6 +128,7 @@ GREEN:
   - `logger.exception`
 - Parsing, contact lookup planning, route-point payload shaping, adjusted-XY math, action normalization, and response shaping moved to `probe_station_gui.design.contact_navigation`.
 - Default needle feedrate resolution is now lazy for move-to-contact and contact-needles planning, so missing contact, invalid action, and contact-context rejections return before touching `settings_manager`, matching the old behavior.
+- Invalid needle actions now short-circuit before contact-context lookup in both design planning and `Main._api_contact_needles()`, restoring the brief-required `400` precedence over context rejection.
 - Parser exception behavior for `contact_settle_s` and needle feedrate remains uncaught in the planning layer, matching the old `_api_move_to_contact` / `_api_contact_needles` behavior.
 - Final-lift handling still swallows only `StageControllerError`, logs it, and still finishes the external task.
 - Route Pause Request / Pause Ack / Interrupt semantics were untouched.
