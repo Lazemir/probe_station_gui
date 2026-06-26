@@ -65,14 +65,14 @@ from probe_station_gui.shared.wheel_guard import (
     GuardedSpinBox as QSpinBox,
 )
 
-from ..design_model import (
+from probe_station_gui.design.model import (
     DesignDocument,
     LayerKey,
     MeasurementTarget,
     Point2D,
     SnapResult,
 )
-from ..route_model import MeasurementRoute
+from probe_station_gui.route.model import MeasurementRoute
 
 try:  # pragma: no cover - optional runtime dependency
     import pyqtgraph as pg

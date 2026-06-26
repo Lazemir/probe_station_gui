@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 if TYPE_CHECKING:
-    from ..stage_controller import StageController
+    from probe_station_gui.stage.controller import StageController
 
 
 logger = logging.getLogger(__name__)

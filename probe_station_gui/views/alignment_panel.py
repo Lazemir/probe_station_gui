@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 
 from probe_station_gui.shared.wheel_guard import GuardedComboBox as QComboBox
 
-from ..design_model import Point2D
+from probe_station_gui.design.model import Point2D
 
 
 class AlignmentPanel(QWidget):

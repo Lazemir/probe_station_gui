@@ -22,9 +22,9 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QApplication, QWidget
 
-from ..design_model import DesignDocument, MeasurementTarget
-from ..motion_prediction import interpolate_position
-from ..route_model import MeasurementRoute
+from probe_station_gui.design.model import DesignDocument, MeasurementTarget
+from probe_station_gui.stage.motion_prediction import interpolate_position
+from probe_station_gui.route.model import MeasurementRoute
 
 
 logger = logging.getLogger(__name__)

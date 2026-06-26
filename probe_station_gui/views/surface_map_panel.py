@@ -37,7 +37,7 @@ from probe_station_gui.shared.wheel_guard import (
     GuardedSpinBox as QSpinBox,
 )
 
-from ..surface_mapping import (
+from probe_station_gui.design.surface_mapping import (
     SurfaceMapConfig,
     SurfaceMapRecord,
     build_surface_route_plan,

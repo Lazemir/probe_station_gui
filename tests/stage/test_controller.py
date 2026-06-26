@@ -99,7 +99,8 @@ def _load_settings_manager():
     module_path = (
         Path(__file__).resolve().parents[2]
         / "probe_station_gui"
-        / "settings_manager.py"
+        / "settings"
+        / "manager.py"
     )
     spec = importlib.util.spec_from_file_location("settings_manager_stage_test", module_path)
     module = importlib.util.module_from_spec(spec)

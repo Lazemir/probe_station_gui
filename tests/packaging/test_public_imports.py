@@ -12,15 +12,10 @@ GUI_PACKAGE_ROOT = ROOT / "probe_station_gui"
 
 
 PUBLIC_IMPORT_PATHS = [
-    "probe_station_gui.settings_manager",
-    "probe_station_gui.feedrate_config",
-    "probe_station_gui.jog_config",
-    "probe_station_gui.controls_config",
     "probe_station_gui.settings.manager",
     "probe_station_gui.settings.feedrate_config",
     "probe_station_gui.views.joystick_window",
     "probe_station_gui.dialogs.settings_dialog",
-    "probe_station_gui.stage.joystick_feedrate_targets",
     "probe_station_gui.views.joystick.feedrate_targets",
 ]
 
@@ -49,9 +44,9 @@ def _configured_packages() -> set[str]:
     return discovered
 
 
-def _root_compatibility_wrapper_imports() -> list[str]:
+def _root_compatibility_wrapper_files() -> list[Path]:
     return [
-        f"probe_station_gui.{path.stem}"
+        path
         for path in sorted(GUI_PACKAGE_ROOT.glob("*.py"))
         if path.name != "__init__.py"
         and "Compatibility wrapper" in path.read_text(encoding="utf-8")
@@ -83,12 +78,10 @@ def test_public_import_paths_remain_available() -> None:
     assert KeyCaptureDialog.__name__ == "KeyCaptureDialog"
 
 
-def test_root_compatibility_wrappers_remain_importable() -> None:
-    wrapper_modules = _root_compatibility_wrapper_imports()
+def test_root_compatibility_wrappers_are_removed() -> None:
+    wrapper_files = _root_compatibility_wrapper_files()
 
-    assert wrapper_modules
-    for module_name in wrapper_modules:
-        importlib.import_module(module_name)
+    assert not wrapper_files
 
 
 def test_packaging_includes_all_source_packages() -> None:

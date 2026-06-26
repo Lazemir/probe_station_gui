@@ -109,13 +109,13 @@ from probe_station_gui import (
     StageController,
     SerialTerminalWindow,
 )
-from probe_station_gui.design_model import DesignDocument, DesignModelError
-from probe_station_gui.design_session import AlignmentPreparation, DesignSession
+from probe_station_gui.design.model import DesignDocument, DesignModelError
+from probe_station_gui.design.session import AlignmentPreparation, DesignSession
 from probe_station_gui.shared.diagnostics import configure_crash_diagnostics
 from probe_station_gui.api.request_bridge import ApiRequestBridge
 from probe_station_gui.api.server import ProbeStationApiServer
 from probe_station_gui.api.keys import API_KEY_FILENAME, ApiKeyStore
-from probe_station_gui.lcr_meter import (
+from probe_station_gui.instruments.meters.lcr import (
     LCRMeterController,
     LCRMeterError,
     ROUTE_METER_GWINSTEK,  # noqa: F401 - re-exported for legacy callers/tests
@@ -125,7 +125,7 @@ from probe_station_gui.lcr_meter import (
 from probe_station_gui.stage.motion_prediction import interpolate_position, motion_progress
 from probe_station_gui.shared.wheel_guard import GuardedComboBox as QComboBox
 from probe_station_gui.stage.controller import StageControllerError
-from probe_station_gui.objective_offsets import (
+from probe_station_gui.design.objective_offsets import (
     ObjectiveOffsetReference,
     base_objective_name,
     calibrated_objective_offset,
@@ -134,11 +134,11 @@ from probe_station_gui.objective_offsets import (
     objective_xy_offset_is_configured,
     raw_stage_to_camera_stage,
 )
-from probe_station_gui.route_model import (
+from probe_station_gui.route.model import (
     MeasurementRoute,
     structure_number_from_labels,
 )
-from probe_station_gui.route_measurement import (
+from probe_station_gui.route.measurement import (
     ROUTE_OPERATION_MEASURE,
     ROUTE_OPERATION_PHOTO,
     ROUTE_OPERATION_PHOTO_THEN_MEASURE,
@@ -152,7 +152,7 @@ from probe_station_gui.route_measurement import (
     route_measurement_sample_from_raw,
     summarize_route_contact_quality,
 )
-from probe_station_gui.route_control_state import (
+from probe_station_gui.route.control_state import (
     ApiRouteControlState,
     api_route_control_legacy_attrs,
     api_route_control_state_from_legacy_attrs,
@@ -165,34 +165,34 @@ from probe_station_gui.route.operation import (
     route_measurement_points_for_route,
     route_measurement_start_decision,
 )
-from probe_station_gui.route_operation_guards import (
+from probe_station_gui.route.operation_guards import (
     route_contact_move_block_message,
     route_shift_save_block_message,
 )
-from probe_station_gui.route_operation_modes import (
+from probe_station_gui.route.operation_modes import (
     route_operation_measure_enabled,
     route_operation_photo_enabled,
 )
-from probe_station_gui.route_measurement_payloads import (
+from probe_station_gui.route.measurement_payloads import (
     route_api_contact_seek_payload,
     route_api_measurement_record_payload,
     route_artifact_public_payload,
     route_artifact_record,
     route_external_result_payload,
 )
-from probe_station_gui.route_api_window_guard import probe_route_api_requires_window
-from probe_station_gui.route_runtime_settings import (
+from probe_station_gui.route.api_window_guard import probe_route_api_requires_window
+from probe_station_gui.route.runtime_settings import (
     route_external_runtime_settings,
     route_measurement_runtime_settings,
     route_runtime_requires_meter_configuration,
     route_waiting_restart_required,
 )
-from probe_station_gui.route_meter_config import (
+from probe_station_gui.route.meter_config import (
     route_meter_configuration_from_payload,
     route_meter_type_from_payload,
 )
-from probe_station_gui.route_measurement_settings import RouteMeasurementSettingsStore
-from probe_station_gui.route_session_actions import (
+from probe_station_gui.route.measurement_settings import RouteMeasurementSettingsStore
+from probe_station_gui.route.session_actions import (
     route_confirmation_action,
     route_session_action_from_payload,
 )
@@ -200,14 +200,14 @@ from probe_station_gui.route.session_start import (
     route_contact_quality_limits_from_payload,
     route_external_session_start_settings_from_payload,
 )
-from probe_station_gui.route_shift import route_shift_from_stage_xy
-from probe_station_gui.route_formatting import (
+from probe_station_gui.route.shift import route_shift_from_stage_xy
+from probe_station_gui.route.formatting import (
     csv_bool as _csv_bool,
     csv_float as _csv_float,
     format_route_ohm as _format_route_ohm,
     format_route_percent as _format_route_percent,
 )
-from probe_station_gui.microscope_imaging import (
+from probe_station_gui.camera.imaging import (
     MicroscopeCaptureResult,
     MicroscopeImageMetadata,
     MicroscopeScanPlan,
@@ -284,7 +284,7 @@ if TYPE_CHECKING:
     from probe_station_gui.dialogs.route_measurement_dialog import (
         RouteMeasurementDialog,
     )
-    from probe_station_gui.route_measurement_config import (
+    from probe_station_gui.route.measurement_config import (
         RouteMeasurementRunConfiguration,
     )
     from probe_station_gui.dialogs.settings_dialog import SettingsDialog
