@@ -174,6 +174,7 @@ from probe_station_gui.route.operation import (
 from probe_station_gui.route.adjustment_flow import (
     route_confirmation_submission_plan,
     route_contact_move_plan,
+    route_shift_save_guard_plan,
     route_shift_save_plan,
 )
 from probe_station_gui.route.operation_modes import (
@@ -8875,6 +8876,21 @@ class Main(QMainWindow):
     def _save_route_measurement_shift(self, point_number: int | None = None) -> None:
         runner = self._route_measurement_runner
         thread = self._route_measurement_thread
+        route_active = thread is not None and thread.is_alive()
+        route_waiting = getattr(self, "_route_measurement_waiting", False)
+        api_route_control = self._api_route_control_state_snapshot()
+        guard_plan = route_shift_save_guard_plan(
+            runner_available=runner is not None,
+            route_active=route_active,
+            route_waiting=route_waiting,
+            api_route_control=api_route_control,
+        )
+        if guard_plan.message:
+            self._show_route_measurement_status(
+                guard_plan.message,
+                guard_plan.timeout_ms,
+            )
+            return
         dialog_current_point = (
             int(self._route_measurement_dialog.current_configuration().current_point)
             if point_number is None and self._route_measurement_dialog is not None
@@ -8882,9 +8898,9 @@ class Main(QMainWindow):
         )
         shift_plan = route_shift_save_plan(
             runner_available=runner is not None,
-            route_active=thread is not None and thread.is_alive(),
-            route_waiting=getattr(self, "_route_measurement_waiting", False),
-            api_route_control=self._api_route_control_state_snapshot(),
+            route_active=route_active,
+            route_waiting=route_waiting,
+            api_route_control=api_route_control,
             requested_point_number=point_number,
             dialog_current_point=dialog_current_point,
             current_point=getattr(self, "_route_measurement_current_point", None),

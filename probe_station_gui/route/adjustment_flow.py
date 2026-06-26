@@ -131,23 +131,17 @@ def route_shift_save_plan(
     dialog_current_point: int | None,
     current_point: int | None,
 ) -> RouteShiftSavePlan:
-    runner_active = bool(runner_available and route_active)
-    if api_route_control.active:
-        runner_active = False
-    runner_waiting = bool(route_waiting if runner_active else False)
-    message = route_shift_save_block_message(
-        runner_active=runner_active,
-        runner_waiting=runner_waiting,
+    guard_plan = route_shift_save_guard_plan(
+        runner_available=runner_available,
+        route_active=route_active,
+        route_waiting=route_waiting,
         api_route_control=api_route_control,
     )
-    if message is not None:
-        return RouteShiftSavePlan(
-            message=message,
-            timeout_ms=5000,
-            runner_active=runner_active,
-            runner_waiting=runner_waiting,
-        )
+    if guard_plan.message:
+        return guard_plan
 
+    runner_active = guard_plan.runner_active
+    runner_waiting = guard_plan.runner_waiting
     point_number = _first_point_number(
         requested_point_number,
         dialog_current_point,
@@ -169,6 +163,35 @@ def route_shift_save_plan(
     )
 
 
+def route_shift_save_guard_plan(
+    *,
+    runner_available: bool,
+    route_active: bool,
+    route_waiting: bool,
+    api_route_control: ApiRouteControlState,
+) -> RouteShiftSavePlan:
+    runner_active = bool(runner_available and route_active)
+    if api_route_control.active:
+        runner_active = False
+    runner_waiting = bool(route_waiting if runner_active else False)
+    message = route_shift_save_block_message(
+        runner_active=runner_active,
+        runner_waiting=runner_waiting,
+        api_route_control=api_route_control,
+    )
+    if message is not None:
+        return RouteShiftSavePlan(
+            message=message,
+            timeout_ms=5000,
+            runner_active=runner_active,
+            runner_waiting=runner_waiting,
+        )
+    return RouteShiftSavePlan(
+        runner_active=runner_active,
+        runner_waiting=runner_waiting,
+    )
+
+
 def _first_point_number(*values: int | None) -> int | None:
     for value in values:
         if value is not None:
@@ -182,5 +205,6 @@ __all__ = [
     "RouteShiftSavePlan",
     "route_confirmation_submission_plan",
     "route_contact_move_plan",
+    "route_shift_save_guard_plan",
     "route_shift_save_plan",
 ]

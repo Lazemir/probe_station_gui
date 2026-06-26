@@ -2334,6 +2334,31 @@ assert image.height() == 4
             ["Route shift saved: dX=+0.5000 mm, dY=-0.2500 mm."],
         )
 
+    def test_blocked_route_shift_save_does_not_read_dialog_configuration(self) -> None:
+        window = Main.__new__(Main)
+        statuses: list[str] = []
+        dialog_calls: list[str] = []
+
+        class _Dialog:
+            def current_configuration(self) -> object:
+                dialog_calls.append("current_configuration")
+                return types.SimpleNamespace(current_point=7)
+
+        window._route_measurement_runner = None
+        window._route_measurement_thread = None
+        window._route_measurement_dialog = _Dialog()
+        window._route_measurement_current_point = None
+        window._api_route_control_active = True
+        window._api_route_control_paused = False
+        window._show_route_measurement_status = (
+            lambda message, _timeout_ms=None: statuses.append(str(message))
+        )
+
+        Main._save_route_measurement_shift(window)
+
+        self.assertEqual(dialog_calls, [])
+        self.assertEqual(statuses, ["Pause API route control before saving shift."])
+
     def test_api_route_control_save_shift_then_resume_does_not_skip_contact(self) -> None:
         window = Main.__new__(Main)
         statuses: list[str] = []

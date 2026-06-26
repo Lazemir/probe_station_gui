@@ -90,3 +90,30 @@ The refactor is justified. `Main` remains the Qt, runner, and hardware side-effe
 
 - `_submit_route_measurement_confirmation` still has CC 17 because restart/runtime-settings/meter side effects remain in `Main`. This is intentional for this pass, but it remains a future extraction candidate.
 - `_on_route_measurement_finished` was not touched in this slice; finish cleanup remains complex and should be handled by a separate focused pass if needed.
+
+## Fix after review
+
+### Changed Files
+
+- `main.py`
+- `probe_station_gui/route/adjustment_flow.py`
+- `tests/app/test_main_coordinate_feedrate.py`
+- `.superpowers/sdd/task-14-report.md`
+
+### Commit Hashes
+
+- Pending fix commit.
+
+### Tests Run
+
+- `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\app\test_main_coordinate_feedrate.py::MainCoordinateFeedrateTest::test_blocked_route_shift_save_does_not_read_dialog_configuration`
+  - First result: 1 failed in 0.90s. The fake dialog recorded a `current_configuration()` call before the blocked API Route Control guard returned.
+  - Final result: 1 passed in 0.76s.
+- `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\route tests\app\test_main_coordinate_feedrate.py tests\ui\test_design_navigator_panel.py`
+  - Result: 305 passed in 4.14s.
+- `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m ruff check --ignore E402,F401 .`
+  - Result: All checks passed.
+
+### Residual Concerns
+
+- No additional concerns from the review fix. The accepted shift-save point precedence remains requested point, dialog current point, then stored current point; blocked shift-save now returns before dialog configuration is read.
