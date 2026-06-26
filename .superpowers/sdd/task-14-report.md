@@ -102,7 +102,7 @@ The refactor is justified. `Main` remains the Qt, runner, and hardware side-effe
 
 ### Commit Hashes
 
-- Pending fix commit.
+- `9c89f75` - Avoid dialog config reads for blocked route shift saves.
 
 ### Tests Run
 
