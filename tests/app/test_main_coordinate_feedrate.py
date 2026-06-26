@@ -3235,6 +3235,77 @@ assert image.height() == 4
         self.assertTrue(new_runner.applied)
         self.assertEqual(new_runner.confirmations, ["next"])
 
+    def test_submit_confirmation_reports_meter_configuration_failure(self) -> None:
+        class _FakeRunner:
+            def __init__(self) -> None:
+                self.confirmations: list[str] = []
+                self.runtime_settings: dict[str, object] = {}
+
+            def update_runtime_settings(self, **kwargs) -> None:
+                self.runtime_settings = dict(kwargs)
+
+            def apply_meter_configuration(self, _configuration) -> None:
+                raise main_module.LCRMeterError("meter offline")
+
+            def submit_confirmation(self, action: str) -> bool:
+                self.confirmations.append(str(action))
+                return True
+
+        configuration = RouteMeasurementRunConfiguration(
+            csv_path="route.csv",
+            previous_csv_path="route.csv",
+            operation_mode=route_measurement_dialog_module.ROUTE_OPERATION_MEASURE,
+            photo_output_dir="photos",
+            photo_settle_s=0.0,
+            photo_autofocus_enabled=False,
+            photo_autofocus_range_mm=0.03,
+            initial_measurement_count=10,
+            followup_measurement_count=240,
+            current_point=1,
+            max_relative_rms=0.01,
+            contact_settle_s=0.0,
+            contact_seek_range_mm=0.01,
+            contact_seek_step_mm=0.001,
+            previous_ok_only=False,
+            meter=RouteMeterConfiguration(),
+            contact_quality_limits=RouteContactQualityLimits(
+                max_mad_sigma_ohm=1_200.0,
+                max_p95_abs_step_ohm=1_800.0,
+                max_relative_mad_sigma=0.07,
+                max_relative_p95_abs_step=0.11,
+            ),
+        )
+        runner = _FakeRunner()
+        statuses: list[str] = []
+        dialog_statuses: list[str] = []
+        window = Main.__new__(Main)
+        window._route_measurement_runner = runner
+        window._route_measurement_waiting = True
+        window._route_measurement_runtime_configuration = configuration
+        window._route_measurement_dialog = types.SimpleNamespace(
+            current_configuration=lambda: configuration,
+            set_waiting=lambda _waiting: None,
+            set_status=lambda message: dialog_statuses.append(str(message)),
+        )
+        window._route_contact_move_thread = None
+        window._save_route_measurement_session_metadata = lambda _configuration: None
+        window._show_status = (
+            lambda message, _timeout_ms=None: statuses.append(str(message))
+        )
+        window.design_navigator_panel = None
+
+        Main._submit_route_measurement_confirmation(window, "next")
+
+        self.assertEqual(
+            statuses,
+            ["Route measurement instrument setup failed: meter offline"],
+        )
+        self.assertEqual(
+            dialog_statuses,
+            ["Route measurement instrument setup failed: meter offline"],
+        )
+        self.assertEqual(runner.confirmations, [])
+
     def test_record_route_contact_height_writes_height_map_csv(self) -> None:
         window = Main.__new__(Main)
         window._design_session = types.SimpleNamespace(

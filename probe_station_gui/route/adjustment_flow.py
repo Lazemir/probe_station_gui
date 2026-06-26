@@ -9,23 +9,6 @@ from probe_station_gui.route.operation_guards import (
     route_contact_move_block_message,
     route_shift_save_block_message,
 )
-from probe_station_gui.route.session_actions import (
-    RouteConfirmationAction,
-    route_confirmation_action,
-)
-
-
-@dataclass(frozen=True)
-class RouteConfirmationSubmissionPlan:
-    api_action: str | None = None
-    confirmation: RouteConfirmationAction | None = None
-    message: str = ""
-    timeout_ms: int = 0
-
-    @property
-    def accepted(self) -> bool:
-        return self.api_action is not None or self.confirmation is not None
-
 
 @dataclass(frozen=True)
 class RouteContactMovePlan:
@@ -54,37 +37,6 @@ class RouteShiftSavePlan:
     @property
     def accepted(self) -> bool:
         return not self.message
-
-
-def route_confirmation_submission_plan(
-    action: str,
-    *,
-    api_route_control: ApiRouteControlState,
-    runner_available: bool,
-    contact_move_active: bool,
-    waiting: bool,
-    pending_point_number: int | None,
-) -> RouteConfirmationSubmissionPlan:
-    api_action = api_route_control.confirmation_api_action(action)
-    if api_action is not None:
-        return RouteConfirmationSubmissionPlan(api_action=api_action)
-    if not runner_available:
-        return RouteConfirmationSubmissionPlan(
-            message="No route measurement is waiting.",
-            timeout_ms=3000,
-        )
-    if contact_move_active:
-        return RouteConfirmationSubmissionPlan(
-            message="Wait for route contact move to finish.",
-            timeout_ms=3000,
-        )
-    return RouteConfirmationSubmissionPlan(
-        confirmation=route_confirmation_action(
-            action,
-            waiting=waiting,
-            pending_point_number=pending_point_number,
-        )
-    )
 
 
 def route_contact_move_plan(
@@ -200,10 +152,8 @@ def _first_point_number(*values: int | None) -> int | None:
 
 
 __all__ = [
-    "RouteConfirmationSubmissionPlan",
     "RouteContactMovePlan",
     "RouteShiftSavePlan",
-    "route_confirmation_submission_plan",
     "route_contact_move_plan",
     "route_shift_save_guard_plan",
     "route_shift_save_plan",

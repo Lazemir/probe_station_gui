@@ -172,10 +172,13 @@ from probe_station_gui.route.operation import (
     route_measurement_start_decision,
 )
 from probe_station_gui.route.adjustment_flow import (
-    route_confirmation_submission_plan,
     route_contact_move_plan,
     route_shift_save_guard_plan,
     route_shift_save_plan,
+)
+from probe_station_gui.route.confirmation_flow import (
+    route_confirmation_runtime_plan,
+    route_confirmation_submission_plan,
 )
 from probe_station_gui.route.operation_modes import (
     route_operation_measure_enabled,
@@ -189,12 +192,6 @@ from probe_station_gui.route.measurement_payloads import (
     route_external_result_payload,
 )
 from probe_station_gui.route.api_window_guard import probe_route_api_requires_window
-from probe_station_gui.route.runtime_settings import (
-    route_external_runtime_settings,
-    route_measurement_runtime_settings,
-    route_runtime_requires_meter_configuration,
-    route_waiting_restart_required,
-)
 from probe_station_gui.route.meter_config import (
     route_meter_configuration_from_payload,
     route_meter_type_from_payload,
@@ -8526,50 +8523,9 @@ class Main(QMainWindow):
             )
             return
         if self._route_measurement_dialog is not None:
-            configuration = self._route_measurement_dialog.current_configuration()
-            previous_configuration = self._route_measurement_runtime_configuration
-            if route_waiting_restart_required(
-                external_session=isinstance(
-                    runner,
-                    RouteExternalMeasurementSessionRunner,
-                ),
-                waiting=self._route_measurement_waiting,
-                setup_changed=self._route_measurement_setup_changed(
-                    previous_configuration,
-                    configuration,
-                ),
-            ):
-                route_offset_xy = (
-                    runner.route_offset_xy()
-                    if hasattr(runner, "route_offset_xy")
-                    else (0.0, 0.0)
-                )
-                if not self._restart_waiting_route_measurement(
-                    configuration,
-                    route_offset_xy=route_offset_xy,
-                ):
-                    return
-                runner = self._route_measurement_runner
-                if runner is None:
-                    return
-            self._route_measurement_runtime_configuration = configuration
-            self._save_route_measurement_session_metadata(configuration)
-            if isinstance(runner, RouteExternalMeasurementSessionRunner):
-                runner.update_runtime_settings(
-                    **route_external_runtime_settings(configuration),
-                )
-            else:
-                runner.update_runtime_settings(
-                    **route_measurement_runtime_settings(configuration),
-                )
-                if route_runtime_requires_meter_configuration(configuration):
-                    try:
-                        runner.apply_meter_configuration(configuration.meter)
-                    except LCRMeterError as exc:
-                        message = f"Route measurement instrument setup failed: {exc}"
-                        self._show_status(message, 8000)
-                        self._route_measurement_dialog.set_status(message)
-                        return
+            runner = self._apply_route_measurement_confirmation_runtime(runner)
+            if runner is None:
+                return
         confirmation = confirmation_plan.confirmation
         if confirmation is None:
             return
@@ -8583,6 +8539,50 @@ class Main(QMainWindow):
         if self._route_measurement_dialog is not None:
             self._route_measurement_dialog.set_waiting(False)
         self._show_status(f"Route measurement: {confirmation.status_label}.")
+
+    def _apply_route_measurement_confirmation_runtime(self, runner):
+        if self._route_measurement_dialog is None:
+            return runner
+        configuration = self._route_measurement_dialog.current_configuration()
+        external_session = isinstance(
+            runner,
+            RouteExternalMeasurementSessionRunner,
+        )
+        runtime_plan = route_confirmation_runtime_plan(
+            configuration,
+            external_session=external_session,
+            waiting=self._route_measurement_waiting,
+            setup_changed=self._route_measurement_setup_changed(
+                self._route_measurement_runtime_configuration,
+                configuration,
+            ),
+        )
+        if runtime_plan.restart_required:
+            route_offset_xy = (
+                runner.route_offset_xy()
+                if hasattr(runner, "route_offset_xy")
+                else (0.0, 0.0)
+            )
+            if not self._restart_waiting_route_measurement(
+                configuration,
+                route_offset_xy=route_offset_xy,
+            ):
+                return None
+            runner = self._route_measurement_runner
+            if runner is None:
+                return None
+        self._route_measurement_runtime_configuration = configuration
+        self._save_route_measurement_session_metadata(configuration)
+        runner.update_runtime_settings(**runtime_plan.runtime_settings)
+        if not external_session and runtime_plan.meter_configuration_required:
+            try:
+                runner.apply_meter_configuration(configuration.meter)
+            except LCRMeterError as exc:
+                message = f"Route measurement instrument setup failed: {exc}"
+                self._show_status(message, 8000)
+                self._route_measurement_dialog.set_status(message)
+                return None
+        return runner
 
     def _submit_route_measurement_jump(self, point_number: int) -> None:
         self._submit_route_measurement_confirmation(f"jump:{int(point_number)}")
