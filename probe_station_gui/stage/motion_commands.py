@@ -11,6 +11,12 @@ import serial
 
 from probe_station_gui.stage.errors import StageControllerError
 from probe_station_gui.stage.jog_commands import format_gcode_value
+from probe_station_gui.stage.motion_command_planning import (
+    absolute_axis_g1_command,
+    absolute_axis_target_limit_error,
+    clamped_motion_feedrate,
+    ordered_absolute_axis_targets,
+)
 from probe_station_gui.stage.motion_timing import (
     absolute_move_distance_for_timeout,
     idle_timeout_for_distance,
@@ -613,21 +619,10 @@ class StageControllerMotionCommandsMixin:
         allow_unhomed: bool = False,
         as_jog: bool = False,
     ) -> None:
-        ordered_targets: dict[str, float] = {}
-        for axis in self.AXIS_INDEX:
-            if axis not in targets:
-                continue
-            value = float(targets[axis])
-            if not math.isfinite(value):
-                raise StageControllerError(f"Unsupported target for {axis}: {value}")
-            ordered_targets[axis] = value
-        unsupported = [
-            str(axis)
-            for axis in targets
-            if str(axis).upper().strip() not in self.AXIS_INDEX
-        ]
-        if unsupported:
-            raise StageControllerError(f"Unsupported axis: {', '.join(unsupported)}")
+        ordered_targets = ordered_absolute_axis_targets(
+            targets,
+            axis_order=self.AXIS_INDEX,
+        )
         if not ordered_targets:
             return
         serial_connection = self._current_serial()
@@ -655,18 +650,14 @@ class StageControllerMotionCommandsMixin:
                     current_values[axis] = float(current_value)
                 limits = self._axis_limits_for_configured_mode(axis, status)
                 if limits and self._axis_software_limit_ready(status, axis):
-                    min_value, max_value = limits
-                    if value < min_value or value > max_value:
-                        raise StageControllerError(
-                            f"{axis} target {value:+.3f} exceeds limits ({min_value:.3f}, {max_value:.3f})."
-                        )
-        effective_feedrate = (
-            self.DEFAULT_FEEDRATE if feedrate is None else max(self.MIN_FEEDRATE, float(feedrate))
+                    error = absolute_axis_target_limit_error(axis, value, limits)
+                    if error is not None:
+                        raise StageControllerError(error)
+        effective_feedrate = clamped_motion_feedrate(
+            feedrate,
+            default_feedrate=self.DEFAULT_FEEDRATE,
+            min_feedrate=self.MIN_FEEDRATE,
         )
-        move_parts = [
-            f"{axis}{value:.4f}"
-            for axis, value in ordered_targets.items()
-        ]
         if as_jog:
             self._write_current_command_and_wait(
                 self._absolute_axis_targets_jog_command(
@@ -690,9 +681,7 @@ class StageControllerMotionCommandsMixin:
         self._write_current_command_and_wait("G90")
         self._reset_feed_override()
         self._write_current_command_and_wait(
-            "G1 "
-            + " ".join(move_parts)
-            + f" F{self._format_gcode_value(effective_feedrate)}",
+            absolute_axis_g1_command(ordered_targets, effective_feedrate),
         )
         if wait_for_completion:
             move_distance = self._absolute_move_distance_for_timeout(
