@@ -172,9 +172,15 @@ from probe_station_gui.route.operation import (
     route_measurement_start_decision,
 )
 from probe_station_gui.route.adjustment_flow import (
+    RouteShiftSavePlan,
+    RouteShiftSaveStatusPlan,
     route_contact_move_plan,
+    route_shift_runner_offset_update,
     route_shift_save_guard_plan,
     route_shift_save_plan,
+    route_shift_save_status_plan,
+    route_shift_stage_position_error_plan,
+    route_shift_stage_xy_plan,
 )
 from probe_station_gui.route.confirmation_flow import (
     route_confirmation_runtime_plan,
@@ -8716,6 +8722,41 @@ class Main(QMainWindow):
 
     def _save_route_measurement_shift(self, point_number: int | None = None) -> None:
         runner = self._route_measurement_runner
+        shift_plan = self._route_shift_save_plan(runner, point_number)
+        if shift_plan.message:
+            self._show_route_measurement_status(
+                shift_plan.message,
+                shift_plan.timeout_ms,
+            )
+            return
+        adjustment_selected, adjustment_point = self._route_shift_adjustment_point(
+            shift_plan,
+            runner,
+        )
+        if not adjustment_selected:
+            return
+        stage_xy = self._route_shift_current_stage_xy()
+        if stage_xy is None:
+            return
+        if shift_plan.runner_active:
+            saved, message = runner.save_current_position_adjustment(stage_xy)
+            self._update_api_route_offset_from_runner(runner, saved)
+        else:
+            self._api_route_offset_xy, message = route_shift_from_stage_xy(
+                stage_xy,
+                adjustment_point.stage_xy,
+            )
+        status_plan = route_shift_save_status_plan(
+            runner_active=shift_plan.runner_active,
+            message=message,
+        )
+        self._apply_route_shift_save_status(status_plan)
+
+    def _route_shift_save_plan(
+        self,
+        runner: object | None,
+        point_number: int | None,
+    ) -> RouteShiftSavePlan:
         thread = self._route_measurement_thread
         route_active = thread is not None and thread.is_alive()
         route_waiting = getattr(self, "_route_measurement_waiting", False)
@@ -8727,17 +8768,13 @@ class Main(QMainWindow):
             api_route_control=api_route_control,
         )
         if guard_plan.message:
-            self._show_route_measurement_status(
-                guard_plan.message,
-                guard_plan.timeout_ms,
-            )
-            return
+            return guard_plan
         dialog_current_point = (
             int(self._route_measurement_dialog.current_configuration().current_point)
             if point_number is None and self._route_measurement_dialog is not None
             else None
         )
-        shift_plan = route_shift_save_plan(
+        return route_shift_save_plan(
             runner_available=runner is not None,
             route_active=route_active,
             route_waiting=route_waiting,
@@ -8746,69 +8783,81 @@ class Main(QMainWindow):
             dialog_current_point=dialog_current_point,
             current_point=getattr(self, "_route_measurement_current_point", None),
         )
-        if shift_plan.message:
-            self._show_route_measurement_status(
-                shift_plan.message,
-                shift_plan.timeout_ms,
-            )
-            return
+
+    def _route_shift_adjustment_point(
+        self,
+        shift_plan: RouteShiftSavePlan,
+        runner: object | None,
+    ) -> tuple[bool, RouteMeasurementPoint | None]:
         point_number = shift_plan.point_number
-        adjustment_point: RouteMeasurementPoint | None = None
         if shift_plan.needs_runner_adjustment and runner is not None:
             point_selected, message = runner.set_current_adjustment_point(
                 int(point_number)
             )
             if not point_selected:
                 self._show_route_measurement_status(message, 6000)
-                return
-        elif shift_plan.needs_api_context:
-            context_result = self._api_contact_context(int(point_number))
-            if not context_result.get("accepted", False):
-                message = str(
-                    context_result.get("message")
-                    or "Route point is unavailable for saving shift."
-                )
-                self._show_route_measurement_status(message, 6000)
-                return
-            adjustment_point = context_result["point"]
+                return False, None
+            return True, None
+        if not shift_plan.needs_api_context:
+            return True, None
+        context_result = self._api_contact_context(int(point_number))
+        if not context_result.get("accepted", False):
+            message = str(
+                context_result.get("message")
+                or "Route point is unavailable for saving shift."
+            )
+            self._show_route_measurement_status(message, 6000)
+            return False, None
+        return True, context_result["point"]
+
+    def _route_shift_current_stage_xy(self) -> tuple[float, float] | None:
         try:
             position = self.stage_controller.current_stage_position()
         except StageControllerError as exc:
             latest = self.stage_controller.latest_stage_position()
-            if self.stage_controller.is_busy() or latest is None:
-                message = str(exc)
-                self._show_status(message, 6000)
-                if self._route_measurement_dialog is not None:
-                    self._route_measurement_dialog.set_status(message)
-                return
+            position_plan = route_shift_stage_position_error_plan(
+                error_message=str(exc),
+                controller_busy=self.stage_controller.is_busy(),
+                latest_position_available=latest is not None,
+            )
+            if position_plan.message:
+                self._show_route_shift_status(
+                    position_plan.message,
+                    position_plan.timeout_ms,
+                )
+                return None
             position = latest
         stage_xy = self._stage_xy_from_position(position)
-        if stage_xy is None:
-            message = "Current stage X/Y position is unavailable."
-            self._show_status(message, 5000)
-            if self._route_measurement_dialog is not None:
-                self._route_measurement_dialog.set_status(message)
+        xy_plan = route_shift_stage_xy_plan(stage_xy_available=stage_xy is not None)
+        if xy_plan.message:
+            self._show_route_shift_status(xy_plan.message, xy_plan.timeout_ms)
+            return None
+        return stage_xy
+
+    def _update_api_route_offset_from_runner(
+        self,
+        runner: object,
+        saved: bool,
+    ) -> None:
+        if not saved or not hasattr(runner, "route_offset_xy"):
             return
-        if shift_plan.runner_active:
-            saved, message = runner.save_current_position_adjustment(stage_xy)
-            if saved and hasattr(runner, "route_offset_xy"):
-                try:
-                    offset_xy = runner.route_offset_xy()
-                    self._api_route_offset_xy = (
-                        float(offset_xy[0]),
-                        float(offset_xy[1]),
-                    )
-                except (TypeError, ValueError, IndexError):
-                    pass
-        else:
-            self._api_route_offset_xy, message = route_shift_from_stage_xy(
-                stage_xy,
-                adjustment_point.stage_xy,
-            )
-            saved = True
-        self._show_status(message, 5000)
+        offset_xy = route_shift_runner_offset_update(runner.route_offset_xy())
+        if offset_xy is not None:
+            self._api_route_offset_xy = offset_xy
+
+    def _show_route_shift_status(self, message: str, timeout_ms: int) -> None:
+        self._show_status(message, timeout_ms)
+        if self._route_measurement_dialog is not None:
+            self._route_measurement_dialog.set_status(message)
+
+    def _apply_route_shift_save_status(
+        self,
+        status_plan: RouteShiftSaveStatusPlan,
+    ) -> None:
+        message = status_plan.message
+        self._show_status(message, status_plan.timeout_ms)
         if self.design_navigator_panel is not None:
-            if shift_plan.runner_active and hasattr(
+            if status_plan.mark_interrupt_pending and hasattr(
                 self.design_navigator_panel,
                 "set_route_measurement_interrupt_request_pending",
             ):
@@ -8817,7 +8866,7 @@ class Main(QMainWindow):
                 )
             self.design_navigator_panel.set_route_measurement_status(message)
         if self._route_measurement_dialog is not None:
-            if shift_plan.runner_active and hasattr(
+            if status_plan.mark_interrupt_pending and hasattr(
                 self._route_measurement_dialog,
                 "set_interrupt_request_pending",
             ):

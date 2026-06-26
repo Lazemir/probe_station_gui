@@ -1,4 +1,11 @@
-from probe_station_gui.route.adjustment_flow import route_contact_move_plan, route_shift_save_plan
+from probe_station_gui.route.adjustment_flow import (
+    route_contact_move_plan,
+    route_shift_runner_offset_update,
+    route_shift_save_plan,
+    route_shift_save_status_plan,
+    route_shift_stage_position_error_plan,
+    route_shift_stage_xy_plan,
+)
 from probe_station_gui.route.control_state import ApiRouteControlState
 
 
@@ -97,3 +104,62 @@ def test_shift_save_plan_resolves_point_and_preserves_runner_adjustment() -> Non
     assert runner_plan.needs_runner_adjustment is True
     assert idle_plan.message == "Select a route point before saving shift."
     assert idle_plan.timeout_ms == 5000
+
+
+def test_shift_stage_position_error_plan_blocks_busy_or_missing_latest_position() -> None:
+    busy = route_shift_stage_position_error_plan(
+        error_message="Stage is busy.",
+        controller_busy=True,
+        latest_position_available=True,
+    )
+    no_latest = route_shift_stage_position_error_plan(
+        error_message="Unable to read stage position.",
+        controller_busy=False,
+        latest_position_available=False,
+    )
+    fallback = route_shift_stage_position_error_plan(
+        error_message="Unable to read stage position.",
+        controller_busy=False,
+        latest_position_available=True,
+    )
+
+    assert busy.message == "Stage is busy."
+    assert busy.timeout_ms == 6000
+    assert busy.use_latest_position is False
+    assert no_latest.message == "Unable to read stage position."
+    assert no_latest.use_latest_position is False
+    assert fallback.accepted is True
+    assert fallback.use_latest_position is True
+
+
+def test_shift_stage_xy_plan_blocks_missing_xy_position() -> None:
+    missing = route_shift_stage_xy_plan(stage_xy_available=False)
+    available = route_shift_stage_xy_plan(stage_xy_available=True)
+
+    assert missing.message == "Current stage X/Y position is unavailable."
+    assert missing.timeout_ms == 5000
+    assert available.accepted is True
+
+
+def test_shift_runner_offset_update_only_accepts_usable_xy_pairs() -> None:
+    assert route_shift_runner_offset_update((0.5, -0.25)) == (0.5, -0.25)
+    assert route_shift_runner_offset_update(["1.25", "2.5"]) == (1.25, 2.5)
+    assert route_shift_runner_offset_update((1.0,)) is None
+    assert route_shift_runner_offset_update(("bad", 2.5)) is None
+    assert route_shift_runner_offset_update(None) is None
+
+
+def test_shift_save_status_plan_marks_interrupt_pending_only_for_runner_save() -> None:
+    runner_plan = route_shift_save_status_plan(
+        runner_active=True,
+        message="saved by runner",
+    )
+    api_plan = route_shift_save_status_plan(
+        runner_active=False,
+        message="saved by api",
+    )
+
+    assert runner_plan.message == "saved by runner"
+    assert runner_plan.timeout_ms == 5000
+    assert runner_plan.mark_interrupt_pending is True
+    assert api_plan.mark_interrupt_pending is False

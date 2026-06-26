@@ -39,6 +39,34 @@ class RouteShiftSavePlan:
         return not self.message
 
 
+@dataclass(frozen=True)
+class RouteShiftStagePositionPlan:
+    message: str = ""
+    timeout_ms: int = 0
+    use_latest_position: bool = False
+
+    @property
+    def accepted(self) -> bool:
+        return not self.message
+
+
+@dataclass(frozen=True)
+class RouteShiftStageXyPlan:
+    message: str = ""
+    timeout_ms: int = 0
+
+    @property
+    def accepted(self) -> bool:
+        return not self.message
+
+
+@dataclass(frozen=True)
+class RouteShiftSaveStatusPlan:
+    message: str
+    timeout_ms: int
+    mark_interrupt_pending: bool = False
+
+
 def route_contact_move_plan(
     *,
     contact_move_active: bool,
@@ -70,6 +98,51 @@ def route_contact_move_plan(
         route_waiting=effective_route_waiting,
         set_resume_point=not effective_route_active or effective_route_waiting,
         set_adjustment_point=effective_route_active and effective_route_waiting,
+    )
+
+
+def route_shift_stage_position_error_plan(
+    *,
+    error_message: str,
+    controller_busy: bool,
+    latest_position_available: bool,
+) -> RouteShiftStagePositionPlan:
+    if controller_busy or not latest_position_available:
+        return RouteShiftStagePositionPlan(
+            message=str(error_message),
+            timeout_ms=6000,
+        )
+    return RouteShiftStagePositionPlan(use_latest_position=True)
+
+
+def route_shift_stage_xy_plan(
+    *,
+    stage_xy_available: bool,
+) -> RouteShiftStageXyPlan:
+    if stage_xy_available:
+        return RouteShiftStageXyPlan()
+    return RouteShiftStageXyPlan(
+        message="Current stage X/Y position is unavailable.",
+        timeout_ms=5000,
+    )
+
+
+def route_shift_runner_offset_update(offset_xy: object) -> tuple[float, float] | None:
+    try:
+        return (float(offset_xy[0]), float(offset_xy[1]))  # type: ignore[index]
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def route_shift_save_status_plan(
+    *,
+    runner_active: bool,
+    message: str,
+) -> RouteShiftSaveStatusPlan:
+    return RouteShiftSaveStatusPlan(
+        message=str(message),
+        timeout_ms=5000,
+        mark_interrupt_pending=bool(runner_active),
     )
 
 
@@ -154,7 +227,14 @@ def _first_point_number(*values: int | None) -> int | None:
 __all__ = [
     "RouteContactMovePlan",
     "RouteShiftSavePlan",
+    "RouteShiftSaveStatusPlan",
+    "RouteShiftStagePositionPlan",
+    "RouteShiftStageXyPlan",
     "route_contact_move_plan",
+    "route_shift_runner_offset_update",
     "route_shift_save_guard_plan",
     "route_shift_save_plan",
+    "route_shift_save_status_plan",
+    "route_shift_stage_position_error_plan",
+    "route_shift_stage_xy_plan",
 ]

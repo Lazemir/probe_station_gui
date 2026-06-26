@@ -51,6 +51,7 @@ from probe_station_gui.route.measurement import (
 )
 from probe_station_gui.instruments.meters.lcr import RouteMeterConfiguration
 from probe_station_gui.settings.manager import ObjectiveCalibrationSettings, Settings
+from probe_station_gui.stage.controller import StageControllerError
 
 
 class _FakeTimer:
@@ -2502,6 +2503,264 @@ assert image.height() == 4
 
         self.assertEqual(dialog_calls, [])
         self.assertEqual(statuses, ["Pause API route control before saving shift."])
+
+    def test_route_shift_save_stage_error_while_busy_does_not_save(self) -> None:
+        window = Main.__new__(Main)
+        statuses: list[str] = []
+        dialog_statuses: list[str] = []
+        runner_calls: list[object] = []
+
+        runner = types.SimpleNamespace(
+            set_current_adjustment_point=lambda point_number: runner_calls.append(
+                ("select", point_number)
+            )
+            or (True, "selected"),
+            save_current_position_adjustment=lambda stage_xy: runner_calls.append(
+                ("save", stage_xy)
+            )
+            or (True, "saved by runner"),
+        )
+        window._route_measurement_runner = runner
+        window._route_measurement_thread = _FakeAliveThread()
+        window._route_measurement_waiting = True
+        window._route_measurement_current_point = None
+        window._route_measurement_dialog = types.SimpleNamespace(
+            set_status=lambda message: dialog_statuses.append(str(message))
+        )
+        window.design_navigator_panel = None
+        window._api_route_control_active = False
+        window._api_route_offset_xy = (0.0, 0.0)
+        window._show_status = (
+            lambda message, _timeout_ms=None: statuses.append(str(message))
+        )
+        window.stage_controller = types.SimpleNamespace(
+            current_stage_position=lambda: (_ for _ in ()).throw(
+                StageControllerError("Stage is busy.")
+            ),
+            latest_stage_position=lambda: (1.0, 2.0, 0.0),
+            is_busy=lambda: True,
+        )
+
+        Main._save_route_measurement_shift(window, 7)
+
+        self.assertEqual(runner_calls, [("select", 7)])
+        self.assertEqual(statuses, ["Stage is busy."])
+        self.assertEqual(dialog_statuses, ["Stage is busy."])
+        self.assertEqual(window._api_route_offset_xy, (0.0, 0.0))
+
+    def test_route_shift_save_stage_error_without_latest_position_does_not_save(self) -> None:
+        window = Main.__new__(Main)
+        statuses: list[str] = []
+        runner_calls: list[object] = []
+
+        runner = types.SimpleNamespace(
+            set_current_adjustment_point=lambda point_number: runner_calls.append(
+                ("select", point_number)
+            )
+            or (True, "selected"),
+            save_current_position_adjustment=lambda stage_xy: runner_calls.append(
+                ("save", stage_xy)
+            )
+            or (True, "saved by runner"),
+        )
+        window._route_measurement_runner = runner
+        window._route_measurement_thread = _FakeAliveThread()
+        window._route_measurement_waiting = True
+        window._route_measurement_current_point = None
+        window._route_measurement_dialog = None
+        window.design_navigator_panel = None
+        window._api_route_control_active = False
+        window._api_route_offset_xy = (0.0, 0.0)
+        window._show_status = (
+            lambda message, _timeout_ms=None: statuses.append(str(message))
+        )
+        window.stage_controller = types.SimpleNamespace(
+            current_stage_position=lambda: (_ for _ in ()).throw(
+                StageControllerError("Unable to read stage position.")
+            ),
+            latest_stage_position=lambda: None,
+            is_busy=lambda: False,
+        )
+
+        Main._save_route_measurement_shift(window, 7)
+
+        self.assertEqual(runner_calls, [("select", 7)])
+        self.assertEqual(statuses, ["Unable to read stage position."])
+        self.assertEqual(window._api_route_offset_xy, (0.0, 0.0))
+
+    def test_route_shift_save_stage_error_with_latest_position_falls_back(self) -> None:
+        window = Main.__new__(Main)
+        statuses: list[str] = []
+        runner_calls: list[object] = []
+
+        runner = types.SimpleNamespace(
+            set_current_adjustment_point=lambda point_number: runner_calls.append(
+                ("select", point_number)
+            )
+            or (True, "selected"),
+            save_current_position_adjustment=lambda stage_xy: runner_calls.append(
+                ("save", stage_xy)
+            )
+            or (True, "saved by runner"),
+            route_offset_xy=lambda: (0.5, -0.25),
+        )
+        window._route_measurement_runner = runner
+        window._route_measurement_thread = _FakeAliveThread()
+        window._route_measurement_waiting = True
+        window._route_measurement_current_point = None
+        window._route_measurement_dialog = None
+        window.design_navigator_panel = None
+        window._api_route_control_active = False
+        window._api_route_offset_xy = (0.0, 0.0)
+        window._stage_xy_from_position = lambda position: (position[0], position[1])
+        window._show_status = (
+            lambda message, _timeout_ms=None: statuses.append(str(message))
+        )
+        window.stage_controller = types.SimpleNamespace(
+            current_stage_position=lambda: (_ for _ in ()).throw(
+                StageControllerError("Unable to read stage position.")
+            ),
+            latest_stage_position=lambda: (1.75, 2.25, 0.0),
+            is_busy=lambda: False,
+        )
+
+        Main._save_route_measurement_shift(window, 7)
+
+        self.assertEqual(runner_calls, [("select", 7), ("save", (1.75, 2.25))])
+        self.assertEqual(statuses, ["saved by runner"])
+        self.assertEqual(window._api_route_offset_xy, (0.5, -0.25))
+
+    def test_route_shift_save_without_usable_stage_xy_shows_unavailable(self) -> None:
+        window = Main.__new__(Main)
+        statuses: list[str] = []
+        dialog_statuses: list[str] = []
+        runner_calls: list[object] = []
+
+        runner = types.SimpleNamespace(
+            set_current_adjustment_point=lambda point_number: runner_calls.append(
+                ("select", point_number)
+            )
+            or (True, "selected"),
+            save_current_position_adjustment=lambda stage_xy: runner_calls.append(
+                ("save", stage_xy)
+            )
+            or (True, "saved by runner"),
+        )
+        window._route_measurement_runner = runner
+        window._route_measurement_thread = _FakeAliveThread()
+        window._route_measurement_waiting = True
+        window._route_measurement_current_point = None
+        window._route_measurement_dialog = types.SimpleNamespace(
+            set_status=lambda message: dialog_statuses.append(str(message))
+        )
+        window.design_navigator_panel = None
+        window._api_route_control_active = False
+        window._api_route_offset_xy = (0.0, 0.0)
+        window._stage_xy_from_position = lambda _position: None
+        window._show_status = (
+            lambda message, _timeout_ms=None: statuses.append(str(message))
+        )
+        window.stage_controller = types.SimpleNamespace(
+            current_stage_position=lambda: (None, 2.25, 0.0),
+            latest_stage_position=lambda: None,
+            is_busy=lambda: False,
+        )
+
+        Main._save_route_measurement_shift(window, 7)
+
+        self.assertEqual(runner_calls, [("select", 7)])
+        self.assertEqual(statuses, ["Current stage X/Y position is unavailable."])
+        self.assertEqual(dialog_statuses, ["Current stage X/Y position is unavailable."])
+        self.assertEqual(window._api_route_offset_xy, (0.0, 0.0))
+
+    def test_runner_route_shift_save_updates_api_offset_only_when_usable(self) -> None:
+        window = Main.__new__(Main)
+        statuses: list[str] = []
+        runner_calls: list[object] = []
+
+        runner = types.SimpleNamespace(
+            set_current_adjustment_point=lambda point_number: runner_calls.append(
+                ("select", point_number)
+            )
+            or (True, "selected"),
+            save_current_position_adjustment=lambda stage_xy: runner_calls.append(
+                ("save", stage_xy)
+            )
+            or (True, "saved by runner"),
+            route_offset_xy=lambda: ("bad", -0.25),
+        )
+        window._route_measurement_runner = runner
+        window._route_measurement_thread = _FakeAliveThread()
+        window._route_measurement_waiting = True
+        window._route_measurement_current_point = None
+        window._route_measurement_dialog = None
+        window.design_navigator_panel = None
+        window._api_route_control_active = False
+        window._api_route_offset_xy = (9.0, 8.0)
+        window._stage_xy_from_position = lambda _position: (1.75, 2.25)
+        window._show_status = (
+            lambda message, _timeout_ms=None: statuses.append(str(message))
+        )
+        window.stage_controller = types.SimpleNamespace(
+            current_stage_position=lambda: (1.75, 2.25, 0.0),
+            latest_stage_position=lambda: None,
+            is_busy=lambda: False,
+        )
+
+        Main._save_route_measurement_shift(window, 7)
+
+        self.assertEqual(runner_calls, [("select", 7), ("save", (1.75, 2.25))])
+        self.assertEqual(statuses, ["saved by runner"])
+        self.assertEqual(window._api_route_offset_xy, (9.0, 8.0))
+
+    def test_runner_route_shift_save_marks_interrupt_pending_in_route_controls(self) -> None:
+        window = Main.__new__(Main)
+        statuses: list[str] = []
+        panel_calls: list[tuple[str, object]] = []
+        dialog_calls: list[tuple[str, object]] = []
+
+        runner = types.SimpleNamespace(
+            set_current_adjustment_point=lambda _point_number: (True, "selected"),
+            save_current_position_adjustment=lambda _stage_xy: (True, "saved by runner"),
+            route_offset_xy=lambda: (0.5, -0.25),
+        )
+        window._route_measurement_runner = runner
+        window._route_measurement_thread = _FakeAliveThread()
+        window._route_measurement_waiting = True
+        window._route_measurement_current_point = None
+        window._route_measurement_dialog = types.SimpleNamespace(
+            set_interrupt_request_pending=lambda value: dialog_calls.append(
+                ("interrupt", value)
+            ),
+            set_status=lambda message: dialog_calls.append(("status", message)),
+        )
+        window.design_navigator_panel = types.SimpleNamespace(
+            set_route_measurement_interrupt_request_pending=lambda value: panel_calls.append(
+                ("interrupt", value)
+            ),
+            set_route_measurement_status=lambda message: panel_calls.append(
+                ("status", message)
+            ),
+        )
+        window._api_route_control_active = False
+        window._api_route_offset_xy = (0.0, 0.0)
+        window._stage_xy_from_position = lambda _position: (1.75, 2.25)
+        window._show_status = (
+            lambda message, _timeout_ms=None: statuses.append(str(message))
+        )
+        window.stage_controller = types.SimpleNamespace(
+            current_stage_position=lambda: (1.75, 2.25, 0.0),
+            latest_stage_position=lambda: None,
+            is_busy=lambda: False,
+        )
+
+        Main._save_route_measurement_shift(window, 7)
+
+        self.assertEqual(statuses, ["saved by runner"])
+        self.assertIn(("interrupt", True), panel_calls)
+        self.assertIn(("status", "saved by runner"), panel_calls)
+        self.assertIn(("interrupt", True), dialog_calls)
+        self.assertIn(("status", "saved by runner"), dialog_calls)
 
     def test_api_route_control_save_shift_then_resume_does_not_skip_contact(self) -> None:
         window = Main.__new__(Main)
