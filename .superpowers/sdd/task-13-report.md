@@ -119,3 +119,38 @@ Explicit helper parameters removed: `5`
   - The fix does not reintroduce explicit `serial_connection` parameters on the five Task 13 FluidNC config helpers and does not add compatibility wrappers.
 - residual concerns:
   - None from the required focused tests and lint. The pre-existing untracked `.scratch/` directory was left untouched.
+
+## Controller verification and final metrics
+
+- task review:
+  - approved after the second re-review; no Critical, Important, or Minor findings remained.
+- controller-run validation:
+  - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests`
+    - final: `781 passed, 2 skipped`
+  - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m ruff check --ignore E402,F401 .`
+    - final: `All checks passed!`
+- Wily command:
+  - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m wily -c %TEMP%\probe_station_gui_wily_cache_task13 diff --detail --revision 00a05de ...stage files...`
+- Wily file-level comparison, `00a05de -> 19fb9f0`:
+  - `fluidnc_config_io.py`: MI `21.0858 -> 21.2981`, LOC `347 -> 336`, cyclomatic `93 -> 93`
+  - `controller.py`: MI `0 -> 0`, LOC `1005 -> 1004`, cyclomatic `176 -> 176`
+  - `homing_startup.py`: MI `31.7427 -> 31.7427`, LOC `193 -> 189`, cyclomatic `39 -> 39`
+  - `motion_commands.py`: MI `0 -> 0`, LOC `935 -> 931`, cyclomatic `173 -> 173`
+  - `autofocus_flow.py`: MI `11.0902 -> 11.1223`, LOC `638 -> 637`, cyclomatic `87 -> 87`
+  - `status_io.py`: MI `23.3707 -> 23.3707`, LOC `330 -> 329`, cyclomatic `68 -> 68`
+  - `jog_queue.py`: MI `13.3109 -> 13.2756`, LOC `539 -> 540`, cyclomatic `108 -> 108`
+- fallback radon/lizard spot checks at final HEAD:
+  - `fluidnc_config_io._ensure_status_report_mask`: radon `A (2)`, lizard `13 NLOC / 3 params`
+  - `fluidnc_config_io._query_axis_max_feedrates_locked`: radon `B (7)`, lizard `29 NLOC / 2 params`
+  - `fluidnc_config_io._refresh_coordinate_system_state`: radon `C (15)`, lizard `39 NLOC / 2 params`
+  - `fluidnc_config_io._read_startup_limits`: radon `A (4)`, lizard `18 NLOC / 2 params`
+  - `fluidnc_config_io._ensure_axis_limits`: radon `C (13)`, lizard `30 NLOC / 2 params`
+  - final touched-stage lizard summary: `3551 NLOC`, average CCN `4.4`, warning count `3`
+- verdict:
+  - This refactor is justified.
+- reason:
+  - behavior preserved: yes
+  - tests passed: yes
+  - metrics improved: yes, narrowly; target helper parameter count dropped by five, touched file LOC mostly decreased, MI improved in two touched files and stayed stable in most others
+  - maintainability improvement: config helpers now use the FluidNC session seam instead of repeating serial pass-through in callers, and regression tests pin the hidden serial/session invariant
+  - new risk introduced: the first implementation exposed a real serial-pinning risk; both affected lock-only path classes now have focused regression coverage
