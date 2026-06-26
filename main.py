@@ -207,11 +207,15 @@ from probe_station_gui.route.api_artifacts import (
     api_route_session_status_response,
     final_api_route_session_status,
 )
-from probe_station_gui.route.measurement_payloads import (
-    route_api_contact_seek_payload,
-    route_api_measurement_record_payload,
-)
 from probe_station_gui.route.api_window_guard import probe_route_api_requires_window
+from probe_station_gui.route.api_measurement import (
+    api_contact_context_response,
+    api_contact_number_from_payload,
+    api_current_contact_error_response,
+    api_current_contact_failure_alert,
+    api_current_contact_response,
+    api_current_contact_settings_from_payload,
+)
 from probe_station_gui.route.meter_config import (
     route_meter_configuration_from_payload,
     route_meter_type_from_payload,
@@ -229,7 +233,6 @@ from probe_station_gui.route.session_start import (
     gui_route_launch_state,
     gui_route_start_availability,
     gui_route_start_preflight,
-    route_contact_quality_limits_from_payload,
 )
 from probe_station_gui.route.finish_flow import (
     route_finish_outcome_plan,
@@ -2237,13 +2240,12 @@ class Main(QMainWindow):
         *,
         seek: bool,
     ) -> dict[str, Any]:
-        contact_number = self._api_contact_number(payload)
+        contact_number = api_contact_number_from_payload(payload)
         if contact_number is None:
-            return {
-                "accepted": False,
-                "status_code": 400,
-                "message": "Provide a positive contact_number.",
-            }
+            return api_current_contact_error_response(
+                "Provide a positive contact_number.",
+                status_code=400,
+            )
         context_result = self._api_contact_context(contact_number)
         if not context_result.get("accepted", False):
             return context_result
@@ -2256,83 +2258,19 @@ class Main(QMainWindow):
             return connect_result
 
         try:
-            check_sample_count = self._api_int(
+            settings = api_current_contact_settings_from_payload(
                 payload,
-                "check_sample_count",
-                "initial_measurement_count",
-                "initial_samples",
-                default=RouteMeasurementRunner.SHORT_CHECK_SAMPLE_COUNT,
-                minimum=2,
+                default_check_sample_count=RouteMeasurementRunner.SHORT_CHECK_SAMPLE_COUNT,
+                default_contact_seek_range_mm=RouteMeasurementRunner.AUTO_CONTACT_SEEK_MAX_TOTAL_MM,
+                default_contact_seek_step_mm=RouteMeasurementRunner.AUTO_CONTACT_SEEK_STEP_MM,
+                default_contact_settle_s=RouteMeasurementRunner.DEFAULT_CONTACT_SETTLE_S,
             )
-            measurement_count = self._api_int(
-                payload,
-                "measurement_count",
-                "sample_count",
-                "samples",
-                default=check_sample_count,
-                minimum=check_sample_count,
-            )
-            contact_seek_range_mm = self._api_float(
-                payload,
-                "contact_seek_range_mm",
-                "contact_seek_max_total_mm",
-                "seek_range_mm",
-                default=RouteMeasurementRunner.AUTO_CONTACT_SEEK_MAX_TOTAL_MM,
-                minimum=0.0,
-            )
-            contact_seek_step_mm = self._api_float(
-                payload,
-                "contact_seek_step_mm",
-                "seek_step_mm",
-                default=abs(RouteMeasurementRunner.AUTO_CONTACT_SEEK_STEP_MM),
-                minimum=0.0,
-            )
-            contact_settle_s = self._api_float(
-                payload,
-                "contact_settle_s",
-                "settle_s",
-                default=RouteMeasurementRunner.DEFAULT_CONTACT_SETTLE_S,
-                minimum=0.0,
-            )
-            contact_quality_limits = self._api_contact_quality_limits(payload)
         except ValueError as exc:
-            return {
-                "accepted": False,
-                "status_code": 400,
-                "message": str(exc),
-                "contact": contact,
-            }
-        max_relative_rms = None
-        if any(
-            key in payload
-            for key in ("max_relative_rms", "max_rel_rms", "max_relative_rms_percent")
-        ):
-            try:
-                if "max_relative_rms_percent" in payload:
-                    max_relative_rms = (
-                        self._api_float(
-                            payload,
-                            "max_relative_rms_percent",
-                            default=math.nan,
-                            minimum=0.0,
-                        )
-                        / 100.0
-                    )
-                else:
-                    max_relative_rms = self._api_float(
-                        payload,
-                        "max_relative_rms",
-                        "max_rel_rms",
-                        default=math.nan,
-                        minimum=0.0,
-                    )
-            except ValueError as exc:
-                return {
-                    "accepted": False,
-                    "status_code": 400,
-                    "message": str(exc),
-                    "contact": contact,
-                }
+            return api_current_contact_error_response(
+                str(exc),
+                status_code=400,
+                contact=contact,
+            )
 
         needle_feedrate = self._api_needle_feedrate(payload)
         runner = RouteMeasurementRunner(
@@ -2341,15 +2279,15 @@ class Main(QMainWindow):
             stage_controller=self.stage_controller,
             lcr_controller=self.lcr_controller,
             needle_feedrate=needle_feedrate,
-            measurement_count=measurement_count,
-            initial_measurement_count=check_sample_count,
+            measurement_count=settings.measurement_count,
+            initial_measurement_count=settings.check_sample_count,
             start_point_number=int(point.index),
-            max_relative_rms=max_relative_rms,
-            contact_quality_limits=contact_quality_limits,
+            max_relative_rms=settings.max_relative_rms,
+            contact_quality_limits=settings.contact_quality_limits,
             auto_contact_seek_on_bad_contact=seek,
-            auto_contact_seek_step_mm=contact_seek_step_mm,
-            auto_contact_seek_max_total_mm=contact_seek_range_mm,
-            contact_settle_s=contact_settle_s,
+            auto_contact_seek_step_mm=settings.contact_seek_step_mm,
+            auto_contact_seek_max_total_mm=settings.contact_seek_range_mm,
+            contact_settle_s=settings.contact_settle_s,
             operation_mode=ROUTE_OPERATION_MEASURE,
             status_callback=self.route_measurement_status.emit,
         )
@@ -2360,12 +2298,11 @@ class Main(QMainWindow):
                 else runner.check_contact(point)
             )
         except (StageControllerError, LCRMeterError, RuntimeError) as exc:
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": str(exc),
-                "contact": contact,
-            }
+            return api_current_contact_error_response(
+                str(exc),
+                status_code=409,
+                contact=contact,
+            )
         except Exception as exc:
             prefix = "Contact seek failed" if seek else "Contact check failed"
             logger.exception("API %s.", prefix.lower())
@@ -2374,49 +2311,27 @@ class Main(QMainWindow):
                 exc,
                 contact=contact,
             )
-        record = result.record
-        response = {
-            "accepted": True,
-            "message": result.message,
-            "timestamp_utc": self._api_timestamp_utc(),
-            "contact": contact,
-            "needle_feedrate_mm_min": needle_feedrate,
-            "contact_ok": bool(result.success),
-            "check_sample_count": check_sample_count,
-            "measurement_count": measurement_count,
-            "contact_settle_s": contact_settle_s,
-            "contact_seek_range_mm": contact_seek_range_mm,
-            "contact_seek_step_mm": contact_seek_step_mm,
-            "contact_quality_limits": contact_quality_limits.as_dict(),
-            "measurement": route_api_measurement_record_payload(record),
-            "contact_seek": route_api_contact_seek_payload(result.contact_seek),
-        }
+        response = api_current_contact_response(
+            result,
+            contact=contact,
+            settings=settings,
+            needle_feedrate=needle_feedrate,
+            timestamp_utc=self._api_timestamp_utc(),
+            seek=seek,
+        )
         if seek:
-            contact_seek = result.contact_seek
-            response["contact_found"] = bool(
-                result.success
-                or (
-                    contact_seek is not None
-                    and bool(getattr(contact_seek, "found", False))
-                )
+            alert = api_current_contact_failure_alert(
+                payload,
+                contact_number=contact_number,
+                result=result,
+                reply_markup=self._telegram_route_actions_markup(),
             )
-            if (
-                not bool(response["contact_found"])
-                and self._api_bool(
-                    payload,
-                    "telegram_on_failure",
-                    "telegram_on_seek_failure",
-                    "notify_on_failure",
-                    default=False,
-                )
-            ):
+            if alert is not None:
                 self._send_telegram_alert(
-                    "route_attention",
-                    "Probe route needs attention:\n"
-                    f"Contact seek failed for contact {contact_number}: "
-                    f"{result.message}",
-                    attach_photo=True,
-                    reply_markup=self._telegram_route_actions_markup(),
+                    alert.channel,
+                    alert.text,
+                    attach_photo=alert.attach_photo,
+                    reply_markup=alert.reply_markup,
                 )
         return response
 
@@ -3106,49 +3021,19 @@ class Main(QMainWindow):
         )
 
     def _api_contact_context(self, contact_number: int) -> dict[str, Any]:
-        if self.serial_connection is None or not self.serial_connection.is_open:
-            return {
-                "accepted": False,
-                "status_code": 503,
-                "message": "Serial connection is not available.",
-            }
-        route = self._design_session.route
-        if route is None or not route.points:
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": "Create or load a probe route before using contacts.",
-            }
-        registration = self._design_session.registration
-        if registration is None or not registration.valid:
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": "Design registration is required before using contacts.",
-            }
-        try:
-            points = self._route_measurement_points(route)
-        except DesignModelError as exc:
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": str(exc),
-            }
-        point = self._api_find_contact_point(points, contact_number)
-        if point is None:
-            return {
-                "accepted": False,
-                "status_code": 404,
-                "message": f"Contact {contact_number} is not enabled or not found.",
-            }
-        return {
-            "accepted": True,
-            "point": point,
-            "contact": self._api_measurement_point_payload(
-                point,
-                requested_contact_number=contact_number,
+        return api_contact_context_response(
+            contact_number,
+            serial_available=bool(
+                self.serial_connection is not None and self.serial_connection.is_open
             ),
-        }
+            route=self._design_session.route,
+            registration=self._design_session.registration,
+            points_factory=self._route_measurement_points,
+            point_finder=self._api_find_contact_point,
+            route_offset_xy=getattr(self, "_api_route_offset_xy", (0.0, 0.0)),
+            adjusted_stage_xy=self._api_route_adjusted_stage_xy,
+            structure_number_for_point=self._api_structure_number_for_measurement_point,
+        )
 
     def _api_route_adjusted_stage_xy(
         self,
@@ -3209,52 +3094,6 @@ class Main(QMainWindow):
             "stage_xy": stage_xy,
         }
 
-    def _api_measurement_point_payload(
-        self,
-        point: RouteMeasurementPoint,
-        *,
-        requested_contact_number: int,
-    ) -> dict[str, Any]:
-        return {
-            "contact_number": int(requested_contact_number),
-            "route_index": int(point.index),
-            "structure_number": self._api_structure_number_for_measurement_point(point),
-            "point_id": point.point_id,
-            "label": point.label,
-            "design_center": {
-                "x": float(point.design_center[0]),
-                "y": float(point.design_center[1]),
-            },
-            "stage_xy": {
-                "x_mm": float(point.stage_xy[0]),
-                "y_mm": float(point.stage_xy[1]),
-            },
-            "route_offset_xy": {
-                "dx_mm": float(getattr(self, "_api_route_offset_xy", (0.0, 0.0))[0]),
-                "dy_mm": float(getattr(self, "_api_route_offset_xy", (0.0, 0.0))[1]),
-            },
-            "adjusted_stage_xy": {
-                "x_mm": float(self._api_route_adjusted_stage_xy(point)[0]),
-                "y_mm": float(self._api_route_adjusted_stage_xy(point)[1]),
-            },
-            "needle_contacts": [
-                {
-                    "needle": 1,
-                    "design": {
-                        "x": float(point.needle_1_design[0]),
-                        "y": float(point.needle_1_design[1]),
-                    },
-                },
-                {
-                    "needle": 2,
-                    "design": {
-                        "x": float(point.needle_2_design[0]),
-                        "y": float(point.needle_2_design[1]),
-                    },
-                },
-            ],
-        }
-
     def _api_route_meter_configuration(
         self,
         payload: object,
@@ -3283,15 +3122,8 @@ class Main(QMainWindow):
         *,
         required: bool = True,
     ) -> int | None:
-        for key in ("contact_number", "contact", "point_number", "structure_number"):
-            if key not in payload:
-                continue
-            try:
-                value = int(payload[key])
-            except (TypeError, ValueError):
-                return None
-            return value if value > 0 else None
-        return None if not required else None
+        _ = required
+        return api_contact_number_from_payload(payload)
 
     def _api_needle_feedrate(self, payload: dict[str, Any]) -> float | None:
         for key in ("needle_feedrate_mm_min", "feedrate_mm_min", "feedrate"):
@@ -3382,14 +3214,6 @@ class Main(QMainWindow):
         if minimum is not None and parsed < minimum:
             raise ValueError(f"{keys[0]} must be at least {minimum}.")
         return parsed
-
-    @classmethod
-    def _api_contact_quality_limits(
-        cls,
-        payload: dict[str, Any],
-    ) -> RouteContactQualityLimits:
-        _ = cls
-        return route_contact_quality_limits_from_payload(payload)
 
     @staticmethod
     def _api_structure_number_for_measurement_point(

@@ -41,6 +41,7 @@ from probe_station_gui.dialogs.route_measurement_dialog import (
 )
 from probe_station_gui.route.measurement import (
     RouteExternalMeasurementSessionRunner,
+    RouteContactPlacementResult,
     RouteContactHeightRecord,
     RouteContactQualityLimits,
     RouteContactQuality,
@@ -1007,6 +1008,333 @@ class MainCoordinateFeedrateTest(unittest.TestCase):
         self.assertEqual(response["error_type"], "RuntimeError")
         self.assertIn("Route measurement instrument setup failed", response["message"])
         self.assertIn("Invalid session handle", response["message"])
+
+    def test_api_check_contact_connection_failure_keeps_contact_payload(self) -> None:
+        point = RouteMeasurementPoint(
+            index=7,
+            point_id="p007",
+            label="Pad 107",
+            design_center=(10.0, 20.0),
+            stage_xy=(1.0, 2.0),
+            needle_1_design=(11.0, 21.0),
+            needle_2_design=(9.0, 19.0),
+        )
+        contact = {"contact_number": 7, "label": "Pad 107"}
+        window = Main.__new__(Main)
+        window._api_contact_context = lambda _contact: {
+            "accepted": True,
+            "point": point,
+            "contact": contact,
+        }
+        window._api_ensure_measurement_instrument_connected = lambda: {
+            "accepted": False,
+            "status_code": 409,
+            "message": "Measurement instrument is not connected.",
+        }
+
+        response = Main._api_check_contact(window, {"contact_number": 7})
+
+        self.assertFalse(response["accepted"])
+        self.assertEqual(response["status_code"], 409)
+        self.assertEqual(
+            response["message"],
+            "Measurement instrument is not connected.",
+        )
+        self.assertEqual(response["contact"], contact)
+
+    def test_api_check_contact_invalid_payload_returns_400_after_context_resolution(
+        self,
+    ) -> None:
+        point = RouteMeasurementPoint(
+            index=7,
+            point_id="p007",
+            label="Pad 107",
+            design_center=(10.0, 20.0),
+            stage_xy=(1.0, 2.0),
+            needle_1_design=(11.0, 21.0),
+            needle_2_design=(9.0, 19.0),
+        )
+        contact = {"contact_number": 7, "label": "Pad 107"}
+        context_calls: list[int] = []
+        window = Main.__new__(Main)
+        window._api_contact_context = lambda contact_number: context_calls.append(
+            int(contact_number)
+        ) or {
+            "accepted": True,
+            "point": point,
+            "contact": contact,
+        }
+        window._api_ensure_measurement_instrument_connected = lambda: None
+
+        response = Main._api_check_contact(
+            window,
+            {"contact_number": 7, "measurement_count": "bad"},
+        )
+
+        self.assertEqual(context_calls, [7])
+        self.assertFalse(response["accepted"])
+        self.assertEqual(response["status_code"], 400)
+        self.assertEqual(
+            response["message"],
+            "Invalid integer value for measurement_count.",
+        )
+        self.assertEqual(response["contact"], contact)
+
+    def test_api_measure_current_contact_constructs_runner_with_parsed_settings_for_check_and_seek(
+        self,
+    ) -> None:
+        point = RouteMeasurementPoint(
+            index=7,
+            point_id="p007",
+            label="Pad 107",
+            design_center=(10.0, 20.0),
+            stage_xy=(1.0, 2.0),
+            needle_1_design=(11.0, 21.0),
+            needle_2_design=(9.0, 19.0),
+        )
+        contact = {"contact_number": 7, "label": "Pad 107"}
+        created: list[dict[str, object]] = []
+        calls: list[tuple[str, RouteMeasurementPoint]] = []
+
+        class _FakeRunner:
+            SHORT_CHECK_SAMPLE_COUNT = RouteMeasurementRunner.SHORT_CHECK_SAMPLE_COUNT
+            AUTO_CONTACT_SEEK_MAX_TOTAL_MM = (
+                RouteMeasurementRunner.AUTO_CONTACT_SEEK_MAX_TOTAL_MM
+            )
+            AUTO_CONTACT_SEEK_STEP_MM = (
+                RouteMeasurementRunner.AUTO_CONTACT_SEEK_STEP_MM
+            )
+            DEFAULT_CONTACT_SETTLE_S = (
+                RouteMeasurementRunner.DEFAULT_CONTACT_SETTLE_S
+            )
+
+            def __init__(self, **kwargs) -> None:
+                created.append(dict(kwargs))
+
+            def check_contact(
+                self,
+                selected_point: RouteMeasurementPoint,
+            ) -> RouteContactPlacementResult:
+                calls.append(("check", selected_point))
+                return RouteContactPlacementResult(
+                    success=True,
+                    message="Contact check complete.",
+                    point=selected_point,
+                    record=RouteMeasurementRecord(
+                        timestamp="2026-06-26T10:00:00+00:00",
+                        structure_number=107,
+                        nplc="1",
+                        measurement_type="resistance",
+                        n_measurements=6,
+                        resistance_ohm=123.4,
+                        resistance_rms_ohm=0.5,
+                        relative_rms=0.004,
+                        status="good",
+                    ),
+                    contact_seek=None,
+                )
+
+            def seek_contact(
+                self,
+                selected_point: RouteMeasurementPoint,
+            ) -> RouteContactPlacementResult:
+                calls.append(("seek", selected_point))
+                return RouteContactPlacementResult(
+                    success=True,
+                    message="Contact seek complete.",
+                    point=selected_point,
+                    record=RouteMeasurementRecord(
+                        timestamp="2026-06-26T10:00:01+00:00",
+                        structure_number=107,
+                        nplc="1",
+                        measurement_type="resistance",
+                        n_measurements=6,
+                        resistance_ohm=123.4,
+                        resistance_rms_ohm=0.5,
+                        relative_rms=0.004,
+                        status="good",
+                    ),
+                    contact_seek=RouteContactSeekResult(
+                        found=True,
+                        status="found",
+                        attempts=2,
+                        initial_status="bad_contact",
+                        final_status="good",
+                        depth_below_down_mm=0.001,
+                        axis_a_lowering_mm=1.001,
+                        step_mm=0.001,
+                        max_depth_mm=0.002,
+                    ),
+                )
+
+        window = Main.__new__(Main)
+        window.stage_controller = object()
+        window.lcr_controller = object()
+        window.route_measurement_status = types.SimpleNamespace(emit=lambda _message: None)
+        window._api_contact_context = lambda _contact: {
+            "accepted": True,
+            "point": point,
+            "contact": contact,
+        }
+        window._api_ensure_measurement_instrument_connected = lambda: None
+        window._api_needle_feedrate = lambda _payload: 7.0
+        window._api_timestamp_utc = lambda: "2026-06-26T10:00:00+00:00"
+
+        with mock.patch.object(main_module, "RouteMeasurementRunner", _FakeRunner):
+            check_response = Main._api_check_contact(
+                window,
+                {
+                    "contact_number": 7,
+                    "initial_samples": 3,
+                    "samples": 6,
+                    "seek_range_mm": 0.07,
+                    "seek_step_mm": 0.003,
+                    "settle_s": 0.2,
+                    "max_relative_rms_percent": 1.5,
+                },
+            )
+            seek_response = Main._api_contact_seek(
+                window,
+                {
+                    "contact_number": 7,
+                    "check_sample_count": 4,
+                    "measurement_count": 5,
+                    "contact_seek_range_mm": 0.08,
+                    "contact_seek_step_mm": 0.004,
+                    "contact_settle_s": 0.3,
+                    "max_rel_rms": 0.02,
+                },
+            )
+
+        self.assertEqual(calls, [("check", point), ("seek", point)])
+        self.assertEqual(len(created), 2)
+        self.assertEqual(created[0]["points"], [point])
+        self.assertEqual(created[0]["stage_controller"], window.stage_controller)
+        self.assertEqual(created[0]["lcr_controller"], window.lcr_controller)
+        self.assertEqual(created[0]["needle_feedrate"], 7.0)
+        self.assertEqual(created[0]["measurement_count"], 6)
+        self.assertEqual(created[0]["initial_measurement_count"], 3)
+        self.assertEqual(created[0]["start_point_number"], 7)
+        self.assertEqual(created[0]["max_relative_rms"], 0.015)
+        self.assertFalse(created[0]["auto_contact_seek_on_bad_contact"])
+        self.assertEqual(created[0]["auto_contact_seek_step_mm"], 0.003)
+        self.assertEqual(created[0]["auto_contact_seek_max_total_mm"], 0.07)
+        self.assertEqual(created[0]["contact_settle_s"], 0.2)
+        self.assertEqual(created[1]["measurement_count"], 5)
+        self.assertEqual(created[1]["initial_measurement_count"], 4)
+        self.assertEqual(created[1]["max_relative_rms"], 0.02)
+        self.assertTrue(created[1]["auto_contact_seek_on_bad_contact"])
+        self.assertEqual(created[1]["auto_contact_seek_step_mm"], 0.004)
+        self.assertEqual(created[1]["auto_contact_seek_max_total_mm"], 0.08)
+        self.assertEqual(created[1]["contact_settle_s"], 0.3)
+        self.assertTrue(check_response["accepted"])
+        self.assertIsNone(check_response["contact_seek"])
+        self.assertTrue(seek_response["accepted"])
+        self.assertTrue(seek_response["contact_found"])
+
+    def test_api_contact_seek_failed_seek_sends_route_attention_alert_once(self) -> None:
+        point = RouteMeasurementPoint(
+            index=7,
+            point_id="p007",
+            label="Pad 107",
+            design_center=(10.0, 20.0),
+            stage_xy=(1.0, 2.0),
+            needle_1_design=(11.0, 21.0),
+            needle_2_design=(9.0, 19.0),
+        )
+        contact = {"contact_number": 7, "label": "Pad 107"}
+        alerts: list[tuple[str, str, bool, object]] = []
+
+        class _FakeRunner:
+            SHORT_CHECK_SAMPLE_COUNT = RouteMeasurementRunner.SHORT_CHECK_SAMPLE_COUNT
+            AUTO_CONTACT_SEEK_MAX_TOTAL_MM = (
+                RouteMeasurementRunner.AUTO_CONTACT_SEEK_MAX_TOTAL_MM
+            )
+            AUTO_CONTACT_SEEK_STEP_MM = (
+                RouteMeasurementRunner.AUTO_CONTACT_SEEK_STEP_MM
+            )
+            DEFAULT_CONTACT_SETTLE_S = (
+                RouteMeasurementRunner.DEFAULT_CONTACT_SETTLE_S
+            )
+
+            def __init__(self, **_kwargs) -> None:
+                pass
+
+            def seek_contact(
+                self,
+                selected_point: RouteMeasurementPoint,
+            ) -> RouteContactPlacementResult:
+                return RouteContactPlacementResult(
+                    success=False,
+                    message="Contact seek could not find contact.",
+                    point=selected_point,
+                    record=RouteMeasurementRecord(
+                        timestamp="2026-06-26T10:05:00+00:00",
+                        structure_number=107,
+                        nplc="1",
+                        measurement_type="resistance",
+                        n_measurements=5,
+                        resistance_ohm=200.0,
+                        resistance_rms_ohm=1.0,
+                        relative_rms=0.01,
+                        status="bad_contact",
+                    ),
+                    contact_seek=RouteContactSeekResult(
+                        found=False,
+                        status="not_found",
+                        attempts=3,
+                        initial_status="bad_contact",
+                        final_status="bad_contact",
+                        depth_below_down_mm=0.002,
+                        axis_a_lowering_mm=1.002,
+                        step_mm=0.001,
+                        max_depth_mm=0.002,
+                    ),
+                )
+
+        window = Main.__new__(Main)
+        window.stage_controller = object()
+        window.lcr_controller = object()
+        window.route_measurement_status = types.SimpleNamespace(emit=lambda _message: None)
+        window._api_contact_context = lambda _contact: {
+            "accepted": True,
+            "point": point,
+            "contact": contact,
+        }
+        window._api_ensure_measurement_instrument_connected = lambda: None
+        window._api_needle_feedrate = lambda _payload: 7.0
+        window._api_timestamp_utc = lambda: "2026-06-26T10:05:00+00:00"
+        window._telegram_route_actions_markup = lambda: "actions"
+        window._send_telegram_alert = (
+            lambda key, text, *, attach_photo=False, reply_markup=None: alerts.append(
+                (key, text, bool(attach_photo), reply_markup)
+            )
+        )
+
+        with mock.patch.object(main_module, "RouteMeasurementRunner", _FakeRunner):
+            response = Main._api_contact_seek(
+                window,
+                {
+                    "contact_number": 7,
+                    "telegram_on_failure": True,
+                },
+            )
+
+        self.assertTrue(response["accepted"])
+        self.assertFalse(response["contact_found"])
+        self.assertEqual(
+            alerts,
+            [
+                (
+                    "route_attention",
+                    "Probe route needs attention:\n"
+                    "Contact seek failed for contact 7: "
+                    "Contact seek could not find contact.",
+                    True,
+                    "actions",
+                )
+            ],
+        )
 
     def test_combine_telegram_contact_photos_side_by_side(self) -> None:
         script = r"""
