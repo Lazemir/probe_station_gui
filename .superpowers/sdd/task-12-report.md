@@ -1,0 +1,36 @@
+# Task 12 Report
+
+- status: DONE
+- changed files:
+  - `probe_station_gui/stage/fluidnc_command_channel.py`
+  - `probe_station_gui/stage/jog_queue.py`
+  - `probe_station_gui/views/joystick_window.py`
+  - `probe_station_gui/views/serial_terminal_window.py`
+  - `tests/stage/test_controller.py`
+  - `tests/ui/test_joystick_feedrate.py`
+  - `tests/ui/test_serial_terminal_window.py`
+  - `.superpowers/sdd/task-12-report.md`
+- commit hash(es): recorded in git history for this task commit
+- tests run and exact results:
+  - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\stage\test_controller.py tests\ui\test_joystick_feedrate.py -q` -> `137 passed in 1.00s`
+  - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\ui\test_serial_terminal_window.py -q` -> `3 passed in 0.25s`
+  - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests -q` -> `777 passed, 2 skipped, 7 subtests passed in 10.45s`
+  - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m ruff check --ignore E402,F401 .` -> `All checks passed!`
+- metrics before/after:
+  - Wily:
+    - before build attempt: completed, but historical revisions reported `No data collected` for `raw`, `cyclomatic`, `maintainability`, and `halstead`
+    - after report attempt: `wily report` crashed for the touched files; fallback metrics below were used instead
+  - Radon spot checks:
+    - `probe_station_gui/views/joystick_window.py::JoystickWindow._queue_controller_command` -> before `B (10)`, after `A (3)`
+    - `probe_station_gui/views/serial_terminal_window.py::SerialTerminalWindow.send_control_x` -> before `B (6)`, after `B (6)`
+    - `probe_station_gui/views/serial_terminal_window.py::SerialTerminalWindow.send_current_line` -> before `C (13)`, after `C (13)`
+    - `probe_station_gui/stage/jog_queue.py::StageControllerJogQueueMixin.queue_outbound_command` -> after `A (5)` (new)
+    - `probe_station_gui/stage/fluidnc_command_channel.py::classify_outbound_command` -> after `A (5)` (new)
+  - Lizard spot checks:
+    - `probe_station_gui/views/joystick_window.py::_queue_controller_command` -> before `CCN 10, length 21`, after `CCN 3, length 12`
+    - `probe_station_gui/views/serial_terminal_window.py::send_control_x` -> before `CCN 6, length 27`, after `CCN 6, length 30`
+    - `probe_station_gui/views/serial_terminal_window.py::send_current_line` -> before `CCN 13, length 46`, after `CCN 13, length 46`
+    - `probe_station_gui/stage/jog_queue.py::queue_outbound_command` -> after `CCN 5, length 22` (new)
+    - `probe_station_gui/stage/fluidnc_command_channel.py::classify_outbound_command` -> after `CCN 5, length 12` (new)
+- concerns/residual gaps:
+  - `wily report` crashed when asked to report the touched files in the working tree, so the complexity comparison relies on radon and lizard spot checks.

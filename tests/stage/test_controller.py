@@ -239,6 +239,82 @@ class StageControllerStartupLimitsTest(unittest.TestCase):
         finally:
             controller.shutdown()
 
+    def test_queue_outbound_command_routes_jog_stop(self) -> None:
+        controller = StageController()
+        try:
+            observed: list[tuple[str, object]] = []
+            controller.queue_jog_stop = lambda: observed.append(("jog_stop", None))
+
+            handled = controller.queue_outbound_command(b"\x85")
+
+            self.assertTrue(handled)
+            self.assertEqual(observed, [("jog_stop", None)])
+        finally:
+            controller.shutdown()
+
+    def test_queue_outbound_command_routes_soft_reset_with_source(self) -> None:
+        controller = StageController()
+        try:
+            observed: list[tuple[str, object]] = []
+            controller.queue_soft_reset = lambda *, source="unknown": observed.append(
+                ("soft_reset", source)
+            )
+
+            handled = controller.queue_outbound_command(
+                b"\x18",
+                source="serial_terminal_ctrl_x",
+            )
+
+            self.assertTrue(handled)
+            self.assertEqual(
+                observed,
+                [("soft_reset", "serial_terminal_ctrl_x")],
+            )
+        finally:
+            controller.shutdown()
+
+    def test_queue_outbound_command_routes_jog_command(self) -> None:
+        controller = StageController()
+        try:
+            observed: list[tuple[str, object]] = []
+            controller.queue_jog_command = lambda command: observed.append(
+                ("jog_command", command)
+            )
+
+            handled = controller.queue_outbound_command("$J=G91 G21 X1.000 F10")
+
+            self.assertTrue(handled)
+            self.assertEqual(
+                observed,
+                [("jog_command", "$J=G91 G21 X1.000 F10")],
+            )
+        finally:
+            controller.shutdown()
+
+    def test_queue_outbound_command_routes_manual_terminal_command(self) -> None:
+        controller = StageController()
+        try:
+            observed: list[tuple[str, object]] = []
+            controller.queue_manual_command = lambda command: observed.append(
+                ("manual_command", command)
+            )
+
+            handled = controller.queue_outbound_command("M114")
+
+            self.assertTrue(handled)
+            self.assertEqual(observed, [("manual_command", "M114")])
+        finally:
+            controller.shutdown()
+
+    def test_queue_outbound_command_returns_none_for_unsupported_bytes(self) -> None:
+        controller = StageController()
+        try:
+            handled = controller.queue_outbound_command(b"\x99")
+
+            self.assertIsNone(handled)
+        finally:
+            controller.shutdown()
+
     def test_absolute_axis_move_respects_homed_axis_soft_limit(self) -> None:
         controller = StageController()
         controller._serial = _FakeSerial()

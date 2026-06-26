@@ -291,6 +291,19 @@ class _FakeCombo:
             self.index = len(self.items) - 1
 
 
+class _FakeSerialConnection:
+    def __init__(self) -> None:
+        self.is_open = True
+        self.writes: list[bytes] = []
+        self.flush_count = 0
+
+    def write(self, payload: bytes) -> None:
+        self.writes.append(payload)
+
+    def flush(self) -> None:
+        self.flush_count += 1
+
+
 class JoystickFeedrateTest(unittest.TestCase):
     def test_feed_target_labels_do_not_duplicate_selected_mode(self) -> None:
         labels = [
@@ -638,6 +651,39 @@ class JoystickFeedrateTest(unittest.TestCase):
         self.assertFalse(widget._needle_animation_timer.isActive())
         self.assertFalse(widget.needles_raise_button.checked)
         self.assertIn("#f0b429", widget.needles_raise_button.styles[-1])
+
+    def test_queue_controller_command_delegates_to_stage_controller_channel(self) -> None:
+        widget = JoystickWindow.__new__(JoystickWindow)
+        observed: list[tuple[object, str]] = []
+        widget.stage_controller = types.SimpleNamespace(
+            queue_outbound_command=lambda command, *, source="unknown": (
+                observed.append((command, source)) or True
+            )
+        )
+        widget._show_warning = lambda _message: None
+
+        handled = JoystickWindow._queue_controller_command(widget, "$J=G91 G21 X1.000 F10")
+
+        self.assertTrue(handled)
+        self.assertEqual(
+            observed,
+            [("$J=G91 G21 X1.000 F10", "joystick_reset_button")],
+        )
+
+    def test_send_command_preserves_fallback_for_unsupported_bytes(self) -> None:
+        widget = JoystickWindow.__new__(JoystickWindow)
+        widget.serial_connection = _FakeSerialConnection()
+        widget.stage_controller = types.SimpleNamespace(
+            queue_outbound_command=lambda _command, *, source="unknown": None
+        )
+        widget._show_warning = lambda _message: None
+        widget.set_serial = lambda _serial: None
+
+        sent = JoystickWindow.send_command(widget, b"\x99")
+
+        self.assertTrue(sent)
+        self.assertEqual(widget.serial_connection.writes, [b"\x99"])
+        self.assertEqual(widget.serial_connection.flush_count, 1)
 
 
 if __name__ == "__main__":

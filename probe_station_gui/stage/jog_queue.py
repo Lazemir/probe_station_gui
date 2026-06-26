@@ -11,6 +11,7 @@ from probe_station_gui.stage.feed_override import (
     feed_override_payload_for_percent_change,
     feed_override_percent_for_feedrates,
 )
+from probe_station_gui.stage.fluidnc_command_channel import classify_outbound_command
 from probe_station_gui.stage.jog_commands import (
     absolute_axis_targets_jog_command,
     jog_command_feedrate,
@@ -26,6 +27,29 @@ logger = logging.getLogger(__name__)
 
 class StageControllerJogQueueMixin:
     """Internal jog parsing, feed override, and async queue entry points."""
+
+    def queue_outbound_command(
+        self,
+        command: str | bytes,
+        *,
+        source: str = "unknown",
+    ) -> bool | None:
+        """Route a UI-originated outbound FluidNC command through controller-owned paths."""
+
+        kind = classify_outbound_command(command)
+        if kind == "jog_stop":
+            self.queue_jog_stop()
+            return True
+        if kind == "soft_reset":
+            self.queue_soft_reset(source=source)
+            return True
+        if kind == "jog_command":
+            self.queue_jog_command(command)
+            return True
+        if kind == "manual_command":
+            self.queue_manual_command(command)
+            return True
+        return None
 
     def queue_jog_command(self, command: str) -> None:
         """Queue the latest jog command for asynchronous serial delivery."""

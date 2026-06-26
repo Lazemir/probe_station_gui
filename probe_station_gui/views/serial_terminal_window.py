@@ -148,7 +148,10 @@ class SerialTerminalWindow(QWidget):
             return
         if self.stage_controller is not None:
             try:
-                self.stage_controller.queue_soft_reset(source="serial_terminal_ctrl_x")
+                self.stage_controller.queue_outbound_command(
+                    b"\x18",
+                    source="serial_terminal_ctrl_x",
+                )
             except Exception as error:  # pragma: no cover - UI safety guard
                 self._append_system_message(str(error))
                 return
@@ -181,7 +184,7 @@ class SerialTerminalWindow(QWidget):
             return
         if self.stage_controller is not None:
             try:
-                self.stage_controller.queue_manual_command(text)
+                self.stage_controller.queue_outbound_command(text)
             except Exception as error:  # pragma: no cover - UI safety guard
                 self._append_system_message(str(error))
                 self.input_edit.selectAll()

@@ -2330,23 +2330,14 @@ class JoystickWindow(QWidget):
         if self.stage_controller is None:
             return None
         try:
-            if isinstance(command, bytes) and command == b"\x85":
-                self.stage_controller.queue_jog_stop()
-                return True
-            if isinstance(command, bytes) and command == b"\x18":
-                self.stage_controller.queue_soft_reset(source="joystick_reset_button")
-                return True
-            if isinstance(command, str) and command.startswith("$J="):
-                self.stage_controller.queue_jog_command(command)
-                return True
-            if isinstance(command, str):
-                self.stage_controller.queue_manual_command(command)
-                return True
+            return self.stage_controller.queue_outbound_command(
+                command,
+                source="joystick_reset_button",
+            )
         except Exception as error:  # pragma: no cover - UI safety guard
             self._show_warning(str(error))
             logger.exception("Failed to queue controller command: %s", error)
             return False
-        return None
 
     @staticmethod
     def _log_serial_write_timing(command: str | bytes, phase: str) -> None:
