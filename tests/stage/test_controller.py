@@ -419,6 +419,24 @@ class _LineFakeSerial(_WritableFakeSerial):
         return b""
 
 
+class _SwappingLineFakeSerial(_LineFakeSerial):
+    def __init__(self, lines: list[bytes], on_write) -> None:
+        super().__init__(lines)
+        self._on_write = on_write
+
+    def write(self, payload: bytes) -> None:
+        super().write(payload)
+        self._on_write(payload)
+
+
+class _RejectingSerial(_WritableFakeSerial):
+    def write(self, payload: bytes) -> None:
+        raise AssertionError(f"replacement serial used for {payload!r}")
+
+    def readline(self) -> bytes:
+        raise AssertionError("replacement serial read")
+
+
 class _TrackingLock:
     def __init__(self) -> None:
         self.depth = 0
@@ -1398,6 +1416,37 @@ class StageControllerAutofocusTest(unittest.TestCase):
             self.assertIs(controller._current_serial(), original)
 
         self.assertIs(controller._current_serial(), replacement)
+
+    def test_absolute_motion_sync_keeps_config_io_on_captured_serial(self) -> None:
+        controller = StageController()
+        replacement = _RejectingSerial()
+
+        def swap_after_status_mask(payload: bytes) -> None:
+            if payload == b"$10=2\n":
+                controller._serial = replacement
+
+        original = _SwappingLineFakeSerial(
+            [
+                b"ok\n",
+                b"[GC:G1 G54 G17 G21 G90]\n",
+                b"ok\n",
+                b"[G54:0.000,0.000,0.000,0.000,0.000]\n",
+                b"ok\n",
+                b"<Idle|WPos:1.000,2.000,3.000,0.000|WCO:0.000,0.000,0.000,0.000|H:XYZA>\n",
+            ],
+            swap_after_status_mask,
+        )
+        controller._serial = original
+
+        with controller._serial_session_lock:
+            status = controller._query_synced_status_for_absolute_motion(min_axes=2)
+
+        self.assertIsNotNone(status)
+        self.assertEqual(
+            original.writes,
+            [b"$10=2\n", b"$G\n", b"$#\n", b"?\n"],
+        )
+        self.assertEqual(replacement.writes, [])
 
 
 class StageControllerObjectiveTest(unittest.TestCase):
@@ -3446,6 +3495,56 @@ class StageControllerStatusRefreshTest(unittest.TestCase):
 
 
 class StageControllerStartupSyncTest(unittest.TestCase):
+    def test_startup_sync_keeps_config_io_on_captured_serial(self) -> None:
+        controller = StageController()
+        replacement = _RejectingSerial()
+
+        def swap_after_config_dump(payload: bytes) -> None:
+            if payload == b"$CD\n":
+                controller._serial = replacement
+
+        original = _SwappingLineFakeSerial(
+            [
+                b"axes:\n",
+                b"  x:\n",
+                b"    max_rate_mm_per_min: 500\n",
+                b"  z:\n",
+                b"    max_rate_mm_per_min: 100\n",
+                b"  a:\n",
+                b"    max_rate_mm_per_min: 80\n",
+                b"ok\n",
+                b"[MSG:INFO: Axis X (0.000,64.000)]\n",
+                b"[MSG:INFO: Axis Y (0.000,64.000)]\n",
+                b"[MSG:INFO: Axis Z (0.000,23.000)]\n",
+                b"[MSG:INFO: Axis A (-5.500,0.000)]\n",
+                b"ok\n",
+                b"ok\n",
+                b"[GC:G1 G54 G17 G21 G90]\n",
+                b"ok\n",
+                b"[G54:0.000,0.000,0.000,0.000,0.000]\n",
+                b"ok\n",
+                b"<Idle|WPos:1.000,2.000,3.000,0.000|WCO:0.000,0.000,0.000,0.000|H:XYZA>\n",
+            ],
+            swap_after_config_dump,
+        )
+        controller._serial = original
+        controller._ensure_controller_session_marker = lambda: None
+        positions = []
+        controller.stage_position_changed = types.SimpleNamespace(
+            emit=lambda position: positions.append(position)
+        )
+
+        controller._run_startup_sync(auto_home_a=True)
+
+        self.assertEqual(
+            original.writes,
+            [b"$CD\n", b"$Startup/Show\n", b"$10=2\n", b"$G\n", b"$#\n", b"?\n"],
+        )
+        self.assertEqual(replacement.writes, [])
+        self.assertEqual(controller._axis_max_feedrates["X"], 500.0)
+        self.assertEqual(controller._axis_limits["Z"], (0.0, 23.0))
+        self.assertEqual(positions[-1], (1.0, 2.0, 3.0, 0.0))
+
     def test_startup_sync_homes_a_when_not_reported_homed(self) -> None:
         controller = StageController()
         controller._serial = _FakeSerial()

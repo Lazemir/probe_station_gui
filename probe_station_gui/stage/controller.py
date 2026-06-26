@@ -956,26 +956,27 @@ class StageController(
         """Refresh coordinate-system state before absolute position reads and moves."""
 
         serial_connection = self._current_serial()
-        if not refresh_coordinate_state:
-            state_was_stale = self._controller_state_stale
-            status = self._query_status_with_required_coordinates(
+        with self._serial_session(serial_connection):
+            if not refresh_coordinate_state:
+                state_was_stale = self._controller_state_stale
+                status = self._query_status_with_required_coordinates(
+                    serial_connection,
+                    axes=axes,
+                    min_axes=min_axes,
+                )
+                if (
+                    status is not None
+                    and not state_was_stale
+                ):
+                    return status
+
+            if self._position_reporting_mode != "machine" or self._controller_state_stale:
+                self._refresh_coordinate_system_state(apply_preference=True)
+            return self._query_status_with_required_coordinates(
                 serial_connection,
                 axes=axes,
                 min_axes=min_axes,
             )
-            if (
-                status is not None
-                and not state_was_stale
-            ):
-                return status
-
-        if self._position_reporting_mode != "machine" or self._controller_state_stale:
-            self._refresh_coordinate_system_state(apply_preference=True)
-        return self._query_status_with_required_coordinates(
-            serial_connection,
-            axes=axes,
-            min_axes=min_axes,
-        )
 
     def _update_cached_positions(self, status: _Status) -> None:
         if status.coordinate_system:

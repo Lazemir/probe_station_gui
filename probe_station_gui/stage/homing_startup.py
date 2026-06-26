@@ -97,7 +97,7 @@ class StageControllerHomingStartupMixin:
             serial_connection = self._require_open_serial()
 
             self.status_message.emit("Loading controller startup state...")
-            with self._serial_session_lock:
+            with self._serial_session(serial_connection):
                 axis_feedrates = dict(self._axis_max_feedrates)
                 if axis_feedrates:
                     logger.info(
@@ -145,7 +145,7 @@ class StageControllerHomingStartupMixin:
                 self.homing_action_started.emit("A")
                 try:
                     self.status_message.emit("A axis not homed. Homing needles on startup.")
-                    with self._serial_session():
+                    with self._serial_session(serial_connection):
                         self._perform_home_command("$HA")
                     self.movement_finished.emit(True, "Startup A homing complete.")
                     self.homing_action_finished.emit(
@@ -155,7 +155,7 @@ class StageControllerHomingStartupMixin:
                     self.movement_finished.emit(False, str(exc))
                     self.homing_action_finished.emit(False, str(exc), "A")
                     raise
-            with self._serial_session_lock:
+            with self._serial_session(serial_connection):
                 self._ensure_controller_session_marker()
             if self._last_stage_position is not None:
                 self.stage_position_changed.emit(tuple(self._last_stage_position))

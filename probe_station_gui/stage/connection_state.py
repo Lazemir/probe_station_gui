@@ -30,8 +30,13 @@ class StageControllerConnectionMixin:
         return serial_connection
 
     @contextmanager
-    def _serial_session(self) -> Iterator[serial.Serial]:
-        serial_connection = self._require_open_serial()
+    def _serial_session(
+        self, serial_connection: Optional[serial.Serial] = None
+    ) -> Iterator[serial.Serial]:
+        if serial_connection is None:
+            serial_connection = self._require_open_serial()
+        elif not serial_connection.is_open:
+            raise StageControllerError("Serial connection is not available.")
         with self._serial_session_lock:
             stack = getattr(self._serial_session_state, "serial_stack", None)
             if stack is None:
