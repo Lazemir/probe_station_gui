@@ -8,6 +8,7 @@ from setuptools import find_packages
 
 
 ROOT = Path(__file__).resolve().parents[2]
+GUI_PACKAGE_ROOT = ROOT / "probe_station_gui"
 
 
 PUBLIC_IMPORT_PATHS = [
@@ -48,6 +49,15 @@ def _configured_packages() -> set[str]:
     return discovered
 
 
+def _root_compatibility_wrapper_imports() -> list[str]:
+    return [
+        f"probe_station_gui.{path.stem}"
+        for path in sorted(GUI_PACKAGE_ROOT.glob("*.py"))
+        if path.name != "__init__.py"
+        and "Compatibility wrapper" in path.read_text(encoding="utf-8")
+    ]
+
+
 def test_public_import_paths_remain_available() -> None:
     for module_name in PUBLIC_IMPORT_PATHS:
         importlib.import_module(module_name)
@@ -71,6 +81,14 @@ def test_public_import_paths_remain_available() -> None:
     assert JogSettingsWidget.__name__ == "JogSettingsWidget"
     assert KeyBindingListEditor.__name__ == "KeyBindingListEditor"
     assert KeyCaptureDialog.__name__ == "KeyCaptureDialog"
+
+
+def test_root_compatibility_wrappers_remain_importable() -> None:
+    wrapper_modules = _root_compatibility_wrapper_imports()
+
+    assert wrapper_modules
+    for module_name in wrapper_modules:
+        importlib.import_module(module_name)
 
 
 def test_packaging_includes_all_source_packages() -> None:
