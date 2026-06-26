@@ -187,6 +187,7 @@ from probe_station_gui.route.confirmation_flow import (
     route_confirmation_submission_plan,
 )
 from probe_station_gui.route.dialog_adapter import (
+    RouteDialogRuntimeSink,
     current_route_measurement_configuration,
     open_or_update_route_measurement_dialog,
     route_dialog_handlers,
@@ -2184,20 +2185,19 @@ class Main(QMainWindow):
             self.design_navigator_panel.set_route_measurement_waiting(
                 ui_state.waiting,
                 reason=ui_state.control_waiting_reason,
-            )
-            self.design_navigator_panel.set_route_measurement_status(message)
-        if self._route_measurement_dialog is not None:
-            self._route_measurement_dialog.set_running(ui_state.active)
-            if hasattr(self._route_measurement_dialog, "set_pause_request_pending"):
-                self._route_measurement_dialog.set_pause_request_pending(
-                    ui_state.pause_pending
                 )
-            self._route_measurement_dialog.set_waiting(
-                ui_state.waiting,
-                reason=ui_state.control_waiting_reason,
-            )
-            self._route_measurement_dialog.set_status(message)
+            self.design_navigator_panel.set_route_measurement_status(message)
+        self._route_dialog_runtime_sink().apply_api_control_update(ui_state, message)
         self._show_status(message, 5000)
+
+    def _route_dialog_runtime_sink(self) -> RouteDialogRuntimeSink:
+        sink = getattr(self, "_route_dialog_runtime", None)
+        if sink is None:
+            sink = RouteDialogRuntimeSink(
+                lambda: getattr(self, "_route_measurement_dialog", None)
+            )
+            self._route_dialog_runtime = sink
+        return sink
 
     def _api_measure_current_contact(
         self,
@@ -7657,8 +7657,8 @@ class Main(QMainWindow):
                 preflight.telegram_failure_text,
                 attach_photo=preflight.attach_failure_photo,
             )
-        if preflight.dialog_status and self._route_measurement_dialog is not None:
-            self._route_measurement_dialog.set_status(preflight.message)
+        if preflight.dialog_status:
+            self._route_dialog_runtime_sink().set_status(preflight.message)
         return False
 
     def _route_measurement_photo_preflight(
@@ -7707,9 +7707,9 @@ class Main(QMainWindow):
         except LCRMeterError as exc:
             message = f"Route measurement instrument setup failed: {exc}"
             self._show_status(message, 8000)
-            if self._route_measurement_dialog is not None:
-                self._route_measurement_dialog.set_running(False)
-                self._route_measurement_dialog.set_status(message)
+            sink = self._route_dialog_runtime_sink()
+            sink.set_running(False)
+            sink.set_status(message)
             return None
         return self.lcr_controller
 
@@ -7835,10 +7835,10 @@ class Main(QMainWindow):
             self.design_navigator_panel.set_route_measurement_status(
                 start_message
             )
-        if self._route_measurement_dialog is not None:
-            self._route_measurement_dialog.set_running(True)
-            self._route_measurement_dialog.reset_progress(point_count)
-            self._route_measurement_dialog.set_status(start_message)
+        self._route_dialog_runtime_sink().route_runner_started(
+            start_message,
+            point_count,
+        )
         self._show_status(start_message)
         self._last_route_measurement_result = None
         if launch_state.send_start_telegram:
@@ -7881,8 +7881,7 @@ class Main(QMainWindow):
         timeout_ms: int = 5000,
     ) -> None:
         self._show_status(message, timeout_ms)
-        if self._route_measurement_dialog is not None:
-            self._route_measurement_dialog.set_status(message)
+        self._route_dialog_runtime_sink().set_status(message)
 
     def _route_measurement_points(
         self,
@@ -8366,14 +8365,12 @@ class Main(QMainWindow):
                 reason=waiting_reason,
             )
             self.design_navigator_panel.set_route_measurement_status(message)
-        if self._route_measurement_dialog is not None:
-            self._route_measurement_dialog.set_running(True)
-            self._route_measurement_dialog.set_waiting(
-                waiting,
-                reason=waiting_reason,
-            )
-            self._route_measurement_dialog.reset_progress(total_points)
-            self._route_measurement_dialog.set_status(message)
+        self._route_dialog_runtime_sink().route_started(
+            message,
+            total_points,
+            waiting=waiting,
+            waiting_reason=waiting_reason,
+        )
         self._show_status(message)
         self._update_stage_coordinate_apply_state()
 
@@ -8394,11 +8391,9 @@ class Main(QMainWindow):
             self.design_navigator_panel.set_route_measurement_status(
                 "Stopping route measurement."
             )
-        if self._route_measurement_dialog is not None:
-            self._route_measurement_dialog.set_waiting(False)
-            self._route_measurement_dialog.set_status(
-                "Stopping route measurement."
-            )
+        self._route_dialog_runtime_sink().stop_requested(
+            "Stopping route measurement."
+        )
 
     def _show_route_measurement_status(
         self,
@@ -8411,8 +8406,7 @@ class Main(QMainWindow):
             self._show_status(message, timeout_ms)
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_route_measurement_status(message)
-        if self._route_measurement_dialog is not None:
-            self._route_measurement_dialog.set_status(message)
+        self._route_dialog_runtime_sink().set_status(message)
 
     def _request_route_measurement_point_correction(
         self,
@@ -8476,8 +8470,7 @@ class Main(QMainWindow):
             self._pending_route_measure_point = None
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_route_measurement_waiting(False)
-        if self._route_measurement_dialog is not None:
-            self._route_measurement_dialog.set_waiting(False)
+        self._route_dialog_runtime_sink().set_waiting(False)
         self._show_status(f"Route measurement: {confirmation.status_label}.")
 
     def _apply_route_measurement_confirmation_runtime(self, runner):
@@ -8527,7 +8520,7 @@ class Main(QMainWindow):
             except LCRMeterError as exc:
                 message = f"Route measurement instrument setup failed: {exc}"
                 self._show_status(message, 8000)
-                self._route_measurement_dialog.set_status(message)
+                self._route_dialog_runtime_sink().set_status(message)
                 return None
         return runner
 
@@ -8653,13 +8646,7 @@ class Main(QMainWindow):
                     True
                 )
             self.design_navigator_panel.set_route_measurement_status(message)
-        if self._route_measurement_dialog is not None:
-            if hasattr(
-                self._route_measurement_dialog,
-                "set_pause_request_pending",
-            ):
-                self._route_measurement_dialog.set_pause_request_pending(True)
-            self._route_measurement_dialog.set_status(message)
+        self._route_dialog_runtime_sink().pause_requested(message)
 
     def _save_route_measurement_shift(self, point_number: int | None = None) -> None:
         runner = self._route_measurement_runner
@@ -8792,8 +8779,7 @@ class Main(QMainWindow):
 
     def _show_route_shift_status(self, message: str, timeout_ms: int) -> None:
         self._show_status(message, timeout_ms)
-        if self._route_measurement_dialog is not None:
-            self._route_measurement_dialog.set_status(message)
+        self._route_dialog_runtime_sink().set_status(message)
 
     def _apply_route_shift_save_status(
         self,
@@ -8810,13 +8796,10 @@ class Main(QMainWindow):
                     True
                 )
             self.design_navigator_panel.set_route_measurement_status(message)
-        if self._route_measurement_dialog is not None:
-            if status_plan.mark_interrupt_pending and hasattr(
-                self._route_measurement_dialog,
-                "set_interrupt_request_pending",
-            ):
-                self._route_measurement_dialog.set_interrupt_request_pending(True)
-            self._route_measurement_dialog.set_status(message)
+        self._route_dialog_runtime_sink().shift_status(
+            message,
+            mark_interrupt_pending=status_plan.mark_interrupt_pending,
+        )
 
     def _interrupt_route_measurement_runner(
         self,
@@ -8845,8 +8828,7 @@ class Main(QMainWindow):
             self._send_route_attention_alert(message)
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_route_measurement_status(message)
-        if self._route_measurement_dialog is not None:
-            self._route_measurement_dialog.set_status(message)
+        self._route_dialog_runtime_sink().set_status(message)
 
     def _on_route_measurement_progress(
         self,
@@ -8855,12 +8837,11 @@ class Main(QMainWindow):
         point_number: int,
     ) -> None:
         self._set_route_measurement_resume_point(point_number)
-        if self._route_measurement_dialog is not None:
-            self._route_measurement_dialog.set_progress(
-                position,
-                total,
-                point_number,
-            )
+        self._route_dialog_runtime_sink().set_progress(
+            position,
+            total,
+            point_number,
+        )
 
     def _on_route_measurement_current_point_changed(self, point_number: int) -> None:
         self._set_route_measurement_resume_point(point_number)
@@ -8879,11 +8860,10 @@ class Main(QMainWindow):
                 waiting,
                 reason=waiting_reason,
             )
-        if self._route_measurement_dialog is not None:
-            self._route_measurement_dialog.set_waiting(
-                waiting,
-                reason=waiting_reason,
-            )
+        self._route_dialog_runtime_sink().set_waiting(
+            waiting,
+            reason=waiting_reason,
+        )
         if not self._route_measurement_waiting:
             return
         pending_point_number = self._pending_route_measure_point
@@ -8923,13 +8903,12 @@ class Main(QMainWindow):
             int(total),
             bool(saved),
         )
-        if self._route_measurement_dialog is not None:
-            self._route_measurement_dialog.set_result(
-                record,
-                position,
-                total,
-                saved,
-            )
+        self._route_dialog_runtime_sink().set_result(
+            record,
+            position,
+            total,
+            saved,
+        )
         pending_contact_photos = self._take_pending_telegram_contact_photos()
         if pending_contact_photos is not None:
             before_photo, after_photo = pending_contact_photos
@@ -8952,8 +8931,7 @@ class Main(QMainWindow):
             self._show_status(message, 8000)
             if self.design_navigator_panel is not None:
                 self.design_navigator_panel.set_route_measurement_status(message)
-            if self._route_measurement_dialog is not None:
-                self._route_measurement_dialog.set_status(message)
+            self._route_dialog_runtime_sink().set_status(message)
 
     @staticmethod
     def _route_record_needs_contact_attention(
@@ -9027,8 +9005,7 @@ class Main(QMainWindow):
         self._show_status(message)
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_route_measurement_status(message)
-        if self._route_measurement_dialog is not None:
-            self._route_measurement_dialog.set_status(message)
+        self._route_dialog_runtime_sink().set_status(message)
         next_point_number = self._route_measurement_next_point_number(position)
         if next_point_number is not None:
             self._set_route_measurement_resume_point(next_point_number)
@@ -9171,10 +9148,7 @@ class Main(QMainWindow):
             self.design_navigator_panel.set_route_measurement_running(False)
             self.design_navigator_panel.set_route_measurement_waiting(False)
             self.design_navigator_panel.set_route_measurement_status(message)
-        if self._route_measurement_dialog is not None:
-            self._route_measurement_dialog.set_running(False)
-            self._route_measurement_dialog.finish_progress(success)
-            self._route_measurement_dialog.set_status(message)
+        self._route_dialog_runtime_sink().finished_ui(success, message)
 
     def _send_route_finish_telegram(
         self,
@@ -9235,10 +9209,8 @@ class Main(QMainWindow):
             return
         self._route_measurement_current_point = value
         self._select_route_point_for_measurement(value)
-        if self._route_measurement_dialog is not None:
-            self._route_measurement_dialog.set_current_point(value)
-            return
-        self._save_route_measurement_current_point(value)
+        if not self._route_dialog_runtime_sink().set_current_point(value):
+            self._save_route_measurement_current_point(value)
 
     def _select_route_point_for_measurement(self, point_number: int) -> None:
         route = self._design_session.route
@@ -9267,10 +9239,10 @@ class Main(QMainWindow):
 
     def _set_route_measurement_pending(self, pending: bool) -> None:
         self._route_measurement_session_active = bool(pending)
-        if self._route_measurement_dialog is not None:
-            self._route_measurement_dialog.set_measurement_session_active(bool(pending))
-            return
-        self._save_route_measurement_pending(bool(pending))
+        if not self._route_dialog_runtime_sink().set_measurement_session_active(
+            bool(pending)
+        ):
+            self._save_route_measurement_pending(bool(pending))
 
     def _save_route_measurement_pending(self, pending: bool) -> None:
         try:
@@ -10585,7 +10557,7 @@ class Main(QMainWindow):
     def _close_auxiliary_windows(self, *, force_route_dialog: bool = False) -> None:
         if self._route_measurement_dialog is not None:
             if force_route_dialog:
-                self._route_measurement_dialog.set_running(False)
+                self._route_dialog_runtime_sink().set_running(False)
             self._route_measurement_dialog.close()
         if self.design_layout_window is not None:
             self.design_layout_window.close()
