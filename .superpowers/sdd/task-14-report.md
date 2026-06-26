@@ -13,7 +13,7 @@ DONE
 
 ## Commit Hashes
 
-- Pending final commit.
+- `e7ab130` - Extract route adjustment flow planning.
 
 ## Tests Run
 
