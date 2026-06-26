@@ -1,6 +1,7 @@
 import pytest
 import types
 
+import probe_station_gui.route.session_start as session_start_module
 from probe_station_gui.design.model import DesignModelError
 from probe_station_gui.route.session_start import (
     DEFAULT_EXTERNAL_SESSION_FOLLOWUP_MEASUREMENT_COUNT,
@@ -14,6 +15,12 @@ from probe_station_gui.route.session_start import (
     route_max_relative_rms_from_payload,
 )
 from probe_station_gui.route.measurement_records import RouteMeasurementPoint
+
+
+def _new_helper(name: str):
+    helper = getattr(session_start_module, name, None)
+    assert helper is not None
+    return helper
 
 
 def test_route_external_session_start_settings_apply_defaults() -> None:
@@ -383,3 +390,125 @@ def test_route_launch_presentation_formats_gui_messages_and_remaining_count() ->
     )
     assert waiting.message == "Preparing route measurement: point 7 P007; 2 points selected."
     assert api_ready.message == "Route API session ready at point 7 P007; 3 points selected."
+
+
+def test_gui_route_start_availability_preserves_rejection_messages() -> None:
+    start_availability = _new_helper("gui_route_start_availability")
+    active = start_availability(
+        route_thread_active=True,
+        serial_connected=True,
+    )
+    disconnected = start_availability(
+        route_thread_active=False,
+        serial_connected=False,
+    )
+
+    assert active.accepted is False
+    assert active.message == "Route measurement is already active."
+    assert active.timeout_ms == 4000
+    assert disconnected.accepted is False
+    assert disconnected.message == "Connect the stage controller before measuring a route."
+    assert disconnected.timeout_ms == 5000
+
+
+def test_gui_route_start_preflight_requires_scale_only_for_photo_routes() -> None:
+    start_preflight = _new_helper("gui_route_start_preflight")
+    photo = start_preflight(
+        photo_enabled=True,
+        photo_autofocus_enabled=False,
+        wait_before_first_point=False,
+        objective_scale_available=False,
+    )
+    measure_autofocus = start_preflight(
+        photo_enabled=False,
+        photo_autofocus_enabled=True,
+        wait_before_first_point=False,
+        objective_scale_available=False,
+    )
+
+    assert photo.accepted is False
+    assert (
+        photo.message
+        == "Calibrate click-to-move for the active objective before saving "
+        "microscope photos with a scale bar."
+    )
+    assert photo.timeout_ms == 8000
+    assert photo.dialog_status is True
+    assert measure_autofocus.accepted is True
+    assert measure_autofocus.check_camera_frame is True
+
+
+def test_gui_route_camera_frame_preflight_formats_photo_and_autofocus_failures() -> None:
+    camera_frame_preflight = _new_helper("gui_route_camera_frame_preflight")
+    photo = camera_frame_preflight(
+        photo_enabled=True,
+        photo_autofocus_enabled=False,
+        camera_frame_available=False,
+    )
+    autofocus = camera_frame_preflight(
+        photo_enabled=False,
+        photo_autofocus_enabled=True,
+        camera_frame_available=False,
+    )
+
+    assert photo.accepted is False
+    assert photo.message == "Camera frame is unavailable; cannot capture route photos."
+    assert photo.telegram_failure_text == (
+        "Probe route could not start:\n"
+        "Camera frame is unavailable; cannot capture route photos."
+    )
+    assert autofocus.accepted is False
+    assert autofocus.message == "Camera frame is unavailable; cannot autofocus route points."
+    assert autofocus.telegram_failure_text == (
+        "Probe route could not start:\n"
+        "Camera frame is unavailable; cannot autofocus route points."
+    )
+
+
+def test_gui_route_launch_state_combines_mode_flags_presentation_and_telegram() -> None:
+    points = [
+        RouteMeasurementPoint(
+            index=1,
+            point_id="p001",
+            label="P001",
+            design_center=(0.0, 0.0),
+            stage_xy=(1.0, 1.0),
+            needle_1_design=(0.0, 0.0),
+            needle_2_design=(0.0, 0.0),
+        ),
+        RouteMeasurementPoint(
+            index=2,
+            point_id="p002",
+            label="P002",
+            design_center=(10.0, 20.0),
+            stage_xy=(2.0, 3.0),
+            needle_1_design=(10.0, 20.0),
+            needle_2_design=(10.0, 20.0),
+        ),
+    ]
+
+    launch_state = _new_helper("gui_route_launch_state")
+    immediate = launch_state(
+        operation_mode="photo_then_measure",
+        points=points,
+        selected_point=points[1],
+        wait_before_first_point=False,
+        previous_ok_skipped_count=1,
+    )
+    waiting = launch_state(
+        operation_mode="photo",
+        points=points,
+        selected_point=points[1],
+        wait_before_first_point=True,
+        previous_ok_skipped_count=None,
+    )
+
+    assert immediate.photo_enabled is True
+    assert immediate.measure_enabled is True
+    assert immediate.send_start_telegram is True
+    assert immediate.presentation.point_numbers == [1, 2]
+    assert "Previous filter skipped 1 points." in immediate.presentation.message
+    assert waiting.photo_enabled is True
+    assert waiting.measure_enabled is False
+    assert waiting.send_start_telegram is False
+    assert waiting.presentation.message == "Preparing route measurement: point 2 P002; 1 points selected."

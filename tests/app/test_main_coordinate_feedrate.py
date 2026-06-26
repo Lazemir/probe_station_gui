@@ -136,6 +136,7 @@ class _FakeVisibleDialog:
         self.running: list[bool] = []
         self.waiting: list[tuple[bool, str]] = []
         self.statuses: list[str] = []
+        self.progress: list[int] = []
 
     def isVisible(self) -> bool:  # noqa: N802 - Qt naming
         return self.visible
@@ -151,6 +152,9 @@ class _FakeVisibleDialog:
 
     def set_status(self, message: str) -> None:
         self.statuses.append(str(message))
+
+    def reset_progress(self, total: int) -> None:
+        self.progress.append(int(total))
 
 
 class _FakeRouteMeasurementRunner:
@@ -444,6 +448,152 @@ def _make_main(current_feedrate: float = 120.0) -> tuple[
     )
     window._design_xy_from_raw_stage_xy = lambda _stage_xy: None
     return window, stage_controller, joystick, timer, statuses
+
+
+class _RouteStartEmit:
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, ...]] = []
+
+    def emit(self, *args: object) -> None:
+        self.calls.append(tuple(args))
+
+
+class _RouteStartLcr:
+    def __init__(
+        self,
+        *,
+        connected: bool = True,
+        error: main_module.LCRMeterError | None = None,
+    ) -> None:
+        self.connected = bool(connected)
+        self.error = error
+        self.configurations: list[RouteMeterConfiguration] = []
+        self.runtime_configurations: list[RouteMeterConfiguration] = []
+
+    def is_connected(self) -> bool:
+        return self.connected
+
+    def apply_route_meter_configuration(
+        self,
+        configuration: RouteMeterConfiguration,
+    ) -> None:
+        if self.error is not None:
+            raise self.error
+        self.configurations.append(configuration)
+
+    def apply_route_meter_runtime_configuration(
+        self,
+        configuration: RouteMeterConfiguration,
+    ) -> None:
+        if self.error is not None:
+            raise self.error
+        self.runtime_configurations.append(configuration)
+
+
+def _route_start_point() -> RouteMeasurementPoint:
+    return RouteMeasurementPoint(
+        index=1,
+        point_id="p001",
+        label="P001",
+        design_center=(100.0, 200.0),
+        stage_xy=(1.0, 2.0),
+        needle_1_design=(101.0, 201.0),
+        needle_2_design=(99.0, 199.0),
+    )
+
+
+def _route_start_configuration(
+    *,
+    operation_mode: str = route_measurement_dialog_module.ROUTE_OPERATION_MEASURE,
+    photo_autofocus_enabled: bool = False,
+) -> RouteMeasurementRunConfiguration:
+    return RouteMeasurementRunConfiguration(
+        csv_path="route.csv",
+        previous_csv_path="route.csv",
+        operation_mode=operation_mode,
+        photo_output_dir="photos",
+        photo_settle_s=0.0,
+        photo_autofocus_enabled=photo_autofocus_enabled,
+        photo_autofocus_range_mm=0.03,
+        initial_measurement_count=10,
+        followup_measurement_count=240,
+        current_point=1,
+        max_relative_rms=0.01,
+        contact_settle_s=0.0,
+        contact_seek_range_mm=0.01,
+        contact_seek_step_mm=0.001,
+        previous_ok_only=False,
+        meter=RouteMeterConfiguration(),
+        contact_quality_limits=RouteContactQualityLimits(
+            max_mad_sigma_ohm=1_500.0,
+            max_p95_abs_step_ohm=2_500.0,
+            max_relative_mad_sigma=0.08,
+            max_relative_p95_abs_step=0.12,
+        ),
+    )
+
+
+def _make_route_start_main(
+    *,
+    thread: object | None = None,
+    serial_open: bool = True,
+    objective_scale: object | None = 1.0,
+    camera_frame: object | None = _FakeFrame("route"),
+    lcr_controller: _RouteStartLcr | None = None,
+) -> tuple[
+    Main,
+    list[tuple[str, int | None]],
+    list[tuple[str, tuple[object, ...], dict[str, object]]],
+    _FakeVisibleDialog,
+    _RouteStartLcr,
+    list[float],
+]:
+    point = _route_start_point()
+    window = Main.__new__(Main)
+    statuses: list[tuple[str, int | None]] = []
+    telegrams: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
+    camera_calls: list[float] = []
+    dialog = _FakeVisibleDialog()
+    lcr = lcr_controller or _RouteStartLcr()
+
+    window._route_measurement_thread = thread
+    window.serial_connection = types.SimpleNamespace(is_open=serial_open)
+    window._design_session = types.SimpleNamespace(
+        route=types.SimpleNamespace(points=[object()], name="route"),
+        registration=types.SimpleNamespace(valid=True),
+    )
+    window._route_measurement_points = lambda _route: [point]
+    window._set_route_measurement_resume_point = lambda _point: None
+    window._route_measurement_session_active = False
+    window._set_route_measurement_pending = lambda _pending: None
+    window._route_measurement_runtime_configuration = None
+    window._save_route_measurement_session_metadata = lambda _configuration: None
+    window._active_microscope_scale = lambda: objective_scale
+
+    def wait_for_camera_frame(*, timeout_s: float = 0.1, **_kwargs):
+        camera_calls.append(float(timeout_s))
+        return camera_frame, None
+
+    window._wait_for_camera_frame = wait_for_camera_frame
+    window.lcr_controller = lcr
+    window.stage_controller = types.SimpleNamespace()
+    window._current_needle_feedrate = lambda: None
+    window.route_measurement_status = _RouteStartEmit()
+    window.route_measurement_progress = _RouteStartEmit()
+    window.route_measurement_recorded = _RouteStartEmit()
+    window.route_measurement_result = _RouteStartEmit()
+    window.route_measurement_waiting_changed = _RouteStartEmit()
+    window.design_navigator_panel = None
+    window._route_measurement_dialog = dialog
+    window._show_status = (
+        lambda message, timeout_ms=None: statuses.append((str(message), timeout_ms))
+    )
+    window._send_telegram_alert = (
+        lambda key, *args, **kwargs: telegrams.append((str(key), args, dict(kwargs)))
+    )
+    window._telegram_photo_lock = threading.Lock()
+    window._update_stage_coordinate_apply_state = lambda: None
+    return window, statuses, telegrams, dialog, lcr, camera_calls
 
 
 def _make_cancel_main() -> tuple[Main, _FakeStageController, _FakeButton, list[str]]:
@@ -3311,6 +3461,147 @@ assert image.height() == 4
         new_runner.stop()
         window._route_measurement_thread.join(timeout=2.0)
 
+    def test_route_start_rejects_active_thread_with_existing_status_timeout(self) -> None:
+        window, statuses, _telegrams, _dialog, lcr, _camera_calls = (
+            _make_route_start_main(thread=_FakeAliveThread())
+        )
+
+        Main._start_route_measurement(window, _route_start_configuration())
+
+        self.assertEqual(statuses, [("Route measurement is already active.", 4000)])
+        self.assertEqual(lcr.configurations, [])
+        self.assertIsInstance(window._route_measurement_thread, _FakeAliveThread)
+
+    def test_route_start_rejects_disconnected_serial_with_existing_status_timeout(
+        self,
+    ) -> None:
+        window, statuses, _telegrams, _dialog, lcr, _camera_calls = (
+            _make_route_start_main(serial_open=False)
+        )
+
+        Main._start_route_measurement(window, _route_start_configuration())
+
+        self.assertEqual(
+            statuses,
+            [("Connect the stage controller before measuring a route.", 5000)],
+        )
+        self.assertEqual(lcr.configurations, [])
+        self.assertIsNone(window._route_measurement_thread)
+
+    def test_photo_route_without_objective_scale_does_not_configure_meter_or_start(
+        self,
+    ) -> None:
+        window, statuses, _telegrams, dialog, lcr, camera_calls = (
+            _make_route_start_main(objective_scale=None)
+        )
+        configuration = _route_start_configuration(
+            operation_mode=route_measurement_dialog_module.ROUTE_OPERATION_PHOTO_THEN_MEASURE,
+        )
+
+        Main._start_route_measurement(window, configuration)
+
+        message = (
+            "Calibrate click-to-move for the active objective before saving "
+            "microscope photos with a scale bar."
+        )
+        self.assertEqual(statuses, [(message, 8000)])
+        self.assertEqual(dialog.statuses, [message])
+        self.assertEqual(camera_calls, [])
+        self.assertEqual(lcr.configurations, [])
+        self.assertIsNone(window._route_measurement_thread)
+
+    def test_immediate_photo_route_without_camera_frame_reports_telegram_failure(
+        self,
+    ) -> None:
+        window, statuses, telegrams, dialog, lcr, camera_calls = (
+            _make_route_start_main(camera_frame=None)
+        )
+        configuration = _route_start_configuration(
+            operation_mode=route_measurement_dialog_module.ROUTE_OPERATION_PHOTO,
+        )
+
+        Main._start_route_measurement(window, configuration)
+
+        message = "Camera frame is unavailable; cannot capture route photos."
+        self.assertEqual(camera_calls, [0.1])
+        self.assertEqual(statuses, [(message, 8000)])
+        self.assertEqual(dialog.statuses, [message])
+        self.assertEqual(
+            telegrams,
+            [
+                (
+                    "route_failed",
+                    (f"Probe route could not start:\n{message}",),
+                    {"attach_photo": True},
+                )
+            ],
+        )
+        self.assertEqual(lcr.configurations, [])
+        self.assertIsNone(window._route_measurement_thread)
+
+    def test_immediate_autofocus_route_without_camera_frame_reports_failure(
+        self,
+    ) -> None:
+        window, statuses, telegrams, dialog, lcr, camera_calls = (
+            _make_route_start_main(camera_frame=None)
+        )
+        configuration = _route_start_configuration(photo_autofocus_enabled=True)
+
+        Main._start_route_measurement(window, configuration)
+
+        message = "Camera frame is unavailable; cannot autofocus route points."
+        self.assertEqual(camera_calls, [0.1])
+        self.assertEqual(statuses, [(message, 8000)])
+        self.assertEqual(dialog.statuses, [message])
+        self.assertEqual(
+            telegrams,
+            [
+                (
+                    "route_failed",
+                    (f"Probe route could not start:\n{message}",),
+                    {"attach_photo": True},
+                )
+            ],
+        )
+        self.assertEqual(lcr.configurations, [])
+        self.assertIsNone(window._route_measurement_thread)
+
+    def test_photo_only_route_uses_dummy_lcr_without_meter_configuration(self) -> None:
+        window, _statuses, _telegrams, _dialog, lcr, _camera_calls = (
+            _make_route_start_main()
+        )
+        configuration = _route_start_configuration(
+            operation_mode=route_measurement_dialog_module.ROUTE_OPERATION_PHOTO,
+        )
+        original_thread = main_module.threading.Thread
+        _FakeThread.instances = []
+        main_module.threading.Thread = _FakeThread
+        try:
+            Main._start_route_measurement(window, configuration)
+        finally:
+            main_module.threading.Thread = original_thread
+
+        self.assertEqual(lcr.configurations, [])
+        self.assertEqual(lcr.runtime_configurations, [])
+        self.assertIsNot(window._route_measurement_runner._lcr_controller, lcr)
+        self.assertEqual(len(_FakeThread.instances), 1)
+        self.assertTrue(_FakeThread.instances[0].started)
+
+    def test_route_start_meter_setup_failure_clears_dialog_running_state(self) -> None:
+        lcr = _RouteStartLcr(error=main_module.LCRMeterError("meter offline"))
+        window, statuses, _telegrams, dialog, _lcr, _camera_calls = (
+            _make_route_start_main(lcr_controller=lcr)
+        )
+
+        Main._start_route_measurement(window, _route_start_configuration())
+
+        message = "Route measurement instrument setup failed: meter offline"
+        self.assertEqual(statuses, [(message, 8000)])
+        self.assertEqual(dialog.running, [False])
+        self.assertEqual(dialog.statuses, [message])
+        self.assertEqual(lcr.configurations, [])
+        self.assertIsNone(window._route_measurement_thread)
+
     def test_prestart_route_measurement_defers_camera_frame_check(self) -> None:
         class _FakeEmit:
             def emit(self, *_args: object) -> None:
@@ -3337,6 +3628,7 @@ assert image.height() == 4
         )
         window = Main.__new__(Main)
         statuses: list[str] = []
+        telegrams: list[tuple[object, ...]] = []
         camera_calls: list[float] = []
         dialog_calls: list[tuple[str, object]] = []
         window._route_measurement_thread = None
@@ -3373,7 +3665,9 @@ assert image.height() == 4
             set_status=lambda message: dialog_calls.append(("status", str(message))),
         )
         window._show_status = lambda message, *_args: statuses.append(str(message))
-        window._send_telegram_alert = lambda *args, **kwargs: None
+        window._send_telegram_alert = (
+            lambda *args, **kwargs: telegrams.append(tuple(args))
+        )
         window._telegram_photo_lock = threading.Lock()
         window._update_stage_coordinate_apply_state = lambda: None
 
@@ -3414,6 +3708,7 @@ assert image.height() == 4
             main_module.threading.Thread = original_thread
 
         self.assertEqual(camera_calls, [])
+        self.assertEqual(telegrams, [])
         self.assertEqual(len(_FakeThread.instances), 1)
         self.assertTrue(_FakeThread.instances[0].started)
         self.assertIsNotNone(window._route_measurement_runner)

@@ -11,6 +11,10 @@ from probe_station_gui.route.contact_quality import (
 )
 from probe_station_gui.route.measurement_records import RouteMeasurementPoint
 from probe_station_gui.route.operation import find_route_contact_point
+from probe_station_gui.route.operation_modes import (
+    route_operation_measure_enabled,
+    route_operation_photo_enabled,
+)
 from probe_station_gui.route.payload_parsing import (
     payload_bool as _payload_bool,
     payload_float as _payload_float,
@@ -88,6 +92,25 @@ class RouteLaunchPresentation:
     message: str
     point_numbers: list[int]
     remaining_count: int
+
+
+@dataclass(frozen=True)
+class GuiRouteStartPreflight:
+    accepted: bool = True
+    message: str = ""
+    timeout_ms: int = 0
+    dialog_status: bool = False
+    check_camera_frame: bool = False
+    telegram_failure_text: str | None = None
+    attach_failure_photo: bool = False
+
+
+@dataclass(frozen=True)
+class GuiRouteLaunchState:
+    photo_enabled: bool
+    measure_enabled: bool
+    presentation: RouteLaunchPresentation
+    send_start_telegram: bool
 
 
 def api_route_session_start_decision(
@@ -193,6 +216,95 @@ def route_launch_presentation(
         message=message,
         point_numbers=[int(point.index) for point in point_list],
         remaining_count=remaining_count,
+    )
+
+
+def gui_route_start_availability(
+    *,
+    route_thread_active: bool,
+    serial_connected: bool,
+) -> GuiRouteStartPreflight:
+    if route_thread_active:
+        return GuiRouteStartPreflight(
+            accepted=False,
+            message="Route measurement is already active.",
+            timeout_ms=4000,
+        )
+    if not serial_connected:
+        return GuiRouteStartPreflight(
+            accepted=False,
+            message="Connect the stage controller before measuring a route.",
+            timeout_ms=5000,
+        )
+    return GuiRouteStartPreflight()
+
+
+def gui_route_start_preflight(
+    *,
+    photo_enabled: bool,
+    photo_autofocus_enabled: bool,
+    wait_before_first_point: bool,
+    objective_scale_available: bool,
+) -> GuiRouteStartPreflight:
+    if photo_enabled and not objective_scale_available:
+        return GuiRouteStartPreflight(
+            accepted=False,
+            message=(
+                "Calibrate click-to-move for the active objective before saving "
+                "microscope photos with a scale bar."
+            ),
+            timeout_ms=8000,
+            dialog_status=True,
+        )
+    return GuiRouteStartPreflight(
+        check_camera_frame=(
+            not wait_before_first_point
+            and (photo_enabled or photo_autofocus_enabled)
+        )
+    )
+
+
+def gui_route_camera_frame_preflight(
+    *,
+    photo_enabled: bool,
+    photo_autofocus_enabled: bool,
+    camera_frame_available: bool,
+) -> GuiRouteStartPreflight:
+    if camera_frame_available or not (photo_enabled or photo_autofocus_enabled):
+        return GuiRouteStartPreflight()
+    message = (
+        "Camera frame is unavailable; cannot capture route photos."
+        if photo_enabled
+        else "Camera frame is unavailable; cannot autofocus route points."
+    )
+    return GuiRouteStartPreflight(
+        accepted=False,
+        message=message,
+        timeout_ms=8000,
+        dialog_status=True,
+        telegram_failure_text=f"Probe route could not start:\n{message}",
+        attach_failure_photo=True,
+    )
+
+
+def gui_route_launch_state(
+    *,
+    operation_mode: object,
+    points: Sequence[RouteMeasurementPoint],
+    selected_point: RouteMeasurementPoint,
+    wait_before_first_point: bool,
+    previous_ok_skipped_count: int | None,
+) -> GuiRouteLaunchState:
+    return GuiRouteLaunchState(
+        photo_enabled=route_operation_photo_enabled(operation_mode),
+        measure_enabled=route_operation_measure_enabled(operation_mode),
+        presentation=route_launch_presentation(
+            points,
+            selected_point,
+            wait_before_first_point=wait_before_first_point,
+            previous_ok_skipped_count=previous_ok_skipped_count,
+        ),
+        send_start_telegram=not wait_before_first_point,
     )
 
 
@@ -429,9 +541,15 @@ __all__ = [
     "DEFAULT_EXTERNAL_SESSION_INITIAL_MEASUREMENT_COUNT",
     "DEFAULT_EXTERNAL_SESSION_PHOTO_FOCUS_RANGE_MM",
     "DEFAULT_EXTERNAL_SESSION_PHOTO_SETTLE_S",
+    "GuiRouteLaunchState",
+    "GuiRouteStartPreflight",
     "RouteExternalSessionStartSettings",
     "RouteLaunchPresentation",
     "api_route_session_start_decision",
+    "gui_route_camera_frame_preflight",
+    "gui_route_launch_state",
+    "gui_route_start_availability",
+    "gui_route_start_preflight",
     "route_launch_presentation",
     "route_contact_quality_limits_from_payload",
     "route_external_session_start_settings_from_payload",

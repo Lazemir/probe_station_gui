@@ -186,10 +186,6 @@ from probe_station_gui.route.confirmation_flow import (
     route_confirmation_runtime_plan,
     route_confirmation_submission_plan,
 )
-from probe_station_gui.route.operation_modes import (
-    route_operation_measure_enabled,
-    route_operation_photo_enabled,
-)
 from probe_station_gui.route.measurement_payloads import (
     route_api_contact_seek_payload,
     route_api_measurement_record_payload,
@@ -205,7 +201,13 @@ from probe_station_gui.route.meter_config import (
 from probe_station_gui.route.measurement_settings import RouteMeasurementSettingsStore
 from probe_station_gui.route.session_actions import route_session_action_from_payload
 from probe_station_gui.route.session_start import (
+    GuiRouteLaunchState,
+    GuiRouteStartPreflight,
     api_route_session_start_decision,
+    gui_route_camera_frame_preflight,
+    gui_route_launch_state,
+    gui_route_start_availability,
+    gui_route_start_preflight,
     route_launch_presentation,
     route_contact_quality_limits_from_payload,
 )
@@ -7731,78 +7733,141 @@ class Main(QMainWindow):
         wait_before_first_point: bool = False,
     ) -> None:
         thread = self._route_measurement_thread
-        if thread is not None and thread.is_alive():
-            self._show_status("Route measurement is already active.", 4000)
-            return
-        if self.serial_connection is None or not self.serial_connection.is_open:
-            self._show_status("Connect the stage controller before measuring a route.", 5000)
+        availability = gui_route_start_availability(
+            route_thread_active=thread is not None and thread.is_alive(),
+            serial_connected=(
+                self.serial_connection is not None and self.serial_connection.is_open
+            ),
+        )
+        if not self._apply_gui_route_start_preflight(availability):
             return
         start_plan = self._route_measurement_start_plan(configuration)
         if start_plan is None:
             return
         points = start_plan.points
         selected_point = start_plan.selected_point
-        previous_ok_skipped_count = start_plan.previous_ok_skipped_count
+        self._prepare_route_measurement_launch(configuration, selected_point)
+        launch_state = gui_route_launch_state(
+            operation_mode=configuration.operation_mode,
+            points=points,
+            selected_point=selected_point,
+            wait_before_first_point=wait_before_first_point,
+            previous_ok_skipped_count=start_plan.previous_ok_skipped_count,
+        )
+        if not self._route_measurement_photo_preflight(
+            launch_state,
+            photo_autofocus_enabled=configuration.photo_autofocus_enabled,
+            wait_before_first_point=wait_before_first_point,
+        ):
+            return
+        route_lcr_controller = self._route_measurement_lcr_controller(
+            configuration,
+            measure_enabled=launch_state.measure_enabled,
+        )
+        if route_lcr_controller is None:
+            return
+        runner = self._build_route_measurement_runner(
+            configuration,
+            points=points,
+            route_lcr_controller=route_lcr_controller,
+            wait_before_first_point=wait_before_first_point,
+        )
+        self._start_route_measurement_runner(
+            runner,
+            launch_state,
+            configuration=configuration,
+            point_count=len(points),
+        )
+
+    def _prepare_route_measurement_launch(
+        self,
+        configuration: RouteMeasurementRunConfiguration,
+        selected_point: RouteMeasurementPoint,
+    ) -> None:
         self._set_route_measurement_resume_point(int(selected_point.index))
         if not self._route_measurement_session_active:
             self._route_measurement_session_active = True
             self._set_route_measurement_pending(True)
         self._route_measurement_runtime_configuration = configuration
         self._save_route_measurement_session_metadata(configuration)
-        photo_enabled = route_operation_photo_enabled(configuration.operation_mode)
-        measure_enabled = route_operation_measure_enabled(configuration.operation_mode)
-        scale = self._active_microscope_scale()
-        if photo_enabled and scale is None:
-            message = (
-                "Calibrate click-to-move for the active objective before saving "
-                "microscope photos with a scale bar."
+
+    def _apply_gui_route_start_preflight(
+        self,
+        preflight: GuiRouteStartPreflight,
+    ) -> bool:
+        if preflight.accepted:
+            return True
+        self._show_status(preflight.message, preflight.timeout_ms)
+        if preflight.telegram_failure_text:
+            self._send_telegram_alert(
+                "route_failed",
+                preflight.telegram_failure_text,
+                attach_photo=preflight.attach_failure_photo,
             )
+        if preflight.dialog_status and self._route_measurement_dialog is not None:
+            self._route_measurement_dialog.set_status(preflight.message)
+        return False
+
+    def _route_measurement_photo_preflight(
+        self,
+        launch_state: GuiRouteLaunchState,
+        *,
+        photo_autofocus_enabled: bool,
+        wait_before_first_point: bool,
+    ) -> bool:
+        scale = self._active_microscope_scale()
+        preflight = gui_route_start_preflight(
+            photo_enabled=launch_state.photo_enabled,
+            photo_autofocus_enabled=photo_autofocus_enabled,
+            wait_before_first_point=wait_before_first_point,
+            objective_scale_available=scale is not None,
+        )
+        if not self._apply_gui_route_start_preflight(preflight):
+            return False
+        if not preflight.check_camera_frame:
+            return True
+        frame, _counter = self._wait_for_camera_frame(timeout_s=0.1)
+        camera_preflight = gui_route_camera_frame_preflight(
+            photo_enabled=launch_state.photo_enabled,
+            photo_autofocus_enabled=photo_autofocus_enabled,
+            camera_frame_available=frame is not None,
+        )
+        return self._apply_gui_route_start_preflight(camera_preflight)
+
+    def _route_measurement_lcr_controller(
+        self,
+        configuration: RouteMeasurementRunConfiguration,
+        *,
+        measure_enabled: bool,
+    ) -> object | None:
+        if not measure_enabled:
+            return object()
+        try:
+            if self.lcr_controller.is_connected():
+                self.lcr_controller.apply_route_meter_configuration(
+                    configuration.meter
+                )
+            else:
+                self.lcr_controller.apply_route_meter_runtime_configuration(
+                    configuration.meter
+                )
+        except LCRMeterError as exc:
+            message = f"Route measurement instrument setup failed: {exc}"
             self._show_status(message, 8000)
             if self._route_measurement_dialog is not None:
+                self._route_measurement_dialog.set_running(False)
                 self._route_measurement_dialog.set_status(message)
-            return
-        if (
-            not wait_before_first_point
-            and (photo_enabled or configuration.photo_autofocus_enabled)
-        ):
-            frame, _counter = self._wait_for_camera_frame(timeout_s=0.1)
-            if frame is None:
-                message = (
-                    "Camera frame is unavailable; cannot capture route photos."
-                    if photo_enabled
-                    else "Camera frame is unavailable; cannot autofocus route points."
-                )
-                self._show_status(message, 8000)
-                self._send_telegram_alert(
-                    "route_failed",
-                    f"Probe route could not start:\n{message}",
-                    attach_photo=True,
-                )
-                if self._route_measurement_dialog is not None:
-                    self._route_measurement_dialog.set_status(message)
-                return
-        route_lcr_controller: object
-        if measure_enabled:
-            try:
-                if self.lcr_controller.is_connected():
-                    self.lcr_controller.apply_route_meter_configuration(
-                        configuration.meter
-                    )
-                else:
-                    self.lcr_controller.apply_route_meter_runtime_configuration(
-                        configuration.meter
-                    )
-            except LCRMeterError as exc:
-                message = f"Route measurement instrument setup failed: {exc}"
-                self._show_status(message, 8000)
-                if self._route_measurement_dialog is not None:
-                    self._route_measurement_dialog.set_running(False)
-                    self._route_measurement_dialog.set_status(message)
-                return
-            route_lcr_controller = self.lcr_controller
-        else:
-            route_lcr_controller = object()
+            return None
+        return self.lcr_controller
 
+    def _build_route_measurement_runner(
+        self,
+        configuration: RouteMeasurementRunConfiguration,
+        *,
+        points: list[RouteMeasurementPoint],
+        route_lcr_controller: object,
+        wait_before_first_point: bool,
+    ) -> RouteMeasurementRunner:
         def on_contact_height_record(
             record: RouteContactHeightRecord,
             position: int,
@@ -7818,7 +7883,7 @@ class Main(QMainWindow):
                 csv_path=active_configuration.csv_path,
             )
 
-        runner = RouteMeasurementRunner(
+        return RouteMeasurementRunner(
             points=points,
             csv_path=configuration.csv_path,
             stage_controller=self.stage_controller,
@@ -7868,17 +7933,21 @@ class Main(QMainWindow):
             photo_focus_enabled=configuration.photo_autofocus_enabled,
             wait_before_first_point=wait_before_first_point,
         )
+
+    def _start_route_measurement_runner(
+        self,
+        runner: RouteMeasurementRunner,
+        launch_state: GuiRouteLaunchState,
+        *,
+        configuration: RouteMeasurementRunConfiguration,
+        point_count: int,
+    ) -> None:
         self._route_measurement_runner = runner
         self._route_measurement_waiting = False
         self._pending_route_measure_point = None
-        self._route_measurement_photo_enabled = photo_enabled
-        self._route_measurement_measure_enabled = measure_enabled
-        presentation = route_launch_presentation(
-            points,
-            selected_point,
-            wait_before_first_point=wait_before_first_point,
-            previous_ok_skipped_count=previous_ok_skipped_count,
-        )
+        self._route_measurement_photo_enabled = launch_state.photo_enabled
+        self._route_measurement_measure_enabled = launch_state.measure_enabled
+        presentation = launch_state.presentation
         self._route_measurement_point_numbers = presentation.point_numbers
         self._last_telegram_attention_message = ""
         with self._telegram_photo_lock:
@@ -7903,11 +7972,11 @@ class Main(QMainWindow):
             )
         if self._route_measurement_dialog is not None:
             self._route_measurement_dialog.set_running(True)
-            self._route_measurement_dialog.reset_progress(len(points))
+            self._route_measurement_dialog.reset_progress(point_count)
             self._route_measurement_dialog.set_status(start_message)
         self._show_status(start_message)
         self._last_route_measurement_result = None
-        if not wait_before_first_point:
+        if launch_state.send_start_telegram:
             self._send_telegram_alert(
                 "route_started",
                 f"Probe route started:\n{start_message}\nCSV: {configuration.csv_path}",
