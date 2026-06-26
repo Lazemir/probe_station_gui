@@ -157,10 +157,16 @@ from probe_station_gui.route.control_state import (
     api_route_control_legacy_attrs,
     api_route_control_state_from_legacy_attrs,
 )
+from probe_station_gui.route.control_operation import (
+    ApiRouteControlInterruptAdapter,
+    ApiRouteControlOperationAdapters,
+    ApiRouteControlRunnerAdapter,
+    ApiRouteControlStateAdapter,
+    ApiRouteControlWindowAdapter,
+    execute_api_route_control_action,
+)
 from probe_station_gui.route.operation import (
-    ApiRouteControlActionEffect,
     RouteMeasurementStartPlan,
-    api_route_control_action_plan,
     find_route_contact_point,
     route_measurement_points_for_route,
     route_measurement_start_decision,
@@ -1975,63 +1981,44 @@ class Main(QMainWindow):
             route_control_window_open=self._route_control_window_is_open()
         )
 
-    def _api_route_control_action(self, payload: dict[str, Any]) -> dict[str, Any]:
-        plan = api_route_control_action_plan(
-            payload,
-            self._api_route_control_state_snapshot(),
-            updated_utc=self._api_timestamp_utc(),
+    def _api_route_control_operation_adapters(self) -> ApiRouteControlOperationAdapters:
+        return ApiRouteControlOperationAdapters(
+            state=ApiRouteControlStateAdapter(
+                snapshot=self._api_route_control_state_snapshot,
+                set_state=self._set_api_route_control_state,
+                status_payload=self._api_route_control_status,
+                update_ui=self._update_api_route_control_ui,
+                updated_utc=self._api_timestamp_utc,
+            ),
+            window=ApiRouteControlWindowAdapter(
+                is_open=self._route_control_window_is_open,
+                guard_closed=lambda action, payload: self._probe_route_api_window_guard(
+                    action,
+                    payload,
+                ),
+                open_for_api_start=self._show_route_measurement_dialog_for_api_session,
+            ),
+            runner=ApiRouteControlRunnerAdapter(
+                clear_waiting_before_start=(
+                    self._clear_waiting_route_runner_before_api_control
+                ),
+            ),
+            interrupt=ApiRouteControlInterruptAdapter(
+                perform=lambda reason, planned_state, planned_message: (
+                    self._interrupt_api_route_controlled_operation(
+                        reason,
+                        planned_state=planned_state,
+                        planned_message=planned_message,
+                    )
+                )
+            ),
         )
-        if plan.effect is ApiRouteControlActionEffect.REJECT:
-            return plan.rejection_payload()
-        if plan.effect is ApiRouteControlActionEffect.STATUS:
-            return self._api_route_control_status()
-        if plan.effect is ApiRouteControlActionEffect.START:
-            existing_route_result = (
-                self._clear_waiting_route_runner_before_api_control()
-            )
-            if existing_route_result is not None:
-                return existing_route_result
-        if (
-            plan.requires_control_window_open
-            and not self._route_control_window_is_open()
-        ):
-            return self._probe_route_api_window_guard(
-                "api_route_control_resume",
-                {"route_action": plan.command.action},
-            )
-        if plan.effect is ApiRouteControlActionEffect.INTERRUPT:
-            return self._interrupt_api_route_controlled_operation(
-                "API route control interrupt requested.",
-                planned_state=plan.state,
-                planned_message=plan.message,
-            )
-        self._set_api_route_control_state(plan.state)
-        if plan.effect is ApiRouteControlActionEffect.CLEAR_ACTION:
-            return self._api_route_control_status()
-        message = plan.message
-        if (
-            plan.effect is ApiRouteControlActionEffect.START
-            and not self._show_route_measurement_dialog_for_api_session()
-        ):
-            state, message = (
-                self._api_route_control_state_snapshot().start_failed_window_not_open()
-            )
-            self._set_api_route_control_state(state)
-            self._update_api_route_control_ui(message)
-            status = self._api_route_control_status()
-            status.update(
-                {
-                    "accepted": False,
-                    "status_code": 409,
-                    "message": message,
-                    "route_control_window_open": False,
-                }
-            )
-            return status
-        self._update_api_route_control_ui(message)
-        status = self._api_route_control_status()
-        status["message"] = message
-        return status
+
+    def _api_route_control_action(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return execute_api_route_control_action(
+            payload,
+            self._api_route_control_operation_adapters(),
+        )
 
     def _clear_waiting_route_runner_before_api_control(
         self,
