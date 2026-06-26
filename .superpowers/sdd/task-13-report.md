@@ -11,7 +11,7 @@
   - `tests/stage/test_controller.py`
   - `.superpowers/sdd/task-13-report.md`
 - commit hash(es):
-  - `7172c2b`
+  - `bd76758` - implementation commit for the completed pass
 
 ## Summary
 
