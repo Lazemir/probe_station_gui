@@ -115,9 +115,12 @@ from probe_station_gui.api.request_bridge import ApiRequestBridge
 from probe_station_gui.api.server import ProbeStationApiServer
 from probe_station_gui.api.keys import API_KEY_FILENAME, ApiKeyStore
 from probe_station_gui.instruments.api_sweep import (
-    api_configure_meter_action,
-    api_prepare_route_meter_controller_action,
-    api_raw_voltage_sweep_action,
+    ApiRawVoltageSweepRequestError,
+    api_raw_voltage_sweep_contact_plan,
+    api_raw_voltage_sweep_error_response,
+    api_raw_voltage_sweep_meter_payload,
+    api_raw_voltage_sweep_request_from_payload,
+    api_raw_voltage_sweep_success_response,
 )
 from probe_station_gui.instruments.meters.lcr import (
     LCRMeterController,
@@ -2378,18 +2381,45 @@ class Main(QMainWindow):
         *,
         prefix: str = "Measurement instrument setup failed",
     ) -> dict[str, Any] | None:
-        return api_prepare_route_meter_controller_action(
-            configuration=configuration,
-            prefix=prefix,
-            is_connected=self.lcr_controller.is_connected,
-            wait_until_idle=getattr(self.lcr_controller, "wait_until_idle", None),
-            apply_route_meter_runtime_configuration=getattr(self.lcr_controller, "apply_route_meter_runtime_configuration", None),
-            ensure_measurement_instrument_connected=self._api_ensure_measurement_instrument_connected,
-            apply_route_meter_configuration=self.lcr_controller.apply_route_meter_configuration,
-            instrument_exception_response=self._api_instrument_exception_response,
-            log_exception=logger.exception,
-            meter_error_types=(LCRMeterError,),
-        )
+        wait_until_idle = getattr(self.lcr_controller, "wait_until_idle", None)
+        if callable(wait_until_idle):
+            try:
+                ready = bool(wait_until_idle(45.0))
+            except Exception as exc:
+                logger.exception("API measurement instrument wait failed.")
+                return self._api_instrument_exception_response(
+                    "Measurement instrument wait failed",
+                    exc,
+                )
+            if not ready:
+                return {
+                    "accepted": False,
+                    "status_code": 409,
+                    "message": "Measurement instrument task is still running.",
+                }
+        if not self.lcr_controller.is_connected():
+            runtime_config = getattr(
+                self.lcr_controller,
+                "apply_route_meter_runtime_configuration",
+                None,
+            )
+            if callable(runtime_config):
+                runtime_config(configuration)
+            connect_result = self._api_ensure_measurement_instrument_connected()
+            if connect_result is not None:
+                return connect_result
+        try:
+            self.lcr_controller.apply_route_meter_configuration(configuration)
+        except LCRMeterError as exc:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": str(exc),
+            }
+        except Exception as exc:
+            logger.exception("%s.", prefix)
+            return self._api_instrument_exception_response(prefix, exc)
+        return None
 
     @staticmethod
     def _api_instrument_exception_response(
@@ -2408,34 +2438,128 @@ class Main(QMainWindow):
         return response
 
     def _api_configure_meter(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return api_configure_meter_action(
-            payload=payload,
-            route_meter_configuration=lambda meter_payload, voltages_v: self._api_route_meter_configuration(meter_payload, voltages_v=voltages_v),
-            prepare_route_meter_controller=self._api_prepare_route_meter_controller,
-            timestamp_utc=self._api_timestamp_utc,
+        try:
+            configuration = self._api_route_meter_configuration(
+                payload,
+                voltages_v=None,
+            )
+        except ValueError as exc:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": str(exc),
+            }
+        setup_result = self._api_prepare_route_meter_controller(
+            configuration,
+            prefix="Measurement instrument setup failed",
         )
+        if setup_result is not None:
+            return setup_result
+        return {
+            "accepted": True,
+            "message": "Measurement instrument configured.",
+            "timestamp_utc": self._api_timestamp_utc(),
+            "meter_type": configuration.meter_type,
+            "nplc": configuration.nplc_label(),
+        }
 
     def _api_raw_voltage_sweep(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return api_raw_voltage_sweep_action(
-            payload=payload,
-            route_meter_configuration=lambda meter_payload, voltages_v: self._api_route_meter_configuration(meter_payload, voltages_v=voltages_v),
-            prepare_route_meter_controller=self._api_prepare_route_meter_controller,
-            contact_context=self._api_contact_context,
-            needle_feedrate=self._api_needle_feedrate,
-            route_adjusted_stage_xy=self._api_route_adjusted_stage_xy,
-            begin_stage_task=lambda label: self.stage_controller.begin_external_task(label),
-            run_needles_action=lambda action, feedrate: self.stage_controller.run_external_needles_action(action, feedrate),
-            run_move_to_xy=lambda x_mm, y_mm: self.stage_controller.run_external_move_to_xy(x_mm, y_mm),
-            finish_stage_task=lambda: self.stage_controller.finish_external_task(),
-            read_voltage_sweep_now=lambda voltages_v: self.lcr_controller.read_voltage_sweep_now(voltages_v),
-            json_ready=self._api_json_ready,
-            timestamp_utc=self._api_timestamp_utc,
-            monotonic=time.monotonic,
-            sleep=time.sleep,
-            instrument_exception_response=self._api_instrument_exception_response,
-            log_exception=logger.exception,
-            stage_or_meter_error_types=(StageControllerError, LCRMeterError),
+        try:
+            request = api_raw_voltage_sweep_request_from_payload(payload)
+            configuration = self._api_route_meter_configuration(
+                api_raw_voltage_sweep_meter_payload(payload),
+                voltages_v=request.voltage_values,
+            )
+        except ApiRawVoltageSweepRequestError as exc:
+            return exc.response()
+        except (TypeError, ValueError) as exc:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": str(exc),
+            }
+        setup_result = self._api_prepare_route_meter_controller(
+            configuration,
+            prefix="Measurement instrument setup failed",
         )
+        if setup_result is not None:
+            return setup_result
+
+        context_result = None
+        if request.contact_number is not None:
+            context_result = self._api_contact_context(request.contact_number)
+        contact_plan_result = api_raw_voltage_sweep_contact_plan(
+            request,
+            context_result=context_result,
+        )
+        if isinstance(contact_plan_result, dict):
+            return contact_plan_result
+        contact_plan = contact_plan_result
+        needle_feedrate = self._api_needle_feedrate(payload)
+        active_stage_task = False
+        needles_lowered = False
+        started_at = time.monotonic()
+        timestamp_utc = self._api_timestamp_utc()
+        try:
+            if request.move_to_contact or request.lower_needles or request.lift_after:
+                self.stage_controller.begin_external_task("API raw voltage sweep")
+                active_stage_task = True
+            if active_stage_task and request.lift_before_move:
+                self.stage_controller.run_external_needles_action(
+                    "lift",
+                    needle_feedrate,
+                )
+            if request.move_to_contact and contact_plan.point is not None:
+                target_xy = self._api_route_adjusted_stage_xy(contact_plan.point)
+                self.stage_controller.run_external_move_to_xy(
+                    target_xy[0],
+                    target_xy[1],
+                )
+            if active_stage_task and request.lower_needles:
+                self.stage_controller.run_external_needles_action(
+                    "lower",
+                    needle_feedrate,
+                )
+                needles_lowered = True
+                if request.contact_settle_s > 0.0:
+                    time.sleep(request.contact_settle_s)
+            raw_measurement = self.lcr_controller.read_voltage_sweep_now(
+                request.voltage_values
+            )
+            return api_raw_voltage_sweep_success_response(
+                voltage_values=request.voltage_values,
+                result=self._api_json_ready(raw_measurement),
+                timestamp_utc=timestamp_utc,
+                elapsed_s=time.monotonic() - started_at,
+                contact=contact_plan.contact,
+                meter_type=configuration.meter_type,
+                lower_needles=request.lower_needles,
+                needles_lowered=needles_lowered,
+                lift_after=request.lift_after,
+            )
+        except (StageControllerError, LCRMeterError) as exc:
+            return api_raw_voltage_sweep_error_response(
+                str(exc),
+                contact=contact_plan.contact,
+            )
+        except Exception as exc:
+            logger.exception("API raw voltage sweep failed.")
+            return self._api_instrument_exception_response(
+                "Raw voltage sweep failed",
+                exc,
+                contact=contact_plan.contact,
+            )
+        finally:
+            if active_stage_task:
+                if request.lift_after and needles_lowered:
+                    try:
+                        self.stage_controller.run_external_needles_action(
+                            "lift",
+                            needle_feedrate,
+                        )
+                    except StageControllerError:
+                        logger.exception("API raw voltage sweep failed to lift needles.")
+                self.stage_controller.finish_external_task()
 
     def _api_visa_list_resources(self) -> dict[str, Any]:
         controller = self._api_visa_controller()

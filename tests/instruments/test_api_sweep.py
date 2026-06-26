@@ -4,9 +4,6 @@ import pytest
 
 from probe_station_gui.instruments.api_sweep import (
     ApiRawVoltageSweepRequestError,
-    api_configure_meter_action,
-    api_prepare_route_meter_controller_action,
-    api_raw_voltage_sweep_action,
     api_raw_voltage_sweep_contact_plan,
     api_raw_voltage_sweep_error_response,
     api_raw_voltage_sweep_missing_contact_response,
@@ -115,6 +112,33 @@ def test_contact_plan_rejects_move_without_contact_number() -> None:
     )
 
 
+def test_contact_plan_preserves_non_dict_contact_payload() -> None:
+    request = api_raw_voltage_sweep_request_from_payload(
+        {"voltages_v": [0.0], "contact_number": 5}
+    )
+
+    plan = api_raw_voltage_sweep_contact_plan(
+        request,
+        context_result={
+            "accepted": True,
+            "point": "point-5",
+            "contact": "Pad 5",
+        },
+    )
+
+    assert plan == (
+        api_raw_voltage_sweep_contact_plan(
+            request,
+            context_result={
+                "accepted": True,
+                "point": "point-5",
+                "contact": "Pad 5",
+            },
+        )
+    )
+    assert plan.contact == "Pad 5"
+
+
 def test_success_response_formats_iv_pairs_from_result_points() -> None:
     response = api_raw_voltage_sweep_success_response(
         voltage_values=[-0.1, 0.0, 0.1],
@@ -189,149 +213,3 @@ def test_stage_or_lcr_error_response_keeps_contact_payload() -> None:
         "message": "Stage is busy.",
         "contact": {"contact_number": 4, "label": "Pad 4"},
     }
-
-
-def test_prepare_route_meter_controller_waits_connects_and_applies_configuration() -> None:
-    calls: list[tuple[object, ...]] = []
-
-    response = api_prepare_route_meter_controller_action(
-        configuration="cfg",
-        prefix="Measurement instrument setup failed",
-        is_connected=lambda: False,
-        wait_until_idle=lambda timeout_s: calls.append(("wait", timeout_s)) or True,
-        apply_route_meter_runtime_configuration=lambda configuration: calls.append(
-            ("runtime", configuration)
-        ),
-        ensure_measurement_instrument_connected=lambda: calls.append(("ensure",)) or None,
-        apply_route_meter_configuration=lambda configuration: calls.append(
-            ("apply", configuration)
-        ),
-        instrument_exception_response=lambda prefix, exc: {
-            "accepted": False,
-            "status_code": 409,
-            "message": f"{prefix}: {exc}",
-            "error_type": type(exc).__name__,
-        },
-        log_exception=lambda _message: None,
-    )
-
-    assert response is None
-    assert calls == [
-        ("wait", 45.0),
-        ("runtime", "cfg"),
-        ("ensure",),
-        ("apply", "cfg"),
-    ]
-
-
-def test_configure_meter_action_returns_success_response() -> None:
-    class _Configuration:
-        meter_type = "keithley_2400_2182a"
-
-        @staticmethod
-        def nplc_label() -> str:
-            return "1"
-
-    calls: list[tuple[object, ...]] = []
-
-    response = api_configure_meter_action(
-        payload={"meter_type": "keithley_2400_2182a"},
-        route_meter_configuration=lambda payload, voltages_v: calls.append(
-            ("config", payload, voltages_v)
-        )
-        or _Configuration(),
-        prepare_route_meter_controller=lambda configuration, *, prefix: calls.append(
-            ("prepare", configuration.meter_type, prefix)
-        )
-        or None,
-        timestamp_utc=lambda: "2026-06-26T12:00:00+00:00",
-    )
-
-    assert response == {
-        "accepted": True,
-        "message": "Measurement instrument configured.",
-        "timestamp_utc": "2026-06-26T12:00:00+00:00",
-        "meter_type": "keithley_2400_2182a",
-        "nplc": "1",
-    }
-    assert calls == [
-        ("config", {"meter_type": "keithley_2400_2182a"}, None),
-        (
-            "prepare",
-            "keithley_2400_2182a",
-            "Measurement instrument setup failed",
-        ),
-    ]
-
-
-def test_raw_voltage_sweep_action_preserves_stage_side_effect_order() -> None:
-    calls: list[tuple[object, ...]] = []
-
-    class _Configuration:
-        meter_type = "keithley_2400_2182a"
-
-    monotonic_values = iter([100.0, 101.25])
-
-    response = api_raw_voltage_sweep_action(
-        payload={"voltages_v": [0.0, "0.1"], "contact_number": 7},
-        route_meter_configuration=lambda payload, voltages_v: calls.append(
-            ("config", payload, tuple(voltages_v or ()))
-        )
-        or _Configuration(),
-        prepare_route_meter_controller=lambda configuration, *, prefix: calls.append(
-            ("prepare", configuration.meter_type, prefix)
-        )
-        or None,
-        contact_context=lambda contact_number: {
-            "accepted": True,
-            "point": f"point-{contact_number}",
-            "contact": {"contact_number": contact_number, "label": "Pad 7"},
-        },
-        needle_feedrate=lambda payload: calls.append(("feedrate", dict(payload))) or 75.0,
-        route_adjusted_stage_xy=lambda point: calls.append(("target", point)) or (1.25, 2.5),
-        begin_stage_task=lambda label: calls.append(("begin", label)),
-        run_needles_action=lambda action, feedrate: calls.append(
-            ("needles", action, feedrate)
-        ),
-        run_move_to_xy=lambda x_mm, y_mm: calls.append(("move", x_mm, y_mm)),
-        finish_stage_task=lambda: calls.append(("finish",)),
-        read_voltage_sweep_now=lambda voltages_v: calls.append(("read", tuple(voltages_v)))
-        or {
-            "points": [{"measured_voltage_v": 0.01, "current_a": 2.0e-6}],
-        },
-        json_ready=lambda result: result,
-        timestamp_utc=lambda: "2026-06-26T12:00:00+00:00",
-        monotonic=lambda: next(monotonic_values),
-        sleep=lambda delay: calls.append(("sleep", delay)),
-        instrument_exception_response=lambda prefix, exc, **extra: {
-            "accepted": False,
-            "status_code": 409,
-            "message": f"{prefix}: {exc}",
-            "error_type": type(exc).__name__,
-            **extra,
-        },
-        log_exception=lambda _message: None,
-    )
-
-    assert response["accepted"] is True
-    assert response["contact"] == {"contact_number": 7, "label": "Pad 7"}
-    assert response["voltages_v"] == [0.0, 0.1]
-    assert response["iv_pairs"] == [{"voltage_v": 0.01, "current_a": 2.0e-6}]
-    assert calls == [
-        ("config", {}, (0.0, 0.1)),
-        (
-            "prepare",
-            "keithley_2400_2182a",
-            "Measurement instrument setup failed",
-        ),
-        ("feedrate", {"voltages_v": [0.0, "0.1"], "contact_number": 7}),
-        ("begin", "API raw voltage sweep"),
-        ("needles", "lift", 75.0),
-        ("target", "point-7"),
-        ("move", 1.25, 2.5),
-        ("needles", "lower", 75.0),
-        ("sleep", 0.2),
-        ("read", (0.0, 0.1)),
-        ("needles", "lift", 75.0),
-        ("finish",),
-    ]

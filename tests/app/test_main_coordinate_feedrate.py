@@ -57,7 +57,7 @@ from probe_station_gui.route.measurement_settings import (
 from probe_station_gui.route.dialog_adapter import (
     request_route_measurement_for_point,
 )
-from probe_station_gui.instruments.meters.lcr import RouteMeterConfiguration
+from probe_station_gui.instruments.meters.lcr import LCRMeterError, RouteMeterConfiguration
 from probe_station_gui.settings.manager import ObjectiveCalibrationSettings, Settings
 from probe_station_gui.stage.controller import StageControllerError
 
@@ -1161,6 +1161,121 @@ class MainCoordinateFeedrateTest(unittest.TestCase):
                 ("finish",),
             ],
         )
+
+    def test_api_raw_voltage_sweep_final_lift_stage_error_is_logged_and_finishes_task(
+        self,
+    ) -> None:
+        calls: list[tuple[object, ...]] = []
+        logged: list[str] = []
+
+        class _Lcr:
+            def read_voltage_sweep_now(self, voltages_v: list[float]) -> dict[str, object]:
+                calls.append(("read", tuple(voltages_v)))
+                return {"points": []}
+
+        def run_needles_action(action: str, feedrate: float | None) -> None:
+            calls.append(("needles", action, feedrate))
+            if action == "lift":
+                raise StageControllerError("lift failed")
+
+        window = Main.__new__(Main)
+        window.stage_controller = types.SimpleNamespace(
+            begin_external_task=lambda label: calls.append(("begin", label)),
+            run_external_needles_action=run_needles_action,
+            run_external_move_to_xy=lambda x_mm, y_mm: calls.append(("move", x_mm, y_mm)),
+            finish_external_task=lambda: calls.append(("finish",)),
+        )
+        window.lcr_controller = _Lcr()
+        window._api_route_meter_configuration = (
+            lambda _payload, voltages_v=None: RouteMeterConfiguration()
+        )
+        window._api_prepare_route_meter_controller = (
+            lambda _configuration, prefix="": None
+        )
+        window._api_needle_feedrate = lambda _payload: 55.0
+        window._api_timestamp_utc = lambda: "2026-06-26T12:00:00+00:00"
+        window._api_json_ready = lambda result: result
+        monotonic_values = iter([300.0, 300.4])
+        original_monotonic = main_module.time.monotonic
+        original_logger_exception = main_module.logger.exception
+        main_module.time.monotonic = lambda: next(monotonic_values)
+        main_module.logger.exception = lambda message, *args: logged.append(
+            str(message) % args if args else str(message)
+        )
+        try:
+            response = Main._api_raw_voltage_sweep(
+                window,
+                {
+                    "voltages_v": [0.0],
+                    "lower_needles": True,
+                    "lift_after": True,
+                    "lift_before_move": False,
+                    "contact_settle_s": 0.0,
+                },
+            )
+        finally:
+            main_module.time.monotonic = original_monotonic
+            main_module.logger.exception = original_logger_exception
+
+        self.assertTrue(response["accepted"], response)
+        self.assertEqual(
+            calls,
+            [
+                ("begin", "API raw voltage sweep"),
+                ("needles", "lower", 55.0),
+                ("read", (0.0,)),
+                ("needles", "lift", 55.0),
+                ("finish",),
+            ],
+        )
+        self.assertEqual(
+            logged,
+            ["API raw voltage sweep failed to lift needles."],
+        )
+
+    def test_api_raw_voltage_sweep_final_lift_lcr_error_is_not_swallowed(self) -> None:
+        class _Lcr:
+            def read_voltage_sweep_now(self, _voltages_v: list[float]) -> dict[str, object]:
+                return {"points": []}
+
+        def run_needles_action(action: str, _feedrate: float | None) -> None:
+            if action == "lift":
+                raise LCRMeterError("unexpected lift meter error")
+
+        window = Main.__new__(Main)
+        window.stage_controller = types.SimpleNamespace(
+            begin_external_task=lambda _label: None,
+            run_external_needles_action=run_needles_action,
+            run_external_move_to_xy=lambda _x_mm, _y_mm: None,
+            finish_external_task=lambda: None,
+        )
+        window.lcr_controller = _Lcr()
+        window._api_route_meter_configuration = (
+            lambda _payload, voltages_v=None: RouteMeterConfiguration()
+        )
+        window._api_prepare_route_meter_controller = (
+            lambda _configuration, prefix="": None
+        )
+        window._api_needle_feedrate = lambda _payload: 55.0
+        window._api_timestamp_utc = lambda: "2026-06-26T12:00:00+00:00"
+        window._api_json_ready = lambda result: result
+        monotonic_values = iter([400.0, 400.4])
+        original_monotonic = main_module.time.monotonic
+        main_module.time.monotonic = lambda: next(monotonic_values)
+        try:
+            with self.assertRaisesRegex(LCRMeterError, "unexpected lift meter error"):
+                Main._api_raw_voltage_sweep(
+                    window,
+                    {
+                        "voltages_v": [0.0],
+                        "lower_needles": True,
+                        "lift_after": True,
+                        "lift_before_move": False,
+                        "contact_settle_s": 0.0,
+                    },
+                )
+        finally:
+            main_module.time.monotonic = original_monotonic
 
     def test_api_route_session_reports_unexpected_instrument_setup_error(self) -> None:
         class _FailingLcr:
