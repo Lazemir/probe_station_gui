@@ -8,6 +8,8 @@ For the current architecture refactoring branch, the user has explicitly request
 
 Use `wily` as the primary metrics comparison tool for refactor passes, especially when comparing between commits. On Windows, always force UTF-8 before Wily or other emoji/Unicode-heavy tooling: `$env:PYTHONIOENCODING='utf-8'; $env:PYTHONUTF8='1'; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; .\.venv\Scripts\python.exe -X utf8 -m wily ...`. The default cp1251 console can crash on Wily's emoji output or any non-ASCII metric/report text, and this has happened before in this project. Keep Wily cache outside the repo, such as under `%TEMP%`, unless the user explicitly asks to persist it. Run Wily build/diff from a clean temporary clone or disposable worktree, not the main checkout: Wily checks out historical revisions and has left this working copy detached with old `main.py` content before. Use `radon`/`lizard` as fallback or spot-check tools when Wily cannot produce the required detail.
 
+The active refactoring roadmap is `.superpowers/sdd/refactor-plan.md`; it tracks the remaining `main.py`, production-monolith, test-monolith, and final hardening phases. The active `main.py` size contract is `.superpowers/sdd/main-loc-contract.md`. Treat it as binding for the remaining refactor track: baseline `main.py` is `8948 LOC` by `radon raw` at `19ccb0b`, and the current target is `<= 7550 LOC` after the planned main-focused passes. If a pass misses its target by more than `50` LOC, the next pass must compensate or the contract must be amended with a concrete reason.
+
 ## Language
 
 **Probe Station**:
