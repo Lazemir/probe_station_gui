@@ -1,7 +1,7 @@
 # Task 31 Report: Manual Jog Prediction Module
 
 - status: `DONE`
-- commits created: `1` (`51abc77 Refactor manual jog prediction state`)
+- commits created: `2` (`51abc77 Refactor manual jog prediction state`; `3eb57b1 Document manual jog prediction metrics`)
 
 ## Changed Files
 
