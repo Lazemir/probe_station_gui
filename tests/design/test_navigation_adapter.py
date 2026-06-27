@@ -138,6 +138,31 @@ def test_persisted_restore_rejects_missing_or_changed_xy_and_accepts_current_fil
     assert not accepted.clear_cached_design
 
 
+def test_persisted_restore_z_mismatch_requests_unhome_without_status(
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    stat = document.path.stat()
+    state = {
+        "document_path": str(document.path),
+        "document_size": stat.st_size,
+        "document_mtime_ns": stat.st_mtime_ns,
+    }
+
+    decision = prepare_persisted_design_restore(
+        state,
+        expected_position=(1.0, 2.0, 3.0),
+        actual_position=(1.0, 2.0, 9.0),
+        document_loaded=False,
+    )
+
+    assert decision.should_start_load
+    assert decision.design_path == str(document.path)
+    assert decision.axes_to_mark_unhomed == {"Z"}
+    assert decision.status_message is None
+    assert not decision.clear_cached_design
+
+
 def test_design_load_success_plan_uses_current_route_point_camera_center(tmp_path: Path) -> None:
     document = _make_document(tmp_path)
     session = DesignSession()

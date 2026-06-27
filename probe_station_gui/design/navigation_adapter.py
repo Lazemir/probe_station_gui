@@ -249,11 +249,6 @@ def prepare_persisted_design_restore(
         design_path=design_path,
         restore_state=design_state,
         axes_to_mark_unhomed=z_axes,
-        status_message=(
-            "Controller Z coordinate changed. Cleared cached Z homing."
-            if z_axes
-            else None
-        ),
     )
 
 

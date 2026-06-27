@@ -436,7 +436,7 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
 
 
 class MainPersistedDesignRestoreTest(unittest.TestCase):
-    def test_z_a_b_mismatch_keeps_design_and_clears_only_z_homing(self) -> None:
+    def test_z_mismatch_with_homed_z_keeps_design_and_reports_one_z_clear(self) -> None:
         window, stage_controller, statuses, starts, saved_without_design = (
             _make_design_restore_main((1.0, 2.0, 3.0, 4.0, 5.0))
         )
@@ -457,7 +457,36 @@ class MainPersistedDesignRestoreTest(unittest.TestCase):
                 "show_window": False,
             },
         )
-        self.assertIn(
+        self.assertEqual(
+            statuses.count("Controller Z coordinate changed. Cleared cached Z homing."),
+            1,
+        )
+
+    def test_z_mismatch_with_unhomed_z_keeps_design_and_does_not_report_z_clear(
+        self,
+    ) -> None:
+        window, stage_controller, statuses, starts, saved_without_design = (
+            _make_design_restore_main((1.0, 2.0, 3.0, 4.0, 5.0))
+        )
+        stage_controller.homed_axes.remove("Z")
+
+        Main._maybe_restore_persisted_design(
+            window,
+            (1.0, 2.0, 9.0, 4.0, 5.0),
+        )
+
+        self.assertEqual(stage_controller.unhomed_requests, [{"Z"}])
+        self.assertEqual(stage_controller.homed_axes, {"X", "Y", "A"})
+        self.assertEqual(saved_without_design, [])
+        self.assertEqual(starts[0][0], "C:\\designs\\sample.gds")
+        self.assertEqual(
+            starts[0][1],
+            {
+                "restore_state": {"document_path": "C:\\designs\\sample.gds"},
+                "show_window": False,
+            },
+        )
+        self.assertNotIn(
             "Controller Z coordinate changed. Cleared cached Z homing.",
             statuses,
         )
