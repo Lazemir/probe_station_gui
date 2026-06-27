@@ -71,7 +71,7 @@ Metrics before:
 
 Metrics after:
 - Final radon raw: `main.py` LOC 9815 / SLOC 9234; `objective_alignment.py` LOC 688 / SLOC 627; `objective_offsets.py` LOC 149 / SLOC 104.
-- Final Wily from disposable UTF-8 temp snapshot/cache: `main.py` raw LOC 9815, cyclomatic 1865.
+- Final Wily from disposable UTF-8 temp snapshot/cache: `main.py` raw LOC 9815, cyclomatic 1865; `objective_alignment.py` raw LOC 688, cyclomatic 95, MI 10.8238; `objective_offsets.py` raw LOC 136 -> 149, cyclomatic 28 -> 29, MI 51.0152 -> 49.7363.
 - Prior code-quality cleanup Wily values: `main.py` raw LOC 9865, cyclomatic 1875.
 - Prior pre-cleanup values: `main.py` raw LOC 9806, cyclomatic 1873.
 - Radon CC final: `_apply_objective_change_offset` A(5); `_capture_manual_alignment_point` B(6); `_set_objective_offset_reference` B(6); `_save_active_objective_offset` A(4); `_delete_objective_profile` A(5); `_set_active_objective` A(5); `_sync_objective_combo` B(8); `_resolve_alignment_capture_stage_position` A(5); new `objective_change_offset_plan` C(14); new `active_objective_configuration` A(3).
@@ -83,5 +83,5 @@ Verdict:
 - Behavior preserved: yes, within covered objective/alignment behavior and full regression suite.
 - Tests passed: yes.
 - Metrics improved: yes. Wily cyclomatic improved from 1882 to 1865; fallback LOC reduction is restored at exactly 220 lines; both named hotspot methods are below CCN 10 and outside the lizard warning range.
-- Maintainability improvement: objective/alignment decisions are pure, named, and directly tested outside `Main`; `Main` is reduced to side-effect orchestration for this workflow, with small shared helpers for repeated status/persistence paths.
+- Maintainability improvement: objective/alignment decisions are pure, named, and directly tested outside `Main`; `Main` is reduced to side-effect orchestration for this workflow, with small shared helpers for repeated status/persistence paths. The small `objective_offsets.py` metric regression is accepted because it is one A(1) pure helper that removes base/active offset selection from `Main` without adding side effects.
 - New risk introduced: low; the fallback recovery is a behavior-preserving cleanup verified by focused/full/ruff, with no hardware-dependent automation.
