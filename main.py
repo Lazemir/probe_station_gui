@@ -168,15 +168,8 @@ from probe_station_gui.views.stage_position_panel import (
     StagePositionPanel,
     format_stage_axis_value,
 )
-from probe_station_gui.design.objective_offsets import (
-    ObjectiveOffsetReference,
-    base_objective_name,
-    calibrated_objective_offset,
-    camera_stage_to_raw_stage,
-    objective_xy_offset,
-    objective_xy_offset_is_configured,
-    raw_stage_to_camera_stage,
-)
+from probe_station_gui.design.objective_offsets import base_objective_name, camera_stage_to_raw_stage, objective_xy_offset, raw_stage_to_camera_stage
+from probe_station_gui.design.objective_alignment import alignment_capture_position_plan, alignment_presentation, design_alignment_capture_plan, manual_alignment_capture_plan, objective_change_offset_plan, objective_combo_sync_plan, objective_offset_reference_plan, profile_add_plan, profile_delete_plan, reset_active_objective_offset, save_active_objective_offset, select_active_objective, update_objective_calibration
 from probe_station_gui.route.model import (
     MeasurementRoute,
     structure_number_from_labels,
@@ -534,7 +527,7 @@ class Main(QMainWindow):
         self._click_calibration_dialog: ClickCalibrationDialog | None = None
         self._sample_load_action: QAction | None = None
         self._sample_unload_action: QAction | None = None
-        self._objective_offset_reference: ObjectiveOffsetReference | None = None
+        self._objective_offset_reference: object | None = None
         self._ruler_action: QAction | None = None
         self._rect_action: QAction | None = None
         self._last_selected_design_point: tuple[float, float] | None = None
@@ -4379,25 +4372,24 @@ class Main(QMainWindow):
         combo = self._objective_combo
         if combo is None:
             return
-        objective_name = normalize_objective_name(objective_name)
         current_names = [
             str(combo.itemData(index) or "")
             for index in range(combo.count())
         ]
-        names = self._objective_names()
-        if current_names != names:
+        plan = objective_combo_sync_plan(current_names, self._objective_names(), objective_name)
+        if plan.rebuild_items:
             combo.blockSignals(True)
             combo.clear()
-            for name in names:
+            for name in plan.names:
                 combo.addItem(name, name)
             combo.blockSignals(False)
-        index = combo.findData(objective_name)
-        if index < 0:
+        if plan.selected_index < 0:
             return
         combo.blockSignals(True)
-        combo.setCurrentIndex(index)
+        combo.setCurrentIndex(plan.selected_index)
         combo.blockSignals(False)
-        self._refresh_click_calibration_ui()
+        if plan.refresh_calibration_ui:
+            self._refresh_click_calibration_ui()
 
     def _on_objective_combo_changed(self, _index: int) -> None:
         combo = self._objective_combo
@@ -4414,100 +4406,58 @@ class Main(QMainWindow):
         apply_motion: bool,
         allow_busy: bool = False,
     ) -> None:
-        objective_name = normalize_objective_name(objective_name)
-        if not objective_name:
-            return
-        settings = self.settings_manager.settings.clone()
-        old_name = settings.objectives.active_name
-        if old_name == objective_name:
+        plan = select_active_objective(self.settings_manager.settings, objective_name, is_busy=self.stage_controller.is_busy(), apply_motion=apply_motion, allow_busy=allow_busy)
+        if plan.refresh_calibration_ui:
             self._refresh_click_calibration_ui()
             return
-        if not allow_busy and self.stage_controller.is_busy():
-            self._sync_objective_combo(old_name)
-            self._show_status("Stage is busy; objective not changed.", 4000)
+        if plan.restore_combo_name is not None:
+            self._sync_objective_combo(plan.restore_combo_name)
+        if plan.settings is None:
+            if plan.status:
+                self._show_status(plan.status, plan.status_timeout_ms)
             return
-        if objective_name not in settings.objectives.objectives:
-            settings.objectives.objectives[objective_name] = default_objective(
-                objective_name
-            )
-        settings.objectives.active_name = objective_name
-        self.settings_manager.replace(settings)
-        self.settings_manager.save()
-        self._apply_objective_settings()
-        if apply_motion:
-            self._apply_objective_change_offset(old_name, objective_name)
-        self._show_status(f"Objective selected: {objective_name}.", 3000)
+        self._persist_objective_plan(plan)
+        if plan.apply_offset_motion:
+            self._apply_objective_change_offset(plan.old_name, plan.new_name)
 
     def _apply_objective_change_offset(self, old_name: str, new_name: str) -> None:
-        objective_settings = self.settings_manager.objectives_configuration()
-        if not objective_settings.apply_offsets_on_change:
+        plan = objective_change_offset_plan(self.settings_manager.objectives_configuration(), old_name, new_name, self.stage_controller.latest_stage_position(), self.stage_controller.is_busy(), display_axis_value_from_raw=self._display_axis_value_from_raw, raw_axis_value_from_display=self._raw_axis_value_from_display)
+        if plan.status:
+            self._show_status(plan.status, plan.status_timeout_ms)
             return
-        old_profile = objective_settings.objectives.get(old_name)
-        new_profile = objective_settings.objectives.get(new_name)
-        if old_profile is None or new_profile is None:
+        if plan.raw_targets is None:
             return
-        if not (
-            objective_xy_offset_is_configured(objective_settings.objectives, old_name)
-            and objective_xy_offset_is_configured(
-                objective_settings.objectives,
-                new_name,
-            )
-        ):
-            self._show_status(
-                "Objective XY offset is not configured for both objectives.",
-                4000,
-            )
-            return
-        old_offset = objective_xy_offset(objective_settings.objectives, old_name)
-        new_offset = objective_xy_offset(objective_settings.objectives, new_name)
-        latest = self.stage_controller.latest_stage_position()
-        if latest is None or len(latest) < 2:
-            self._show_status("Stage position unavailable; objective offset not applied.", 4000)
-            return
-        raw_targets: dict[str, float] = {
-            "X": float(latest[0]) + float(new_offset[0]) - float(old_offset[0]),
-            "Y": float(latest[1]) + float(new_offset[1]) - float(old_offset[1]),
-        }
-        if (
-            old_profile.z_offset_configured
-            and new_profile.z_offset_configured
-            and len(latest) >= 3
-        ):
-            current_z_display = self._display_axis_value_from_raw("Z", float(latest[2]))
-            z_display = (
-                current_z_display
-                + float(new_profile.z_offset_mm)
-                - float(old_profile.z_offset_mm)
-            )
-            raw_targets["Z"] = self._raw_axis_value_from_display("Z", z_display)
-        if self.stage_controller.is_busy():
-            self._show_status("Stage is busy; objective offset not applied.", 4000)
-            return
-        accepted = self.stage_controller.request_absolute_axis_targets_move(
-            raw_targets,
-            feedrate=self._current_linear_feedrate(),
-            allow_unhomed=False,
-        )
-        if accepted:
-            axes = ", ".join(sorted(raw_targets))
-            self._show_status(f"Applying {new_name} objective offset on {axes}.", 4000)
-        else:
-            self._show_status("Objective offset move was not accepted.", 4000)
+        accepted = self.stage_controller.request_absolute_axis_targets_move(plan.raw_targets, feedrate=self._current_linear_feedrate(), allow_unhomed=False)
+        status = plan.accepted_status if accepted else plan.rejected_status
+        if status:
+            self._show_status(status, plan.status_timeout_ms)
 
     def _apply_objective_settings(self) -> None:
         objective_settings = self.settings_manager.objectives_configuration()
-        active_objective = objective_settings.objectives.get(
-            objective_settings.active_name
-        )
+        active_objective = objective_settings.objectives.get(objective_settings.active_name)
         if active_objective is None:
             active_objective = default_objective(objective_settings.active_name)
-        self.stage_controller.apply_objective_configuration(
-            active_objective,
-            objective_settings.objectives,
-        )
+        self.stage_controller.apply_objective_configuration(active_objective, objective_settings.objectives)
         self._sync_objective_combo(objective_settings.active_name)
         if self._design_session.document is not None:
             self._refresh_design_position()
+
+    def _persist_objective_plan(self, plan) -> bool:
+        if plan.settings is None:
+            if plan.status:
+                self._show_status(plan.status, plan.status_timeout_ms)
+            return False
+        self.settings_manager.replace(plan.settings)
+        self.settings_manager.save()
+        if getattr(plan, "apply_settings", False):
+            self._apply_objective_settings()
+        if getattr(plan, "refresh_design_position", False):
+            self._refresh_design_position()
+        if getattr(plan, "refresh_calibration_ui", False):
+            self._refresh_click_calibration_ui()
+        if plan.status:
+            self._show_status(plan.status, plan.status_timeout_ms)
+        return True
 
     def _show_click_calibration_dialog(self) -> None:
         if self._click_calibration_dialog is None:
@@ -4533,31 +4483,20 @@ class Main(QMainWindow):
         if self.stage_controller.is_busy():
             self._show_status("Stage is busy; objective not added.", 4000)
             return
-        raw_name, accepted = QInputDialog.getText(
-            self,
-            "Add Objective",
-            "Objective name",
-        )
+        raw_name, accepted = QInputDialog.getText(self, "Add Objective", "Objective name")
         if not accepted:
             return
-        name = normalize_objective_name(raw_name)
-        if not name:
-            self._show_status(
-                "Objective name must use letters, digits, dot, dash, or underscore.",
-                5000,
-            )
+        plan = profile_add_plan(self.settings_manager.settings, raw_name)
+        if plan.select_existing_name is not None:
+            self._set_active_objective(plan.select_existing_name, apply_motion=True)
+            if plan.status:
+                self._show_status(plan.status, plan.status_timeout_ms)
             return
-        settings = self.settings_manager.settings.clone()
-        if name in settings.objectives.objectives:
-            self._set_active_objective(name, apply_motion=True)
-            self._show_status(f"Objective already exists: {name}.", 3000)
+        if plan.settings is None:
+            if plan.status:
+                self._show_status(plan.status, plan.status_timeout_ms)
             return
-        settings.objectives.objectives[name] = default_objective(name)
-        settings.objectives.active_name = name
-        self.settings_manager.replace(settings)
-        self.settings_manager.save()
-        self._apply_objective_settings()
-        self._show_status(f"Objective added: {name}.", 3000)
+        self._persist_objective_plan(plan)
 
     def _delete_objective_profile(self, objective_name: str) -> None:
         if self.stage_controller.is_busy():
@@ -4567,31 +4506,19 @@ class Main(QMainWindow):
         name = normalize_objective_name(objective_name)
         if not name:
             return
-        settings = self.settings_manager.settings.clone()
-        profiles = settings.objectives.objectives
-        if name not in profiles:
-            self._show_status(f"Objective does not exist: {name}.", 4000)
+        preflight = profile_delete_plan(self.settings_manager.settings, name, confirmed=False)
+        if preflight.status:
+            self._show_status(preflight.status, preflight.status_timeout_ms)
             return
-        if len(profiles) <= 1:
-            self._show_status("At least one objective profile is required.", 4000)
-            return
-        response = QMessageBox.question(
-            self,
-            "Delete Objective",
-            f"Delete objective profile {name}?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
+        response = QMessageBox.question(self, "Delete Objective", f"Delete objective profile {name}?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if response != QMessageBox.Yes:
             return
-        del profiles[name]
-        if settings.objectives.active_name == name:
-            remaining = ordered_objective_names(profiles)
-            settings.objectives.active_name = remaining[0]
-        self.settings_manager.replace(settings)
-        self.settings_manager.save()
-        self._apply_objective_settings()
-        self._show_status(f"Objective deleted: {name}.", 3000)
+        plan = profile_delete_plan(self.settings_manager.settings, name, confirmed=True)
+        if plan.settings is None:
+            if plan.status:
+                self._show_status(plan.status, plan.status_timeout_ms)
+            return
+        self._persist_objective_plan(plan)
 
     def _set_objective_offset_reference(self) -> None:
         if self.stage_controller.is_busy():
@@ -4600,102 +4527,42 @@ class Main(QMainWindow):
         raw_stage_xy = self._resolve_alignment_capture_stage_position()
         if raw_stage_xy is None:
             return
-        settings = self.settings_manager.settings.clone()
-        active_name = normalize_objective_name(settings.objectives.active_name)
-        if not active_name:
-            return
-        profiles = settings.objectives.objectives
-        if active_name not in profiles:
-            profiles[active_name] = default_objective(active_name)
-        base_name = base_objective_name(profiles)
-        if active_name == base_name:
-            profile = profiles[active_name]
-            profile.xy_offset_x_mm = 0.0
-            profile.xy_offset_y_mm = 0.0
-            profile.xy_offset_configured = True
-            profiles[active_name] = profile
-            self.settings_manager.replace(settings)
-            self.settings_manager.save()
-            self._apply_objective_settings()
-        elif not objective_xy_offset_is_configured(profiles, active_name):
-            self._show_status(
-                "Set the objective offset reference with the base objective first.",
-                6000,
-            )
-            return
-        reference_offset = objective_xy_offset(profiles, active_name)
-        self._objective_offset_reference = ObjectiveOffsetReference(
-            objective_name=active_name,
-            stage_xy=raw_stage_xy,
-            offset_xy=reference_offset,
-        )
-        self._refresh_click_calibration_ui()
-        self._show_status(
-            f"Objective offset reference set with {active_name}. "
-            "Center the same feature under another objective and press Save Offset.",
-            8000,
-        )
+        plan = objective_offset_reference_plan(self.settings_manager.settings, raw_stage_xy)
+        if plan.settings is not None:
+            self._persist_objective_plan(plan)
+        if plan.reference is not None:
+            self._objective_offset_reference = plan.reference
+            self._refresh_click_calibration_ui()
+        elif plan.refresh_calibration_ui:
+            self._refresh_click_calibration_ui()
+        if plan.status and plan.settings is None:
+            self._show_status(plan.status, plan.status_timeout_ms)
 
     def _save_active_objective_offset(self) -> None:
         if self.stage_controller.is_busy():
             self._show_status("Stage is busy; objective offset not saved.", 4000)
             return
-        reference = self._objective_offset_reference
-        if reference is None:
+        if self._objective_offset_reference is None:
             self._show_status("Set an objective offset reference first.", 5000)
             return
         raw_stage_xy = self._resolve_alignment_capture_stage_position()
         if raw_stage_xy is None:
             return
-        settings = self.settings_manager.settings.clone()
-        active_name = normalize_objective_name(settings.objectives.active_name)
-        if not active_name:
+        plan = save_active_objective_offset(self.settings_manager.settings, self._objective_offset_reference, raw_stage_xy)
+        if plan.settings is None:
+            if plan.status:
+                self._show_status(plan.status, plan.status_timeout_ms)
             return
-        profiles = settings.objectives.objectives
-        if active_name not in profiles:
-            profiles[active_name] = default_objective(active_name)
-        profile = profiles[active_name]
-        base_name = base_objective_name(profiles)
-        if active_name == base_name:
-            offset_xy = (0.0, 0.0)
-        else:
-            offset_xy = calibrated_objective_offset(reference, raw_stage_xy)
-        profile.xy_offset_x_mm = float(offset_xy[0])
-        profile.xy_offset_y_mm = float(offset_xy[1])
-        profile.xy_offset_configured = True
-        profiles[active_name] = profile
-        self.settings_manager.replace(settings)
-        self.settings_manager.save()
-        self._apply_objective_settings()
-        self._refresh_design_position()
-        self._show_status(
-            f"Saved {active_name} objective offset: "
-            f"X={offset_xy[0]:+.4f}, Y={offset_xy[1]:+.4f} mm.",
-            6000,
-        )
+        self._persist_objective_plan(plan)
 
     def _reset_active_objective_offset(self) -> None:
         if self.stage_controller.is_busy():
             self._show_status("Stage is busy; objective offset not reset.", 4000)
             return
-        settings = self.settings_manager.settings.clone()
-        active_name = normalize_objective_name(settings.objectives.active_name)
-        if not active_name:
+        plan = reset_active_objective_offset(self.settings_manager.settings)
+        if plan.settings is None:
             return
-        profiles = settings.objectives.objectives
-        if active_name not in profiles:
-            profiles[active_name] = default_objective(active_name)
-        profile = profiles[active_name]
-        profile.xy_offset_x_mm = 0.0
-        profile.xy_offset_y_mm = 0.0
-        profile.xy_offset_configured = active_name == base_objective_name(profiles)
-        profiles[active_name] = profile
-        self.settings_manager.replace(settings)
-        self.settings_manager.save()
-        self._apply_objective_settings()
-        self._refresh_design_position()
-        self._refresh_click_calibration_ui()
-        self._show_status(f"Reset {active_name} objective offset.", 4000)
+        self._persist_objective_plan(plan)
 
     def _refresh_click_calibration_ui(self) -> None:
         if self._click_calibration_action is not None:
@@ -4715,28 +4582,10 @@ class Main(QMainWindow):
         objective_name: str,
         pixels_to_mm: object,
     ) -> None:
-        name = normalize_objective_name(objective_name)
-        if not name:
+        plan = update_objective_calibration(self.settings_manager.settings, objective_name, pixels_to_mm)
+        if plan.settings is None:
             return
-        settings = self.settings_manager.settings.clone()
-        profile = settings.objectives.objectives.get(name)
-        if profile is None:
-            profile = default_objective(name)
-        matrix: list[list[float]] = []
-        if isinstance(pixels_to_mm, (list, tuple)):
-            try:
-                matrix = [
-                    [float(pixels_to_mm[0][0]), float(pixels_to_mm[0][1])],
-                    [float(pixels_to_mm[1][0]), float(pixels_to_mm[1][1])],
-                ]
-            except (TypeError, ValueError, IndexError):
-                matrix = []
-        profile.pixels_to_mm = matrix
-        profile.xy_calibration_configured = bool(matrix)
-        settings.objectives.objectives[name] = profile
-        self.settings_manager.replace(settings)
-        self.settings_manager.save()
-        self._refresh_click_calibration_ui()
+        self._persist_objective_plan(plan)
 
     def _on_objective_mismatch_detected(
         self,
@@ -4755,11 +4604,6 @@ class Main(QMainWindow):
 
     def _design_window_is_open(self) -> bool:
         return self.design_layout_window is not None and self.design_layout_window.isVisible()
-
-    def _current_alignment_points(self) -> list[tuple[float, float] | None]:
-        if self._design_backed_alignment_active():
-            return list(self._design_session.source_stage_marks[:2])
-        return list(self._manual_alignment_points[:2])
 
     def _collapse_alignment_panel_if_ready(self) -> None:
         if self.alignment_dock is None or not self._design_window_is_open():
@@ -4838,20 +4682,14 @@ class Main(QMainWindow):
         try:
             stage_position = self.stage_controller.current_stage_position()
         except Exception as exc:
-            if str(exc) != "Unable to read stage position.":
-                self._show_status(str(exc), 5000)
-                return None
-            latest = self.stage_controller.latest_stage_position()
-            if latest is None or len(latest) < 2:
-                self.stage_controller.request_status_refresh()
-                self._show_status(str(exc), 5000)
-                return None
-            stage_position = latest
-        if len(stage_position) < 2:
+            plan = alignment_capture_position_plan(error_message=str(exc), latest_position=self.stage_controller.latest_stage_position())
+        else:
+            plan = alignment_capture_position_plan(stage_position=stage_position)
+        if plan.request_status_refresh:
             self.stage_controller.request_status_refresh()
-            self._show_status("X/Y coordinates are unavailable.", 5000)
-            return None
-        return (float(stage_position[0]), float(stage_position[1]))
+        if plan.status:
+            self._show_status(plan.status, plan.status_timeout_ms)
+        return plan.stage_xy
 
     def _capture_manual_alignment_center(self, slot: int) -> None:
         if slot not in (0, 1):
@@ -4910,7 +4748,6 @@ class Main(QMainWindow):
         self._refresh_manual_alignment_ui()
         self._update_stage_coordinate_apply_state()
 
-        label = "image" if source == "image" else "center"
         if self._design_backed_alignment_active():
             registration_stage_xy = self._camera_stage_xy_from_raw_stage_xy(captured)
             self._pending_alignment_preparation = None
@@ -4918,104 +4755,64 @@ class Main(QMainWindow):
             self._refresh_design_panel()
             self._refresh_design_position()
             pair_count = self._design_session.source_pair_count()
-            if pair_count < 2:
-                self._set_alignment_panel_expanded()
-                self._show_status(
-                    f"Design alignment: point {slot + 1} captured from {label} "
-                    f"at X={registration_stage_xy[0]:.3f}, "
-                    f"Y={registration_stage_xy[1]:.3f}. "
-                    "Capture the other point next.",
-                    6000,
-                )
-                return
-            try:
-                preparation = self._design_session.prepare_source_alignment()
-            except DesignModelError as exc:
-                self._show_status(str(exc), 7000)
-                return
-            if not self._design_spacing_ratio_is_reasonable(preparation.distance_ratio):
-                self._show_status(
-                    "Design calibration aborted: mark spacing mismatch. "
-                    f"Design {preparation.design_distance_mm:.4f} mm vs chip {preparation.stage_distance_mm:.4f} mm.",
-                    8000,
-                )
-                return
-            if abs(preparation.rotation_deg) < 1e-3:
-                self._design_session.apply_prepared_alignment(preparation)
-                self._set_design_snap_enabled(False)
-                self._refresh_design_panel()
-                self._refresh_design_position()
-                self._collapse_alignment_panel_if_ready()
-                self._show_status(
-                    "Design calibration complete. "
-                    f"Spacing ratio {preparation.distance_ratio:.3f}.",
-                    7000,
-                )
-                return
-            self._pending_alignment_preparation = preparation
-            self._set_alignment_panel_expanded()
-            self._show_status(
-                "Two mark pairs captured. "
-                f"Rotating chip by {preparation.rotation_deg:+.3f} deg to match the design.",
-                7000,
-            )
-            self.stage_controller.request_rotate_b(preparation.rotation_deg)
+            preparation = None
+            preparation_error = None
+            spacing_reasonable = True
+            if pair_count >= 2:
+                try:
+                    preparation = self._design_session.prepare_source_alignment()
+                except DesignModelError as exc:
+                    preparation_error = str(exc)
+                else:
+                    spacing_reasonable = self._design_spacing_ratio_is_reasonable(preparation.distance_ratio)
+            plan = design_alignment_capture_plan(slot=slot, stage_xy=registration_stage_xy, source=source, pair_count=pair_count, preparation=preparation, preparation_error=preparation_error, spacing_reasonable=spacing_reasonable)
+            self._apply_alignment_capture_plan(plan)
             return
 
-        self._manual_alignment_points[slot] = captured
-        self._set_alignment_panel_expanded()
-        self._refresh_manual_alignment_ui()
-        other_slot = 1 - slot
-        if self._manual_alignment_points[other_slot] is None:
-            self._show_status(
-                f"Chip alignment: point {slot + 1} captured from {label} at X={captured[0]:.3f}, Y={captured[1]:.3f}. Capture point {other_slot + 1} next.",
-                6000,
-            )
-            return
+        plan = manual_alignment_capture_plan(slot, captured, source=source, manual_points=self._manual_alignment_points, target_angles=self.ALIGNMENT_TARGET_ANGLES)
+        self._apply_alignment_capture_plan(plan)
 
-        first_point = self._manual_alignment_points[0]
-        second_point = self._manual_alignment_points[1]
-        if first_point is None or second_point is None:
-            return
-        rotation_deg = self._calculate_alignment_rotation(first_point, second_point)
-        if rotation_deg is None:
-            self._show_status(
-                "Chip alignment points are too close together. Capture two distinct points.",
-                5000,
-            )
-            return
-        if abs(rotation_deg) < 1e-3:
-            self._collapse_alignment_panel_if_design_open()
-            self._show_status("Chip alignment points are already aligned.", 5000)
-            return
-
-        self._show_status(
-            f"Chip alignment: rotating B by {rotation_deg:+.3f} deg.",
-            5000,
-        )
-        self._invalidate_design_registration(
-            "Design registration cleared after B-axis rotation."
-        )
-        self._pending_quick_alignment_rotation = True
-        self.stage_controller.request_rotate_b(rotation_deg)
+    def _apply_alignment_capture_plan(self, plan) -> None:
+        if plan.points is not None:
+            self._manual_alignment_points = plan.points
+        if plan.apply_prepared_alignment and plan.preparation is not None:
+            self._design_session.apply_prepared_alignment(plan.preparation)
+        if plan.pending_preparation is not None:
+            self._pending_alignment_preparation = plan.pending_preparation
+        for enabled, callback in (
+            (plan.disable_snap, lambda: self._set_design_snap_enabled(False)),
+            (plan.pending_quick_alignment_rotation, lambda: setattr(self, "_pending_quick_alignment_rotation", True)),
+            (plan.refresh_manual_ui, self._refresh_manual_alignment_ui),
+            (plan.refresh_design_panel, self._refresh_design_panel),
+            (plan.refresh_design_position, self._refresh_design_position),
+            (plan.expand_alignment, self._set_alignment_panel_expanded),
+            (plan.collapse_alignment_if_ready, self._collapse_alignment_panel_if_ready),
+            (plan.collapse_alignment_if_design_open, self._collapse_alignment_panel_if_design_open),
+            (plan.invalidate_design_registration, lambda: self._invalidate_design_registration("Design registration cleared after B-axis rotation.")),
+        ):
+            if enabled:
+                callback()
+        if plan.status:
+            self._show_status(plan.status, plan.status_timeout_ms)
+        if plan.request_b_rotation and plan.rotation_deg is not None:
+            self.stage_controller.request_rotate_b(plan.rotation_deg)
 
     def _refresh_manual_alignment_ui(self) -> None:
+        presentation = alignment_presentation(
+            design_backed=self._design_backed_alignment_active(),
+            design_stage_marks=self._design_session.source_stage_marks,
+            manual_points=self._manual_alignment_points,
+            pick_slot=self._manual_alignment_pick_slot,
+        )
         if self.alignment_panel is not None:
             self.alignment_panel.set_design_marks(self._design_session.source_design_marks)
-            self.alignment_panel.set_captured_points(self._current_alignment_points())
-            self.alignment_panel.set_pick_slot(self._manual_alignment_pick_slot)
+            self.alignment_panel.set_captured_points(presentation.captured_points)
+            self.alignment_panel.set_pick_slot(presentation.pick_slot)
             self.alignment_panel.set_registration_status(
                 self._design_session.registration_status
             )
-        if self._manual_alignment_pick_slot is None:
-            instruction = ""
-        else:
-            instruction = (
-                f"Chip alignment: click point {self._manual_alignment_pick_slot + 1} "
-                "or press Space for the center."
-            )
-        self.view.set_alignment_mode(self._manual_alignment_pick_slot is not None)
-        self.view.set_alignment_instruction(instruction)
+        self.view.set_alignment_mode(presentation.alignment_mode)
+        self.view.set_alignment_instruction(presentation.instruction)
 
     def _update_coordinate_display(
         self,
@@ -5196,32 +4993,6 @@ class Main(QMainWindow):
             return self._design_xy_from_raw_stage_xy(fluidnc_xy)
         except Exception:
             return None
-
-    @classmethod
-    def _calculate_alignment_rotation(
-        cls,
-        first_position: tuple[float, float],
-        second_position: tuple[float, float],
-    ) -> float | None:
-        dx = second_position[0] - first_position[0]
-        dy = second_position[1] - first_position[1]
-        if math.hypot(dx, dy) <= 1e-6:
-            return None
-        angle_deg = math.degrees(math.atan2(dy, dx))
-        best_delta = min(
-            (
-                cls._normalise_angle(target - angle_deg)
-                for target in cls.ALIGNMENT_TARGET_ANGLES
-            ),
-            key=lambda value: abs(value),
-        )
-        if abs(best_delta) > 45.0:
-            return None
-        return best_delta
-
-    @staticmethod
-    def _normalise_angle(angle_deg: float) -> float:
-        return ((angle_deg + 180.0) % 360.0) - 180.0
 
     def show_joystick_window(self) -> None:
         if not self.joystick_panel or not self.joystick_dock:
