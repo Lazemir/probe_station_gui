@@ -8,7 +8,7 @@ Commits:
 - `0cba3e6` Extract objective alignment policy
 - `7265fa5` Update task 34 report hash
 - `d91bc2b` Restore objective alignment parity
-- cleanup commit pending
+- `117e673` Clean up objective alignment adapter formatting
 
 Files changed:
 - `main.py`
