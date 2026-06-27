@@ -85,7 +85,11 @@ def parse_telegram_command(text: str) -> tuple[str, str]:
 def route_message_command(text: str) -> TelegramCommandRoute | None:
     command, _args = parse_telegram_command(text)
     if command in HELP_COMMANDS:
-        return TelegramCommandRoute("help")
+        return TelegramCommandRoute(
+            "response",
+            text=HELP_TEXT,
+            callback_answer="Commands.",
+        )
     if command in STATUS_COMMANDS:
         return TelegramCommandRoute("status")
     if command in ROUTE_PHOTO_COMMANDS:
@@ -231,6 +235,14 @@ def route_action_response(
         "No active route.",
         None,
     )
+
+
+def is_route_action(action: str) -> bool:
+    return str(action or "").strip().lower() in ROUTE_ACTIONS
+
+
+def thread_alive(thread: object | None) -> bool:
+    return thread is not None and thread.is_alive()
 
 
 def status_text(snapshot: TelegramStatusSnapshot) -> str:

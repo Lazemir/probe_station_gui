@@ -172,3 +172,97 @@ def test_command_service_reports_running_thread() -> None:
     service._thread = SimpleNamespace(is_alive=lambda: True)  # type: ignore[assignment]
 
     assert service.is_running()
+
+
+def test_send_telegram_bot_message_for_settings_resolves_token_and_document(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    sent: list[dict[str, object]] = []
+    document = tmp_path / "result.csv"
+    document.write_text("x,y\n", encoding="utf-8")
+
+    settings = SimpleNamespace(
+        enabled=True,
+        chat_id="42",
+        bot_token="token",
+    )
+    monkeypatch.setattr(
+        telegram_notifications,
+        "send_telegram_message_in_thread",
+        lambda **kwargs: sent.append(dict(kwargs)) or True,
+    )
+    monkeypatch.setattr(
+        telegram_notifications,
+        "resolved_bot_token",
+        lambda _settings: "token",
+    )
+
+    accepted = telegram_notifications.send_telegram_bot_message_for_settings(
+        settings,
+        "message",
+        photo=(b"photo", "photo.jpg"),
+        document_path=document,
+        reply_markup="markup",
+    )
+
+    assert accepted is True
+    assert sent == [
+        {
+            "bot_token": "token",
+            "chat_id": "42",
+            "text": "message",
+            "photo_bytes": b"photo",
+            "photo_name": "photo.jpg",
+            "document_path": document,
+            "reply_markup": "markup",
+        }
+    ]
+
+
+def test_send_telegram_alert_for_settings_checks_alert_and_attaches_photo(
+    monkeypatch,
+) -> None:
+    sent: list[dict[str, object]] = []
+    settings = SimpleNamespace(
+        enabled=True,
+        chat_id="42",
+        alert_enabled=lambda key: key == "route_attention",
+    )
+    monkeypatch.setattr(
+        telegram_notifications,
+        "send_telegram_message_in_thread",
+        lambda **kwargs: sent.append(dict(kwargs)) or True,
+    )
+    monkeypatch.setattr(
+        telegram_notifications,
+        "resolved_bot_token",
+        lambda _settings: "token",
+    )
+
+    telegram_notifications.send_telegram_alert_for_settings(
+        settings,
+        "route_attention",
+        "message",
+        attach_photo=True,
+        latest_camera_frame_photo=lambda: (b"latest", "latest.jpg"),
+        reply_markup="markup",
+    )
+    telegram_notifications.send_telegram_alert_for_settings(
+        settings,
+        "disabled_alert",
+        "ignored",
+        latest_camera_frame_photo=lambda: None,
+    )
+
+    assert sent == [
+        {
+            "bot_token": "token",
+            "chat_id": "42",
+            "text": "message",
+            "photo_bytes": b"latest",
+            "photo_name": "latest.jpg",
+            "document_path": None,
+            "reply_markup": "markup",
+        }
+    ]

@@ -138,6 +138,30 @@ def test_telegram_route_action_response_submits_api_route_control_confirmation()
     assert response.reply_markup == "markup"
 
 
+def test_invalid_telegram_route_callback_does_not_consult_api_route_control() -> None:
+    window = Main.__new__(Main)
+    submitted: list[str] = []
+    api_snapshots: list[str] = []
+    window._route_measurement_waiting = True
+    window._route_measurement_runner = None
+    window._telegram_default_markup = lambda: "markup"
+    window._submit_route_measurement_confirmation = submitted.append
+
+    def api_route_control_state_snapshot() -> object:
+        api_snapshots.append("called")
+        return SimpleNamespace(accepts_route_confirmation=True)
+
+    window._api_route_control_state_snapshot = api_route_control_state_snapshot
+
+    response = Main._handle_telegram_callback(window, "route:remeasure")
+
+    assert submitted == []
+    assert api_snapshots == []
+    assert response.text == "Unknown route action."
+    assert response.callback_answer == "Unknown action."
+    assert response.reply_markup == "markup"
+
+
 def test_telegram_status_response_attaches_latest_camera_photo() -> None:
     window = Main.__new__(Main)
     window._latest_camera_frame_photo = lambda: (b"jpeg", "latest.jpg")

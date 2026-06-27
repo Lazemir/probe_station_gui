@@ -26,7 +26,11 @@ def test_parse_plain_command_and_empty_input() -> None:
 
 
 def test_message_routing_for_known_commands_and_unknown() -> None:
-    assert commands.route_message_command("/help").kind == "help"
+    help_route = commands.route_message_command("/help")
+
+    assert help_route.kind == "response"
+    assert help_route.text == commands.help_text()
+    assert help_route.callback_answer == "Commands."
     assert commands.route_message_command("статус").kind == "status"
     assert commands.route_message_command("/photo").kind == "route_photo"
     assert commands.route_message_command("/contact").kind == "contact_photo"

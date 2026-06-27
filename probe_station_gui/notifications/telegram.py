@@ -643,6 +643,88 @@ def send_telegram_message_in_thread(
     return True
 
 
+def send_telegram_bot_message_for_settings(
+    settings: object,
+    message: str,
+    *,
+    photo: tuple[bytes, str] | None = None,
+    document_path: str | Path | None = None,
+    reply_markup: object | None = None,
+) -> bool:
+    if not getattr(settings, "enabled", False):
+        return False
+    chat_id = str(getattr(settings, "chat_id", "") or "").strip()
+    if not chat_id:
+        return False
+    bot_token = resolved_bot_token(settings)
+    if not bot_token:
+        return False
+    document = _existing_document_path(document_path)
+    return send_telegram_message_in_thread(
+        bot_token=bot_token,
+        chat_id=chat_id,
+        text=message,
+        photo_bytes=photo[0] if photo is not None else None,
+        photo_name=photo[1] if photo is not None else "microscope.jpg",
+        document_path=document,
+        reply_markup=reply_markup,
+    )
+
+
+def send_telegram_alert_for_settings(
+    settings: object,
+    alert_key: str,
+    message: str,
+    *,
+    attach_photo: bool = False,
+    photo: tuple[bytes, str] | None = None,
+    document_path: str | Path | None = None,
+    reply_markup: object | None = None,
+    latest_camera_frame_photo: Callable[[], tuple[bytes, str] | None] | None = None,
+) -> None:
+    if not getattr(settings, "enabled", False):
+        logger.debug("Telegram alert skipped: disabled alert=%s", alert_key)
+        return
+    alert_enabled = getattr(settings, "alert_enabled", None)
+    if callable(alert_enabled) and not alert_enabled(alert_key):
+        logger.debug("Telegram alert skipped: alert=%s is disabled", alert_key)
+        return
+    chat_id = str(getattr(settings, "chat_id", "") or "").strip()
+    if not chat_id:
+        logger.warning("Telegram alert skipped: chat is not linked alert=%s", alert_key)
+        return
+    bot_token = resolved_bot_token(settings)
+    if not bot_token:
+        logger.warning(
+            "Telegram alert skipped: bot token is not configured alert=%s",
+            alert_key,
+        )
+        return
+    resolved_photo = photo
+    if resolved_photo is None and attach_photo and latest_camera_frame_photo is not None:
+        resolved_photo = latest_camera_frame_photo()
+    send_telegram_message_in_thread(
+        bot_token=bot_token,
+        chat_id=chat_id,
+        text=message,
+        photo_bytes=resolved_photo[0] if resolved_photo is not None else None,
+        photo_name=resolved_photo[1] if resolved_photo is not None else "microscope.jpg",
+        document_path=_existing_document_path(document_path),
+        reply_markup=reply_markup,
+    )
+
+
+def telegram_route_attention_alert_enabled(settings: object) -> bool:
+    alert_enabled = getattr(settings, "alert_enabled", None)
+    return bool(
+        getattr(settings, "enabled", False)
+        and str(getattr(settings, "chat_id", "") or "").strip()
+        and callable(alert_enabled)
+        and alert_enabled("route_attention")
+        and resolved_bot_token(settings)
+    )
+
+
 def telegram_inline_keyboard(
     rows: Sequence[Sequence[tuple[str, str]]],
 ) -> object | None:
@@ -664,6 +746,13 @@ def telegram_inline_keyboard(
         for row in rows
     ]
     return InlineKeyboardMarkup(button_rows)  # type: ignore[operator]
+
+
+def _existing_document_path(document_path: str | Path | None) -> Path | None:
+    document = Path(document_path).expanduser() if document_path is not None else None
+    if document is not None and document.exists() and document.is_file():
+        return document
+    return None
 
 
 def _linked_chat_from_update(
