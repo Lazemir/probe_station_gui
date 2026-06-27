@@ -4416,9 +4416,14 @@ class Main(QMainWindow):
             if plan.status:
                 self._show_status(plan.status, plan.status_timeout_ms)
             return
-        self._persist_objective_plan(plan)
+        self.settings_manager.replace(plan.settings)
+        self.settings_manager.save()
+        if plan.apply_settings:
+            self._apply_objective_settings()
         if plan.apply_offset_motion:
             self._apply_objective_change_offset(plan.old_name, plan.new_name)
+        if plan.status:
+            self._show_status(plan.status, plan.status_timeout_ms)
 
     def _apply_objective_change_offset(self, old_name: str, new_name: str) -> None:
         plan = objective_change_offset_plan(self.settings_manager.objectives_configuration(), old_name, new_name, self.stage_controller.latest_stage_position(), self.stage_controller.is_busy(), display_axis_value_from_raw=self._display_axis_value_from_raw, raw_axis_value_from_display=self._raw_axis_value_from_display)

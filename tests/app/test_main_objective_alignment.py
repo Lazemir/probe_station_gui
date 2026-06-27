@@ -159,6 +159,19 @@ def test_set_active_objective_busy_restores_combo_and_does_not_save() -> None:
     assert statuses == ["Stage is busy; objective not changed."]
 
 
+def test_set_active_objective_reports_selected_after_offset_motion_status() -> None:
+    window, stage, manager, statuses = _window()
+
+    Main._set_active_objective(window, "X20", apply_motion=True)
+
+    assert manager.settings.objectives.active_name == "X20"
+    assert stage.absolute_moves
+    assert statuses == [
+        "Applying X20 objective offset on X, Y, Z.",
+        "Objective selected: X20.",
+    ]
+
+
 def test_set_objective_offset_reference_base_saves_zero_offset_and_refreshes() -> None:
     window, _stage, manager, statuses = _window()
     window._resolve_alignment_capture_stage_position = lambda: (10.0, 20.0)

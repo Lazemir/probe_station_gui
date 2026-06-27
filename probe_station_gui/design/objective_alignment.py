@@ -20,7 +20,6 @@ from probe_station_gui.settings.objective_config import (
     default_objective,
     normalize_objective_name,
     ordered_objective_names,
-    parse_pixels_to_mm_matrix,
 )
 
 
@@ -415,7 +414,7 @@ def update_objective_calibration(
     profile = cloned.objectives.objectives.get(name)
     if profile is None:
         profile = default_objective(name)
-    matrix = parse_pixels_to_mm_matrix(pixels_to_mm)
+    matrix = _legacy_pixels_to_mm_matrix(pixels_to_mm)
     profile.pixels_to_mm = matrix
     profile.xy_calibration_configured = bool(matrix)
     cloned.objectives.objectives[name] = profile
@@ -637,6 +636,18 @@ def alignment_presentation(
 
 def _alignment_source_label(source: str) -> str:
     return "image" if source == "image" else "center"
+
+
+def _legacy_pixels_to_mm_matrix(raw_matrix: object) -> list[list[float]]:
+    if not isinstance(raw_matrix, (list, tuple)):
+        return []
+    try:
+        return [
+            [float(raw_matrix[0][0]), float(raw_matrix[0][1])],
+            [float(raw_matrix[1][0]), float(raw_matrix[1][1])],
+        ]
+    except (TypeError, ValueError, IndexError):
+        return []
 
 
 def _normalise_angle(angle_deg: float) -> float:

@@ -6,6 +6,8 @@ Reason: The strict `main.py <= 9715` physical LOC target was not reached. The fa
 
 Commits:
 - `0cba3e6` Extract objective alignment policy
+- `7265fa5` Update task 34 report hash
+- follow-up parity fix commit pending
 
 Files changed:
 - `main.py`
@@ -18,24 +20,30 @@ Behavior summary:
 - Added `probe_station_gui/design/objective_alignment.py` as directly tested pure decision policy for objective combo synchronization, objective selection, profile add/delete/reset/update, objective-change offset target planning, objective offset reference/save/reset, alignment capture position fallback, manual quick-alignment rotation planning, design-backed alignment capture decisions, and alignment presentation payloads.
 - Kept `Main` as the side-effect adapter for Qt dialogs/widgets, settings replacement/saving, stage reads/moves/B rotation, coordinate conversion, design/session mutation, snap toggles, panel refresh, and status display.
 - Preserved external status text and movement target behavior covered by app characterization tests.
+- Follow-up parity fix restored objective selection final status ordering and old permissive objective calibration matrix persistence.
 
 TDD red/green evidence:
 - RED: `python -m pytest tests\design\test_objective_alignment.py -q` failed with `ModuleNotFoundError: No module named 'probe_station_gui.design.objective_alignment'`.
 - GREEN: `tests\design\test_objective_alignment.py` passed after implementing the pure module.
 - Characterization: `tests\app\test_main_objective_alignment.py` passed before refactoring `Main`, then continued passing after adapter rewiring.
 - Full-suite regression: one brittle dataclass identity assertion failed in full-suite order; changed it to compare reference fields, then full suite passed.
+- Follow-up RED: `python -m pytest tests\app\test_main_objective_alignment.py::test_set_active_objective_reports_selected_after_offset_motion_status tests\design\test_objective_alignment.py::test_update_objective_calibration_preserves_old_permissive_matrix_conversion -q` failed because selected status came before offset status and singular calibration matrices were cleared.
+- Follow-up GREEN: the same two regressions passed after deferring selected status until after offset handling and restoring the old permissive 2x2 float conversion policy.
 
 Focused results:
 - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\design\test_objective_alignment.py tests\design\test_objective_offsets.py tests\settings\test_objective_config.py tests\app\test_main_objective_alignment.py tests\app\test_main_coordinate_feedrate.py tests\app\test_main_planned_move_prediction.py -q`
 - Result: `200 passed, 3 subtests passed in 2.19s`
+- Follow-up result: `202 passed, 3 subtests passed in 2.23s`
 
 Full results:
 - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests`
 - Result: `1079 passed, 2 skipped in 11.34s`
+- Follow-up result: `1081 passed, 2 skipped in 11.09s`
 
 Ruff results:
 - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m ruff check --ignore E402,F401 .`
 - Result: `All checks passed!`
+- Follow-up result: `All checks passed!`
 
 Metrics before:
 - Provided baseline: `main.py` physical LOC 10035; Wily cyclomatic 1882; Wily raw LOC 10035; MI 0.

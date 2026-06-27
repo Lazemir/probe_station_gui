@@ -157,6 +157,25 @@ def test_profile_add_delete_reset_and_calibration_plans_mutate_settings() -> Non
     ]
 
 
+def test_update_objective_calibration_preserves_old_permissive_matrix_conversion() -> None:
+    settings = _settings()
+
+    singular = update_objective_calibration(settings, "X20", [[1, 2], [2, 4]])
+    nonfinite = update_objective_calibration(settings, "X20", [[1, "nan"], [0, 1]])
+
+    assert singular.settings is not None
+    singular_profile = singular.settings.objectives.objectives["X20"]
+    assert singular_profile.pixels_to_mm == [[1.0, 2.0], [2.0, 4.0]]
+    assert singular_profile.xy_calibration_configured is True
+
+    assert nonfinite.settings is not None
+    nonfinite_profile = nonfinite.settings.objectives.objectives["X20"]
+    assert nonfinite_profile.pixels_to_mm[0][0] == 1.0
+    assert math.isnan(nonfinite_profile.pixels_to_mm[0][1])
+    assert nonfinite_profile.pixels_to_mm[1] == [0.0, 1.0]
+    assert nonfinite_profile.xy_calibration_configured is True
+
+
 def test_objective_offset_reference_save_and_reset_base_and_non_base() -> None:
     settings = _settings()
     base = objective_offset_reference_plan(settings, (10.0, 20.0))
