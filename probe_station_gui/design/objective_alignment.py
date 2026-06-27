@@ -558,8 +558,6 @@ def design_alignment_capture_plan(
     if pair_count < 2:
         return AlignmentCapturePlan(
             expand_alignment=True,
-            refresh_design_panel=True,
-            refresh_design_position=True,
             status=(
                 f"Design alignment: point {slot + 1} captured from {label} "
                 f"at X={stage_xy[0]:.3f}, Y={stage_xy[1]:.3f}. "

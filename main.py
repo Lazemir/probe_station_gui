@@ -168,8 +168,28 @@ from probe_station_gui.views.stage_position_panel import (
     StagePositionPanel,
     format_stage_axis_value,
 )
-from probe_station_gui.design.objective_offsets import base_objective_name, camera_stage_to_raw_stage, objective_xy_offset, raw_stage_to_camera_stage
-from probe_station_gui.design.objective_alignment import alignment_capture_position_plan, alignment_presentation, design_alignment_capture_plan, manual_alignment_capture_plan, objective_change_offset_plan, objective_combo_sync_plan, objective_offset_reference_plan, profile_add_plan, profile_delete_plan, reset_active_objective_offset, save_active_objective_offset, select_active_objective, update_objective_calibration
+from probe_station_gui.design.objective_offsets import (
+    ObjectiveOffsetReference,
+    base_objective_name,
+    camera_stage_to_raw_stage,
+    objective_xy_offset,
+    raw_stage_to_camera_stage,
+)
+from probe_station_gui.design.objective_alignment import (
+    alignment_capture_position_plan,
+    alignment_presentation,
+    design_alignment_capture_plan,
+    manual_alignment_capture_plan,
+    objective_change_offset_plan,
+    objective_combo_sync_plan,
+    objective_offset_reference_plan,
+    profile_add_plan,
+    profile_delete_plan,
+    reset_active_objective_offset,
+    save_active_objective_offset,
+    select_active_objective,
+    update_objective_calibration,
+)
 from probe_station_gui.route.model import (
     MeasurementRoute,
     structure_number_from_labels,
@@ -527,7 +547,7 @@ class Main(QMainWindow):
         self._click_calibration_dialog: ClickCalibrationDialog | None = None
         self._sample_load_action: QAction | None = None
         self._sample_unload_action: QAction | None = None
-        self._objective_offset_reference: object | None = None
+        self._objective_offset_reference: ObjectiveOffsetReference | None = None
         self._ruler_action: QAction | None = None
         self._rect_action: QAction | None = None
         self._last_selected_design_point: tuple[float, float] | None = None
@@ -4406,7 +4426,13 @@ class Main(QMainWindow):
         apply_motion: bool,
         allow_busy: bool = False,
     ) -> None:
-        plan = select_active_objective(self.settings_manager.settings, objective_name, is_busy=self.stage_controller.is_busy(), apply_motion=apply_motion, allow_busy=allow_busy)
+        plan = select_active_objective(
+            self.settings_manager.settings,
+            objective_name,
+            is_busy=self.stage_controller.is_busy(),
+            apply_motion=apply_motion,
+            allow_busy=allow_busy,
+        )
         if plan.refresh_calibration_ui:
             self._refresh_click_calibration_ui()
             return
@@ -4426,13 +4452,25 @@ class Main(QMainWindow):
             self._show_status(plan.status, plan.status_timeout_ms)
 
     def _apply_objective_change_offset(self, old_name: str, new_name: str) -> None:
-        plan = objective_change_offset_plan(self.settings_manager.objectives_configuration(), old_name, new_name, self.stage_controller.latest_stage_position(), self.stage_controller.is_busy(), display_axis_value_from_raw=self._display_axis_value_from_raw, raw_axis_value_from_display=self._raw_axis_value_from_display)
+        plan = objective_change_offset_plan(
+            self.settings_manager.objectives_configuration(),
+            old_name,
+            new_name,
+            self.stage_controller.latest_stage_position(),
+            self.stage_controller.is_busy(),
+            display_axis_value_from_raw=self._display_axis_value_from_raw,
+            raw_axis_value_from_display=self._raw_axis_value_from_display,
+        )
         if plan.status:
             self._show_status(plan.status, plan.status_timeout_ms)
             return
         if plan.raw_targets is None:
             return
-        accepted = self.stage_controller.request_absolute_axis_targets_move(plan.raw_targets, feedrate=self._current_linear_feedrate(), allow_unhomed=False)
+        accepted = self.stage_controller.request_absolute_axis_targets_move(
+            plan.raw_targets,
+            feedrate=self._current_linear_feedrate(),
+            allow_unhomed=False,
+        )
         status = plan.accepted_status if accepted else plan.rejected_status
         if status:
             self._show_status(status, plan.status_timeout_ms)
@@ -4769,12 +4807,28 @@ class Main(QMainWindow):
                 except DesignModelError as exc:
                     preparation_error = str(exc)
                 else:
-                    spacing_reasonable = self._design_spacing_ratio_is_reasonable(preparation.distance_ratio)
-            plan = design_alignment_capture_plan(slot=slot, stage_xy=registration_stage_xy, source=source, pair_count=pair_count, preparation=preparation, preparation_error=preparation_error, spacing_reasonable=spacing_reasonable)
+                    spacing_reasonable = self._design_spacing_ratio_is_reasonable(
+                        preparation.distance_ratio
+                    )
+            plan = design_alignment_capture_plan(
+                slot=slot,
+                stage_xy=registration_stage_xy,
+                source=source,
+                pair_count=pair_count,
+                preparation=preparation,
+                preparation_error=preparation_error,
+                spacing_reasonable=spacing_reasonable,
+            )
             self._apply_alignment_capture_plan(plan)
             return
 
-        plan = manual_alignment_capture_plan(slot, captured, source=source, manual_points=self._manual_alignment_points, target_angles=self.ALIGNMENT_TARGET_ANGLES)
+        plan = manual_alignment_capture_plan(
+            slot,
+            captured,
+            source=source,
+            manual_points=self._manual_alignment_points,
+            target_angles=self.ALIGNMENT_TARGET_ANGLES,
+        )
         self._apply_alignment_capture_plan(plan)
 
     def _apply_alignment_capture_plan(self, plan) -> None:

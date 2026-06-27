@@ -2,12 +2,13 @@
 
 Status: DONE_WITH_CONCERNS
 
-Reason: The strict `main.py <= 9715` physical LOC target was not reached. The fallback target was met: `main.py` is 9806 physical LOC, a 229-line reduction from the provided 10035 baseline, and both requested hotspot methods are below CCN 10.
+Reason: The strict `main.py <= 9715` physical LOC target was not reached. After code-quality cleanup, `main.py` is 9865 physical LOC, a 170-line reduction from the provided 10035 baseline. The earlier fallback LOC target is no longer met because LOC-driven compressed formatting was removed; both requested hotspot methods remain below CCN 10 and Wily cyclomatic remains improved.
 
 Commits:
 - `0cba3e6` Extract objective alignment policy
 - `7265fa5` Update task 34 report hash
 - `d91bc2b` Restore objective alignment parity
+- cleanup commit pending
 
 Files changed:
 - `main.py`
@@ -21,6 +22,7 @@ Behavior summary:
 - Kept `Main` as the side-effect adapter for Qt dialogs/widgets, settings replacement/saving, stage reads/moves/B rotation, coordinate conversion, design/session mutation, snap toggles, panel refresh, and status display.
 - Preserved external status text and movement target behavior covered by app characterization tests.
 - Follow-up parity fix restored objective selection final status ordering and old permissive objective calibration matrix persistence.
+- Code-quality cleanup rewrapped compressed imports/planner calls, restored the concrete `_objective_offset_reference` annotation, and removed redundant first-point design alignment refresh flags from the pure plan while leaving `Main` as the single refresh source for that branch.
 
 TDD red/green evidence:
 - RED: `python -m pytest tests\design\test_objective_alignment.py -q` failed with `ModuleNotFoundError: No module named 'probe_station_gui.design.objective_alignment'`.
@@ -34,24 +36,28 @@ Focused results:
 - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\design\test_objective_alignment.py tests\design\test_objective_offsets.py tests\settings\test_objective_config.py tests\app\test_main_objective_alignment.py tests\app\test_main_coordinate_feedrate.py tests\app\test_main_planned_move_prediction.py -q`
 - Result: `200 passed, 3 subtests passed in 2.19s`
 - Follow-up result: `202 passed, 3 subtests passed in 2.23s`
+- Cleanup result: `202 passed, 3 subtests passed in 2.33s`
 
 Full results:
 - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests`
 - Result: `1079 passed, 2 skipped in 11.34s`
 - Follow-up result: `1081 passed, 2 skipped in 11.09s`
+- Cleanup result: `1081 passed, 2 skipped in 11.21s`
 
 Ruff results:
 - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m ruff check --ignore E402,F401 .`
 - Result: `All checks passed!`
 - Follow-up result: `All checks passed!`
+- Cleanup result: `All checks passed!`
 
 Metrics before:
 - Provided baseline: `main.py` physical LOC 10035; Wily cyclomatic 1882; Wily raw LOC 10035; MI 0.
 - Provided hotspots: `_apply_objective_change_offset` lizard 55 NLOC / CCN 13, radon C(13); `_capture_manual_alignment_point` 93 NLOC / CCN 13, radon C(13); `_set_objective_offset_reference` 42 / 7; `_save_active_objective_offset` 37 / 7; `_delete_objective_profile` 33 / 7; `_set_active_objective` 30 / 7; `_sync_objective_combo` 23 / 7; `_resolve_alignment_capture_stage_position` 20 / 6.
 
 Metrics after:
-- Physical LOC: `main.py` 9806; `objective_alignment.py` 669.
-- Wily from disposable temp snapshot/cache: `main.py` raw LOC 9806, cyclomatic 1873.
+- Physical LOC after cleanup: `main.py` 9865; `objective_alignment.py` 678.
+- Wily from disposable temp snapshot/cache after cleanup: `main.py` raw LOC 9865, cyclomatic 1875.
+- Prior pre-cleanup values: `main.py` raw LOC 9806, cyclomatic 1873.
 - Radon raw: `main.py` LOC 9806 / SLOC 9225; `objective_alignment.py` LOC 669 / SLOC 612.
 - Radon MI: `main.py - C (0.00)`; `objective_alignment.py - B (11.78)`.
 - Radon CC: `_apply_objective_change_offset` A(5); `_capture_manual_alignment_point` B(6); new `objective_change_offset_plan` C(14).
@@ -62,6 +68,6 @@ Verdict:
 - Justified: yes.
 - Behavior preserved: yes, within covered objective/alignment behavior and full regression suite.
 - Tests passed: yes.
-- Metrics improved: yes; fallback accepted, strict line target missed.
+- Metrics improved: yes for Wily cyclomatic and hotspot complexity; strict line target missed and fallback LOC target no longer met after removing LOC-driven formatting.
 - Maintainability improvement: objective/alignment decisions are pure, named, and directly tested outside `Main`; `Main` is reduced to side-effect orchestration for this workflow.
-- New risk introduced: modest risk from compacted long adapter call lines used to meet the physical LOC fallback target; mitigated by focused pure/app tests plus full-suite verification.
+- New risk introduced: low; cleanup was formatting/type narrowing plus removal of a redundant pure-plan refresh flag, verified by focused/full/ruff.
