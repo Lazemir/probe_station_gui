@@ -152,6 +152,10 @@ from probe_station_gui.stage.position_presenter import (
 )
 from probe_station_gui.shared.wheel_guard import GuardedComboBox as QComboBox
 from probe_station_gui.stage.controller import StageControllerError
+from probe_station_gui.views.stage_position_panel import (
+    StagePositionPanel,
+    format_stage_axis_value,
+)
 from probe_station_gui.design.objective_offsets import (
     ObjectiveOffsetReference,
     base_objective_name,
@@ -565,6 +569,7 @@ class Main(QMainWindow):
         self._pending_click_to_move: tuple[float, float, float, float] | None = None
         self._pending_click_deadline: float | None = None
         self._pending_stage_axis_targets: dict[str, tuple[float, float]] = {}
+        self._stage_position_panel: StagePositionPanel | None = None
         self._design_snap_enabled = True
         self._last_reported_b_position: float | None = None
         self._last_camera_frame_ui_timestamp: float | None = None
@@ -581,13 +586,7 @@ class Main(QMainWindow):
         self._stage_axis_base_styles: dict[str, tuple[str, str]] = {}
         self._stage_motion_axes: set[str] = set()
         self._stage_motion_blink_dimmed = False
-        self._stage_axis_return_commits: set[str] = set()
-        self._stage_axis_escape_shortcuts: list[QShortcut] = []
         self._objective_combo: QComboBox | None = None
-        self._stage_coordinate_mode_combo: QComboBox | None = None
-        self._stage_coordinate_apply_button: QPushButton | None = None
-        self._stage_coordinate_cancel_button: QPushButton | None = None
-        self._updating_stage_position_fields = False
         self._pending_linear_feedrate_default: float | None = None
         self._homing_active_key: str | None = None
         self._pending_homing_axes: list[str] = []
@@ -3254,163 +3253,38 @@ class Main(QMainWindow):
         )
 
     def _create_stage_position_widget(self) -> QWidget:
-        widget = QWidget(self)
-        layout = QHBoxLayout(widget)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
-        label = QLabel("Position:", widget)
-        label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        layout.addWidget(label)
-        for axis_name in self.STAGE_AXIS_NAMES:
-            axis_label = QLabel(axis_name, widget)
-            axis_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            layout.addWidget(axis_label)
-            field = QLineEdit(widget)
-            field.setAlignment(Qt.AlignCenter)
-            field.setFixedWidth(72)
-            field.setPlaceholderText("---")
-            field.setToolTip(
-                f"Current {axis_name} coordinate. Enter target and press Enter."
-            )
-            validator = QDoubleValidator(-1000000.0, 1000000.0, 6, field)
-            validator.setNotation(QDoubleValidator.StandardNotation)
-            validator.setLocale(QLocale.c())
-            field.setValidator(validator)
-            field.returnPressed.connect(
-                lambda axis=axis_name: self._on_stage_axis_return_pressed(axis)
-            )
-            escape_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), field)
-            escape_shortcut.setContext(Qt.WidgetShortcut)
-            escape_shortcut.setAutoRepeat(False)
-            escape_shortcut.activated.connect(
-                lambda axis=axis_name: self._on_stage_axis_escape_pressed(axis)
-            )
-            self._stage_axis_escape_shortcuts.append(escape_shortcut)
-            field.editingFinished.connect(
-                lambda axis=axis_name: self._on_stage_axis_editing_finished(axis)
-            )
-            field.textEdited.connect(
-                lambda _text, axis=axis_name: self._on_stage_axis_text_edited(axis)
-            )
-            self._stage_axis_fields[axis_name] = field
-            layout.addWidget(field)
-        mode_label = QLabel("Input:", widget)
-        mode_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        layout.addWidget(mode_label)
-        self._stage_coordinate_mode_combo = QComboBox(widget)
-        self._stage_coordinate_mode_combo.addItem("Absolute", "G90")
-        self._stage_coordinate_mode_combo.addItem("Relative", "G91")
-        self._stage_coordinate_mode_combo.setToolTip(
-            "Coordinate input mode. Idle fields always show absolute coordinates."
-        )
-        self._stage_coordinate_mode_combo.currentIndexChanged.connect(
-            self._on_stage_coordinate_mode_changed
-        )
-        layout.addWidget(self._stage_coordinate_mode_combo)
-        self._stage_coordinate_apply_button = QPushButton("Apply", widget)
-        self._stage_coordinate_apply_button.setEnabled(False)
-        self._stage_coordinate_apply_button.setToolTip(
-            "Apply changed coordinate fields as one move."
-        )
-        self._stage_coordinate_apply_button.clicked.connect(
-            self._apply_pending_stage_coordinate_targets
-        )
-        layout.addWidget(self._stage_coordinate_apply_button)
-        self._stage_coordinate_cancel_button = QPushButton("Cancel", widget)
-        self._stage_coordinate_cancel_button.setEnabled(False)
-        self._stage_coordinate_cancel_button.setToolTip(
-            "Clear edited fields or cancel the active stage workflow."
-        )
-        self._stage_coordinate_cancel_button.clicked.connect(
-            self._cancel_stage_coordinate_action
-        )
-        layout.addWidget(self._stage_coordinate_cancel_button)
-        self._set_stage_position_fields_available(False)
-        return widget
-
-    def _set_stage_position_fields_available(self, available: bool) -> None:
-        self._updating_stage_position_fields = True
-        try:
-            for axis_name, field in self._stage_axis_fields.items():
-                field.blockSignals(True)
-                if not available:
-                    field.clear()
-                    field.setPlaceholderText("---")
-                    field.setEnabled(False)
-                    field.setModified(False)
-                    self._style_stage_axis_field(field, "#e6e6e6", "#666666")
-                else:
-                    field.setEnabled(True)
-                field.blockSignals(False)
-        finally:
-            self._updating_stage_position_fields = False
-        self._update_stage_coordinate_apply_state()
-
-    @staticmethod
-    def _style_stage_axis_field(field: QLineEdit, background: str, foreground: str) -> None:
-        field.setStyleSheet(
-            "QLineEdit {"
-            f"background-color: {background}; color: {foreground}; "
-            f"border: 1px solid {background}; border-radius: 4px; "
-            "padding: 2px 5px;"
-            "}"
-            "QLineEdit:disabled {"
-            f"background-color: {background}; color: {foreground};"
-            "}"
-        )
-
-    @staticmethod
-    def _format_stage_axis_value(value: float) -> str:
-        numeric_value = float(value)
-        if abs(numeric_value) < 0.0005:
-            numeric_value = 0.0
-        text = f"{numeric_value:.3f}"
-        return text.rstrip("0").rstrip(".") if "." in text else text
+        panel = StagePositionPanel(self.STAGE_AXIS_NAMES, self)
+        panel.axis_escape_pressed.connect(self._on_stage_axis_escape_pressed)
+        panel.axis_editing_finished.connect(self._on_stage_axis_editing_finished)
+        panel.axis_text_edited.connect(self._update_stage_coordinate_apply_state)
+        panel.input_mode_changed.connect(self._on_stage_coordinate_mode_changed)
+        panel.apply_requested.connect(self._apply_pending_stage_coordinate_targets)
+        panel.cancel_requested.connect(self._cancel_stage_coordinate_action)
+        self._stage_position_panel = panel
+        self._stage_axis_fields = panel.axis_fields
+        self._stage_axis_base_styles = panel.base_styles
+        self._pending_stage_axis_targets = panel.pending_targets
+        return panel
 
     def _display_axis_value_from_raw(self, axis_name: str, raw_value: float) -> float:
-        axis = axis_name.strip().upper()
         if not hasattr(self, "stage_controller"):
             return float(raw_value)
-        return self.stage_controller.calibrated_axis_display_value(
-            axis,
-            float(raw_value),
-        )
+        return self.stage_controller.calibrated_axis_display_value(axis_name.strip().upper(), float(raw_value))
 
     def _raw_axis_value_from_display(
         self,
         axis_name: str,
         display_value: float,
     ) -> float:
-        axis = axis_name.strip().upper()
         if not hasattr(self, "stage_controller"):
             return float(display_value)
-        return self.stage_controller.calibrated_axis_raw_value(
-            axis,
-            float(display_value),
-        )
-
-    def _apply_stage_axis_field_style(
-        self, axis_name: str, field: QLineEdit | None = None
-    ) -> None:
-        axis = axis_name.strip().upper()
-        target = field or self._stage_axis_fields.get(axis)
-        if target is None:
-            return
-        background, foreground = self._stage_axis_base_styles.get(
-            axis, ("#e6e6e6", "#666666")
-        )
-        if axis in self._pending_stage_axis_targets:
-            background = self.STAGE_AXIS_EDITED_BACKGROUND
-            foreground = self.STAGE_AXIS_EDITED_FOREGROUND
-        elif axis in self._stage_motion_axes and self._stage_motion_blink_dimmed:
-            background = self.STAGE_AXIS_DIMMED_BACKGROUNDS.get(background, background)
-        self._style_stage_axis_field(target, background, foreground)
+        return self.stage_controller.calibrated_axis_raw_value(axis_name.strip().upper(), float(display_value))
 
     def _refresh_stage_axis_styles(self) -> None:
-        for axis_name, field in self._stage_axis_fields.items():
-            if axis_name not in self._stage_axis_base_styles:
-                continue
-            self._apply_stage_axis_field_style(axis_name, field)
+        panel = getattr(self, "_stage_position_panel", None)
+        if panel is None:
+            return
+        panel.refresh_axis_styles(self._stage_motion_axes, self._stage_motion_blink_dimmed)
 
     def _set_stage_motion_axes(self, axes: object) -> None:
         if isinstance(axes, str):
@@ -3450,22 +3324,15 @@ class Main(QMainWindow):
         self._stage_motion_blink_dimmed = not self._stage_motion_blink_dimmed
         self._refresh_stage_axis_styles()
 
-    def _on_stage_axis_return_pressed(self, axis_name: str) -> None:
-        axis = axis_name.strip().upper()
-        if axis in self.STAGE_AXIS_NAMES:
-            self._stage_axis_return_commits.add(axis)
-
-    def _on_stage_axis_text_edited(self, _axis_name: str) -> None:
-        if self._updating_stage_position_fields:
-            return
-        self._update_stage_coordinate_apply_state()
-
     def _on_stage_axis_escape_pressed(self, axis_name: str) -> None:
+        panel = getattr(self, "_stage_position_panel", None)
+        if panel is None:
+            return
         axis = axis_name.strip().upper()
-        self._stage_axis_return_commits.discard(axis)
-        self._pending_stage_axis_targets.pop(axis, None)
-        self._reset_stage_axis_field(axis)
-        field = self._stage_axis_fields.get(axis)
+        panel.discard_return_commit(axis)
+        panel.pop_pending_target(axis)
+        panel.reset_axis_field(axis, self._stage_axis_display_values.get(axis))
+        field = panel.field(axis)
         if field is not None:
             field.deselect()
             field.clearFocus()
@@ -3474,24 +3341,11 @@ class Main(QMainWindow):
         self.view.setFocus(Qt.OtherFocusReason)
 
     def _on_stage_coordinate_mode_changed(self) -> None:
-        if self._pending_stage_axis_targets:
-            self._pending_stage_axis_targets.clear()
+        if self._pending_stage_axis_targets and self._stage_position_panel is not None:
+            self._stage_position_panel.clear_pending_targets(self._stage_axis_display_values)
             self._update_stage_position_display(self.stage_controller.latest_stage_position())
             self._show_status("Cleared pending coordinate edits after input mode change.", 2000)
         self._update_stage_coordinate_apply_state()
-
-    def _selected_stage_coordinate_input_mode(self) -> str:
-        combo = self._stage_coordinate_mode_combo
-        if combo is None:
-            return "G90"
-        mode = normalize_api_coordinate_input_mode(combo.currentData())
-        return mode or "G90"
-
-    def _stage_axis_fields_have_modified_text(self) -> bool:
-        return any(
-            field.isEnabled() and field.isModified()
-            for field in self._stage_axis_fields.values()
-        )
 
     def _surface_map_capture_running(self) -> bool:
         window = self.surface_map_window
@@ -3590,31 +3444,19 @@ class Main(QMainWindow):
             QTimer.singleShot(delay_ms, self._update_stage_coordinate_apply_state)
 
     def _update_stage_coordinate_apply_state(self) -> None:
-        apply_button = self._stage_coordinate_apply_button
-        cancel_button = self._stage_coordinate_cancel_button
-        available = (
-            bool(self._pending_stage_axis_targets)
-            or self._stage_axis_fields_have_modified_text()
-        )
-        controller_busy = (
-            hasattr(self, "stage_controller") and self.stage_controller.is_busy()
-        )
+        panel = getattr(self, "_stage_position_panel", None)
+        if panel is None:
+            return
+        controller_busy = hasattr(self, "stage_controller") and self.stage_controller.is_busy()
         active = self._coordinate_move_axis is not None or controller_busy
-        if apply_button is not None:
-            apply_button.setEnabled(available and not active)
-        if cancel_button is not None:
-            cancel_button.setEnabled(available or self._has_cancelable_operation())
+        available = panel.has_pending_or_modified_fields()
+        panel.set_action_buttons_enabled(available and not active, available or self._has_cancelable_operation())
 
     def _clear_pending_stage_coordinate_targets(self) -> bool:
-        had_changes = (
-            bool(self._pending_stage_axis_targets)
-            or self._stage_axis_fields_have_modified_text()
-        )
-        self._stage_axis_return_commits.clear()
-        self._pending_stage_axis_targets.clear()
-        for axis in self.STAGE_AXIS_NAMES:
-            self._reset_stage_axis_field(axis)
-        self._refresh_stage_axis_styles()
+        panel = getattr(self, "_stage_position_panel", None)
+        if panel is None:
+            return False
+        had_changes = panel.clear_pending_targets(self._stage_axis_display_values)
         self._update_stage_coordinate_apply_state()
         return had_changes
 
@@ -8492,6 +8334,7 @@ class Main(QMainWindow):
             self._clear_stage_motion_axes()
 
     def _update_stage_position_display(self, position: object | None) -> None:
+        panel = getattr(self, "_stage_position_panel", None)
         plan = stage_position_display_plan(
             position,
             axis_names=self.STAGE_AXIS_NAMES,
@@ -8510,103 +8353,72 @@ class Main(QMainWindow):
             self._stage_axis_display_values.clear()
             self._stage_axis_homed.clear()
             self._stage_axis_base_styles.clear()
-            self._pending_stage_axis_targets.clear()
+            if panel is None:
+                return
+            panel.base_styles.clear()
+            panel.pending_targets.clear()
+            panel.return_commits.clear()
             self._clear_stage_motion_axes()
-            self._set_stage_position_fields_available(False)
+            panel.set_fields_available(False)
+            self._update_stage_coordinate_apply_state()
             return
         self._stage_axis_homed = set(plan.homed_axes)
-        self._updating_stage_position_fields = True
-        try:
-            for axis_plan in plan.axis_updates:
-                field = self._stage_axis_fields[axis_plan.axis]
-                self._stage_axis_raw_values[axis_plan.axis] = axis_plan.raw_value
-                if axis_plan.axis not in plan.homed_axes:
-                    self._stage_unhomed_display_origins.setdefault(
-                        axis_plan.axis,
-                        axis_plan.raw_value,
-                    )
-                self._stage_axis_base_styles[axis_plan.axis] = (
-                    axis_plan.base_background,
-                    axis_plan.base_foreground,
-                )
-                self._stage_axis_display_values[axis_plan.axis] = (
-                    axis_plan.display_value
-                )
-                field.blockSignals(True)
-                field.setEnabled(True)
-                if not field.hasFocus():
-                    field.setText(self._format_stage_axis_value(axis_plan.visible_value))
-                    field.setModified(False)
-                field.setToolTip(axis_plan.tooltip)
-                self._apply_stage_axis_field_style(axis_plan.axis, field)
-                field.blockSignals(False)
-            for axis_name in plan.missing_axes:
-                field = self._stage_axis_fields[axis_name]
-                self._stage_axis_base_styles.pop(axis_name, None)
-                self._pending_stage_axis_targets.pop(axis_name, None)
-                field.blockSignals(True)
-                field.clear()
-                field.setEnabled(False)
-                field.setModified(False)
-                self._style_stage_axis_field(field, "#e6e6e6", "#666666")
-                field.blockSignals(False)
-        finally:
-            self._updating_stage_position_fields = False
+        for axis_plan in plan.axis_updates:
+            self._stage_axis_raw_values[axis_plan.axis] = axis_plan.raw_value
+            if axis_plan.axis not in plan.homed_axes:
+                self._stage_unhomed_display_origins.setdefault(axis_plan.axis, axis_plan.raw_value)
+            self._stage_axis_base_styles[axis_plan.axis] = (axis_plan.base_background, axis_plan.base_foreground)
+            self._stage_axis_display_values[axis_plan.axis] = axis_plan.display_value
+        if panel is None:
+            return
+        panel.apply_display_plan(plan)
         if not plan.fields_available:
-            self._set_stage_position_fields_available(False)
+            panel.set_fields_available(False)
+            self._update_stage_coordinate_apply_state()
             return
         self._update_stage_coordinate_apply_state()
 
     def _on_stage_axis_editing_finished(self, axis_name: str) -> bool | None:
-        if self._updating_stage_position_fields:
+        panel = getattr(self, "_stage_position_panel", None)
+        if panel is None or panel.is_programmatic_update:
             return None
         axis = axis_name.strip().upper()
-        commit_from_return = axis in self._stage_axis_return_commits
-        self._stage_axis_return_commits.discard(axis)
-        field = self._stage_axis_fields.get(axis)
+        commit_from_return = panel.consume_return_commit(axis)
+        field = panel.field(axis)
         if field is None or not field.isEnabled() or not field.isModified():
             return None
+
+        def reject(message: str, timeout_ms: int) -> bool:
+            panel.pop_pending_target(axis)
+            panel.reset_axis_field(axis, self._stage_axis_display_values.get(axis))
+            self._refresh_stage_axis_styles()
+            self._update_stage_coordinate_apply_state()
+            self._show_status(message, timeout_ms)
+            return False
+
         text = field.text().strip().replace(",", ".")
         try:
             display_target = float(text)
         except (TypeError, ValueError):
-            self._pending_stage_axis_targets.pop(axis, None)
-            self._reset_stage_axis_field(axis)
-            self._show_status(f"Invalid {axis} target coordinate.", 3000)
-            return False
-        input_mode = self._selected_stage_coordinate_input_mode()
-        raw_target, resolved_display_target = self._resolve_stage_axis_target(
-            axis,
-            display_target,
-            input_mode,
-        )
+            return reject(f"Invalid {axis} target coordinate.", 3000)
+        input_mode = panel.selected_input_mode()
+        raw_target, resolved_display_target = self._resolve_stage_axis_target(axis, display_target, input_mode)
         if raw_target is None:
-            self._pending_stage_axis_targets.pop(axis, None)
-            self._reset_stage_axis_field(axis)
-            self._show_status(f"{axis} coordinate is unavailable.", 3000)
-            return False
-        limit_error = self._stage_axis_target_limit_error(
-            axis,
-            resolved_display_target,
-        )
+            return reject(f"{axis} coordinate is unavailable.", 3000)
+        limit_error = self._stage_axis_target_limit_error(axis, resolved_display_target)
         if limit_error is not None:
-            self._pending_stage_axis_targets.pop(axis, None)
-            self._reset_stage_axis_field(axis)
-            self._show_status(limit_error, 4000)
-            return False
+            return reject(limit_error, 4000)
         field.blockSignals(True)
-        field.setText(self._format_stage_axis_value(display_target))
+        field.setText(format_stage_axis_value(display_target))
         field.setModified(False)
         if commit_from_return:
             field.clearFocus()
         field.blockSignals(False)
         if commit_from_return:
             self.view.setFocus(Qt.OtherFocusReason)
-        self._set_pending_stage_axis_target(
-            axis,
-            raw_target,
-            resolved_display_target,
-        )
+        panel.set_pending_target(axis, raw_target, resolved_display_target)
+        self._refresh_stage_axis_styles()
+        self._update_stage_coordinate_apply_state()
         return True
 
     def _apply_pending_stage_coordinate_targets(self) -> None:
@@ -8652,25 +8464,6 @@ class Main(QMainWindow):
         private_setter = getattr(joystick, "_set_control_mode", None)
         if callable(private_setter):
             private_setter("jog", emit_changed=True)
-
-    def _set_pending_stage_axis_target(
-        self, axis_name: str, raw_target: float, display_target: float
-    ) -> None:
-        axis = axis_name.strip().upper()
-        if axis not in self.STAGE_AXIS_NAMES:
-            return
-        self._pending_stage_axis_targets[axis] = (
-            float(raw_target),
-            float(display_target),
-        )
-        field = self._stage_axis_fields.get(axis)
-        if field is not None and not field.hasFocus():
-            field.blockSignals(True)
-            field.setText(self._format_stage_axis_value(display_target))
-            field.setModified(False)
-            field.blockSignals(False)
-        self._refresh_stage_axis_styles()
-        self._update_stage_coordinate_apply_state()
 
     def _start_coordinate_axis_move(
         self,
@@ -9045,22 +8838,6 @@ class Main(QMainWindow):
             f"{axis} target {target:+.3f} exceeds software limits "
             f"({min_value:.3f}..{max_value:.3f})."
         )
-
-    def _reset_stage_axis_field(self, axis_name: str) -> None:
-        axis = axis_name.strip().upper()
-        field = self._stage_axis_fields.get(axis)
-        if field is None:
-            return
-        value = self._stage_axis_display_values.get(axis)
-        field.blockSignals(True)
-        if value is None:
-            field.clear()
-        else:
-            field.setText(self._format_stage_axis_value(value))
-        field.setModified(False)
-        field.blockSignals(False)
-        self._refresh_stage_axis_styles()
-        self._update_stage_coordinate_apply_state()
 
     def _on_limit_axes_changed(self, axes: object) -> None:
         if isinstance(axes, (set, list, tuple)):

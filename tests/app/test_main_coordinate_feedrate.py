@@ -314,6 +314,102 @@ class _FakeFrame:
         return _FakeFrame(self.name)
 
 
+class _FakeStagePositionPanel:
+    def __init__(
+        self,
+        axis_fields: dict[str, "_FakeLineEdit"],
+        *,
+        apply_button: _FakeButton | None = None,
+        cancel_button: _FakeButton | None = None,
+    ) -> None:
+        self.axis_fields = axis_fields
+        self.apply_button = apply_button
+        self.cancel_button = cancel_button
+        self.pending_targets: dict[str, tuple[float, float]] = {}
+        self.base_styles: dict[str, tuple[str, str]] = {}
+        self.return_commits: set[str] = set()
+        self.is_programmatic_update = False
+        self.display_plans: list[object] = []
+        self.available_calls: list[bool] = []
+        self.action_button_states: list[tuple[bool, bool]] = []
+        self.cleared_display_values: list[dict[str, float]] = []
+
+    def field(self, axis: str) -> _FakeLineEdit | None:
+        return self.axis_fields.get(str(axis).strip().upper())
+
+    def apply_display_plan(self, plan: object) -> None:
+        self.display_plans.append(plan)
+        for axis_plan in getattr(plan, "axis_updates", ()):
+            field = self.axis_fields[axis_plan.axis]
+            self.base_styles[axis_plan.axis] = (
+                axis_plan.base_background,
+                axis_plan.base_foreground,
+            )
+            field.setEnabled(True)
+            if not field.hasFocus():
+                field.setText(main_module.format_stage_axis_value(axis_plan.visible_value))
+                field.setModified(False)
+            field.setToolTip(axis_plan.tooltip)
+            field.styles.append(
+                (
+                    str(axis_plan.base_background),
+                    str(axis_plan.base_foreground),
+                )
+            )
+        for axis_name in getattr(plan, "missing_axes", ()):
+            field = self.axis_fields[axis_name]
+            self.base_styles.pop(axis_name, None)
+            self.pending_targets.pop(axis_name, None)
+            field.clear()
+            field.setEnabled(False)
+            field.setModified(False)
+            field.styles.append(("#e6e6e6", "#666666"))
+
+    def set_fields_available(self, available: bool) -> None:
+        self.available_calls.append(bool(available))
+
+    def refresh_axis_styles(self, motion_axes: object, motion_blink_dimmed: bool) -> None:
+        normalized_motion_axes = {
+            str(axis).strip().upper() for axis in motion_axes if str(axis).strip()
+        }
+        for axis_name, field in self.axis_fields.items():
+            if axis_name not in self.base_styles:
+                continue
+            background, foreground = self.base_styles[axis_name]
+            if axis_name in self.pending_targets:
+                field.styles.append(("#d7b8ff", "#1f1233"))
+            elif axis_name in normalized_motion_axes and motion_blink_dimmed:
+                field.styles.append(
+                    (main_module.Main.STAGE_AXIS_DIMMED_BACKGROUNDS[background], foreground)
+                )
+            else:
+                field.styles.append((background, foreground))
+
+    def has_pending_or_modified_fields(self) -> bool:
+        return bool(self.pending_targets) or any(
+            field.isEnabled() and field.isModified()
+            for field in self.axis_fields.values()
+        )
+
+    def set_action_buttons_enabled(
+        self,
+        apply_enabled: bool,
+        cancel_enabled: bool,
+    ) -> None:
+        if self.apply_button is not None:
+            self.apply_button.setEnabled(apply_enabled)
+        if self.cancel_button is not None:
+            self.cancel_button.setEnabled(cancel_enabled)
+        self.action_button_states.append((bool(apply_enabled), bool(cancel_enabled)))
+
+    def clear_pending_targets(self, display_values: dict[str, float]) -> bool:
+        had_changes = self.has_pending_or_modified_fields()
+        self.pending_targets.clear()
+        self.return_commits.clear()
+        self.cleared_display_values.append(dict(display_values))
+        return had_changes
+
+
 class _FakeJoystick:
     def __init__(self, current_feedrate: float) -> None:
         self._current_feedrate = float(current_feedrate)
@@ -551,6 +647,11 @@ def _make_main(current_feedrate: float = 120.0) -> tuple[
         return tuple(values)
 
     window._position_with_axis_values = position_with_axis_values
+    panel = _FakeStagePositionPanel(window._stage_axis_fields)
+    window._stage_position_panel = panel
+    window._pending_stage_axis_targets = panel.pending_targets
+    window._stage_axis_base_styles = panel.base_styles
+    window._stage_axis_return_commits = panel.return_commits
     window._set_stage_motion_axes = lambda axes: setattr(
         window, "_motion_axes", set(axes)
     )
@@ -727,6 +828,7 @@ def _make_cancel_main() -> tuple[Main, _FakeStageController, _FakeButton, list[s
     window._stage_coordinate_cancel_button = cancel_button
     window._pending_stage_axis_targets = {}
     window._stage_axis_fields = {}
+    window._stage_axis_display_values = {}
     window._stage_axis_return_commits = set()
     window._stage_axis_base_styles = {}
     window._coordinate_move_axis = None
@@ -742,6 +844,15 @@ def _make_cancel_main() -> tuple[Main, _FakeStageController, _FakeButton, list[s
     window._pending_quick_alignment_rotation = False
     window.design_navigator_panel = None
     window.view = _FakeView()
+    panel = _FakeStagePositionPanel(
+        window._stage_axis_fields,
+        apply_button=window._stage_coordinate_apply_button,
+        cancel_button=cancel_button,
+    )
+    window._stage_position_panel = panel
+    window._pending_stage_axis_targets = panel.pending_targets
+    window._stage_axis_base_styles = panel.base_styles
+    window._stage_axis_return_commits = panel.return_commits
     window._show_status = (
         lambda message, _timeout_ms=None: statuses.append(str(message))
     )
@@ -773,6 +884,11 @@ def _make_stage_position_display_main() -> tuple[Main, _FakeStageController]:
     window._stage_motion_axes = set()
     window._stage_motion_blink_dimmed = False
     window._updating_stage_position_fields = False
+    panel = _FakeStagePositionPanel(window._stage_axis_fields)
+    window._stage_position_panel = panel
+    window._pending_stage_axis_targets = panel.pending_targets
+    window._stage_axis_base_styles = panel.base_styles
+    window._stage_axis_return_commits = panel.return_commits
     window._clear_stage_motion_axes = lambda: None
     window._update_stage_coordinate_apply_state = lambda: None
     window._set_stage_position_fields_available = (
@@ -812,6 +928,30 @@ def _telegram_test_photo_bytes(width: int, height: int, fill: int) -> bytes:
 
 
 class MainCoordinateFeedrateTest(unittest.TestCase):
+    def test_stage_position_display_updates_caches_while_panel_applies_ui_state(
+        self,
+    ) -> None:
+        window, stage_controller = _make_stage_position_display_main()
+        panel = _FakeStagePositionPanel(window._stage_axis_fields)
+        window._stage_position_panel = panel
+        window._stage_axis_base_styles = panel.base_styles
+        window._pending_stage_axis_targets = panel.pending_targets
+        window._stage_axis_return_commits = panel.return_commits
+
+        Main._update_stage_position_display(window, (1.0, 2.0, 3.0))
+
+        self.assertEqual(window._stage_axis_raw_values, {"X": 1.0, "Y": 2.0, "Z": 3.0})
+        self.assertEqual(
+            window._stage_axis_display_values,
+            {"X": 1.0, "Y": 2.0, "Z": 3.0},
+        )
+        self.assertEqual(window._stage_axis_homed, {"X", "Y"})
+        self.assertEqual(len(panel.display_plans), 1)
+        self.assertEqual(
+            window._stage_axis_fields["X"].tool_tip,
+            "X coordinate. Enter targets and press Apply. Move feedrate: 123.0 mm/min.",
+        )
+
     def test_stage_position_display_preserves_focused_pending_coordinate_edit(self) -> None:
         window, _stage_controller = _make_stage_position_display_main()
         x_field = window._stage_axis_fields["X"]
@@ -841,6 +981,40 @@ class MainCoordinateFeedrateTest(unittest.TestCase):
         self.assertEqual(
             window._stage_axis_fields["X"].styles[-1],
             ("#c62828", "#ffffff"),
+        )
+
+    def test_stage_coordinate_mode_change_clears_pending_targets_and_reports_status(
+        self,
+    ) -> None:
+        window = Main.__new__(Main)
+        latest_position = (4.0, 5.0, 6.0)
+        statuses: list[str] = []
+        display_updates: list[tuple[float, ...]] = []
+        panel = _FakeStagePositionPanel({"X": _FakeLineEdit()})
+        panel.pending_targets["X"] = (1.0, 1.5)
+        window._stage_position_panel = panel
+        window._pending_stage_axis_targets = panel.pending_targets
+        window._stage_axis_return_commits = panel.return_commits
+        window._stage_axis_display_values = {"X": 9.0}
+        window.stage_controller = types.SimpleNamespace(
+            latest_stage_position=lambda: latest_position,
+        )
+        window._update_stage_position_display = lambda position: display_updates.append(
+            tuple(float(value) for value in position)
+        )
+        window._show_status = lambda message, timeout_ms=None: statuses.append(
+            f"{message}|{timeout_ms}"
+        )
+        window._update_stage_coordinate_apply_state = lambda: None
+
+        Main._on_stage_coordinate_mode_changed(window)
+
+        self.assertEqual(panel.pending_targets, {})
+        self.assertEqual(panel.cleared_display_values, [{"X": 9.0}])
+        self.assertEqual(display_updates, [latest_position])
+        self.assertEqual(
+            statuses,
+            ["Cleared pending coordinate edits after input mode change.|2000"],
         )
 
     def test_api_keithley_meter_configuration_accepts_code_auto_ranges(self) -> None:
@@ -6153,6 +6327,22 @@ assert image.height() == 4
         Main._update_stage_coordinate_apply_state(window)
 
         self.assertFalse(cancel_button.enabled)
+
+    def test_apply_cancel_state_uses_panel_pending_and_cancelable_operation_flags(
+        self,
+    ) -> None:
+        window = Main.__new__(Main)
+        panel = _FakeStagePositionPanel({"X": _FakeLineEdit(enabled=True, modified=True)})
+        panel.pending_targets["X"] = (5.0, 5.0)
+        window._stage_position_panel = panel
+        window._pending_stage_axis_targets = panel.pending_targets
+        window.stage_controller = types.SimpleNamespace(is_busy=lambda: False)
+        window._coordinate_move_axis = None
+        window._has_cancelable_operation = lambda: True
+
+        Main._update_stage_coordinate_apply_state(window)
+
+        self.assertEqual(panel.action_button_states[-1], (True, True))
 
     def test_cancel_button_cancels_generic_busy_stage_task(self) -> None:
         window, stage_controller, _cancel_button, statuses = _make_cancel_main()

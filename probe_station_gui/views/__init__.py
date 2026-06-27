@@ -17,6 +17,10 @@ _LAZY_EXPORTS = {
         "probe_station_gui.views.serial_terminal_window",
         "SerialTerminalWindow",
     ),
+    "StagePositionPanel": (
+        "probe_station_gui.views.stage_position_panel",
+        "StagePositionPanel",
+    ),
 }
 
 __all__ = list(_LAZY_EXPORTS)
