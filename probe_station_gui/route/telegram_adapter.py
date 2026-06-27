@@ -636,6 +636,43 @@ def _combined_route_contact_caption(before_caption: str, after_caption: str) -> 
     return str(after_caption or "").strip()
 
 
+def route_telegram_state_from_legacy_owner(owner: object) -> RouteTelegramPhotoState:
+    state = RouteTelegramPhotoState(lock=getattr(owner, "_telegram_photo_lock", None))
+    if getattr(owner, "_telegram_route_photo_requested", False):
+        state.request_route_photo()
+    if getattr(owner, "_telegram_contact_photo_requested", False):
+        state.request_contact_photo()
+    state._pending_contact_before_photo = getattr(
+        owner,
+        "_telegram_pending_contact_before_photo",
+        None,
+    )
+    state._pending_contact_photo = getattr(
+        owner,
+        "_telegram_pending_contact_photo",
+        None,
+    )
+    state._last_pre_contact_photo = getattr(
+        owner,
+        "_last_route_pre_contact_photo",
+        None,
+    )
+    state._last_contact_failure_photo = getattr(
+        owner,
+        "_last_route_contact_failure_photo",
+        None,
+    )
+    state._last_contact_failure_before_photo = getattr(
+        owner,
+        "_last_route_contact_failure_before_photo",
+        None,
+    )
+    state._last_attention_message = str(
+        getattr(owner, "_last_telegram_attention_message", "") or ""
+    )
+    return state
+
+
 __all__ = [
     "RouteTelegramPhotoState",
     "TelegramCaptionedPhoto",
@@ -649,5 +686,6 @@ __all__ = [
     "route_pre_contact_photo_caption",
     "route_requested_photo_caption",
     "route_start_telegram_text",
+    "route_telegram_state_from_legacy_owner",
     "telegram_contact_photo_payload",
 ]

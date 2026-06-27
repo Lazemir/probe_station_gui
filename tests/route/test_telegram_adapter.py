@@ -4,6 +4,7 @@ import threading
 import unittest
 import zlib
 from pathlib import Path
+from types import SimpleNamespace
 
 from PySide6.QtGui import QImage
 
@@ -20,6 +21,7 @@ from probe_station_gui.route.telegram_adapter import (
     RouteTelegramPhotoState,
     combine_telegram_contact_photos,
     capture_route_photo,
+    route_telegram_state_from_legacy_owner,
     route_finish_telegram_payload,
     route_photo_focus_payload,
     route_start_telegram_text,
@@ -88,6 +90,34 @@ def _bad_contact_record() -> RouteMeasurementRecord:
 
 
 class RouteTelegramAdapterTest(unittest.TestCase):
+    def test_route_telegram_state_from_legacy_owner_preserves_flags_and_photos(
+        self,
+    ) -> None:
+        owner = SimpleNamespace(
+            _telegram_photo_lock=threading.Lock(),
+            _telegram_route_photo_requested=True,
+            _telegram_contact_photo_requested=True,
+            _telegram_pending_contact_before_photo=(b"before", "before.jpg", ""),
+            _telegram_pending_contact_photo=(b"after", "after.jpg", ""),
+            _last_route_pre_contact_photo=(1, 2, b"pre", "pre.jpg", ""),
+            _last_route_contact_failure_photo=(b"failure", "failure.jpg", ""),
+            _last_route_contact_failure_before_photo=(b"before-failure", "bf.jpg", ""),
+            _last_telegram_attention_message="attention",
+        )
+
+        state = route_telegram_state_from_legacy_owner(owner)
+
+        self.assertTrue(state.consume_route_photo_request())
+        self.assertEqual(
+            state.take_pending_contact_photos(),
+            ((b"before", "before.jpg", ""), (b"after", "after.jpg", "")),
+        )
+        self.assertEqual(
+            state.latest_contact_failure_photos(),
+            ((b"before-failure", "bf.jpg", ""), (b"failure", "failure.jpg", "")),
+        )
+        self.assertFalse(state.should_send_attention("attention"))
+
     def test_capture_route_photo_builds_route_metadata_and_returns_saved_path(
         self,
     ) -> None:

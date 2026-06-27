@@ -280,6 +280,7 @@ from probe_station_gui.route.telegram_adapter import (
     route_photo_focus_payload,
     route_requested_photo_caption,
     route_start_telegram_text,
+    route_telegram_state_from_legacy_owner,
     telegram_contact_photo_payload,
 )
 from probe_station_gui.route.shift import route_shift_from_stage_xy
@@ -323,6 +324,7 @@ from probe_station_gui.notifications.telegram import (
     send_telegram_message_in_thread,
     telegram_inline_keyboard,
 )
+from probe_station_gui.notifications import telegram_commands
 from probe_station_gui.views.alignment_panel import AlignmentPanel
 from probe_station_gui.views.contact_oscillation_window import (
     ContactOscillationWindow,
@@ -893,294 +895,92 @@ class Main(QMainWindow):
             )
         request.set_response(response)
 
-    def _handle_telegram_bot_request(
-        self,
-        request: TelegramBotRequest,
-    ) -> TelegramBotResponse | None:
+    def _handle_telegram_bot_request(self, request: TelegramBotRequest) -> TelegramBotResponse | None:
         if request.kind == "callback":
             return self._handle_telegram_callback(request.callback_data)
-        command, _args = self._parse_telegram_command(request.text)
-        if command in {"start", "help", "commands"}:
-            return TelegramBotResponse(
-                self._telegram_help_text(),
-                reply_markup=self._telegram_default_markup(),
-                callback_answer="Commands.",
-            )
-        if command in {"status", "статус"}:
-            return self._telegram_status_response()
-        if command in {"next_photo", "photo", "route_photo", "фото"}:
-            return self._telegram_request_next_route_photo_response()
-        if command in {"next_contact", "contact", "контакт"}:
-            return self._telegram_request_next_contact_photo_response()
-        if command in {
-            "measure",
-            "skip",
-            "next",
-        }:
-            return self._telegram_route_action_response(command)
-        return None
-
-    def _handle_telegram_callback(self, data: str) -> TelegramBotResponse:
-        key = str(data or "").strip().lower()
-        if key == "status":
-            return self._telegram_status_response()
-        if key == "watch:photo":
-            return self._telegram_request_next_route_photo_response()
-        if key == "watch:contact":
-            return self._telegram_request_next_contact_photo_response()
-        if key.startswith("route:"):
-            return self._telegram_route_action_response(key.split(":", 1)[1])
-        return TelegramBotResponse(
-            "Unknown Telegram action.",
-            callback_answer="Unknown action.",
-            reply_markup=self._telegram_default_markup(),
+        return self._telegram_response_for_command_route(
+            telegram_commands.route_message_command(request.text)
         )
 
-    @staticmethod
-    def _parse_telegram_command(text: str) -> tuple[str, str]:
-        stripped = str(text or "").strip()
-        if not stripped:
-            return "", ""
-        if stripped.startswith("/"):
-            parts = stripped.split(maxsplit=1)
-            command = parts[0].lstrip("/").split("@", 1)[0].lower()
-            args = parts[1] if len(parts) > 1 else ""
-            return command, args.strip()
-        parts = stripped.split(maxsplit=1)
-        command = parts[0].lower()
-        args = parts[1] if len(parts) > 1 else ""
-        return command, args.strip()
-
-    @staticmethod
-    def _telegram_help_text() -> str:
-        return (
-            "Probe Station Telegram commands:\n"
-            "/status - current state and microscope frame\n"
-            "/next_photo - send the next route structure photo\n"
-            "/next_contact - send the next route contact attempt photo\n"
-            "/measure, /skip, /next - answer a waiting route prompt"
+    def _handle_telegram_callback(self, data: str) -> TelegramBotResponse:
+        return self._telegram_response_for_command_route(
+            telegram_commands.route_callback(data)
+        ) or TelegramBotResponse("", reply_markup=self._telegram_default_markup())
+    def _telegram_response_for_command_route(self, route: telegram_commands.TelegramCommandRoute | None) -> TelegramBotResponse | None:
+        if route is None:
+            return None
+        handlers = {
+            "status": self._telegram_status_response,
+            "route_photo": self._telegram_request_next_route_photo_response,
+            "contact_photo": self._telegram_request_next_contact_photo_response,
+        }
+        if route.kind == "help":
+            return self._telegram_text_response(
+                telegram_commands.help_text(),
+                "Commands.",
+            )
+        if route.kind == "route_action":
+            return self._telegram_route_action_response(route.action)
+        handler = handlers.get(route.kind)
+        if handler is not None:
+            return handler()
+        return TelegramBotResponse(
+            route.text,
+            callback_answer=route.callback_answer,
+            reply_markup=self._telegram_default_markup(),
         )
 
     def _telegram_status_response(self) -> TelegramBotResponse:
         photo = self._latest_camera_frame_photo()
-        return TelegramBotResponse(
-            self._telegram_status_text(),
-            photo_bytes=photo[0] if photo is not None else None,
-            photo_name=photo[1] if photo is not None else "microscope.jpg",
-            reply_markup=self._telegram_default_markup(),
-            callback_answer="Status sent.",
-        )
+        return TelegramBotResponse(self._telegram_status_text(), photo_bytes=photo[0] if photo is not None else None, photo_name=photo[1] if photo is not None else "microscope.jpg", reply_markup=self._telegram_default_markup(), callback_answer="Status sent.")
 
     def _telegram_request_next_route_photo_response(self) -> TelegramBotResponse:
-        route_active = (
-            self._route_measurement_thread is not None
-            and self._route_measurement_thread.is_alive()
-        )
-        if not route_active:
-            return TelegramBotResponse(
-                "No route measurement is running.",
-                reply_markup=self._telegram_default_markup(),
-                callback_answer="No active route.",
-            )
-        if not self._route_measurement_photo_enabled:
-            return TelegramBotResponse(
-                "The active route is not configured to capture structure photos.",
-                reply_markup=self._telegram_default_markup(),
-                callback_answer="No route photos.",
-            )
-        self._route_telegram_adapter().request_route_photo()
-        return TelegramBotResponse(
-            "The next route structure photo will be sent here.",
-            reply_markup=self._telegram_default_markup(),
-            callback_answer="Waiting for route photo.",
-        )
+        plan = telegram_commands.next_route_photo_response(route_active=self._telegram_thread_alive(self._route_measurement_thread), structure_photos_enabled=self._route_measurement_photo_enabled)
+        if plan.request_photo:
+            self._route_telegram_adapter().request_route_photo()
+        return self._telegram_text_response(plan.text, plan.callback_answer)
 
     def _telegram_request_next_contact_photo_response(self) -> TelegramBotResponse:
-        route_active = (
-            self._route_measurement_thread is not None
-            and self._route_measurement_thread.is_alive()
-        )
-        if not route_active:
-            return TelegramBotResponse(
-                "No route measurement is running.",
-                reply_markup=self._telegram_default_markup(),
-                callback_answer="No active route.",
-            )
-        if not self._route_measurement_measure_enabled:
-            return TelegramBotResponse(
-                "The active route is not configured to measure contacts.",
-                reply_markup=self._telegram_default_markup(),
-                callback_answer="No contact measurements.",
-            )
-        self._route_telegram_adapter().request_contact_photo()
-        return TelegramBotResponse(
-            "The next route contact attempt photo will be sent here.",
-            reply_markup=self._telegram_default_markup(),
-            callback_answer="Waiting for contact photo.",
-        )
+        plan = telegram_commands.next_contact_photo_response(route_active=self._telegram_thread_alive(self._route_measurement_thread), contact_measurement_enabled=self._route_measurement_measure_enabled)
+        if plan.request_photo:
+            self._route_telegram_adapter().request_contact_photo()
+        return self._telegram_text_response(plan.text, plan.callback_answer)
 
     def _telegram_route_action_response(self, action: str) -> TelegramBotResponse:
-        action_key = str(action or "").strip().lower()
-        if action_key not in {"measure", "skip", "next"}:
-            return TelegramBotResponse(
-                "Unknown route action.",
-                reply_markup=self._telegram_default_markup(),
-                callback_answer="Unknown action.",
-            )
-        if not self._route_measurement_waiting:
-            return TelegramBotResponse(
-                "Route measurement is not waiting for an action.",
-                reply_markup=self._telegram_default_markup(),
-                callback_answer="Route is not waiting.",
-            )
         runner = self._route_measurement_runner
-        if runner is None:
-            api_route_control = self._api_route_control_state_snapshot()
-            if api_route_control.accepts_route_confirmation:
-                self._submit_route_measurement_confirmation(action_key)
-                return TelegramBotResponse(
-                    f"API route control action submitted: {action_key}.",
-                    reply_markup=self._telegram_default_markup(),
-                    callback_answer=f"{action_key} submitted.",
-                )
-            return TelegramBotResponse(
-                "No route measurement is running.",
-                reply_markup=self._telegram_default_markup(),
-                callback_answer="No active route.",
-            )
-        self._submit_route_measurement_confirmation(action_key)
-        return TelegramBotResponse(
-            f"Route measurement action submitted: {action_key}.",
-            reply_markup=self._telegram_default_markup(),
-            callback_answer=f"{action_key} submitted.",
-        )
+        api_accepts_confirmation = self._api_route_control_state_snapshot().accepts_route_confirmation if runner is None else False
+        plan = telegram_commands.route_action_response(action, route_waiting=self._route_measurement_waiting, runner_available=runner is not None, api_route_control_accepts_confirmation=api_accepts_confirmation)
+        if plan.submit_action is not None:
+            self._submit_route_measurement_confirmation(plan.submit_action)
+        return self._telegram_text_response(plan.text, plan.callback_answer)
+
+    def _telegram_text_response(self, text: str, callback_answer: str) -> TelegramBotResponse:
+        return TelegramBotResponse(text, reply_markup=self._telegram_default_markup(), callback_answer=callback_answer)
 
     def _telegram_default_markup(self) -> object | None:
-        rows: list[list[tuple[str, str]]] = [
-            [("Status", "status")],
-            [
-                ("Next photo", "watch:photo"),
-                ("Next contact", "watch:contact"),
-            ],
-        ]
-        if self._route_measurement_waiting:
-            rows.append(
-                [
-                    ("Measure", "route:measure"),
-                    ("Skip", "route:skip"),
-                ]
-            )
-        return telegram_inline_keyboard(rows)
+        return telegram_inline_keyboard(telegram_commands.default_markup_rows(self._route_measurement_waiting))
 
     @staticmethod
     def _telegram_route_actions_markup() -> object | None:
-        return telegram_inline_keyboard(
-            [
-                [
-                    ("Measure", "route:measure"),
-                    ("Skip", "route:skip"),
-                ],
-                [("Status", "status")],
-            ]
-        )
+        return telegram_inline_keyboard(telegram_commands.route_action_markup_rows())
 
     def _route_telegram_adapter(self) -> RouteTelegramPhotoState:
         adapter = getattr(self, "_route_telegram", None)
         if adapter is not None:
             return adapter
-        adapter = RouteTelegramPhotoState(
-            lock=getattr(self, "_telegram_photo_lock", None)
-        )
-        if getattr(self, "_telegram_route_photo_requested", False):
-            adapter.request_route_photo()
-        if getattr(self, "_telegram_contact_photo_requested", False):
-            adapter.request_contact_photo()
-        adapter._pending_contact_before_photo = getattr(
-            self,
-            "_telegram_pending_contact_before_photo",
-            None,
-        )
-        adapter._pending_contact_photo = getattr(
-            self,
-            "_telegram_pending_contact_photo",
-            None,
-        )
-        adapter._last_pre_contact_photo = getattr(
-            self,
-            "_last_route_pre_contact_photo",
-            None,
-        )
-        adapter._last_contact_failure_photo = getattr(
-            self,
-            "_last_route_contact_failure_photo",
-            None,
-        )
-        adapter._last_contact_failure_before_photo = getattr(
-            self,
-            "_last_route_contact_failure_before_photo",
-            None,
-        )
-        adapter._last_attention_message = str(
-            getattr(self, "_last_telegram_attention_message", "") or ""
-        )
+        adapter = route_telegram_state_from_legacy_owner(self)
         self._route_telegram = adapter
         return adapter
 
     def _telegram_status_text(self) -> str:
-        stage_status = self._api_stage_status()
-        route_active = (
-            self._route_measurement_thread is not None
-            and self._route_measurement_thread.is_alive()
-        )
-        route_state = "idle"
-        if route_active:
-            route_state = "waiting" if self._route_measurement_waiting else "running"
-            if self._route_measurement_current_point is not None:
-                route_state = (
-                    f"{route_state}, point {self._route_measurement_current_point}"
-                )
-        elif self._route_measurement_session_active:
-            route_state = "session active"
-            if self._route_measurement_current_point is not None:
-                route_state = (
-                    f"{route_state}, point {self._route_measurement_current_point}"
-                )
-        else:
-            api_route_control_status = (
-                self._api_route_control_state_snapshot().telegram_status_text()
-            )
-            if api_route_control_status:
-                route_state = api_route_control_status
-        lines = [
-            "Probe Station status",
-            f"Current: {self._latest_status_message or 'idle'}",
-            f"Route: {route_state}",
-            f"Serial: {'connected' if stage_status.get('connected') else 'disconnected'}",
-            f"Stage: {stage_status.get('state') or 'unknown'}"
-            f"{' busy' if stage_status.get('busy') else ''}",
-            f"Coordinates: {stage_status.get('coordinate_display') or 'unknown'}",
-        ]
-        position = stage_status.get("display_position")
-        if isinstance(position, dict) and position:
-            values = []
-            for axis in self.STAGE_AXIS_NAMES:
-                if axis in position:
-                    try:
-                        values.append(f"{axis}={float(position[axis]):.4f}")
-                    except (TypeError, ValueError):
-                        pass
-            if values:
-                lines.append("Position: " + ", ".join(values))
-        homed_axes = stage_status.get("homed_axes")
-        if isinstance(homed_axes, list):
-            lines.append("Homed: " + (", ".join(homed_axes) if homed_axes else "none"))
-        if self._microscope_scan_thread is not None and self._microscope_scan_thread.is_alive():
-            lines.append("Microscope scan: running")
-        if self._contact_seek_thread is not None and self._contact_seek_thread.is_alive():
-            lines.append("Contact seek: running")
-        if self._latest_camera_frame_for_notifications is None:
-            lines.append("Camera frame: unavailable")
-        return "\n".join(lines)
+        return telegram_commands.status_text(self._telegram_status_snapshot())
+
+    def _telegram_status_snapshot(self) -> telegram_commands.TelegramStatusSnapshot:
+        return telegram_commands.TelegramStatusSnapshot(latest_status_message=self._latest_status_message, route_thread_active=self._telegram_thread_alive(self._route_measurement_thread), route_waiting=self._route_measurement_waiting, route_session_active=self._route_measurement_session_active, route_current_point=self._route_measurement_current_point, api_route_control_status_text=self._api_route_control_state_snapshot().telegram_status_text(), stage_status=self._api_stage_status(), microscope_scan_active=self._telegram_thread_alive(self._microscope_scan_thread), contact_seek_active=self._telegram_thread_alive(self._contact_seek_thread), camera_frame_available=self._latest_camera_frame_for_notifications is not None, stage_axis_names=self.STAGE_AXIS_NAMES)
+
+    @staticmethod
+    def _telegram_thread_alive(thread: object | None) -> bool:
+        return thread is not None and thread.is_alive()
 
     def _submit_api_move_request(self, move_request: dict[str, Any]) -> dict[str, Any]:
         if self._api_bridge is None:
