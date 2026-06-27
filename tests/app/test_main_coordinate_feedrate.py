@@ -333,6 +333,7 @@ class _FakeStagePositionPanel:
         self.available_calls: list[bool] = []
         self.action_button_states: list[tuple[bool, bool]] = []
         self.cleared_display_values: list[dict[str, float]] = []
+        self.pending_only_clear_count = 0
 
     def field(self, axis: str) -> _FakeLineEdit | None:
         return self.axis_fields.get(str(axis).strip().upper())
@@ -407,6 +408,19 @@ class _FakeStagePositionPanel:
         self.pending_targets.clear()
         self.return_commits.clear()
         self.cleared_display_values.append(dict(display_values))
+        for axis_name, field in self.axis_fields.items():
+            if axis_name in display_values:
+                field.setText(main_module.format_stage_axis_value(display_values[axis_name]))
+            else:
+                field.clear()
+            field.setModified(False)
+        return had_changes
+
+    def clear_pending_target_state(self) -> bool:
+        had_changes = self.has_pending_or_modified_fields()
+        self.pending_targets.clear()
+        self.return_commits.clear()
+        self.pending_only_clear_count += 1
         return had_changes
 
 
@@ -1010,12 +1024,43 @@ class MainCoordinateFeedrateTest(unittest.TestCase):
         Main._on_stage_coordinate_mode_changed(window)
 
         self.assertEqual(panel.pending_targets, {})
-        self.assertEqual(panel.cleared_display_values, [{"X": 9.0}])
+        self.assertEqual(panel.pending_only_clear_count, 1)
+        self.assertEqual(panel.cleared_display_values, [])
         self.assertEqual(display_updates, [latest_position])
         self.assertEqual(
             statuses,
             ["Cleared pending coordinate edits after input mode change.|2000"],
         )
+
+    def test_stage_coordinate_mode_change_preserves_focused_uncommitted_edit(
+        self,
+    ) -> None:
+        window, stage_controller = _make_stage_position_display_main()
+        panel = _FakeStagePositionPanel(window._stage_axis_fields)
+        window._stage_position_panel = panel
+        window._pending_stage_axis_targets = panel.pending_targets
+        window._stage_axis_return_commits = panel.return_commits
+        window._stage_axis_base_styles = panel.base_styles
+        stage_controller.latest_position = (4.0, 5.0, 6.0, 0.0, 0.0, 0.0)
+        statuses: list[str] = []
+        window._show_status = lambda message, timeout_ms=None: statuses.append(
+            f"{message}|{timeout_ms}"
+        )
+        x_field = window._stage_axis_fields["X"]
+        y_field = window._stage_axis_fields["Y"]
+        x_field.setText("12.5")
+        panel.pending_targets["X"] = (12.5, 12.5)
+        y_field.has_focus = True
+        y_field.setText("7.777")
+        y_field.setModified(True)
+
+        Main._on_stage_coordinate_mode_changed(window)
+
+        self.assertEqual(panel.pending_targets, {})
+        self.assertEqual(panel.pending_only_clear_count, 1)
+        self.assertEqual(statuses, ["Cleared pending coordinate edits after input mode change.|2000"])
+        self.assertEqual(y_field.text(), "7.777")
+        self.assertTrue(y_field.isModified())
 
     def test_api_keithley_meter_configuration_accepts_code_auto_ranges(self) -> None:
         window = Main.__new__(Main)

@@ -173,6 +173,33 @@ def test_apply_display_plan_preserves_focused_modified_pending_text(
     panel.deleteLater()
 
 
+def test_clear_pending_target_state_preserves_uncommitted_focused_text(
+    qt_app: QApplication,
+) -> None:
+    panel = StagePositionPanel(("X", "Y"))
+    panel.apply_display_plan(
+        _display_plan(
+            AxisFieldPresentation("X", 1.0, 1.0, 1.0, "#1565c0", "#f5f5f5", "X axis"),
+            AxisFieldPresentation("Y", 2.0, 2.0, 2.0, "#1565c0", "#f5f5f5", "Y axis"),
+        )
+    )
+    panel.set_pending_target("X", 8.0, 8.0)
+    y_field = panel.axis_fields["Y"]
+    y_field.setFocus()
+    qt_app.processEvents()
+    y_field.setText("7.777")
+    y_field.setModified(True)
+
+    had_changes = panel.clear_pending_target_state()
+
+    assert had_changes
+    assert panel.pending_targets == {}
+    assert y_field.text() == "7.777"
+    assert y_field.isModified()
+
+    panel.deleteLater()
+
+
 def test_limit_base_style_overrides_homed_and_unhomed_styles(
     qt_app: QApplication,
 ) -> None:

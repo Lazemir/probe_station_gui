@@ -1,7 +1,7 @@
 # Task 30 Report: Stage Position Field Adapter
 
 - status: `DONE`
-- commits created: `1` (`Refactor stage position UI adapter`)
+- commits created: `2` (`Refactor stage position UI adapter`; `Preserve focused stage edit on mode change`)
 
 ## Changed Files
 
@@ -44,6 +44,27 @@
   - `1023 passed, 2 skipped`
 - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m ruff check --ignore E402,F401 .`
   - `All checks passed!`
+
+## Review Fix
+
+- Finding addressed: mode changes must clear pending targets without wiping unrelated focused, uncommitted edits.
+- Regression added in `tests/app/test_main_coordinate_feedrate.py` for mixed state:
+  - pending target on `X`
+  - focused modified text on `Y`
+  - `Main._on_stage_coordinate_mode_changed(...)`
+  - verifies pending targets clear, status message emits, and `Y` text/modified state survive the refresh
+- Panel change:
+  - added `StagePositionPanel.clear_pending_target_state()` for pending-target/return-commit clearing without field resets
+  - kept `StagePositionPanel.clear_pending_targets(...)` as the broader reset path used by `_clear_pending_stage_coordinate_targets()`
+
+Commands and results:
+
+- RED:
+  - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\app\test_main_coordinate_feedrate.py -k "mode_change_preserves_focused_uncommitted_edit or mode_change_clears_pending_targets_and_reports_status" -q`
+  - Result: `1 failed, 1 passed`
+- GREEN:
+  - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\app\test_main_coordinate_feedrate.py tests\ui\test_stage_position_panel.py -q`
+  - Result: `175 passed, 3 subtests passed`
 
 ## main.py Physical LOC
 

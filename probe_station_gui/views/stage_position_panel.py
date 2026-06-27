@@ -293,13 +293,19 @@ class StagePositionPanel(QWidget):
         display_values: dict[str, float] | None = None,
     ) -> bool:
         had_changes = self.has_pending_or_modified_fields()
-        self._return_commits.clear()
-        self._pending_targets.clear()
+        self.clear_pending_target_state()
         for axis_name in self._axis_names:
             self.reset_axis_field(
                 axis_name,
                 None if display_values is None else display_values.get(axis_name),
             )
+        self.refresh_axis_styles(self._motion_axes, self._motion_blink_dimmed)
+        return had_changes
+
+    def clear_pending_target_state(self) -> bool:
+        had_changes = self.has_pending_or_modified_fields()
+        self._return_commits.clear()
+        self._pending_targets.clear()
         self.refresh_axis_styles(self._motion_axes, self._motion_blink_dimmed)
         return had_changes
 

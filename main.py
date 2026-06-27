@@ -3342,7 +3342,7 @@ class Main(QMainWindow):
 
     def _on_stage_coordinate_mode_changed(self) -> None:
         if self._pending_stage_axis_targets and self._stage_position_panel is not None:
-            self._stage_position_panel.clear_pending_targets(self._stage_axis_display_values)
+            self._stage_position_panel.clear_pending_target_state()
             self._update_stage_position_display(self.stage_controller.latest_stage_position())
             self._show_status("Cleared pending coordinate edits after input mode change.", 2000)
         self._update_stage_coordinate_apply_state()
