@@ -62,6 +62,10 @@ from probe_station_gui.instruments.meters.lcr import LCRMeterError, RouteMeterCo
 from probe_station_gui.settings.manager import ObjectiveCalibrationSettings, Settings
 from probe_station_gui.stage.api_moves import api_move_feedrate
 from probe_station_gui.stage.controller import StageControllerError
+from probe_station_gui.stage.manual_jog_prediction import (
+    ManualJogPredictionConfig,
+    ManualJogPredictionState,
+)
 
 
 class _FakeTimer:
@@ -625,19 +629,20 @@ def _make_main(current_feedrate: float = 120.0) -> tuple[
     window._planned_move_waiting_for_fresh_status = False
     window._pending_alignment_preparation = None
     window._pending_quick_alignment_rotation = False
-    window._manual_jog_stage_position = None
-    window._manual_jog_stage_xy = None
-    window._manual_jog_axis_velocities = {}
-    window._manual_jog_stop_axis_velocities = {}
-    window._manual_jog_velocity_xy = None
-    window._manual_jog_stop_prediction_until = None
-    window._manual_jog_stop_tail_position = None
-    window._manual_jog_waiting_for_fresh_status = False
-    window._manual_jog_settle_until = 0.0
-    window._manual_jog_stop_status_timestamp = None
-    window._manual_jog_command_started_at = None
-    window._manual_jog_last_timestamp = None
-    window._manual_jog_last_prediction_log_at = 0.0
+    window._current_design_stage_xy = None
+    window._manual_jog_prediction = ManualJogPredictionState(
+        ManualJogPredictionConfig(
+            axis_names=Main.STAGE_AXIS_NAMES,
+            ignore_idle_after_command_s=Main.MANUAL_JOG_IGNORE_IDLE_AFTER_COMMAND_S,
+            reconcile_smooth_threshold_mm=Main.MANUAL_JOG_RECONCILE_SMOOTH_THRESHOLD_MM,
+            reconcile_smooth_alpha=Main.MANUAL_JOG_RECONCILE_SMOOTH_ALPHA,
+            status_settle_hold_s=Main.MANUAL_JOG_STATUS_SETTLE_HOLD_S,
+            default_stop_tail_s=Main.MANUAL_JOG_DEFAULT_STOP_TAIL_S,
+            stop_tail_min_s=Main.MANUAL_JOG_STOP_TAIL_MIN_S,
+            stop_tail_max_s=Main.MANUAL_JOG_STOP_TAIL_MAX_S,
+            stop_tail_learn_alpha=Main.MANUAL_JOG_STOP_TAIL_LEARN_ALPHA,
+        )
+    )
     window._manual_jog_timer = timer
     window._seed_motion_prediction_position = lambda: (
         0.0,
@@ -6327,6 +6332,57 @@ assert image.height() == 4
         self.assertIsNone(window._coordinate_move_axis)
         self.assertEqual(window._coordinate_move_axes, set())
         self.assertEqual(window._motion_axes, {"X"})
+
+    def test_manual_jog_start_pauses_terminal_poll_and_publishes_seeded_position(
+        self,
+    ) -> None:
+        window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
+        paused: list[bool] = []
+        published: list[tuple[float, ...]] = []
+        window.serial_terminal_panel = types.SimpleNamespace(
+            set_live_poll_paused=lambda paused_state: paused.append(bool(paused_state))
+        )
+        window._publish_stage_position_estimate = lambda position: published.append(
+            tuple(float(value) for value in position)
+        )
+        stage_controller.latest_position = (1.0, 2.0, 3.0, 0.0, 0.0, 0.0)
+
+        Main._on_manual_jog_command_changed(window, (("X", 2.0),), 60.0)
+
+        self.assertEqual(paused, [True])
+        self.assertEqual(published, [(1.0, 2.0, 3.0, 0.0, 0.0, 0.0)])
+
+    def test_manual_jog_stop_resumes_terminal_poll_and_schedules_refreshes(self) -> None:
+        window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
+        paused: list[bool] = []
+        refreshes: list[tuple[int, ...]] = []
+        single_shots: list[int] = []
+        window.serial_terminal_panel = types.SimpleNamespace(
+            set_live_poll_paused=lambda paused_state: paused.append(bool(paused_state))
+        )
+        window._manual_jog_prediction.axis_velocities = {"X": 1.0}
+        window._manual_jog_prediction.stage_position = (
+            1.0,
+            2.0,
+            3.0,
+            0.0,
+            0.0,
+            0.0,
+        )
+        window._manual_jog_prediction.stage_xy = (1.0, 2.0)
+        window._schedule_status_refreshes = lambda delays: refreshes.append(tuple(delays))
+        stage_controller.last_status_time = 12.0
+
+        def run_single_shot(delay: int, callback) -> None:
+            single_shots.append(int(delay))
+            callback()
+
+        with mock.patch.object(main_module.QTimer, "singleShot", side_effect=run_single_shot):
+            Main._on_manual_jog_stopped(window)
+
+        self.assertEqual(single_shots, [Main.TERMINAL_RESUME_AFTER_JOG_MS])
+        self.assertEqual(paused, [False])
+        self.assertEqual(refreshes, [tuple(Main.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)])
 
     def test_feedrate_change_does_not_reissue_stale_idle_coordinate_move(self) -> None:
         window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)

@@ -1,4 +1,5 @@
 import sys
+import time
 import types
 import unittest
 
@@ -19,6 +20,10 @@ def _restore_real_imports_for_main() -> None:
 
 _restore_real_imports_for_main()
 from main import Main
+from probe_station_gui.stage.manual_jog_prediction import (
+    ManualJogPredictionConfig,
+    ManualJogPredictionState,
+)
 
 
 class _FakeStageController:
@@ -28,6 +33,7 @@ class _FakeStageController:
         self.state = state
         self.position = (0.0, 0.0, 4.0, 0.0, 0.0)
         self.status_timestamp = 10.0
+        self.last_jog_write_time: float | None = None
         self.move_requests: list[tuple[float, float]] = []
 
     def latest_stage_state(self) -> str:
@@ -41,6 +47,9 @@ class _FakeStageController:
 
     def last_status_timestamp(self) -> float:
         return self.status_timestamp
+
+    def last_jog_write_timestamp(self) -> float | None:
+        return self.last_jog_write_time
 
     def is_busy(self) -> bool:
         return False
@@ -87,33 +96,41 @@ def _make_main(
     window._planned_move_stop_status_timestamp = None
     window._pending_planned_move_target_xy = None
     window._pending_planned_move_source_label = None
-    window._manual_jog_waiting_for_fresh_status = False
-    window._manual_jog_stage_position = None
-    window._manual_jog_stage_xy = None
-    window._manual_jog_stop_tail_position = None
-    window._manual_jog_stop_status_timestamp = None
-    window._manual_jog_settle_until = 0.0
-    window._manual_jog_last_timestamp = None
+    window._manual_jog_prediction = ManualJogPredictionState(
+        ManualJogPredictionConfig(
+            axis_names=Main.STAGE_AXIS_NAMES,
+            ignore_idle_after_command_s=Main.MANUAL_JOG_IGNORE_IDLE_AFTER_COMMAND_S,
+            reconcile_smooth_threshold_mm=Main.MANUAL_JOG_RECONCILE_SMOOTH_THRESHOLD_MM,
+            reconcile_smooth_alpha=Main.MANUAL_JOG_RECONCILE_SMOOTH_ALPHA,
+            status_settle_hold_s=Main.MANUAL_JOG_STATUS_SETTLE_HOLD_S,
+            default_stop_tail_s=Main.MANUAL_JOG_DEFAULT_STOP_TAIL_S,
+            stop_tail_min_s=Main.MANUAL_JOG_STOP_TAIL_MIN_S,
+            stop_tail_max_s=Main.MANUAL_JOG_STOP_TAIL_MAX_S,
+            stop_tail_learn_alpha=Main.MANUAL_JOG_STOP_TAIL_LEARN_ALPHA,
+        )
+    )
 
     window._coerce_position_tuple = lambda position: tuple(position)
     window._maybe_restore_persisted_design = lambda _position: None
-    window._manual_jog_prediction_available = lambda: False
-    window._manual_jog_prediction_active = lambda: False
-    window._should_ignore_manual_jog_status_sample = lambda _stage_xy: False
     window._log_design_position_reconcile = (
         lambda predicted, actual: reconciles.append((predicted, actual))
     )
+    original_smooth = window._manual_jog_prediction.smooth_actual_stage_xy
 
     def smooth(
         predicted: tuple[float, float],
         actual: tuple[float, float],
+        *,
+        latest_state: str,
     ) -> tuple[float, float]:
         smooth_calls.append((predicted, actual))
-        return actual
+        return original_smooth(
+            predicted,
+            actual,
+            latest_state=latest_state,
+        )
 
-    window._smooth_manual_jog_actual_position = smooth
-    window._learn_manual_jog_stop_tail = lambda _predicted, _actual: None
-    window._clear_manual_jog_stop_prediction = lambda: None
+    window._manual_jog_prediction.smooth_actual_stage_xy = smooth
     window._publish_stage_position_estimate = lambda position: published.append(
         tuple(float(value) for value in position)
     )
@@ -222,7 +239,7 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
         Main._on_stage_position_changed(window, (0.0, 0.0, 4.0, 0.0, 0.0))
 
         self.assertEqual(window._planned_move_stage_xy, (5.0, 5.0))
-        self.assertEqual(window._manual_jog_stage_xy, (5.0, 5.0))
+        self.assertEqual(window._manual_jog_prediction.stage_xy, (5.0, 5.0))
         self.assertEqual(published[-1][:2], (5.0, 5.0))
         self.assertEqual(reconciles, [((5.0, 5.0), (0.0, 0.0))])
         self.assertEqual(smooth_calls, [])
@@ -239,6 +256,55 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
         self.assertEqual(published[-1][:2], (0.0, 0.0))
         self.assertEqual(smooth_calls, [((5.0, 5.0), (0.0, 0.0))])
 
+    def test_idle_status_learns_manual_stop_tail_and_clears_waiting(self) -> None:
+        window, published, _reconciles, _smooth_calls = _make_main(state="idle")
+        window._planned_move_started_at = None
+        window._planned_move_stage_xy = None
+        prediction = window._manual_jog_prediction
+        prediction.stage_position = (5.0, 5.0, 4.0, 0.0, 0.0)
+        prediction.stage_xy = (5.0, 5.0)
+        prediction.waiting_for_fresh_status = True
+        prediction.stop_tail_position = (5.0, 5.0, 4.0, 0.0, 0.0)
+        prediction.stop_axis_velocities = {"X": 1.0}
+        prediction.stop_tail_s = 0.1
+
+        Main._on_stage_position_changed(window, (6.0, 7.0, 4.0, 0.0, 0.0))
+
+        self.assertFalse(prediction.waiting_for_fresh_status)
+        self.assertIsNone(prediction.stop_status_timestamp)
+        self.assertEqual(prediction.stop_axis_velocities, {})
+        self.assertEqual(published[-1][:2], (6.0, 7.0))
+
+    def test_fresh_idle_manual_jog_sample_is_ignored_but_stale_idle_reconciles(self) -> None:
+        window, published, reconciles, _smooth_calls = _make_main(state="idle")
+        now = time.monotonic()
+        window._planned_move_started_at = None
+        window._planned_move_stage_xy = None
+        prediction = window._manual_jog_prediction
+        prediction.stage_position = (5.0, 5.0, 4.0, 0.0, 0.0)
+        prediction.stage_xy = (5.0, 5.0)
+        prediction.axis_velocities = {"X": 1.0}
+        prediction.command_started_at = now - 0.01
+        window.stage_controller.last_jog_write_time = now - 0.01
+
+        Main._on_stage_position_changed(window, (0.0, 0.0, 4.0, 0.0, 0.0))
+
+        self.assertEqual(published, [])
+        self.assertEqual(reconciles, [])
+        self.assertEqual(prediction.stage_xy, (5.0, 5.0))
+
+        prediction.command_started_at = now - (
+            Main.MANUAL_JOG_IGNORE_IDLE_AFTER_COMMAND_S + 0.1
+        )
+        window.stage_controller.last_jog_write_time = now - (
+            Main.MANUAL_JOG_IGNORE_IDLE_AFTER_COMMAND_S + 0.1
+        )
+
+        Main._on_stage_position_changed(window, (0.0, 0.0, 4.0, 0.0, 0.0))
+
+        self.assertEqual(reconciles, [((5.0, 5.0), (0.0, 0.0))])
+        self.assertEqual(published[-1][:2], (0.0, 0.0))
+
     def test_unhomed_xy_without_manual_prediction_clears_prediction_and_finishes_when_idle(
         self,
     ) -> None:
@@ -250,8 +316,8 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
         displayed: list[tuple[float, ...]] = []
 
         window.stage_controller.axes_are_homed = lambda axes: False
-        window._manual_jog_stage_position = (9.0, 9.0, 9.0)
-        window._manual_jog_stage_xy = (9.0, 9.0)
+        window._manual_jog_prediction.stage_position = (9.0, 9.0, 9.0)
+        window._manual_jog_prediction.stage_xy = (9.0, 9.0)
         window._planned_move_stage_xy = (8.0, 8.0)
         window._update_stage_position_display = lambda position: displayed.append(position)
         window._update_coordinate_display = (
@@ -265,8 +331,8 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
         Main._on_stage_position_changed(window, (1.0, 2.0, 3.0))
 
         self.assertEqual(displayed, [(1.0, 2.0, 3.0)])
-        self.assertIsNone(window._manual_jog_stage_position)
-        self.assertIsNone(window._manual_jog_stage_xy)
+        self.assertIsNone(window._manual_jog_prediction.stage_position)
+        self.assertIsNone(window._manual_jog_prediction.stage_xy)
         self.assertIsNone(window._planned_move_stage_xy)
         self.assertEqual(coordinate_updates, [None])
         self.assertEqual(design_updates, [(1.0, 2.0)])
