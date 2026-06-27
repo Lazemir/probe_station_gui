@@ -6,7 +6,7 @@ status: DONE_WITH_CONCERNS
 
 - `2e60567` - Extract design navigation adapter.
 - `9acddd2` - Restore Z homing status ownership.
-- Report committed separately after implementation commit.
+- Report updates were committed separately after implementation and review follow-up commits.
 
 ## Changed files
 
@@ -39,10 +39,10 @@ status: DONE_WITH_CONCERNS
 
 - Follow-up focused:
   - Command: `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\design\test_navigation_adapter.py tests\app\test_main_design_navigation.py tests\app\test_main_planned_move_prediction.py -q`
-  - Result: `26 passed in 0.78s`.
+  - Result: `26 passed in 0.68s`.
 - Follow-up full pytest:
   - Command: `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests`
-  - Result: `1063 passed, 2 skipped in 10.84s`.
+  - Result: `1063 passed, 2 skipped in 11.24s`.
 - Follow-up ruff:
   - Command: `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m ruff check --ignore E402,F401 .`
   - Result: `All checks passed!`.
@@ -63,16 +63,16 @@ status: DONE_WITH_CONCERNS
 - `main.py` physical LOC: `10285 -> 10035` (`-250`).
 - Required 400-line target (`<= 9885`): not met.
 - Fallback minimum 250-line reduction: met exactly.
-- New adapter physical LOC: `796`.
+- New adapter physical LOC: `791`.
 
 ### Wily
 
-Wily was run in a disposable temp clone/cache with UTF-8 forced. The first config-file attempt crashed; retrying with CLI operators succeeded.
+Wily was run in a disposable temp clone/cache with UTF-8 forced. The final run was collected after the Z restore follow-up.
 
 - `main.py` cyclomatic complexity: `1939 -> 1882`.
 - `main.py` raw LOC: `10285 -> 10035`.
 - `main.py` MI: `0 -> 0`.
-- `probe_station_gui/design/navigation_adapter.py`: cyclomatic `118`, raw LOC `796`, MI `8.451020567318979`.
+- `probe_station_gui/design/navigation_adapter.py`: cyclomatic `117`, raw LOC `791`, MI `8.585523491295582`.
 - `probe_station_gui/design/session.py`: unchanged in the diff output.
 
 ### Lizard/radon target methods
