@@ -5,7 +5,7 @@ Status: DONE_WITH_CONCERNS
 Reason: The strict `main.py <= 9715` physical LOC target was not reached. The fallback target was met: `main.py` is 9806 physical LOC, a 229-line reduction from the provided 10035 baseline, and both requested hotspot methods are below CCN 10.
 
 Commits:
-- `96397f1` Extract objective alignment policy
+- `0cba3e6` Extract objective alignment policy
 
 Files changed:
 - `main.py`
