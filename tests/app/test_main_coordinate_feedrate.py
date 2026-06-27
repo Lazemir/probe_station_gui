@@ -62,6 +62,10 @@ from probe_station_gui.instruments.meters.lcr import LCRMeterError, RouteMeterCo
 from probe_station_gui.settings.manager import ObjectiveCalibrationSettings, Settings
 from probe_station_gui.stage.api_moves import api_move_feedrate
 from probe_station_gui.stage.controller import StageControllerError
+from probe_station_gui.stage.coordinate_targets import (
+    CoordinateTargetConfig,
+    CoordinateTargetMoveState,
+)
 from probe_station_gui.stage.manual_jog_prediction import (
     ManualJogPredictionConfig,
     ManualJogPredictionState,
@@ -591,6 +595,18 @@ class _FakeSettingsManager:
         self.saved_count += 1
 
 
+def _coordinate_target_state() -> CoordinateTargetMoveState:
+    return CoordinateTargetMoveState(
+        CoordinateTargetConfig(
+            axis_names=Main.STAGE_AXIS_NAMES,
+            min_feedrate_mm_min=Main.MIN_FEEDRATE_MM_MIN,
+            duration_padding_s=Main.PLANNED_MOVE_DURATION_PADDING_S,
+            min_idle_accept_s=Main.COORDINATE_MOVE_MIN_IDLE_ACCEPT_S,
+            target_tolerance_mm=Main.COORDINATE_MOVE_TARGET_TOLERANCE_MM,
+        )
+    )
+
+
 def _make_main(current_feedrate: float = 120.0) -> tuple[
     Main,
     _FakeStageController,
@@ -610,17 +626,7 @@ def _make_main(current_feedrate: float = 120.0) -> tuple[
     window.serial_terminal_panel = None
     window._pending_stage_axis_targets = {}
     window._stage_axis_fields = {}
-    window._coordinate_move_axis = None
-    window._coordinate_move_axes = set()
-    window._coordinate_move_origin_position = None
-    window._coordinate_move_stage_position = None
-    window._coordinate_move_target_position = None
-    window._coordinate_move_started_at = None
-    window._coordinate_move_ends_at = None
-    window._coordinate_move_programmed_feedrate = None
-    window._coordinate_move_effective_feedrate = None
-    window._coordinate_move_seen_active_state = False
-    window._coordinate_move_reissue_cancel_pending = False
+    window._coordinate_targets = _coordinate_target_state()
     window._pending_homing_axes = []
     window._pending_click_to_move = None
     window._pending_planned_move_target_xy = None
@@ -850,9 +856,7 @@ def _make_cancel_main() -> tuple[Main, _FakeStageController, _FakeButton, list[s
     window._stage_axis_display_values = {}
     window._stage_axis_return_commits = set()
     window._stage_axis_base_styles = {}
-    window._coordinate_move_axis = None
-    window._coordinate_move_axes = set()
-    window._coordinate_move_seen_active_state = False
+    window._coordinate_targets = _coordinate_target_state()
     window._route_measurement_runner = None
     window.surface_map_window = None
     window._manual_alignment_pick_slot = None
@@ -6007,8 +6011,8 @@ assert image.height() == 4
             stage_controller.requests,
             [({"X": 5.0, "Y": -2.0}, 120.0)],
         )
-        self.assertEqual(window._coordinate_move_programmed_feedrate, 120.0)
-        self.assertEqual(window._coordinate_move_effective_feedrate, 120.0)
+        self.assertEqual(window._coordinate_targets.programmed_feedrate, 120.0)
+        self.assertEqual(window._coordinate_targets.effective_feedrate, 120.0)
         self.assertTrue(timer.started)
         self.assertEqual(_joystick.common_targets, [])
         self.assertEqual(_joystick.common_cleared, 1)
@@ -6038,7 +6042,7 @@ assert image.height() == 4
         self,
     ) -> None:
         window, stage_controller, _joystick, _timer, _statuses = _make_main(77.0)
-        window._coordinate_move_axis = "X"
+        window._coordinate_targets.active_axis = "X"
         window._resolve_stage_axis_target = (
             lambda axis, display_target, input_mode: (
                 display_target,
@@ -6218,8 +6222,8 @@ assert image.height() == 4
             stage_controller.requests,
             [({"X": 5.0}, 120.0), ({"X": 5.0}, 180.0)],
         )
-        self.assertEqual(window._coordinate_move_programmed_feedrate, 180.0)
-        self.assertEqual(window._coordinate_move_effective_feedrate, 180.0)
+        self.assertEqual(window._coordinate_targets.programmed_feedrate, 180.0)
+        self.assertEqual(window._coordinate_targets.effective_feedrate, 180.0)
         self.assertTrue(advances)
         self.assertTrue(
             any(
@@ -6236,7 +6240,7 @@ assert image.height() == 4
             feedrate_mm_min=120.0,
             source_label="coordinate fields",
         )
-        window._coordinate_move_axis = None
+        window._coordinate_targets.active_axis = None
         window._advance_coordinate_move_prediction = lambda: None
         stage_controller.busy = True
 
@@ -6251,8 +6255,8 @@ assert image.height() == 4
                 ({"X": 5.0, "Y": -2.0}, 180.0),
             ],
         )
-        self.assertEqual(window._coordinate_move_programmed_feedrate, 180.0)
-        self.assertEqual(window._coordinate_move_effective_feedrate, 180.0)
+        self.assertEqual(window._coordinate_targets.programmed_feedrate, 180.0)
+        self.assertEqual(window._coordinate_targets.effective_feedrate, 180.0)
 
     def test_coordinate_move_feedrate_change_keeps_tracking_after_busy_reissue_cancel(
         self,
@@ -6269,7 +6273,7 @@ assert image.height() == 4
 
         Main._apply_coordinate_move_feedrate(window, 180.0)
 
-        self.assertTrue(window._coordinate_move_reissue_cancel_pending)
+        self.assertTrue(window._coordinate_targets.reissue_cancel_pending)
         self.assertEqual(stage_controller.absolute_jog_replace_flags, [True])
         self.assertEqual(
             stage_controller.requests,
@@ -6278,10 +6282,10 @@ assert image.height() == 4
 
         Main.on_move_finished(window, False, "Operation cancelled.")
 
-        self.assertFalse(window._coordinate_move_reissue_cancel_pending)
-        self.assertEqual(window._coordinate_move_axis, "X")
-        self.assertEqual(window._coordinate_move_axes, {"X"})
-        self.assertEqual(window._coordinate_move_programmed_feedrate, 180.0)
+        self.assertFalse(window._coordinate_targets.reissue_cancel_pending)
+        self.assertEqual(window._coordinate_targets.active_axis, "X")
+        self.assertEqual(window._coordinate_targets.active_axes, {"X"})
+        self.assertEqual(window._coordinate_targets.programmed_feedrate, 180.0)
         self.assertFalse(
             any("Operation cancelled." in item for item in statuses)
         )
@@ -6304,10 +6308,10 @@ assert image.height() == 4
 
         Main._apply_coordinate_move_feedrate(window, 180.0)
 
-        self.assertEqual(window._coordinate_move_axis, "X")
-        self.assertEqual(window._coordinate_move_axes, {"X"})
-        self.assertEqual(window._coordinate_move_programmed_feedrate, 120.0)
-        self.assertEqual(window._coordinate_move_effective_feedrate, 120.0)
+        self.assertEqual(window._coordinate_targets.active_axis, "X")
+        self.assertEqual(window._coordinate_targets.active_axes, {"X"})
+        self.assertEqual(window._coordinate_targets.programmed_feedrate, 120.0)
+        self.assertEqual(window._coordinate_targets.effective_feedrate, 120.0)
         self.assertEqual(stage_controller.requests, [({"X": 5.0}, 120.0)])
         self.assertEqual(stage_controller.jog_stops, 0)
         self.assertTrue(scheduled_delays)
@@ -6329,8 +6333,8 @@ assert image.height() == 4
 
         Main._on_manual_jog_command_changed(window, (("X", -250.0),), 60.0)
 
-        self.assertIsNone(window._coordinate_move_axis)
-        self.assertEqual(window._coordinate_move_axes, set())
+        self.assertIsNone(window._coordinate_targets.active_axis)
+        self.assertEqual(window._coordinate_targets.active_axes, set())
         self.assertEqual(window._motion_axes, {"X"})
 
     def test_manual_jog_start_pauses_terminal_poll_and_publishes_seeded_position(
@@ -6397,8 +6401,8 @@ assert image.height() == 4
 
         Main._apply_coordinate_move_feedrate(window, 180.0)
 
-        self.assertIsNone(window._coordinate_move_axis)
-        self.assertEqual(window._coordinate_move_axes, set())
+        self.assertIsNone(window._coordinate_targets.active_axis)
+        self.assertEqual(window._coordinate_targets.active_axes, set())
         self.assertEqual(stage_controller.requests, [({"X": 5.0, "Z": 3.84}, 120.0)])
         self.assertEqual(stage_controller.jog_stops, 0)
 
@@ -6438,7 +6442,7 @@ assert image.height() == 4
         window._stage_position_panel = panel
         window._pending_stage_axis_targets = panel.pending_targets
         window.stage_controller = types.SimpleNamespace(is_busy=lambda: False)
-        window._coordinate_move_axis = None
+        window._coordinate_targets = _coordinate_target_state()
         window._has_cancelable_operation = lambda: True
 
         Main._update_stage_coordinate_apply_state(window)
@@ -6460,14 +6464,10 @@ assert image.height() == 4
 
     def test_cancel_button_keeps_coordinate_move_on_jog_cancel_path(self) -> None:
         window, stage_controller, _cancel_button, _statuses = _make_cancel_main()
-        window._coordinate_move_axis = "X"
-        window._coordinate_move_axes = {"X"}
+        window._coordinate_targets.active_axis = "X"
+        window._coordinate_targets.active_axes = {"X"}
         window._clear_coordinate_move_tracking = (
-            lambda *, clear_pending, reset_override: setattr(
-                window,
-                "_coordinate_move_axis",
-                None,
-            )
+            lambda *, clear_pending, reset_override: window._coordinate_targets.clear_tracking()
         )
 
         Main._cancel_stage_coordinate_action(window)
@@ -6538,12 +6538,12 @@ assert image.height() == 4
             source_label="coordinate fields",
         )
         stage_controller.latest_state = "Idle"
-        window._coordinate_move_started_at = None
+        window._coordinate_targets.started_at = None
 
         Main._finish_coordinate_move_if_idle(window, (0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
 
-        self.assertEqual(window._coordinate_move_axis, "X")
-        self.assertEqual(window._coordinate_move_axes, {"X", "Y"})
+        self.assertEqual(window._coordinate_targets.active_axis, "X")
+        self.assertEqual(window._coordinate_targets.active_axes, {"X", "Y"})
 
     def test_idle_status_after_motion_clears_coordinate_tracking(self) -> None:
         window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
@@ -6554,12 +6554,12 @@ assert image.height() == 4
             source_label="coordinate fields",
         )
         stage_controller.latest_state = "Idle"
-        window._coordinate_move_started_at = None
-        window._coordinate_move_seen_active_state = True
+        window._coordinate_targets.started_at = None
+        window._coordinate_targets.seen_active_state = True
 
         Main._finish_coordinate_move_if_idle(window, (5.0, -2.0, 0.0, 0.0, 0.0, 0.0))
 
-        self.assertIsNone(window._coordinate_move_axis)
+        self.assertIsNone(window._coordinate_targets.active_axis)
 
     def test_previous_micron_step_status_does_not_clear_coordinate_tracking(self) -> None:
         window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
@@ -6570,15 +6570,15 @@ assert image.height() == 4
             source_label="coordinate field",
         )
         stage_controller.latest_state = "Idle"
-        window._coordinate_move_started_at = None
-        window._coordinate_move_seen_active_state = True
+        window._coordinate_targets.started_at = None
+        window._coordinate_targets.seen_active_state = True
 
         Main._finish_coordinate_move_if_idle(
             window,
             (0.0, 0.0, 0.0, -0.004, 0.0, 0.0),
         )
 
-        self.assertEqual(window._coordinate_move_axis, "A")
+        self.assertEqual(window._coordinate_targets.active_axis, "A")
 
 
 if __name__ == "__main__":

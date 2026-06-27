@@ -143,13 +143,20 @@ from probe_station_gui.instruments.meters.lcr import (
 from probe_station_gui.stage.api_moves import (
     api_axis_value_map, api_coordinate_move_busy_response, api_coordinate_move_plan,
     api_coordinate_move_start_failed_response, api_coordinate_move_success_response,
-    api_move_feedrate, normalize_api_coordinate_input_mode,
+    api_move_feedrate,
+)
+from probe_station_gui.stage.coordinate_targets import (
+    CoordinateTargetConfig,
+    CoordinateTargetMoveState,
+    plan_coordinate_target_start,
+    resolve_stage_axis_target,
+    stage_axis_target_limit_error,
 )
 from probe_station_gui.stage.manual_jog_prediction import (
     ManualJogPredictionConfig,
     ManualJogPredictionState,
 )
-from probe_station_gui.stage.motion_prediction import interpolate_position, motion_progress
+from probe_station_gui.stage.motion_prediction import motion_progress
 from probe_station_gui.stage.position_presenter import (
     stage_position_display_plan,
     stage_position_signal_plan,
@@ -560,17 +567,15 @@ class Main(QMainWindow):
         self._planned_move_stop_status_timestamp: float | None = None
         self._pending_planned_move_target_xy: tuple[float, float] | None = None
         self._pending_planned_move_source_label: str | None = None
-        self._coordinate_move_axis: str | None = None
-        self._coordinate_move_axes: set[str] = set()
-        self._coordinate_move_origin_position: tuple[float, ...] | None = None
-        self._coordinate_move_stage_position: tuple[float, ...] | None = None
-        self._coordinate_move_target_position: tuple[float, ...] | None = None
-        self._coordinate_move_started_at: float | None = None
-        self._coordinate_move_ends_at: float | None = None
-        self._coordinate_move_programmed_feedrate: float | None = None
-        self._coordinate_move_effective_feedrate: float | None = None
-        self._coordinate_move_seen_active_state = False
-        self._coordinate_move_reissue_cancel_pending = False
+        self._coordinate_targets = CoordinateTargetMoveState(
+            CoordinateTargetConfig(
+                axis_names=self.STAGE_AXIS_NAMES,
+                min_feedrate_mm_min=self.MIN_FEEDRATE_MM_MIN,
+                duration_padding_s=self.PLANNED_MOVE_DURATION_PADDING_S,
+                min_idle_accept_s=self.COORDINATE_MOVE_MIN_IDLE_ACCEPT_S,
+                target_tolerance_mm=self.COORDINATE_MOVE_TARGET_TOLERANCE_MM,
+            )
+        )
         self._pending_click_to_move: tuple[float, float, float, float] | None = None
         self._pending_click_deadline: float | None = None
         self._pending_stage_axis_targets: dict[str, tuple[float, float]] = {}
@@ -1438,7 +1443,7 @@ class Main(QMainWindow):
         )
         if isinstance(move_plan, dict):
             return move_plan
-        if self._coordinate_move_axis is not None or self.stage_controller.is_busy():
+        if self._coordinate_targets.has_active_move() or self.stage_controller.is_busy():
             return api_coordinate_move_busy_response()
         if not self._start_coordinate_targets_move(move_plan.target_map, feedrate_mm_min=move_plan.feedrate_mm_min, source_label="API"):
             return api_coordinate_move_start_failed_response()
@@ -1459,8 +1464,8 @@ class Main(QMainWindow):
                 axis: float(values[1])
                 for axis, values in self._pending_stage_axis_targets.items()
             },
-            "active_coordinate_axis": self._coordinate_move_axis,
-            "active_coordinate_axes": sorted(self._coordinate_move_axes),
+            "active_coordinate_axis": self._coordinate_targets.active_axis,
+            "active_coordinate_axes": sorted(self._coordinate_targets.active_axes),
             "current_feedrate_mm_min": self._current_linear_feedrate(),
         }
 
@@ -1485,8 +1490,8 @@ class Main(QMainWindow):
                 axis: float(values[1])
                 for axis, values in self._pending_stage_axis_targets.items()
             },
-            "active_coordinate_axis": self._coordinate_move_axis,
-            "active_coordinate_axes": sorted(self._coordinate_move_axes),
+            "active_coordinate_axis": self._coordinate_targets.active_axis,
+            "active_coordinate_axes": sorted(self._coordinate_targets.active_axes),
             "current_feedrate_mm_min": self._current_linear_feedrate(),
         }
 
@@ -1500,7 +1505,7 @@ class Main(QMainWindow):
                 "accepted": False,
                 "message": "Serial connection is not available.",
             }
-        if self._coordinate_move_axis is not None or self.stage_controller.is_busy():
+        if self._coordinate_targets.has_active_move() or self.stage_controller.is_busy():
             return {
                 "accepted": False,
                 "message": "Stage is busy. Ignoring surface-map target.",
@@ -3380,7 +3385,7 @@ class Main(QMainWindow):
             and route_measurement_thread.is_alive()
         )
         return (
-            self._coordinate_move_axis is not None
+            self._coordinate_targets.has_active_move()
             or controller_busy
             or self._controller_reports_active_motion()
             or route_contact_move_active
@@ -3453,7 +3458,7 @@ class Main(QMainWindow):
         if panel is None:
             return
         controller_busy = hasattr(self, "stage_controller") and self.stage_controller.is_busy()
-        active = self._coordinate_move_axis is not None or controller_busy
+        active = self._coordinate_targets.has_active_move() or controller_busy
         available = panel.has_pending_or_modified_fields()
         panel.set_action_buttons_enabled(available and not active, available or self._has_cancelable_operation())
 
@@ -3505,7 +3510,7 @@ class Main(QMainWindow):
                     "Microscope scan stop requested."
                 )
             cancelled_any = True
-        if self._coordinate_move_axis is not None:
+        if self._coordinate_targets.has_active_move():
             self.stage_controller.cancel_active_motion(
                 "Coordinate move cancel requested."
             )
@@ -5144,35 +5149,9 @@ class Main(QMainWindow):
             values[1] = float(stage_xy[1])
         return tuple(values)
 
-    def _position_with_axis_values(
-        self,
-        raw_targets: dict[str, float],
-        *,
-        base_position: object | None = None,
-    ) -> tuple[float, ...] | None:
-        position = base_position
-        if not isinstance(position, (tuple, list)):
-            position = self._seed_motion_prediction_position()
-        values: list[float] = []
-        if isinstance(position, (tuple, list)):
-            try:
-                values = [float(value) for value in position]
-            except (TypeError, ValueError):
-                values = []
-        for axis_name, raw_value in raw_targets.items():
-            axis = axis_name.strip().upper()
-            try:
-                axis_index = self.STAGE_AXIS_NAMES.index(axis)
-            except ValueError:
-                return None
-            if len(values) <= axis_index:
-                return None
-            values[axis_index] = float(raw_value)
-        return tuple(values)
-
     def _seed_motion_prediction_position(self) -> tuple[float, ...] | None:
         return self._manual_jog_prediction.seed_position(
-            coordinate_move_stage_position=self._coordinate_move_stage_position,
+            coordinate_move_stage_position=self._coordinate_targets.stage_position,
             latest_stage_position=self.stage_controller.latest_stage_position(),
             current_design_stage_xy=self._current_design_stage_xy,
         )
@@ -5185,8 +5164,8 @@ class Main(QMainWindow):
         self._update_design_position(design_stage_xy)
 
     def _preferred_design_stage_xy(self) -> tuple[float, float] | None:
-        if self._coordinate_move_stage_position is not None:
-            stage_xy = self._stage_xy_from_position(self._coordinate_move_stage_position)
+        if self._coordinate_targets.stage_position is not None:
+            stage_xy = self._stage_xy_from_position(self._coordinate_targets.stage_position)
             if stage_xy is not None:
                 return stage_xy
         stage_xy = self._manual_jog_prediction.predicted_stage_xy(time.monotonic())
@@ -5362,8 +5341,8 @@ class Main(QMainWindow):
             commanded_distances,
             feedrate=feedrate,
             now=time.monotonic(),
-            coordinate_move_active=self._coordinate_move_axis is not None,
-            coordinate_move_stage_position=self._coordinate_move_stage_position,
+            coordinate_move_active=self._coordinate_targets.has_active_move(),
+            coordinate_move_stage_position=self._coordinate_targets.stage_position,
             latest_stage_position=self.stage_controller.latest_stage_position(),
             current_design_stage_xy=self._current_design_stage_xy,
         )
@@ -5540,7 +5519,7 @@ class Main(QMainWindow):
         if raw_target is None:
             self._show_status(f"{axis} coordinate is unavailable.", 3000)
             return
-        if self._coordinate_move_axis is not None:
+        if self._coordinate_targets.has_active_move():
             self._show_status("Stage is busy. Ignoring manual axis move.", 3000)
             return
         if self.stage_controller.is_busy():
@@ -5631,7 +5610,7 @@ class Main(QMainWindow):
         if self._manual_jog_prediction.prediction_active():
             self._advance_manual_jog_prediction()
             return
-        if self._coordinate_move_started_at is not None:
+        if self._coordinate_targets.started_at is not None:
             self._advance_coordinate_move_prediction()
             return
         if self._planned_move_started_at is not None:
@@ -5643,7 +5622,7 @@ class Main(QMainWindow):
         now = time.monotonic()
         result = self._manual_jog_prediction.advance(
             now=now,
-            coordinate_move_stage_position=self._coordinate_move_stage_position,
+            coordinate_move_stage_position=self._coordinate_targets.stage_position,
             latest_stage_position=self.stage_controller.latest_stage_position(),
             current_design_stage_xy=self._current_design_stage_xy,
         )
@@ -5667,23 +5646,14 @@ class Main(QMainWindow):
             self._manual_jog_timer.stop()
 
     def _advance_coordinate_move_prediction(self) -> None:
-        if (
-            self._coordinate_move_origin_position is None
-            or self._coordinate_move_target_position is None
-            or self._coordinate_move_started_at is None
-            or self._coordinate_move_ends_at is None
-        ):
+        decision = self._coordinate_targets.advance_prediction(
+            monotonic_s=time.monotonic(),
+        )
+        if decision.clear_tracking:
             self._clear_coordinate_move_tracking(clear_pending=False, reset_override=True)
             return
-        now = time.monotonic()
-        self._coordinate_move_stage_position = interpolate_position(
-            self._coordinate_move_origin_position,
-            self._coordinate_move_target_position,
-            self._coordinate_move_started_at,
-            self._coordinate_move_ends_at,
-            now,
-        )
-        self._publish_stage_position_estimate(self._coordinate_move_stage_position)
+        if decision.publish_position is not None:
+            self._publish_stage_position_estimate(decision.publish_position)
 
     def _advance_planned_move_prediction(self) -> None:
         if (
@@ -5880,10 +5850,10 @@ class Main(QMainWindow):
                 self._collapse_alignment_panel_if_design_open()
         if (
             not success
-            and getattr(self, "_coordinate_move_reissue_cancel_pending", False)
+            and self._coordinate_targets.reissue_cancel_pending
             and "operation cancelled" in message_lower
         ):
-            self._coordinate_move_reissue_cancel_pending = False
+            self._coordinate_targets.reissue_cancel_pending = False
             logger.debug(
                 "Coordinate move worker cancelled for feedrate reissue; "
                 "keeping coordinate tracking active."
@@ -5891,7 +5861,7 @@ class Main(QMainWindow):
             self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
             self._schedule_cancel_state_refresh()
             return
-        self._coordinate_move_reissue_cancel_pending = False
+        self._coordinate_targets.reissue_cancel_pending = False
         if success:
             if self._pending_click_to_move is None:
                 self.view.finish_target_motion_to_center()
@@ -7962,7 +7932,7 @@ class Main(QMainWindow):
             position,
             latest_state=latest_state,
             coordinate_move_axis_active=(
-                getattr(self, "_coordinate_move_axis", None) is not None
+                self._coordinate_targets.has_active_move()
             ),
             xy_homed=xy_homed,
             xyz_homed=xyz_homed,
@@ -7979,7 +7949,7 @@ class Main(QMainWindow):
                 registration is not None and getattr(registration, "valid", False)
             ),
             manual_jog_stage_position=self._manual_jog_prediction.stage_position,
-            coordinate_move_stage_position=self._coordinate_move_stage_position,
+            coordinate_move_stage_position=self._coordinate_targets.stage_position,
             planned_move_started_at=self._planned_move_started_at,
             planned_move_waiting_for_fresh_status=(
                 self._planned_move_waiting_for_fresh_status
@@ -7992,7 +7962,7 @@ class Main(QMainWindow):
             position_with_stage_xy=self._position_with_stage_xy,
         )
         if signal_plan.status.mark_coordinate_move_active:
-            self._coordinate_move_seen_active_state = True
+            self._coordinate_targets.seen_active_state = True
         if self.contact_calibration_window is not None:
             self.contact_calibration_window.set_current_stage_position(
                 signal_plan.status.contact_calibration_position
@@ -8193,7 +8163,7 @@ class Main(QMainWindow):
         if not self._pending_stage_axis_targets:
             self._show_status("No coordinate changes to apply.", 2000)
             return
-        if self._coordinate_move_axis is not None or self.stage_controller.is_busy():
+        if self._coordinate_targets.has_active_move() or self.stage_controller.is_busy():
             self._show_status("Stage is busy. Ignoring coordinate targets.", 3000)
             self._update_stage_coordinate_apply_state()
             return
@@ -8249,70 +8219,40 @@ class Main(QMainWindow):
         feedrate_mm_min: float,
         source_label: str,
     ) -> bool:
-        ordered_targets = {
-            axis: targets[axis]
-            for axis in self.STAGE_AXIS_NAMES
-            if axis in targets
-        }
-        if not ordered_targets:
-            return False
-        feedrate = max(self.MIN_FEEDRATE_MM_MIN, float(feedrate_mm_min))
-        origin_position = self._seed_motion_prediction_position()
-        if origin_position is None:
-            origin_position = self.stage_controller.latest_stage_position()
-        if not isinstance(origin_position, (tuple, list)):
-            self._show_status("Stage coordinates are unavailable.", 3000)
-            return False
-        raw_targets = {
-            axis: float(values[0])
-            for axis, values in ordered_targets.items()
-        }
-        display_targets = {
-            axis: float(values[1])
-            for axis, values in ordered_targets.items()
-        }
-        for axis, display_target in display_targets.items():
-            limit_error = self._stage_axis_target_limit_error(axis, display_target)
-            if limit_error is not None:
-                self._show_status(limit_error, 4000)
-                return False
-        target_position = self._position_with_axis_values(
-            raw_targets,
-            base_position=origin_position,
+        decision = plan_coordinate_target_start(
+            self._coordinate_targets.config,
+            targets=targets,
+            feedrate_mm_min=feedrate_mm_min,
+            source_label=source_label,
+            seed_position=self._seed_motion_prediction_position(),
+            latest_stage_position=self.stage_controller.latest_stage_position(),
+            axis_target_limit_error=self._stage_axis_target_limit_error,
+            axis_max_feedrates=self.stage_controller.axis_max_feedrates(),
+            monotonic_s=time.monotonic(),
         )
-        if target_position is None:
-            self._show_status("Stage coordinates are unavailable.", 3000)
+        if not decision.accepted:
+            if decision.status is not None:
+                self._show_status(
+                    decision.status.message,
+                    decision.status.timeout_ms,
+                )
             return False
-        for axis in ordered_targets:
+        plan = decision.plan
+        if plan is None:
+            return False
+        for axis in plan.remove_pending_axes:
             self._pending_stage_axis_targets.pop(axis, None)
-        axes = list(ordered_targets)
-        self._coordinate_move_axis = axes[0]
-        self._coordinate_move_axes = set(axes)
-        if "B" in self._coordinate_move_axes:
+        if plan.invalidate_design_registration:
             self._invalidate_design_registration(
                 "Design registration cleared after B-axis coordinate motion."
             )
-        self._coordinate_move_origin_position = tuple(float(v) for v in origin_position)
-        self._coordinate_move_stage_position = self._coordinate_move_origin_position
-        self._coordinate_move_target_position = target_position
-        self._coordinate_move_started_at = time.monotonic()
-        self._coordinate_move_programmed_feedrate = feedrate
-        self._coordinate_move_effective_feedrate = feedrate
-        self._coordinate_move_seen_active_state = False
-        self._coordinate_move_ends_at = self._coordinate_move_started_at + max(
-            self._coordinate_move_duration_s(
-                self._coordinate_move_origin_position,
-                target_position,
-                feedrate,
-            ),
-            0.05,
-        )
-        self._set_stage_motion_axes(set(axes))
-        self._activate_coordinate_common_feedrate(axes, feedrate)
+        self._coordinate_targets.apply_start_plan(plan)
+        self._set_stage_motion_axes(set(plan.ordered_axes))
+        self._apply_coordinate_common_feedrate_plan(plan.common_feedrate)
         self._update_stage_coordinate_apply_state()
         accepted = self.stage_controller.request_absolute_axis_targets_move(
-            raw_targets,
-            feedrate=feedrate,
+            plan.raw_targets,
+            feedrate=plan.feedrate_mm_min,
         )
         if not accepted:
             self._clear_coordinate_move_tracking(
@@ -8320,149 +8260,63 @@ class Main(QMainWindow):
                 reset_override=True,
             )
             return False
-        target_text = ", ".join(
-            f"{axis}={display_targets[axis]:.3f}" for axis in axes
-        )
-        self._show_status(
-            f"Moving {target_text} at F{feedrate:.1f} from {source_label}.",
-            3000,
-        )
-        self._publish_stage_position_estimate(self._coordinate_move_stage_position)
+        self._show_status(plan.status.message, plan.status.timeout_ms)
+        self._publish_stage_position_estimate(plan.publish_position)
         if not self._manual_jog_timer.isActive():
             self._manual_jog_timer.start()
         return True
 
-    def _activate_coordinate_common_feedrate(
-        self,
-        axes: list[str],
-        feedrate: float,
-    ) -> None:
+    def _apply_coordinate_common_feedrate_plan(self, plan: object) -> None:
         if self.joystick_panel is None:
             return
-        axis_set = {str(axis).strip().upper() for axis in axes}
-        if len(axis_set) <= 1 or axis_set <= {"X", "Y"}:
+        clear_common_target = bool(getattr(plan, "clear_common_target", False))
+        if clear_common_target:
             if hasattr(self.joystick_panel, "clear_common_feedrate_target"):
                 self.joystick_panel.clear_common_feedrate_target()
             return
-        limits = self.stage_controller.axis_max_feedrates()
-        axis_limits: list[float] = []
-        for axis in axes:
-            try:
-                value = float(limits.get(axis, 0.0))
-            except (TypeError, ValueError):
-                continue
-            if math.isfinite(value) and value > 0.0:
-                axis_limits.append(value)
-        max_feedrate = (
-            max(axis_limits)
-            if axis_limits
-            else max(self.MIN_FEEDRATE_MM_MIN, float(feedrate))
-        )
         if hasattr(self.joystick_panel, "set_common_feedrate_target"):
-            self.joystick_panel.set_common_feedrate_target(feedrate, max_feedrate)
-
-    def _coordinate_move_duration_s(
-        self,
-        origin_position: tuple[float, ...],
-        target_position: tuple[float, ...],
-        feedrate_mm_min: float,
-    ) -> float:
-        axes = self._coordinate_move_axes
-        if not axes and self._coordinate_move_axis is not None:
-            axes = {self._coordinate_move_axis}
-        squared = 0.0
-        for axis in axes:
-            try:
-                axis_index = self.STAGE_AXIS_NAMES.index(axis)
-            except ValueError:
-                continue
-            if axis_index >= len(origin_position) or axis_index >= len(target_position):
-                continue
-            delta = float(target_position[axis_index]) - float(origin_position[axis_index])
-            squared += delta * delta
-        distance = math.sqrt(squared)
-        speed_mm_per_s = max(self.MIN_FEEDRATE_MM_MIN, float(feedrate_mm_min)) / 60.0
-        return (distance / speed_mm_per_s) + self.PLANNED_MOVE_DURATION_PADDING_S
-
-    def _coordinate_position_is_at_target(self, position: object | None) -> bool:
-        target_position = self._coordinate_move_target_position
-        if target_position is None or not isinstance(position, (tuple, list)):
-            return False
-        active_axes = set(self._coordinate_move_axes)
-        if not active_axes and self._coordinate_move_axis is not None:
-            active_axes.add(self._coordinate_move_axis)
-        if not active_axes:
-            return False
-        for axis in active_axes:
-            try:
-                axis_index = self.STAGE_AXIS_NAMES.index(axis)
-            except ValueError:
-                return False
-            if axis_index >= len(position) or axis_index >= len(target_position):
-                return False
-            if (
-                abs(float(position[axis_index]) - float(target_position[axis_index]))
-                > self.COORDINATE_MOVE_TARGET_TOLERANCE_MM
-            ):
-                return False
-        return True
+            self.joystick_panel.set_common_feedrate_target(
+                float(getattr(plan, "feedrate_mm_min")),
+                float(getattr(plan, "max_feedrate_mm_min")),
+            )
 
     def _apply_coordinate_move_feedrate(self, feedrate_mm_min: float) -> None:
-        active_axes = set(self._coordinate_move_axes)
-        if not active_axes and self._coordinate_move_axis is not None:
-            active_axes.add(self._coordinate_move_axis)
-        if (
-            not active_axes
-            or self._coordinate_move_programmed_feedrate is None
-            or self._coordinate_move_target_position is None
-        ):
-            return
         latest_state = (self.stage_controller.latest_stage_state() or "").lower()
-        if not self.stage_controller.is_busy() and latest_state in {"", "idle"}:
-            logger.debug(
-                "Ignoring feedrate change for stale coordinate move tracking."
-            )
+        decision = self._coordinate_targets.plan_feedrate_reissue(
+            controller_busy=self.stage_controller.is_busy(),
+            latest_stage_state=latest_state,
+            requested_feedrate_mm_min=feedrate_mm_min,
+            monotonic_s=time.monotonic(),
+        )
+        if decision.log_debug_message is not None:
+            logger.debug(decision.log_debug_message)
+        if decision.clear_stale_tracking:
             self._clear_coordinate_move_tracking(
                 clear_pending=False,
                 reset_override=False,
             )
-            self._clear_stage_motion_axes()
-            return
-        try:
-            requested_feedrate = max(
-                self.MIN_FEEDRATE_MM_MIN,
-                float(feedrate_mm_min),
-            )
-        except (TypeError, ValueError):
-            return
-        target_position = self._coordinate_move_target_position
-        raw_targets: dict[str, float] = {}
-        for axis in self.STAGE_AXIS_NAMES:
-            if axis not in active_axes:
-                continue
-            try:
-                axis_index = self.STAGE_AXIS_NAMES.index(axis)
-            except ValueError:
-                continue
-            if axis_index >= len(target_position):
-                continue
-            raw_targets[axis] = float(target_position[axis_index])
-        if not raw_targets:
+            if decision.clear_stage_motion_axes:
+                self._clear_stage_motion_axes()
             return
         self._advance_coordinate_move_prediction()
-        current_position = (
-            self._coordinate_move_stage_position
-            or self._coordinate_move_origin_position
+        if not self._coordinate_targets.has_active_move():
+            return
+        decision = self._coordinate_targets.plan_feedrate_reissue(
+            controller_busy=self.stage_controller.is_busy(),
+            latest_stage_state=latest_state,
+            requested_feedrate_mm_min=feedrate_mm_min,
+            monotonic_s=time.monotonic(),
         )
-        if current_position is None:
+        request = decision.request
+        if request is None:
             return
         try:
-            replace_active = self.stage_controller.is_busy()
-            if replace_active:
-                self._coordinate_move_reissue_cancel_pending = True
+            self._coordinate_targets.reissue_cancel_pending = (
+                request.set_reissue_cancel_pending
+            )
             accepted = self.stage_controller.queue_absolute_axis_targets_jog(
-                raw_targets,
-                feedrate=requested_feedrate,
+                request.raw_targets,
+                feedrate=request.requested_feedrate_mm_min,
                 replace_active=True,
             )
         except Exception as error:  # pragma: no cover - UI safety guard
@@ -8470,41 +8324,20 @@ class Main(QMainWindow):
             accepted = False
             self._show_status(str(error), 3000)
         if not accepted:
-            self._coordinate_move_reissue_cancel_pending = False
+            self._coordinate_targets.reissue_cancel_pending = False
             self._show_status("Unable to update coordinate move feedrate.", 3000)
             self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
             return
-        now = time.monotonic()
-        self._coordinate_move_origin_position = tuple(float(v) for v in current_position)
-        self._coordinate_move_programmed_feedrate = requested_feedrate
-        self._coordinate_move_effective_feedrate = requested_feedrate
-        self._coordinate_move_started_at = now
-        self._coordinate_move_ends_at = now + max(
-            self._coordinate_move_duration_s(
-                self._coordinate_move_origin_position,
-                self._coordinate_move_target_position,
-                requested_feedrate,
-            ),
-            0.05,
-        )
+        self._coordinate_targets.apply_feedrate_reissue_success(request)
         self._show_status(
-            f"Active coordinate move feedrate: F{requested_feedrate:.1f}.",
+            f"Active coordinate move feedrate: F{request.requested_feedrate_mm_min:.1f}.",
             1500,
         )
 
     def _clear_coordinate_move_tracking(
         self, *, clear_pending: bool, reset_override: bool
     ) -> None:
-        self._coordinate_move_axis = None
-        self._coordinate_move_axes.clear()
-        self._coordinate_move_origin_position = None
-        self._coordinate_move_stage_position = None
-        self._coordinate_move_target_position = None
-        self._coordinate_move_started_at = None
-        self._coordinate_move_ends_at = None
-        self._coordinate_move_programmed_feedrate = None
-        self._coordinate_move_effective_feedrate = None
-        self._coordinate_move_seen_active_state = False
+        self._coordinate_targets.clear_tracking()
         if clear_pending:
             self._pending_stage_axis_targets.clear()
         if reset_override:
@@ -8517,7 +8350,7 @@ class Main(QMainWindow):
         self._update_stage_coordinate_apply_state()
 
     def _start_next_pending_stage_axis_move(self) -> None:
-        if self._coordinate_move_axis is not None or not self._pending_stage_axis_targets:
+        if self._coordinate_targets.has_active_move() or not self._pending_stage_axis_targets:
             return
         if self.stage_controller.is_busy():
             QTimer.singleShot(200, self._start_next_pending_stage_axis_move)
@@ -8531,21 +8364,15 @@ class Main(QMainWindow):
         self._start_coordinate_axis_move(axis, raw_target, display_target)
 
     def _finish_coordinate_move_if_idle(self, position: object | None) -> None:
-        if self._coordinate_move_axis is None:
+        decision = self._coordinate_targets.finish_if_idle_decision(
+            latest_stage_state=self.stage_controller.latest_stage_state(),
+            position=position,
+            monotonic_s=time.monotonic(),
+        )
+        if not decision.finish:
             return
-        latest_state = (self.stage_controller.latest_stage_state() or "").lower()
-        if latest_state != "idle":
-            return
-        if not self._coordinate_position_is_at_target(position):
-            return
-        if (
-            self._coordinate_move_started_at is not None
-            and time.monotonic() - self._coordinate_move_started_at
-            < self.COORDINATE_MOVE_MIN_IDLE_ACCEPT_S
-        ):
-            return
-        if isinstance(position, tuple):
-            self._coordinate_move_stage_position = tuple(float(v) for v in position)
+        if decision.stage_position is not None:
+            self._coordinate_targets.stage_position = decision.stage_position
         self._clear_coordinate_move_tracking(clear_pending=False, reset_override=True)
         if self._pending_homing_axes:
             QTimer.singleShot(0, self._start_next_pending_homing_action)
@@ -8564,38 +8391,25 @@ class Main(QMainWindow):
         input_value: float,
         input_mode: str,
     ) -> tuple[float | None, float]:
-        axis = axis_name.strip().upper()
-        if axis not in self.STAGE_AXIS_NAMES:
-            return None, float(input_value)
-        mode = normalize_api_coordinate_input_mode(input_mode) or "G90"
-        if mode == "G91":
-            current_display = self._stage_axis_display_values.get(axis)
-            if current_display is None:
-                return None, float(input_value)
-            display_target = float(current_display) + float(input_value)
-        else:
-            display_target = float(input_value)
-        raw_target = self._raw_target_from_display_value(axis, display_target)
-        return raw_target, display_target
+        return resolve_stage_axis_target(
+            self.STAGE_AXIS_NAMES,
+            raw_target_from_display_value=self._raw_target_from_display_value,
+            display_values=self._stage_axis_display_values,
+            axis_name=axis_name,
+            input_value=input_value,
+            input_mode=input_mode,
+        )
 
     def _stage_axis_target_limit_error(
         self,
         axis_name: str,
         display_target: float,
     ) -> str | None:
-        axis = axis_name.strip().upper()
-        if axis not in self._stage_axis_homed:
-            return None
-        limits = self.stage_controller.axis_display_limits(axis)
-        if limits is None:
-            return None
-        min_value, max_value = limits
-        target = float(display_target)
-        if min_value <= target <= max_value:
-            return None
-        return (
-            f"{axis} target {target:+.3f} exceeds software limits "
-            f"({min_value:.3f}..{max_value:.3f})."
+        return stage_axis_target_limit_error(
+            axis_name,
+            display_target,
+            homed_axes=self._stage_axis_homed,
+            axis_display_limits=self.stage_controller.axis_display_limits,
         )
 
     def _on_limit_axes_changed(self, axes: object) -> None:
@@ -8761,7 +8575,7 @@ class Main(QMainWindow):
             self._homing_active_key is None
             and not self.stage_controller.is_busy()
             and not self._controller_latest_state_blocks_motion()
-            and self._coordinate_move_axis is None
+            and not self._coordinate_targets.has_active_move()
         ):
             first_axis = normalized.pop(0)
             if not self.stage_controller.request_home_axis(first_axis):
@@ -8775,7 +8589,7 @@ class Main(QMainWindow):
     def _start_next_pending_homing_action(self) -> None:
         if self._homing_active_key is not None or not self._pending_homing_axes:
             return
-        if self.stage_controller.is_busy() or self._coordinate_move_axis is not None:
+        if self.stage_controller.is_busy() or self._coordinate_targets.has_active_move():
             QTimer.singleShot(200, self._start_next_pending_homing_action)
             return
         if self._controller_latest_state_blocks_motion():

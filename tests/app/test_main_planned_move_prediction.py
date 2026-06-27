@@ -20,6 +20,10 @@ def _restore_real_imports_for_main() -> None:
 
 _restore_real_imports_for_main()
 from main import Main
+from probe_station_gui.stage.coordinate_targets import (
+    CoordinateTargetConfig,
+    CoordinateTargetMoveState,
+)
 from probe_station_gui.stage.manual_jog_prediction import (
     ManualJogPredictionConfig,
     ManualJogPredictionState,
@@ -89,7 +93,15 @@ def _make_main(
     window.contact_calibration_window = None
     window._pending_alignment_preparation = None
     window._last_reported_b_position = None
-    window._coordinate_move_stage_position = None
+    window._coordinate_targets = CoordinateTargetMoveState(
+        CoordinateTargetConfig(
+            axis_names=Main.STAGE_AXIS_NAMES,
+            min_feedrate_mm_min=Main.MIN_FEEDRATE_MM_MIN,
+            duration_padding_s=Main.PLANNED_MOVE_DURATION_PADDING_S,
+            min_idle_accept_s=Main.COORDINATE_MOVE_MIN_IDLE_ACCEPT_S,
+            target_tolerance_mm=Main.COORDINATE_MOVE_TARGET_TOLERANCE_MM,
+        )
+    )
     window._planned_move_stage_xy = (5.0, 5.0)
     window._planned_move_started_at = 1.0
     window._planned_move_waiting_for_fresh_status = False
