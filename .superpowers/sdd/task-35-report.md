@@ -5,7 +5,7 @@ Status: DONE_WITH_CONCERNS
 ## Commits
 
 - `e8b340e refactor: extract Telegram command policy`
-- Follow-up: `fix: address Telegram command review`
+- `a3d1c2f fix: address Telegram command review`
 
 ## Files Changed
 
@@ -58,7 +58,10 @@ Final:
 
 - `main.py` raw LOC: 9613, SLOC 9033
 - `probe_station_gui/notifications/telegram_commands.py` raw LOC: 304, SLOC 262
+- `probe_station_gui/notifications/telegram.py` raw LOC: 883, SLOC 741
+- `probe_station_gui/route/telegram_adapter.py` raw LOC: 691, SLOC 638
 - Wily temp clone/cache: `main.py` cyclomatic 1795, raw LOC 9613
+- Wily local module tradeoffs: `notifications.telegram.py` cyclomatic 183 -> 213 and MI 8.767 -> 3.384 after moving transport send preparation out of `Main`; `route.telegram_adapter.py` cyclomatic 102 -> 106 and MI 13.406 -> 12.496 after moving legacy Telegram route state migration out of `Main`.
 - `main.py` MI: C (0.00)
 - `telegram_commands.py` MI: A (24.93)
 - `Main._telegram_status_text`: radon A(1), lizard 2 NLOC / CCN 1
@@ -73,3 +76,4 @@ Strict `main.py <= 9535` was not met. Fallback criteria were met:
 - `_telegram_status_text` is no longer in radon/lizard warning range.
 - Wily `main.py` cyclomatic improved from 1865 to 1795.
 - Focused/full tests and ruff pass.
+- Spec and code-quality re-reviews approved. The local complexity regressions in `notifications.telegram` and `route.telegram_adapter` were accepted because they are cohesive transport/state-migration helpers, directly tested, and keep command policy side-effect free.
