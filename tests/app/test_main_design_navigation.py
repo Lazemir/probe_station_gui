@@ -1,0 +1,212 @@
+from __future__ import annotations
+
+import os
+import sys
+import types
+from pathlib import Path
+
+import numpy as np
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+
+def _restore_real_imports_for_main() -> None:
+    for name in list(sys.modules):
+        if name == "PySide6" or name.startswith("PySide6."):
+            del sys.modules[name]
+    serial_module = sys.modules.get("serial")
+    if serial_module is not None and not hasattr(serial_module, "__path__"):
+        for name in list(sys.modules):
+            if name == "serial" or name.startswith("serial."):
+                del sys.modules[name]
+    for name in list(sys.modules):
+        if name == "probe_station_gui" or name.startswith("probe_station_gui."):
+            del sys.modules[name]
+
+
+_restore_real_imports_for_main()
+
+import main as main_module
+from main import Main
+from probe_station_gui.design.session import DesignSession
+
+DesignDocument = main_module.DesignDocument
+
+
+class _FakeStageController:
+    def __init__(self) -> None:
+        self.homed_axes = {"X", "Y", "Z"}
+        self.unhomed_requests: list[set[str]] = []
+        self.move_requests: list[tuple[float, float]] = []
+        self.busy = False
+
+    def mark_axes_unhomed(self, axes: set[str]) -> set[str]:
+        normalized = {str(axis).strip().upper() for axis in axes}
+        self.unhomed_requests.append(normalized)
+        removed = self.homed_axes.intersection(normalized)
+        self.homed_axes -= removed
+        return set(removed)
+
+    def is_busy(self) -> bool:
+        return self.busy
+
+    def request_move_to_xy(self, x_value: float, y_value: float) -> None:
+        self.move_requests.append((float(x_value), float(y_value)))
+
+
+class _FakeSettingsManager:
+    def __init__(self) -> None:
+        self.last_design_directory: Path | None = None
+
+    def set_design_last_directory(self, path: Path) -> None:
+        self.last_design_directory = Path(path)
+
+
+class _FakeDesignPanel:
+    def __init__(self) -> None:
+        self.directories: list[Path] = []
+        self.status_messages: list[str] = []
+
+    def set_design_dialog_directory(self, path: Path) -> None:
+        self.directories.append(Path(path))
+
+    def set_status_message(self, message: str) -> None:
+        self.status_messages.append(str(message))
+
+
+class _FakeCell:
+    def __init__(self) -> None:
+        self.name = "TOP"
+
+    def get_polygons(self, *args: object, **kwargs: object) -> dict[tuple[int, int], list[np.ndarray]]:
+        return {(1, 0): [np.asarray([[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]])]}
+
+
+class _FakeLibrary:
+    unit = 1e-6
+    precision = 1e-9
+
+    def __init__(self) -> None:
+        self.cells = [_FakeCell()]
+
+    def top_level(self) -> list[_FakeCell]:
+        return self.cells
+
+
+def _make_document(tmp_path: Path) -> DesignDocument:
+    design_path = tmp_path / "loaded.gds"
+    design_path.write_bytes(b"loaded-design")
+    return DesignDocument._from_components(
+        path=design_path,
+        library=_FakeLibrary(),
+        top_cell_name="TOP",
+    )
+
+
+def _make_window() -> tuple[Main, _FakeStageController, list[str]]:
+    window = Main.__new__(Main)
+    stage_controller = _FakeStageController()
+    statuses: list[str] = []
+    window.stage_controller = stage_controller
+    window._design_session = DesignSession()
+    window._pending_persisted_design_state = None
+    window._pending_persisted_design_position = None
+    window._design_load_generation = 1
+    window._design_load_restore_states = {}
+    window._design_load_show_window = {}
+    window._pending_alignment_preparation = None
+    window._last_selected_design_point = None
+    window._design_snap_enabled = False
+    window._current_design_stage_xy = None
+    window.design_layout_window = None
+    window.design_navigator_panel = None
+    window.view = types.SimpleNamespace(
+        set_design_minimap_data=lambda **_kwargs: None,
+    )
+    window.settings_manager = _FakeSettingsManager()
+    window._show_status = lambda message, _timeout=0: statuses.append(message)
+    window._save_controller_state_without_design = lambda: statuses.append("saved_without_design")
+    window._persist_controller_state_if_available = lambda: statuses.append("persisted")
+    window._reset_manual_alignment = lambda **_kwargs: statuses.append("reset_alignment")
+    window._set_design_snap_enabled = lambda enabled: setattr(window, "_design_snap_enabled", bool(enabled))
+    window._refresh_design_panel = lambda: statuses.append("refresh_panel")
+    window._refresh_design_position = lambda: statuses.append("refresh_position")
+    window._toggle_design_layout_window = lambda _show: statuses.append("toggle_window")
+    window._restore_route_measurement_state_after_design_load = lambda: statuses.append("restore_route")
+    window._raw_stage_xy_from_design_xy = lambda _design_xy: (1.5, -2.0)
+    window._clear_planned_move_prediction = lambda **_kwargs: statuses.append("clear_prediction")
+    return window, stage_controller, statuses
+
+
+def test_maybe_restore_persisted_design_clears_design_and_unhomes_xy_when_xy_changed() -> None:
+    window, stage_controller, statuses = _make_window()
+    window._pending_persisted_design_state = {"document_path": "C:\\designs\\sample.gds"}
+    window._pending_persisted_design_position = (1.0, 2.0, 3.0)
+
+    Main._maybe_restore_persisted_design(window, (1.25, 2.5, 3.0))
+
+    assert stage_controller.unhomed_requests == [{"X", "Y"}]
+    assert stage_controller.homed_axes == {"Z"}
+    assert "saved_without_design" in statuses
+    assert any("Controller X/Y coordinates changed" in item for item in statuses)
+
+
+def test_on_design_document_loaded_error_saves_controller_state_without_design_when_restoring() -> None:
+    window, _stage_controller, statuses = _make_window()
+    window._design_load_restore_states[1] = {"document_path": "missing.gds"}
+    window._design_load_show_window[1] = False
+
+    Main._on_design_document_loaded(window, 1, None, RuntimeError("boom"))
+
+    assert statuses == ["boom", "saved_without_design"]
+
+
+def test_on_design_document_loaded_success_refreshes_persists_and_restores_route(tmp_path: Path) -> None:
+    window, _stage_controller, statuses = _make_window()
+    document = _make_document(tmp_path)
+    panel = _FakeDesignPanel()
+    window.design_navigator_panel = panel
+    window._design_load_show_window[1] = False
+
+    Main._on_design_document_loaded(window, 1, document, None)
+
+    assert window._design_session.document is document
+    assert window._design_snap_enabled
+    assert statuses[:2] == ["reset_alignment", "refresh_panel"]
+    assert "refresh_position" in statuses
+    assert "persisted" in statuses
+    assert "restore_route" in statuses
+    assert any("Loaded design 'loaded.gds' (TOP)." == item for item in statuses)
+    assert panel.directories == [tmp_path]
+    assert window.settings_manager.last_design_directory == tmp_path
+
+
+def test_move_to_design_coordinate_seeds_prediction_and_requests_move_after_acceptance() -> None:
+    window, stage_controller, statuses = _make_window()
+    window._design_session.load_document(
+        DesignDocument(
+            path=Path("C:/designs/sample.gds"),
+            library=object(),
+            top_cell=object(),
+            top_cell_name="TOP",
+            cell_names=("TOP",),
+            dbu=1e-6,
+            user_unit=1e-9,
+            bounds=(0.0, 0.0, 1.0, 1.0),
+            polygons_by_layer={(1, 0): (np.asarray([[0.0, 0.0], [1.0, 0.0]]),)},
+            visible_layers=frozenset({(1, 0)}),
+        )
+    )
+
+    accepted = Main._move_to_design_coordinate(
+        window,
+        (100.0, 200.0),
+        source_label="design window",
+    )
+
+    assert accepted
+    assert statuses == ["refresh_panel", "clear_prediction"]
+    assert window._last_selected_design_point == (100.0, 200.0)
+    assert window._pending_planned_move_target_xy == (1.5, -2.0)
+    assert window._pending_planned_move_source_label == "design window"
+    assert stage_controller.move_requests == [(1.5, -2.0)]

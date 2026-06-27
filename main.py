@@ -120,6 +120,7 @@ from probe_station_gui.design.contact_navigation import (
     api_route_adjusted_stage_xy,
     api_route_point_payload,
 )
+from probe_station_gui.design import navigation_adapter as design_navigation
 from probe_station_gui.design.session import AlignmentPreparation, DesignSession
 from probe_station_gui.shared.diagnostics import configure_crash_diagnostics
 from probe_station_gui.api.request_bridge import ApiRequestBridge
@@ -3827,7 +3828,7 @@ class Main(QMainWindow):
 
     def _prepare_persisted_design_restore(self, cached_state: dict[str, object]) -> None:
         design_state = cached_state.get("design_session")
-        cached_position = self._coerce_position_tuple(
+        cached_position = design_navigation.coerce_position_tuple(
             cached_state.get("last_stage_position")
         )
         if not isinstance(design_state, dict) or cached_position is None:
@@ -3846,49 +3847,29 @@ class Main(QMainWindow):
         self._pending_persisted_design_position = None
         if self._design_session.document is not None:
             return
-        axis_mismatches = self._position_axis_mismatches(
-            expected_position,
-            position,
+        decision = design_navigation.prepare_persisted_design_restore(
+            design_state, expected_position=expected_position, actual_position=position,
+            document_loaded=False, axis_names=self.STAGE_AXIS_NAMES,
+            tolerance=self.DESIGN_RESTORE_POSITION_TOLERANCE,
+            file_is_current=self._persisted_design_file_is_current,
         )
-        xy_mismatches = axis_mismatches.intersection({"X", "Y"})
-        if expected_position is None or xy_mismatches:
-            if xy_mismatches:
-                removed_axes = self.stage_controller.mark_axes_unhomed(xy_mismatches)
-                if removed_axes:
-                    axes_label = ", ".join(sorted(removed_axes))
-                    self._show_status(
-                        f"Controller {axes_label} coordinate changed. Cleared cached homing.",
-                        5000,
-                    )
-            self._show_status(
-                "Controller X/Y coordinates changed. Cleared cached design selection.",
-                5000,
-            )
-            self._save_controller_state_without_design()
-            return
-        if "Z" in axis_mismatches:
-            removed_axes = self.stage_controller.mark_axes_unhomed({"Z"})
+        if decision.axes_to_mark_unhomed:
+            removed_axes = self.stage_controller.mark_axes_unhomed(decision.axes_to_mark_unhomed)
             if removed_axes:
-                self._show_status(
-                    "Controller Z coordinate changed. Cleared cached Z homing.",
-                    5000,
-                )
-        if not self._persisted_design_file_is_current(design_state):
-            self._show_status(
-                "Cached design file changed or is unavailable. Cleared cached design selection.",
-                5000,
+                axes_label = ", ".join(sorted(removed_axes))
+                if removed_axes == {"Z"}:
+                    self._show_status("Controller Z coordinate changed. Cleared cached Z homing.", 5000)
+                else:
+                    self._show_status(f"Controller {axes_label} coordinate changed. Cleared cached homing.", 5000)
+        if decision.status_message is not None:
+            self._show_status(decision.status_message, decision.status_timeout_ms)
+        if decision.clear_cached_design:
+            self._save_controller_state_without_design()
+            return
+        if decision.should_start_load and decision.design_path is not None:
+            self._start_design_document_load(
+                decision.design_path, restore_state=decision.restore_state, show_window=False
             )
-            self._save_controller_state_without_design()
-            return
-        design_path = str(design_state.get("document_path") or "").strip()
-        if not design_path:
-            self._save_controller_state_without_design()
-            return
-        self._start_design_document_load(
-            design_path,
-            restore_state=design_state,
-            show_window=False,
-        )
 
     def _save_controller_state_without_design(self) -> None:
         state = self.stage_controller.export_cached_controller_state()
@@ -3901,76 +3882,13 @@ class Main(QMainWindow):
         state.pop("design_session", None)
         self.settings_manager.save_controller_state(state)
 
-    @classmethod
-    def _position_axis_mismatches(
-        cls,
-        expected: tuple[float, ...] | None,
-        actual: tuple[float, ...],
-    ) -> set[str]:
-        if not expected:
-            return {"X", "Y"}
-        tolerance = cls.DESIGN_RESTORE_POSITION_TOLERANCE
-        mismatches: set[str] = set()
-        for index, axis_name in enumerate(cls.STAGE_AXIS_NAMES):
-            if index >= len(expected):
-                break
-            if index >= len(actual):
-                mismatches.add(axis_name)
-                continue
-            try:
-                expected_value = float(expected[index])
-                actual_value = float(actual[index])
-            except (TypeError, ValueError):
-                mismatches.add(axis_name)
-                continue
-            if (
-                not math.isfinite(expected_value)
-                or not math.isfinite(actual_value)
-                or abs(expected_value - actual_value) > tolerance
-            ):
-                mismatches.add(axis_name)
-        return mismatches
-
     @staticmethod
     def _coerce_position_tuple(value: object) -> tuple[float, ...] | None:
-        if not isinstance(value, (list, tuple)) or not value:
-            return None
-        values: list[float] = []
-        for item in value:
-            try:
-                coordinate = float(item)
-            except (TypeError, ValueError):
-                return None
-            if not math.isfinite(coordinate):
-                return None
-            values.append(coordinate)
-        return tuple(values)
+        return design_navigation.coerce_position_tuple(value)
 
     @staticmethod
     def _persisted_design_file_is_current(state: dict[str, object]) -> bool:
-        path_text = str(state.get("document_path") or "").strip()
-        if not path_text:
-            return False
-        path = Path(path_text).expanduser()
-        try:
-            stat = path.stat()
-        except OSError:
-            return False
-        saved_size = state.get("document_size")
-        if saved_size is not None:
-            try:
-                if int(saved_size) != int(stat.st_size):
-                    return False
-            except (TypeError, ValueError):
-                return False
-        saved_mtime = state.get("document_mtime_ns")
-        if saved_mtime is not None:
-            try:
-                if int(saved_mtime) != int(stat.st_mtime_ns):
-                    return False
-            except (TypeError, ValueError):
-                return False
-        return True
+        return design_navigation.persisted_design_file_is_current(state)
 
     def _persist_serial_connection_state(self, connected: bool) -> None:
         self.settings_manager.save_serial_connection_state(
@@ -5933,18 +5851,10 @@ class Main(QMainWindow):
                 action.blockSignals(False)
 
     def _load_design_document(self, design_path: str) -> None:
-        self._start_design_document_load(
-            design_path,
-            restore_state=None,
-            show_window=True,
-        )
+        self._start_design_document_load(design_path, restore_state=None, show_window=True)
 
     def _start_design_document_load(
-        self,
-        design_path: str,
-        *,
-        restore_state: dict[str, object] | None,
-        show_window: bool,
+        self, design_path: str, *, restore_state: dict[str, object] | None, show_window: bool
     ) -> None:
         self._design_load_generation += 1
         generation = self._design_load_generation
@@ -5959,7 +5869,6 @@ class Main(QMainWindow):
         elif self.design_navigator_panel:
             self.design_navigator_panel.set_status_message("Loading design...")
         self._show_status(f"Loading design '{Path(path_text).name}'...")
-
         def load_design() -> None:
             try:
                 document = DesignDocument.load(path_text)
@@ -5968,135 +5877,92 @@ class Main(QMainWindow):
                 return
             self.design_document_loaded.emit(generation, document, None)
 
-        threading.Thread(
-            target=load_design,
-            name="DesignDocumentLoad",
-            daemon=True,
-        ).start()
+        threading.Thread(target=load_design, name="DesignDocumentLoad", daemon=True).start()
 
-    def _on_design_document_loaded(
-        self,
-        generation: int,
-        document: object,
-        error: object,
-    ) -> None:
+    def _on_design_document_loaded(self, generation: int, document: object, error: object) -> None:
         if generation != self._design_load_generation:
             return
         restore_state = self._design_load_restore_states.pop(generation, None)
         show_window = self._design_load_show_window.pop(generation, True)
-        if error is not None:
-            message = str(error)
-            self._show_status(message, 6000)
-            if self.design_layout_window is not None and show_window:
-                self.design_layout_window.set_status_message(message)
-            elif self.design_navigator_panel:
-                self.design_navigator_panel.set_status_message(message)
-            if restore_state is not None:
-                self._save_controller_state_without_design()
-            return
-        if not isinstance(document, DesignDocument):
-            message = "Loaded design has an unexpected type."
-            self._show_status(message, 6000)
-            if self.design_layout_window is not None and show_window:
-                self.design_layout_window.set_status_message(message)
-            elif self.design_navigator_panel:
-                self.design_navigator_panel.set_status_message(message)
-            if restore_state is not None:
-                self._save_controller_state_without_design()
-            return
         try:
-            if restore_state is not None:
-                document = self._document_with_persisted_design_view(
-                    document,
-                    restore_state,
-                )
-            self._reset_manual_alignment(cancel_pick=True)
-            if restore_state is None:
-                self._design_session.load_document(document)
-            else:
-                self._design_session.restore_persisted_state(document, restore_state)
-            self._pending_alignment_preparation = None
-            current_route_point = self._design_session.current_route_point()
-            self._last_selected_design_point = (
-                current_route_point.camera_center
-                if current_route_point is not None
-                else None
+            plan = design_navigation.design_document_loaded_plan(
+                self._design_session,
+                document,
+                error,
+                restore_state,
             )
-            self._set_design_snap_enabled(True)
-            self.settings_manager.set_design_last_directory(document.path.parent)
-            if self.design_navigator_panel is not None:
-                self.design_navigator_panel.set_design_dialog_directory(
-                    document.path.parent
-                )
-            if self.design_layout_window is not None and show_window:
-                self.design_layout_window.set_status_message("Rendering design...")
-                QApplication.processEvents()
-            self._refresh_design_panel()
-            self._refresh_design_position()
-            if show_window:
-                self._toggle_design_layout_window(True)
-            self._persist_controller_state_if_available()
-            self._show_status(
-                f"Loaded design '{document.path.name}' ({document.top_cell_name}).",
-                5000,
-            )
-            self._restore_route_measurement_state_after_design_load()
         except DesignModelError as exc:
             self._show_status(str(exc), 6000)
             if restore_state is not None:
                 self._save_controller_state_without_design()
+            return
+        if not plan.accepted:
+            self._apply_design_load_failure_plan(plan, show_window)
+            return
+        self._apply_design_load_success_plan(plan, show_window)
 
-    def _document_with_persisted_design_view(
-        self,
-        document: DesignDocument,
-        state: dict[str, object],
-    ) -> DesignDocument:
-        top_cell_name = str(state.get("top_cell_name") or "").strip()
-        if top_cell_name and top_cell_name != document.top_cell_name:
-            document = document.with_top_cell(top_cell_name)
-        try:
-            rotation_quarter_turns = int(state.get("rotation_quarter_turns", 0))
-        except (TypeError, ValueError):
-            rotation_quarter_turns = 0
-        if rotation_quarter_turns:
-            document = document.with_rotation_delta(rotation_quarter_turns)
-        visible_layers = self._parse_persisted_visible_layers(
-            state.get("visible_layers")
-        )
-        if visible_layers:
-            document = document.with_visible_layers(visible_layers)
-        return document
+    def _apply_design_load_success_plan(self, plan: design_navigation.DesignLoadResultPlan, show_window: bool) -> None:
+        self._reset_manual_alignment(cancel_pick=True)
+        self._pending_alignment_preparation = None
+        self._last_selected_design_point = plan.last_selected_design_point
+        self._set_design_snap_enabled(True)
+        if plan.document_directory is not None:
+            self.settings_manager.set_design_last_directory(plan.document_directory)
+            if self.design_navigator_panel is not None:
+                self.design_navigator_panel.set_design_dialog_directory(plan.document_directory)
+        if self.design_layout_window is not None and show_window:
+            self.design_layout_window.set_status_message("Rendering design...")
+            QApplication.processEvents()
+        self._refresh_design_panel()
+        self._refresh_design_position()
+        if show_window:
+            self._toggle_design_layout_window(True)
+        self._persist_controller_state_if_available()
+        self._show_navigation_status(plan)
+        self._restore_route_measurement_state_after_design_load()
 
-    @staticmethod
-    def _parse_persisted_visible_layers(value: object) -> set[tuple[int, int]]:
-        layers: set[tuple[int, int]] = set()
-        if not isinstance(value, list):
-            return layers
-        for item in value:
-            if not isinstance(item, (list, tuple)) or len(item) != 2:
-                continue
-            try:
-                layers.add((int(item[0]), int(item[1])))
-            except (TypeError, ValueError):
-                continue
-        return layers
+    def _apply_design_load_failure_plan(self, plan: design_navigation.DesignLoadResultPlan, show_window: bool) -> None:
+        message = plan.status_message or ""
+        self._show_status(message, plan.status_timeout_ms)
+        if self.design_layout_window is not None and show_window:
+            self.design_layout_window.set_status_message(message)
+        elif self.design_navigator_panel:
+            self.design_navigator_panel.set_status_message(message)
+        if plan.clear_cached_design:
+            self._save_controller_state_without_design()
+
+    def _show_navigation_status(self, plan: object) -> None:
+        message = getattr(plan, "status_message", None)
+        if message is not None:
+            self._show_status(message, getattr(plan, "status_timeout_ms", 5000))
+
+    def _apply_route_edit_plan(self, plan: design_navigation.RouteEditPlan, *, empty_selection: bool = False, update_selection: bool = True) -> bool:
+        if not plan.accepted:
+            self._show_navigation_status(plan)
+            return False
+        if update_selection:
+            self._last_selected_design_point = (
+                None if empty_selection else plan.last_selected_design_point
+            )
+        self._refresh_design_panel()
+        self._show_navigation_status(plan)
+        return True
 
     def _unload_design_document(self) -> None:
         self._design_load_generation += 1
-        if self._design_session.document is None:
+        plan = design_navigation.unload_design_document(self._design_session)
+        if not plan.accepted:
             return
-        document_name = self._design_session.document.path.name
         self._reset_manual_alignment(cancel_pick=True)
-        self._design_session.unload_document()
         self._pending_alignment_preparation = None
         self._last_selected_design_point = None
         self._refresh_design_panel()
         self._update_design_position(None)
-        self._show_status(f"Unloaded design '{document_name}'.", 5000)
+        self._show_navigation_status(plan)
 
     def _set_design_top_cell(self, top_cell_name: str) -> None:
         try:
-            self._design_session.set_top_cell(top_cell_name)
+            plan = design_navigation.set_design_top_cell(self._design_session, top_cell_name)
         except DesignModelError as exc:
             self._show_status(str(exc), 6000)
             return
@@ -6104,24 +5970,17 @@ class Main(QMainWindow):
         self._last_selected_design_point = None
         self._refresh_design_panel()
         self._refresh_design_position()
-        self._show_status(f"Switched design top cell to '{top_cell_name}'.", 5000)
+        self._show_navigation_status(plan)
 
-    def _set_design_layer_visibility(
-        self, layer: int, datatype: int, visible: bool
-    ) -> None:
-        document = self._design_session.document
-        if document is None:
-            return
-        visible_layers = set(document.visible_layers)
-        layer_key = (int(layer), int(datatype))
-        if visible:
-            visible_layers.add(layer_key)
-        else:
-            visible_layers.discard(layer_key)
+    def _set_design_layer_visibility(self, layer: int, datatype: int, visible: bool) -> None:
         try:
-            self._design_session.set_visible_layers(visible_layers)
+            plan = design_navigation.set_design_layer_visibility(
+                self._design_session, layer, datatype, visible
+            )
         except DesignModelError as exc:
             self._show_status(str(exc), 5000)
+            return
+        if not plan.accepted:
             return
         self._refresh_design_panel()
 
@@ -6144,105 +6003,65 @@ class Main(QMainWindow):
             )
             return
         route_measurement_thread = getattr(self, "_route_measurement_thread", None)
-        if (
-            route_measurement_thread is not None
-            and route_measurement_thread.is_alive()
-        ):
+        if route_measurement_thread is not None and route_measurement_thread.is_alive():
             self._show_status("Stop route measurement before rotating the design.", 5000)
             return
-        _ = quarter_turn_delta
-        delta = 1
-        previous_selected_point = self._last_selected_design_point
         try:
-            rotated_document = self._design_session.rotate_document(delta)
+            plan = design_navigation.rotate_design_document(
+                self._design_session, 1, self._last_selected_design_point, can_rotate=True
+            )
         except DesignModelError as exc:
             self._show_status(str(exc), 5000)
             return
-        if previous_selected_point is not None:
-            self._last_selected_design_point = document.rotate_point(
-                previous_selected_point,
-                delta,
-            )
+        self._last_selected_design_point = plan.last_selected_design_point
         self._pending_alignment_preparation = None
         self._refresh_design_panel()
         self._refresh_design_position()
-        self._show_status(
-            f"Rotated design counterclockwise: "
-            f"{rotated_document.rotation_quarter_turns * 90} deg.",
-            4000,
-        )
+        self._show_navigation_status(plan)
 
     def _create_measurement_route(self) -> None:
         try:
-            route = self._design_session.create_route()
+            plan = design_navigation.create_measurement_route(self._design_session)
         except DesignModelError as exc:
             self._show_status(str(exc), 5000)
             return
         self._last_selected_design_point = None
         self._refresh_design_panel()
-        self._show_status(f"Created route '{route.name}'.", 4000)
+        self._show_navigation_status(plan)
 
     def _load_measurement_route(self, route_path: str) -> None:
-        document = self._design_session.document
-        if document is None:
-            self._show_status("Load a design before loading a route.", 5000)
-            return
         try:
-            route = MeasurementRoute.load(route_path)
-            self._design_session.set_route(route)
+            plan = design_navigation.load_measurement_route(self._design_session, route_path)
         except DesignModelError as exc:
             self._show_status(str(exc), 7000)
             return
-        current_point = self._design_session.current_route_point()
-        self._last_selected_design_point = (
-            current_point.camera_center if current_point is not None else None
-        )
-        self._refresh_design_panel()
-        self._show_status(
-            f"Loaded route '{route.name}' with {len(route.points)} points.",
-            5000,
-        )
+        if not self._apply_route_edit_plan(plan):
+            return
         self._restore_route_measurement_state_after_design_load()
 
     def _save_measurement_route(self) -> None:
-        route = self._design_session.route
-        if route is None:
-            self._show_status("No route is loaded.", 4000)
-            return
         try:
-            path = route.save()
+            plan = design_navigation.save_measurement_route(self._design_session)
         except DesignModelError as exc:
             self._show_status(str(exc), 5000)
             return
-        self._refresh_design_panel()
-        self._show_status(f"Saved route '{path.name}'.", 4000)
+        self._apply_route_edit_plan(plan, update_selection=False)
 
     def _save_measurement_route_as(self, route_path: str) -> None:
-        route = self._design_session.route
-        if route is None:
-            self._show_status("No route is loaded.", 4000)
-            return
         try:
-            path = route.save(route_path)
+            plan = design_navigation.save_measurement_route(self._design_session, route_path)
         except DesignModelError as exc:
             self._show_status(str(exc), 5000)
             return
-        self._refresh_design_panel()
-        self._show_status(f"Saved route '{path.name}'.", 4000)
+        self._apply_route_edit_plan(plan, update_selection=False)
 
     def _add_design_route_point(self, x_value: float, y_value: float) -> None:
         try:
-            point = self._design_session.add_route_point((float(x_value), float(y_value)))
+            plan = design_navigation.add_design_route_point(self._design_session, x_value, y_value)
         except DesignModelError as exc:
             self._show_status(str(exc), 5000)
             return
-        self._last_selected_design_point = point.camera_center
-        self._refresh_design_panel()
-        self._show_status(
-            f"Added route point {point.label} at X={point.camera_center[0]:.3f}, "
-            f"Y={point.camera_center[1]:.3f}.",
-            3000,
-        )
+        self._apply_route_edit_plan(plan)
 
     def _add_current_design_route_point(self) -> None:
         if self._current_design_stage_xy is None:
@@ -6258,77 +6077,27 @@ class Main(QMainWindow):
         self._add_design_route_point(design_xy[0], design_xy[1])
 
     def _add_route_array_points(
-        self,
-        origin_x: float,
-        origin_y: float,
-        step_x_dx: float,
-        step_x_dy: float,
-        count_x: int,
-        step_y_dx: float,
-        step_y_dy: float,
-        count_y: int,
-        serpentine: bool,
-        replace_existing: bool,
+        self, origin_x: float, origin_y: float, step_x_dx: float, step_x_dy: float,
+        count_x: int, step_y_dx: float, step_y_dy: float, count_y: int,
+        serpentine: bool, replace_existing: bool,
     ) -> None:
-        if self._design_session.document is None:
-            self._show_status("Load a design before adding route points.", 5000)
-            return
-        route = self._design_session.route
-        if route is None:
-            try:
-                route = self._design_session.create_route()
-            except DesignModelError as exc:
-                self._show_status(str(exc), 5000)
-                return
         try:
-            added = route.add_grid_points(
-                (float(origin_x), float(origin_y)),
-                (float(step_x_dx), float(step_x_dy)),
-                int(count_x),
-                (float(step_y_dx), float(step_y_dy)),
-                int(count_y),
-                serpentine=bool(serpentine),
-                clear_existing=bool(replace_existing),
+            plan = design_navigation.add_route_array_points(
+                self._design_session, origin_x, origin_y, step_x_dx, step_x_dy,
+                count_x, step_y_dx, step_y_dy, count_y, serpentine, replace_existing,
             )
         except DesignModelError as exc:
             self._show_status(str(exc), 5000)
             return
-        if added:
-            self._design_session.selected_route_point_index = len(route.points) - 1
-            self._last_selected_design_point = added[-1].camera_center
-        else:
-            self._design_session.selected_route_point_index = -1
-            self._last_selected_design_point = None
-        self._refresh_design_panel()
-        mode = "Replaced route with" if replace_existing else "Added"
-        self._show_status(
-            f"{mode} {len(added)} array route points "
-            f"from X={float(origin_x):.3f}, Y={float(origin_y):.3f}.",
-            4000,
-        )
+        self._apply_route_edit_plan(plan)
 
     def _remove_selected_route_point(self) -> None:
-        point = self._design_session.remove_selected_route_point()
-        if point is None:
-            self._show_status("No route point is selected.", 3000)
-            return
-        current_point = self._design_session.current_route_point()
-        self._last_selected_design_point = (
-            current_point.camera_center if current_point is not None else None
-        )
-        self._refresh_design_panel()
-        self._show_status(f"Removed route point {point.label}.", 3000)
+        plan = design_navigation.remove_selected_route_point(self._design_session)
+        self._apply_route_edit_plan(plan)
 
     def _clear_measurement_route_points(self) -> None:
-        route = self._design_session.route
-        if route is None:
-            self._show_status("No route is loaded.", 3000)
-            return
-        route.clear_points()
-        self._design_session.selected_route_point_index = -1
-        self._last_selected_design_point = None
-        self._refresh_design_panel()
-        self._show_status("Cleared route points.", 3000)
+        plan = design_navigation.clear_measurement_route_points(self._design_session)
+        self._apply_route_edit_plan(plan, empty_selection=True)
 
     def _open_route_measurement_dialog(self, *, start_context: bool = True) -> None:
         route = self._design_session.route
@@ -7630,18 +7399,13 @@ class Main(QMainWindow):
             self._save_route_measurement_current_point(value)
 
     def _select_route_point_for_measurement(self, point_number: int) -> None:
-        route = self._design_session.route
-        if route is None or not route.points:
-            return
-        index = int(point_number) - 1
-        if not 0 <= index < len(route.points):
-            return
-        if self._design_session.selected_route_point_index == index:
-            return
-        point = self._design_session.select_route_point(index)
-        self._last_selected_design_point = (
-            point.camera_center if point is not None else None
+        plan = design_navigation.select_route_point_for_measurement(
+            self._design_session,
+            point_number,
         )
+        if not plan.selected:
+            return
+        self._last_selected_design_point = plan.last_selected_design_point
         self._refresh_design_panel()
         self._persist_controller_state_if_available()
 
@@ -7679,8 +7443,8 @@ class Main(QMainWindow):
             logger.exception("Failed to persist route measurement session metadata.")
 
     def _select_route_point(self, index: int) -> None:
-        point = self._design_session.select_route_point(index)
-        self._last_selected_design_point = point.camera_center if point is not None else None
+        plan = design_navigation.select_route_point(self._design_session, index)
+        self._last_selected_design_point = plan.last_selected_design_point
         self._refresh_design_panel()
 
     def _set_route_needle_offsets(
@@ -7776,35 +7540,40 @@ class Main(QMainWindow):
             self._update_design_position(None)
 
     def _on_design_target_selected(self, target_id: str) -> None:
-        self._design_session.select_target_by_id(target_id)
+        design_navigation.select_design_target(self._design_session, target_id)
         self._refresh_design_panel()
 
     def _select_next_design_target(self) -> None:
-        target = self._design_session.select_next_target()
+        plan = design_navigation.select_next_design_target(self._design_session)
         self._refresh_design_panel()
-        if target is not None:
-            self._show_status(f"Selected target '{target.label}'.", 3000)
+        if plan.status_message is not None:
+            self._show_status(plan.status_message, plan.status_timeout_ms)
 
     def _select_previous_design_target(self) -> None:
-        target = self._design_session.select_previous_target()
+        plan = design_navigation.select_previous_design_target(self._design_session)
         self._refresh_design_panel()
-        if target is not None:
-            self._show_status(f"Selected target '{target.label}'.", 3000)
+        if plan.status_message is not None:
+            self._show_status(plan.status_message, plan.status_timeout_ms)
 
     def _move_to_design_target(self, target_id: str) -> None:
         target = self._design_session.select_target_by_id(target_id)
-        if target is None:
-            self._show_status(f"Unknown target '{target_id}'.", 5000)
-            return
-        stage_xy = self._raw_stage_xy_from_design_xy(target.design_center)
-        if stage_xy is None:
-            self._show_status(
-                "Design registration is required before moving to a target.",
-                6000,
-            )
+        stage_xy = (
+            self._raw_stage_xy_from_design_xy(target.design_center)
+            if target is not None
+            else None
+        )
+        plan = design_navigation.plan_design_target_move(
+            self._design_session,
+            target_id,
+            stage_xy,
+        )
+        if not plan.accepted:
+            if plan.status_message is not None:
+                self._show_status(plan.status_message, plan.status_timeout_ms)
             return
         self._refresh_design_panel()
-        self.stage_controller.request_move_to_xy(stage_xy[0], stage_xy[1])
+        assert plan.stage_xy is not None
+        self.stage_controller.request_move_to_xy(plan.stage_xy[0], plan.stage_xy[1])
 
     def _move_to_minimap_design_point(self, x_value: float, y_value: float) -> None:
         design_xy = (float(x_value), float(y_value))
@@ -7827,88 +7596,66 @@ class Main(QMainWindow):
         self, design_xy: tuple[float, float], *, source_label: str
     ) -> bool:
         document = self._design_session.document
-        if document is None:
+        stage_xy = (
+            self._raw_stage_xy_from_design_xy(design_xy)
+            if document is not None
+            else None
+        )
+        plan = design_navigation.plan_design_coordinate_move(
+            document is not None,
+            self.stage_controller.is_busy() if document is not None else False,
+            design_xy,
+            stage_xy,
+            source_label,
+        )
+        if not plan.accepted:
+            if plan.status_message is not None:
+                self._show_status(plan.status_message, plan.status_timeout_ms)
             return False
-        if self.stage_controller.is_busy():
-            self._show_status("Stage is busy. Ignoring design move request.", 3000)
-            return False
-        stage_xy = self._raw_stage_xy_from_design_xy(design_xy)
-        if stage_xy is None:
-            self._show_status(
-                "Design click-to-move requires completed registration.",
-                5000,
-            )
-            return False
-        self._last_selected_design_point = design_xy
+        self._last_selected_design_point = plan.last_selected_design_point
         self._refresh_design_panel()
         self._clear_planned_move_prediction(clear_wait_state=True)
-        self._pending_planned_move_target_xy = (float(stage_xy[0]), float(stage_xy[1]))
-        self._pending_planned_move_source_label = source_label
-        self.stage_controller.request_move_to_xy(stage_xy[0], stage_xy[1])
+        self._pending_planned_move_target_xy = plan.pending_planned_move_target_xy
+        self._pending_planned_move_source_label = plan.source_label
+        assert plan.stage_xy is not None and plan.design_xy is not None
+        self.stage_controller.request_move_to_xy(plan.stage_xy[0], plan.stage_xy[1])
         logger.debug(
             "DESIGN MOVE source=%s design=(%.3f, %.3f) stage=(%.3f, %.3f)",
-            source_label,
-            design_xy[0],
-            design_xy[1],
-            stage_xy[0],
-            stage_xy[1],
+            plan.source_label,
+            plan.design_xy[0],
+            plan.design_xy[1],
+            plan.stage_xy[0],
+            plan.stage_xy[1],
         )
         return True
 
     def _refresh_design_panel(self) -> None:
         panel = self.design_navigator_panel
-        current_target = self._design_session.current_target()
-        selected_target_id = current_target.id if current_target else None
-        registration_valid = (
-            self._design_session.registration is not None
-            and self._design_session.registration.valid
+        route_measurement_thread = getattr(self, "_route_measurement_thread", None)
+        p = design_navigation.design_panel_presentation(
+            self._design_session,
+            route_running=route_measurement_thread is not None and route_measurement_thread.is_alive(),
+            pending_alignment_preparation=self._pending_alignment_preparation is not None,
+            design_snap_enabled=self._design_snap_enabled,
         )
         if panel is not None:
-            panel.set_document(self._design_session.document)
-            panel.set_design_registration_active(registration_valid)
-            panel.set_targets(
-                self._design_session.targets,
-                selected_target_id=selected_target_id,
-            )
-            panel.set_route(
-                self._design_session.route,
-                selected_route_point_index=self._design_session.selected_route_point_index,
-            )
-            panel.set_route_measurement_running(
-                self._route_measurement_thread is not None
-                and self._route_measurement_thread.is_alive()
-            )
-            if self._pending_alignment_preparation is not None:
-                panel.set_calibration_prompt(
-                    "Calibration step 4/4: chip rotation is in progress."
-                )
-            else:
-                panel.set_calibration_prompt(self._design_session.calibration_prompt())
-            panel.set_registration_status(self._design_session.registration_status)
-            panel.set_registration_marks(
-                self._design_session.source_design_marks,
-                self._design_session.check_design_marks,
-            )
-            panel.set_stage_registration_marks(self._design_session.source_stage_marks)
+            panel.set_document(p.document)
+            panel.set_design_registration_active(p.registration_valid)
+            panel.set_targets(p.targets, selected_target_id=p.selected_target_id)
+            panel.set_route(p.route, selected_route_point_index=p.selected_route_point_index)
+            panel.set_route_measurement_running(p.route_measurement_running)
+            panel.set_calibration_prompt(p.calibration_prompt)
+            panel.set_registration_status(p.registration_status)
+            panel.set_registration_marks(p.source_design_marks, p.check_design_marks)
+            panel.set_stage_registration_marks(p.source_stage_marks)
         if self.design_layout_window is not None:
-            self.design_layout_window.set_snap_enabled(self._design_snap_enabled)
-            self.design_layout_window.set_document(self._design_session.document)
-            self.design_layout_window.set_targets(
-                self._design_session.targets,
-                selected_target_id=selected_target_id,
-            )
-            self.design_layout_window.set_probe_route(
-                self._design_session.route,
-                selected_route_point_index=self._design_session.selected_route_point_index,
-            )
-            self.design_layout_window.set_navigation_enabled(registration_valid)
-            self.design_layout_window.set_registration_marks(
-                self._design_session.source_design_marks,
-                self._design_session.check_design_marks,
-            )
-            self.design_layout_window.set_stage_registration_marks(
-                self._design_session.source_stage_marks
-            )
+            self.design_layout_window.set_snap_enabled(p.design_snap_enabled)
+            self.design_layout_window.set_document(p.document)
+            self.design_layout_window.set_targets(p.targets, selected_target_id=p.selected_target_id)
+            self.design_layout_window.set_probe_route(p.route, selected_route_point_index=p.selected_route_point_index)
+            self.design_layout_window.set_navigation_enabled(p.registration_valid)
+            self.design_layout_window.set_registration_marks(p.source_design_marks, p.check_design_marks)
+            self.design_layout_window.set_stage_registration_marks(p.source_stage_marks)
         self._refresh_manual_alignment_ui()
         self._update_design_position(self._current_design_stage_xy)
         self._persist_controller_state_if_available()
@@ -8479,29 +8226,32 @@ class Main(QMainWindow):
         if stage_xy is not None:
             design_xy = self._design_xy_from_raw_stage_xy(stage_xy)
             fov_design_size = self._resolve_design_fov_size()
+        p = design_navigation.design_position_presentation(
+            self._design_session,
+            stage_xy=stage_xy,
+            design_xy=design_xy,
+            fov_design_size=fov_design_size,
+            last_selected_design_point=self._last_selected_design_point,
+        )
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_current_position(
-                stage_xy,
-                design_xy,
-                fov_design_size=fov_design_size,
+                p.stage_xy, p.current_design_position, fov_design_size=p.fov_design_size
             )
         if self.design_layout_window is not None:
             self.design_layout_window.set_current_design_position(
-                design_xy,
-                fov_design_size=fov_design_size,
+                p.current_design_position, fov_design_size=p.fov_design_size
             )
-        current_target = self._design_session.current_target()
         self.view.set_design_minimap_data(
-            document=self._design_session.document,
-            targets=self._design_session.targets,
-            selected_target_id=current_target.id if current_target else None,
-            probe_route=self._design_session.route,
-            selected_route_point_index=self._design_session.selected_route_point_index,
-            selected_design_point=self._last_selected_design_point,
-            current_design_position=design_xy,
-            fov_design_size=fov_design_size,
-            source_design_marks=self._design_session.source_design_marks_compact(),
-            check_design_marks=self._design_session.check_design_marks,
+            document=p.document,
+            targets=p.targets,
+            selected_target_id=p.selected_target_id,
+            probe_route=p.probe_route,
+            selected_route_point_index=p.selected_route_point_index,
+            selected_design_point=p.selected_design_point,
+            current_design_position=p.current_design_position,
+            fov_design_size=p.fov_design_size,
+            source_design_marks=p.source_design_marks,
+            check_design_marks=p.check_design_marks,
         )
 
     def _log_design_position_reconcile(
