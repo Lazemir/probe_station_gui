@@ -8,8 +8,12 @@ Commits:
 - `0cba3e6` Extract objective alignment policy
 - `7265fa5` Update task 34 report hash
 - `d91bc2b` Restore objective alignment parity
+- `d244a04` Update task 34 parity report hash
 - `117e673` Clean up objective alignment adapter formatting
+- `03197b8` Update task 34 cleanup report hash
 - `89cbc81` Restore Task 34 LOC fallback
+- `93cf7d2` Update Task 34 fallback report hash
+- `0098039` Clarify objective offset helper docstring
 
 Files changed:
 - `main.py`
@@ -26,6 +30,7 @@ Behavior summary:
 - Follow-up parity fix restored objective selection final status ordering and old permissive objective calibration matrix persistence.
 - Code-quality cleanup rewrapped compressed imports/planner calls, restored the concrete `_objective_offset_reference` annotation, and removed redundant first-point design alignment refresh flags from the pure plan while leaving `Main` as the single refresh source for that branch.
 - Fallback recovery replaced the long objective/alignment from-import list with module aliases, centralized plan status emission in `Main`, moved active-objective fallback selection to `objective_alignment`, moved base/active route offset selection to `objective_offsets`, and removed a constant text wrapper. No Qt, hardware, settings ownership, or stage side effects were moved to the pure policy modules.
+- Final docstring cleanup corrected `base_and_active_objective_offsets` wording without changing behavior or metrics.
 
 TDD red/green evidence:
 - RED: `python -m pytest tests\design\test_objective_alignment.py -q` failed with `ModuleNotFoundError: No module named 'probe_station_gui.design.objective_alignment'`.
@@ -42,6 +47,7 @@ Focused results:
 - Parity follow-up result: `202 passed, 3 subtests passed in 2.23s`
 - Code-quality cleanup result: `202 passed, 3 subtests passed in 2.33s`
 - Fallback recovery result: `202 passed, 3 subtests passed in 2.30s`
+- Final docstring cleanup result: `202 passed, 3 subtests passed in 2.17s`
 
 Full results:
 - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests`
@@ -49,6 +55,7 @@ Full results:
 - Parity follow-up result: `1081 passed, 2 skipped in 11.09s`
 - Code-quality cleanup result: `1081 passed, 2 skipped in 11.21s`
 - Fallback recovery result: `1081 passed, 2 skipped in 11.25s`
+- Final docstring cleanup result: `1081 passed, 2 skipped in 11.18s`
 
 Ruff results:
 - `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m ruff check --ignore E402,F401 .`
@@ -56,6 +63,7 @@ Ruff results:
 - Parity follow-up result: `All checks passed!`
 - Code-quality cleanup result: `All checks passed!`
 - Fallback recovery result: `All checks passed!`
+- Final docstring cleanup result: `All checks passed!`
 
 Metrics before:
 - Provided baseline: `main.py` physical LOC 10035; Wily cyclomatic 1882; Wily raw LOC 10035; MI 0.
