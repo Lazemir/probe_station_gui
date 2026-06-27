@@ -163,6 +163,85 @@ def test_api_coordinate_move_plan_joins_limit_error_messages() -> None:
     }
 
 
+def test_api_coordinate_move_plan_preserves_validation_priority() -> None:
+    bad_mode_response = api_coordinate_move_plan(
+        {" q ": "bad"},
+        axis_names=AXIS_NAMES,
+        mode="polar",
+        feedrate="bad",
+        current_feedrate=77.0,
+        min_feedrate=1.0,
+        resolve_axis_target=_resolve_axis_target,
+        axis_target_limit_error=_axis_target_limit_error,
+    )
+    bad_feedrate_response = api_coordinate_move_plan(
+        {" q ": "bad"},
+        axis_names=AXIS_NAMES,
+        mode="G90",
+        feedrate="bad",
+        current_feedrate=77.0,
+        min_feedrate=1.0,
+        resolve_axis_target=_resolve_axis_target,
+        axis_target_limit_error=_axis_target_limit_error,
+    )
+    unsupported_response = api_coordinate_move_plan(
+        {" q ": 1.0, "X": "bad", "A": 4.0, "Y": 2.0},
+        axis_names=AXIS_NAMES,
+        mode="G90",
+        feedrate=None,
+        current_feedrate=77.0,
+        min_feedrate=1.0,
+        resolve_axis_target=_resolve_axis_target,
+        axis_target_limit_error=_axis_target_limit_error,
+    )
+    invalid_value_response = api_coordinate_move_plan(
+        {"X": "bad", "A": 4.0, "Y": 2.0},
+        axis_names=AXIS_NAMES,
+        mode="G90",
+        feedrate=None,
+        current_feedrate=77.0,
+        min_feedrate=1.0,
+        resolve_axis_target=_resolve_axis_target,
+        axis_target_limit_error=_axis_target_limit_error,
+    )
+    unavailable_response = api_coordinate_move_plan(
+        {"A": 4.0, "Y": 2.0},
+        axis_names=AXIS_NAMES,
+        mode="G90",
+        feedrate=None,
+        current_feedrate=77.0,
+        min_feedrate=1.0,
+        resolve_axis_target=_resolve_axis_target,
+        axis_target_limit_error=_axis_target_limit_error,
+    )
+
+    assert bad_mode_response == {
+        "accepted": False,
+        "status_code": 400,
+        "message": "Unsupported coordinate mode: polar.",
+    }
+    assert bad_feedrate_response == {
+        "accepted": False,
+        "status_code": 400,
+        "message": "Invalid feedrate: bad.",
+    }
+    assert unsupported_response == {
+        "accepted": False,
+        "status_code": 400,
+        "message": "Unsupported axes:  q .",
+    }
+    assert invalid_value_response == {
+        "accepted": False,
+        "status_code": 400,
+        "message": "Invalid coordinate values for: X.",
+    }
+    assert unavailable_response == {
+        "accepted": False,
+        "status_code": 409,
+        "message": "Coordinates are unavailable in the GUI for: A.",
+    }
+
+
 def test_api_coordinate_move_plan_rejects_when_no_targets_remain() -> None:
     response = api_coordinate_move_plan(
         {},

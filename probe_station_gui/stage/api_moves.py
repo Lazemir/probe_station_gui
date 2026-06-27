@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Callable, Sequence
+from typing import Callable, Sequence
 
 
 ResolveAxisTarget = Callable[[str, float, str], tuple[float | None, float]]
@@ -18,6 +18,15 @@ class ApiCoordinateMovePlan:
     axes: list[str]
     feedrate_mm_min: float
     mode: str
+
+
+@dataclass(frozen=True)
+class _ParsedCoordinateTargets:
+    targets: dict[str, tuple[float, float]]
+    invalid_axes: list[str]
+    invalid_values: list[str]
+    unavailable_axes: list[str]
+    limit_errors: list[str]
 
 
 def api_axis_value_map(
@@ -62,6 +71,142 @@ def api_move_feedrate(
     return max(float(min_feedrate), value)
 
 
+def _coordinate_move_rejection(
+    *,
+    status_code: int,
+    message: str,
+) -> dict[str, object]:
+    return {
+        "accepted": False,
+        "status_code": status_code,
+        "message": message,
+    }
+
+
+def _normalized_axis_names(axis_names: Sequence[str]) -> tuple[str, ...]:
+    return tuple(str(axis) for axis in axis_names)
+
+
+def _parse_coordinate_targets(
+    targets: dict[object, object],
+    *,
+    axis_names: tuple[str, ...],
+    input_mode: str,
+    resolve_axis_target: ResolveAxisTarget,
+    axis_target_limit_error: AxisTargetLimitError,
+) -> _ParsedCoordinateTargets:
+    parsed_targets: dict[str, tuple[float, float]] = {}
+    invalid_axes: list[str] = []
+    invalid_values: list[str] = []
+    unavailable_axes: list[str] = []
+    limit_errors: list[str] = []
+
+    for raw_axis, raw_value in targets.items():
+        axis = str(raw_axis).strip().upper()
+        if axis not in axis_names:
+            invalid_axes.append(str(raw_axis))
+            continue
+
+        try:
+            display_target = float(raw_value)
+        except (TypeError, ValueError):
+            invalid_values.append(axis)
+            continue
+        if not math.isfinite(display_target):
+            invalid_values.append(axis)
+            continue
+
+        raw_target, resolved_display_target = resolve_axis_target(
+            axis,
+            display_target,
+            input_mode,
+        )
+        if raw_target is None:
+            unavailable_axes.append(axis)
+            continue
+
+        limit_error = axis_target_limit_error(axis, resolved_display_target)
+        if limit_error is not None:
+            limit_errors.append(limit_error)
+            continue
+
+        parsed_targets[axis] = (
+            float(raw_target),
+            float(resolved_display_target),
+        )
+
+    return _ParsedCoordinateTargets(
+        targets=parsed_targets,
+        invalid_axes=invalid_axes,
+        invalid_values=invalid_values,
+        unavailable_axes=unavailable_axes,
+        limit_errors=limit_errors,
+    )
+
+
+def _coordinate_target_error_response(
+    parsed_targets: _ParsedCoordinateTargets,
+) -> dict[str, object] | None:
+    if parsed_targets.invalid_axes:
+        return _coordinate_move_rejection(
+            status_code=400,
+            message=f"Unsupported axes: {', '.join(parsed_targets.invalid_axes)}.",
+        )
+    if parsed_targets.invalid_values:
+        return _coordinate_move_rejection(
+            status_code=400,
+            message=(
+                "Invalid coordinate values for: "
+                f"{', '.join(parsed_targets.invalid_values)}."
+            ),
+        )
+    if parsed_targets.unavailable_axes:
+        return _coordinate_move_rejection(
+            status_code=409,
+            message=(
+                "Coordinates are unavailable in the GUI for: "
+                f"{', '.join(parsed_targets.unavailable_axes)}."
+            ),
+        )
+    if parsed_targets.limit_errors:
+        return _coordinate_move_rejection(
+            status_code=409,
+            message=" ".join(parsed_targets.limit_errors),
+        )
+    return None
+
+
+def _ordered_coordinate_targets(
+    parsed_targets: dict[str, tuple[float, float]],
+    *,
+    axis_names: tuple[str, ...],
+) -> list[tuple[str, float, float]]:
+    return [
+        (axis, *parsed_targets[axis])
+        for axis in axis_names
+        if axis in parsed_targets
+    ]
+
+
+def _coordinate_move_plan_from_ordered_targets(
+    ordered_targets: list[tuple[str, float, float]],
+    *,
+    feedrate_mm_min: float,
+    mode: str,
+) -> ApiCoordinateMovePlan:
+    axes = [axis for axis, _raw, _display in ordered_targets]
+    return ApiCoordinateMovePlan(
+        ordered_targets=ordered_targets,
+        target_map={
+            axis: (raw_target, display_target)
+            for axis, raw_target, display_target in ordered_targets
+        },
+        axes=axes,
+        feedrate_mm_min=float(feedrate_mm_min),
+        mode=mode,
+    )
+
+
 def api_coordinate_move_plan(
     targets: object,
     *,
@@ -74,115 +219,52 @@ def api_coordinate_move_plan(
     axis_target_limit_error: AxisTargetLimitError,
 ) -> ApiCoordinateMovePlan | dict[str, object]:
     if not isinstance(targets, dict):
-        return {
-            "accepted": False,
-            "status_code": 400,
-            "message": "Coordinate targets must be an object.",
-        }
+        return _coordinate_move_rejection(
+            status_code=400,
+            message="Coordinate targets must be an object.",
+        )
     input_mode = normalize_api_coordinate_input_mode(mode)
     if input_mode is None:
-        return {
-            "accepted": False,
-            "status_code": 400,
-            "message": f"Unsupported coordinate mode: {mode}.",
-        }
+        return _coordinate_move_rejection(
+            status_code=400,
+            message=f"Unsupported coordinate mode: {mode}.",
+        )
     move_feedrate = api_move_feedrate(
         feedrate,
         current_feedrate=current_feedrate,
         min_feedrate=min_feedrate,
     )
     if move_feedrate is None:
-        return {
-            "accepted": False,
-            "status_code": 400,
-            "message": f"Invalid feedrate: {feedrate}.",
-        }
-
-    normalized_axis_names = tuple(str(axis) for axis in axis_names)
-    parsed_targets: dict[str, tuple[float, float]] = {}
-    invalid_axes: list[str] = []
-    invalid_values: list[str] = []
-    unavailable_axes: list[str] = []
-    limit_errors: list[str] = []
-    for raw_axis, raw_value in targets.items():
-        axis = str(raw_axis).strip().upper()
-        if axis not in normalized_axis_names:
-            invalid_axes.append(str(raw_axis))
-            continue
-        try:
-            display_target = float(raw_value)
-        except (TypeError, ValueError):
-            invalid_values.append(axis)
-            continue
-        if not math.isfinite(display_target):
-            invalid_values.append(axis)
-            continue
-        raw_target, resolved_display_target = resolve_axis_target(
-            axis,
-            display_target,
-            input_mode,
-        )
-        if raw_target is None:
-            unavailable_axes.append(axis)
-            continue
-        limit_error = axis_target_limit_error(axis, resolved_display_target)
-        if limit_error is not None:
-            limit_errors.append(limit_error)
-            continue
-        parsed_targets[axis] = (
-            float(raw_target),
-            float(resolved_display_target),
+        return _coordinate_move_rejection(
+            status_code=400,
+            message=f"Invalid feedrate: {feedrate}.",
         )
 
-    if invalid_axes:
-        return {
-            "accepted": False,
-            "status_code": 400,
-            "message": f"Unsupported axes: {', '.join(invalid_axes)}.",
-        }
-    if invalid_values:
-        return {
-            "accepted": False,
-            "status_code": 400,
-            "message": f"Invalid coordinate values for: {', '.join(invalid_values)}.",
-        }
-    if unavailable_axes:
-        return {
-            "accepted": False,
-            "status_code": 409,
-            "message": (
-                "Coordinates are unavailable in the GUI for: "
-                f"{', '.join(unavailable_axes)}."
-            ),
-        }
-    if limit_errors:
-        return {
-            "accepted": False,
-            "status_code": 409,
-            "message": " ".join(limit_errors),
-        }
+    normalized_axis_names = _normalized_axis_names(axis_names)
+    parsed_targets = _parse_coordinate_targets(
+        targets,
+        axis_names=normalized_axis_names,
+        input_mode=input_mode,
+        resolve_axis_target=resolve_axis_target,
+        axis_target_limit_error=axis_target_limit_error,
+    )
+    error_response = _coordinate_target_error_response(parsed_targets)
+    if error_response is not None:
+        return error_response
 
-    ordered_targets = [
-        (axis, *parsed_targets[axis])
-        for axis in normalized_axis_names
-        if axis in parsed_targets
-    ]
+    ordered_targets = _ordered_coordinate_targets(
+        parsed_targets.targets,
+        axis_names=normalized_axis_names,
+    )
     if not ordered_targets:
-        return {
-            "accepted": False,
-            "status_code": 400,
-            "message": "Provide at least one target coordinate.",
-        }
+        return _coordinate_move_rejection(
+            status_code=400,
+            message="Provide at least one target coordinate.",
+        )
 
-    axes = [axis for axis, _raw, _display in ordered_targets]
-    return ApiCoordinateMovePlan(
-        ordered_targets=ordered_targets,
-        target_map={
-            axis: (raw_target, display_target)
-            for axis, raw_target, display_target in ordered_targets
-        },
-        axes=axes,
-        feedrate_mm_min=float(move_feedrate),
+    return _coordinate_move_plan_from_ordered_targets(
+        ordered_targets,
+        feedrate_mm_min=move_feedrate,
         mode=input_mode,
     )
 
