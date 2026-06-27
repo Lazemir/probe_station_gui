@@ -5,6 +5,7 @@ status: DONE_WITH_CONCERNS
 ## Commits created
 
 - `2e60567` - Extract design navigation adapter.
+- `9acddd2` - Restore Z homing status ownership.
 - Report committed separately after implementation commit.
 
 ## Changed files
@@ -13,6 +14,7 @@ status: DONE_WITH_CONCERNS
 - `probe_station_gui/design/navigation_adapter.py`
 - `tests/design/test_navigation_adapter.py`
 - `tests/app/test_main_design_navigation.py`
+- `tests/app/test_main_planned_move_prediction.py`
 - `.superpowers/sdd/task-33-report.md`
 
 ## Behavior summary
@@ -35,6 +37,15 @@ status: DONE_WITH_CONCERNS
 
 ## Verification summaries
 
+- Follow-up focused:
+  - Command: `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\design\test_navigation_adapter.py tests\app\test_main_design_navigation.py tests\app\test_main_planned_move_prediction.py -q`
+  - Result: `26 passed in 0.78s`.
+- Follow-up full pytest:
+  - Command: `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests`
+  - Result: `1063 passed, 2 skipped in 10.84s`.
+- Follow-up ruff:
+  - Command: `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m ruff check --ignore E402,F401 .`
+  - Result: `All checks passed!`.
 - Focused:
   - Command: `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\design\test_navigation_adapter.py tests\design\test_workflow.py tests\design\test_click_navigation.py tests\app\test_main_design_navigation.py tests\app\test_main_planned_move_prediction.py -q`
   - Result: `41 passed in 1.11s`.
