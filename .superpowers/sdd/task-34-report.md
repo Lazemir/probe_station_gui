@@ -7,7 +7,7 @@ Reason: The strict `main.py <= 9715` physical LOC target was not reached. The fa
 Commits:
 - `0cba3e6` Extract objective alignment policy
 - `7265fa5` Update task 34 report hash
-- follow-up parity fix commit pending
+- `d91bc2b` Restore objective alignment parity
 
 Files changed:
 - `main.py`
