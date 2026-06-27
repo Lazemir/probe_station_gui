@@ -126,6 +126,14 @@ from probe_station_gui.shared.diagnostics import configure_crash_diagnostics
 from probe_station_gui.api.request_bridge import ApiRequestBridge
 from probe_station_gui.api.server import ProbeStationApiServer
 from probe_station_gui.api.keys import API_KEY_FILENAME, ApiKeyStore
+from probe_station_gui.api.command_dispatch import (
+    ApiBridgeRequestHandlers,
+    ApiCommandDispatchHandlers,
+    api_command_action_payload as command_dispatch_action_payload,
+    dispatch_api_command_request as command_dispatch_request,
+    handle_api_request as command_dispatch_handle_api_request,
+    submit_api_command_request_from_api_thread as command_dispatch_from_api_thread,
+)
 from probe_station_gui.instruments.api_sweep import (
     ApiRawVoltageSweepRequestError,
     api_raw_voltage_sweep_contact_plan,
@@ -1082,20 +1090,14 @@ class Main(QMainWindow):
         self,
         command_request: dict[str, Any],
     ) -> dict[str, Any]:
-        action, payload = self._api_command_action_payload(command_request)
-        if action in {"api_route_control_status", "api_route_control_action"}:
-            return self._submit_api_command_request_on_gui_thread(command_request)
-        if self._probe_route_api_requires_window(action, payload):
-            guard = self._submit_probe_route_window_guard_on_gui_thread(action, payload)
-            if not guard.get("accepted", False):
-                return guard
-            return self._dispatch_api_command_request(
-                command_request,
-                apply_route_control_guard=False,
-            )
-        return self._dispatch_api_command_request(
+        return command_dispatch_from_api_thread(
             command_request,
-            apply_route_control_guard=False,
+            submit_on_gui_thread=self._submit_api_command_request_on_gui_thread,
+            submit_probe_route_window_guard_on_gui_thread=(
+                self._submit_probe_route_window_guard_on_gui_thread
+            ),
+            dispatch_direct=self._dispatch_api_command_request,
+            route_window_required=self._probe_route_api_requires_window,
         )
 
     def _submit_api_command_request_on_gui_thread(
@@ -1140,11 +1142,32 @@ class Main(QMainWindow):
     def _api_command_action_payload(
         command_request: dict[str, Any],
     ) -> tuple[str, dict[str, Any]]:
-        action = str(command_request.get("action", "")).strip().lower()
-        payload = command_request.get("payload")
-        if not isinstance(payload, dict):
-            payload = {}
-        return action, payload
+        return command_dispatch_action_payload(command_request)
+
+    def _api_command_dispatch_handlers(self) -> ApiCommandDispatchHandlers:
+        return ApiCommandDispatchHandlers(
+            route_control_guard=self._probe_route_api_window_guard,
+            list_contacts=self._api_list_contacts,
+            move_to_contact=self._api_move_to_contact,
+            contact_needles=self._api_contact_needles,
+            check_contact=self._api_check_contact,
+            stage_local_focus=self._api_stage_local_focus,
+            route_contact_focus=self._api_route_contact_focus,
+            route_contact_photo=self._api_route_contact_photo,
+            contact_seek=self._api_contact_seek,
+            api_route_control_status=self._api_route_control_status,
+            api_route_control_action=self._api_route_control_action,
+            configure_meter=self._api_configure_meter,
+            raw_voltage_sweep=self._api_raw_voltage_sweep,
+            visa_list_resources=self._api_visa_list_resources,
+            visa_operation=self._api_visa_operation,
+            start_route_session=self._api_start_route_session,
+            route_session_status=self._api_route_session_status,
+            route_session_action=self._api_route_session_action,
+            route_session_result=self._api_route_session_result,
+            route_session_seek=self._api_route_session_seek,
+            route_session_artifact=self._api_route_session_artifact,
+        )
 
     def _dispatch_api_command_request(
         self,
@@ -1152,56 +1175,11 @@ class Main(QMainWindow):
         *,
         apply_route_control_guard: bool,
     ) -> dict[str, Any]:
-        action, payload = self._api_command_action_payload(command_request)
-        if apply_route_control_guard:
-            route_control_guard = self._probe_route_api_window_guard(action, payload)
-            if route_control_guard is not None:
-                return route_control_guard
-        if action == "list_contacts":
-            return self._api_list_contacts()
-        if action == "move_to_contact":
-            return self._api_move_to_contact(payload)
-        if action == "contact_needles":
-            return self._api_contact_needles(payload)
-        if action == "check_contact":
-            return self._api_check_contact(payload)
-        if action == "stage_local_focus":
-            return self._api_stage_local_focus(payload)
-        if action == "route_contact_focus":
-            return self._api_route_contact_focus(payload)
-        if action == "route_contact_photo":
-            return self._api_route_contact_photo(payload)
-        if action == "contact_seek":
-            return self._api_contact_seek(payload)
-        if action == "api_route_control_status":
-            return self._api_route_control_status()
-        if action == "api_route_control_action":
-            return self._api_route_control_action(payload)
-        if action == "configure_meter":
-            return self._api_configure_meter(payload)
-        if action == "raw_voltage_sweep":
-            return self._api_raw_voltage_sweep(payload)
-        if action == "visa_list_resources":
-            return self._api_visa_list_resources()
-        if action == "visa_operation":
-            return self._api_visa_operation(payload)
-        if action == "start_route_session":
-            return self._api_start_route_session(payload)
-        if action == "route_session_status":
-            return self._api_route_session_status()
-        if action == "route_session_action":
-            return self._api_route_session_action(payload)
-        if action == "route_session_result":
-            return self._api_route_session_result(payload)
-        if action == "route_session_seek":
-            return self._api_route_session_seek()
-        if action == "route_session_artifact":
-            return self._api_route_session_artifact(payload)
-        return {
-            "accepted": False,
-            "status_code": 400,
-            "message": f"Unsupported API command: {action}",
-        }
+        return command_dispatch_request(
+            command_request,
+            self._api_command_dispatch_handlers(),
+            apply_route_control_guard=apply_route_control_guard,
+        )
 
     def _probe_route_api_window_guard(
         self,
@@ -1245,44 +1223,15 @@ class Main(QMainWindow):
         return True
 
     def _handle_api_request(self, request: dict[str, Any]) -> dict[str, Any]:
-        action = str(request.get("action", "")).strip().lower()
-        if action == "move_to_coordinates":
-            return self._api_move_to_coordinates(
-                request.get("targets"),
-                mode=request.get("mode", "G90"),
-                feedrate=request.get("feedrate"),
-            )
-        if action == "status":
-            return self._api_stage_status()
-        if action == "command":
-            command = request.get("command")
-            if not isinstance(command, dict):
-                return {
-                    "accepted": False,
-                    "status_code": 400,
-                    "message": "API command request must be an object.",
-                }
-            return self._submit_api_command_request(command)
-        if action == "probe_route_window_guard":
-            guard_action = str(request.get("guard_action", "")).strip().lower()
-            payload = request.get("payload")
-            if not isinstance(payload, dict):
-                payload = {}
-            route_control_guard = self._probe_route_api_window_guard(
-                guard_action,
-                payload,
-            )
-            if route_control_guard is not None:
-                return route_control_guard
-            return {
-                "accepted": True,
-                "route_control_window_open": True,
-            }
-        return {
-            "accepted": False,
-            "status_code": 400,
-            "message": f"Unsupported API action: {action}",
-        }
+        return command_dispatch_handle_api_request(
+            request,
+            ApiBridgeRequestHandlers(
+                move_to_coordinates=self._api_move_to_coordinates,
+                stage_status=self._api_stage_status,
+                submit_command=self._submit_api_command_request,
+                route_control_guard=self._probe_route_api_window_guard,
+            ),
+        )
 
     def _api_move_to_coordinates(self, targets: object, *, mode: object = "G90", feedrate: object = None) -> dict[str, Any]:
         move_plan = api_coordinate_move_plan(
