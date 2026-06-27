@@ -77,7 +77,7 @@ def objective_xy_offset(
 
 
 def base_and_active_objective_offsets(objective_settings: object) -> tuple[Point2D, Point2D]:
-    """Return contact and photo offsets for the active objective settings."""
+    """Return base and active offsets for the active objective settings."""
 
     profiles = getattr(objective_settings, "objectives", {})
     active_name = getattr(objective_settings, "active_name", "")
