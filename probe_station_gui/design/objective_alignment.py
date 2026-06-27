@@ -31,6 +31,15 @@ MIN_ALIGNMENT_DISTANCE_MM = 1e-6
 ALIGNMENT_TARGET_ANGLES = (0.0, 90.0, 180.0, -90.0)
 
 
+def active_objective_configuration(objective_settings: object) -> tuple[object, object]:
+    objectives = getattr(objective_settings, "objectives", {})
+    active_name = normalize_objective_name(getattr(objective_settings, "active_name", ""))
+    active_objective = objectives.get(active_name) if hasattr(objectives, "get") else None
+    if active_objective is None:
+        active_objective = default_objective(active_name)
+    return active_objective, objectives
+
+
 @dataclass(frozen=True)
 class ObjectiveComboSyncPlan:
     names: list[str]
@@ -661,6 +670,7 @@ __all__ = [
     "ObjectiveOffsetReferencePlan",
     "ObjectiveProfilePlan",
     "ObjectiveSelectionPlan",
+    "active_objective_configuration",
     "alignment_capture_position_plan",
     "alignment_presentation",
     "design_alignment_capture_plan",

@@ -76,6 +76,18 @@ def objective_xy_offset(
     return (x_value, y_value)
 
 
+def base_and_active_objective_offsets(objective_settings: object) -> tuple[Point2D, Point2D]:
+    """Return contact and photo offsets for the active objective settings."""
+
+    profiles = getattr(objective_settings, "objectives", {})
+    active_name = getattr(objective_settings, "active_name", "")
+    base_name = base_objective_name(profiles)
+    return (
+        objective_xy_offset(profiles, base_name),
+        objective_xy_offset(profiles, active_name),
+    )
+
+
 def objective_xy_offset_is_configured(
     profiles: Mapping[str, object] | object,
     objective_name: str,
@@ -127,6 +139,7 @@ def calibrated_objective_offset(
 
 __all__ = [
     "ObjectiveOffsetReference",
+    "base_and_active_objective_offsets",
     "base_objective_name",
     "calibrated_objective_offset",
     "camera_stage_to_raw_stage",
