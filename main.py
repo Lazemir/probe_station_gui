@@ -336,6 +336,19 @@ from probe_station_gui.views.dock_widgets import CollapsibleDockWidget
 from probe_station_gui.views.oscillation_panel import OscillationPanel
 from probe_station_gui.views.resistance_monitor_panel import ResistanceMonitorPanel
 from probe_station_gui.views.serial_connection_panel import SerialConnectionPanel
+from probe_station_gui.views.main_window_auxiliary import (
+    create_design_layout_window,
+    open_settings_dialog,
+    show_microscope_scan_dialog,
+    show_connection_dialog,
+    show_surface_map_window,
+    sync_contact_calibration_window_action,
+    sync_design_layout_window_action,
+    toggle_contact_calibration_window,
+    toggle_design_layout_window,
+)
+from probe_station_gui.views.main_window_docks import create_main_window_docks
+from probe_station_gui.views.main_window_menus import setup_main_window_menus
 
 _startup_trace("application imports done")
 
@@ -3747,167 +3760,19 @@ class Main(QMainWindow):
         self.lcr_controller.request_disconnect()
 
     def _setup_menus(self) -> None:
-        app_menu = self.menuBar().addMenu("Application")
-        navigation_menu = self.menuBar().addMenu("Navigation")
-        panels_menu = self.menuBar().addMenu("Tools")
-        calibration_menu = self.menuBar().addMenu("Calibration")
-
-        settings_action = QAction("Settings…", self)
-        settings_action.setText("Settings")
-        settings_action.triggered.connect(self._open_settings_dialog)
-        app_menu.addAction(settings_action)
-
-        open_log_action = QAction("Open Status Log…", self)
-        open_log_action.setText("Open Status Log")
-        open_log_action.triggered.connect(self._open_status_log)
-        app_menu.addAction(open_log_action)
-
-        serial_connection_action = QAction("Connection", self)
-        serial_connection_action.triggered.connect(self._show_connection_dialog)
-        app_menu.addAction(serial_connection_action)
-
-        self._sample_load_action = QAction("Load Sample", self)
-        self._sample_load_action.triggered.connect(self._request_sample_load)
-        navigation_menu.addAction(self._sample_load_action)
-
-        self._sample_unload_action = QAction("Unload Sample", self)
-        self._sample_unload_action.triggered.connect(self._request_sample_unload)
-        navigation_menu.addAction(self._sample_unload_action)
-
-        self._design_layout_window_action = QAction("Design Window", self)
-        self._design_layout_window_action.setCheckable(True)
-        self._design_layout_window_action.toggled.connect(
-            self._toggle_design_layout_window
-        )
-        navigation_menu.addAction(self._design_layout_window_action)
-
-        self._contact_calibration_window_action = QAction(
-            "Contact / Stone Calibration", self
-        )
-        self._contact_calibration_window_action.setCheckable(True)
-        self._contact_calibration_window_action.toggled.connect(
-            self._toggle_contact_calibration_window
-        )
-        calibration_menu.addAction(self._contact_calibration_window_action)
-
-        self._surface_map_window_action = QAction("Surface Map", self)
-        self._surface_map_window_action.triggered.connect(self._show_surface_map_window)
-        calibration_menu.addAction(self._surface_map_window_action)
-
-        self._microscope_scan_action = QAction("Microscope Scan", self)
-        self._microscope_scan_action.triggered.connect(self._show_microscope_scan_dialog)
-        calibration_menu.addAction(self._microscope_scan_action)
-
-        self._click_calibration_action = QAction("Click-to-Move Calibration", self)
-        self._click_calibration_action.triggered.connect(self._show_click_calibration_dialog)
-        calibration_menu.addAction(self._click_calibration_action)
-
-        for dock, title in (
-            (self.resistance_dock, "Resistance"),
-            (self.oscillation_dock, "Oscillation"),
-            (self.joystick_dock, "Joystick"),
-        ):
-            if dock is None:
-                continue
-            action = dock.toggleViewAction()
-            action.setText(title)
-            panels_menu.addAction(action)
-
-        for dock, title in (
-            (self.alignment_dock, "Alignment"),
-        ):
-            if dock is None:
-                continue
-            action = dock.toggleViewAction()
-            action.setText(title)
-            calibration_menu.addAction(action)
-
-        panels_menu.addSeparator()
-        self._ruler_action = QAction("Ruler", self)
-        self._ruler_action.setCheckable(True)
-        self._ruler_action.setShortcut(QKeySequence("R"))
-        self._ruler_action.setShortcutContext(Qt.ApplicationShortcut)
-        self._ruler_action.toggled.connect(self._on_measure_action_toggled)
-        panels_menu.addAction(self._ruler_action)
-        self.addAction(self._ruler_action)
-
-        self._rect_action = QAction("Rectangle", self)
-        self._rect_action.setCheckable(True)
-        self._rect_action.setShortcut(QKeySequence("T"))
-        self._rect_action.setShortcutContext(Qt.ApplicationShortcut)
-        self._rect_action.toggled.connect(self._on_measure_action_toggled)
-        panels_menu.addAction(self._rect_action)
-        self.addAction(self._rect_action)
-
-        self._alignment_capture_action = QAction("Capture Alignment Point", self)
-        self._alignment_capture_action.setShortcut(
-            QKeySequence(self.ALIGNMENT_CAPTURE_SHORTCUT)
-        )
-        self._alignment_capture_action.setShortcutContext(Qt.ApplicationShortcut)
-        self._alignment_capture_action.triggered.connect(
-            self._capture_manual_alignment_center_shortcut
-        )
-        self.addAction(self._alignment_capture_action)
-
-        self._alignment_exit_action = QAction("Cancel Alignment Pick", self)
-        self._alignment_exit_action.setShortcut(QKeySequence(Qt.Key_Escape))
-        self._alignment_exit_action.setShortcutContext(Qt.ApplicationShortcut)
-        self._alignment_exit_action.triggered.connect(self._cancel_manual_alignment_pick)
-        self._alignment_exit_action.triggered.connect(self._on_measure_mode_exited)
-        self.addAction(self._alignment_exit_action)
+        setup_main_window_menus(self)
 
     def _toggle_design_layout_window(self, visible: bool) -> None:
-        if self.design_layout_window is None:
-            self._design_layout_window_requested = bool(visible)
-            if visible:
-                if self._design_layout_window_class is not None:
-                    self._create_design_layout_window(self._design_layout_window_class)
-                    return
-                self._show_status("Preparing design window...")
-                self._preload_design_layout_window()
-            return
-        if visible:
-            self._design_layout_window_requested = True
-            self.design_layout_window.show_and_raise()
-            self._collapse_alignment_panel_if_ready()
-        else:
-            self._design_layout_window_requested = False
-            self.design_layout_window.hide()
+        toggle_design_layout_window(self, visible)
 
     def _on_design_layout_window_visibility_changed(self, visible: bool) -> None:
-        if self._design_layout_window_action is None:
-            return
-        self._design_layout_window_action.blockSignals(True)
-        self._design_layout_window_action.setChecked(visible)
-        self._design_layout_window_action.blockSignals(False)
-        if visible:
-            self._collapse_alignment_panel_if_ready()
+        sync_design_layout_window_action(self, visible)
 
     def _toggle_contact_calibration_window(self, visible: bool) -> None:
-        if self.contact_calibration_window is None:
-            if self._contact_calibration_window_action is not None:
-                self._contact_calibration_window_action.blockSignals(True)
-                self._contact_calibration_window_action.setChecked(False)
-                self._contact_calibration_window_action.blockSignals(False)
-            return
-        if visible:
-            self.contact_calibration_window.show_and_raise()
-            latest_lowering = self.stage_controller.latest_axis_a_lowering()
-            if latest_lowering is not None:
-                self.contact_calibration_window.set_current_needle_lowering(
-                    latest_lowering
-                )
-            elif self.serial_connection is not None and self.serial_connection.is_open:
-                self.stage_controller.request_status_refresh()
-            return
-        self.contact_calibration_window.hide()
+        toggle_contact_calibration_window(self, visible)
 
     def _on_contact_calibration_window_visibility_changed(self, visible: bool) -> None:
-        if self._contact_calibration_window_action is None:
-            return
-        self._contact_calibration_window_action.blockSignals(True)
-        self._contact_calibration_window_action.setChecked(visible)
-        self._contact_calibration_window_action.blockSignals(False)
+        sync_contact_calibration_window_action(self, visible)
 
     def _on_design_layout_point_selected(
         self, slot: int, x_value: float, y_value: float
@@ -4058,39 +3923,10 @@ class Main(QMainWindow):
             )
 
     def _open_settings_dialog(self, initial_tab: object = None) -> None:
-        from probe_station_gui.dialogs.settings_dialog import SettingsDialog
-
-        tab_name = initial_tab if isinstance(initial_tab, str) else None
-        self._stop_telegram_bot_service()
-        dialog = SettingsDialog(
-            self.settings_manager.settings,
-            self,
-            initial_tab=tab_name,
-            camera_settings_source=self.grabber,
-            api_key_store=self._api_key_store,
-        )
-        dialog.settings_applied.connect(self._apply_settings_from_dialog)
-        try:
-            if dialog.exec() != QDialog.Accepted:
-                if not dialog.was_applied():
-                    logger.debug("Settings dialog cancelled")
-        finally:
-            self._configure_telegram_bot_from_settings()
+        open_settings_dialog(self, initial_tab)
 
     def _show_connection_dialog(self, tab_name: object = None) -> None:
-        if self.serial_connection_dialog is None:
-            return
-        if self.serial_connection_panel is not None:
-            self.serial_connection_panel.set_lcr_resource(
-                self.lcr_controller.connection_label()
-            )
-        if self.serial_connection_tabs is not None:
-            self.serial_connection_tabs.setCurrentIndex(
-                1 if tab_name == "terminal" else 0
-            )
-        self.serial_connection_dialog.show()
-        self.serial_connection_dialog.raise_()
-        self.serial_connection_dialog.activateWindow()
+        show_connection_dialog(self, tab_name)
 
     def _apply_settings_from_dialog(self, new_settings: object) -> None:
         if not isinstance(new_settings, Settings):
@@ -8065,343 +7901,13 @@ class Main(QMainWindow):
             logger.exception("Failed to force jog stop before %s.", reason)
 
     def _create_dock_widgets(self) -> None:
-        self.serial_connection_dialog = QDialog(self)
-        self.serial_connection_dialog.setWindowTitle("Connection")
-        self.serial_connection_dialog.setModal(False)
-        self.serial_connection_dialog.setMinimumWidth(420)
-        self.serial_connection_dialog.resize(640, 520)
-
-        dialog_layout = QVBoxLayout(self.serial_connection_dialog)
-        dialog_layout.setContentsMargins(8, 8, 8, 8)
-        dialog_layout.setSpacing(8)
-
-        self.serial_connection_tabs = QTabWidget(self.serial_connection_dialog)
-        dialog_layout.addWidget(self.serial_connection_tabs)
-
-        self.serial_connection_panel = SerialConnectionPanel(
-            self.serial_connection_tabs
-        )
-        self.serial_connection_tabs.addTab(self.serial_connection_panel, "Connection")
-
-        self.serial_terminal_panel = SerialTerminalWindow(self.serial_connection_tabs)
-        self.serial_terminal_panel.set_stage_controller(self.stage_controller)
-        self.serial_terminal_panel.set_serial(self.serial_connection)
-        self.serial_terminal_panel.manual_command_sent.connect(
-            self._on_manual_terminal_command
-        )
-        self.serial_connection_tabs.addTab(self.serial_terminal_panel, "Terminal")
-
-        close_button_row = QHBoxLayout()
-        close_button_row.addStretch(1)
-        close_button = QPushButton("Close", self.serial_connection_dialog)
-        close_button.clicked.connect(self.serial_connection_dialog.close)
-        close_button_row.addWidget(close_button)
-        dialog_layout.addLayout(close_button_row)
-
-        self.serial_connection_panel.connected.connect(self.on_serial_connected)
-        self.serial_connection_panel.disconnected.connect(self.on_serial_disconnected)
-        self.serial_connection_panel.lcr_connect_requested.connect(
-            self.lcr_controller.request_connect
-        )
-        self.serial_connection_panel.lcr_disconnect_requested.connect(
-            self._request_lcr_disconnect
-        )
-
-        self.resistance_panel = ResistanceMonitorPanel(self)
-        self.resistance_panel.set_standby_enabled(
-            self.lcr_controller.live_polling_enabled()
-        )
-        self.resistance_panel.standby_enabled_changed.connect(
-            self._on_resistance_standby_enabled_changed
-        )
-        self.resistance_dock = CollapsibleDockWidget("Resistance", self)
-        self.resistance_dock.setObjectName("ResistanceDock")
-        self.resistance_dock.setWidget(self.resistance_panel)
-        self.resistance_dock.setAllowedAreas(
-            Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea
-        )
-        self.addDockWidget(Qt.LeftDockWidgetArea, self.resistance_dock)
-
-        self.lcr_controller.status_message.connect(
-            self.serial_connection_panel.set_lcr_status_message
-        )
-        self.lcr_controller.status_message.connect(
-            self.resistance_panel.set_status_message
-        )
-
-        self.joystick_panel = JoystickWindow(self)
-        self.joystick_panel.set_stage_controller(self.stage_controller)
-        self._apply_axis_feedrate_limits(self._current_axis_feedrate_limits())
-        feedrates = self.settings_manager.feedrate_configuration()
-        self.joystick_panel.apply_feedrate_settings(
-            feedrates.linear.presets,
-            feedrates.linear.default,
-            feedrates.rotary.presets,
-            feedrates.rotary.default,
-        )
-        jog = self.settings_manager.jog_configuration()
-        self.joystick_panel.apply_jog_settings(
-            jog.linear_distance_mm,
-            jog.rotary_distance_deg,
-            jog.motion_safety_disabled,
-            jog.manual_axis,
-            jog.manual_axis_distance_mm,
-            jog.manual_axis_mode,
-            jog.manual_axis_feedrate_mm_min,
-            jog.focus_feedrate_mm_min,
-            jog.turntable_feedrate_mm_min,
-            jog.mode,
-            focus_step_feedrate_mm_min=jog.focus_step_feedrate_mm_min,
-            needle_step_feedrate_mm_min=jog.needles_step_feedrate_mm_min,
-            turntable_step_feedrate_mm_min=jog.turntable_step_feedrate_mm_min,
-        )
-        needle_settings = self.settings_manager.needle_calibration_configuration()
-        self.joystick_panel.apply_needle_settings(needle_settings.feedrate_mm_min)
-        self.stage_controller.set_motion_safety_disabled(jog.motion_safety_disabled)
-        self.joystick_panel.set_serial(self.serial_connection)
-        self.joystick_panel.autofocus_requested.connect(
-            self.stage_controller.request_autofocus
-        )
-        self.joystick_panel.home_axis_requested.connect(
-            self._request_home_axis_from_ui
-        )
-        self.joystick_panel.home_all_requested.connect(
-            self._request_home_all_from_ui
-        )
-        self.joystick_panel.needles_raise_requested.connect(
-            self.stage_controller.request_needles_raise
-        )
-        self.joystick_panel.needles_lift_requested.connect(
-            self.stage_controller.request_needles_lift
-        )
-        self.joystick_panel.needles_lower_requested.connect(
-            self.stage_controller.request_needles_lower
-        )
-        self.joystick_panel.needle_current_lower_contact_save_requested.connect(
-            self._save_current_needle_height
-        )
-        self.joystick_panel.needle_contact_coordinate_save_requested.connect(
-            self._save_needle_position_from_display_a_coordinate
-        )
-        self.joystick_panel.zero_b_requested.connect(self._zero_b_axis)
-        self.joystick_panel.manual_axis_move_requested.connect(
-            self._on_manual_axis_move_requested
-        )
-        self.joystick_panel.manual_axis_settings_changed.connect(
-            self._save_manual_axis_jog_settings
-        )
-        self.joystick_panel.control_mode_changed.connect(
-            self._save_jog_control_mode
-        )
-        self.joystick_panel.linear_feedrate_changed.connect(
-            self._on_linear_feedrate_changed
-        )
-        self.joystick_panel.common_feedrate_changed.connect(
-            self._apply_coordinate_move_feedrate
-        )
-        self.joystick_panel.step_feedrate_changed.connect(
-            self._on_step_feedrate_changed
-        )
-        self.joystick_panel.focus_feedrate_changed.connect(
-            self._on_focus_feedrate_changed
-        )
-        self.joystick_panel.focus_step_feedrate_changed.connect(
-            self._on_focus_step_feedrate_changed
-        )
-        self.joystick_panel.needle_feedrate_changed.connect(
-            self._on_needle_feedrate_changed
-        )
-        self.joystick_panel.needle_step_feedrate_changed.connect(
-            self._on_needle_step_feedrate_changed
-        )
-        self.joystick_panel.turntable_feedrate_changed.connect(
-            self._on_turntable_feedrate_changed
-        )
-        self.joystick_panel.turntable_step_feedrate_changed.connect(
-            self._on_turntable_step_feedrate_changed
-        )
-        self.joystick_panel.motion_axis_requested.connect(self._on_manual_motion_axis)
-        self.joystick_panel.jog_command_changed.connect(
-            self._on_manual_jog_command_changed
-        )
-        self.joystick_panel.jog_stopped.connect(self._on_manual_jog_stopped)
-        self.joystick_panel.reset_requested.connect(
-            lambda: self._invalidate_design_registration(
-                "Design registration cleared after controller reset."
-            )
-        )
-        self.stage_controller.homing_status_changed.connect(
-            self.joystick_panel.set_homing_status
-        )
-        self.stage_controller.homing_status_changed.connect(self._on_homing_status_changed)
-        self.stage_controller.homing_status_changed.connect(self._persist_controller_state)
-        self.stage_controller.limit_axes_changed.connect(self._on_limit_axes_changed)
-        self.stage_controller.limit_axes_changed.connect(self.joystick_panel.set_limit_axes)
-        self.stage_controller.homing_action_started.connect(
-            self.joystick_panel.set_homing_action_started
-        )
-        self.stage_controller.homing_action_started.connect(
-            self._on_homing_action_started
-        )
-        self.stage_controller.homing_action_finished.connect(
-            self.joystick_panel.set_homing_action_finished
-        )
-        self.stage_controller.homing_action_finished.connect(self._on_homing_action_finished)
-        self.stage_controller.axis_a_ready_changed.connect(
-            self.joystick_panel.set_axis_a_ready
-        )
-        self.stage_controller.needles_state_changed.connect(
-            self.joystick_panel.set_needles_state
-        )
-        self.stage_controller.needles_state_changed.connect(self._persist_controller_state)
-        self.stage_controller.needles_zone_changed.connect(
-            self.joystick_panel.set_needles_zone
-        )
-        self.stage_controller.needles_action_started.connect(
-            self.joystick_panel.set_needles_action_started
-        )
-        self.stage_controller.needles_action_started.connect(
-            self._on_needles_action_started
-        )
-        self.stage_controller.needles_action_finished.connect(
-            self.joystick_panel.set_needles_action_finished
-        )
-        self.stage_controller.needles_action_finished.connect(
-            self._on_needles_action_finished
-        )
-        self.joystick_panel.reset_requested.connect(
-            lambda: self.stage_controller.reset_controller(
-                source="joystick_reset_button"
-            )
-        )
-        self.stage_controller.stage_position_changed.connect(self._persist_controller_state)
-        self.joystick_dock = CollapsibleDockWidget("Joystick", self)
-        self.joystick_dock.setObjectName("JoystickDock")
-        self.joystick_dock.setWidget(self.joystick_panel)
-        self.joystick_dock.setAllowedAreas(
-            Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea
-        )
-        self.addDockWidget(Qt.LeftDockWidgetArea, self.joystick_dock)
-        self.splitDockWidget(self.resistance_dock, self.joystick_dock, Qt.Vertical)
-
-        self.contact_calibration_window = ContactOscillationWindow()
-        self.contact_calibration_window.visibility_changed.connect(
-            self._on_contact_calibration_window_visibility_changed
-        )
-        self.contact_calibration_window.autofocus_requested.connect(
-            self.stage_controller.request_autofocus
-        )
-        self.contact_calibration_window.save_surface_position_requested.connect(
-            self._save_surface_position
-        )
-        self.contact_calibration_window.move_to_surface_position_requested.connect(
-            self._move_to_surface_position
-        )
-        self.contact_calibration_window.contact_seek_requested.connect(
-            self._request_contact_seek
-        )
-        self.contact_calibration_window.contact_seek_cancel_requested.connect(
-            self._cancel_contact_seek
-        )
-        self.lcr_controller.connection_changed.connect(
-            self._on_lcr_connection_changed
-        )
-        self.lcr_controller.reading_started.connect(
-            self._on_lcr_reading_started
-        )
-        self.lcr_controller.reading_summary_updated.connect(
-            self._on_lcr_reading_summary_updated
-        )
-        self.lcr_controller.reading_updated.connect(
-            self._on_lcr_reading_updated
-        )
-
-        self.oscillation_panel = self.contact_calibration_window.oscillation_panel
-        self.oscillation_panel.start_requested.connect(
-            self.stage_controller.request_oscillation
-        )
-        self.oscillation_panel.start_requested.connect(self._save_oscillation_configuration)
-        self.oscillation_panel.stop_requested.connect(
-            self.stage_controller.request_stop_oscillation
-        )
-        self.oscillation_panel.configuration_changed.connect(
-            self._save_oscillation_configuration
-        )
-        self.joystick_dock.raise_()
-
-        self.alignment_panel = AlignmentPanel(self)
-        self.alignment_panel.open_design_window_requested.connect(
-            lambda: self._toggle_design_layout_window(True)
-        )
-        self.alignment_panel.capture_point_requested.connect(
-            self._request_alignment_capture
-        )
-        self.alignment_panel.reset_points_requested.connect(
-            self._reset_alignment_capture_points
-        )
-        self.alignment_panel.cancel_pick_requested.connect(
-            self._cancel_manual_alignment_pick
-        )
-        self.alignment_panel.clear_registration_requested.connect(
-            self._clear_design_registration
-        )
-        self.alignment_dock = CollapsibleDockWidget("Alignment", self)
-        self.alignment_dock.setObjectName("AlignmentDock")
-        self.alignment_dock.setWidget(self.alignment_panel)
-        self.alignment_dock.setAllowedAreas(
-            Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea
-        )
-        self.addDockWidget(Qt.RightDockWidgetArea, self.alignment_dock)
-        self.alignment_dock.hide()
-
-        self._refresh_manual_alignment_ui()
-        self._update_coordinate_display()
-        self._refresh_design_panel()
-        self.resizeDocks(
-            [self.resistance_dock, self.joystick_dock],
-            [130, 430],
-            Qt.Vertical,
-        )
-        self.resizeDocks(
-            [self.joystick_dock, self.alignment_dock],
-            [360, 520],
-            Qt.Horizontal,
-        )
+        create_main_window_docks(self)
 
     def _show_surface_map_window(self) -> None:
-        if self.surface_map_window is None:
-            from probe_station_gui.views.surface_map_panel import SurfaceMapWindow
-
-            self.surface_map_window = SurfaceMapWindow(
-                stage_status_provider=self._surface_map_stage_status,
-                stage_move_requester=self._surface_map_move_to_xy,
-                settings_path=self.settings_manager.config_dir() / "surface-map-settings.json",
-                parent=None,
-            )
-            self.surface_map_window.capture_running_changed.connect(
-                lambda _running: self._update_stage_coordinate_apply_state()
-            )
-        self.surface_map_window.showNormal()
-        self.surface_map_window.raise_()
+        show_surface_map_window(self)
 
     def _show_microscope_scan_dialog(self) -> None:
-        from probe_station_gui.dialogs.microscope_scan_dialog import (
-            MicroscopeScanDialog,
-        )
-
-        default_dir = self._default_microscope_scan_output_dir()
-        if self.microscope_scan_dialog is None:
-            dialog = MicroscopeScanDialog(
-                default_output_dir=default_dir,
-                parent=None,
-            )
-            dialog.scan_requested.connect(self._start_microscope_scan)
-            dialog.stop_requested.connect(self._request_stop_microscope_scan)
-            dialog.finished.connect(lambda _result: self._clear_microscope_scan_dialog())
-            self.microscope_scan_dialog = dialog
-        self.microscope_scan_dialog.show()
-        self.microscope_scan_dialog.raise_()
-        self.microscope_scan_dialog.activateWindow()
+        show_microscope_scan_dialog(self)
 
     def _default_microscope_scan_output_dir(self) -> str:
         document = self._design_session.document
@@ -8728,127 +8234,7 @@ class Main(QMainWindow):
         self,
         design_layout_window_class: object | None = None,
     ) -> None:
-        if self.design_layout_window is not None:
-            return
-        if design_layout_window_class is None:
-            design_layout_window_class = self._design_layout_window_class
-        if design_layout_window_class is None:
-            from probe_station_gui.views.design_navigator_panel import (
-                DesignLayoutWindow as imported_design_layout_window_class,
-            )
-
-            design_layout_window_class = imported_design_layout_window_class
-        self._design_layout_window_class = design_layout_window_class
-        self.design_layout_window = design_layout_window_class()
-        self.design_navigator_panel = self.design_layout_window.navigator_panel
-        self.design_navigator_panel.load_design_requested.connect(self._load_design_document)
-        self.design_navigator_panel.unload_design_requested.connect(
-            self._unload_design_document
-        )
-        self.design_navigator_panel.top_cell_changed.connect(self._set_design_top_cell)
-        self.design_navigator_panel.layer_visibility_changed.connect(
-            self._set_design_layer_visibility
-        )
-        self.design_navigator_panel.design_rotate_requested.connect(
-            self._rotate_design_document
-        )
-        self.design_navigator_panel.route_new_requested.connect(
-            self._create_measurement_route
-        )
-        self.design_navigator_panel.route_open_requested.connect(
-            self._load_measurement_route
-        )
-        self.design_navigator_panel.route_save_requested.connect(
-            self._save_measurement_route
-        )
-        self.design_navigator_panel.route_save_as_requested.connect(
-            self._save_measurement_route_as
-        )
-        self.design_navigator_panel.route_add_current_requested.connect(
-            self._add_current_design_route_point
-        )
-        self.design_navigator_panel.route_remove_selected_requested.connect(
-            self._remove_selected_route_point
-        )
-        self.design_navigator_panel.route_clear_requested.connect(
-            self._clear_measurement_route_points
-        )
-        self.design_navigator_panel.route_selected.connect(
-            self._select_route_point
-        )
-        self.design_navigator_panel.route_offsets_changed.connect(
-            self._set_route_needle_offsets
-        )
-        self.design_navigator_panel.route_edit_enabled_changed.connect(
-            self._set_route_edit_enabled
-        )
-        self.design_navigator_panel.route_array_requested.connect(
-            self._add_route_array_points
-        )
-        self.design_navigator_panel.route_measurement_run_requested.connect(
-            self._open_route_measurement_dialog
-        )
-        self.design_navigator_panel.route_measurement_measure_requested.connect(
-            route_measurement_point_request_handler_for_owner(self)
-        )
-        self.design_navigator_panel.route_measurement_stop_requested.connect(
-            self._request_stop_route_measurement
-        )
-        self.design_navigator_panel.route_measurement_pause_requested.connect(
-            self._request_pause_route_measurement
-        )
-        self.design_navigator_panel.route_measurement_interrupt_requested.connect(
-            self._request_route_measurement_point_correction
-        )
-        self.design_navigator_panel.route_measurement_save_shift_requested.connect(
-            self._save_route_measurement_shift
-        )
-        self.design_navigator_panel.route_measurement_confirmation_requested.connect(
-            self._submit_route_measurement_confirmation
-        )
-        self.design_navigator_panel.route_measurement_jump_requested.connect(
-            self._submit_route_measurement_jump
-        )
-        self.design_navigator_panel.route_measurement_move_requested.connect(
-            self._request_route_contact_move
-        )
-        self.design_navigator_panel.move_to_target_requested.connect(
-            self._move_to_design_target
-        )
-        self.design_navigator_panel.next_target_requested.connect(
-            self._select_next_design_target
-        )
-        self.design_navigator_panel.previous_target_requested.connect(
-            self._select_previous_design_target
-        )
-        self.design_navigator_panel.target_selected.connect(
-            self._on_design_target_selected
-        )
-        self.design_navigator_panel.snap_enabled_changed.connect(
-            self._on_design_snap_enabled_changed
-        )
-        self.design_layout_window.calibration_point_selected.connect(
-            self._on_design_layout_point_selected
-        )
-        self.design_layout_window.move_requested.connect(
-            lambda x_value, y_value: self._move_to_design_window_point(x_value, y_value)
-        )
-        self.design_layout_window.route_point_requested.connect(
-            self._add_design_route_point
-        )
-        self.design_layout_window.hover_snap_changed.connect(
-            self.design_navigator_panel.set_hover_snap
-        )
-        self.design_layout_window.visibility_changed.connect(
-            self._on_design_layout_window_visibility_changed
-        )
-        self.design_navigator_panel.set_design_dialog_directory(
-            self.settings_manager.design_last_directory()
-        )
-        self._refresh_design_panel()
-        if self._design_layout_window_requested:
-            self.design_layout_window.show_and_raise()
-            self._collapse_alignment_panel_if_ready()
+        create_design_layout_window(self, design_layout_window_class)
 
     def _move_to_design_window_point(self, x_value: float, y_value: float) -> None:
         design_xy = (float(x_value), float(y_value))
