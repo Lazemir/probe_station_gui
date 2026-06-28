@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from probe_station_gui.instruments.meters.lcr_helpers import callable_accepts_keyword
+from probe_station_gui.route import measurement_recording
 from probe_station_gui.route.contact_quality import (
     RouteContactQuality,
     RouteMeasurementSample,
@@ -184,7 +185,7 @@ def _status_contact_seek_start(
         f"{initial_quality.status}, "
         f"median={format_route_ohm(initial_quality.median_ohm)}, "
         f"MAD={format_route_ohm(initial_quality.mad_sigma_ohm)}"
-        f"{owner._contact_quality_failure_suffix(initial_quality)}; "
+        f"{measurement_recording.contact_quality_failure_suffix(owner, initial_quality)}; "
         "seeking contact up to "
         f"{owner._auto_contact_seek_max_total_mm:.3f} mm."
     )
@@ -409,7 +410,7 @@ def _status_contact_seek_attempt_quality(
         f"{depth_label}, {quality.status}, "
         f"median={format_route_ohm(quality.median_ohm)}, "
         f"MAD={format_route_ohm(quality.mad_sigma_ohm)}"
-        f"{owner._contact_quality_failure_suffix(quality)}."
+        f"{measurement_recording.contact_quality_failure_suffix(owner, quality)}."
     )
 
 
@@ -471,7 +472,7 @@ def _bad_contact_seek_resolution(
         f"({full_quality.status}, "
         f"median={format_route_ohm(full_quality.median_ohm)}, "
         f"MAD={format_route_ohm(full_quality.mad_sigma_ohm)}"
-        f"{owner._contact_quality_failure_suffix(full_quality)}); "
+        f"{measurement_recording.contact_quality_failure_suffix(owner, full_quality)}); "
         "trying deeper."
     )
     return ContactSeekAttemptResolution(

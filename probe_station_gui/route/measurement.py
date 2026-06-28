@@ -7,7 +7,7 @@ import logging
 import math
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Collection
@@ -16,12 +16,12 @@ from probe_station_gui.route.contact_quality import (
     RouteContactQuality,
     RouteContactQualityLimits,
     RouteMeasurementSample,
-    _format_contact_quality_failure,
     route_measurement_sample_from_raw,
     summarize_route_contact_quality,
 )
 from probe_station_gui.route import contact_lifecycle
 from probe_station_gui.route import contact_measurement
+from probe_station_gui.route import measurement_recording
 from probe_station_gui.route.contact_seek import (
     ContactSeekAttempt,
     normalize_contact_seek_limit,
@@ -52,10 +52,8 @@ from probe_station_gui.route.measurement_records import (
 )
 from probe_station_gui.route.external_session import RouteExternalMeasurementSessionRunner
 from probe_station_gui.route.formatting import (
-    format_route_ohm,
     format_route_percent,
 )
-from probe_station_gui.route.model import structure_number_from_labels
 from probe_station_gui.route.operation_modes import (
     ROUTE_OPERATION_MEASURE,
     ROUTE_OPERATION_MODES,
@@ -1011,7 +1009,8 @@ class RouteMeasurementRunner:
                 state.stop_message = "Route measurement stopped by user."
             return
         self._wait_for_route_point_lift_before_record(state, progress)
-        state.record = self._record_for_point(
+        state.record = measurement_recording.record_for_point(
+            self,
             point=point,
             samples=samples,
         )
@@ -1069,7 +1068,8 @@ class RouteMeasurementRunner:
             state.quality_rejected,
             state.save_exhausted_bad_contact,
             state.measurements_saved,
-        ) = self._record_route_point_measurement(
+        ) = measurement_recording.record_route_point_measurement(
+            self,
             point=point,
             record=state.record,
             position=position,
@@ -1264,7 +1264,7 @@ class RouteMeasurementRunner:
         pause_after_point: bool,
         save_exhausted_bad_contact: bool,
     ) -> _RoutePointFlowResult | None:
-        status_detail = self._saved_route_point_status_detail(
+        status_detail = measurement_recording.saved_route_point_status_detail(
             record,
             save_exhausted_bad_contact=save_exhausted_bad_contact,
         )
@@ -1295,18 +1295,6 @@ class RouteMeasurementRunner:
             measurements_saved=saved_count,
             stop_message=loop_decision.stop_message,
         )
-
-    @staticmethod
-    def _saved_route_point_status_detail(
-        record: RouteMeasurementRecord,
-        *,
-        save_exhausted_bad_contact: bool,
-    ) -> str:
-        if save_exhausted_bad_contact:
-            return "contact seek exhausted; saved"
-        if record.status == "short":
-            return "short-circuit detected; saved"
-        return "saved"
 
     def _route_completion_message(self, progress: _RouteRunProgress) -> str:
         if self._measure_enabled and self._photo_enabled:
@@ -1419,44 +1407,6 @@ class RouteMeasurementRunner:
         if decision == "skip" or (default_advances and decision != "remeasure"):
             return _RoutePointLoopDecision(position_index=position_index + 1), 0
         return _RoutePointLoopDecision(position_index=position_index), 0
-
-    def _record_route_point_measurement(
-        self,
-        *,
-        point: RouteMeasurementPoint,
-        record: RouteMeasurementRecord,
-        position: int,
-        total: int,
-    ) -> tuple[RouteMeasurementRecord, bool, bool, bool, int]:
-        save_exhausted_bad_contact = self._should_save_exhausted_bad_contact(record)
-        record_saved = False
-        quality_rejected = False
-        if (
-            self._confirm_each_point
-            and self._record_exceeds_quality_limit(record)
-            and not save_exhausted_bad_contact
-        ):
-            if not self._record_has_failed_contact_quality(record):
-                record = replace(record, status="unstable")
-            quality_rejected = True
-        else:
-            self._csv_writer.append(record)
-            record_saved = True
-        self._emit_contact_photo(
-            point,
-            record,
-            position,
-            total,
-            record_saved,
-        )
-        self._emit_result(record, position, total, record_saved)
-        return (
-            record,
-            record_saved,
-            quality_rejected,
-            save_exhausted_bad_contact,
-            1 if record_saved else 0,
-        )
 
     def _prepare_route_point_for_measurement(
         self,
@@ -1878,7 +1828,11 @@ class RouteMeasurementRunner:
         )
         if samples is None:
             return None
-        record = self._record_for_point(point=point, samples=samples)
+        record = measurement_recording.record_for_point(
+            self,
+            point=point,
+            samples=samples,
+        )
         contact_height_record = self._contact_height_record_for_point(
             point=point,
             record=record,
@@ -1919,7 +1873,7 @@ class RouteMeasurementRunner:
         record = RoutePhotoRecord(
             timestamp=datetime.now().isoformat(timespec="seconds"),
             path=str(result),
-            structure_number=_structure_number_for_point(point),
+            structure_number=measurement_recording.structure_number_for_point(point),
             point_index=int(point.index),
             point_id=point.point_id,
             label=point.label,
@@ -2370,20 +2324,20 @@ class RouteMeasurementRunner:
         if emit_result:
             self._emit_result(record, position, total, False)
         contact_quality = record.contact_quality
-        if self._record_has_failed_contact_quality(record):
+        if measurement_recording.record_has_failed_contact_quality(record):
             assert contact_quality is not None
             self._status(
                 f"Route measurement: point {position}/{total} contact check failed "
                 f"({contact_quality.status}"
-                f"{self._contact_quality_failure_suffix(contact_quality)}); "
+                f"{measurement_recording.contact_quality_failure_suffix(self, contact_quality)}); "
                 "correct contact, then Measure, "
                 "Remeasure, or Skip."
             )
         else:
             self._status(
                 f"Route measurement: point {position}/{total} relative RMS "
-                f"{_format_percent(record.relative_rms)} exceeds "
-                f"{_format_percent(self._max_relative_rms or math.nan)}; "
+                f"{format_route_percent(record.relative_rms)} exceeds "
+                f"{format_route_percent(self._max_relative_rms or math.nan)}; "
                 "correct contact, then Measure, Remeasure, or Skip."
             )
         decision = self._wait_for_valid_confirmation()
@@ -2431,79 +2385,9 @@ class RouteMeasurementRunner:
             if int(point.index) == target:
                 return index
         for index, point in enumerate(self._points):
-            if _structure_number_for_point(point) == target:
+            if measurement_recording.structure_number_for_point(point) == target:
                 return index
         return None
-
-    def _record_for_point(
-        self,
-        *,
-        point: RouteMeasurementPoint,
-        samples: list[RouteMeasurementSample],
-    ) -> RouteMeasurementRecord:
-        stats = self._resistance_stats_from_samples(samples)
-        if stats.complete_finite_batch:
-            contact_quality = self._contact_quality_from_samples(samples)
-            status = self._record_status_for_samples(samples, contact_quality)
-        else:
-            status = "overload"
-            contact_quality = None
-        return RouteMeasurementRecord(
-            timestamp=datetime.now().isoformat(timespec="seconds"),
-            structure_number=_structure_number_for_point(point),
-            nplc=self._nplc_label,
-            measurement_type=self._measurement_type,
-            n_measurements=stats.count,
-            resistance_ohm=stats.mean_ohm,
-            resistance_rms_ohm=stats.rms_ohm,
-            relative_rms=stats.relative_rms,
-            status=status,
-            contact_quality=contact_quality,
-            raw_samples=tuple(samples),
-        )
-
-    def _record_exceeds_quality_limit(self, record: RouteMeasurementRecord) -> bool:
-        if record.status == "short":
-            return False
-        if self._record_has_failed_contact_quality(record):
-            return True
-        if self._max_relative_rms is None or record.status != "ok":
-            return False
-        return (
-            math.isfinite(record.relative_rms)
-            and record.relative_rms > self._max_relative_rms
-        )
-
-    @staticmethod
-    def _record_has_failed_contact_quality(record: RouteMeasurementRecord) -> bool:
-        contact_quality = record.contact_quality
-        return contact_quality is not None and contact_quality.good is False
-
-    @staticmethod
-    def _contact_placement_record_is_success(record: RouteMeasurementRecord) -> bool:
-        return str(record.status).strip().lower() in {"ok", "short"}
-
-    def _should_save_exhausted_bad_contact(
-        self,
-        record: RouteMeasurementRecord,
-    ) -> bool:
-        if not self._record_has_failed_contact_quality(record):
-            return False
-        contact_seek = self._current_contact_seek_result
-        if (
-            contact_seek is None
-            or contact_seek.found
-            or contact_seek.status != "not_found"
-        ):
-            return False
-        depth = float(contact_seek.depth_below_down_mm)
-        max_depth = float(contact_seek.max_depth_mm)
-        return (
-            math.isfinite(depth)
-            and math.isfinite(max_depth)
-            and max_depth > 0.0
-            and depth >= max_depth - 1e-9
-        )
 
     def _samples_are_short(
         self,
@@ -2516,46 +2400,6 @@ class RouteMeasurementRunner:
         samples: list[RouteMeasurementSample] | tuple[RouteMeasurementSample, ...],
     ) -> RouteContactQuality:
         return contact_measurement.contact_quality_from_samples(self, samples)
-
-    def _contact_quality_failure_suffix(self, quality: RouteContactQuality) -> str:
-        detail = _format_contact_quality_failure(
-            quality,
-            self._contact_quality_limits,
-        )
-        return f", failed criterion: {detail}" if detail else ""
-
-    def _contact_placement_message(
-        self,
-        *,
-        action_label: str,
-        failure_label: str,
-        point: RouteMeasurementPoint,
-        record: RouteMeasurementRecord,
-        position: int,
-        total: int,
-        success: bool,
-        seek: RouteContactSeekResult | None = None,
-    ) -> str:
-        status = record.status or "unknown"
-        contact_suffix = (
-            self._contact_quality_failure_suffix(record.contact_quality)
-            if record.contact_quality is not None
-            else ""
-        )
-        if seek is not None:
-            return (
-                f"{action_label}: point {position}/{total} {point.label}, "
-                f"{seek.status}, final={status}{contact_suffix}."
-            )
-        if success:
-            return (
-                f"{action_label}: point {position}/{total} {point.label}, "
-                f"{status}."
-            )
-        return (
-            f"{failure_label}: point {position}/{total} "
-            f"{point.label}, {status}{contact_suffix}."
-        )
 
     def _samples_have_bad_contact(
         self,
@@ -2594,14 +2438,6 @@ def _normalize_operation_mode(value: object) -> str:
     return normalize_route_operation_mode(value)
 
 
-def _structure_number_for_point(point: RouteMeasurementPoint) -> int:
-    return structure_number_from_labels(
-        point.label,
-        point.point_id,
-        default=point.index,
-    )
-
-
 def latest_route_measurement_statuses(csv_path: str | Path) -> dict[int, str]:
     """Return the latest measurement status by structure number from a route CSV."""
 
@@ -2638,13 +2474,6 @@ def filter_route_points_by_previous_status(
     return [
         point
         for point in points
-        if statuses.get(_structure_number_for_point(point)) in allowed
+        if statuses.get(measurement_recording.structure_number_for_point(point))
+        in allowed
     ]
-
-
-def _format_percent(value: float) -> str:
-    return format_route_percent(value)
-
-
-def _format_ohm(value: float) -> str:
-    return format_route_ohm(value)

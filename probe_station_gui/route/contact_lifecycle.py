@@ -6,6 +6,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from probe_station_gui.route import measurement_recording
 from probe_station_gui.route.measurement_payloads import focus_result_to_dict
 from probe_station_gui.route.measurement_records import (
     RouteContactPlacementResult,
@@ -61,14 +62,15 @@ def place_contact(
             position=position,
             total=total,
         )
-        success = owner._contact_placement_record_is_success(record)
+        success = measurement_recording.contact_placement_record_is_success(record)
         needles_lowered = _lift_after_failed_contact_if_needed(
             owner,
             success=success,
             lift_on_failure=lift_on_failure,
             needles_lowered=needles_lowered,
         )
-        message = owner._contact_placement_message(
+        message = measurement_recording.contact_placement_message(
+            owner,
             action_label="Contact ready",
             failure_label="Contact check failed",
             point=point,
@@ -192,7 +194,11 @@ def measure_contact_placement_record(
     )
     if samples is None:
         raise RuntimeError("Contact placement stopped.")
-    return owner._record_for_point(point=point, samples=samples)
+    return measurement_recording.record_for_point(
+        owner,
+        point=point,
+        samples=samples,
+    )
 
 
 def lift_needles_after_failed_contact(owner: Any) -> None:
@@ -412,10 +418,15 @@ def measure_current_contact(
         prepare_task = None
         if samples is None:
             raise RuntimeError(f"{action_label} stopped.")
-        record = owner._record_for_point(point=point, samples=samples)
-        success = owner._contact_placement_record_is_success(record)
+        record = measurement_recording.record_for_point(
+            owner,
+            point=point,
+            samples=samples,
+        )
+        success = measurement_recording.contact_placement_record_is_success(record)
         seek = owner._current_contact_seek_result
-        message = owner._contact_placement_message(
+        message = measurement_recording.contact_placement_message(
+            owner,
             action_label=action_label,
             failure_label=f"{action_label} failed",
             point=point,
