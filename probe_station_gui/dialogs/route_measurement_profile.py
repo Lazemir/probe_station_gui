@@ -156,20 +156,13 @@ class RouteMeasurementProfileMixin:
         if not isinstance(data, dict):
             raise ValueError("Profile JSON root must be an object.")
         migrate_keithley_defaults = self._should_migrate_keithley_defaults(data)
-        csv_path = data.get("csv_path")
-        if isinstance(csv_path, str) and csv_path.strip():
-            self._csv_path_edit.setText(csv_path.strip())
-        previous_csv_path = data.get("previous_csv_path")
-        if isinstance(previous_csv_path, str) and previous_csv_path.strip():
-            self._previous_csv_path_edit.setText(previous_csv_path.strip())
-        elif isinstance(csv_path, str) and csv_path.strip():
-            self._previous_csv_path_edit.setText(csv_path.strip())
+        self._apply_profile_paths(data)
         operation_mode = data.get("operation_mode")
         if isinstance(operation_mode, str):
             self._set_combo_data(self._operation_combo, operation_mode)
-        photo_output_dir = data.get("photo_output_dir")
-        if isinstance(photo_output_dir, str) and photo_output_dir.strip():
-            self._photo_dir_edit.setText(photo_output_dir.strip())
+        photo_output_dir = self._profile_text(data.get("photo_output_dir"))
+        if photo_output_dir is not None:
+            self._photo_dir_edit.setText(photo_output_dir)
         self._set_spinbox_value(self._photo_settle_spin, data.get("photo_settle_s"))
         self._photo_autofocus_checkbox.setChecked(
             bool(data.get("photo_autofocus_enabled", False))
@@ -187,13 +180,10 @@ class RouteMeasurementProfileMixin:
         self._measurement_pending = bool(session_active)
         current_point = data.get("current_point", data.get("start_point"))
         self._set_spinbox_value(self._current_point_spin, current_point)
-        max_relative_rms = data.get("max_relative_rms")
-        try:
-            max_relative_rms_percent = float(max_relative_rms) * 100.0
-        except (TypeError, ValueError):
-            max_relative_rms_percent = math.nan
-        if math.isfinite(max_relative_rms_percent):
-            self._max_relative_rms_spin.setValue(max_relative_rms_percent)
+        self._set_ratio_percent_spinbox_value(
+            self._max_relative_rms_spin,
+            data.get("max_relative_rms"),
+        )
         self._previous_ok_only_checkbox.setChecked(
             bool(data.get("previous_ok_only", False))
         )
@@ -207,19 +197,39 @@ class RouteMeasurementProfileMixin:
             data.get("contact_seek_step_mm"),
         )
         self._apply_contact_quality_limits_profile(data)
-        meter = data.get("meter")
-        if isinstance(meter, dict):
-            meter_type = meter.get("meter_type")
-            if isinstance(meter_type, str):
-                self._set_combo_data(self._meter_combo, meter_type)
-            self._apply_gwinstek_profile(meter.get("gwinstek"))
-            self._apply_keithley_profile(meter.get("keithley"))
+        self._apply_meter_profile(data.get("meter"))
         if migrate_keithley_defaults:
             self._apply_default_keithley_route_settings()
         self._update_meter_page()
         self._update_gwinstek_state()
         self._update_operation_state()
         return migrate_keithley_defaults
+
+    def _apply_profile_paths(self, data: dict[str, Any]) -> None:
+        csv_path = self._profile_text(data.get("csv_path"))
+        if csv_path is not None:
+            self._csv_path_edit.setText(csv_path)
+        previous_csv_path = self._profile_text(data.get("previous_csv_path"))
+        if previous_csv_path is not None:
+            self._previous_csv_path_edit.setText(previous_csv_path)
+        elif csv_path is not None:
+            self._previous_csv_path_edit.setText(csv_path)
+
+    @staticmethod
+    def _profile_text(value: object) -> str | None:
+        if not isinstance(value, str):
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+    def _apply_meter_profile(self, data: object) -> None:
+        if not isinstance(data, dict):
+            return
+        meter_type = data.get("meter_type")
+        if isinstance(meter_type, str):
+            self._set_combo_data(self._meter_combo, meter_type)
+        self._apply_gwinstek_profile(data.get("gwinstek"))
+        self._apply_keithley_profile(data.get("keithley"))
 
     def _should_migrate_keithley_defaults(self, data: dict[str, Any]) -> bool:
         try:

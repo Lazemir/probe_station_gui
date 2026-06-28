@@ -149,3 +149,18 @@ def test_legacy_keithley_profile_migrates_route_defaults(
     )
     assert saved["meter"]["keithley"]["use_buffer"] is True
     assert saved["meter"]["keithley"]["use_trigger_link"] is True
+
+
+def test_profile_uses_csv_path_as_previous_csv_fallback(
+    qt_app: QApplication,
+    tmp_path: Path,
+) -> None:
+    _ = qt_app
+    dialog = _dialog(tmp_path)
+    csv_path = str(tmp_path / "measure.csv")
+
+    assert dialog._apply_profile_data({"csv_path": csv_path}) is False
+
+    saved = dialog._profile_data()
+    assert saved["csv_path"] == csv_path
+    assert saved["previous_csv_path"] == csv_path
