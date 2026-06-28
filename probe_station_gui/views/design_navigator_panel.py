@@ -63,6 +63,9 @@ from probe_station_gui.design.model import (
     SnapResult,
 )
 from probe_station_gui.route.model import MeasurementRoute
+from probe_station_gui.views.design_navigator_enablement import (
+    DesignNavigatorEnablement,
+)
 from probe_station_gui.views.design_plot_pane import _DesignPlotPane, pg
 
 
@@ -867,75 +870,103 @@ class DesignNavigatorPanel(QWidget):
         self._availability_label.setText(" ".join(messages))
 
     def _update_enabled_state(self) -> None:
-        has_document = self._document is not None
-        self._unload_design_button.setEnabled(has_document)
-        self._top_cell_combo.setEnabled(has_document)
-        self._layer_list.setEnabled(has_document)
-        self._snap_checkbox.setEnabled(has_document)
-        has_route = self._route is not None
-        route_running = self._route_measurement_running
-        has_route_selection = (
-            has_route
-            and 0 <= self._selected_route_point_index < len(self._route.points)
+        state = self._enabled_state()
+        self._apply_document_enabled_state(state)
+        self._apply_design_tool_enabled_state(state)
+        self._apply_route_edit_enabled_state(state)
+        self._apply_route_run_enabled_state(state)
+        self._apply_route_tool_options_enabled_state(state)
+
+    def _enabled_state(self) -> DesignNavigatorEnablement:
+        route = self._route
+        has_route = route is not None
+        return DesignNavigatorEnablement(
+            has_document=self._document is not None,
+            has_route=has_route,
+            route_saved=bool(route is not None and route.path is not None),
+            route_has_points=bool(route is not None and route.points),
+            has_route_selection=bool(
+                route is not None
+                and 0 <= self._selected_route_point_index < len(route.points)
+            ),
+            has_current_design_position=self._current_design_position is not None,
+            route_running=self._route_measurement_running,
+            design_registration_active=self._design_registration_active,
+            route_control=self._route_measurement_control_state().presentation(),
         )
-        has_current_design_position = self._current_design_position is not None
-        self._route_new_button.setEnabled(has_document and not route_running)
-        self._route_open_button.setEnabled(has_document and not route_running)
-        self._route_save_button.setEnabled(
-            has_route and self._route.path is not None and not route_running
-        )
-        self._route_save_as_button.setEnabled(has_route and not route_running)
-        self._select_tool_button.setEnabled(has_document and not route_running)
-        self._ruler_tool_button.setEnabled(has_document and not route_running)
-        self._array_tool_button.setEnabled(has_document and not route_running)
-        self._rotate_tool_button.setEnabled(
-            has_document
-            and not route_running
-            and not self._design_registration_active
-        )
-        if not has_document and self._route_pick_mode is not None:
+
+    def _apply_document_enabled_state(
+        self,
+        state: DesignNavigatorEnablement,
+    ) -> None:
+        self._unload_design_button.setEnabled(state.has_document)
+        self._top_cell_combo.setEnabled(state.has_document)
+        self._layer_list.setEnabled(state.has_document)
+        self._snap_checkbox.setEnabled(state.has_document)
+        self._route_new_button.setEnabled(state.can_edit_design)
+        self._route_open_button.setEnabled(state.can_edit_design)
+        self._route_save_button.setEnabled(state.can_save_route)
+        self._route_save_as_button.setEnabled(state.can_save_route_as)
+        self._clear_document_dependent_modes_if_needed(state)
+
+    def _clear_document_dependent_modes_if_needed(
+        self,
+        state: DesignNavigatorEnablement,
+    ) -> None:
+        if state.has_document:
+            return
+        if self._route_pick_mode is not None:
             self._clear_route_pick_mode("Load a design to pick route geometry.")
-        if not has_document and self._active_design_tool != "select":
+        if self._active_design_tool != "select":
             self._set_design_tool("select")
+
+    def _apply_design_tool_enabled_state(
+        self,
+        state: DesignNavigatorEnablement,
+    ) -> None:
+        self._select_tool_button.setEnabled(state.can_edit_design)
+        self._ruler_tool_button.setEnabled(state.can_edit_design)
+        self._array_tool_button.setEnabled(state.can_edit_design)
+        self._rotate_tool_button.setEnabled(state.can_use_rotate_tool)
+
+    def _apply_route_edit_enabled_state(
+        self,
+        state: DesignNavigatorEnablement,
+    ) -> None:
         for spinbox in (
             self._needle_1_dx_spin,
             self._needle_1_dy_spin,
             self._needle_2_dx_spin,
             self._needle_2_dy_spin,
         ):
-            spinbox.setEnabled(has_route and not route_running)
-        self._route_table.setEnabled(has_route)
-        self._route_add_current_button.setEnabled(
-            has_route and has_current_design_position and not route_running
-        )
-        self._route_remove_button.setEnabled(has_route_selection and not route_running)
-        self._route_clear_button.setEnabled(
-            has_route and bool(self._route.points) and not route_running
-        )
-        self._route_run_button.setEnabled(has_route_selection)
-        self._route_stop_button.setEnabled(route_running)
-        route_control = self._route_measurement_control_state().presentation()
-        route_confirm_waiting = route_control.can_confirm_waiting
+            spinbox.setEnabled(state.can_edit_route_offsets)
+        self._route_table.setEnabled(state.has_route)
+        self._route_add_current_button.setEnabled(state.can_add_current_route_point)
+        self._route_remove_button.setEnabled(state.can_remove_route_point)
+        self._route_clear_button.setEnabled(state.can_clear_route)
+
+    def _apply_route_run_enabled_state(
+        self,
+        state: DesignNavigatorEnablement,
+    ) -> None:
+        route_control = state.route_control
+        self._route_run_button.setEnabled(state.has_route_selection)
+        self._route_stop_button.setEnabled(state.route_running)
         self._route_pause_button.setText(route_control.pause_text)
         self._route_pause_button.setEnabled(route_control.pause_enabled)
         self._route_interrupt_button.setText(route_control.interrupt_text)
         self._route_interrupt_button.setEnabled(route_control.interrupt_enabled)
-        self._route_save_shift_button.setEnabled(
-            has_route_selection and route_confirm_waiting
-        )
-        self._route_remeasure_button.setEnabled(route_confirm_waiting)
-        self._route_skip_button.setEnabled(route_confirm_waiting)
-        self._route_next_button.setEnabled(route_confirm_waiting)
-        self._route_move_selected_button.setEnabled(
-            has_route_selection
-            and (
-                not route_running
-                or route_confirm_waiting
-            )
-        )
-        self._route_jump_selected_button.setEnabled(
-            route_confirm_waiting and has_route_selection
-        )
+        self._route_save_shift_button.setEnabled(state.can_save_shift)
+        self._route_remeasure_button.setEnabled(state.can_confirm_waiting)
+        self._route_skip_button.setEnabled(state.can_confirm_waiting)
+        self._route_next_button.setEnabled(state.can_confirm_waiting)
+        self._route_move_selected_button.setEnabled(state.can_move_selected)
+        self._route_jump_selected_button.setEnabled(state.can_jump_selected)
+
+    def _apply_route_tool_options_enabled_state(
+        self,
+        state: DesignNavigatorEnablement,
+    ) -> None:
         for widget in (
             self._ruler_clear_button,
             self._ruler_cancel_button,
@@ -957,7 +988,7 @@ class DesignNavigatorPanel(QWidget):
             self._route_array_create_button,
             self._route_array_cancel_button,
         ):
-            widget.setEnabled(has_document and not route_running)
+            widget.setEnabled(state.can_use_tool_options)
 
     def _make_route_offset_spinbox(self, parent: QWidget) -> QDoubleSpinBox:
         spinbox = QDoubleSpinBox(parent)
