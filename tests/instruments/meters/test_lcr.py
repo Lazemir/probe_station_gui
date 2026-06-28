@@ -827,13 +827,13 @@ class LCRMeterTest(unittest.TestCase):
         controller = LCRMeterController()
         controller.reading_updated = _DeletedSignalSource()
         controller._stop_polling.clear()
-        controller._worker_shutdown.clear()
+        controller._worker_runtime.shutdown_event.clear()
 
         controller._emit_reading_summary(42.0, 1)
 
         self.assertTrue(controller._shutdown_started)
         self.assertTrue(controller._stop_polling.is_set())
-        self.assertTrue(controller._worker_shutdown.is_set())
+        self.assertTrue(controller._worker_runtime.shutdown_requested)
 
     def test_controller_polling_disconnects_on_unexpected_driver_error(self) -> None:
         controller = LCRMeterController()

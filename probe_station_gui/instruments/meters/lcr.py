@@ -5,7 +5,6 @@ from __future__ import annotations
 import atexit
 import logging
 import math
-import queue
 import threading
 import time
 import weakref
@@ -16,7 +15,7 @@ from PySide6.QtCore import QObject, Signal
 
 from probe_station_measure import OHMMETER_RANGE_MANUAL
 from probe_station_gui.instruments.meters.worker import (
-    MeterWorkerCall as _MeterWorkerCall,
+    MeterWorkerRuntime as _MeterWorkerRuntime,
     meter_worker_poll_timeout,
 )
 from probe_station_gui.instruments.meters.gwinstek_session import (
@@ -435,15 +434,14 @@ class LCRMeterController(QObject):
         self._session: Optional[object] = None
         self._stop_polling = threading.Event()
         self._live_polling_enabled = True
+        self._worker_runtime = _MeterWorkerRuntime(
+            name="LCRMeterWorker",
+            poll_timeout=self._meter_worker_poll_timeout,
+            poll_once=self._run_meter_poll_once,
+            logger=logger,
+        )
         self._pending_route_meter_configuration: RouteMeterConfiguration | None = None
-        self._worker_queue: queue.Queue[_MeterWorkerCall | None] = queue.Queue()
-        self._worker_thread: threading.Thread | None = None
-        self._worker_start_lock = threading.Lock()
-        self._worker_shutdown = threading.Event()
         self._shutdown_started = False
-        self._worker_state = threading.Condition()
-        self._worker_pending_calls = 0
-        self._worker_running_call = False
         self._live_output_context: object | None = None
         _LCR_METER_CONTROLLERS.add(self)
 
@@ -529,98 +527,19 @@ class LCRMeterController(QObject):
     def wait_until_idle(self, timeout_s: float | None = None) -> bool:
         """Wait until the current background meter task finishes."""
 
-        worker_thread = self._worker_thread
-        if worker_thread is not None and threading.current_thread() is worker_thread:
-            return True
-        timeout = (
-            self.TASK_WAIT_TIMEOUT_S
-            if timeout_s is None
-            else max(0.0, float(timeout_s))
+        return self._worker_runtime.wait_until_idle(
+            timeout_s=timeout_s,
+            default_timeout_s=self.TASK_WAIT_TIMEOUT_S,
         )
-        deadline = time.monotonic() + timeout
-        with self._worker_state:
-            while True:
-                if self._worker_pending_calls <= 0 and not self._worker_running_call:
-                    return True
-                remaining = deadline - time.monotonic()
-                if remaining <= 0.0:
-                    return False
-                self._worker_state.wait(timeout=min(0.05, remaining))
-
-    def _ensure_worker_started(self) -> None:
-        with self._worker_start_lock:
-            thread = self._worker_thread
-            if thread is not None and thread.is_alive():
-                return
-            self._worker_shutdown.clear()
-            thread = threading.Thread(
-                target=self._meter_worker_loop,
-                name="LCRMeterWorker",
-                daemon=True,
-            )
-            self._worker_thread = thread
-            thread.start()
 
     def _wake_meter_worker(self) -> None:
-        self._ensure_worker_started()
-        self._worker_queue.put(None)
+        self._worker_runtime.wake()
 
     def _run_on_meter_worker(self, func: Callable[[], object]) -> object:
-        worker_thread = self._worker_thread
-        if worker_thread is not None and threading.current_thread() is worker_thread:
-            return func()
-        done = threading.Event()
-        call = _MeterWorkerCall(func=func, done=done)
-        with self._worker_state:
-            self._worker_pending_calls += 1
-        self._worker_queue.put(call)
-        self._ensure_worker_started()
-        done.wait()
-        if call.error is not None:
-            raise call.error
-        return call.result
+        return self._worker_runtime.run(func)
 
     def _submit_meter_worker_call(self, func: Callable[[], object]) -> bool:
-        with self._worker_state:
-            if self._worker_pending_calls > 0 or self._worker_running_call:
-                return False
-            self._worker_pending_calls += 1
-        self._worker_queue.put(_MeterWorkerCall(func=func))
-        self._ensure_worker_started()
-        return True
-
-    def _meter_worker_loop(self) -> None:
-        while not self._worker_shutdown.is_set():
-            timeout = self._meter_worker_poll_timeout()
-            try:
-                call = self._worker_queue.get(timeout=timeout)
-            except queue.Empty:
-                with self._worker_state:
-                    self._worker_running_call = True
-                try:
-                    self._run_meter_poll_once()
-                finally:
-                    with self._worker_state:
-                        self._worker_running_call = False
-                        self._worker_state.notify_all()
-                continue
-            if call is None:
-                continue
-            with self._worker_state:
-                self._worker_running_call = True
-            try:
-                call.result = call.func()
-            except BaseException as exc:
-                call.error = exc
-                if call.done is None:
-                    logger.exception("Measurement instrument worker task failed.")
-            finally:
-                if call.done is not None:
-                    call.done.set()
-                with self._worker_state:
-                    self._worker_running_call = False
-                    self._worker_pending_calls = max(0, self._worker_pending_calls - 1)
-                    self._worker_state.notify_all()
+        return self._worker_runtime.submit(func)
 
     def _meter_worker_poll_timeout(self) -> float | None:
         return meter_worker_poll_timeout(
@@ -1005,10 +924,7 @@ class LCRMeterController(QObject):
         _LCR_METER_CONTROLLERS.discard(self)
         self._shutdown_started = True
         self._stop_polling.set()
-        self._worker_shutdown.set()
-        self._worker_queue.put(None)
-        with self._worker_state:
-            self._worker_state.notify_all()
+        self._worker_runtime.request_shutdown()
 
     @staticmethod
     def _mean_resistance_from_measurements(measurements: object) -> float:
@@ -1160,15 +1076,7 @@ class LCRMeterController(QObject):
             self._run_on_meter_worker(self._disconnect_session)
         except Exception:  # pragma: no cover - best effort shutdown
             logger.exception("Failed to close measurement instrument session during shutdown")
-        self._worker_shutdown.set()
-        self._worker_queue.put(None)
-        worker_thread = self._worker_thread
-        if (
-            worker_thread is not None
-            and worker_thread.is_alive()
-            and worker_thread is not threading.current_thread()
-        ):
-            worker_thread.join(timeout=2.0)
+        self._worker_runtime.shutdown(join_timeout_s=2.0)
 
     def _run_connect(self) -> None:
         try:
@@ -1367,12 +1275,7 @@ class LCRMeterController(QObject):
         self._stop_polling.set()
         if self._live_output_context is None:
             return
-        worker_thread = self._worker_thread
-        if (
-            worker_thread is not None
-            and worker_thread.is_alive()
-            and worker_thread is not threading.current_thread()
-        ):
+        if self._worker_runtime.has_live_worker_other_than_current():
             self._run_on_meter_worker(self._close_live_output_context_on_worker)
         else:
             self._close_live_output_context_on_worker()
