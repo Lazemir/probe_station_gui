@@ -2,8 +2,8 @@
 
 Updated: 2026-06-28
 Branch: `codex/refactor-stage-controller`
-Current completed task: Task 45c, route record/result policy extraction.
-Active next task: Task 46, design navigator panel extraction.
+Current completed task: Task 46a, design plot pane extraction.
+Active next task: Task 46b, design navigator enablement policy extraction.
 
 This plan supersedes the original 5-task architecture sketch. It reflects the current code shape after Tasks 1-38 and the current LOC audit.
 
@@ -20,11 +20,11 @@ Largest production files by physical line count:
 | File | Lines | Current problem |
 | --- | ---: | --- |
 | `main.py` | 7545 | still central, but Phase 1 target is met; remaining work should avoid using it as the only sink |
-| `probe_station_gui/route/measurement.py` | 2479 | route runner still coordinates route point orchestration and confirmation, but contact lifecycle/readout/recording policy are now separate modules |
-| `probe_station_gui/views/design_navigator_panel.py` | 3083 | plotting, route editing, tools, state enablement, and layout-window adapter live together |
 | `probe_station_gui/views/joystick_window.py` | 3059 | jog UI, keyboard handling, feedrate UI, serial commands, and panel state are coupled |
+| `probe_station_gui/route/measurement.py` | 2479 | route runner still coordinates route point orchestration and confirmation, but contact lifecycle/readout/recording policy are now separate modules |
 | `probe_station_gui/dialogs/route_measurement_dialog.py` | 2179 | Qt construction, profile persistence, runtime controls, histogram/raw data presentation mixed |
 | `probe_station_gui/instruments/meters/lcr.py` | 2010 | instrument worker, meter capabilities, polling, and route-meter adapter logic mixed |
+| `probe_station_gui/views/design_navigator_panel.py` | 1818 | route editing, tool state, enablement policy, and layout-window adapter remain; plot rendering is now isolated in `views/design_plot_pane.py` |
 | `probe_station_measure/instrument_drivers/Keithley/Keithley_2400_2182A.py` | 1698 | external driver wrapper likely needs an adapter/facade pass before editing internals |
 | `probe_station_gui/settings/manager.py` | 1660 | settings load/save/migration and section compatibility remain concentrated |
 | `probe_station_gui/dialogs/settings_dialog.py` | 1613 | settings UI still mirrors section knowledge |
@@ -83,7 +83,7 @@ Goal: after `main.py` is no longer the dominant blocker, reduce navigation cost 
 | Task | Scope | Current behavior | Structural improvement | Validation check | Target |
 | --- | --- | --- | --- | --- | --- |
 | 45 | `route/measurement.py` | Runner coordinated movement, autofocus, photo capture, contact placement, measurement reading, confirmation, and result recording. | Split route-contact lifecycle, contact readout/seek, and record/result policy while preserving `RouteMeasurementRunner` interface and route control semantics. | `tests/route/test_measurement.py`, route interrupt/autofocus/contact tests, full suite. | Completed: 45a extracted contact lifecycle (`measurement.py 3176 -> 2988 LOC`, Wily cyclomatic `520 -> 493`, runner `place_contact`/`prepare_external_contact` CC `11/10 -> 1/1`); 45b extracted contact measurement/readout/seek (`measurement.py 2988 -> 2650 LOC`, Wily SLOC `2775 -> 2445`, Wily cyclomatic `493 -> 417`, runner contact-readout helper CCs down to `1`, new `route/contact_measurement.py` 751 LOC / MI 17.18 / max CC 8); 45c extracted record/result policy (`measurement.py 2650 -> 2479 LOC`, Wily SLOC `2445 -> 2289`, Wily cyclomatic `417 -> 379`, new `route/measurement_recording.py` 211 LOC / MI 37.05 / max CC 8 / 100% coverage). Target passed: file is below 2500 lines, no lizard warnings in touched route slice. |
-| 46 | `views/design_navigator_panel.py` | Plot pane, route editing, tool state, enablement policy, and layout-window adapter are mixed. | Split plot rendering/tool policy from panel adapter; preserve signals and UI copy. | `tests/ui/test_design_navigator_panel.py`, design workflow/navigation tests, full suite. | File below 2300 lines; `_update_enabled_state` below warning threshold. |
+| 46 | `views/design_navigator_panel.py` | Plot pane, route editing, tool state, enablement policy, and layout-window adapter are mixed. | Split plot rendering/tool policy from panel adapter; preserve signals and UI copy. | `tests/ui/test_design_navigator_panel.py`, design workflow/navigation tests, full suite. | In progress: 46a extracted `_DesignPlotPane` to `views/design_plot_pane.py` (`design_navigator_panel.py 3083 -> 1818 LOC`, Wily SLOC `2848 -> 1670`, Wily cyclomatic `535 -> 251`; new plot module `1286 LOC`, Wily cyclomatic `284`). 46b remains: `_update_enabled_state` is still 92 NLOC / CCN 29 and must be split below warning threshold. |
 | 47 | `views/joystick_window.py` | Jog UI, keyboard controls, feedrate controls, serial command intent, and panel state are mixed. | Extract keyboard/jog presentation and feedrate sections into focused view helpers. | `tests/ui/test_joystick_feedrate.py`, key binding tests, stage jog command tests, full suite. | File below 2300 lines. |
 | 48 | `dialogs/route_measurement_dialog.py` | Qt construction, profile persistence, run controls, histogram/raw data display live together. | Split profile persistence and presentation modules; keep dialog as Qt adapter. | Route dialog/run UI tests and route measurement tests. | File below 1600 lines; histogram paint/control state helpers below warning threshold. |
 | 49 | `instruments/meters/lcr.py` | Worker scheduling, live polling, capabilities, and route-meter behavior are mixed. | Separate instrument worker lifecycle from meter capabilities and adapter code. | LCR worker/GW Instek/instrument tests, full suite. | File below 1400 lines. |
@@ -120,10 +120,10 @@ These are intentionally not part of the behavior-preserving refactor passes:
 
 ## Next Action
 
-Continue Task 46 from Phase 2:
+Continue Task 46b from Phase 2:
 
-1. Start with a read-only slice audit of `probe_station_gui/views/design_navigator_panel.py`.
-2. Identify one cohesive extraction that removes plot rendering/tool policy or layout-window adapter code without changing signals or UI copy.
-3. Add/update focused UI/design tests only where characterization is missing.
+1. Extract the `_update_enabled_state` decision logic from `probe_station_gui/views/design_navigator_panel.py` into a focused enablement helper/policy.
+2. Preserve existing enabled/disabled states, tooltips, and visible UI copy.
+3. Add or update focused characterization tests for key panel states before changing the logic shape.
 4. Run Wily metrics from a disposable UTF-8 temp clone/cache, full `pytest tests`, configured ruff, coverage, and lizard before each commit.
-5. Task 46 target remains `design_navigator_panel.py < 2300 LOC`; current line count is `3083`, so the remaining reduction target is at least `784 LOC`.
+5. Task 46 target is half-met: `design_navigator_panel.py < 2300 LOC` is achieved (`1818 LOC`), but `_update_enabled_state` must still fall below lizard warning threshold.
