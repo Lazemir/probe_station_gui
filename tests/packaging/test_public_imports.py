@@ -60,22 +60,28 @@ def test_public_import_paths_remain_available() -> None:
     from probe_station_gui import Grabber, JoystickWindow, StageController
     from probe_station_gui.dialogs.settings_dialog import (
         ControlsSettingsWidget,
+        CoordinateSystemSettingsWidget,
         FeedrateGroupEditor,
         FeedrateSettingsWidget,
         JogSettingsWidget,
         KeyBindingListEditor,
         KeyCaptureDialog,
+        MeasurementSettingsWidget,
+        ObjectivesSettingsWidget,
     )
 
     assert Grabber.__name__ == "Grabber"
     assert JoystickWindow.__name__ == "JoystickWindow"
     assert StageController.__name__ == "StageController"
     assert ControlsSettingsWidget.__name__ == "ControlsSettingsWidget"
+    assert CoordinateSystemSettingsWidget.__name__ == "CoordinateSystemSettingsWidget"
     assert FeedrateGroupEditor.__name__ == "FeedrateGroupEditor"
     assert FeedrateSettingsWidget.__name__ == "FeedrateSettingsWidget"
     assert JogSettingsWidget.__name__ == "JogSettingsWidget"
     assert KeyBindingListEditor.__name__ == "KeyBindingListEditor"
     assert KeyCaptureDialog.__name__ == "KeyCaptureDialog"
+    assert MeasurementSettingsWidget.__name__ == "MeasurementSettingsWidget"
+    assert ObjectivesSettingsWidget.__name__ == "ObjectivesSettingsWidget"
 
 
 def test_root_compatibility_wrappers_are_removed() -> None:
