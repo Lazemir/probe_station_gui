@@ -2,8 +2,8 @@
 
 Updated: 2026-06-28
 Branch: `codex/refactor-stage-controller`
-Current completed task: Task 45a, route contact lifecycle extraction.
-Active next task: Task 45b, route contact measurement/readout extraction.
+Current completed task: Task 45b, route contact measurement/readout extraction.
+Active next task: Task 45c, route record/result policy extraction.
 
 This plan supersedes the original 5-task architecture sketch. It reflects the current code shape after Tasks 1-38 and the current LOC audit.
 
@@ -20,7 +20,7 @@ Largest production files by physical line count:
 | File | Lines | Current problem |
 | --- | ---: | --- |
 | `main.py` | 7545 | still central, but Phase 1 target is met; remaining work should avoid using it as the only sink |
-| `probe_station_gui/route/measurement.py` | 3176 | route runner still mixes movement, autofocus, contact placement, measurement, confirmation, and artifacts |
+| `probe_station_gui/route/measurement.py` | 2650 | route runner still mixes route point orchestration, confirmation, result recording, and artifact policy |
 | `probe_station_gui/views/design_navigator_panel.py` | 3083 | plotting, route editing, tools, state enablement, and layout-window adapter live together |
 | `probe_station_gui/views/joystick_window.py` | 3059 | jog UI, keyboard handling, feedrate UI, serial commands, and panel state are coupled |
 | `probe_station_gui/dialogs/route_measurement_dialog.py` | 2179 | Qt construction, profile persistence, runtime controls, histogram/raw data presentation mixed |
@@ -36,7 +36,7 @@ Largest test files:
 | --- | ---: | --- |
 | `tests/app/test_main_coordinate_feedrate.py` | 6585 | multiple `Main` adapter suites in one file |
 | `tests/stage/test_controller.py` | 4056 | stage controller behavior tests not split by module responsibility |
-| `tests/route/test_measurement.py` | 3863 | route runner characterization is monolithic |
+| `tests/route/test_measurement.py` | 3978 | route runner characterization is monolithic |
 | `tests/instruments/meters/test_lcr.py` | 1251 | LCR worker/capability/adapter tests mixed |
 
 ## Global Rules
@@ -82,7 +82,7 @@ Goal: after `main.py` is no longer the dominant blocker, reduce navigation cost 
 
 | Task | Scope | Current behavior | Structural improvement | Validation check | Target |
 | --- | --- | --- | --- | --- | --- |
-| 45 | `route/measurement.py` | Runner still coordinates movement, autofocus, photo capture, contact placement, measurement reading, confirmation, and result recording. | Split remaining runner internals by route-contact lifecycle and artifact/result recording while preserving `RouteMeasurementRunner` interface. | `tests/route/test_measurement.py`, route interrupt/autofocus/contact tests, full suite. | In progress: 45a extracted contact lifecycle (`measurement.py 3176 -> 2988 LOC`, Wily cyclomatic `520 -> 493`, runner `place_contact`/`prepare_external_contact` CC `11/10 -> 1/1`). Continue until file is below 2500 lines and warning-level runner helpers are removed. |
+| 45 | `route/measurement.py` | Runner still coordinates movement, autofocus, photo capture, contact placement, measurement reading, confirmation, and result recording. | Split remaining runner internals by route-contact lifecycle and artifact/result recording while preserving `RouteMeasurementRunner` interface. | `tests/route/test_measurement.py`, route interrupt/autofocus/contact tests, full suite. | In progress: 45a extracted contact lifecycle (`measurement.py 3176 -> 2988 LOC`, Wily cyclomatic `520 -> 493`, runner `place_contact`/`prepare_external_contact` CC `11/10 -> 1/1`); 45b extracted contact measurement/readout/seek (`measurement.py 2988 -> 2650 LOC`, Wily SLOC `2775 -> 2445`, Wily cyclomatic `493 -> 417`, runner contact-readout helper CCs down to `1`, new `route/contact_measurement.py` 751 LOC / MI 17.18 / max CC 8). Continue until file is below 2500 lines and warning-level runner helpers are removed. |
 | 46 | `views/design_navigator_panel.py` | Plot pane, route editing, tool state, enablement policy, and layout-window adapter are mixed. | Split plot rendering/tool policy from panel adapter; preserve signals and UI copy. | `tests/ui/test_design_navigator_panel.py`, design workflow/navigation tests, full suite. | File below 2300 lines; `_update_enabled_state` below warning threshold. |
 | 47 | `views/joystick_window.py` | Jog UI, keyboard controls, feedrate controls, serial command intent, and panel state are mixed. | Extract keyboard/jog presentation and feedrate sections into focused view helpers. | `tests/ui/test_joystick_feedrate.py`, key binding tests, stage jog command tests, full suite. | File below 2300 lines. |
 | 48 | `dialogs/route_measurement_dialog.py` | Qt construction, profile persistence, run controls, histogram/raw data display live together. | Split profile persistence and presentation modules; keep dialog as Qt adapter. | Route dialog/run UI tests and route measurement tests. | File below 1600 lines; histogram paint/control state helpers below warning threshold. |
@@ -122,8 +122,9 @@ These are intentionally not part of the behavior-preserving refactor passes:
 
 Continue Task 45 from Phase 2:
 
-1. Task 45b: extract contact measurement/readout/seek engine from `RouteMeasurementRunner` without moving pause/confirmation consumption.
-2. Keep `RouteMeasurementRunner` public methods stable.
-3. Add or update characterization tests before moving contact seek/readout paths.
-4. Run Wily metrics from a disposable UTF-8 temp clone/cache, full `pytest tests`, configured ruff, coverage, and lizard before each commit.
-5. Task 45 target remains `route/measurement.py < 2500 LOC`; after 45a it is `2988 LOC`, so remaining reduction target is at least `489 LOC`.
+1. Task 45c: extract route record/result policy helpers from `RouteMeasurementRunner` without moving pause/confirmation consumption or CSV callback ordering.
+2. Candidate helpers: `_record_for_point`, `_record_exceeds_quality_limit`, `_record_has_failed_contact_quality`, `_contact_placement_record_is_success`, `_should_save_exhausted_bad_contact`, `_contact_quality_failure_suffix`, and `_contact_placement_message`.
+3. Keep `RouteMeasurementRunner` public methods stable and keep existing private runner helper names as facades where tests or adjacent code already exercise them.
+4. Add or update characterization tests before moving artifact/result policy paths.
+5. Run Wily metrics from a disposable UTF-8 temp clone/cache, full `pytest tests`, configured ruff, coverage, and lizard before each commit.
+6. Task 45 target remains `route/measurement.py < 2500 LOC`; after 45b it is `2650 LOC`, so remaining reduction target is at least `151 LOC`.

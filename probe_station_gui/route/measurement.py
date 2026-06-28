@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import csv
-import inspect
 import logging
 import math
 import threading
@@ -17,16 +16,14 @@ from probe_station_gui.route.contact_quality import (
     RouteContactQuality,
     RouteContactQualityLimits,
     RouteMeasurementSample,
-    _contact_quality_from_samples,
     _format_contact_quality_failure,
-    _measurement_sample_from_raw,
     route_measurement_sample_from_raw,
     summarize_route_contact_quality,
 )
 from probe_station_gui.route import contact_lifecycle
+from probe_station_gui.route import contact_measurement
 from probe_station_gui.route.contact_seek import (
     ContactSeekAttempt,
-    contact_seek_attempts,
     normalize_contact_seek_limit,
     normalize_contact_seek_step,
 )
@@ -72,25 +69,6 @@ from probe_station_gui.route.shift import route_shift_from_stage_xy
 
 
 logger = logging.getLogger(__name__)
-
-
-def _callable_accepts_keyword(function: object, name: str) -> bool:
-    try:
-        signature = inspect.signature(function)
-    except (TypeError, ValueError):
-        return False
-    keyword_kinds = {
-        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-        inspect.Parameter.KEYWORD_ONLY,
-    }
-    return any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD
-        or (
-            parameter.name == name
-            and parameter.kind in keyword_kinds
-        )
-        for parameter in signature.parameters.values()
-    )
 
 
 class _BackgroundRouteTask:
@@ -172,28 +150,6 @@ class _RoutePointMeasurementState:
     save_exhausted_bad_contact: bool = False
     measurements_saved: int = 0
     stop_message: str | None = None
-
-
-@dataclass(frozen=True)
-class _ResistanceStats:
-    count: int
-    mean_ohm: float
-    rms_ohm: float
-    relative_rms: float
-    complete_finite_batch: bool
-
-
-@dataclass(frozen=True)
-class _ContactSeekAttemptMeasurement:
-    samples: list[RouteMeasurementSample]
-    axis_a_lowering_mm: float
-
-
-@dataclass(frozen=True)
-class _ContactSeekAttemptResolution:
-    samples: list[RouteMeasurementSample] | None
-    final_status: str
-    found: bool = False
 
 
 class RouteMeasurementRunner:
@@ -2050,7 +2006,10 @@ class RouteMeasurementRunner:
         source_list_count = self._source_list_prepare_count(count)
 
         def prepare() -> None:
-            if _callable_accepts_keyword(preparer, "source_list_count"):
+            if contact_measurement.callable_accepts_keyword(
+                preparer,
+                "source_list_count",
+            ):
                 preparer(count, source_list_count=source_list_count)
             else:
                 preparer(count)
@@ -2121,45 +2080,11 @@ class RouteMeasurementRunner:
         prepare_task: _BackgroundRouteTask | None = None,
         after_measurement: Callable[[], object] | None = None,
     ) -> list[RouteMeasurementSample] | None:
-        self._current_contact_seek_result = None
-        initial_count = self._initial_measurement_count()
-        initial_after_measurement = (
-            after_measurement if self._measurement_count <= initial_count else None
-        )
-        samples = self._read_measurement_samples(
-            initial_count,
-            start_index=1,
-            prepare_task=prepare_task,
-            after_measurement=initial_after_measurement,
-        )
-        if samples is None:
-            return None
-        if not self._auto_contact_seek_on_bad_contact or self._samples_are_short(samples):
-            return self._complete_measurement_samples(
-                samples,
-                after_measurement=after_measurement,
-            )
-        if self._samples_have_bad_contact(samples):
-            return self._seek_contact_from_current_position(
-                initial_samples=samples,
-                position=position,
-                total=total,
-                after_measurement=after_measurement,
-            )
-        completed_samples = self._complete_measurement_samples(
-            samples,
-            after_measurement=after_measurement,
-        )
-        if (
-            completed_samples is None
-            or self._completed_measurement_is_acceptable(completed_samples)
-        ):
-            return completed_samples
-        return self._seek_contact_from_current_position(
-            initial_samples=completed_samples,
+        return contact_measurement.measure_samples(
+            self,
             position=position,
             total=total,
-            skip_current_depth=True,
+            prepare_task=prepare_task,
             after_measurement=after_measurement,
         )
 
@@ -2169,22 +2094,11 @@ class RouteMeasurementRunner:
         *,
         after_measurement: Callable[[], object] | None = None,
     ) -> list[RouteMeasurementSample] | None:
-        remaining_count = self._measurement_count - len(samples)
-        if (
-            remaining_count <= 0
-            or self._samples_are_short(samples)
-            or self._samples_have_bad_contact(samples)
-        ):
-            return samples
-        extra_samples = self._read_measurement_samples(
-            remaining_count,
-            start_index=len(samples) + 1,
-            prepare_task=self._start_measurement_prepare_task(remaining_count),
+        return contact_measurement.complete_measurement_samples(
+            self,
+            samples,
             after_measurement=after_measurement,
         )
-        if extra_samples is None:
-            return None
-        return samples + extra_samples
 
     def _seek_contact_from_current_position(
         self,
@@ -2195,46 +2109,14 @@ class RouteMeasurementRunner:
         skip_current_depth: bool = False,
         after_measurement: Callable[[], object] | None = None,
     ) -> list[RouteMeasurementSample] | None:
-        if self._auto_contact_seek_max_total_mm <= 0.0:
-            return initial_samples
-        lower_to_depth = getattr(
-            self._stage_controller,
-            "run_external_needles_lower_to_depth_below_down",
-            None,
+        return contact_measurement.seek_contact_from_current_position(
+            self,
+            initial_samples=initial_samples,
+            position=position,
+            total=total,
+            skip_current_depth=skip_current_depth,
+            after_measurement=after_measurement,
         )
-        adjust = getattr(self._stage_controller, "run_external_needles_adjust", None)
-        if not callable(lower_to_depth) and not callable(adjust):
-            return initial_samples
-        initial_quality = self._contact_quality_from_samples(initial_samples)
-        if skip_current_depth:
-            self._status(
-                f"Route measurement: point {position}/{total} full measurement "
-                f"rejected after contact check {initial_quality.status}; "
-                "trying deeper contact up to "
-                f"{self._auto_contact_seek_max_total_mm:.3f} mm."
-            )
-        else:
-            self._status(
-                f"Route measurement: point {position}/{total} contact check "
-                f"{initial_quality.status}, "
-                f"median={_format_ohm(initial_quality.median_ohm)}, "
-                f"MAD={_format_ohm(initial_quality.mad_sigma_ohm)}"
-                f"{self._contact_quality_failure_suffix(initial_quality)}; "
-                "seeking contact up to "
-                f"{self._auto_contact_seek_max_total_mm:.3f} mm."
-            )
-        self._contact_seek_active.set()
-        try:
-            return self._run_contact_seek_attempts(
-                initial_samples=initial_samples,
-                initial_quality=initial_quality,
-                position=position,
-                total=total,
-                lower_to_depth=lower_to_depth,
-                adjust=adjust,
-            )
-        finally:
-            self._contact_seek_active.clear()
 
     def _run_contact_seek_attempts(
         self,
@@ -2246,79 +2128,15 @@ class RouteMeasurementRunner:
         lower_to_depth: Callable[..., object] | None,
         adjust: Callable[..., object] | None,
     ) -> list[RouteMeasurementSample] | None:
-        step_mm = self._auto_contact_seek_step_mm
-        samples = initial_samples
-        attempts = contact_seek_attempts(
-            step_mm,
-            self._auto_contact_seek_max_total_mm,
+        return contact_measurement.run_contact_seek_attempts(
+            self,
+            initial_samples=initial_samples,
+            initial_quality=initial_quality,
+            position=position,
+            total=total,
+            lower_to_depth=lower_to_depth,
+            adjust=adjust,
         )
-        attempts_completed = 0
-        last_depth_mm = math.nan
-        last_axis_a_lowering_mm = math.nan
-        last_status = initial_quality.status
-        for attempt in attempts:
-            if self._route_point_stop_requested():
-                return None
-            self._status(
-                f"Route measurement: point {position}/{total} "
-                f"pressing deeper {attempt.attempt_number}/{attempt.max_attempts}, "
-                f"{attempt.depth_mm:.4f} mm below down."
-            )
-            prepare_task = self._start_measurement_prepare_task(
-                self._initial_measurement_count()
-            )
-            if self._route_point_stop_requested():
-                return None
-            if not self._press_contact_seek_attempt(
-                attempt,
-                lower_to_depth=lower_to_depth,
-                adjust=adjust,
-            ):
-                return initial_samples
-            if self._route_point_stop_requested():
-                return None
-            attempts_completed += 1
-            last_depth_mm = float(attempt.depth_mm)
-            measurement = self._read_contact_seek_attempt_measurement(prepare_task)
-            if measurement is None:
-                return None
-            last_axis_a_lowering_mm = measurement.axis_a_lowering_mm
-            depth_label = f"{attempt.depth_mm:.4f} mm below down"
-            resolution = self._resolve_contact_seek_attempt(
-                samples=measurement.samples,
-                depth_label=depth_label,
-                position=position,
-                total=total,
-            )
-            if resolution.samples is None:
-                return None
-            samples = resolution.samples
-            last_status = resolution.final_status
-            if resolution.found:
-                self._set_contact_seek_result(
-                    found=True,
-                    status="found" if last_status != "short" else "short",
-                    attempts=attempts_completed,
-                    initial_status=initial_quality.status,
-                    final_status=last_status,
-                    depth_below_down_mm=attempt.depth_mm,
-                    axis_a_lowering_mm=last_axis_a_lowering_mm,
-                )
-                return samples
-        self._status(
-            f"Route measurement: point {position}/{total} contact seek did not "
-            f"find stable contact within {self._auto_contact_seek_max_total_mm:.3f} mm."
-        )
-        self._set_contact_seek_result(
-            found=False,
-            status="not_found",
-            attempts=attempts_completed,
-            initial_status=initial_quality.status,
-            final_status=last_status,
-            depth_below_down_mm=last_depth_mm,
-            axis_a_lowering_mm=last_axis_a_lowering_mm,
-        )
-        return samples
 
     def _press_contact_seek_attempt(
         self,
@@ -2327,34 +2145,20 @@ class RouteMeasurementRunner:
         lower_to_depth: Callable[..., object] | None,
         adjust: Callable[..., object] | None,
     ) -> bool:
-        if attempt.depth_mm > 0.0 and callable(lower_to_depth):
-            lower_to_depth(attempt.depth_mm, self._needle_feedrate)
-            return True
-        if callable(adjust):
-            adjust(
-                attempt.adjust_delta_mm(self._auto_contact_seek_step_mm),
-                self._needle_feedrate,
-            )
-            return True
-        return False
+        return contact_measurement.press_contact_seek_attempt(
+            self,
+            attempt,
+            lower_to_depth=lower_to_depth,
+            adjust=adjust,
+        )
 
     def _read_contact_seek_attempt_measurement(
         self,
         prepare_task: _BackgroundRouteTask | None,
-    ) -> _ContactSeekAttemptMeasurement | None:
-        if not self._sleep_contact_settle():
-            return None
-        axis_a_lowering_mm = self._latest_axis_a_lowering()
-        samples = self._read_measurement_samples(
-            self._initial_measurement_count(),
-            start_index=1,
-            prepare_task=prepare_task,
-        )
-        if samples is None:
-            return None
-        return _ContactSeekAttemptMeasurement(
-            samples=samples,
-            axis_a_lowering_mm=axis_a_lowering_mm,
+    ) -> contact_measurement.ContactSeekAttemptMeasurement | None:
+        return contact_measurement.read_contact_seek_attempt_measurement(
+            self,
+            prepare_task,
         )
 
     def _resolve_contact_seek_attempt(
@@ -2364,73 +2168,13 @@ class RouteMeasurementRunner:
         depth_label: str,
         position: int,
         total: int,
-    ) -> _ContactSeekAttemptResolution:
-        if self._samples_are_short(samples):
-            self._status(
-                f"Route measurement: point {position}/{total} "
-                f"{depth_label}, short-circuit detected."
-            )
-            return _ContactSeekAttemptResolution(
-                samples=samples,
-                final_status="short",
-                found=True,
-            )
-        quality = self._contact_quality_from_samples(samples)
-        self._status(
-            f"Route measurement: point {position}/{total} "
-            f"{depth_label}, {quality.status}, "
-            f"median={_format_ohm(quality.median_ohm)}, "
-            f"MAD={_format_ohm(quality.mad_sigma_ohm)}"
-            f"{self._contact_quality_failure_suffix(quality)}."
-        )
-        if quality.good is False:
-            return _ContactSeekAttemptResolution(
-                samples=samples,
-                final_status=quality.status,
-            )
-        completed_samples = self._complete_measurement_samples(samples)
-        if completed_samples is None:
-            return _ContactSeekAttemptResolution(
-                samples=None,
-                final_status=quality.status,
-            )
-        if self._completed_measurement_is_acceptable(completed_samples):
-            return _ContactSeekAttemptResolution(
-                samples=completed_samples,
-                final_status=self._contact_status_for_samples(completed_samples),
-                found=True,
-            )
-        if self._samples_have_bad_contact(completed_samples):
-            full_quality = self._contact_quality_from_samples(completed_samples)
-            self._status(
-                f"Route measurement: point {position}/{total} full "
-                f"measurement at {depth_label} failed contact check "
-                f"({full_quality.status}, "
-                f"median={_format_ohm(full_quality.median_ohm)}, "
-                f"MAD={_format_ohm(full_quality.mad_sigma_ohm)}"
-                f"{self._contact_quality_failure_suffix(full_quality)}); "
-                "trying deeper."
-            )
-            return _ContactSeekAttemptResolution(
-                samples=completed_samples,
-                final_status=full_quality.status,
-            )
-        if self._samples_exceed_relative_rms_limit(completed_samples):
-            relative_rms = self._relative_rms_from_samples(completed_samples)
-            self._status(
-                f"Route measurement: point {position}/{total} full "
-                f"measurement at {depth_label} relative RMS "
-                f"{_format_percent(relative_rms)} exceeds "
-                f"{_format_percent(self._max_relative_rms or math.nan)}; "
-                "trying deeper."
-            )
-            return _ContactSeekAttemptResolution(
-                samples=completed_samples,
-                final_status="unstable",
-            )
-        return _ContactSeekAttemptResolution(
-            samples=completed_samples,
-            final_status=quality.status,
+    ) -> contact_measurement.ContactSeekAttemptResolution:
+        return contact_measurement.resolve_contact_seek_attempt(
+            self,
+            samples=samples,
+            depth_label=depth_label,
+            position=position,
+            total=total,
         )
 
     def _set_contact_seek_result(
@@ -2444,27 +2188,19 @@ class RouteMeasurementRunner:
         depth_below_down_mm: float,
         axis_a_lowering_mm: float,
     ) -> None:
-        self._current_contact_seek_result = RouteContactSeekResult(
-            found=bool(found),
-            status=str(status),
-            attempts=max(0, int(attempts)),
-            initial_status=str(initial_status),
-            final_status=str(final_status),
-            depth_below_down_mm=float(depth_below_down_mm),
-            axis_a_lowering_mm=float(axis_a_lowering_mm),
-            step_mm=abs(float(self._auto_contact_seek_step_mm)),
-            max_depth_mm=float(self._auto_contact_seek_max_total_mm),
+        contact_measurement.set_contact_seek_result(
+            self,
+            found=found,
+            status=status,
+            attempts=attempts,
+            initial_status=initial_status,
+            final_status=final_status,
+            depth_below_down_mm=depth_below_down_mm,
+            axis_a_lowering_mm=axis_a_lowering_mm,
         )
 
     def _latest_axis_a_lowering(self) -> float:
-        getter = getattr(self._stage_controller, "latest_axis_a_lowering", None)
-        if not callable(getter):
-            return math.nan
-        try:
-            value = float(getter())
-        except (TypeError, ValueError):
-            return math.nan
-        return value if math.isfinite(value) else math.nan
+        return contact_measurement.latest_axis_a_lowering(self)
 
     def _contact_height_record_for_point(
         self,
@@ -2509,82 +2245,46 @@ class RouteMeasurementRunner:
         self,
         samples: list[RouteMeasurementSample] | tuple[RouteMeasurementSample, ...],
     ) -> str:
-        if self._samples_are_short(samples):
-            return "short"
-        return self._contact_quality_from_samples(samples).status
+        return contact_measurement.contact_status_for_samples(self, samples)
 
     def _completed_measurement_is_acceptable(
         self,
         samples: list[RouteMeasurementSample],
     ) -> bool:
-        if self._samples_are_short(samples):
-            return True
-        if self._samples_have_bad_contact(samples):
-            return False
-        return not self._samples_exceed_relative_rms_limit(samples)
+        return contact_measurement.completed_measurement_is_acceptable(
+            self,
+            samples,
+        )
 
     def _samples_exceed_relative_rms_limit(
         self,
         samples: list[RouteMeasurementSample],
     ) -> bool:
-        if self._max_relative_rms is None:
-            return False
-        relative_rms = self._relative_rms_from_samples(samples)
-        return (
-            math.isfinite(relative_rms)
-            and relative_rms > self._max_relative_rms
+        return contact_measurement.samples_exceed_relative_rms_limit(
+            self,
+            samples,
         )
 
     @staticmethod
     def _relative_rms_from_samples(samples: list[RouteMeasurementSample]) -> float:
-        return RouteMeasurementRunner._resistance_stats_from_samples(samples).relative_rms
+        return contact_measurement.relative_rms_from_samples(samples)
 
     def _record_status_for_samples(
         self,
         samples: list[RouteMeasurementSample],
         contact_quality: RouteContactQuality,
     ) -> str:
-        if self._samples_are_short(samples):
-            return "short"
-        if contact_quality.good is False:
-            return "bad_contact"
-        return "ok"
+        return contact_measurement.record_status_for_samples(
+            self,
+            samples,
+            contact_quality,
+        )
 
     @staticmethod
     def _resistance_stats_from_samples(
         samples: list[RouteMeasurementSample],
-    ) -> _ResistanceStats:
-        resistances_ohm = tuple(
-            sample.differential_resistance_ohm for sample in samples
-        )
-        finite_resistances = tuple(
-            float(value) for value in resistances_ohm if math.isfinite(value)
-        )
-        if len(finite_resistances) != len(resistances_ohm) or not finite_resistances:
-            return _ResistanceStats(
-                count=len(resistances_ohm),
-                mean_ohm=math.inf,
-                rms_ohm=math.nan,
-                relative_rms=math.nan,
-                complete_finite_batch=False,
-            )
-        mean_resistance = sum(finite_resistances) / len(finite_resistances)
-        variance = sum(
-            (value - mean_resistance) ** 2 for value in finite_resistances
-        ) / len(finite_resistances)
-        rms_resistance = math.sqrt(variance)
-        relative_rms = (
-            rms_resistance / abs(mean_resistance)
-            if mean_resistance
-            else math.nan
-        )
-        return _ResistanceStats(
-            count=len(resistances_ohm),
-            mean_ohm=mean_resistance,
-            rms_ohm=rms_resistance,
-            relative_rms=relative_rms,
-            complete_finite_batch=True,
-        )
+    ) -> contact_measurement.ResistanceStats:
+        return contact_measurement.resistance_stats_from_samples(samples)
 
     def _initial_measurement_count(self) -> int:
         return min(self._measurement_count, self._initial_measurement_count_value)
@@ -2597,51 +2297,16 @@ class RouteMeasurementRunner:
         prepare_task: _BackgroundRouteTask | None = None,
         after_measurement: Callable[[], object] | None = None,
     ) -> list[RouteMeasurementSample] | None:
-        count = max(0, int(count))
-        if count <= 0:
-            return []
-        if prepare_task is not None:
-            prepare_task.wait()
-        batch_reader = getattr(
-            self._lcr_controller,
-            "read_route_measurement_batch_now",
-            None,
+        return contact_measurement.read_measurement_samples(
+            self,
+            count,
+            start_index=start_index,
+            prepare_task=prepare_task,
+            after_measurement=after_measurement,
         )
-        if callable(batch_reader) and count > 1:
-            if self._route_point_stop_requested():
-                return None
-            if (
-                after_measurement is not None
-                and _callable_accepts_keyword(batch_reader, "after_measurement")
-            ):
-                raw_batch = list(
-                    batch_reader(count, after_measurement=after_measurement)
-                )
-            else:
-                raw_batch = list(batch_reader(count))
-            samples = [
-                _measurement_sample_from_raw(raw, index)
-                for index, raw in enumerate(raw_batch, start=start_index)
-            ]
-            if self._route_point_stop_requested():
-                return None
-            return samples
-        samples: list[RouteMeasurementSample] = []
-        for index in range(start_index, start_index + count):
-            if self._route_point_stop_requested():
-                return None
-            samples.append(self._read_measurement_sample(index))
-            if self._route_point_stop_requested():
-                return None
-        return samples
 
     def _read_measurement_sample(self, sample_index: int) -> RouteMeasurementSample:
-        reader = getattr(self._lcr_controller, "read_route_measurement_now", None)
-        if callable(reader):
-            raw = reader()
-        else:
-            raw = self._lcr_controller.read_primary_value_now()
-        return _measurement_sample_from_raw(raw, sample_index)
+        return contact_measurement.read_measurement_sample(self, sample_index)
 
     def _wait_before_first_route_point(
         self,
@@ -2844,16 +2509,13 @@ class RouteMeasurementRunner:
         self,
         samples: list[RouteMeasurementSample] | tuple[RouteMeasurementSample, ...],
     ) -> bool:
-        return any(sample.compliance_hit for sample in samples)
+        return contact_measurement.samples_are_short(samples)
 
     def _contact_quality_from_samples(
         self,
         samples: list[RouteMeasurementSample] | tuple[RouteMeasurementSample, ...],
     ) -> RouteContactQuality:
-        return _contact_quality_from_samples(
-            samples,
-            contact_quality_limits=self._contact_quality_limits,
-        )
+        return contact_measurement.contact_quality_from_samples(self, samples)
 
     def _contact_quality_failure_suffix(self, quality: RouteContactQuality) -> str:
         detail = _format_contact_quality_failure(
@@ -2899,7 +2561,7 @@ class RouteMeasurementRunner:
         self,
         samples: list[RouteMeasurementSample] | tuple[RouteMeasurementSample, ...],
     ) -> bool:
-        return self._contact_quality_from_samples(samples).good is False
+        return contact_measurement.samples_have_bad_contact(self, samples)
 
 
 __all__ = [

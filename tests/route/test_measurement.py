@@ -2218,6 +2218,53 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
         )
         self.assertEqual([call for call in stage.calls if call[0] == "adjust"], [])
 
+    def test_stop_during_auto_contact_seek_readout_writes_no_csv_row(self) -> None:
+        point = _point(1)
+        stage = _FakeStage()
+        runner_holder: dict[str, RouteMeasurementRunner] = {}
+
+        def stop_on_second_batch(batch_number: int) -> None:
+            if batch_number == 2:
+                runner_holder["runner"].stop()
+
+        lcr = _PausingBatchRouteLCR(
+            [
+                {"differential_resistance_ohm": value}
+                for value in (200000.0, 210000.0, 1000.0, 1001.0)
+            ],
+            stop_on_second_batch,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "route.csv"
+            runner = RouteMeasurementRunner(
+                points=[point],
+                csv_path=csv_path,
+                stage_controller=stage,
+                lcr_controller=lcr,
+                needle_feedrate=75.0,
+                measurement_count=2,
+                initial_measurement_count=2,
+                auto_contact_seek_on_bad_contact=True,
+                contact_settle_s=0.0,
+            )
+            runner_holder["runner"] = runner
+
+            success, message = runner.run()
+
+            self.assertFalse(success)
+            self.assertEqual(message, "Route measurement stopped by user.")
+            self.assertEqual(_read_csv_rows_if_exists(csv_path), [])
+
+        depth_index = stage.calls.index(("lower_to_depth", 0.001, 75.0))
+        final_lift_index = next(
+            index
+            for index, call in enumerate(stage.calls)
+            if index > depth_index and call == ("needles", "lift", 75.0)
+        )
+        self.assertLess(depth_index, final_lift_index)
+        self.assertEqual(stage.calls[-1], ("finish",))
+
     def test_place_contact_reuses_contact_seek_without_csv_and_leaves_needles_down(
         self,
     ) -> None:
