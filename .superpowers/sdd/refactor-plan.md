@@ -11,7 +11,7 @@ This plan supersedes the original 5-task architecture sketch. It reflects the cu
 
 `main.py`:
 
-- `radon raw main.py`: `LOC 7720`, `SLOC 7172`
+- `radon raw main.py`: `LOC 7545`, `SLOC 6997`
 - baseline before the current Phase 1 contract: `LOC 8948`, `SLOC 8400`
 - Binding target contract: `.superpowers/sdd/main-loc-contract.md`
 
@@ -19,25 +19,25 @@ Largest production files by physical line count:
 
 | File | Lines | Current problem |
 | --- | ---: | --- |
-| `main.py` | 8410 | central Qt/API/stage/route adapter still owns too many workflows |
-| `probe_station_gui/route/measurement.py` | 2978 | route runner still mixes movement, autofocus, contact placement, measurement, confirmation, and artifacts |
-| `probe_station_gui/views/design_navigator_panel.py` | 2861 | plotting, route editing, tools, state enablement, and layout-window adapter live together |
-| `probe_station_gui/views/joystick_window.py` | 2832 | jog UI, keyboard handling, feedrate UI, serial commands, and panel state are coupled |
-| `probe_station_gui/dialogs/route_measurement_dialog.py` | 1992 | Qt construction, profile persistence, runtime controls, histogram/raw data presentation mixed |
-| `probe_station_gui/instruments/meters/lcr.py` | 1853 | instrument worker, meter capabilities, polling, and route-meter adapter logic mixed |
-| `probe_station_measure/instrument_drivers/Keithley/Keithley_2400_2182A.py` | 1538 | external driver wrapper likely needs an adapter/facade pass before editing internals |
-| `probe_station_gui/settings/manager.py` | 1498 | settings load/save/migration and section compatibility remain concentrated |
-| `probe_station_gui/dialogs/settings_dialog.py` | 1433 | settings UI still mirrors section knowledge |
-| `probe_station_gui/views/microscope_view.py` | 1431 | rendering, overlay state, minimap, input handling, and zoom behavior mixed |
+| `main.py` | 7545 | still central, but Phase 1 target is met; remaining work should avoid using it as the only sink |
+| `probe_station_gui/route/measurement.py` | 3176 | route runner still mixes movement, autofocus, contact placement, measurement, confirmation, and artifacts |
+| `probe_station_gui/views/design_navigator_panel.py` | 3083 | plotting, route editing, tools, state enablement, and layout-window adapter live together |
+| `probe_station_gui/views/joystick_window.py` | 3059 | jog UI, keyboard handling, feedrate UI, serial commands, and panel state are coupled |
+| `probe_station_gui/dialogs/route_measurement_dialog.py` | 2179 | Qt construction, profile persistence, runtime controls, histogram/raw data presentation mixed |
+| `probe_station_gui/instruments/meters/lcr.py` | 2010 | instrument worker, meter capabilities, polling, and route-meter adapter logic mixed |
+| `probe_station_measure/instrument_drivers/Keithley/Keithley_2400_2182A.py` | 1698 | external driver wrapper likely needs an adapter/facade pass before editing internals |
+| `probe_station_gui/settings/manager.py` | 1660 | settings load/save/migration and section compatibility remain concentrated |
+| `probe_station_gui/dialogs/settings_dialog.py` | 1613 | settings UI still mirrors section knowledge |
+| `probe_station_gui/views/microscope_view.py` | 1567 | rendering, overlay state, minimap, input handling, and zoom behavior mixed |
 
 Largest test files:
 
 | File | Lines | Current problem |
 | --- | ---: | --- |
-| `tests/app/test_main_coordinate_feedrate.py` | 5763 | multiple `Main` adapter suites in one file |
-| `tests/stage/test_controller.py` | 3524 | stage controller behavior tests not split by module responsibility |
-| `tests/route/test_measurement.py` | 3436 | route runner characterization is monolithic |
-| `tests/instruments/meters/test_lcr.py` | 1072 | LCR worker/capability/adapter tests mixed |
+| `tests/app/test_main_coordinate_feedrate.py` | 6585 | multiple `Main` adapter suites in one file |
+| `tests/stage/test_controller.py` | 4056 | stage controller behavior tests not split by module responsibility |
+| `tests/route/test_measurement.py` | 3863 | route runner characterization is monolithic |
+| `tests/instruments/meters/test_lcr.py` | 1251 | LCR worker/capability/adapter tests mixed |
 
 ## Global Rules
 
@@ -67,9 +67,9 @@ Contract: `.superpowers/sdd/main-loc-contract.md`
 | 41 | Microscope scan workflow | `Main` owns scan start, run loop, settle, tile capture, mosaic save, manifest write, finish UI. | Move scan planning/filesystem payload helpers into a microscope scan module; keep thread/Qt updates in `Main`. | Existing microscope scan/app tests plus new pure tests for manifest/tile payloads. | Completed as LOC-gate exception: `8371 LOC`; Wily cyclomatic `1591 -> 1587`. |
 | 42 | Contact seek and saved positions | `Main` owns contact seek request/run/finish plus saved needle/surface/sample position helpers. | Extract contact seek presentation/result planning, saved-position payload helpers, and sample handling stage sequences while preserving owner-level tunables. | Contact seek/app tests, stage needle settings tests, full suite. | Completed: `main.py 8371 -> 7961 LOC`; Wily cyclomatic `1587 -> 1502`; target passed. |
 | 43 | Serial/controller connection UI flow | `Main` owns serial connected/disconnected, auto-connect, startup sync, reboot recovery, feedrate preferences, controller-state persistence glue. | Move connection-state UI orchestration into a main-window adapter module; keep actual serial/stage behavior unchanged. | Serial connection/terminal/stage controller tests, app smoke, full suite. | Completed: `main.py 7961 -> 7720 LOC`; Wily cyclomatic `1502 -> 1451`; target passed. |
-| 44 | Route/UI residue cleanup | Many thin `Main` wrappers remain after route/design/API/Telegram/objective extraction. | Delete/consolidate wrappers that no longer add locality; move cohesive adapter groups to existing modules. | Full route/app/API/Telegram/design focused suites, full suite. | `main.py <= 7550 LOC`. |
+| 44 | Route/UI residue cleanup | Many thin `Main` wrappers remain after route/design/API/Telegram/objective extraction. | Delete/consolidate wrappers that no longer add locality; move cohesive adapter groups to existing modules. | Full route/app/API/Telegram/design focused suites, full suite. | Completed: `main.py 7720 -> 7545 LOC`; Wily cyclomatic `1451 -> 1385`; target passed. |
 
-Phase 1 is complete only when:
+Phase 1 is complete:
 
 - `main.py <= 7550 LOC` by `radon raw`;
 - Wily `main.py` cyclomatic is below the `19ccb0b` baseline;
@@ -95,7 +95,7 @@ Goal: test files should be navigable by responsibility. This is not cosmetic: re
 
 | Task | Scope | Current behavior | Structural improvement | Validation check | Target |
 | --- | --- | --- | --- | --- | --- |
-| 51 | `tests/app/test_main_coordinate_feedrate.py` | Many unrelated `Main` adapter behaviors live in one 5763-line file. | Split by feature area: API coordinate moves, route API, manual jog prediction, stage panel, route control, Telegram/app adapter. | Run split files plus full suite; ensure no shared fixture behavior changes. | No app test file above 1800 lines. |
+| 51 | `tests/app/test_main_coordinate_feedrate.py` | Many unrelated `Main` adapter behaviors live in one 6585-line file. | Split by feature area: API coordinate moves, route API, manual jog prediction, stage panel, route control, Telegram/app adapter. | Run split files plus full suite; ensure no shared fixture behavior changes. | No app test file above 1800 lines. |
 | 52 | `tests/stage/test_controller.py` | Stage controller tests are not split by current module responsibilities. | Split by controller seam: status/session, motion commands, needle actions, connection state, cache/import. | Stage test subset and full suite. | No stage controller test file above 1600 lines. |
 | 53 | `tests/route/test_measurement.py` | Route runner characterization is monolithic. | Split by lifecycle: start/finish, contact seek/placement, interrupt/pause, recording/artifacts, config. | Route test subset and full suite. | No route measurement test file above 1600 lines. |
 | 54 | Instrument tests | LCR and Keithley tests mix capabilities, worker behavior, and driver behavior. | Split LCR worker/capability/adapter tests and Keithley driver tests by behavior. | Instrument test subset and full suite. | No instrument test file above 900 lines. |
@@ -120,10 +120,10 @@ These are intentionally not part of the behavior-preserving refactor passes:
 
 ## Next Action
 
-Start Task 44 from the `main.py` LOC contract:
+Stop after Task 44 commit, then start Task 45 from Phase 2 when work resumes:
 
-1. Create a Task 44 brief with current behavior, structural improvement, validation checks, baseline metrics, and LOC target.
+1. Create a Task 45 brief for `probe_station_gui/route/measurement.py`.
 2. Use subagents for implementation review/spec review where useful.
-3. Run Wily metrics from a disposable UTF-8 temp clone/cache.
-4. Run full `pytest tests` and configured ruff.
-5. Commit Task 44 separately.
+3. Identify the route-runner responsibility slice with the best behavior-preserving extraction target.
+4. Add or update characterization tests before moving route lifecycle logic.
+5. Run Wily metrics from a disposable UTF-8 temp clone/cache, full `pytest tests`, configured ruff, coverage, and lizard before commit.

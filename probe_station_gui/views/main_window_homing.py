@@ -1,0 +1,231 @@
+"""Main-window homing and limit-axis UI orchestration."""
+
+from __future__ import annotations
+
+import time
+from typing import Any, Protocol
+
+from PySide6.QtCore import QTimer
+
+
+VALID_HOME_AXES = {"X", "Y", "Z", "A"}
+REGISTRATION_INVALIDATING_HOME_KEYS = {"X", "Y", "B", "ALL"}
+HOMING_RETRY_DELAY_MS = 200
+
+
+class MainWindowHomingOwner(Protocol):
+    STAGE_AXIS_NAMES: tuple[str, ...]
+    _stage_limit_axes: set[str]
+    _manual_jog_prediction: Any
+    _planned_move_stage_xy: tuple[float, float] | None
+    _planned_move_started_at: float | None
+    _planned_move_waiting_for_fresh_status: bool
+    _pending_homing_axes: list[str]
+    _homing_active_key: str | None
+    _coordinate_targets: Any
+    joystick_panel: Any
+    stage_controller: Any
+
+    def _update_stage_position_display(self, position: object) -> None: ...
+    def _position_with_stage_xy(self, stage_xy: tuple[float, float]) -> object: ...
+    def _controller_latest_state_blocks_motion(self) -> bool: ...
+    def _queue_or_start_homing_axes(self, axes: list[str]) -> None: ...
+    def _start_next_pending_homing_action(self) -> None: ...
+    def _refresh_pending_homing_ui(self) -> None: ...
+    def _update_stage_coordinate_apply_state(self) -> None: ...
+    def _clear_stage_motion_axes(self) -> None: ...
+    def _invalidate_design_registration(self, message: str) -> None: ...
+    def _set_stage_motion_axes(self, axes: set[str]) -> None: ...
+
+
+def on_limit_axes_changed(owner: MainWindowHomingOwner, axes: object) -> None:
+    owner._stage_limit_axes = _normalized_limit_axes(owner, axes)
+    predicted_position = _manual_jog_predicted_position(owner)
+    if predicted_position is not None:
+        owner._update_stage_position_display(predicted_position)
+        return
+    owner._update_stage_position_display(owner.stage_controller.latest_stage_position())
+
+
+def on_homing_status_changed(
+    owner: MainWindowHomingOwner,
+    _homed_axes: object,
+) -> None:
+    predicted_position = _manual_jog_predicted_position(owner)
+    if predicted_position is not None:
+        owner._update_stage_position_display(predicted_position)
+        return
+    if (
+        owner._planned_move_stage_xy is not None
+        and (
+            owner._planned_move_started_at is not None
+            or owner._planned_move_waiting_for_fresh_status
+        )
+    ):
+        owner._update_stage_position_display(
+            owner._position_with_stage_xy(owner._planned_move_stage_xy)
+        )
+        return
+    owner._update_stage_position_display(owner.stage_controller.latest_stage_position())
+
+
+def request_home_axis_from_ui(owner: MainWindowHomingOwner, axis: str) -> None:
+    axis_name = axis.strip().upper()
+    if axis_name not in VALID_HOME_AXES:
+        return
+    owner._queue_or_start_homing_axes([axis_name])
+
+
+def request_home_all_from_ui(owner: MainWindowHomingOwner) -> None:
+    if owner.stage_controller.request_home_all():
+        owner._pending_homing_axes.clear()
+        owner._refresh_pending_homing_ui()
+
+
+def queue_or_start_homing_axes(
+    owner: MainWindowHomingOwner,
+    axes: list[str],
+) -> None:
+    normalized = _queued_axes(owner, axes)
+    if not normalized:
+        return
+    if _can_start_homing_now(owner):
+        first_axis = normalized.pop(0)
+        if not owner.stage_controller.request_home_axis(first_axis):
+            normalized.insert(0, first_axis)
+    owner._pending_homing_axes.extend(normalized)
+    owner._refresh_pending_homing_ui()
+    owner._update_stage_coordinate_apply_state()
+    if owner._pending_homing_axes and owner._homing_active_key is None:
+        QTimer.singleShot(HOMING_RETRY_DELAY_MS, owner._start_next_pending_homing_action)
+
+
+def start_next_pending_homing_action(owner: MainWindowHomingOwner) -> None:
+    if owner._homing_active_key is not None or not owner._pending_homing_axes:
+        return
+    if owner.stage_controller.is_busy() or owner._coordinate_targets.has_active_move():
+        QTimer.singleShot(HOMING_RETRY_DELAY_MS, owner._start_next_pending_homing_action)
+        return
+    if owner._controller_latest_state_blocks_motion():
+        QTimer.singleShot(HOMING_RETRY_DELAY_MS, owner._start_next_pending_homing_action)
+        return
+    axis = owner._pending_homing_axes.pop(0)
+    owner._refresh_pending_homing_ui()
+    if not owner.stage_controller.request_home_axis(axis):
+        owner._pending_homing_axes.insert(0, axis)
+        owner._refresh_pending_homing_ui()
+        QTimer.singleShot(HOMING_RETRY_DELAY_MS, owner._start_next_pending_homing_action)
+
+
+def clear_pending_homing_queue(owner: MainWindowHomingOwner) -> None:
+    owner._homing_active_key = None
+    owner._pending_homing_axes.clear()
+    owner._refresh_pending_homing_ui()
+    owner._update_stage_coordinate_apply_state()
+
+
+def refresh_pending_homing_ui(owner: MainWindowHomingOwner) -> None:
+    if owner.joystick_panel is not None:
+        owner.joystick_panel.set_pending_homing_actions(set(owner._pending_homing_axes))
+
+
+def on_homing_action_finished(
+    owner: MainWindowHomingOwner,
+    success: bool,
+    _message: str,
+    axis_key: str,
+) -> None:
+    key = axis_key.strip().upper()
+    if key == owner._homing_active_key or key == "ALL":
+        owner._homing_active_key = None
+    if not success:
+        owner._pending_homing_axes.clear()
+        owner._refresh_pending_homing_ui()
+        owner._clear_stage_motion_axes()
+        owner._update_stage_coordinate_apply_state()
+        return
+    if key in REGISTRATION_INVALIDATING_HOME_KEYS:
+        owner._invalidate_design_registration(
+            f"Design registration cleared after homing {key}."
+        )
+    owner._clear_stage_motion_axes()
+    owner._refresh_pending_homing_ui()
+    owner._update_stage_coordinate_apply_state()
+    if owner._pending_homing_axes:
+        QTimer.singleShot(0, owner._start_next_pending_homing_action)
+
+
+def on_homing_action_started(owner: MainWindowHomingOwner, axis_key: str) -> None:
+    key = axis_key.strip().upper()
+    owner._homing_active_key = key
+    if key in owner._pending_homing_axes:
+        owner._pending_homing_axes.remove(key)
+        owner._refresh_pending_homing_ui()
+    if key == "ALL":
+        owner._set_stage_motion_axes({"X", "Y", "Z", "A"})
+    elif key in owner.STAGE_AXIS_NAMES:
+        owner._set_stage_motion_axes({key})
+    owner._update_stage_coordinate_apply_state()
+
+
+def on_needles_action_started(owner: MainWindowHomingOwner, _action: str) -> None:
+    owner._set_stage_motion_axes({"A"})
+    owner._update_stage_coordinate_apply_state()
+
+
+def on_needles_action_finished(
+    owner: MainWindowHomingOwner,
+    _success: bool,
+    _message: str,
+    _action: str,
+) -> None:
+    owner._clear_stage_motion_axes()
+    owner._update_stage_coordinate_apply_state()
+
+
+def _normalized_limit_axes(
+    owner: MainWindowHomingOwner,
+    axes: object,
+) -> set[str]:
+    if not isinstance(axes, (set, list, tuple)):
+        return set()
+    return {
+        axis_name
+        for axis in axes
+        if (axis_name := str(axis).strip().upper()) in owner.STAGE_AXIS_NAMES
+    }
+
+
+def _manual_jog_predicted_position(owner: MainWindowHomingOwner) -> object | None:
+    if (
+        owner._manual_jog_prediction.prediction_available(time.monotonic())
+        and owner._manual_jog_prediction.stage_position is not None
+    ):
+        return owner._manual_jog_prediction.stage_position
+    return None
+
+
+def _queued_axes(
+    owner: MainWindowHomingOwner,
+    axes: list[str],
+) -> list[str]:
+    normalized: list[str] = []
+    for axis in axes:
+        axis_name = axis.strip().upper()
+        if axis_name not in VALID_HOME_AXES:
+            continue
+        if axis_name == owner._homing_active_key:
+            continue
+        if axis_name in owner._pending_homing_axes:
+            continue
+        normalized.append(axis_name)
+    return normalized
+
+
+def _can_start_homing_now(owner: MainWindowHomingOwner) -> bool:
+    return (
+        owner._homing_active_key is None
+        and not owner.stage_controller.is_busy()
+        and not owner._controller_latest_state_blocks_motion()
+        and not owner._coordinate_targets.has_active_move()
+    )

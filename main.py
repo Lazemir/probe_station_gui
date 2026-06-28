@@ -358,9 +358,11 @@ from probe_station_gui.views.main_window_menus import setup_main_window_menus
 from probe_station_gui.views import (
     main_window_connection_flow as connection_flow,
 )
+from probe_station_gui.views import main_window_homing as homing_ui
 from probe_station_gui.views import (
     main_window_needle_calibration as needle_calibration_ui,
 )
+from probe_station_gui.views import main_window_shutdown as shutdown_ui
 
 _startup_trace("application imports done")
 
@@ -6745,41 +6747,10 @@ class Main(QMainWindow):
         )
 
     def _on_limit_axes_changed(self, axes: object) -> None:
-        if isinstance(axes, (set, list, tuple)):
-            self._stage_limit_axes = {
-                str(axis).strip().upper()
-                for axis in axes
-                if str(axis).strip().upper() in self.STAGE_AXIS_NAMES
-            }
-        else:
-            self._stage_limit_axes = set()
-        if (
-            self._manual_jog_prediction.prediction_available(time.monotonic())
-            and self._manual_jog_prediction.stage_position is not None
-        ):
-            self._update_stage_position_display(self._manual_jog_prediction.stage_position)
-            return
-        self._update_stage_position_display(self.stage_controller.latest_stage_position())
+        homing_ui.on_limit_axes_changed(self, axes)
 
     def _on_homing_status_changed(self, _homed_axes: object) -> None:
-        if (
-            self._manual_jog_prediction.prediction_available(time.monotonic())
-            and self._manual_jog_prediction.stage_position is not None
-        ):
-            self._update_stage_position_display(self._manual_jog_prediction.stage_position)
-            return
-        if (
-            self._planned_move_stage_xy is not None
-            and (
-                self._planned_move_started_at is not None
-                or self._planned_move_waiting_for_fresh_status
-            )
-        ):
-            self._update_stage_position_display(
-                self._position_with_stage_xy(self._planned_move_stage_xy)
-            )
-            return
-        self._update_stage_position_display(self.stage_controller.latest_stage_position())
+        homing_ui.on_homing_status_changed(self, _homed_axes)
 
     def _refresh_controller_status(self) -> None:
         if self.serial_connection is None or not self.serial_connection.is_open:
@@ -6883,193 +6854,47 @@ class Main(QMainWindow):
         return (float(np.linalg.norm(width_vec)), float(np.linalg.norm(height_vec)))
 
     def _request_home_axis_from_ui(self, axis: str) -> None:
-        axis_name = axis.strip().upper()
-        if axis_name not in {"X", "Y", "Z", "A"}:
-            return
-        self._queue_or_start_homing_axes([axis_name])
+        homing_ui.request_home_axis_from_ui(self, axis)
 
     def _request_home_all_from_ui(self) -> None:
-        if self.stage_controller.request_home_all():
-            self._pending_homing_axes.clear()
-            self._refresh_pending_homing_ui()
+        homing_ui.request_home_all_from_ui(self)
 
     def _queue_or_start_homing_axes(self, axes: list[str]) -> None:
-        normalized: list[str] = []
-        for axis in axes:
-            axis_name = axis.strip().upper()
-            if axis_name not in {"X", "Y", "Z", "A"}:
-                continue
-            if axis_name == self._homing_active_key:
-                continue
-            if axis_name in self._pending_homing_axes:
-                continue
-            normalized.append(axis_name)
-        if not normalized:
-            return
-        if (
-            self._homing_active_key is None
-            and not self.stage_controller.is_busy()
-            and not self._controller_latest_state_blocks_motion()
-            and not self._coordinate_targets.has_active_move()
-        ):
-            first_axis = normalized.pop(0)
-            if not self.stage_controller.request_home_axis(first_axis):
-                normalized.insert(0, first_axis)
-        self._pending_homing_axes.extend(normalized)
-        self._refresh_pending_homing_ui()
-        self._update_stage_coordinate_apply_state()
-        if self._pending_homing_axes and self._homing_active_key is None:
-            QTimer.singleShot(200, self._start_next_pending_homing_action)
+        homing_ui.queue_or_start_homing_axes(self, axes)
 
     def _start_next_pending_homing_action(self) -> None:
-        if self._homing_active_key is not None or not self._pending_homing_axes:
-            return
-        if self.stage_controller.is_busy() or self._coordinate_targets.has_active_move():
-            QTimer.singleShot(200, self._start_next_pending_homing_action)
-            return
-        if self._controller_latest_state_blocks_motion():
-            QTimer.singleShot(200, self._start_next_pending_homing_action)
-            return
-        axis = self._pending_homing_axes.pop(0)
-        self._refresh_pending_homing_ui()
-        if not self.stage_controller.request_home_axis(axis):
-            self._pending_homing_axes.insert(0, axis)
-            self._refresh_pending_homing_ui()
-            QTimer.singleShot(200, self._start_next_pending_homing_action)
+        homing_ui.start_next_pending_homing_action(self)
 
     def _clear_pending_homing_queue(self) -> None:
-        self._homing_active_key = None
-        self._pending_homing_axes.clear()
-        self._refresh_pending_homing_ui()
-        self._update_stage_coordinate_apply_state()
+        homing_ui.clear_pending_homing_queue(self)
 
     def _refresh_pending_homing_ui(self) -> None:
-        if self.joystick_panel is not None:
-            self.joystick_panel.set_pending_homing_actions(
-                set(self._pending_homing_axes)
-            )
+        homing_ui.refresh_pending_homing_ui(self)
 
     def _on_homing_action_finished(
         self, success: bool, _message: str, axis_key: str
     ) -> None:
-        key = axis_key.strip().upper()
-        if key == self._homing_active_key or key == "ALL":
-            self._homing_active_key = None
-        if not success:
-            self._pending_homing_axes.clear()
-            self._refresh_pending_homing_ui()
-            self._clear_stage_motion_axes()
-            self._update_stage_coordinate_apply_state()
-            return
-        if key in {"X", "Y", "B", "ALL"}:
-            self._invalidate_design_registration(
-                f"Design registration cleared after homing {key}."
-            )
-        self._clear_stage_motion_axes()
-        self._refresh_pending_homing_ui()
-        self._update_stage_coordinate_apply_state()
-        if self._pending_homing_axes:
-            QTimer.singleShot(0, self._start_next_pending_homing_action)
+        homing_ui.on_homing_action_finished(self, success, _message, axis_key)
 
     def _on_homing_action_started(self, axis_key: str) -> None:
-        key = axis_key.strip().upper()
-        self._homing_active_key = key
-        if key in self._pending_homing_axes:
-            self._pending_homing_axes.remove(key)
-            self._refresh_pending_homing_ui()
-        if key == "ALL":
-            self._set_stage_motion_axes({"X", "Y", "Z", "A"})
-        elif key in self.STAGE_AXIS_NAMES:
-            self._set_stage_motion_axes({key})
-        self._update_stage_coordinate_apply_state()
+        homing_ui.on_homing_action_started(self, axis_key)
 
     def _on_needles_action_started(self, _action: str) -> None:
-        self._set_stage_motion_axes({"A"})
-        self._update_stage_coordinate_apply_state()
+        homing_ui.on_needles_action_started(self, _action)
 
     def _on_needles_action_finished(
         self, _success: bool, _message: str, _action: str
     ) -> None:
-        self._clear_stage_motion_axes()
-        self._update_stage_coordinate_apply_state()
+        homing_ui.on_needles_action_finished(self, _success, _message, _action)
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
-        serial_was_connected = bool(
-            self.serial_connection is not None and self.serial_connection.is_open
-        )
-        lcr_was_connected = bool(self.lcr_controller.is_connected())
-        self._persist_serial_connection_state(serial_was_connected)
-        self._persist_lcr_connection_state(lcr_was_connected)
-        if serial_was_connected:
-            self._persist_controller_state()
-        if self._api_server is not None:
-            self._api_server.stop()
-        self._stop_telegram_bot_service()
-        self._design_position_timer.stop()
-        self._manual_jog_timer.stop()
-        self._stage_motion_blink_timer.stop()
-        if self._linear_feedrate_save_timer.isActive():
-            self._linear_feedrate_save_timer.stop()
-        self._save_pending_linear_feedrate_default()
-        if self._route_measurement_runner is not None:
-            self._route_measurement_runner.stop()
-        if (
-            self._route_measurement_thread is not None
-            and self._route_measurement_thread.is_alive()
-        ):
-            self._route_measurement_thread.join(timeout=2.0)
-        if self._microscope_scan_thread is not None:
-            self._microscope_scan_stop_requested.set()
-        if (
-            self._microscope_scan_thread is not None
-            and self._microscope_scan_thread.is_alive()
-        ):
-            self._microscope_scan_thread.join(timeout=2.0)
-        self._stop_jog_before_serial_close("application shutdown")
-        self.grabber.stop()
-        self.thread.quit()
-        self.thread.wait()
-        if self.serial_connection and self.serial_connection.is_open:
-            self.serial_connection.close()
-        if self.joystick_panel:
-            self.joystick_panel.set_serial(None)
-        if self.serial_terminal_panel:
-            self.serial_terminal_panel.set_serial(None)
-        self.stage_controller.request_stop_oscillation()
-        self.stage_controller.shutdown()
-        self.lcr_controller.shutdown()
-        self._close_auxiliary_windows(force_route_dialog=True)
-        if self.serial_connection_panel:
-            self.serial_connection_panel.shutdown()
-        event.accept()
+        shutdown_ui.close_event(self, event)
 
     def _close_auxiliary_windows(self, *, force_route_dialog: bool = False) -> None:
-        if self._route_measurement_dialog is not None:
-            if force_route_dialog:
-                self._route_runtime_presenter().set_running(False)
-            self._route_measurement_dialog.close()
-        if self.design_layout_window is not None:
-            self.design_layout_window.close()
-        if self.contact_calibration_window is not None:
-            self.contact_calibration_window.close()
-        if self.surface_map_window is not None:
-            self.surface_map_window.close()
-        if self.microscope_scan_dialog is not None:
-            self.microscope_scan_dialog.close()
-        serial_connection_dialog = getattr(self, "serial_connection_dialog", None)
-        if serial_connection_dialog is not None:
-            serial_connection_dialog.close()
+        shutdown_ui.close_auxiliary_windows(self, force_route_dialog=force_route_dialog)
 
     def _stop_jog_before_serial_close(self, reason: str) -> None:
-        if self.serial_connection is None or not self.serial_connection.is_open:
-            return
-        logger.warning("Stopping active jog before %s.", reason)
-        if self.joystick_panel is not None:
-            self.joystick_panel.stop_jog()
-        try:
-            self.stage_controller.force_jog_stop(timeout=0.8)
-        except Exception:
-            logger.exception("Failed to force jog stop before %s.", reason)
+        shutdown_ui.stop_jog_before_serial_close(self, reason)
 
     def _create_dock_widgets(self) -> None:
         create_main_window_docks(self)
