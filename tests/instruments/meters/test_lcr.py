@@ -145,6 +145,8 @@ class _FakeVisaHandle:
         self.writes: list[str] = []
         self.queries: list[str] = []
         self.cleared = False
+        self.raw_data = b"raw-response"
+        self.read_text = "text-response"
 
     def write(self, command: str) -> None:
         self.writes.append(command)
@@ -153,8 +155,39 @@ class _FakeVisaHandle:
         self.queries.append(command)
         return "fake-response"
 
+    def read(self) -> str:
+        return self.read_text
+
+    def read_raw(self) -> bytes:
+        return self.raw_data
+
     def clear(self) -> None:
         self.cleared = True
+
+
+class _AskOnlyVisaHandle:
+    def __init__(self) -> None:
+        self.asks: list[str] = []
+
+    def ask(self, command: str) -> str:
+        self.asks.append(command)
+        return "ask-response"
+
+
+class _DeviceClearVisaHandle:
+    def __init__(self) -> None:
+        self.device_cleared = False
+
+    def device_clear(self) -> None:
+        self.device_cleared = True
+
+
+class _TextOnlyVisaHandle:
+    def __init__(self) -> None:
+        self.read_text = "raw-as-text"
+
+    def read(self) -> str:
+        return self.read_text
 
 
 class _FakeLCRSession(_LCRSession):
@@ -952,6 +985,92 @@ class LCRMeterTest(unittest.TestCase):
         self.assertEqual(session.source_handle.timeout, 0)
         self.assertTrue(session.voltmeter_handle.cleared)
         self.assertEqual(stopped, [True, True])
+
+    def test_route_meter_visa_operation_supports_write_read_and_read_raw(self) -> None:
+        session = _FakeKeithleySession()
+        meter = RouteMeter(RouteMeterConfiguration(meter_type=ROUTE_METER_KEITHLEY))
+        meter._session = session
+
+        self.assertIsNone(
+            meter.visa_operation(
+                "meter.source",
+                "write",
+                command=":SOUR:VOLT 0.03",
+                timeout_ms=1234,
+                read_termination="\n",
+                write_termination="\n",
+            )
+        )
+        self.assertEqual(
+            meter.visa_operation("meter.source", "read"),
+            "text-response",
+        )
+        self.assertEqual(
+            meter.visa_operation("meter.source", "read_raw"),
+            b"raw-response",
+        )
+
+        self.assertEqual(session.source_handle.writes, [":SOUR:VOLT 0.03"])
+        self.assertEqual(session.source_handle.timeout, 0)
+        self.assertEqual(session.source_handle.read_termination, "")
+        self.assertEqual(session.source_handle.write_termination, "")
+
+    def test_route_meter_visa_query_uses_ask_when_query_is_missing(self) -> None:
+        handle = _AskOnlyVisaHandle()
+
+        class _AskOnlySession(_FakeKeithleySession):
+            def visa_handle_for_role(self, role: str):
+                if role == "meter.source":
+                    return handle
+                return super().visa_handle_for_role(role)
+
+        meter = RouteMeter(RouteMeterConfiguration(meter_type=ROUTE_METER_KEITHLEY))
+        meter._session = _AskOnlySession()
+
+        response = meter.visa_operation("meter.source", "query", command="*IDN?")
+
+        self.assertEqual(response, "ask-response")
+        self.assertEqual(handle.asks, ["*IDN?"])
+
+    def test_route_meter_visa_read_raw_falls_back_to_text_read(self) -> None:
+        handle = _TextOnlyVisaHandle()
+
+        class _TextOnlySession(_FakeKeithleySession):
+            def visa_handle_for_role(self, role: str):
+                if role == "meter.source":
+                    return handle
+                return super().visa_handle_for_role(role)
+
+        meter = RouteMeter(RouteMeterConfiguration(meter_type=ROUTE_METER_KEITHLEY))
+        meter._session = _TextOnlySession()
+
+        self.assertEqual(
+            meter.visa_operation("meter.source", "read_raw"),
+            b"raw-as-text",
+        )
+
+    def test_route_meter_visa_clear_uses_device_clear_fallback(self) -> None:
+        handle = _DeviceClearVisaHandle()
+
+        class _DeviceClearSession(_FakeKeithleySession):
+            def visa_handle_for_role(self, role: str):
+                if role == "meter.source":
+                    return handle
+                return super().visa_handle_for_role(role)
+
+        meter = RouteMeter(RouteMeterConfiguration(meter_type=ROUTE_METER_KEITHLEY))
+        meter._session = _DeviceClearSession()
+
+        self.assertIsNone(meter.visa_operation("meter.source", "clear"))
+
+        self.assertTrue(handle.device_cleared)
+
+    def test_route_meter_visa_operation_rejects_unsupported_operation(self) -> None:
+        meter = RouteMeter(RouteMeterConfiguration(meter_type=ROUTE_METER_KEITHLEY))
+        meter._session = _FakeKeithleySession()
+
+        with self.assertRaisesRegex(LCRMeterError, "Unsupported VISA operation"):
+            meter.visa_operation("meter.source", "flash")
 
     def test_route_meter_opens_keithley_through_external_driver_factory(self) -> None:
         created: list[tuple[str, str, int]] = []

@@ -31,6 +31,10 @@ from probe_station_gui.instruments.meters.lcr_helpers import (
     session_visa_resource_roles as _session_visa_resource_roles,
     voltage_sweep_point_to_dict as _voltage_sweep_point_to_dict,
 )
+from probe_station_gui.instruments.meters.lcr_visa import (
+    VisaOperationError as _VisaOperationError,
+    session_visa_operation as _run_session_visa_operation,
+)
 from probe_station_gui.route.meter_config import (
     GWInstekRouteMeterSettings,
     KeithleyRouteMeterSettings,
@@ -115,94 +119,18 @@ def _session_visa_operation(
     read_termination: str | None,
     write_termination: str | None,
 ) -> object:
-    if session is None:
-        raise LCRMeterError("Measurement instrument is not connected.")
-    resolver = getattr(session, "visa_handle_for_role", None)
-    if not callable(resolver):
-        raise LCRMeterError("Measurement instrument does not expose VISA roles.")
     try:
-        handle = resolver(role)
-    except KeyError as exc:
+        return _run_session_visa_operation(
+            session,
+            role,
+            operation,
+            command=command,
+            timeout_ms=timeout_ms,
+            read_termination=read_termination,
+            write_termination=write_termination,
+        )
+    except _VisaOperationError as exc:
         raise LCRMeterError(str(exc)) from exc
-
-    previous: dict[str, object] = {}
-    try:
-        _set_temporary_visa_attribute(handle, previous, "timeout", timeout_ms)
-        _set_temporary_visa_attribute(
-            handle,
-            previous,
-            "read_termination",
-            read_termination,
-        )
-        _set_temporary_visa_attribute(
-            handle,
-            previous,
-            "write_termination",
-            write_termination,
-        )
-        normalized = str(operation or "").strip().lower().replace("-", "_")
-        if normalized == "write":
-            if command is None:
-                raise LCRMeterError("VISA write requires a command.")
-            handle.write(str(command))
-            return None
-        if normalized in {"query", "ask"}:
-            if command is None:
-                raise LCRMeterError("VISA query requires a command.")
-            query = getattr(handle, "query", None)
-            if callable(query):
-                return str(query(str(command))).strip()
-            ask = getattr(handle, "ask", None)
-            if callable(ask):
-                return str(ask(str(command))).strip()
-            raise LCRMeterError("VISA handle cannot run queries.")
-        if normalized == "read":
-            reader = getattr(handle, "read", None)
-            if not callable(reader):
-                raise LCRMeterError("VISA handle cannot read text.")
-            return str(reader())
-        if normalized == "read_raw":
-            reader = getattr(handle, "read_raw", None)
-            if callable(reader):
-                data = reader()
-            else:
-                text_reader = getattr(handle, "read", None)
-                if not callable(text_reader):
-                    raise LCRMeterError("VISA handle cannot read raw bytes.")
-                data = str(text_reader()).encode("utf-8")
-            return bytes(data)
-        if normalized == "clear":
-            clearer = getattr(handle, "clear", None)
-            if not callable(clearer):
-                clearer = getattr(handle, "device_clear", None)
-            if not callable(clearer):
-                visa_handle = getattr(handle, "visa_handle", None)
-                clearer = getattr(visa_handle, "clear", None)
-            if callable(clearer):
-                clearer()
-            return None
-    finally:
-        for name, value in previous.items():
-            try:
-                setattr(handle, name, value)
-            except Exception:
-                logger.debug("Failed to restore VISA attribute %s", name, exc_info=True)
-    raise LCRMeterError(f"Unsupported VISA operation: {operation}")
-
-
-def _set_temporary_visa_attribute(
-    handle: object,
-    previous: dict[str, object],
-    name: str,
-    value: object,
-) -> None:
-    if value is None or not hasattr(handle, name):
-        return
-    try:
-        previous[name] = getattr(handle, name)
-        setattr(handle, name, value)
-    except Exception:
-        logger.debug("VISA handle does not accept %s=%r", name, value, exc_info=True)
 
 
 class LCRMeterError(RuntimeError):
