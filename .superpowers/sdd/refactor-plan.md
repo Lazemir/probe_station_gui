@@ -2,8 +2,8 @@
 
 Updated: 2026-06-28
 Branch: `codex/refactor-stage-controller`
-Current completed task: Task 49a, LCR VISA operation dispatcher extraction.
-Active next task: Task 49b, LCR route-session adapter extraction.
+Current completed task: Task 49b, LCR route-session adapter extraction.
+Active next task: Task 49c, GW Instek session adapter extraction.
 
 This plan supersedes the original 5-task architecture sketch. It reflects the current code shape after Tasks 1-38 and the current LOC audit.
 
@@ -86,7 +86,7 @@ Goal: after `main.py` is no longer the dominant blocker, reduce navigation cost 
 | 46 | `views/design_navigator_panel.py` | Plot pane, route editing, tool state, enablement policy, and layout-window adapter were mixed. | Split plot rendering and enablement policy from panel adapter; preserve signals and UI copy. | `tests/ui/test_design_navigator_panel.py`, design workflow/navigation tests, full suite. | Completed: 46a extracted `_DesignPlotPane` to `views/design_plot_pane.py` (`design_navigator_panel.py 3083 -> 1818 LOC`, Wily SLOC `2848 -> 1670`, Wily cyclomatic `535 -> 251`; new plot module `1286 LOC`, Wily cyclomatic `284`). 46b extracted `DesignNavigatorEnablement` (`design_navigator_panel.py 1818 -> 1849 LOC`, Wily file cyclomatic `251 -> 238`, `_update_enabled_state` CC `29 -> 1`, new enablement module `82 LOC` / MI 38.89 / 100% coverage). Target passed: file is below 2300 lines and `_update_enabled_state` is below warning threshold. |
 | 47 | `views/joystick_window.py` | Jog UI, keyboard controls, feedrate controls, serial command intent, and panel state were mixed. | Extract feedrate and helper widget sections into focused view helpers while preserving jog/serial behavior. | `tests/ui/test_joystick_feedrate.py`, key binding tests, stage jog command tests, full suite. | Completed: 47a extracted feedrate controls to `views/joystick/feedrate_panel.py` (`joystick_window.py 3059 -> 2372 LOC`, Wily SLOC `2822 -> 2189`, Wily cyclomatic `644 -> 509`; new feedrate module `709 LOC`, max CC 10). 47b extracted helper widgets to `views/joystick/widgets.py` (`joystick_window.py 2372 -> 2254 LOC`, Wily SLOC `2189 -> 2094`, Wily cyclomatic `509 -> 478`; new widgets module `134 LOC` / MI 49.68). Target passed: `joystick_window.py < 2300 LOC`. Residual known hotspot: `_apply_axes` remains 55 NLOC / CCN 17 and should be handled only with explicit characterization of `$J`, stop/resend, and controller coordination. |
 | 48 | `dialogs/route_measurement_dialog.py` | Qt construction, profile persistence, run controls, histogram/raw data display live together. | Split profile persistence and presentation modules; keep dialog as Qt adapter. | Route dialog/run UI tests and route measurement tests. | Completed: 48a extracted SI-prefix and histogram/raw-data presentation (`route_measurement_dialog.py 2179 -> 1809 LOC`, Wily cyclomatic `324 -> 249`). 48b extracted defaults/profile persistence (`route_measurement_dialog.py 1809 -> 1390 LOC`, Wily cyclomatic `249 -> 176`, coverage `72% -> 73%`). 48c extracted operation-state policy (`_update_operation_state` CCN `22 -> 3`, dialog Wily cyclomatic `176 -> 156`). 48d split histogram painting (`paintEvent` CCN `24 -> 4`, lizard result-view warnings `1 -> 0`; aggregate Wily file metrics worsened, so treat this only as a hotspot cleanup). 48e split profile path/meter helpers (`_apply_profile_data` CCN `16 -> 5`, profile Wily cyclomatic `77 -> 76`, Task 48 lizard warnings `1 -> 0`). Target passed: `route_measurement_dialog.py < 1500 LOC`, Task 48 slice has no lizard warning-level functions. |
-| 49 | `instruments/meters/lcr.py` | Worker scheduling, live polling, capabilities, and route-meter behavior are mixed. | Separate instrument worker lifecycle from meter capabilities and adapter code. | LCR worker/GW Instek/instrument tests, full suite. | In progress: 49a extracted low-level VISA operation dispatch into `instruments/meters/lcr_visa.py` while preserving `lcr.py` facade (`lcr.py 2010 -> 1938 LOC`, Wily cyclomatic `395 -> 371`, `_session_visa_operation` CCN `22 -> 2`, coverage `73% -> 74%`). Target remains: `lcr.py < 1400 LOC`. |
+| 49 | `instruments/meters/lcr.py` | Worker scheduling, live polling, capabilities, and route-meter behavior are mixed. | Separate instrument worker lifecycle from meter capabilities and adapter code. | LCR worker/GW Instek/instrument tests, full suite. | In progress: 49a extracted low-level VISA operation dispatch into `instruments/meters/lcr_visa.py` while preserving `lcr.py` facade (`lcr.py 2010 -> 1938 LOC`, Wily cyclomatic `395 -> 371`, `_session_visa_operation` CCN `22 -> 2`, coverage `73% -> 74%`). 49b extracted shared route-session configuration/read/batch helpers into `instruments/meters/lcr_route_session.py` (`lcr.py 1938 -> 1800 LOC`, Wily cyclomatic `371 -> 355`, route adapter helper CCs below warning threshold, coverage stayed `74%`). Target remains: `lcr.py < 1400 LOC`. |
 | 50 | Settings manager/dialog | Settings parsing, migration, defaults, and UI section knowledge are still duplicated. | Move remaining settings sections behind section modules and metadata consumed by UI. | Settings tests, key binding/feedrate/needle calibration tests, full suite. | `settings/manager.py < 1100`, `settings_dialog.py < 1100`. |
 
 ## Phase 3: Test Monolith Track
@@ -122,9 +122,9 @@ These are intentionally not part of the behavior-preserving refactor passes:
 
 Continue with Task 49 from Phase 2:
 
-1. Extract shared route-session adapter logic used by both `RouteMeter` and `LCRMeterController`, but keep `lcr.py` as the public facade.
-2. Preserve monkeypatch compatibility for `lcr_module._open_keithley_session` and direct tests around `_LCRSession`.
-3. Add characterization tests for the first route-session behavior touched, especially the undercovered GW Instek `RouteMeter` path if that path moves.
-4. Do not move worker lifecycle, live polling, or live Keithley output context until route adapter duplication is reduced.
-5. Target file below 1400 lines without moving complexity into shallow pass-through modules.
+1. Extract the GW Instek `_LCRSession` implementation from `lcr.py` into a focused adapter module.
+2. Keep `lcr.py` as the public facade and preserve `lcr_module._LCRSession` monkeypatch compatibility by importing/re-exporting the moved class.
+3. Add characterization around `_LCRSession.configure_measurement` command sequencing before moving internals, because this is the largest remaining GW Instek protocol hotspot.
+4. Do not move worker lifecycle, live polling, or live Keithley output context until the GW Instek adapter is isolated.
+5. Target `lcr.py <= 1500 LOC` for 49c and keep the overall Task 49 target at `lcr.py < 1400 LOC`.
 6. Run Wily metrics from a disposable UTF-8 temp clone/cache, focused instrument tests, full `pytest tests`, configured ruff, coverage, and lizard before each commit.

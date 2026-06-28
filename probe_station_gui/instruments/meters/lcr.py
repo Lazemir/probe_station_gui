@@ -26,10 +26,15 @@ from probe_station_gui.instruments.meters.lcr_helpers import (
     normalize_visa_role as _normalize_visa_role,
     normalize_resource_name,
     parse_numeric_response as _parse_numeric_response,
-    prepare_route_measurement_batch as _prepare_route_measurement_batch,
-    read_route_measurement_batch as _read_route_measurement_batch,
     session_visa_resource_roles as _session_visa_resource_roles,
     voltage_sweep_point_to_dict as _voltage_sweep_point_to_dict,
+)
+from probe_station_gui.instruments.meters.lcr_route_session import (
+    RouteSessionError as _RouteSessionError,
+    configure_route_session as _configure_route_session,
+    prepare_route_measurement_batch_on_session as _prepare_route_measurement_batch_on_session,
+    read_route_measurement_batch_from_session as _read_route_measurement_batch_from_session,
+    read_route_measurement_from_session as _read_route_measurement_from_session,
 )
 from probe_station_gui.instruments.meters.lcr_visa import (
     VisaOperationError as _VisaOperationError,
@@ -503,26 +508,7 @@ class RouteMeter:
             session = _LCRSession(settings.resource_name, self._timeout_ms)
             try:
                 session.identify()
-                session.configure_measurement(
-                    measurement_function=settings.measurement_function,
-                    range_mode=settings.range_mode,
-                    impedance_range=settings.impedance_range,
-                    dcr_range=settings.dcr_range,
-                    frequency_hz=settings.frequency_hz,
-                    level_mode=settings.level_mode,
-                    voltage_level_v=settings.voltage_level_v,
-                    current_level_a=settings.current_level_a,
-                    source_resistance_ohm=settings.source_resistance_ohm,
-                    aperture_rate=settings.aperture_rate,
-                    aperture_averages=settings.aperture_averages,
-                    trigger_source="BUS",
-                    trigger_delay_s=settings.trigger_delay_s,
-                    bias_enabled=settings.bias_enabled,
-                    bias_level_v=settings.bias_level_v,
-                    monitor1=settings.monitor1,
-                    monitor2=settings.monitor2,
-                    alc_enabled=settings.alc_enabled,
-                )
+                self._configure_open_session(session, self._configuration)
             except Exception:
                 session.close()
                 raise
@@ -537,28 +523,9 @@ class RouteMeter:
             )
             try:
                 identify = getattr(session, "identify", None)
-                configure = getattr(session, "configure_measurement")
                 if callable(identify):
                     identify()
-                configure(
-                    keithley_measurement_voltage_v=settings.measurement_voltage_v,
-                    keithley_range_mode=settings.range_mode,
-                    keithley_expected_resistance_ohm=settings.expected_resistance_ohm,
-                    keithley_minimum_resistance_ohm=settings.minimum_resistance_ohm,
-                    keithley_maximum_current_a=settings.maximum_current_a,
-                    keithley_voltage_range_v=settings.voltage_range_v,
-                    keithley_source_voltage_range_v=settings.source_voltage_range_v,
-                    keithley_voltmeter_range_v=settings.voltmeter_range_v,
-                    keithley_current_range_a=settings.current_range_a,
-                    keithley_compliance_current_a=settings.compliance_current_a,
-                    keithley_range_voltage_headroom=settings.range_voltage_headroom,
-                    keithley_range_current_headroom=settings.range_current_headroom,
-                    keithley_nplc=settings.nplc,
-                    keithley_terminals=settings.terminals,
-                    keithley_trigger_delay_s=settings.trigger_delay_s,
-                    keithley_use_buffer=settings.use_buffer,
-                    keithley_use_trigger_link=settings.use_trigger_link,
-                )
+                self._configure_open_session(session, self._configuration)
             except Exception:
                 closer = getattr(session, "close", None)
                 if callable(closer):
@@ -591,63 +558,24 @@ class RouteMeter:
             raise LCRMeterError(
                 f"Open route instrument is {configured_label}; route requested {requested_label}."
             )
-        if configuration.meter_type == ROUTE_METER_GWINSTEK:
-            if not isinstance(self._session, _LCRSession):
-                raise LCRMeterError("Open route instrument is not a GW Instek LCR.")
-            settings = configuration.gwinstek
-            self._session.configure_measurement(
-                measurement_function=settings.measurement_function,
-                range_mode=settings.range_mode,
-                impedance_range=settings.impedance_range,
-                dcr_range=settings.dcr_range,
-                frequency_hz=settings.frequency_hz,
-                level_mode=settings.level_mode,
-                voltage_level_v=settings.voltage_level_v,
-                current_level_a=settings.current_level_a,
-                source_resistance_ohm=settings.source_resistance_ohm,
-                aperture_rate=settings.aperture_rate,
-                aperture_averages=settings.aperture_averages,
-                trigger_source="BUS",
-                trigger_delay_s=settings.trigger_delay_s,
-                bias_enabled=settings.bias_enabled,
-                bias_level_v=settings.bias_level_v,
-                monitor1=settings.monitor1,
-                monitor2=settings.monitor2,
-                alc_enabled=settings.alc_enabled,
+        self._configure_open_session(self._session, configuration)
+        self._configuration = configuration
+
+    @staticmethod
+    def _configure_open_session(
+        session: object,
+        configuration: RouteMeterConfiguration,
+    ) -> None:
+        try:
+            _configure_route_session(
+                session,
+                configuration,
+                gwinstek_session_type=_LCRSession,
+                gwinstek_error="Open route instrument is not a GW Instek LCR.",
+                keithley_error="Open route instrument is not a Keithley pair.",
             )
-            self._configuration = configuration
-            return
-        if configuration.meter_type == ROUTE_METER_KEITHLEY:
-            if isinstance(self._session, _LCRSession):
-                raise LCRMeterError("Open route instrument is not a Keithley pair.")
-            settings = configuration.keithley
-            configure = getattr(self._session, "configure_measurement", None)
-            if not callable(configure):
-                raise LCRMeterError("Open route instrument is not a Keithley pair.")
-            configure(
-                keithley_measurement_voltage_v=settings.measurement_voltage_v,
-                keithley_range_mode=settings.range_mode,
-                keithley_expected_resistance_ohm=settings.expected_resistance_ohm,
-                keithley_minimum_resistance_ohm=settings.minimum_resistance_ohm,
-                keithley_maximum_current_a=settings.maximum_current_a,
-                keithley_voltage_range_v=settings.voltage_range_v,
-                keithley_source_voltage_range_v=settings.source_voltage_range_v,
-                keithley_voltmeter_range_v=settings.voltmeter_range_v,
-                keithley_current_range_a=settings.current_range_a,
-                keithley_compliance_current_a=settings.compliance_current_a,
-                keithley_range_voltage_headroom=settings.range_voltage_headroom,
-                keithley_range_current_headroom=settings.range_current_headroom,
-                keithley_nplc=settings.nplc,
-                keithley_terminals=settings.terminals,
-                keithley_trigger_delay_s=settings.trigger_delay_s,
-                keithley_use_buffer=settings.use_buffer,
-                keithley_use_trigger_link=settings.use_trigger_link,
-            )
-            self._configuration = configuration
-            return
-        raise LCRMeterError(
-            f"Unsupported route measurement instrument: {configuration.meter_type}"
-        )
+        except _RouteSessionError as exc:
+            raise LCRMeterError(str(exc)) from exc
 
     def read_primary_value_now(self, *, restart_polling: bool = False) -> float:
         if self._session is None:
@@ -665,14 +593,13 @@ class RouteMeter:
             self.open()
         if self._session is None:
             raise LCRMeterError("Route measurement instrument is not open.")
-        reader = getattr(self._session, "read_route_measurement", None)
-        if callable(reader):
-            return dict(reader(trigger=True))
-        primary_reader = getattr(self._session, "read_primary_value", None)
-        if not callable(primary_reader):
-            raise LCRMeterError("Route measurement instrument cannot read values.")
-        value = primary_reader(trigger=True)
-        return {"differential_resistance_ohm": value}
+        try:
+            return _read_route_measurement_from_session(
+                self._session,
+                cannot_read_message="Route measurement instrument cannot read values.",
+            )
+        except _RouteSessionError as exc:
+            raise LCRMeterError(str(exc)) from exc
 
     def read_route_measurement_batch_now(
         self,
@@ -687,17 +614,15 @@ class RouteMeter:
         if self._session is None:
             raise LCRMeterError("Route measurement instrument is not open.")
         count = max(1, int(count))
-        batch_reader = getattr(self._session, "read_route_measurements", None)
-        if callable(batch_reader):
-            return [
-                dict(item)
-                for item in _read_route_measurement_batch(
-                    batch_reader,
-                    count,
-                    after_measurement=after_measurement,
-                )
-            ]
-        return [self.read_route_measurement_now() for _index in range(count)]
+        try:
+            return _read_route_measurement_batch_from_session(
+                self._session,
+                count,
+                after_measurement=after_measurement,
+                cannot_read_message="Route measurement instrument cannot read values.",
+            )
+        except _RouteSessionError as exc:
+            raise LCRMeterError(str(exc)) from exc
 
     def prepare_route_measurement_batch_now(
         self,
@@ -709,9 +634,8 @@ class RouteMeter:
             self.open()
         if self._session is None:
             raise LCRMeterError("Route measurement instrument is not open.")
-        preparer = getattr(self._session, "prepare_route_measurements", None)
-        _prepare_route_measurement_batch(
-            preparer,
+        _prepare_route_measurement_batch_on_session(
+            self._session,
             max(1, int(count)),
             source_list_count=source_list_count,
         )
@@ -1098,61 +1022,16 @@ class LCRMeterController(QObject):
         session: object,
         configuration: RouteMeterConfiguration,
     ) -> None:
-        if configuration.meter_type == ROUTE_METER_GWINSTEK:
-            if not isinstance(session, _LCRSession):
-                raise LCRMeterError("Connected instrument is not a GW Instek LCR.")
-            settings = configuration.gwinstek
-            session.configure_measurement(
-                measurement_function=settings.measurement_function,
-                range_mode=settings.range_mode,
-                impedance_range=settings.impedance_range,
-                dcr_range=settings.dcr_range,
-                frequency_hz=settings.frequency_hz,
-                level_mode=settings.level_mode,
-                voltage_level_v=settings.voltage_level_v,
-                current_level_a=settings.current_level_a,
-                source_resistance_ohm=settings.source_resistance_ohm,
-                aperture_rate=settings.aperture_rate,
-                aperture_averages=settings.aperture_averages,
-                trigger_source="BUS",
-                trigger_delay_s=settings.trigger_delay_s,
-                bias_enabled=settings.bias_enabled,
-                bias_level_v=settings.bias_level_v,
-                monitor1=settings.monitor1,
-                monitor2=settings.monitor2,
-                alc_enabled=settings.alc_enabled,
+        try:
+            _configure_route_session(
+                session,
+                configuration,
+                gwinstek_session_type=_LCRSession,
+                gwinstek_error="Connected instrument is not a GW Instek LCR.",
+                keithley_error="Connected instrument is not a Keithley pair.",
             )
-            return
-        if configuration.meter_type == ROUTE_METER_KEITHLEY:
-            if isinstance(session, _LCRSession):
-                raise LCRMeterError("Connected instrument is not a Keithley pair.")
-            settings = configuration.keithley
-            configure = getattr(session, "configure_measurement", None)
-            if not callable(configure):
-                raise LCRMeterError("Connected instrument is not a Keithley pair.")
-            configure(
-                keithley_measurement_voltage_v=settings.measurement_voltage_v,
-                keithley_range_mode=settings.range_mode,
-                keithley_expected_resistance_ohm=settings.expected_resistance_ohm,
-                keithley_minimum_resistance_ohm=settings.minimum_resistance_ohm,
-                keithley_maximum_current_a=settings.maximum_current_a,
-                keithley_voltage_range_v=settings.voltage_range_v,
-                keithley_source_voltage_range_v=settings.source_voltage_range_v,
-                keithley_voltmeter_range_v=settings.voltmeter_range_v,
-                keithley_current_range_a=settings.current_range_a,
-                keithley_compliance_current_a=settings.compliance_current_a,
-                keithley_range_voltage_headroom=settings.range_voltage_headroom,
-                keithley_range_current_headroom=settings.range_current_headroom,
-                keithley_nplc=settings.nplc,
-                keithley_terminals=settings.terminals,
-                keithley_trigger_delay_s=settings.trigger_delay_s,
-                keithley_use_buffer=settings.use_buffer,
-                keithley_use_trigger_link=settings.use_trigger_link,
-            )
-            return
-        raise LCRMeterError(
-            f"Unsupported route measurement instrument: {configuration.meter_type}"
-        )
+        except _RouteSessionError as exc:
+            raise LCRMeterError(str(exc)) from exc
 
     def apply_route_meter_runtime_configuration(
         self,
@@ -1253,7 +1132,10 @@ class LCRMeterController(QObject):
         self._stop_polling_session()
         self.reading_started.emit(1)
         try:
-            measurement = self._read_route_measurement_from_session(session)
+            measurement = _read_route_measurement_from_session(
+                session,
+                cannot_read_message="Measurement instrument cannot read route values.",
+            )
         except Exception as exc:
             error = self._lcr_error(exc)
             self._disconnect_session()
@@ -1355,21 +1237,12 @@ class LCRMeterController(QObject):
         self._stop_polling_session()
         self.reading_started.emit(count)
         try:
-            batch_reader = getattr(session, "read_route_measurements", None)
-            if callable(batch_reader):
-                measurements = [
-                    dict(item)
-                    for item in _read_route_measurement_batch(
-                        batch_reader,
-                        count,
-                        after_measurement=after_measurement,
-                    )
-                ]
-            else:
-                measurements = [
-                    self._read_route_measurement_from_session(session)
-                    for _index in range(count)
-                ]
+            measurements = _read_route_measurement_batch_from_session(
+                session,
+                count,
+                after_measurement=after_measurement,
+                cannot_read_message="Measurement instrument cannot read route values.",
+            )
         except Exception as exc:
             error = self._lcr_error(exc)
             self._disconnect_session()
@@ -1410,9 +1283,8 @@ class LCRMeterController(QObject):
             raise LCRMeterError("Measurement instrument is not connected.")
         self._stop_polling_session()
         try:
-            preparer = getattr(session, "prepare_route_measurements", None)
-            _prepare_route_measurement_batch(
-                preparer,
+            _prepare_route_measurement_batch_on_session(
+                session,
                 count,
                 source_list_count=source_list_count,
             )
@@ -1422,16 +1294,6 @@ class LCRMeterController(QObject):
             self.connection_changed.emit(False, "", str(error))
             self.status_message.emit(f"Instrument preparation failed: {error}")
             raise error from exc
-
-    def _read_route_measurement_from_session(self, session: object) -> dict[str, object]:
-        reader = getattr(session, "read_route_measurement", None)
-        if callable(reader):
-            return dict(reader(trigger=True))
-        primary_reader = getattr(session, "read_primary_value", None)
-        if not callable(primary_reader):
-            raise LCRMeterError("Measurement instrument cannot read route values.")
-        primary_value = primary_reader(trigger=True)
-        return {"differential_resistance_ohm": primary_value}
 
     def _emit_reading_summary(self, primary_value: float, sample_count: int) -> None:
         count = max(1, int(sample_count))

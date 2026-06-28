@@ -1107,6 +1107,55 @@ class LCRMeterTest(unittest.TestCase):
         self.assertEqual(session.configurations[-1]["keithley_nplc"], 1.0)
         self.assertEqual(session.configurations[-1]["keithley_use_buffer"], True)
 
+    def test_route_meter_opens_applies_and_reads_gwinstek_session(self) -> None:
+        created: list[tuple[str, int]] = []
+
+        class _OpeningFakeLCRSession(_FakeLCRSession):
+            def __init__(self, address: str, timeout_ms: int) -> None:
+                super().__init__()
+                created.append((address, timeout_ms))
+                self.identify_count = 0
+
+            def identify(self) -> str:
+                self.identify_count += 1
+                return "fake-lcr"
+
+        original = lcr_module._LCRSession
+        lcr_module._LCRSession = _OpeningFakeLCRSession
+        try:
+            meter = RouteMeter(
+                RouteMeterConfiguration(
+                    meter_type=ROUTE_METER_GWINSTEK,
+                    gwinstek=GWInstekRouteMeterSettings(
+                        resource_name="COM4",
+                        aperture_averages=3,
+                    ),
+                ),
+                timeout_ms=4321,
+            )
+
+            value = meter.read_primary_value_now()
+            meter.apply_route_meter_configuration(
+                RouteMeterConfiguration(
+                    meter_type=ROUTE_METER_GWINSTEK,
+                    gwinstek=GWInstekRouteMeterSettings(
+                        resource_name="COM4",
+                        aperture_averages=5,
+                    ),
+                )
+            )
+        finally:
+            lcr_module._LCRSession = original
+
+        session = meter._session
+        self.assertIsInstance(session, _OpeningFakeLCRSession)
+        self.assertEqual(created, [("COM4", 4321)])
+        self.assertEqual(value, 42.0)
+        self.assertEqual(session.identify_count, 1)
+        self.assertEqual(session.configurations[0]["trigger_source"], "BUS")
+        self.assertEqual(session.configurations[0]["aperture_averages"], 3)
+        self.assertEqual(session.configurations[1]["aperture_averages"], 5)
+
     def test_route_meter_prepares_and_reads_keithley_batch_callbacks(self) -> None:
         session = _FakeKeithleySession()
         meter = RouteMeter(
