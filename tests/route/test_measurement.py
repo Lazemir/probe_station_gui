@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from probe_station_gui.route.measurement import (
@@ -2296,6 +2297,73 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
 
         self.assertEqual(lcr.batch_counts, [2, 2])
         self.assertEqual(stage.calls[-2:], [("needles", "lift", None), ("finish",)])
+
+    def test_prepare_external_contact_uses_photo_prelude_then_places_contact(
+        self,
+    ) -> None:
+        point = replace(_point(1), photo_stage_xy=(20.0, 30.0))
+        stage = _FakeStage()
+        records = []
+
+        def focus(_point, _position, _total) -> dict[str, object]:
+            stage.calls.append(("focus", _point.index))
+            return {"focus_best_z_mm": 1.02}
+
+        def capture(_point, _position, _total, focus_result) -> str:
+            stage.calls.append(("focus_result", focus_result))
+            stage.calls.append(("photo", _point.index))
+            return "photo.png"
+
+        lcr = _FakeBatchRouteLCR(
+            [
+                {"differential_resistance_ohm": 1000.0},
+                {"differential_resistance_ohm": 1001.0},
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = RouteMeasurementRunner(
+                points=[point],
+                csv_path=Path(tmpdir) / "route.csv",
+                stage_controller=stage,
+                lcr_controller=lcr,
+                needle_feedrate=75.0,
+                measurement_count=2,
+                initial_measurement_count=2,
+                photo_callback=capture,
+                photo_focus_callback=focus,
+                photo_record_callback=lambda record, _position, _total: records.append(
+                    record
+                ),
+                photo_settle_s=0.0,
+                contact_settle_s=0.0,
+            )
+
+            result = runner.prepare_external_contact(
+                point,
+                photo_enabled=True,
+                photo_focus_enabled=True,
+            )
+
+            self.assertTrue(result.placement.success, result.placement.message)
+            self.assertEqual(result.photo_path, "photo.png")
+            self.assertEqual(result.focus, {"focus_best_z_mm": 1.02})
+
+        photo_move_index = stage.calls.index(("move", 20.0, 30.0))
+        focus_index = stage.calls.index(("focus", 1))
+        photo_index = stage.calls.index(("photo", 1))
+        contact_move_index = stage.calls.index(("move", 1.0, 11.0))
+        lower_index = stage.calls.index(("needles", "lower", 75.0))
+        self.assertLess(photo_move_index, focus_index)
+        self.assertLess(focus_index, photo_index)
+        self.assertLess(photo_index, contact_move_index)
+        self.assertLess(contact_move_index, lower_index)
+        self.assertEqual(
+            [call for call in stage.calls if isinstance(call, tuple) and call[0] == "move"],
+            [("move", 20.0, 30.0), ("move", 1.0, 11.0)],
+        )
+        self.assertNotIn(("needles", "lift", 75.0), stage.calls)
+        self.assertEqual(records[0].stage_xy, (20.0, 30.0))
+        self.assertEqual(lcr.batch_counts, [2])
 
     def test_check_contact_measures_current_position_without_seek_or_csv(self) -> None:
         point = _point(1)

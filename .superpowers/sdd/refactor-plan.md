@@ -2,8 +2,8 @@
 
 Updated: 2026-06-28
 Branch: `codex/refactor-stage-controller`
-Current completed task: Task 43, serial/controller connection UI flow.
-Active next task: Task 44, route/UI residue cleanup.
+Current completed task: Task 45a, route contact lifecycle extraction.
+Active next task: Task 45b, route contact measurement/readout extraction.
 
 This plan supersedes the original 5-task architecture sketch. It reflects the current code shape after Tasks 1-38 and the current LOC audit.
 
@@ -82,7 +82,7 @@ Goal: after `main.py` is no longer the dominant blocker, reduce navigation cost 
 
 | Task | Scope | Current behavior | Structural improvement | Validation check | Target |
 | --- | --- | --- | --- | --- | --- |
-| 45 | `route/measurement.py` | Runner still coordinates movement, autofocus, photo capture, contact placement, measurement reading, confirmation, and result recording. | Split remaining runner internals by route-contact lifecycle and artifact/result recording while preserving `RouteMeasurementRunner` interface. | `tests/route/test_measurement.py`, route interrupt/autofocus/contact tests, full suite. | File below 2500 lines; remove warning-level runner helpers. |
+| 45 | `route/measurement.py` | Runner still coordinates movement, autofocus, photo capture, contact placement, measurement reading, confirmation, and result recording. | Split remaining runner internals by route-contact lifecycle and artifact/result recording while preserving `RouteMeasurementRunner` interface. | `tests/route/test_measurement.py`, route interrupt/autofocus/contact tests, full suite. | In progress: 45a extracted contact lifecycle (`measurement.py 3176 -> 2988 LOC`, Wily cyclomatic `520 -> 493`, runner `place_contact`/`prepare_external_contact` CC `11/10 -> 1/1`). Continue until file is below 2500 lines and warning-level runner helpers are removed. |
 | 46 | `views/design_navigator_panel.py` | Plot pane, route editing, tool state, enablement policy, and layout-window adapter are mixed. | Split plot rendering/tool policy from panel adapter; preserve signals and UI copy. | `tests/ui/test_design_navigator_panel.py`, design workflow/navigation tests, full suite. | File below 2300 lines; `_update_enabled_state` below warning threshold. |
 | 47 | `views/joystick_window.py` | Jog UI, keyboard controls, feedrate controls, serial command intent, and panel state are mixed. | Extract keyboard/jog presentation and feedrate sections into focused view helpers. | `tests/ui/test_joystick_feedrate.py`, key binding tests, stage jog command tests, full suite. | File below 2300 lines. |
 | 48 | `dialogs/route_measurement_dialog.py` | Qt construction, profile persistence, run controls, histogram/raw data display live together. | Split profile persistence and presentation modules; keep dialog as Qt adapter. | Route dialog/run UI tests and route measurement tests. | File below 1600 lines; histogram paint/control state helpers below warning threshold. |
@@ -120,10 +120,10 @@ These are intentionally not part of the behavior-preserving refactor passes:
 
 ## Next Action
 
-Stop after Task 44 commit, then start Task 45 from Phase 2 when work resumes:
+Continue Task 45 from Phase 2:
 
-1. Create a Task 45 brief for `probe_station_gui/route/measurement.py`.
-2. Use subagents for implementation review/spec review where useful.
-3. Identify the route-runner responsibility slice with the best behavior-preserving extraction target.
-4. Add or update characterization tests before moving route lifecycle logic.
-5. Run Wily metrics from a disposable UTF-8 temp clone/cache, full `pytest tests`, configured ruff, coverage, and lizard before commit.
+1. Task 45b: extract contact measurement/readout/seek engine from `RouteMeasurementRunner` without moving pause/confirmation consumption.
+2. Keep `RouteMeasurementRunner` public methods stable.
+3. Add or update characterization tests before moving contact seek/readout paths.
+4. Run Wily metrics from a disposable UTF-8 temp clone/cache, full `pytest tests`, configured ruff, coverage, and lizard before each commit.
+5. Task 45 target remains `route/measurement.py < 2500 LOC`; after 45a it is `2988 LOC`, so remaining reduction target is at least `489 LOC`.
