@@ -164,6 +164,7 @@ from probe_station_gui.stage.manual_jog_prediction import (
     ManualJogPredictionConfig,
     ManualJogPredictionState,
 )
+from probe_station_gui.stage import sample_handling
 from probe_station_gui.stage.motion_prediction import motion_progress
 from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
 from probe_station_gui.stage import position_update as stage_position_update
@@ -354,6 +355,9 @@ from probe_station_gui.views.main_window_auxiliary import (
 )
 from probe_station_gui.views.main_window_docks import create_main_window_docks
 from probe_station_gui.views.main_window_menus import setup_main_window_menus
+from probe_station_gui.views import (
+    main_window_needle_calibration as needle_calibration_ui,
+)
 
 _startup_trace("application imports done")
 
@@ -470,14 +474,22 @@ class Main(QMainWindow):
     CAMERA_UI_FRAME_GAP_WARNING_S = 0.25
     CLICK_TO_MOVE_PENDING_RETRY_MS = 150
     CLICK_TARGET_ANIMATION_PADDING_S = 0.03
-    CONTACT_SEEK_STEP_MM = -0.001
-    CONTACT_SEEK_MAX_TOTAL_MM = 0.020
-    CONTACT_SEEK_QUICK_COUNT = 25
-    CONTACT_SEEK_CONFIRM_COUNT = 250
-    SAMPLE_LOAD_X_MM = 0.0
-    SAMPLE_LOAD_Y_MM = 0.0
-    SAMPLE_UNLOAD_X_MM = -32.0
-    SAMPLE_UNLOAD_Y_MM = 32.0
+    CONTACT_SEEK_STEP_MM = (
+        needle_calibration_ui.manual_contact_seek.DEFAULT_MANUAL_CONTACT_SEEK_STEP_MM
+    )
+    CONTACT_SEEK_MAX_TOTAL_MM = (
+        needle_calibration_ui.manual_contact_seek.DEFAULT_MANUAL_CONTACT_SEEK_MAX_TOTAL_MM
+    )
+    CONTACT_SEEK_QUICK_COUNT = (
+        needle_calibration_ui.manual_contact_seek.DEFAULT_MANUAL_CONTACT_SEEK_QUICK_COUNT
+    )
+    CONTACT_SEEK_CONFIRM_COUNT = (
+        needle_calibration_ui.manual_contact_seek.DEFAULT_MANUAL_CONTACT_SEEK_CONFIRM_COUNT
+    )
+    SAMPLE_LOAD_X_MM = sample_handling.SAMPLE_LOAD_X_MM
+    SAMPLE_LOAD_Y_MM = sample_handling.SAMPLE_LOAD_Y_MM
+    SAMPLE_UNLOAD_X_MM = sample_handling.SAMPLE_UNLOAD_X_MM
+    SAMPLE_UNLOAD_Y_MM = sample_handling.SAMPLE_UNLOAD_Y_MM
 
     def __init__(self) -> None:
         _startup_trace("Main.__init__ entered")
@@ -3684,50 +3696,7 @@ class Main(QMainWindow):
         self._update_coordinate_display(cursor_xy=None)
 
     def _apply_needle_calibration_runtime(self, needle_settings: object) -> None:
-        self.stage_controller.apply_needle_calibration(
-            raise_position_mm=(
-                needle_settings.raise_position_mm
-                if needle_settings.raise_position_configured
-                else None
-            ),
-            down_position_mm=(
-                needle_settings.down_position_mm
-                if needle_settings.down_position_configured
-                else None
-            ),
-            contact_zone_mm=needle_settings.contact_zone_mm,
-        )
-        if self.joystick_panel is not None:
-            self.joystick_panel.set_needle_contact_coordinate(
-                "raise",
-                self._display_a_for_needle_lowering(
-                    needle_settings.raise_position_mm
-                    if needle_settings.raise_position_configured
-                    else None
-                ),
-            )
-            self.joystick_panel.set_needle_contact_coordinate(
-                "lower",
-                self._display_a_for_needle_lowering(
-                    needle_settings.down_position_mm
-                    if needle_settings.down_position_configured
-                    else None
-                ),
-            )
-        if self.contact_calibration_window is not None:
-            self.contact_calibration_window.set_saved_needle_height(
-                needle_settings.down_position_mm
-                if needle_settings.down_position_configured
-                else None
-            )
-            self.contact_calibration_window.set_saved_surface_position(
-                "chip",
-                needle_settings.chip_position,
-            )
-            self.contact_calibration_window.set_saved_surface_position(
-                "stone",
-                needle_settings.stone_position,
-            )
+        needle_calibration_ui.apply_needle_calibration_runtime(self, needle_settings)
 
     def _open_settings_dialog(self, initial_tab: object = None) -> None:
         open_settings_dialog(self, initial_tab)
@@ -7670,27 +7639,10 @@ class Main(QMainWindow):
             lcr_controller.set_live_polling_enabled(True)
 
     def _request_contact_seek(self) -> None:
-        thread = self._contact_seek_thread
-        if thread is not None and thread.is_alive():
-            self._show_status("Contact seek is already running.")
-            return
-        if self._route_measurement_thread is not None and self._route_measurement_thread.is_alive():
-            self._show_status("Stop route measurement before contact seek.")
-            return
-        if not self.lcr_controller.is_connected():
-            self._show_status("Connect the measurement instrument before contact seek.")
-            if self.contact_calibration_window is not None:
-                self.contact_calibration_window.set_contact_seek_result(
-                    "Measurement instrument is not connected."
-                )
-            return
-        self._contact_seek_stop_requested.clear()
-        if self.contact_calibration_window is not None:
-            self.contact_calibration_window.set_contact_seek_running(True)
-            self.contact_calibration_window.set_contact_seek_result("Starting.")
-        thread = threading.Thread(target=self._run_contact_seek, daemon=True)
-        self._contact_seek_thread = thread
-        thread.start()
+        needle_calibration_ui.request_contact_seek(
+            self,
+            thread_factory=threading.Thread,
+        )
 
     def _cancel_contact_seek(self) -> None:
         self._contact_seek_stop_requested.set()
@@ -7698,72 +7650,7 @@ class Main(QMainWindow):
         self._show_status("Contact seek cancel requested.")
 
     def _run_contact_seek(self) -> None:
-        stage_reserved = False
-        moved_mm = 0.0
-        try:
-            self.stage_controller.begin_external_task("contact seek")
-            stage_reserved = True
-            feedrate = self._current_needle_feedrate()
-            quick_quality = self._contact_seek_measure_quality(
-                self.CONTACT_SEEK_QUICK_COUNT
-            )
-            self.contact_seek_status.emit(
-                "Contact seek: current position "
-                f"{quick_quality.status}, median="
-                f"{_format_route_ohm(quick_quality.median_ohm)}."
-            )
-            if quick_quality.good is True:
-                if self._confirm_and_save_contact_seek("current position", moved_mm):
-                    return
-
-            max_steps = int(
-                math.ceil(
-                    self.CONTACT_SEEK_MAX_TOTAL_MM
-                    / abs(self.CONTACT_SEEK_STEP_MM)
-                )
-            )
-            for step_index in range(max_steps):
-                if self._contact_seek_stop_requested.is_set():
-                    self.contact_seek_finished.emit(False, "Contact seek cancelled.")
-                    return
-                self.contact_seek_status.emit(
-                    "Contact seek: lowering A "
-                    f"{step_index + 1}/{max_steps}."
-                )
-                self.stage_controller.run_external_needles_adjust(
-                    self.CONTACT_SEEK_STEP_MM,
-                    feedrate,
-                )
-                moved_mm += abs(self.CONTACT_SEEK_STEP_MM)
-                if self._contact_seek_stop_requested.is_set():
-                    self.contact_seek_finished.emit(False, "Contact seek cancelled.")
-                    return
-                quick_quality = self._contact_seek_measure_quality(
-                    self.CONTACT_SEEK_QUICK_COUNT
-                )
-                self.contact_seek_status.emit(
-                    "Contact seek: "
-                    f"{moved_mm:.4f} mm down, {quick_quality.status}, "
-                    f"median={_format_route_ohm(quick_quality.median_ohm)}, "
-                    f"MAD={_format_route_ohm(quick_quality.mad_sigma_ohm)}."
-                )
-                if quick_quality.good is True:
-                    if self._confirm_and_save_contact_seek(
-                        f"{moved_mm:.4f} mm down",
-                        moved_mm,
-                    ):
-                        return
-            self.contact_seek_finished.emit(
-                False,
-                "Contact seek did not find a stable contact within "
-                f"{self.CONTACT_SEEK_MAX_TOTAL_MM:.3f} mm.",
-            )
-        except Exception as exc:
-            logger.exception("Contact seek failed.")
-            self.contact_seek_finished.emit(False, f"Contact seek failed: {exc}")
-        finally:
-            if stage_reserved:
-                self.stage_controller.finish_external_task()
+        needle_calibration_ui.run_contact_seek(self)
 
     def _contact_seek_measure_quality(self, count: int):
         raw_batch = self.lcr_controller.read_route_measurement_batch_now(int(count))
@@ -7774,67 +7661,28 @@ class Main(QMainWindow):
         return summarize_route_contact_quality(samples)
 
     def _confirm_and_save_contact_seek(self, label: str, moved_mm: float) -> bool:
-        self.contact_seek_status.emit(
-            "Contact seek: confirming stable contact with "
-            f"{self.CONTACT_SEEK_CONFIRM_COUNT} readings."
+        return needle_calibration_ui.confirm_and_save_contact_seek(
+            self,
+            label,
+            moved_mm,
         )
-        confirm_quality = self._contact_seek_measure_quality(
-            self.CONTACT_SEEK_CONFIRM_COUNT
-        )
-        if confirm_quality.good is not True:
-            self.contact_seek_status.emit(
-                "Contact seek: quick check was good, confirmation failed "
-                f"({confirm_quality.status})."
-            )
-            return False
-        lowering_mm = self.stage_controller.latest_axis_a_lowering()
-        if lowering_mm is None:
-            raise StageControllerError("Unable to read A lowering after contact seek.")
-        self.stage_controller.finish_external_task()
-        try:
-            self.stage_controller.set_current_axis_work_coordinate("A", 0.0)
-        except StageControllerError:
-            raise
-        detail = (
-            f"{label}; moved {moved_mm:.4f} mm; "
-            f"median={_format_route_ohm(confirm_quality.median_ohm)}, "
-            f"MAD={_format_route_ohm(confirm_quality.mad_sigma_ohm)}, "
-            f"p95 step={_format_route_ohm(confirm_quality.p95_abs_step_ohm)}."
-        )
-        self.contact_seek_calibration_found.emit(float(lowering_mm), detail)
-        self.contact_seek_finished.emit(True, f"Contact seek found stable contact: {detail}")
-        return True
 
     def _on_contact_seek_status(self, message: str) -> None:
-        if self.contact_calibration_window is not None:
-            self.contact_calibration_window.set_contact_seek_result(message)
-        self._show_status(message, 5000)
+        needle_calibration_ui.on_contact_seek_status(self, message)
 
     def _on_contact_seek_calibration_found(
         self,
         lowering_mm: float,
         detail: str,
     ) -> None:
-        self._save_needle_down_position_from_lowering(float(lowering_mm))
-        if self.contact_calibration_window is not None:
-            self.contact_calibration_window.set_contact_seek_result(detail)
+        needle_calibration_ui.on_contact_seek_calibration_found(
+            self,
+            lowering_mm,
+            detail,
+        )
 
     def _on_contact_seek_finished(self, success: bool, message: str) -> None:
-        thread = self._contact_seek_thread
-        if thread is not None and not thread.is_alive():
-            thread.join(timeout=0.1)
-        self._contact_seek_thread = None
-        self._resume_resistance_standby_polling()
-        if self.contact_calibration_window is not None:
-            self.contact_calibration_window.set_contact_seek_running(False)
-            self.contact_calibration_window.set_contact_seek_result(message)
-        self._show_status(message, 8000 if not success else 5000)
-        if not success:
-            self._send_telegram_alert(
-                "contact_seek_failed",
-                f"Contact seek needs attention:\n{message}",
-                attach_photo=True,
-            )
+        needle_calibration_ui.on_contact_seek_finished(self, success, message)
 
     def _display_a_for_needle_lowering(self, lowering_mm: float | None) -> float | None:
         if lowering_mm is None:
@@ -7854,61 +7702,18 @@ class Main(QMainWindow):
         self._set_design_snap_enabled(enabled)
 
     def _save_current_needle_height(self) -> None:
-        a_position = self.stage_controller.latest_a_position()
-        latest_state = self.stage_controller.latest_stage_state()
-        if latest_state not in (None, "Idle"):
-            self._show_status("Wait for the stage to stop before saving needle contact.")
-            return
-        if a_position is None:
-            a_position = self.stage_controller.current_a_position()
-        if a_position is None:
-            reason = (
-                self.stage_controller.last_a_position_read_failure()
-                or "unknown reason"
-            )
-            if "stage task is active" in reason:
-                status_reason = "stage is busy"
-            elif "serial connection" in reason:
-                status_reason = "serial connection is unavailable"
-            elif "status query" in reason:
-                status_reason = "controller status was unavailable"
-            elif "does not include A axis" in reason:
-                status_reason = "controller status did not include A"
-            else:
-                status_reason = "see log for details"
-            logger.warning("Unable to save needle down height: %s", reason)
-            self._show_status(f"Unable to read A position: {status_reason}.")
-            return
-        latest_state = self.stage_controller.latest_stage_state()
-        if latest_state not in (None, "Idle"):
-            self._show_status("Wait for the stage to stop before saving needle contact.")
-            return
-        lowering_mm = self.stage_controller.axis_a_lowering_for_configured_coordinate(
-            a_position
-        )
-        try:
-            self.stage_controller.set_current_axis_work_coordinate("A", 0.0)
-        except StageControllerError as exc:
-            logger.warning("Unable to zero A work coordinate for needle contact: %s", exc)
-            self._show_status(f"Unable to set A0 at needle contact: {exc}")
-            return
-        self._save_needle_down_position_from_lowering(lowering_mm)
+        needle_calibration_ui.save_current_needle_height(self)
 
     def _save_needle_position_from_display_a_coordinate(
         self,
         action: str,
         a_coordinate: float,
     ) -> None:
-        try:
-            display_a = float(a_coordinate)
-        except (TypeError, ValueError):
-            self._show_status("Invalid A coordinate.")
-            return
-        if not math.isfinite(display_a):
-            self._show_status("Invalid A coordinate.")
-            return
-        raw_a = self.stage_controller.calibrated_axis_raw_value("A", display_a)
-        self._save_needle_position_from_raw_a_coordinate(action, raw_a)
+        needle_calibration_ui.save_needle_position_from_display_a_coordinate(
+            self,
+            action,
+            a_coordinate,
+        )
 
     def _save_needle_down_position_from_raw_a_coordinate(
         self,
@@ -7920,14 +7725,9 @@ class Main(QMainWindow):
         self,
         lowering_mm: float,
     ) -> None:
-        settings = self.settings_manager.settings.clone()
-        settings.needle_calibration.down_position_mm = max(0.0, float(lowering_mm))
-        settings.needle_calibration.down_position_configured = True
-        self.settings_manager.replace(settings)
-        self.settings_manager.save()
-        self._apply_needle_calibration_runtime(settings.needle_calibration)
-        self._show_status(
-            "Saved needle down target and set current A position to A0."
+        needle_calibration_ui.save_needle_down_position_from_lowering(
+            self,
+            lowering_mm,
         )
 
     def _save_needle_position_from_raw_a_coordinate(
@@ -7935,111 +7735,26 @@ class Main(QMainWindow):
         action: str,
         a_coordinate: float,
     ) -> None:
-        action_key = action.strip().lower()
-        if action_key not in {"raise", "lower"}:
-            self._show_status(f"Unknown needle target '{action}'.")
-            return
-        try:
-            raw_a = float(a_coordinate)
-        except (TypeError, ValueError):
-            self._show_status("Invalid A coordinate.")
-            return
-        if not math.isfinite(raw_a):
-            self._show_status("Invalid A coordinate.")
-            return
-        lowering_mm = self.stage_controller.axis_a_lowering_for_configured_coordinate(
-            raw_a
-        )
-        settings = self.settings_manager.settings.clone()
-        if action_key == "raise":
-            settings.needle_calibration.raise_position_mm = lowering_mm
-            settings.needle_calibration.raise_position_configured = True
-        else:
-            settings.needle_calibration.down_position_mm = lowering_mm
-            settings.needle_calibration.down_position_configured = True
-        self.settings_manager.replace(settings)
-        self.settings_manager.save()
-        self._apply_needle_calibration_runtime(settings.needle_calibration)
-        target_display_a = self._display_a_for_needle_lowering(lowering_mm)
-        self._show_status(
-            f"Saved needle {action_key} target "
-            f"A={target_display_a:.4f} ({lowering_mm:.4f} mm lowering)."
+        needle_calibration_ui.save_needle_position_from_raw_a_coordinate(
+            self,
+            action,
+            a_coordinate,
         )
 
     def _save_surface_position(self, target: str) -> None:
-        target_key = target.strip().lower()
-        if target_key not in {"chip", "stone"}:
-            self._show_status(f"Unknown calibration position '{target}'.")
-            return
-        try:
-            current_position = self.stage_controller.current_stage_position()
-        except Exception as exc:
-            self._show_status(str(exc))
-            return
-        if len(current_position) < 3:
-            self._show_status("Controller did not report X/Y/Z coordinates.")
-            return
-        settings = self.settings_manager.settings.clone()
-        saved_position = (
-            settings.needle_calibration.chip_position
-            if target_key == "chip"
-            else settings.needle_calibration.stone_position
-        )
-        saved_position.x_mm = float(current_position[0])
-        saved_position.y_mm = float(current_position[1])
-        saved_position.z_mm = float(current_position[2])
-        saved_position.configured = True
-        self.settings_manager.replace(settings)
-        self.settings_manager.save()
-        self._apply_needle_calibration_runtime(settings.needle_calibration)
-        self._show_status(
-            f"Saved {target_key} focus at "
-            f"X={saved_position.x_mm:.4f}, "
-            f"Y={saved_position.y_mm:.4f}, "
-            f"Z={saved_position.z_mm:.4f} mm."
-        )
+        needle_calibration_ui.save_surface_position(self, target)
 
     def _move_to_surface_position(self, target: str) -> None:
-        target_key = target.strip().lower()
-        if target_key not in {"chip", "stone"}:
-            self._show_status(f"Unknown calibration position '{target}'.")
-            return
-        settings = self.settings_manager.needle_calibration_configuration()
-        destination = (
-            settings.chip_position if target_key == "chip" else settings.stone_position
-        )
-        other = (
-            settings.stone_position if target_key == "chip" else settings.chip_position
-        )
-        if not destination.configured:
-            self._show_status(f"Save the {target_key} focus position first.")
-            return
-        transit_z = destination.z_mm
-        if other.configured:
-            transit_z = min(destination.z_mm, other.z_mm)
-        self.stage_controller.request_move_to_xyz(
-            destination.x_mm,
-            destination.y_mm,
-            destination.z_mm,
-            transit_z,
-            f"{target_key} position",
-        )
+        needle_calibration_ui.move_to_surface_position(self, target)
 
     def _sample_handling_active(self) -> bool:
         thread = getattr(self, "_sample_handling_thread", None)
         return thread is not None and thread.is_alive()
 
     def _latest_stage_z(self) -> float | None:
-        latest = self.stage_controller.latest_stage_position()
-        if latest is None or len(latest) < 3:
-            return None
-        try:
-            z_mm = float(latest[2])
-        except (TypeError, ValueError):
-            return None
-        if not math.isfinite(z_mm):
-            return None
-        return z_mm
+        return sample_handling.latest_stage_z(
+            self.stage_controller.latest_stage_position()
+        )
 
     def _active_sample_objective_name(self) -> str:
         try:
@@ -8048,136 +7763,73 @@ class Main(QMainWindow):
         except Exception:
             logger.debug("Unable to read active objective for sample focus.", exc_info=True)
             raw_name = ""
-        name = normalize_objective_name(raw_name)
-        if name:
-            return name
-        fallback = str(raw_name or "").strip().upper()
-        return fallback or "UNKNOWN"
+        return sample_handling.active_sample_objective_name(raw_name)
 
     def _remember_sample_focus_from_latest(self) -> float | None:
-        z_mm = self._latest_stage_z()
-        if z_mm is not None:
-            focus_by_objective = getattr(
-                self,
-                "_last_sample_focus_z_by_objective",
-                None,
-            )
-            if focus_by_objective is None:
-                focus_by_objective = {}
-                self._last_sample_focus_z_by_objective = focus_by_objective
-            focus_by_objective[self._active_sample_objective_name()] = z_mm
-        return z_mm
+        return sample_handling.remember_sample_focus(
+            self._sample_focus_cache(),
+            raw_objective_name=self._active_sample_objective_name(),
+            latest_position=self.stage_controller.latest_stage_position(),
+        )
 
     def _sample_load_focus_z(self) -> float | None:
-        objective_name = self._active_sample_objective_name()
-        focus_by_objective = getattr(
-            self,
-            "_last_sample_focus_z_by_objective",
-            {},
+        return sample_handling.sample_load_focus_z(
+            self._sample_focus_cache(),
+            raw_objective_name=self._active_sample_objective_name(),
+            latest_position=self.stage_controller.latest_stage_position(),
         )
-        if objective_name in focus_by_objective:
-            return focus_by_objective[objective_name]
-        return self._latest_stage_z()
+
+    def _sample_focus_cache(self) -> dict[str, float]:
+        focus_by_objective = getattr(self, "_last_sample_focus_z_by_objective", None)
+        if focus_by_objective is None:
+            focus_by_objective = {}
+            self._last_sample_focus_z_by_objective = focus_by_objective
+        return focus_by_objective
 
     def _sample_workflow_can_start(self, action: str) -> bool:
-        if not self._stage_serial_ready():
-            self._show_status("Stage is not connected; sample action not started.", 4000)
-            return False
-        if self._sample_handling_active() or self._has_cancelable_operation():
-            self._show_status(f"Stage is busy. Ignoring sample {action} request.", 4000)
+        decision = sample_handling.sample_start_decision(
+            action,
+            stage_ready=self._stage_serial_ready(),
+            sample_active=self._sample_handling_active(),
+            cancelable_operation=self._has_cancelable_operation(),
+        )
+        if not decision.accepted:
+            self._show_status(decision.status_message, 4000)
             return False
         return True
 
     def _design_registration_is_active(self) -> bool:
-        registration = getattr(
-            getattr(self, "_design_session", None),
-            "registration",
-            None,
+        return sample_handling.design_registration_is_active(
+            getattr(self, "_design_session", None)
         )
-        return bool(registration is not None and getattr(registration, "valid", False))
 
     def _request_sample_unload(self) -> None:
-        if not self._sample_workflow_can_start("unload"):
-            return
-        if self._design_registration_is_active():
-            response = QMessageBox.question(
-                self,
-                "Unload Sample",
-                "Unload sample and clear design registration?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-            if response != QMessageBox.Yes:
-                return
-            self._invalidate_design_registration(
-                "Design registration cleared before sample unload."
-            )
-        self._remember_sample_focus_from_latest()
-        xy_feedrate = self.stage_controller.max_feedrate_for_axes(("X", "Y"))
-        needle_feedrate = self._current_needle_feedrate()
-        thread = threading.Thread(
-            target=self._run_sample_unload,
-            args=(xy_feedrate, needle_feedrate),
-            daemon=True,
-            name="SampleUnload",
+        needle_calibration_ui.request_sample_unload(
+            self,
+            message_box=QMessageBox,
+            thread_factory=threading.Thread,
         )
-        self._sample_handling_thread = thread
-        thread.start()
 
     def _request_sample_load(self) -> None:
-        if not self._sample_workflow_can_start("load"):
-            return
-        focus_z_mm = self._sample_load_focus_z()
-        xy_feedrate = self.stage_controller.max_feedrate_for_axes(("X", "Y"))
-        focus_feedrate = self.stage_controller.max_feedrate_for_axes(("Z",))
-        needle_feedrate = self._current_needle_feedrate()
-        thread = threading.Thread(
-            target=self._run_sample_load,
-            args=(focus_z_mm, xy_feedrate, focus_feedrate, needle_feedrate),
-            daemon=True,
-            name="SampleLoad",
+        needle_calibration_ui.request_sample_load(
+            self,
+            thread_factory=threading.Thread,
         )
-        self._sample_handling_thread = thread
-        thread.start()
 
     def _run_sample_unload(
         self,
         xy_feedrate: float,
         needle_feedrate: float,
     ) -> None:
-        success = False
-        message = ""
-        try:
-            self.stage_controller.begin_external_task("sample unload")
-            self.sample_handling_status.emit("Sample unload: raising needles.")
-            self.stage_controller.run_external_needles_action(
-                "raise",
-                needle_feedrate,
-            )
-            self.sample_handling_status.emit(
-                "Sample unload: moving to "
-                f"X={self.SAMPLE_UNLOAD_X_MM:.3f}, "
-                f"Y={self.SAMPLE_UNLOAD_Y_MM:.3f}."
-            )
-            self.stage_controller.run_external_move_to_xy(
-                self.SAMPLE_UNLOAD_X_MM,
-                self.SAMPLE_UNLOAD_Y_MM,
-                feedrate=xy_feedrate,
-            )
-            message = (
-                "Sample unloaded at "
-                f"X={self.SAMPLE_UNLOAD_X_MM:.3f}, "
-                f"Y={self.SAMPLE_UNLOAD_Y_MM:.3f}; needles are raised."
-            )
-            success = True
-        except StageControllerError as exc:
-            message = f"Sample unload failed: {exc}"
-        except Exception as exc:
-            logger.exception("Sample unload failed.")
-            message = f"Sample unload failed: {exc}"
-        finally:
-            self.stage_controller.finish_external_task()
-            self.sample_handling_finished.emit(success, message, False, None)
+        sample_handling.run_sample_unload(
+            self.stage_controller,
+            xy_feedrate=xy_feedrate,
+            needle_feedrate=needle_feedrate,
+            emit_status=self.sample_handling_status.emit,
+            emit_finished=self.sample_handling_finished.emit,
+            unload_x_mm=self.SAMPLE_UNLOAD_X_MM,
+            unload_y_mm=self.SAMPLE_UNLOAD_Y_MM,
+        )
 
     def _run_sample_load(
         self,
@@ -8186,59 +7838,17 @@ class Main(QMainWindow):
         focus_feedrate: float,
         needle_feedrate: float,
     ) -> None:
-        success = False
-        message = ""
-        try:
-            self.stage_controller.begin_external_task("sample load")
-            self.sample_handling_status.emit("Sample load: raising needles.")
-            self.stage_controller.run_external_needles_action(
-                "raise",
-                needle_feedrate,
-            )
-            self.sample_handling_status.emit(
-                "Sample load: moving to "
-                f"X={self.SAMPLE_LOAD_X_MM:.3f}, "
-                f"Y={self.SAMPLE_LOAD_Y_MM:.3f}."
-            )
-            self.stage_controller.run_external_move_to_xy(
-                self.SAMPLE_LOAD_X_MM,
-                self.SAMPLE_LOAD_Y_MM,
-                feedrate=xy_feedrate,
-            )
-            if focus_z_mm is not None:
-                self.sample_handling_status.emit(
-                    f"Sample load: moving Z to last focus {focus_z_mm:.4f} mm."
-                )
-                self.stage_controller.run_external_absolute_axis_targets_move(
-                    {"Z": focus_z_mm},
-                    feedrate=focus_feedrate,
-                )
-                message = (
-                    "Sample loaded at "
-                    f"X={self.SAMPLE_LOAD_X_MM:.3f}, "
-                    f"Y={self.SAMPLE_LOAD_Y_MM:.3f}, "
-                    f"Z={focus_z_mm:.4f}."
-                )
-            else:
-                message = (
-                    "Sample loaded at "
-                    f"X={self.SAMPLE_LOAD_X_MM:.3f}, "
-                    f"Y={self.SAMPLE_LOAD_Y_MM:.3f}; last focus is unavailable."
-                )
-            success = True
-        except StageControllerError as exc:
-            message = f"Sample load failed: {exc}"
-        except Exception as exc:
-            logger.exception("Sample load failed.")
-            message = f"Sample load failed: {exc}"
-        finally:
-            self.stage_controller.finish_external_task()
-            self.sample_handling_finished.emit(
-                success,
-                message,
-                success,
-                focus_z_mm,
-            )
+        sample_handling.run_sample_load(
+            self.stage_controller,
+            focus_z_mm=focus_z_mm,
+            xy_feedrate=xy_feedrate,
+            focus_feedrate=focus_feedrate,
+            needle_feedrate=needle_feedrate,
+            emit_status=self.sample_handling_status.emit,
+            emit_finished=self.sample_handling_finished.emit,
+            load_x_mm=self.SAMPLE_LOAD_X_MM,
+            load_y_mm=self.SAMPLE_LOAD_Y_MM,
+        )
 
     def _on_sample_handling_finished(
         self,
@@ -8247,34 +7857,14 @@ class Main(QMainWindow):
         offer_autofocus: bool,
         focus_z_mm: object,
     ) -> None:
-        self._sample_handling_thread = None
-        if message:
-            self._show_status(message, 7000)
-        self._clear_stage_motion_axes()
-        self._update_stage_coordinate_apply_state()
-        self._schedule_cancel_state_refresh()
-        if not success or not offer_autofocus:
-            return
-        prompt = "Run autofocus now?"
-        try:
-            focus_z = float(focus_z_mm)
-        except (TypeError, ValueError):
-            focus_z = math.nan
-        if math.isfinite(focus_z):
-            prompt = f"Sample is near Z={focus_z:.4f} mm. Run autofocus now?"
-        response = QMessageBox.question(
+        needle_calibration_ui.on_sample_handling_finished(
             self,
-            "Autofocus",
-            prompt,
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes,
+            success,
+            message,
+            offer_autofocus,
+            focus_z_mm,
+            message_box=QMessageBox,
         )
-        if response != QMessageBox.Yes:
-            return
-        if self.stage_controller.is_busy():
-            self._show_status("Stage is busy; autofocus not started.", 4000)
-            return
-        self.stage_controller.request_autofocus()
 
     def _on_oscillation_state_changed(self, running: bool, axis: str) -> None:
         if self.oscillation_panel:

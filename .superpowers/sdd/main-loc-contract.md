@@ -53,3 +53,4 @@ The `main.py` reduction track is complete when all are true:
 ## Contract Exceptions
 
 - Task 41 finished at `main.py LOC 8371`, missing the `<= 8250` target by `121` LOC. This is accepted as a documented exception because the implementation that reached the target moved thread/stage/camera/Qt/file-save side effects out of `Main`, contradicting the task brief. The accepted version keeps those side effects in `Main` and still improves Wily `main.py` cyclomatic `1591 -> 1587`. Task 42 must compensate by keeping the existing `<= 8000` target, requiring at least `371` LOC reduction from the Task 41 result.
+- Task 42 compensated the Task 41 miss and passed the contract: `main.py LOC 8371 -> 7961`, SLOC `7823 -> 7413`, Wily `main.py` cyclomatic `1587 -> 1502`, MI `0 -> 0`. The compatibility fix restored `Main.CONTACT_SEEK_*` and `Main.SAMPLE_*` owner-level tunables, so the final reduction is smaller than the first extraction but still below the required `<= 8000` target.

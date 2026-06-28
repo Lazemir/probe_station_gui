@@ -1,9 +1,25 @@
-"""Contact-seek configuration and depth planning helpers."""
+"""Contact-seek configuration, status, and depth planning helpers."""
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Any
+
+from probe_station_gui.route.formatting import format_route_ohm
+
+
+DEFAULT_MANUAL_CONTACT_SEEK_STEP_MM = -0.001
+DEFAULT_MANUAL_CONTACT_SEEK_MAX_TOTAL_MM = 0.020
+DEFAULT_MANUAL_CONTACT_SEEK_QUICK_COUNT = 25
+DEFAULT_MANUAL_CONTACT_SEEK_CONFIRM_COUNT = 250
+
+
+@dataclass(frozen=True)
+class ContactSeekStartDecision:
+    accepted: bool
+    status_message: str = ""
+    calibration_window_result: str | None = None
 
 
 @dataclass(frozen=True)
@@ -18,6 +34,96 @@ class ContactSeekAttempt:
             self.depth_mm - self.previous_depth_mm,
             float(step_mm),
         )
+
+
+def contact_seek_start_decision(
+    *,
+    contact_seek_active: bool,
+    route_measurement_active: bool,
+    instrument_connected: bool,
+) -> ContactSeekStartDecision:
+    if contact_seek_active:
+        return ContactSeekStartDecision(
+            accepted=False,
+            status_message="Contact seek is already running.",
+        )
+    if route_measurement_active:
+        return ContactSeekStartDecision(
+            accepted=False,
+            status_message="Stop route measurement before contact seek.",
+        )
+    if not instrument_connected:
+        return ContactSeekStartDecision(
+            accepted=False,
+            status_message="Connect the measurement instrument before contact seek.",
+            calibration_window_result="Measurement instrument is not connected.",
+        )
+    return ContactSeekStartDecision(accepted=True)
+
+
+def contact_seek_current_position_status(quality: Any) -> str:
+    return (
+        "Contact seek: current position "
+        f"{quality.status}, median={format_route_ohm(quality.median_ohm)}."
+    )
+
+
+def contact_seek_lowering_status(attempt: ContactSeekAttempt) -> str:
+    return (
+        "Contact seek: lowering A "
+        f"{attempt.attempt_number}/{attempt.max_attempts}."
+    )
+
+
+def contact_seek_depth_status(moved_mm: float, quality: Any) -> str:
+    return (
+        "Contact seek: "
+        f"{moved_mm:.4f} mm down, {quality.status}, "
+        f"median={format_route_ohm(quality.median_ohm)}, "
+        f"MAD={format_route_ohm(quality.mad_sigma_ohm)}."
+    )
+
+
+def contact_seek_confirming_status(confirm_count: int) -> str:
+    return (
+        "Contact seek: confirming stable contact with "
+        f"{int(confirm_count)} readings."
+    )
+
+
+def contact_seek_confirmation_failed_status(quality: Any) -> str:
+    return (
+        "Contact seek: quick check was good, confirmation failed "
+        f"({quality.status})."
+    )
+
+
+def contact_seek_found_detail(label: str, moved_mm: float, quality: Any) -> str:
+    return (
+        f"{label}; moved {moved_mm:.4f} mm; "
+        f"median={format_route_ohm(quality.median_ohm)}, "
+        f"MAD={format_route_ohm(quality.mad_sigma_ohm)}, "
+        f"p95 step={format_route_ohm(quality.p95_abs_step_ohm)}."
+    )
+
+
+def contact_seek_found_message(detail: str) -> str:
+    return f"Contact seek found stable contact: {detail}"
+
+
+def contact_seek_cancelled_message() -> str:
+    return "Contact seek cancelled."
+
+
+def contact_seek_not_found_message(max_total_mm: float) -> str:
+    return (
+        "Contact seek did not find a stable contact within "
+        f"{float(max_total_mm):.3f} mm."
+    )
+
+
+def contact_seek_failed_message(exc: BaseException) -> str:
+    return f"Contact seek failed: {exc}"
 
 
 def normalize_contact_seek_step(value: object, *, default_step_mm: float) -> float:
