@@ -100,6 +100,19 @@ class _FakeInstrument:
         return types.SimpleNamespace(primary=7.5)
 
 
+class _ConfiguringFakeInstrument:
+    def __init__(self, responses: dict[str, str]) -> None:
+        self.responses = dict(responses)
+        self.operations: list[tuple[str, str]] = []
+
+    def write(self, command: str) -> None:
+        self.operations.append(("write", command))
+
+    def ask(self, query: str) -> str:
+        self.operations.append(("ask", query))
+        return self.responses[query]
+
+
 class _FakeSession:
     backend_name = "fake"
 
@@ -353,6 +366,181 @@ class LCRMeterTest(unittest.TestCase):
         self.assertEqual(value, 12.5)
         self.assertTrue(instrument.trigger_fetch_called)
         self.assertFalse(instrument.fetch_main_called)
+
+    def test_session_configures_impedance_measurement_command_sequence(self) -> None:
+        session = _LCRSession.__new__(_LCRSession)
+        session.CONFIG_COMMAND_DELAY_S = 0
+        session.CONFIG_VERIFY_DELAY_S = 0
+        session.POST_CONFIG_SETTLE_S = 0
+        instrument = _ConfiguringFakeInstrument(
+            {
+                "FUNC?": "CpD",
+                "TRIG:SOUR?": "BUS",
+                "FUNC:RANG:AUTO?": "HOLD",
+                "APER:RATE?": "MED",
+                "APER:AVG?": "4",
+                "TRIG:DLY?": "0.25",
+                "FUNC:IMP:RANG?": "7",
+                "FREQ?": "1000.0",
+                "LEV:SRES?": "100",
+                "FUNC:MON1?": "Z",
+                "FUNC:MON2?": "TH",
+                "LEV:ALC?": "ON",
+                "LEV:CURR?": "0.0015",
+                "BIAS?": "1.2",
+            }
+        )
+        session._instrument = instrument
+
+        session.configure_measurement(
+            measurement_function="CpD",
+            range_mode="HOLD",
+            impedance_range=7,
+            dcr_range=3,
+            frequency_hz=1000.0,
+            level_mode="CURRENT",
+            voltage_level_v=0.2,
+            current_level_a=0.0015,
+            source_resistance_ohm=100,
+            aperture_rate="MED",
+            aperture_averages=4,
+            trigger_source="BUS",
+            trigger_delay_s=0.25,
+            bias_enabled=True,
+            bias_level_v=1.2,
+            monitor1="Z",
+            monitor2="TH",
+            alc_enabled=True,
+        )
+
+        self.assertEqual(
+            instrument.operations,
+            [
+                ("write", "FUNC CpD"),
+                ("ask", "FUNC?"),
+                ("write", "TRIG:SOUR BUS"),
+                ("ask", "TRIG:SOUR?"),
+                ("write", "FUNC:RANG:AUTO HOLD"),
+                ("ask", "FUNC:RANG:AUTO?"),
+                ("write", "APER MED"),
+                ("ask", "APER:RATE?"),
+                ("write", "APER 4"),
+                ("ask", "APER:AVG?"),
+                ("write", "TRIG:DLY 0.25"),
+                ("ask", "TRIG:DLY?"),
+                ("write", "FUNC:IMP:RANG 7"),
+                ("ask", "FUNC:IMP:RANG?"),
+                ("write", "FREQ 1000.0"),
+                ("ask", "FREQ?"),
+                ("write", "LEV:SRES 100"),
+                ("ask", "LEV:SRES?"),
+                ("write", "FUNC:MON1 Z"),
+                ("ask", "FUNC:MON1?"),
+                ("write", "FUNC:MON2 TH"),
+                ("ask", "FUNC:MON2?"),
+                ("write", "LEV:ALC ON"),
+                ("ask", "LEV:ALC?"),
+                ("write", "LEV:CURR 1.5m"),
+                ("ask", "LEV:CURR?"),
+                ("write", "BIAS 1.2"),
+                ("ask", "BIAS?"),
+            ],
+        )
+
+    def test_session_configures_dcr_measurement_command_sequence(self) -> None:
+        session = _LCRSession.__new__(_LCRSession)
+        session.CONFIG_COMMAND_DELAY_S = 0
+        session.CONFIG_VERIFY_DELAY_S = 0
+        session.POST_CONFIG_SETTLE_S = 0
+        instrument = _ConfiguringFakeInstrument(
+            {
+                "FUNC?": "DCR",
+                "TRIG:SOUR?": "BUS",
+                "FUNC:RANG:AUTO?": "HOLD",
+                "APER:RATE?": "FAST",
+                "APER:AVG?": "1",
+                "TRIG:DLY?": "0.0",
+                "FUNC:DCR:RANG?": "3",
+                "BIAS?": "OFF",
+            }
+        )
+        session._instrument = instrument
+
+        session.configure_measurement(
+            measurement_function="DCR",
+            range_mode="HOLD",
+            impedance_range=7,
+            dcr_range=3,
+            frequency_hz=1000.0,
+            level_mode="VOLTAGE",
+            voltage_level_v=0.2,
+            current_level_a=0.0015,
+            source_resistance_ohm=100,
+            aperture_rate="FAST",
+            aperture_averages=1,
+            trigger_source="BUS",
+            trigger_delay_s=0.0,
+            bias_enabled=True,
+            bias_level_v=1.2,
+            monitor1="Z",
+            monitor2="TH",
+            alc_enabled=True,
+        )
+
+        self.assertEqual(
+            instrument.operations,
+            [
+                ("write", "FUNC DCR"),
+                ("ask", "FUNC?"),
+                ("write", "TRIG:SOUR BUS"),
+                ("ask", "TRIG:SOUR?"),
+                ("write", "FUNC:RANG:AUTO HOLD"),
+                ("ask", "FUNC:RANG:AUTO?"),
+                ("write", "APER FAST"),
+                ("ask", "APER:RATE?"),
+                ("write", "APER 1"),
+                ("ask", "APER:AVG?"),
+                ("write", "TRIG:DLY 0.0"),
+                ("ask", "TRIG:DLY?"),
+                ("write", "FUNC:DCR:RANG 3"),
+                ("ask", "FUNC:DCR:RANG?"),
+                ("write", "BIAS OFF"),
+                ("ask", "BIAS?"),
+            ],
+        )
+
+    def test_session_configuration_failure_raises_lcr_meter_error(self) -> None:
+        session = _LCRSession.__new__(_LCRSession)
+        session.CONFIG_COMMAND_DELAY_S = 0
+        session.CONFIG_VERIFY_DELAY_S = 0
+        session.POST_CONFIG_SETTLE_S = 0
+        session.CONFIG_VERIFY_RETRIES = 1
+        session._instrument = _ConfiguringFakeInstrument({"FUNC?": "DCR"})
+
+        with self.assertRaisesRegex(
+            LCRMeterError,
+            "Unable to configure LCR measurement",
+        ):
+            session.configure_measurement(
+                measurement_function="CpD",
+                range_mode="AUTO",
+                impedance_range=7,
+                dcr_range=3,
+                frequency_hz=1000.0,
+                level_mode="VOLTAGE",
+                voltage_level_v=0.2,
+                current_level_a=0.0015,
+                source_resistance_ohm=100,
+                aperture_rate="FAST",
+                aperture_averages=1,
+                trigger_source="BUS",
+                trigger_delay_s=0.0,
+                bias_enabled=False,
+                bias_level_v=0.0,
+                monitor1="Z",
+                monitor2="TH",
+                alc_enabled=False,
+            )
 
     def test_controller_single_read_is_triggered_and_does_not_restart_polling(self) -> None:
         controller = LCRMeterController()
