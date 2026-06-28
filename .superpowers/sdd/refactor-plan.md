@@ -2,8 +2,8 @@
 
 Updated: 2026-06-28
 Branch: `codex/refactor-stage-controller`
-Current completed task: Task 47a, joystick feedrate panel extraction.
-Active next task: Task 47b, joystick helper widget/keyboard extraction.
+Current completed task: Task 47b, joystick helper widget extraction.
+Active next task: Task 48, route measurement dialog extraction.
 
 This plan supersedes the original 5-task architecture sketch. It reflects the current code shape after Tasks 1-38 and the current LOC audit.
 
@@ -21,9 +21,9 @@ Largest production files by physical line count:
 | --- | ---: | --- |
 | `main.py` | 7545 | still central, but Phase 1 target is met; remaining work should avoid using it as the only sink |
 | `probe_station_gui/route/measurement.py` | 2479 | route runner still coordinates route point orchestration and confirmation, but contact lifecycle/readout/recording policy are now separate modules |
-| `probe_station_gui/views/joystick_window.py` | 2372 | jog execution, keyboard handling, serial commands, homing/needle UI, and panel state remain; feedrate panel behavior is now isolated |
 | `probe_station_gui/dialogs/route_measurement_dialog.py` | 2179 | Qt construction, profile persistence, runtime controls, histogram/raw data presentation mixed |
 | `probe_station_gui/instruments/meters/lcr.py` | 2010 | instrument worker, meter capabilities, polling, and route-meter adapter logic mixed |
+| `probe_station_gui/views/joystick_window.py` | 2254 | jog execution, keyboard handling, serial commands, homing/needle UI, and panel state remain; feedrate panel and helper widgets are isolated |
 | `probe_station_gui/views/design_navigator_panel.py` | 1849 | route editing/tool state and layout-window adapter remain; plot rendering and enablement policy are now isolated |
 | `probe_station_measure/instrument_drivers/Keithley/Keithley_2400_2182A.py` | 1698 | external driver wrapper likely needs an adapter/facade pass before editing internals |
 | `probe_station_gui/settings/manager.py` | 1660 | settings load/save/migration and section compatibility remain concentrated |
@@ -84,7 +84,7 @@ Goal: after `main.py` is no longer the dominant blocker, reduce navigation cost 
 | --- | --- | --- | --- | --- | --- |
 | 45 | `route/measurement.py` | Runner coordinated movement, autofocus, photo capture, contact placement, measurement reading, confirmation, and result recording. | Split route-contact lifecycle, contact readout/seek, and record/result policy while preserving `RouteMeasurementRunner` interface and route control semantics. | `tests/route/test_measurement.py`, route interrupt/autofocus/contact tests, full suite. | Completed: 45a extracted contact lifecycle (`measurement.py 3176 -> 2988 LOC`, Wily cyclomatic `520 -> 493`, runner `place_contact`/`prepare_external_contact` CC `11/10 -> 1/1`); 45b extracted contact measurement/readout/seek (`measurement.py 2988 -> 2650 LOC`, Wily SLOC `2775 -> 2445`, Wily cyclomatic `493 -> 417`, runner contact-readout helper CCs down to `1`, new `route/contact_measurement.py` 751 LOC / MI 17.18 / max CC 8); 45c extracted record/result policy (`measurement.py 2650 -> 2479 LOC`, Wily SLOC `2445 -> 2289`, Wily cyclomatic `417 -> 379`, new `route/measurement_recording.py` 211 LOC / MI 37.05 / max CC 8 / 100% coverage). Target passed: file is below 2500 lines, no lizard warnings in touched route slice. |
 | 46 | `views/design_navigator_panel.py` | Plot pane, route editing, tool state, enablement policy, and layout-window adapter were mixed. | Split plot rendering and enablement policy from panel adapter; preserve signals and UI copy. | `tests/ui/test_design_navigator_panel.py`, design workflow/navigation tests, full suite. | Completed: 46a extracted `_DesignPlotPane` to `views/design_plot_pane.py` (`design_navigator_panel.py 3083 -> 1818 LOC`, Wily SLOC `2848 -> 1670`, Wily cyclomatic `535 -> 251`; new plot module `1286 LOC`, Wily cyclomatic `284`). 46b extracted `DesignNavigatorEnablement` (`design_navigator_panel.py 1818 -> 1849 LOC`, Wily file cyclomatic `251 -> 238`, `_update_enabled_state` CC `29 -> 1`, new enablement module `82 LOC` / MI 38.89 / 100% coverage). Target passed: file is below 2300 lines and `_update_enabled_state` is below warning threshold. |
-| 47 | `views/joystick_window.py` | Jog UI, keyboard controls, feedrate controls, serial command intent, and panel state are mixed. | Extract keyboard/jog presentation and feedrate sections into focused view helpers. | `tests/ui/test_joystick_feedrate.py`, key binding tests, stage jog command tests, full suite. | In progress: 47a extracted feedrate controls to `views/joystick/feedrate_panel.py` (`joystick_window.py 3059 -> 2372 LOC`, Wily SLOC `2822 -> 2189`, Wily cyclomatic `644 -> 509`; new feedrate module `709 LOC`, max CC 10). 47b remains: get `joystick_window.py < 2300 LOC` without changing `$J` command generation, keyboard stop/resend, or serial command coordination. |
+| 47 | `views/joystick_window.py` | Jog UI, keyboard controls, feedrate controls, serial command intent, and panel state were mixed. | Extract feedrate and helper widget sections into focused view helpers while preserving jog/serial behavior. | `tests/ui/test_joystick_feedrate.py`, key binding tests, stage jog command tests, full suite. | Completed: 47a extracted feedrate controls to `views/joystick/feedrate_panel.py` (`joystick_window.py 3059 -> 2372 LOC`, Wily SLOC `2822 -> 2189`, Wily cyclomatic `644 -> 509`; new feedrate module `709 LOC`, max CC 10). 47b extracted helper widgets to `views/joystick/widgets.py` (`joystick_window.py 2372 -> 2254 LOC`, Wily SLOC `2189 -> 2094`, Wily cyclomatic `509 -> 478`; new widgets module `134 LOC` / MI 49.68). Target passed: `joystick_window.py < 2300 LOC`. Residual known hotspot: `_apply_axes` remains 55 NLOC / CCN 17 and should be handled only with explicit characterization of `$J`, stop/resend, and controller coordination. |
 | 48 | `dialogs/route_measurement_dialog.py` | Qt construction, profile persistence, run controls, histogram/raw data display live together. | Split profile persistence and presentation modules; keep dialog as Qt adapter. | Route dialog/run UI tests and route measurement tests. | File below 1600 lines; histogram paint/control state helpers below warning threshold. |
 | 49 | `instruments/meters/lcr.py` | Worker scheduling, live polling, capabilities, and route-meter behavior are mixed. | Separate instrument worker lifecycle from meter capabilities and adapter code. | LCR worker/GW Instek/instrument tests, full suite. | File below 1400 lines. |
 | 50 | Settings manager/dialog | Settings parsing, migration, defaults, and UI section knowledge are still duplicated. | Move remaining settings sections behind section modules and metadata consumed by UI. | Settings tests, key binding/feedrate/needle calibration tests, full suite. | `settings/manager.py < 1100`, `settings_dialog.py < 1100`. |
@@ -120,10 +120,10 @@ These are intentionally not part of the behavior-preserving refactor passes:
 
 ## Next Action
 
-Continue Task 47b from Phase 2:
+Continue Task 48 from Phase 2:
 
-1. Extract remaining embedded helper widgets or keyboard/global event methods mechanically, choosing the smallest pass that gets `joystick_window.py < 2300 LOC`.
-2. Preserve `$J` command generation, keyboard stop/resend, serial command coordination, and feedrate settings behavior.
-3. Add focused characterization tests first if the pass touches `_apply_axes`, `stop_jog`, or key press/release state.
+1. Start with a read-only slice audit of `probe_station_gui/dialogs/route_measurement_dialog.py` and its route dialog tests.
+2. Identify one cohesive extraction that removes profile persistence or presentation sections without changing route-control semantics.
+3. Add focused characterization tests before changing runtime controls or histogram/raw data display behavior.
 4. Run Wily metrics from a disposable UTF-8 temp clone/cache, full `pytest tests`, configured ruff, coverage, and lizard before each commit.
-5. Task 47 target remains `joystick_window.py < 2300 LOC`; current count after 47a is `2372 LOC`, so the remaining reduction is at least `73 LOC`.
+5. Task 48 target: `route_measurement_dialog.py < 1600 LOC`; route Pause/Resume/Interrupt semantics remain safety-critical and must not change incidentally.
