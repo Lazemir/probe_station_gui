@@ -1,9 +1,9 @@
 # Architecture Refactoring Plan
 
-Updated: 2026-06-28
+Updated: 2026-06-29
 Branch: `codex/refactor-stage-controller`
-Current completed task: Task 51a, app test support extraction.
-Active next task: Task 51b, split stage/coordinate app tests.
+Current completed task: Task 51b, stage/coordinate app test split.
+Active next task: Task 51c, split route-control/API route app tests.
 
 This plan supersedes the original 5-task architecture sketch. It reflects the current code shape after Tasks 1-38 and the current LOC audit.
 
@@ -34,7 +34,7 @@ Largest test files:
 
 | File | Lines | Current problem |
 | --- | ---: | --- |
-| `tests/app/test_main_coordinate_feedrate.py` | 5696 | multiple `Main` adapter suites in one file; shared fakes/helpers are now in `tests/app/main_coordinate_feedrate_support.py` |
+| `tests/app/test_main_coordinate_feedrate.py` | 4941 | route API, meter/API raw/contact, Telegram, and route-control adapter tests remain together; shared fakes/helpers are in `tests/app/main_coordinate_feedrate_support.py` |
 | `tests/stage/test_controller.py` | 4056 | stage controller behavior tests not split by module responsibility |
 | `tests/route/test_measurement.py` | 3978 | route runner characterization is monolithic |
 | `tests/instruments/meters/test_lcr.py` | 1251 | LCR worker/capability/adapter tests mixed |
@@ -95,7 +95,7 @@ Goal: test files should be navigable by responsibility. This is not cosmetic: re
 
 | Task | Scope | Current behavior | Structural improvement | Validation check | Target |
 | --- | --- | --- | --- | --- | --- |
-| 51 | `tests/app/test_main_coordinate_feedrate.py` | Many unrelated `Main` adapter behaviors live in one 6585-line file. | Split by feature area: API coordinate moves, route API, manual jog prediction, stage panel, route control, Telegram/app adapter. | Run split files plus full suite; ensure no shared fixture behavior changes. | In progress: 51a extracted shared app-test support to `tests/app/main_coordinate_feedrate_support.py` (`test_main_coordinate_feedrate.py 6585 -> 5696 LOC`, Wily cyclomatic `389 -> 200`, new support module `947 LOC` / Wily cyclomatic `185`, full suite `1240 passed, 2 skipped`, direct unittest execution preserved). Target remains: no app test file above 1800 lines. |
+| 51 | `tests/app/test_main_coordinate_feedrate.py` | Many unrelated `Main` adapter behaviors live in one 6585-line file. | Split by feature area: API coordinate moves, route API, manual jog prediction, stage panel, route control, Telegram/app adapter. | Run split files plus full suite; ensure no shared fixture behavior changes. | In progress: 51a extracted shared app-test support to `tests/app/main_coordinate_feedrate_support.py` (`test_main_coordinate_feedrate.py 6585 -> 5696 LOC`, Wily cyclomatic `389 -> 200`, new support module `947 LOC` / Wily cyclomatic `185`, full suite `1240 passed, 2 skipped`, direct unittest execution preserved). 51b split stage/coordinate/cancel/home tracking tests into `tests/app/test_main_stage_coordinate_controls.py` (`test_main_coordinate_feedrate.py 5696 -> 4941 LOC`, Wily cyclomatic `200 -> 158`, new file `766 LOC` / Wily cyclomatic `44`, 12 stale imports removed, full suite `1240 passed, 2 skipped`, direct unittest execution preserved). Target remains: no app test file above 1800 lines. |
 | 52 | `tests/stage/test_controller.py` | Stage controller tests are not split by current module responsibilities. | Split by controller seam: status/session, motion commands, needle actions, connection state, cache/import. | Stage test subset and full suite. | No stage controller test file above 1600 lines. |
 | 53 | `tests/route/test_measurement.py` | Route runner characterization is monolithic. | Split by lifecycle: start/finish, contact seek/placement, interrupt/pause, recording/artifacts, config. | Route test subset and full suite. | No route measurement test file above 1600 lines. |
 | 54 | Instrument tests | LCR and Keithley tests mix capabilities, worker behavior, and driver behavior. | Split LCR worker/capability/adapter tests and Keithley driver tests by behavior. | Instrument test subset and full suite. | No instrument test file above 900 lines. |
@@ -122,7 +122,8 @@ These are intentionally not part of the behavior-preserving refactor passes:
 
 Continue Task 51 with a concrete split:
 
-1. Task 51b: move stage/coordinate tests into `tests/app/test_main_stage_coordinate_controls.py`.
-2. Keep `tests/app/main_coordinate_feedrate_support.py` as the shared helper module for now; do not introduce `conftest.py` until at least two split test files prove the shared surface.
-3. Preserve direct execution for any split file that keeps a `unittest.main()` guard, or remove the guard intentionally with verification.
-4. Run focused split files, direct execution where applicable, full `pytest tests`, configured ruff, Wily/radon/lizard metrics, and commit before the next split.
+1. Task 51c: move route-control/API route-control tests into a dedicated app test module.
+2. Use a read-only explorer first to map method ranges and shared helper needs; avoid mixing this with meter/raw/contact tests in the same pass.
+3. Keep `tests/app/main_coordinate_feedrate_support.py` as the shared helper module for now; do not introduce `conftest.py` until at least three split test files prove the shared surface.
+4. Preserve direct execution for any split file that keeps a `unittest.main()` guard, or remove the guard intentionally with verification.
+5. Run focused split files, direct execution where applicable, full `pytest tests`, configured ruff, Wily/radon/lizard metrics, and commit before the next split.
