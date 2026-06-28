@@ -2,8 +2,8 @@
 
 Updated: 2026-06-28
 Branch: `codex/refactor-stage-controller`
-Current completed commit: `5ce3d50 refactor: split API coordinate move planning`
-Active next task: Task 39, stage position update adapter.
+Current completed task: Task 40, coordinate move lifecycle/cancel.
+Active next task: Task 41, microscope scan workflow.
 
 This plan supersedes the original 5-task architecture sketch. It reflects the current code shape after Tasks 1-38 and the current LOC audit.
 
@@ -11,8 +11,8 @@ This plan supersedes the original 5-task architecture sketch. It reflects the cu
 
 `main.py`:
 
-- `radon raw main.py`: `LOC 8948`, `SLOC 8400`
-- physical lines: `8410`
+- `radon raw main.py`: `LOC 8446`, `SLOC 7898`
+- baseline before the current Phase 1 contract: `LOC 8948`, `SLOC 8400`
 - Binding target contract: `.superpowers/sdd/main-loc-contract.md`
 
 Largest production files by physical line count:
@@ -120,10 +120,10 @@ These are intentionally not part of the behavior-preserving refactor passes:
 
 ## Next Action
 
-Start Task 39 from the `main.py` LOC contract:
+Start Task 41 from the `main.py` LOC contract:
 
-1. Create a Task 39 brief with current behavior, structural improvement, validation checks, baseline metrics, and LOC target.
+1. Create a Task 41 brief with current behavior, structural improvement, validation checks, baseline metrics, and LOC target.
 2. Use subagents for implementation review/spec review where useful.
 3. Run Wily metrics from a disposable UTF-8 temp clone/cache.
 4. Run full `pytest tests` and configured ruff.
-5. Commit Task 39 separately.
+5. Commit Task 41 separately.

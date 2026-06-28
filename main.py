@@ -166,6 +166,7 @@ from probe_station_gui.stage.manual_jog_prediction import (
     ManualJogPredictionState,
 )
 from probe_station_gui.stage.motion_prediction import motion_progress
+from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
 from probe_station_gui.stage import position_update as stage_position_update
 from probe_station_gui.shared.wheel_guard import GuardedComboBox as QComboBox
 from probe_station_gui.stage.controller import StageControllerError
@@ -3128,35 +3129,7 @@ class Main(QMainWindow):
         return thread is not None and thread.is_alive()
 
     def _has_cancelable_operation(self) -> bool:
-        controller_busy = (
-            hasattr(self, "stage_controller") and self.stage_controller.is_busy()
-        )
-        route_contact_move_thread = getattr(self, "_route_contact_move_thread", None)
-        route_contact_move_active = (
-            route_contact_move_thread is not None
-            and route_contact_move_thread.is_alive()
-        )
-        route_measurement_thread = getattr(self, "_route_measurement_thread", None)
-        route_measurement_active = (
-            route_measurement_thread is not None
-            and route_measurement_thread.is_alive()
-        )
-        return (
-            self._coordinate_targets.has_active_move()
-            or controller_busy
-            or self._controller_reports_active_motion()
-            or route_contact_move_active
-            or route_measurement_active
-            or self._surface_map_capture_running()
-            or self._microscope_scan_running()
-            or self._sample_handling_active()
-            or self._manual_alignment_pick_slot is not None
-            or self._pending_click_to_move is not None
-            or bool(self._pending_homing_axes)
-            or self._homing_active_key is not None
-            or self._pending_alignment_preparation is not None
-            or self._pending_quick_alignment_rotation
-        )
+        return stage_move_lifecycle.has_cancelable_operation(self)
 
     def _controller_reports_active_motion(self) -> bool:
         if not hasattr(self, "stage_controller"):
@@ -3228,82 +3201,10 @@ class Main(QMainWindow):
         return had_changes
 
     def _cancel_stage_coordinate_action(self) -> None:
-        cancelled_any = False
-        cleared_edits = False
-        if self._pending_click_to_move is not None:
-            self._clear_pending_click_to_move(clear_cross=True)
-            cancelled_any = True
-        if self._manual_alignment_pick_slot is not None:
-            self._cancel_manual_alignment_pick()
-            cancelled_any = True
-        if self._pending_alignment_preparation is not None:
-            self._pending_alignment_preparation = None
-            cancelled_any = True
-        if self._pending_quick_alignment_rotation:
-            self._pending_quick_alignment_rotation = False
-            cancelled_any = True
-        if self._pending_homing_axes or self._homing_active_key is not None:
-            self._clear_pending_homing_queue()
-            cancelled_any = True
-        runner = self._route_measurement_runner
-        if runner is not None:
-            runner.stop()
-            cancelled_any = True
-            if self.design_navigator_panel is not None:
-                self.design_navigator_panel.set_route_measurement_waiting(False)
-                self.design_navigator_panel.set_route_measurement_status(
-                    "Route measurement cancel requested."
-                )
-        if self._surface_map_capture_running():
-            try:
-                self.surface_map_window.stop_capture()
-            except Exception:
-                logger.exception("Failed to stop surface map capture from Cancel.")
-            cancelled_any = True
-        if self._microscope_scan_running():
-            self._microscope_scan_stop_requested.set()
-            if self.microscope_scan_dialog is not None:
-                self.microscope_scan_dialog.set_status(
-                    "Microscope scan stop requested."
-                )
-            cancelled_any = True
-        if self._coordinate_targets.has_active_move():
-            self.stage_controller.cancel_active_motion(
-                "Coordinate move cancel requested."
-            )
-            self._clear_coordinate_move_tracking(
-                clear_pending=True,
-                reset_override=True,
-            )
-            self._clear_stage_motion_axes()
-            self._clear_pending_stage_coordinate_targets()
-            self.view.setFocus(Qt.OtherFocusReason)
-            self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
-            self._schedule_cancel_state_refresh()
-            return
-        if self._controller_reports_active_motion():
-            self.stage_controller.cancel_active_motion("Motion cancel requested.")
-            self._clear_stage_motion_axes()
-            self._clear_planned_move_prediction(clear_wait_state=True)
-            cancelled_any = True
-            self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
-        if self.stage_controller.is_busy():
-            self.stage_controller.cancel_active_task("Operation cancel requested.")
-            self._clear_stage_motion_axes()
-            self._clear_planned_move_prediction(clear_wait_state=True)
-            cancelled_any = True
-            self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
-        if self._clear_pending_stage_coordinate_targets():
-            cleared_edits = True
-            self.view.setFocus(Qt.OtherFocusReason)
-        if cancelled_any:
-            self.view.setFocus(Qt.OtherFocusReason)
-            self._show_status("Cancel requested.", 3000)
-            self._schedule_cancel_state_refresh()
-            return
-        if cleared_edits:
-            self._show_status("Cleared pending coordinate edits.", 2000)
-            self._schedule_cancel_state_refresh()
+        stage_move_lifecycle.cancel_stage_coordinate_action(
+            self,
+            focus_reason=Qt.OtherFocusReason,
+        )
 
     def _append_status_log(self, message: str) -> None:
         if not message:
@@ -4975,101 +4876,7 @@ class Main(QMainWindow):
         self._update_stage_coordinate_apply_state()
 
     def on_move_finished(self, success: bool, message: str) -> None:
-        message_lower = message.lower() if message else ""
-        if self._pending_planned_move_target_xy is not None:
-            logger.debug(
-                "MOTION PREDICTION planned_move_pending_cleared success=%s message=%s",
-                success,
-                message,
-            )
-            self._pending_planned_move_target_xy = None
-            self._pending_planned_move_source_label = None
-        if (
-            self._planned_move_started_at is not None
-            or self._planned_move_waiting_for_fresh_status
-        ):
-            logger.debug(
-                "MOTION PREDICTION planned_move_finish success=%s stage=%s",
-                success,
-                self._format_optional_point(self._planned_move_stage_xy),
-            )
-            if success:
-                if self._planned_move_target_xy is not None:
-                    self._planned_move_stage_xy = self._planned_move_target_xy
-                self._planned_move_origin_xy = None
-                self._planned_move_target_xy = None
-                self._planned_move_started_at = None
-                self._planned_move_ends_at = None
-                self._planned_move_waiting_for_fresh_status = (
-                    self._planned_move_stage_xy is not None
-                )
-                self._planned_move_stop_status_timestamp = (
-                    self.stage_controller.last_status_timestamp()
-                )
-            else:
-                self._clear_planned_move_prediction(clear_wait_state=True)
-        if self._pending_alignment_preparation is not None:
-            preparation = self._pending_alignment_preparation
-            self._pending_alignment_preparation = None
-            if success:
-                self._design_session.apply_prepared_alignment(preparation)
-                self._set_design_snap_enabled(False)
-                self._refresh_design_panel()
-                self._refresh_design_position()
-                self._collapse_alignment_panel_if_ready()
-                self.view.clear_target_cross()
-                self._show_status(
-                    "Design calibration complete. "
-                    f"Rotation {preparation.rotation_deg:+.3f} deg, "
-                    f"spacing ratio {preparation.distance_ratio:.3f}.",
-                    7000,
-                )
-            else:
-                self._show_status(
-                    f"Design calibration rotation failed: {message}",
-                    7000,
-                )
-            self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
-            return
-        if self._pending_quick_alignment_rotation:
-            self._pending_quick_alignment_rotation = False
-            if success:
-                self._collapse_alignment_panel_if_design_open()
-        if (
-            not success
-            and self._coordinate_targets.reissue_cancel_pending
-            and "operation cancelled" in message_lower
-        ):
-            self._coordinate_targets.reissue_cancel_pending = False
-            logger.debug(
-                "Coordinate move worker cancelled for feedrate reissue; "
-                "keeping coordinate tracking active."
-            )
-            self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
-            self._schedule_cancel_state_refresh()
-            return
-        self._coordinate_targets.reissue_cancel_pending = False
-        if success:
-            if self._pending_click_to_move is None:
-                self.view.finish_target_motion_to_center()
-                self.view.clear_target_cross()
-            self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
-        elif self._pending_click_to_move is None:
-            self.view.clear_target_cross()
-        if (
-            not success
-            or "skipped" in message_lower
-            or "already" in message_lower
-            or "unchanged" in message_lower
-        ):
-            self._clear_coordinate_move_tracking(
-                clear_pending=not success,
-                reset_override=True,
-            )
-            self._clear_stage_motion_axes()
-        if message:
-            self._show_status(message, 5000)
-        self._schedule_cancel_state_refresh()
+        stage_move_lifecycle.on_move_finished(self, success, message)
 
     def on_autofocus_finished(self, success: bool, message: str) -> None:
         if message:
@@ -7150,17 +6957,11 @@ class Main(QMainWindow):
     def _clear_coordinate_move_tracking(
         self, *, clear_pending: bool, reset_override: bool
     ) -> None:
-        self._coordinate_targets.clear_tracking()
-        if clear_pending:
-            self._pending_stage_axis_targets.clear()
-        if reset_override:
-            self.stage_controller.queue_feed_override_reset()
-        if self.joystick_panel is not None:
-            self.joystick_panel.clear_temporary_linear_feedrate_bounds()
-            if hasattr(self.joystick_panel, "clear_common_feedrate_target"):
-                self.joystick_panel.clear_common_feedrate_target()
-        self._refresh_stage_axis_styles()
-        self._update_stage_coordinate_apply_state()
+        stage_move_lifecycle.clear_coordinate_move_tracking(
+            self,
+            clear_pending=clear_pending,
+            reset_override=reset_override,
+        )
 
     def _start_next_pending_stage_axis_move(self) -> None:
         if self._coordinate_targets.has_active_move() or not self._pending_stage_axis_targets:
@@ -7177,18 +6978,12 @@ class Main(QMainWindow):
         self._start_coordinate_axis_move(axis, raw_target, display_target)
 
     def _finish_coordinate_move_if_idle(self, position: object | None) -> None:
-        decision = self._coordinate_targets.finish_if_idle_decision(
-            latest_stage_state=self.stage_controller.latest_stage_state(),
-            position=position,
+        stage_move_lifecycle.finish_coordinate_move_if_idle(
+            self,
+            position,
             monotonic_s=time.monotonic(),
+            schedule_single_shot=QTimer.singleShot,
         )
-        if not decision.finish:
-            return
-        if decision.stage_position is not None:
-            self._coordinate_targets.stage_position = decision.stage_position
-        self._clear_coordinate_move_tracking(clear_pending=False, reset_override=True)
-        if self._pending_homing_axes:
-            QTimer.singleShot(0, self._start_next_pending_homing_action)
 
     def _raw_target_from_display_value(
         self, axis_name: str, display_target: float
