@@ -49,3 +49,7 @@ The `main.py` reduction track is complete when all are true:
 - Do not move hardware I/O into new modules just to reduce `main.py`.
 - Do not rename external API routes, route-control terms, UI labels, settings keys, or public client methods.
 - Do not treat total repository LOC increase as failure if complexity and locality improve.
+
+## Contract Exceptions
+
+- Task 41 finished at `main.py LOC 8371`, missing the `<= 8250` target by `121` LOC. This is accepted as a documented exception because the implementation that reached the target moved thread/stage/camera/Qt/file-save side effects out of `Main`, contradicting the task brief. The accepted version keeps those side effects in `Main` and still improves Wily `main.py` cyclomatic `1591 -> 1587`. Task 42 must compensate by keeping the existing `<= 8000` target, requiring at least `371` LOC reduction from the Task 41 result.

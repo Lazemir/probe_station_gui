@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import csv
 import importlib
-import json
 import math
 import os
 import re
@@ -307,18 +306,15 @@ from probe_station_gui.route.artifact_rows import (
 )
 from probe_station_gui.camera.imaging import (
     MicroscopeCaptureResult,
-    MicroscopeImageMetadata,
     MicroscopeScanPlan,
     MicroscopeScanTile,
-    build_design_scan_plan,
     objective_scale_calibration,
     route_photo_filename,
     save_microscope_image,
-    scan_tile_filename,
-    stage_bounds_from_design_bounds,
     stitch_scan_tiles,
     utc_timestamp,
 )
+from probe_station_gui.camera import microscope_scan
 from probe_station_gui.settings.manager import (
     Settings,
     SettingsManager,
@@ -7357,10 +7353,7 @@ class Main(QMainWindow):
         show_microscope_scan_dialog(self)
 
     def _default_microscope_scan_output_dir(self) -> str:
-        document = self._design_session.document
-        if document is not None:
-            return str(document.path.with_name(f"{document.path.stem}-microscope-scan"))
-        return str(Path.cwd() / "microscope-scan")
+        return microscope_scan.default_output_dir(self._design_session.document)
 
     def _clear_microscope_scan_dialog(self) -> None:
         self.microscope_scan_dialog = None
@@ -7375,63 +7368,59 @@ class Main(QMainWindow):
         if self.microscope_scan_dialog is not None:
             self.microscope_scan_dialog.set_status(message)
 
+    def _show_microscope_scan_start_rejection(self, decision: object) -> bool:
+        if bool(getattr(decision, "accepted", False)):
+            return False
+        status = getattr(decision, "status", None)
+        if status is not None:
+            self._show_status(status.message, status.timeout_ms)
+        return True
+
     def _start_microscope_scan(
         self,
         configuration: MicroscopeScanConfiguration,
     ) -> None:
-        if self._microscope_scan_running():
-            self._show_status("Microscope scan is already running.", 4000)
-            return
-        if self.serial_connection is None or not self.serial_connection.is_open:
-            self._show_status("Connect the stage controller before scanning.", 5000)
+        preflight = microscope_scan.start_environment_decision(
+            scan_running=self._microscope_scan_running(),
+            serial_connected=(
+                self.serial_connection is not None and self.serial_connection.is_open
+            ),
+        )
+        if self._show_microscope_scan_start_rejection(preflight):
             return
         document = self._design_session.document
-        if document is None:
-            self._show_status("Load a design before scanning.", 5000)
-            return
         registration = self._design_session.registration
-        if registration is None or not registration.valid:
-            self._show_status(
-                "Design registration is required before scanning.",
-                6000,
-            )
+        design_preflight = microscope_scan.start_design_decision(
+            document=document,
+            registration_valid=bool(
+                registration is not None and registration.valid
+            ),
+        )
+        if self._show_microscope_scan_start_rejection(design_preflight):
             return
         scale = self._active_microscope_scale()
-        if scale is None:
-            self._show_status(
-                "Calibrate click-to-move for the active objective before scanning.",
-                8000,
-            )
+        scale_preflight = microscope_scan.start_scale_decision(scale=scale)
+        if self._show_microscope_scan_start_rejection(scale_preflight):
             return
         frame, _counter = self._wait_for_camera_frame(timeout_s=0.1)
-        if frame is None:
-            self._show_status("Camera frame is unavailable; cannot scan.", 8000)
-            return
-        fov_size_mm = (
-            frame.width() * scale.pixel_size_x_mm,
-            frame.height() * scale.pixel_size_y_mm,
+        frame_size_px = None if frame is None else (frame.width(), frame.height())
+        decision = microscope_scan.scan_plan_decision(
+            document=document,
+            scale=scale,
+            frame_size_px=frame_size_px,
+            overlap_fraction=configuration.overlap_fraction,
+            design_to_stage_xy=self._raw_stage_xy_from_design_xy,
         )
-        try:
-            stage_bounds = stage_bounds_from_design_bounds(
-                document.bounds,
-                self._raw_stage_xy_from_design_xy,
-            )
-            plan = build_design_scan_plan(
-                stage_bounds=stage_bounds,
-                fov_size_mm=fov_size_mm,
-                overlap_fraction=configuration.overlap_fraction,
-            )
-        except (ValueError, DesignModelError) as exc:
-            self._show_status(str(exc), 8000)
+        if self._show_microscope_scan_start_rejection(decision):
             return
-        if not plan.tiles:
-            self._show_status("Microscope scan plan has no tiles.", 5000)
+        plan = decision.plan
+        if plan is None:
             return
         self._microscope_scan_stop_requested.clear()
         if self.microscope_scan_dialog is not None:
             self.microscope_scan_dialog.set_running(True)
             self.microscope_scan_dialog.set_status(
-                f"Microscope scan starting: {len(plan.tiles)} tiles."
+                microscope_scan.starting_status(plan)
             )
         self._microscope_scan_thread = threading.Thread(
             target=self._run_microscope_scan,
@@ -7449,7 +7438,7 @@ class Main(QMainWindow):
     ) -> None:
         success = False
         message = "Microscope scan stopped."
-        output_dir = Path(configuration.output_dir).expanduser().resolve()
+        output_dir = microscope_scan.output_dir_from_configuration(configuration)
         scale = self._active_microscope_scale()
         if scale is None:
             self.microscope_scan_finished.emit(
@@ -7471,9 +7460,8 @@ class Main(QMainWindow):
                 if self._microscope_scan_stop_requested.is_set():
                     message = "Microscope scan stopped by user."
                     break
-                total = len(plan.tiles)
                 self.microscope_scan_status.emit(
-                    f"Microscope scan: tile {tile.index}/{total}."
+                    microscope_scan.tile_status(tile, len(plan.tiles))
                 )
                 self.stage_controller.run_external_move_to_xy(
                     tile.stage_xy[0],
@@ -7502,16 +7490,17 @@ class Main(QMainWindow):
                     output_dir=output_dir,
                     scale=scale,
                 )
-                manifest_path = self._write_microscope_scan_manifest(
+                manifest_path = microscope_scan.write_manifest(
                     output_dir=output_dir,
                     plan=plan,
                     tile_results=tile_results,
                     mosaic_result=mosaic_result,
                 )
                 success = True
-                message = (
-                    f"Microscope scan complete: {len(tile_results)} tiles, "
-                    f"mosaic {mosaic_result.image_path}, manifest {manifest_path}."
+                message = microscope_scan.completion_message(
+                    tile_count=len(tile_results),
+                    mosaic_result=mosaic_result,
+                    manifest_path=manifest_path,
                 )
         except Exception as exc:
             logger.exception("Microscope scan failed")
@@ -7536,7 +7525,7 @@ class Main(QMainWindow):
         plan: MicroscopeScanPlan,
         *,
         output_dir: Path,
-        scale,
+        scale: Any,
     ) -> MicroscopeCaptureResult:
         before_counter = self._latest_camera_counter()
         frame, _counter = self._wait_for_camera_frame(
@@ -7545,42 +7534,27 @@ class Main(QMainWindow):
         )
         if frame is None:
             raise RuntimeError("Camera frame is unavailable.")
-        captured_at = utc_timestamp()
         objective_name, magnification = self._active_objective_metadata()
-        document = self._design_session.document
-        scan_name = document.path.stem if document is not None else "design_scan"
-        design_xy = self._design_xy_from_raw_stage_xy(tile.stage_xy)
-        metadata = MicroscopeImageMetadata(
-            title="Probe Station Design Scan",
-            mode="design scan tile",
-            captured_at=captured_at,
+        save_plan = microscope_scan.tile_image_save_plan(
+            output_dir=output_dir,
+            scan_name=microscope_scan.scan_name_from_document(
+                self._design_session.document
+            ),
+            tile=tile,
+            plan=plan,
+            captured_at=utc_timestamp(),
             objective_name=objective_name,
             magnification=magnification,
-            scan_tile_index=tile.index,
-            scan_tile_total=len(plan.tiles),
-            scan_row=tile.row,
-            scan_column=tile.column,
-            design_xy=design_xy,
+            design_xy=self._design_xy_from_raw_stage_xy(tile.stage_xy),
             stage_position=self._stage_position_for_image_metadata(
                 stage_xy=tile.stage_xy
             ),
-            stage_xy=tile.stage_xy,
-            notes=("needles raised before scan",),
-            extra={
-                "overlap_fraction": plan.overlap_fraction,
-                "row_count": plan.row_count,
-                "column_count": plan.column_count,
-            },
         )
         return save_microscope_image(
             frame=frame,
-            output_dir=output_dir / "tiles",
-            filename_stem=scan_tile_filename(
-                scan_name=scan_name,
-                tile=tile,
-                captured_at=captured_at,
-            ),
-            metadata=metadata,
+            output_dir=save_plan.output_dir,
+            filename_stem=save_plan.filename_stem,
+            metadata=save_plan.metadata,
             scale=scale,
         )
 
@@ -7590,75 +7564,26 @@ class Main(QMainWindow):
         plan: MicroscopeScanPlan,
         *,
         output_dir: Path,
-        scale,
+        scale: Any,
     ) -> MicroscopeCaptureResult:
-        captured_at = utc_timestamp()
         objective_name, magnification = self._active_objective_metadata()
-        document = self._design_session.document
-        scan_name = document.path.stem if document is not None else "design_scan"
-        metadata = MicroscopeImageMetadata(
-            title="Probe Station Design Scan Mosaic",
-            mode="design scan mosaic",
-            captured_at=captured_at,
+        save_plan = microscope_scan.mosaic_image_save_plan(
+            output_dir=output_dir,
+            scan_name=microscope_scan.scan_name_from_document(
+                self._design_session.document
+            ),
+            plan=plan,
+            captured_at=utc_timestamp(),
             objective_name=objective_name,
             magnification=magnification,
-            scan_tile_total=len(plan.tiles),
-            notes=("stage-coordinate tile mosaic",),
-            extra={
-                "overlap_fraction": plan.overlap_fraction,
-                "row_count": plan.row_count,
-                "column_count": plan.column_count,
-                "stage_bounds": list(plan.stage_bounds),
-                "covered_stage_bounds": list(plan.covered_stage_bounds),
-                "fov_size_mm": list(plan.fov_size_mm),
-            },
         )
         return save_microscope_image(
             frame=mosaic,
-            output_dir=output_dir,
-            filename_stem=f"{scan_name}_mosaic_{captured_at}",
-            metadata=metadata,
+            output_dir=save_plan.output_dir,
+            filename_stem=save_plan.filename_stem,
+            metadata=save_plan.metadata,
             scale=scale,
         )
-
-    def _write_microscope_scan_manifest(
-        self,
-        *,
-        output_dir: Path,
-        plan: MicroscopeScanPlan,
-        tile_results: list[MicroscopeCaptureResult],
-        mosaic_result: MicroscopeCaptureResult,
-    ) -> Path:
-        manifest_path = output_dir / "microscope-scan-manifest.json"
-        data = {
-            "version": 1,
-            "created_at": utc_timestamp(),
-            "tile_count": len(tile_results),
-            "row_count": plan.row_count,
-            "column_count": plan.column_count,
-            "overlap_fraction": plan.overlap_fraction,
-            "stage_bounds": list(plan.stage_bounds),
-            "covered_stage_bounds": list(plan.covered_stage_bounds),
-            "fov_size_mm": list(plan.fov_size_mm),
-            "mosaic": {
-                "image": str(mosaic_result.image_path),
-                "metadata": str(mosaic_result.metadata_path),
-            },
-            "tiles": [
-                {
-                    "index": tile.index,
-                    "row": tile.row,
-                    "column": tile.column,
-                    "stage_xy": list(tile.stage_xy),
-                    "image": str(result.image_path),
-                    "metadata": str(result.metadata_path),
-                }
-                for tile, result in zip(plan.tiles, tile_results)
-            ],
-        }
-        with manifest_path.open("w", encoding="utf-8") as handle:
-            json.dump(data, handle, indent=2, ensure_ascii=False)
-        return manifest_path
 
     def _on_microscope_scan_status(self, message: str) -> None:
         self._show_status(message)
