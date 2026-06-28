@@ -25,6 +25,7 @@ from probe_station_gui.settings.controls_config import (
     ControlAction,
     KeyBinding,
 )
+from probe_station_gui.settings.default_file import normalize_default_settings_data
 from probe_station_gui.settings.feedrate_config import (
     FeedrateGroup,
     FeedrateGroupConfig,
@@ -98,7 +99,6 @@ from probe_station_gui.settings.sections import (
 from probe_station_gui.notifications.telegram_settings import (
     TELEGRAM_ALERT_TYPES,
     TelegramSettings,
-    default_telegram_alerts,
     parse_telegram_alerts,
 )
 from probe_station_gui.notifications.telegram import (
@@ -575,349 +575,7 @@ class SettingsManager:
         if not isinstance(data, dict):
             data = {}
 
-        logging_section = data.get("logging")
-        if not isinstance(logging_section, dict):
-            logging_section = {"level": "INFO", "file": log_path}
-            data["logging"] = logging_section
-        else:
-            logging_section["file"] = log_path
-
-        api_section = data.get("api")
-        if not isinstance(api_section, dict):
-            api_section = ApiSettings().to_dict()
-            data["api"] = api_section
-        else:
-            defaults = ApiSettings().to_dict()
-            for key, value in defaults.items():
-                api_section.setdefault(key, value)
-
-        telegram_section = data.get("telegram")
-        if not isinstance(telegram_section, dict):
-            data["telegram"] = TelegramSettings().to_dict()
-        else:
-            defaults = TelegramSettings().to_dict()
-            for key, value in defaults.items():
-                telegram_section.setdefault(key, value)
-            telegram_section.pop("bot_token", None)
-            alerts = telegram_section.get("alerts")
-            if not isinstance(alerts, dict):
-                telegram_section["alerts"] = default_telegram_alerts()
-            else:
-                for key, enabled in default_telegram_alerts().items():
-                    alerts.setdefault(key, enabled)
-
-        feedrates_section = data.get("feedrates")
-        legacy_presets = data.get("feedrate_presets")
-        if not isinstance(feedrates_section, dict):
-            legacy_raw_present = bool(legacy_presets)
-            linear_presets = self._parse_feedrate_list(
-                legacy_presets,
-                fallback=self.DEFAULT_LINEAR_FEEDRATE_PRESETS,
-            )
-            if legacy_raw_present:
-                rotary_presets = list(linear_presets)
-            else:
-                rotary_presets = list(self.DEFAULT_ROTARY_FEEDRATE_PRESETS)
-            feedrates_section = {
-                self.LINEAR_GROUP: {
-                    "presets": linear_presets,
-                    "default": self.DEFAULT_FEEDRATE_DEFAULT,
-                },
-                self.ROTARY_GROUP: {
-                    "presets": rotary_presets,
-                    "default": self.DEFAULT_FEEDRATE_DEFAULT,
-                },
-            }
-            data["feedrates"] = feedrates_section
-        else:
-            if self.LINEAR_GROUP not in feedrates_section:
-                feedrates_section[self.LINEAR_GROUP] = {
-                    "presets": list(self.DEFAULT_LINEAR_FEEDRATE_PRESETS),
-                    "default": self.DEFAULT_FEEDRATE_DEFAULT,
-                }
-            if self.ROTARY_GROUP not in feedrates_section:
-                feedrates_section[self.ROTARY_GROUP] = {
-                    "presets": list(self.DEFAULT_ROTARY_FEEDRATE_PRESETS),
-                    "default": self.DEFAULT_FEEDRATE_DEFAULT,
-                }
-            data["feedrates"] = feedrates_section
-
-        jog_section = data.get("jog")
-        if not isinstance(jog_section, dict):
-            jog_section = {
-                "mode": self.DEFAULT_JOG_MODE,
-                "linear_distance_mm": self.DEFAULT_LINEAR_JOG_DISTANCE_MM,
-                "rotary_distance_deg": self.DEFAULT_ROTARY_JOG_DISTANCE_DEG,
-                "motion_safety_disabled": self.DEFAULT_MOTION_SAFETY_DISABLED,
-                "manual_axis": self.DEFAULT_MANUAL_AXIS,
-                "manual_axis_distance_mm": self.DEFAULT_MANUAL_AXIS_DISTANCE_MM,
-                "manual_axis_mode": self.DEFAULT_MANUAL_AXIS_MODE,
-                "manual_axis_feedrate_mm_min": self.DEFAULT_MANUAL_AXIS_FEEDRATE_MM_MIN,
-                "focus_feedrate_mm_min": self.DEFAULT_FOCUS_FEEDRATE_MM_MIN,
-                "focus_step_feedrate_mm_min": self.DEFAULT_FOCUS_STEP_FEEDRATE_MM_MIN,
-                "needles_step_feedrate_mm_min": self.DEFAULT_NEEDLES_STEP_FEEDRATE_MM_MIN,
-                "turntable_feedrate_mm_min": self.DEFAULT_TURNTABLE_FEEDRATE_MM_MIN,
-                "turntable_step_feedrate_mm_min": self.DEFAULT_TURNTABLE_STEP_FEEDRATE_MM_MIN,
-            }
-            data["jog"] = jog_section
-        else:
-            jog_section.setdefault("mode", self.DEFAULT_JOG_MODE)
-            jog_section.setdefault(
-                "linear_distance_mm", self.DEFAULT_LINEAR_JOG_DISTANCE_MM
-            )
-            jog_section.setdefault(
-                "rotary_distance_deg", self.DEFAULT_ROTARY_JOG_DISTANCE_DEG
-            )
-            jog_section.setdefault(
-                "motion_safety_disabled", self.DEFAULT_MOTION_SAFETY_DISABLED
-            )
-            jog_section.setdefault("manual_axis", self.DEFAULT_MANUAL_AXIS)
-            jog_section.setdefault(
-                "manual_axis_distance_mm", self.DEFAULT_MANUAL_AXIS_DISTANCE_MM
-            )
-            jog_section.setdefault("manual_axis_mode", self.DEFAULT_MANUAL_AXIS_MODE)
-            jog_section.setdefault(
-                "manual_axis_feedrate_mm_min",
-                self.DEFAULT_MANUAL_AXIS_FEEDRATE_MM_MIN,
-            )
-            jog_section.setdefault(
-                "focus_feedrate_mm_min",
-                self.DEFAULT_FOCUS_FEEDRATE_MM_MIN,
-            )
-            jog_section.setdefault(
-                "focus_step_feedrate_mm_min",
-                self.DEFAULT_FOCUS_STEP_FEEDRATE_MM_MIN,
-            )
-            jog_section.setdefault(
-                "needles_step_feedrate_mm_min",
-                self.DEFAULT_NEEDLES_STEP_FEEDRATE_MM_MIN,
-            )
-            jog_section.setdefault(
-                "turntable_feedrate_mm_min",
-                self.DEFAULT_TURNTABLE_FEEDRATE_MM_MIN,
-            )
-            jog_section.setdefault(
-                "turntable_step_feedrate_mm_min",
-                self.DEFAULT_TURNTABLE_STEP_FEEDRATE_MM_MIN,
-            )
-
-        click_to_move_section = data.get("click_to_move")
-        if not isinstance(click_to_move_section, dict):
-            click_to_move_section = ClickToMoveSettings(
-                pending_timeout_s=self.DEFAULT_CLICK_TO_MOVE_PENDING_TIMEOUT_S
-            ).to_dict()
-            data["click_to_move"] = click_to_move_section
-        else:
-            click_to_move_section.setdefault(
-                "pending_timeout_s",
-                self.DEFAULT_CLICK_TO_MOVE_PENDING_TIMEOUT_S,
-            )
-
-        oscillation_section = data.get("oscillation")
-        if not isinstance(oscillation_section, dict):
-            oscillation_section = {
-                "mode": self.DEFAULT_OSCILLATION_MODE,
-                "amplitude_mm": self.DEFAULT_OSCILLATION_AMPLITUDE_MM,
-                "feedrate_mm_min": self.DEFAULT_OSCILLATION_FEEDRATE_MM_MIN,
-                "turns_per_sweep": self.DEFAULT_OSCILLATION_TURNS_PER_SWEEP,
-            }
-            data["oscillation"] = oscillation_section
-        else:
-            oscillation_section.setdefault("mode", self.DEFAULT_OSCILLATION_MODE)
-            oscillation_section.setdefault(
-                "amplitude_mm", self.DEFAULT_OSCILLATION_AMPLITUDE_MM
-            )
-            oscillation_section.setdefault(
-                "feedrate_mm_min", self.DEFAULT_OSCILLATION_FEEDRATE_MM_MIN
-            )
-            oscillation_section.setdefault(
-                "turns_per_sweep", self.DEFAULT_OSCILLATION_TURNS_PER_SWEEP
-            )
-
-        needle_section = data.get("needle_calibration")
-        if not isinstance(needle_section, dict):
-            needle_section = {
-                "meter_type": self.DEFAULT_LCR_METER_TYPE,
-                "visa_resource": self.DEFAULT_LCR_VISA_RESOURCE,
-                "keithley_source_resource": self.DEFAULT_KEITHLEY_SOURCE_RESOURCE,
-                "keithley_voltmeter_resource": self.DEFAULT_KEITHLEY_VOLTMETER_RESOURCE,
-                "measurement_function": self.DEFAULT_LCR_MEASUREMENT_FUNCTION,
-                "range_mode": self.DEFAULT_LCR_RANGE_MODE,
-                "auto_range_enabled": self.DEFAULT_LCR_AUTO_RANGE_ENABLED,
-                "impedance_range": self.DEFAULT_LCR_IMPEDANCE_RANGE,
-                "dcr_range": self.DEFAULT_LCR_DCR_RANGE,
-                "frequency_hz": self.DEFAULT_LCR_FREQUENCY_HZ,
-                "level_mode": self.DEFAULT_LCR_LEVEL_MODE,
-                "voltage_level_v": self.DEFAULT_LCR_VOLTAGE_LEVEL_V,
-                "current_level_a": self.DEFAULT_LCR_CURRENT_LEVEL_A,
-                "source_resistance_ohm": self.DEFAULT_LCR_SOURCE_RESISTANCE_OHM,
-                "aperture_rate": self.DEFAULT_LCR_APERTURE_RATE,
-                "aperture_averages": self.DEFAULT_LCR_APERTURE_AVERAGES,
-                "trigger_source": self.DEFAULT_LCR_TRIGGER_SOURCE,
-                "trigger_delay_s": self.DEFAULT_LCR_TRIGGER_DELAY_S,
-                "bias_enabled": self.DEFAULT_LCR_BIAS_ENABLED,
-                "bias_level_v": self.DEFAULT_LCR_BIAS_LEVEL_V,
-                "monitor1": self.DEFAULT_LCR_MONITOR,
-                "monitor2": self.DEFAULT_LCR_MONITOR,
-                "alc_enabled": self.DEFAULT_LCR_ALC_ENABLED,
-                "short_threshold_ohm": self.DEFAULT_SHORT_THRESHOLD_OHM,
-                "poll_interval_ms": self.DEFAULT_LCR_POLL_INTERVAL_MS,
-                "feedrate_mm_min": self.DEFAULT_NEEDLE_FEEDRATE_MM_MIN,
-                "contact_zone_mm": self.DEFAULT_NEEDLE_CONTACT_ZONE_MM,
-                "raise_position_mm": 0.0,
-                "raise_position_configured": False,
-                "down_position_mm": 0.0,
-                "down_position_configured": False,
-                "chip_position": {
-                    "x_mm": 0.0,
-                    "y_mm": 0.0,
-                    "z_mm": 0.0,
-                    "configured": False,
-                },
-                "stone_position": {
-                    "x_mm": 0.0,
-                    "y_mm": 0.0,
-                    "z_mm": 0.0,
-                    "configured": False,
-                },
-            }
-            data["needle_calibration"] = needle_section
-        else:
-            needle_section.setdefault("meter_type", self.DEFAULT_LCR_METER_TYPE)
-            needle_section.setdefault("visa_resource", self.DEFAULT_LCR_VISA_RESOURCE)
-            needle_section.setdefault(
-                "keithley_source_resource", self.DEFAULT_KEITHLEY_SOURCE_RESOURCE
-            )
-            needle_section.setdefault(
-                "keithley_voltmeter_resource",
-                self.DEFAULT_KEITHLEY_VOLTMETER_RESOURCE,
-            )
-            needle_section.setdefault(
-                "measurement_function", self.DEFAULT_LCR_MEASUREMENT_FUNCTION
-            )
-            needle_section.setdefault("range_mode", self.DEFAULT_LCR_RANGE_MODE)
-            needle_section.setdefault(
-                "auto_range_enabled", self.DEFAULT_LCR_AUTO_RANGE_ENABLED
-            )
-            needle_section.setdefault(
-                "impedance_range", self.DEFAULT_LCR_IMPEDANCE_RANGE
-            )
-            needle_section.setdefault("dcr_range", self.DEFAULT_LCR_DCR_RANGE)
-            needle_section.setdefault("frequency_hz", self.DEFAULT_LCR_FREQUENCY_HZ)
-            needle_section.setdefault("level_mode", self.DEFAULT_LCR_LEVEL_MODE)
-            needle_section.setdefault(
-                "voltage_level_v", self.DEFAULT_LCR_VOLTAGE_LEVEL_V
-            )
-            needle_section.setdefault(
-                "current_level_a", self.DEFAULT_LCR_CURRENT_LEVEL_A
-            )
-            needle_section.setdefault(
-                "source_resistance_ohm", self.DEFAULT_LCR_SOURCE_RESISTANCE_OHM
-            )
-            needle_section.setdefault("aperture_rate", self.DEFAULT_LCR_APERTURE_RATE)
-            needle_section.setdefault(
-                "aperture_averages", self.DEFAULT_LCR_APERTURE_AVERAGES
-            )
-            needle_section.setdefault("trigger_source", self.DEFAULT_LCR_TRIGGER_SOURCE)
-            needle_section.setdefault(
-                "trigger_delay_s", self.DEFAULT_LCR_TRIGGER_DELAY_S
-            )
-            needle_section.setdefault("bias_enabled", self.DEFAULT_LCR_BIAS_ENABLED)
-            needle_section.setdefault("bias_level_v", self.DEFAULT_LCR_BIAS_LEVEL_V)
-            needle_section.setdefault("monitor1", self.DEFAULT_LCR_MONITOR)
-            needle_section.setdefault("monitor2", self.DEFAULT_LCR_MONITOR)
-            needle_section.setdefault("alc_enabled", self.DEFAULT_LCR_ALC_ENABLED)
-            needle_section.setdefault(
-                "short_threshold_ohm", self.DEFAULT_SHORT_THRESHOLD_OHM
-            )
-            needle_section.setdefault(
-                "poll_interval_ms", self.DEFAULT_LCR_POLL_INTERVAL_MS
-            )
-            needle_section.setdefault(
-                "feedrate_mm_min", self.DEFAULT_NEEDLE_FEEDRATE_MM_MIN
-            )
-            needle_section.setdefault(
-                "contact_zone_mm", self.DEFAULT_NEEDLE_CONTACT_ZONE_MM
-            )
-            needle_section.setdefault("raise_position_mm", 0.0)
-            needle_section.setdefault("raise_position_configured", False)
-            needle_section.setdefault("down_position_mm", 0.0)
-            needle_section.setdefault("down_position_configured", False)
-            for key in ("chip_position", "stone_position"):
-                bookmark = needle_section.get(key)
-                if not isinstance(bookmark, dict):
-                    bookmark = {}
-                    needle_section[key] = bookmark
-                bookmark.setdefault("x_mm", 0.0)
-                bookmark.setdefault("y_mm", 0.0)
-                bookmark.setdefault("z_mm", 0.0)
-                bookmark.setdefault("configured", False)
-
-        axis_a_section = data.get("axis_a_calibration")
-        if not isinstance(axis_a_section, dict):
-            axis_a_section = AxisACalibrationSettings().to_dict()
-            data["axis_a_calibration"] = axis_a_section
-        else:
-            defaults = AxisACalibrationSettings().to_dict()
-            for key, value in defaults.items():
-                axis_a_section.setdefault(key, value)
-
-        axis_z_section = data.get("axis_z_calibration")
-        if not isinstance(axis_z_section, dict):
-            axis_z_section = AxisZCalibrationSettings().to_dict()
-            data["axis_z_calibration"] = axis_z_section
-        else:
-            defaults = AxisZCalibrationSettings().to_dict()
-            for key, value in defaults.items():
-                axis_z_section.setdefault(key, value)
-
-        coordinate_section = data.get("coordinate_system")
-        if not isinstance(coordinate_section, dict):
-            coordinate_section = {
-                "position_mode": self.DEFAULT_POSITION_MODE,
-                "startup_mode": self.DEFAULT_COORDINATE_STARTUP_MODE,
-                "preferred_system": self.DEFAULT_COORDINATE_SYSTEM,
-            }
-            data["coordinate_system"] = coordinate_section
-        else:
-            coordinate_section.setdefault(
-                "position_mode", self.DEFAULT_POSITION_MODE
-            )
-            coordinate_section.setdefault(
-                "startup_mode", self.DEFAULT_COORDINATE_STARTUP_MODE
-            )
-            coordinate_section.setdefault(
-                "preferred_system", self.DEFAULT_COORDINATE_SYSTEM
-            )
-
-        objectives_section = data.get("objectives")
-        if not isinstance(objectives_section, dict):
-            data["objectives"] = ObjectivesSettings().to_dict()
-        else:
-            defaults = ObjectivesSettings().to_dict()
-            objectives_section.setdefault("active_name", defaults["active_name"])
-            objectives_section.setdefault(
-                "apply_offsets_on_change",
-                defaults["apply_offsets_on_change"],
-            )
-            raw_profiles = objectives_section.get("objectives")
-            if not isinstance(raw_profiles, dict) or not raw_profiles:
-                raw_profiles = dict(defaults["objectives"])
-                objectives_section["objectives"] = raw_profiles
-            default_profiles = defaults["objectives"]
-            if isinstance(default_profiles, dict):
-                for name, stored in list(raw_profiles.items()):
-                    normalized_name = normalize_objective_name(name)
-                    profile = default_profiles.get(normalized_name)
-                    if not isinstance(profile, dict):
-                        profile = default_objective(normalized_name).to_dict()
-                    if isinstance(stored, dict):
-                        for key, value in profile.items():
-                            stored.setdefault(key, value)
-
-        design_last_directory = data.get("design_last_directory")
-        if not isinstance(design_last_directory, str):
-            data["design_last_directory"] = ""
+        data = normalize_default_settings_data(data, log_path=log_path)
 
         with self._config_path.open("w", encoding="utf-8") as target:
             json.dump(data, target, indent=2, ensure_ascii=False)
@@ -930,7 +588,52 @@ class SettingsManager:
         with self._config_path.open("r", encoding="utf-8-sig") as handle:
             raw = json.load(handle)
         self._logger.debug("Loaded settings from %s", self._config_path)
-        controls_raw = raw.get("controls", {}) if isinstance(raw, dict) else {}
+        return self._settings_from_raw(raw)
+
+    def _settings_from_raw(self, raw: object) -> Settings:
+        controls = self._load_controls(raw)
+        logging_settings = self._parse_logging(
+            self._raw_section(raw, "logging", default={})
+        )
+        if not logging_settings.file:
+            default_log = str(self._default_log_path())
+            logging_settings.file = default_log
+            self._logger.debug(
+                "Log file path missing in settings; defaulting to %s", default_log
+            )
+        feedrates = self._parse_feedrates(
+            self._raw_section(raw, "feedrates"),
+            self._raw_section(raw, "feedrate_presets"),
+        )
+        return Settings(
+            controls=controls,
+            logging=logging_settings,
+            api=self._parse_api(self._raw_section(raw, "api")),
+            telegram=self._parse_telegram(self._raw_section(raw, "telegram")),
+            feedrates=feedrates,
+            oscillation=self._parse_oscillation(self._raw_section(raw, "oscillation")),
+            jog=self._parse_jog(self._raw_section(raw, "jog")),
+            click_to_move=self._parse_click_to_move(
+                self._raw_section(raw, "click_to_move")
+            ),
+            needle_calibration=self._parse_needle_calibration(
+                self._raw_section(raw, "needle_calibration")
+            ),
+            axis_a_calibration=self._parse_axis_a_calibration(
+                self._raw_section(raw, "axis_a_calibration")
+            ),
+            axis_z_calibration=self._parse_axis_z_calibration(
+                self._raw_section(raw, "axis_z_calibration")
+            ),
+            coordinate_system=self._parse_coordinate_system(
+                self._raw_section(raw, "coordinate_system")
+            ),
+            objectives=self._parse_objectives(self._raw_section(raw, "objectives")),
+            design_last_directory=self._design_last_directory_from_raw(raw),
+        )
+
+    def _load_controls(self, raw: object) -> Dict[str, List[KeyBinding]]:
+        controls_raw = self._raw_section(raw, "controls", default={})
         controls: Dict[str, List[KeyBinding]] = {}
         for key, values in controls_raw.items():
             bindings: List[KeyBinding] = []
@@ -949,58 +652,22 @@ class SettingsManager:
                     if action.key not in raw_control_keys
                     else []
                 )
-        logging_raw = raw.get("logging", {}) if isinstance(raw, dict) else {}
-        logging_settings = self._parse_logging(logging_raw)
-        if not logging_settings.file:
-            default_log = str(self._default_log_path())
-            logging_settings.file = default_log
-            self._logger.debug(
-                "Log file path missing in settings; defaulting to %s", default_log
-            )
-        feedrates_raw = raw.get("feedrates") if isinstance(raw, dict) else None
-        legacy_presets = raw.get("feedrate_presets") if isinstance(raw, dict) else None
-        feedrates = self._parse_feedrates(feedrates_raw, legacy_presets)
-        api_raw = raw.get("api") if isinstance(raw, dict) else None
-        telegram_raw = raw.get("telegram") if isinstance(raw, dict) else None
-        oscillation_raw = raw.get("oscillation") if isinstance(raw, dict) else None
-        jog_raw = raw.get("jog") if isinstance(raw, dict) else None
-        click_to_move_raw = (
-            raw.get("click_to_move") if isinstance(raw, dict) else None
-        )
-        needle_calibration_raw = (
-            raw.get("needle_calibration") if isinstance(raw, dict) else None
-        )
-        axis_a_calibration_raw = (
-            raw.get("axis_a_calibration") if isinstance(raw, dict) else None
-        )
-        axis_z_calibration_raw = (
-            raw.get("axis_z_calibration") if isinstance(raw, dict) else None
-        )
-        coordinate_system_raw = (
-            raw.get("coordinate_system") if isinstance(raw, dict) else None
-        )
-        objectives_raw = raw.get("objectives") if isinstance(raw, dict) else None
-        design_last_directory = ""
+        return controls
+
+    @staticmethod
+    def _raw_section(raw: object, key: str, *, default: object = None) -> object:
         if isinstance(raw, dict):
-            design_last_directory_raw = raw.get("design_last_directory", "")
-            if isinstance(design_last_directory_raw, str):
-                design_last_directory = design_last_directory_raw.strip()
-        return Settings(
-            controls=controls,
-            logging=logging_settings,
-            api=self._parse_api(api_raw),
-            telegram=self._parse_telegram(telegram_raw),
-            feedrates=feedrates,
-            oscillation=self._parse_oscillation(oscillation_raw),
-            jog=self._parse_jog(jog_raw),
-            click_to_move=self._parse_click_to_move(click_to_move_raw),
-            needle_calibration=self._parse_needle_calibration(needle_calibration_raw),
-            axis_a_calibration=self._parse_axis_a_calibration(axis_a_calibration_raw),
-            axis_z_calibration=self._parse_axis_z_calibration(axis_z_calibration_raw),
-            coordinate_system=self._parse_coordinate_system(coordinate_system_raw),
-            objectives=self._parse_objectives(objectives_raw),
-            design_last_directory=design_last_directory,
-        )
+            return raw.get(key, default)
+        return default
+
+    @staticmethod
+    def _design_last_directory_from_raw(raw: object) -> str:
+        if not isinstance(raw, dict):
+            return ""
+        value = raw.get("design_last_directory", "")
+        if isinstance(value, str):
+            return value.strip()
+        return ""
 
     def _parse_logging(self, raw_logging) -> LoggingSettings:
         """Create a logging configuration from persisted data."""

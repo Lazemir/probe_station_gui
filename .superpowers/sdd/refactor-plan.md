@@ -2,8 +2,8 @@
 
 Updated: 2026-06-28
 Branch: `codex/refactor-stage-controller`
-Current completed task: Task 49d, LCR controller runtime/worker extraction.
-Active next task: Task 50, settings manager/dialog section extraction.
+Current completed task: Task 50a, settings default-file normalization extraction.
+Active next task: Task 50b, settings dialog measurement widget extraction.
 
 This plan supersedes the original 5-task architecture sketch. It reflects the current code shape after Tasks 1-38 and the current LOC audit.
 
@@ -87,7 +87,7 @@ Goal: after `main.py` is no longer the dominant blocker, reduce navigation cost 
 | 47 | `views/joystick_window.py` | Jog UI, keyboard controls, feedrate controls, serial command intent, and panel state were mixed. | Extract feedrate and helper widget sections into focused view helpers while preserving jog/serial behavior. | `tests/ui/test_joystick_feedrate.py`, key binding tests, stage jog command tests, full suite. | Completed: 47a extracted feedrate controls to `views/joystick/feedrate_panel.py` (`joystick_window.py 3059 -> 2372 LOC`, Wily SLOC `2822 -> 2189`, Wily cyclomatic `644 -> 509`; new feedrate module `709 LOC`, max CC 10). 47b extracted helper widgets to `views/joystick/widgets.py` (`joystick_window.py 2372 -> 2254 LOC`, Wily SLOC `2189 -> 2094`, Wily cyclomatic `509 -> 478`; new widgets module `134 LOC` / MI 49.68). Target passed: `joystick_window.py < 2300 LOC`. Residual known hotspot: `_apply_axes` remains 55 NLOC / CCN 17 and should be handled only with explicit characterization of `$J`, stop/resend, and controller coordination. |
 | 48 | `dialogs/route_measurement_dialog.py` | Qt construction, profile persistence, run controls, histogram/raw data display live together. | Split profile persistence and presentation modules; keep dialog as Qt adapter. | Route dialog/run UI tests and route measurement tests. | Completed: 48a extracted SI-prefix and histogram/raw-data presentation (`route_measurement_dialog.py 2179 -> 1809 LOC`, Wily cyclomatic `324 -> 249`). 48b extracted defaults/profile persistence (`route_measurement_dialog.py 1809 -> 1390 LOC`, Wily cyclomatic `249 -> 176`, coverage `72% -> 73%`). 48c extracted operation-state policy (`_update_operation_state` CCN `22 -> 3`, dialog Wily cyclomatic `176 -> 156`). 48d split histogram painting (`paintEvent` CCN `24 -> 4`, lizard result-view warnings `1 -> 0`; aggregate Wily file metrics worsened, so treat this only as a hotspot cleanup). 48e split profile path/meter helpers (`_apply_profile_data` CCN `16 -> 5`, profile Wily cyclomatic `77 -> 76`, Task 48 lizard warnings `1 -> 0`). Target passed: `route_measurement_dialog.py < 1500 LOC`, Task 48 slice has no lizard warning-level functions. |
 | 49 | `instruments/meters/lcr.py` | Worker scheduling, live polling, capabilities, and route-meter behavior are mixed. | Separate instrument worker lifecycle from meter capabilities and adapter code. | LCR worker/GW Instek/instrument tests, full suite. | Completed: 49a extracted low-level VISA operation dispatch into `instruments/meters/lcr_visa.py` while preserving `lcr.py` facade (`lcr.py 2010 -> 1938 LOC`, Wily cyclomatic `395 -> 371`, `_session_visa_operation` CCN `22 -> 2`, coverage `73% -> 74%`). 49b extracted shared route-session configuration/read/batch helpers into `instruments/meters/lcr_route_session.py` (`lcr.py 1938 -> 1800 LOC`, Wily cyclomatic `371 -> 355`, route adapter helper CCs below warning threshold, coverage stayed `74%`). 49c extracted GW Instek session implementation into `instruments/meters/gwinstek_session.py` (`lcr.py 1800 -> 1495 LOC`, Wily cyclomatic `355 -> 300`, moved `configure_measurement` CCN `12 -> 5`, coverage stayed `74%`). 49d extracted worker scheduling into `MeterWorkerRuntime` (`lcr.py 1495 -> 1398 LOC`, Wily cyclomatic `300 -> 273`, full suite `1232 passed, 2 skipped`). Target passed: `lcr.py < 1400 LOC`, no lizard warnings in touched slice. |
-| 50 | Settings manager/dialog | Settings parsing, migration, defaults, and UI section knowledge are still duplicated. | Move remaining settings sections behind section modules and metadata consumed by UI. | Settings tests, key binding/feedrate/needle calibration tests, full suite. | `settings/manager.py < 1100`, `settings_dialog.py < 1100`. |
+| 50 | Settings manager/dialog | Settings parsing, migration, defaults, and UI section knowledge are still duplicated. | Move remaining settings sections behind section modules and metadata consumed by UI. | Settings tests, key binding/feedrate/needle calibration tests, full suite. | In progress: 50a extracted first-run default settings JSON normalization into `settings/default_file.py` and split `_load` orchestration (`settings/manager.py 1660 -> 1327 LOC`, Wily cyclomatic `214 -> 174`, `_ensure_default_file` CC `35 -> 4`, `_load` CC `27 -> 1`, full suite `1234 passed, 2 skipped`). Targets remain: `settings/manager.py < 1100`, `settings_dialog.py < 1100`. |
 
 ## Phase 3: Test Monolith Track
 
@@ -122,9 +122,9 @@ These are intentionally not part of the behavior-preserving refactor passes:
 
 Continue with Task 50 from Phase 2:
 
-1. Investigate `probe_station_gui/settings/manager.py` and `probe_station_gui/dialogs/settings_dialog.py` together; they are coupled by section names, defaults, parsing, and UI controls.
-2. Identify one settings section that can move behind a deep section module without changing public `SettingsManager` behavior or settings JSON shape.
-3. Add or update focused settings/UI tests before moving parsing or defaults.
-4. Preserve compatibility with `default_settings.json`, user settings migration behavior, and existing settings UI labels/controls.
-5. Target first pass: reduce either `settings/manager.py` or `settings_dialog.py` by at least 150 LOC while lowering at least one section-specific complexity hotspot.
+1. Extract `MeasurementSettingsWidget` from `probe_station_gui/dialogs/settings_dialog.py` into a focused settings dialog module.
+2. Preserve settings UI labels, enabled/disabled state behavior, and `SettingsDialog` public behavior.
+3. Add focused UI characterization around `_update_lcr_control_state` if the moved widget path lacks direct coverage.
+4. Do not rename `needle_calibration` settings fields or route meter choices.
+5. Target 50b: reduce `settings_dialog.py` by at least 250 LOC and lower `_update_lcr_control_state` from `D(21)` or move it behind focused tests with no lizard warning.
 6. Run Wily metrics from a disposable UTF-8 temp clone/cache, focused settings/UI tests, full `pytest tests`, configured ruff, coverage, and lizard before each commit.
