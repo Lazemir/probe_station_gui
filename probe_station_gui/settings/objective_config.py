@@ -7,6 +7,12 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
+from probe_station_gui.settings.value_parsing import (
+    coerce_bool,
+    finite_float,
+    positive_float,
+)
+
 
 OBJECTIVE_NAMES: tuple[str, ...] = ("X5", "X10", "X20", "X50")
 DEFAULT_ACTIVE_OBJECTIVE = "X5"
@@ -190,3 +196,135 @@ def parse_pixels_to_mm_matrix(raw_matrix: object) -> list[list[float]]:
     if abs(det) < 1e-18:
         return []
     return rows
+
+
+def parse_objective_profile(
+    name: str,
+    raw_profile: object,
+) -> ObjectiveCalibrationSettings:
+    """Normalise one persisted objective profile."""
+
+    defaults = default_objective(name)
+    if not isinstance(raw_profile, dict):
+        return defaults
+    matrix = parse_pixels_to_mm_matrix(raw_profile.get("pixels_to_mm"))
+    xy_configured = coerce_bool(
+        raw_profile.get("xy_calibration_configured", bool(matrix)),
+        default=bool(matrix),
+    )
+    if not matrix:
+        xy_configured = False
+    return ObjectiveCalibrationSettings(
+        name=name,
+        magnification=positive_float(
+            raw_profile.get("magnification", defaults.magnification),
+            default=defaults.magnification,
+        ),
+        xy_offset_x_mm=finite_float(
+            raw_profile.get("xy_offset_x_mm", defaults.xy_offset_x_mm),
+            default=defaults.xy_offset_x_mm,
+        ),
+        xy_offset_y_mm=finite_float(
+            raw_profile.get("xy_offset_y_mm", defaults.xy_offset_y_mm),
+            default=defaults.xy_offset_y_mm,
+        ),
+        xy_offset_configured=coerce_bool(
+            raw_profile.get(
+                "xy_offset_configured",
+                defaults.xy_offset_configured,
+            ),
+            default=defaults.xy_offset_configured,
+        ),
+        z_offset_mm=finite_float(
+            raw_profile.get("z_offset_mm", defaults.z_offset_mm),
+            default=defaults.z_offset_mm,
+        ),
+        z_offset_configured=coerce_bool(
+            raw_profile.get(
+                "z_offset_configured",
+                defaults.z_offset_configured,
+            ),
+            default=defaults.z_offset_configured,
+        ),
+        pixels_to_mm=matrix,
+        xy_calibration_configured=xy_configured,
+        autofocus_range_mm=positive_float(
+            raw_profile.get(
+                "autofocus_range_mm",
+                defaults.autofocus_range_mm,
+            ),
+            default=defaults.autofocus_range_mm,
+        ),
+        autofocus_fine_step_mm=positive_float(
+            raw_profile.get(
+                "autofocus_fine_step_mm",
+                defaults.autofocus_fine_step_mm,
+            ),
+            default=defaults.autofocus_fine_step_mm,
+        ),
+    )
+
+
+def parse_objectives_settings(raw_objectives: object) -> ObjectivesSettings:
+    """Normalise persisted objective profiles."""
+
+    active_name = DEFAULT_ACTIVE_OBJECTIVE
+    apply_offsets_on_change = True
+    raw_profiles = None
+    if isinstance(raw_objectives, dict):
+        normalized_active = normalize_objective_name(
+            raw_objectives.get("active_name", active_name)
+        )
+        if normalized_active:
+            active_name = normalized_active
+        apply_offsets_on_change = coerce_bool(
+            raw_objectives.get(
+                "apply_offsets_on_change",
+                apply_offsets_on_change,
+            ),
+            default=apply_offsets_on_change,
+        )
+        raw_profiles = raw_objectives.get("objectives")
+
+    profile_map = raw_profiles if isinstance(raw_profiles, dict) else {}
+    names = _objective_names_for_parse(profile_map, active_name)
+    if active_name not in names and profile_map:
+        active_name = names[0]
+    elif active_name not in names:
+        names.append(active_name)
+    profiles = {
+        name: parse_objective_profile(
+            name,
+            _raw_objective_profile(profile_map, name),
+        )
+        for name in names
+    }
+    return ObjectivesSettings(
+        active_name=active_name,
+        apply_offsets_on_change=apply_offsets_on_change,
+        objectives=profiles,
+    )
+
+
+def _objective_names_for_parse(
+    profile_map: dict[object, object],
+    active_name: str,
+) -> list[str]:
+    names: list[str] = []
+    for raw_name in profile_map:
+        name = normalize_objective_name(raw_name)
+        if name and name not in names:
+            names.append(name)
+    if names:
+        return names
+    return list(OBJECTIVE_NAMES) or [active_name]
+
+
+def _raw_objective_profile(
+    profile_map: dict[object, object],
+    name: str,
+) -> object:
+    for raw_key, candidate in profile_map.items():
+        if normalize_objective_name(raw_key) == name:
+            return candidate
+    return None

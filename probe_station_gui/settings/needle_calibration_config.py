@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 
 LCR_MEASUREMENT_FUNCTIONS: tuple[str, ...] = (
@@ -304,265 +304,447 @@ def parse_needle_calibration_settings(
 ) -> NeedleCalibrationConfig:
     """Normalise persisted needle calibration settings."""
 
-    meter_type = defaults.meter_type
-    visa_resource = defaults.visa_resource
-    keithley_source_resource = defaults.keithley_source_resource
-    keithley_voltmeter_resource = defaults.keithley_voltmeter_resource
-    measurement_function = defaults.measurement_function
-    range_mode = defaults.range_mode
-    auto_range_enabled = defaults.auto_range_enabled
-    impedance_range = defaults.impedance_range
-    dcr_range = defaults.dcr_range
-    frequency_hz = defaults.frequency_hz
-    level_mode = defaults.level_mode
-    voltage_level_v = defaults.voltage_level_v
-    current_level_a = defaults.current_level_a
-    source_resistance_ohm = defaults.source_resistance_ohm
-    aperture_rate = defaults.aperture_rate
-    aperture_averages = defaults.aperture_averages
-    trigger_source = defaults.trigger_source
-    trigger_delay_s = defaults.trigger_delay_s
-    bias_enabled = defaults.bias_enabled
-    bias_level_v = defaults.bias_level_v
-    monitor1 = defaults.monitor
-    monitor2 = defaults.monitor
-    alc_enabled = defaults.alc_enabled
-    short_threshold_ohm = defaults.short_threshold_ohm
-    poll_interval_ms = defaults.poll_interval_ms
-    feedrate_mm_min = defaults.feedrate_mm_min
-    contact_zone_mm = defaults.contact_zone_mm
-    raise_position_mm = 0.0
-    raise_position_configured = False
-    down_position_mm = 0.0
-    down_position_configured = False
-    chip_position = SavedStagePositionConfig()
-    stone_position = SavedStagePositionConfig()
-
+    config = _default_needle_calibration_config(defaults)
     if isinstance(raw_needle_calibration, dict):
-        meter_type = _normalise_choice(
-            raw_needle_calibration.get("meter_type", meter_type),
+        config = _needle_calibration_config_from_raw(
+            raw_needle_calibration,
+            config,
+            defaults,
+        )
+    return _validated_needle_calibration_config(config, defaults)
+
+
+def _default_needle_calibration_config(
+    defaults: NeedleCalibrationDefaults,
+) -> NeedleCalibrationConfig:
+    return NeedleCalibrationConfig(
+        meter_type=defaults.meter_type,
+        visa_resource=defaults.visa_resource,
+        keithley_source_resource=defaults.keithley_source_resource,
+        keithley_voltmeter_resource=defaults.keithley_voltmeter_resource,
+        measurement_function=defaults.measurement_function,
+        range_mode=defaults.range_mode,
+        auto_range_enabled=defaults.auto_range_enabled,
+        impedance_range=defaults.impedance_range,
+        dcr_range=defaults.dcr_range,
+        frequency_hz=defaults.frequency_hz,
+        level_mode=defaults.level_mode,
+        voltage_level_v=defaults.voltage_level_v,
+        current_level_a=defaults.current_level_a,
+        source_resistance_ohm=defaults.source_resistance_ohm,
+        aperture_rate=defaults.aperture_rate,
+        aperture_averages=defaults.aperture_averages,
+        trigger_source=defaults.trigger_source,
+        trigger_delay_s=defaults.trigger_delay_s,
+        bias_enabled=defaults.bias_enabled,
+        bias_level_v=defaults.bias_level_v,
+        monitor1=defaults.monitor,
+        monitor2=defaults.monitor,
+        alc_enabled=defaults.alc_enabled,
+        short_threshold_ohm=defaults.short_threshold_ohm,
+        poll_interval_ms=defaults.poll_interval_ms,
+        feedrate_mm_min=defaults.feedrate_mm_min,
+        contact_zone_mm=defaults.contact_zone_mm,
+        raise_position_mm=0.0,
+        raise_position_configured=False,
+        down_position_mm=0.0,
+        down_position_configured=False,
+        chip_position=SavedStagePositionConfig(),
+        stone_position=SavedStagePositionConfig(),
+    )
+
+
+def _needle_calibration_config_from_raw(
+    raw_needle_calibration: dict,
+    config: NeedleCalibrationConfig,
+    defaults: NeedleCalibrationDefaults,
+) -> NeedleCalibrationConfig:
+    return NeedleCalibrationConfig(
+        meter_type=_normalise_choice(
+            raw_needle_calibration.get("meter_type", config.meter_type),
             choices=defaults.meter_types,
-            default=meter_type,
-        )
-        visa_resource = _strip_string(
-            raw_needle_calibration.get("visa_resource", visa_resource),
-            default=visa_resource,
-        )
-        keithley_source_resource = _strip_string(
+            default=config.meter_type,
+        ),
+        visa_resource=_strip_string(
+            raw_needle_calibration.get("visa_resource", config.visa_resource),
+            default=config.visa_resource,
+        ),
+        keithley_source_resource=_strip_string(
             raw_needle_calibration.get(
                 "keithley_source_resource",
-                keithley_source_resource,
+                config.keithley_source_resource,
             ),
-            default=keithley_source_resource,
-        )
-        keithley_voltmeter_resource = _strip_string(
+            default=config.keithley_source_resource,
+        ),
+        keithley_voltmeter_resource=_strip_string(
             raw_needle_calibration.get(
                 "keithley_voltmeter_resource",
-                keithley_voltmeter_resource,
+                config.keithley_voltmeter_resource,
             ),
-            default=keithley_voltmeter_resource,
-        )
-        measurement_function = _normalise_choice(
+            default=config.keithley_voltmeter_resource,
+        ),
+        measurement_function=_normalise_choice(
             raw_needle_calibration.get(
                 "measurement_function",
-                measurement_function,
+                config.measurement_function,
             ),
             choices=defaults.measurement_functions,
-            default=measurement_function,
-        )
-        range_mode = _normalise_choice(
-            raw_needle_calibration.get("range_mode", range_mode),
+            default=config.measurement_function,
+        ),
+        range_mode=_normalise_choice(
+            raw_needle_calibration.get("range_mode", config.range_mode),
             choices=defaults.range_modes,
-            default=range_mode,
-        )
-        auto_range_enabled = _coerce_bool(
-            raw_needle_calibration.get("auto_range_enabled", auto_range_enabled),
+            default=config.range_mode,
+        ),
+        auto_range_enabled=_coerce_bool(
+            raw_needle_calibration.get(
+                "auto_range_enabled",
+                config.auto_range_enabled,
+            ),
             default=defaults.auto_range_enabled,
-        )
-        impedance_range = _coerce_int(
-            raw_needle_calibration.get("impedance_range", impedance_range),
+        ),
+        impedance_range=_coerce_int(
+            raw_needle_calibration.get("impedance_range", config.impedance_range),
             default=defaults.impedance_range,
-        )
-        dcr_range = _coerce_int(
-            raw_needle_calibration.get("dcr_range", dcr_range),
+        ),
+        dcr_range=_coerce_int(
+            raw_needle_calibration.get("dcr_range", config.dcr_range),
             default=defaults.dcr_range,
-        )
-        frequency_hz = _coerce_float(
-            raw_needle_calibration.get("frequency_hz", frequency_hz),
+        ),
+        frequency_hz=_coerce_float(
+            raw_needle_calibration.get("frequency_hz", config.frequency_hz),
             default=defaults.frequency_hz,
-        )
-        level_mode = _normalise_choice(
-            raw_needle_calibration.get("level_mode", level_mode),
+        ),
+        level_mode=_normalise_choice(
+            raw_needle_calibration.get("level_mode", config.level_mode),
             choices=defaults.level_modes,
-            default=level_mode,
-        )
-        voltage_level_v = _coerce_float(
-            raw_needle_calibration.get("voltage_level_v", voltage_level_v),
+            default=config.level_mode,
+        ),
+        voltage_level_v=_coerce_float(
+            raw_needle_calibration.get("voltage_level_v", config.voltage_level_v),
             default=defaults.voltage_level_v,
-        )
-        current_level_a = _coerce_float(
-            raw_needle_calibration.get("current_level_a", current_level_a),
+        ),
+        current_level_a=_coerce_float(
+            raw_needle_calibration.get("current_level_a", config.current_level_a),
             default=defaults.current_level_a,
-        )
-        source_resistance_ohm = _coerce_int(
+        ),
+        source_resistance_ohm=_coerce_int(
             raw_needle_calibration.get(
                 "source_resistance_ohm",
-                source_resistance_ohm,
+                config.source_resistance_ohm,
             ),
             default=defaults.source_resistance_ohm,
-        )
-        aperture_rate = _normalise_choice(
-            raw_needle_calibration.get("aperture_rate", aperture_rate),
+        ),
+        aperture_rate=_normalise_choice(
+            raw_needle_calibration.get("aperture_rate", config.aperture_rate),
             choices=defaults.aperture_rates,
-            default=aperture_rate,
-        )
-        aperture_averages = _coerce_int(
-            raw_needle_calibration.get("aperture_averages", aperture_averages),
+            default=config.aperture_rate,
+        ),
+        aperture_averages=_coerce_int(
+            raw_needle_calibration.get(
+                "aperture_averages",
+                config.aperture_averages,
+            ),
             default=defaults.aperture_averages,
-        )
-        trigger_source = _normalise_choice(
-            raw_needle_calibration.get("trigger_source", trigger_source),
+        ),
+        trigger_source=_normalise_choice(
+            raw_needle_calibration.get("trigger_source", config.trigger_source),
             choices=defaults.trigger_sources,
-            default=trigger_source,
-        )
-        trigger_delay_s = _coerce_float(
-            raw_needle_calibration.get("trigger_delay_s", trigger_delay_s),
+            default=config.trigger_source,
+        ),
+        trigger_delay_s=_coerce_float(
+            raw_needle_calibration.get("trigger_delay_s", config.trigger_delay_s),
             default=defaults.trigger_delay_s,
-        )
-        bias_enabled = _coerce_bool(
-            raw_needle_calibration.get("bias_enabled", bias_enabled),
+        ),
+        bias_enabled=_coerce_bool(
+            raw_needle_calibration.get("bias_enabled", config.bias_enabled),
             default=defaults.bias_enabled,
-        )
-        bias_level_v = _coerce_float(
-            raw_needle_calibration.get("bias_level_v", bias_level_v),
+        ),
+        bias_level_v=_coerce_float(
+            raw_needle_calibration.get("bias_level_v", config.bias_level_v),
             default=defaults.bias_level_v,
-        )
-        monitor1 = _normalise_choice(
-            raw_needle_calibration.get("monitor1", monitor1),
+        ),
+        monitor1=_normalise_choice(
+            raw_needle_calibration.get("monitor1", config.monitor1),
             choices=defaults.monitor_parameters,
-            default=monitor1,
-        )
-        monitor2 = _normalise_choice(
-            raw_needle_calibration.get("monitor2", monitor2),
+            default=config.monitor1,
+        ),
+        monitor2=_normalise_choice(
+            raw_needle_calibration.get("monitor2", config.monitor2),
             choices=defaults.monitor_parameters,
-            default=monitor2,
-        )
-        alc_enabled = _coerce_bool(
-            raw_needle_calibration.get("alc_enabled", alc_enabled),
+            default=config.monitor2,
+        ),
+        alc_enabled=_coerce_bool(
+            raw_needle_calibration.get("alc_enabled", config.alc_enabled),
             default=defaults.alc_enabled,
-        )
-        short_threshold_ohm = _coerce_float(
+        ),
+        short_threshold_ohm=_coerce_float(
             raw_needle_calibration.get(
                 "short_threshold_ohm",
-                short_threshold_ohm,
+                config.short_threshold_ohm,
             ),
             default=defaults.short_threshold_ohm,
-        )
-        poll_interval_ms = _coerce_int(
-            raw_needle_calibration.get("poll_interval_ms", poll_interval_ms),
+        ),
+        poll_interval_ms=_coerce_int(
+            raw_needle_calibration.get("poll_interval_ms", config.poll_interval_ms),
             default=defaults.poll_interval_ms,
-        )
-        feedrate_mm_min = _coerce_float(
-            raw_needle_calibration.get("feedrate_mm_min", feedrate_mm_min),
+        ),
+        feedrate_mm_min=_coerce_float(
+            raw_needle_calibration.get("feedrate_mm_min", config.feedrate_mm_min),
             default=defaults.feedrate_mm_min,
-        )
-        contact_zone_mm = _coerce_float(
-            raw_needle_calibration.get("contact_zone_mm", contact_zone_mm),
+        ),
+        contact_zone_mm=_coerce_float(
+            raw_needle_calibration.get("contact_zone_mm", config.contact_zone_mm),
             default=defaults.contact_zone_mm,
-        )
-        raise_position_mm = _coerce_float(
-            raw_needle_calibration.get("raise_position_mm", raise_position_mm),
+        ),
+        raise_position_mm=_coerce_float(
+            raw_needle_calibration.get("raise_position_mm", config.raise_position_mm),
             default=0.0,
-        )
-        raise_position_configured = bool(
+        ),
+        raise_position_configured=bool(
             raw_needle_calibration.get(
                 "raise_position_configured",
-                raise_position_configured,
+                config.raise_position_configured,
             )
-        )
-        down_position_mm = _coerce_float(
-            raw_needle_calibration.get("down_position_mm", down_position_mm),
+        ),
+        down_position_mm=_coerce_float(
+            raw_needle_calibration.get("down_position_mm", config.down_position_mm),
             default=0.0,
-        )
-        down_position_configured = bool(
+        ),
+        down_position_configured=bool(
             raw_needle_calibration.get(
                 "down_position_configured",
-                down_position_configured,
+                config.down_position_configured,
             )
-        )
-        chip_position = parse_saved_stage_position(
+        ),
+        chip_position=parse_saved_stage_position(
             raw_needle_calibration.get("chip_position")
-        )
-        stone_position = parse_saved_stage_position(
+        ),
+        stone_position=parse_saved_stage_position(
             raw_needle_calibration.get("stone_position")
-        )
+        ),
+    )
 
-    if impedance_range < 0 or impedance_range > 8:
+
+def _validated_needle_calibration_config(
+    config: NeedleCalibrationConfig,
+    defaults: NeedleCalibrationDefaults,
+) -> NeedleCalibrationConfig:
+    config = _validated_lcr_range_config(config, defaults)
+    config = _validated_timing_and_threshold_config(config, defaults)
+    return _validated_needle_motion_config(config, defaults)
+
+
+def _validated_lcr_range_config(
+    config: NeedleCalibrationConfig,
+    defaults: NeedleCalibrationDefaults,
+) -> NeedleCalibrationConfig:
+    impedance_range = config.impedance_range
+    dcr_range = config.dcr_range
+    frequency_hz = config.frequency_hz
+    voltage_level_v = config.voltage_level_v
+    current_level_a = config.current_level_a
+    source_resistance_ohm = config.source_resistance_ohm
+    aperture_averages = config.aperture_averages
+    if _outside(impedance_range, 0, 8):
         impedance_range = defaults.impedance_range
-    if dcr_range < 0 or dcr_range > 8:
+    if _outside(dcr_range, 0, 8):
         dcr_range = defaults.dcr_range
     if frequency_hz < 10:
         frequency_hz = defaults.frequency_hz
-    if voltage_level_v < 0.01 or voltage_level_v > 2.0:
+    if _outside(voltage_level_v, 0.01, 2.0):
         voltage_level_v = defaults.voltage_level_v
-    if current_level_a < 0.0001 or current_level_a > 0.02:
+    if _outside(current_level_a, 0.0001, 0.02):
         current_level_a = defaults.current_level_a
     if source_resistance_ohm not in defaults.source_resistances_ohm:
         source_resistance_ohm = defaults.source_resistance_ohm
-    if aperture_averages < 1 or aperture_averages > 256:
+    if _outside(aperture_averages, 1, 256):
         aperture_averages = defaults.aperture_averages
-    if trigger_delay_s < 0 or trigger_delay_s > 60:
+    return replace(
+        config,
+        impedance_range=impedance_range,
+        dcr_range=dcr_range,
+        frequency_hz=frequency_hz,
+        voltage_level_v=voltage_level_v,
+        current_level_a=current_level_a,
+        source_resistance_ohm=source_resistance_ohm,
+        aperture_averages=aperture_averages,
+    )
+
+
+def _validated_timing_and_threshold_config(
+    config: NeedleCalibrationConfig,
+    defaults: NeedleCalibrationDefaults,
+) -> NeedleCalibrationConfig:
+    trigger_delay_s = config.trigger_delay_s
+    bias_level_v = config.bias_level_v
+    short_threshold_ohm = config.short_threshold_ohm
+    poll_interval_ms = config.poll_interval_ms
+    if _outside(trigger_delay_s, 0, 60):
         trigger_delay_s = defaults.trigger_delay_s
-    if bias_level_v < -2.5 or bias_level_v > 2.5:
+    if _outside(bias_level_v, -2.5, 2.5):
         bias_level_v = defaults.bias_level_v
     if short_threshold_ohm < 0:
         short_threshold_ohm = defaults.short_threshold_ohm
     if poll_interval_ms < 50:
         poll_interval_ms = defaults.poll_interval_ms
+    return replace(
+        config,
+        trigger_delay_s=trigger_delay_s,
+        bias_level_v=bias_level_v,
+        short_threshold_ohm=short_threshold_ohm,
+        poll_interval_ms=poll_interval_ms,
+    )
+
+
+def _validated_needle_motion_config(
+    config: NeedleCalibrationConfig,
+    defaults: NeedleCalibrationDefaults,
+) -> NeedleCalibrationConfig:
+    feedrate_mm_min = config.feedrate_mm_min
+    contact_zone_mm = config.contact_zone_mm
+    raise_position_mm = config.raise_position_mm
+    raise_position_configured = config.raise_position_configured
     if feedrate_mm_min <= 0:
         feedrate_mm_min = defaults.feedrate_mm_min
     feedrate_mm_min = max(defaults.min_feedrate_mm_min, feedrate_mm_min)
     if contact_zone_mm < 0:
         contact_zone_mm = defaults.contact_zone_mm
-    auto_range_enabled = range_mode == "AUTO"
-    if not raise_position_configured and down_position_configured:
-        raise_position_mm = down_position_mm
+    if not raise_position_configured and config.down_position_configured:
+        raise_position_mm = config.down_position_mm
         raise_position_configured = True
-
-    return NeedleCalibrationConfig(
-        meter_type=meter_type,
-        visa_resource=visa_resource,
-        keithley_source_resource=keithley_source_resource,
-        keithley_voltmeter_resource=keithley_voltmeter_resource,
-        measurement_function=measurement_function,
-        range_mode=range_mode,
-        auto_range_enabled=auto_range_enabled,
-        impedance_range=impedance_range,
-        dcr_range=dcr_range,
-        frequency_hz=frequency_hz,
-        level_mode=level_mode,
-        voltage_level_v=voltage_level_v,
-        current_level_a=current_level_a,
-        source_resistance_ohm=source_resistance_ohm,
-        aperture_rate=aperture_rate,
-        aperture_averages=aperture_averages,
-        trigger_source=trigger_source,
-        trigger_delay_s=trigger_delay_s,
-        bias_enabled=bias_enabled,
-        bias_level_v=bias_level_v,
-        monitor1=monitor1,
-        monitor2=monitor2,
-        alc_enabled=alc_enabled,
-        short_threshold_ohm=short_threshold_ohm,
-        poll_interval_ms=poll_interval_ms,
+    return replace(
+        config,
+        auto_range_enabled=config.range_mode == "AUTO",
         feedrate_mm_min=feedrate_mm_min,
         contact_zone_mm=contact_zone_mm,
         raise_position_mm=raise_position_mm,
         raise_position_configured=raise_position_configured,
-        down_position_mm=down_position_mm,
-        down_position_configured=down_position_configured,
-        chip_position=chip_position,
-        stone_position=stone_position,
+    )
+
+
+def _outside(value: float, lower: float, upper: float) -> bool:
+    return value < lower or value > upper
+
+
+def parse_needle_calibration_preferences(
+    raw_needle_calibration: object,
+    *,
+    min_feedrate_mm_min: float,
+) -> NeedleCalibrationSettings:
+    """Normalise persisted needle calibration settings for the GUI settings model."""
+
+    config = parse_needle_calibration_settings(
+        raw_needle_calibration,
+        default_needle_calibration_values(
+            min_feedrate_mm_min=min_feedrate_mm_min,
+        ),
+    )
+    return needle_calibration_settings_from_config(config)
+
+
+def default_needle_calibration_values(
+    *,
+    min_feedrate_mm_min: float,
+) -> NeedleCalibrationDefaults:
+    """Return default values and constraints for needle calibration parsing."""
+
+    defaults = NeedleCalibrationSettings()
+    return NeedleCalibrationDefaults(
+        meter_type=defaults.meter_type,
+        visa_resource=defaults.visa_resource,
+        keithley_source_resource=defaults.keithley_source_resource,
+        keithley_voltmeter_resource=defaults.keithley_voltmeter_resource,
+        measurement_function=defaults.measurement_function,
+        range_mode=defaults.range_mode,
+        auto_range_enabled=defaults.auto_range_enabled,
+        impedance_range=defaults.impedance_range,
+        dcr_range=defaults.dcr_range,
+        frequency_hz=defaults.frequency_hz,
+        level_mode=defaults.level_mode,
+        voltage_level_v=defaults.voltage_level_v,
+        current_level_a=defaults.current_level_a,
+        source_resistance_ohm=defaults.source_resistance_ohm,
+        aperture_rate=defaults.aperture_rate,
+        aperture_averages=defaults.aperture_averages,
+        trigger_source=defaults.trigger_source,
+        trigger_delay_s=defaults.trigger_delay_s,
+        bias_enabled=defaults.bias_enabled,
+        bias_level_v=defaults.bias_level_v,
+        monitor=defaults.monitor1,
+        alc_enabled=defaults.alc_enabled,
+        short_threshold_ohm=defaults.short_threshold_ohm,
+        poll_interval_ms=defaults.poll_interval_ms,
+        feedrate_mm_min=defaults.feedrate_mm_min,
+        contact_zone_mm=defaults.contact_zone_mm,
+        min_feedrate_mm_min=min_feedrate_mm_min,
+        meter_types=LCR_METER_TYPES,
+        measurement_functions=LCR_MEASUREMENT_FUNCTIONS,
+        range_modes=LCR_RANGE_MODES,
+        level_modes=LCR_LEVEL_MODES,
+        source_resistances_ohm=LCR_SOURCE_RESISTANCES_OHM,
+        aperture_rates=LCR_APERTURE_RATES,
+        trigger_sources=LCR_TRIGGER_SOURCES,
+        monitor_parameters=LCR_MONITOR_PARAMETERS,
+    )
+
+
+def needle_calibration_settings_from_config(
+    config: NeedleCalibrationConfig,
+) -> NeedleCalibrationSettings:
+    """Convert normalised needle calibration data to mutable settings."""
+
+    return NeedleCalibrationSettings(
+        meter_type=config.meter_type,
+        visa_resource=config.visa_resource,
+        keithley_source_resource=config.keithley_source_resource,
+        keithley_voltmeter_resource=config.keithley_voltmeter_resource,
+        measurement_function=config.measurement_function,
+        range_mode=config.range_mode,
+        auto_range_enabled=config.auto_range_enabled,
+        impedance_range=config.impedance_range,
+        dcr_range=config.dcr_range,
+        frequency_hz=config.frequency_hz,
+        level_mode=config.level_mode,
+        voltage_level_v=config.voltage_level_v,
+        current_level_a=config.current_level_a,
+        source_resistance_ohm=config.source_resistance_ohm,
+        aperture_rate=config.aperture_rate,
+        aperture_averages=config.aperture_averages,
+        trigger_source=config.trigger_source,
+        trigger_delay_s=config.trigger_delay_s,
+        bias_enabled=config.bias_enabled,
+        bias_level_v=config.bias_level_v,
+        monitor1=config.monitor1,
+        monitor2=config.monitor2,
+        alc_enabled=config.alc_enabled,
+        short_threshold_ohm=config.short_threshold_ohm,
+        poll_interval_ms=config.poll_interval_ms,
+        feedrate_mm_min=config.feedrate_mm_min,
+        contact_zone_mm=config.contact_zone_mm,
+        raise_position_mm=config.raise_position_mm,
+        raise_position_configured=config.raise_position_configured,
+        down_position_mm=config.down_position_mm,
+        down_position_configured=config.down_position_configured,
+        chip_position=saved_stage_position_settings_from_config(
+            config.chip_position
+        ),
+        stone_position=saved_stage_position_settings_from_config(
+            config.stone_position
+        ),
+    )
+
+
+def saved_stage_position_settings_from_config(
+    config: SavedStagePositionConfig,
+) -> SavedStagePositionSettings:
+    """Convert a normalised saved stage position to mutable settings."""
+
+    return SavedStagePositionSettings(
+        x_mm=config.x_mm,
+        y_mm=config.y_mm,
+        z_mm=config.z_mm,
+        configured=config.configured,
     )
 
 

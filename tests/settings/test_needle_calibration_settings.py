@@ -4,17 +4,13 @@ from probe_station_gui.settings.needle_calibration_config import (
     LCR_METER_TYPE_KEITHLEY,
     NeedleCalibrationSettings,
     SavedStagePositionSettings,
-)
-from probe_station_gui.settings.manager import (
-    SettingsManager,
+    parse_needle_calibration_preferences,
 )
 
 
 class NeedleCalibrationParsingTest(unittest.TestCase):
     def test_parse_normalizes_lcr_choices_ranges_and_feedrate(self) -> None:
-        manager = object.__new__(SettingsManager)
-
-        parsed = manager._parse_needle_calibration(
+        parsed = parse_needle_calibration_preferences(
             {
                 "meter_type": LCR_METER_TYPE_KEITHLEY,
                 "visa_resource": " COM5 ",
@@ -43,7 +39,8 @@ class NeedleCalibrationParsingTest(unittest.TestCase):
                 "poll_interval_ms": "500",
                 "feedrate_mm_min": "0.1",
                 "contact_zone_mm": "0.125",
-            }
+            },
+            min_feedrate_mm_min=1.0,
         )
 
         self.assertEqual(parsed.meter_type, LCR_METER_TYPE_KEITHLEY)
@@ -73,13 +70,12 @@ class NeedleCalibrationParsingTest(unittest.TestCase):
         self.assertEqual(parsed.contact_zone_mm, 0.125)
 
     def test_parse_migrates_down_position_to_raise_when_raise_is_missing(self) -> None:
-        manager = object.__new__(SettingsManager)
-
-        parsed = manager._parse_needle_calibration(
+        parsed = parse_needle_calibration_preferences(
             {
                 "down_position_mm": "1.25",
                 "down_position_configured": True,
-            }
+            },
+            min_feedrate_mm_min=1.0,
         )
 
         self.assertEqual(parsed.down_position_mm, 1.25)
@@ -88,9 +84,7 @@ class NeedleCalibrationParsingTest(unittest.TestCase):
         self.assertTrue(parsed.raise_position_configured)
 
     def test_parse_preserves_saved_chip_and_stone_positions(self) -> None:
-        manager = object.__new__(SettingsManager)
-
-        parsed = manager._parse_needle_calibration(
+        parsed = parse_needle_calibration_preferences(
             {
                 "chip_position": {
                     "x_mm": "1.0",
@@ -104,7 +98,8 @@ class NeedleCalibrationParsingTest(unittest.TestCase):
                     "z_mm": "6.0",
                     "configured": True,
                 },
-            }
+            },
+            min_feedrate_mm_min=1.0,
         )
 
         self.assertEqual(

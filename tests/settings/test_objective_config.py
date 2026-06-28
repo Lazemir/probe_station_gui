@@ -3,6 +3,7 @@ from probe_station_gui.settings.objective_config import (
     ObjectivesSettings,
     normalize_objective_name,
     ordered_objective_names,
+    parse_objectives_settings,
     parse_pixels_to_mm_matrix,
 )
 
@@ -58,3 +59,59 @@ def test_parse_pixels_to_mm_matrix_preserves_tiny_valid_determinant() -> None:
         [1e-08, 0.0],
         [0.0, 1e-08],
     ]
+
+
+def test_parse_objectives_rejects_invalid_matrix() -> None:
+    parsed = parse_objectives_settings(
+        {
+            "active_name": "x10",
+            "objectives": {
+                "X10": {
+                    "pixels_to_mm": [[1.0, 2.0], [2.0, 4.0]],
+                    "xy_calibration_configured": True,
+                }
+            },
+        }
+    )
+
+    assert parsed.active_name == "X10"
+    assert not parsed.objectives["X10"].xy_calibration_configured
+    assert parsed.objectives["X10"].pixels_to_mm == []
+
+
+def test_parse_objectives_preserves_custom_profile() -> None:
+    parsed = parse_objectives_settings(
+        {
+            "active_name": "x100",
+            "objectives": {
+                "x100": {
+                    "pixels_to_mm": [[0.0001, 0.0], [0.0, 0.00011]],
+                    "xy_calibration_configured": True,
+                }
+            },
+        }
+    )
+
+    assert parsed.active_name == "X100"
+    assert "X100" in parsed.objectives
+    assert parsed.objectives["X100"].xy_calibration_configured
+    assert parsed.objectives["X100"].pixels_to_mm == [
+        [0.0001, 0.0],
+        [0.0, 0.00011],
+    ]
+
+
+def test_parse_objectives_uses_remaining_profile_when_active_was_deleted() -> None:
+    parsed = parse_objectives_settings(
+        {
+            "active_name": "X50",
+            "objectives": {
+                "X10": {
+                    "xy_calibration_configured": False,
+                }
+            },
+        }
+    )
+
+    assert parsed.active_name == "X10"
+    assert list(parsed.objectives) == ["X10"]

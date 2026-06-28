@@ -20,9 +20,9 @@ from probe_station_gui.design.objective_offsets import base_objective_name
 from probe_station_gui.settings.manager import (
     ObjectiveCalibrationSettings,
     ObjectivesSettings,
-    normalize_objective_name,
     ordered_objective_names,
 )
+from probe_station_gui.settings.objective_config import normalize_objective_name
 from probe_station_gui.shared.wheel_guard import GuardedComboBox as QComboBox
 
 

@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List
 
 from probe_station_gui.settings.axis_calibration_config import (
     AxisACalibrationConfig,
@@ -28,13 +28,10 @@ from probe_station_gui.settings.controls_config import (
 from probe_station_gui.settings.default_file import normalize_default_settings_data
 from probe_station_gui.settings.feedrate_config import (
     FeedrateGroup,
-    FeedrateGroupConfig,
     FeedrateSettings,
-    feedrate_group_from_raw,
-    normalise_feedrate_group,
+    feedrate_group_from_config,
+    normalise_feedrate_settings,
     parse_feedrate_groups,
-    parse_feedrate_list,
-    select_feedrate_default,
 )
 from probe_station_gui.stage.fluidnc_protocol import parse_fluidnc_axis_max_feedrates
 from probe_station_gui.settings.jog_config import (
@@ -49,27 +46,21 @@ from probe_station_gui.settings.needle_calibration_config import (
     LCR_MEASUREMENT_FUNCTIONS,
     LCR_METER_TYPE_GWINSTEK,
     LCR_METER_TYPE_KEITHLEY,
-    LCR_METER_TYPE_LABELS,
     LCR_METER_TYPES,
     LCR_MONITOR_PARAMETERS,
     LCR_RANGE_MODES,
     LCR_SOURCE_RESISTANCES_OHM,
     LCR_TRIGGER_SOURCES,
-    NeedleCalibrationDefaults,
     NeedleCalibrationSettings,
     SavedStagePositionSettings,
-    parse_needle_calibration_settings,
-    parse_saved_stage_position,
+    parse_needle_calibration_preferences,
 )
 from probe_station_gui.settings.objective_config import (
-    DEFAULT_ACTIVE_OBJECTIVE,
-    OBJECTIVE_NAMES,
     ObjectiveCalibrationSettings,
     ObjectivesSettings,
     default_objective,
-    normalize_objective_name,
     ordered_objective_names,
-    parse_pixels_to_mm_matrix,
+    parse_objectives_settings,
 )
 from probe_station_gui.settings.oscillation_config import (
     OscillationSettings,
@@ -78,11 +69,7 @@ from probe_station_gui.settings.oscillation_config import (
 )
 from probe_station_gui.settings.value_parsing import (
     coerce_bool,
-    coerce_float,
-    coerce_int,
     finite_float,
-    normalise_choice,
-    positive_float,
 )
 from probe_station_gui.settings.section_parsing import (
     parse_api_settings,
@@ -628,7 +615,7 @@ class SettingsManager:
             coordinate_system=self._parse_coordinate_system(
                 self._raw_section(raw, "coordinate_system")
             ),
-            objectives=self._parse_objectives(self._raw_section(raw, "objectives")),
+            objectives=parse_objectives_settings(self._raw_section(raw, "objectives")),
             design_last_directory=self._design_last_directory_from_raw(raw),
         )
 
@@ -692,7 +679,7 @@ class SettingsManager:
 
         settings = TelegramSettings()
         if isinstance(raw_telegram, dict):
-            settings.enabled = self._coerce_bool(
+            settings.enabled = coerce_bool(
                 raw_telegram.get("enabled", settings.enabled),
                 default=settings.enabled,
             )
@@ -730,12 +717,19 @@ class SettingsManager:
     def _parse_feedrates(self, raw_feedrates, legacy_presets) -> FeedrateSettings:
         """Normalise persisted feedrate data supporting legacy layouts."""
 
-        linear_group, rotary_group = self._parse_feedrate_groups(
-            raw_feedrates, legacy_presets
+        linear_config, rotary_config = parse_feedrate_groups(
+            raw_feedrates,
+            legacy_presets,
+            linear_group=self.LINEAR_GROUP,
+            rotary_group=self.ROTARY_GROUP,
+            linear_defaults=self.DEFAULT_LINEAR_FEEDRATE_PRESETS,
+            rotary_defaults=self.DEFAULT_ROTARY_FEEDRATE_PRESETS,
+            default_feedrate=self.DEFAULT_FEEDRATE_DEFAULT,
+            min_feedrate=self.MIN_FEEDRATE_MM_MIN,
         )
         return FeedrateSettings(
-            linear=linear_group,
-            rotary=rotary_group,
+            linear=feedrate_group_from_config(linear_config),
+            rotary=feedrate_group_from_config(rotary_config),
         )
 
     def _parse_jog(self, raw_jog) -> JogSettings:
@@ -789,7 +783,7 @@ class SettingsManager:
 
         timeout_s = self.DEFAULT_CLICK_TO_MOVE_PENDING_TIMEOUT_S
         if isinstance(raw_click_to_move, dict):
-            timeout_s = self._finite_float(
+            timeout_s = finite_float(
                 raw_click_to_move.get("pending_timeout_s", timeout_s),
                 default=self.DEFAULT_CLICK_TO_MOVE_PENDING_TIMEOUT_S,
             )
@@ -823,87 +817,9 @@ class SettingsManager:
     ) -> NeedleCalibrationSettings:
         """Normalise persisted needle calibration settings."""
 
-        config = parse_needle_calibration_settings(
+        return parse_needle_calibration_preferences(
             raw_needle_calibration,
-            self._needle_calibration_defaults(),
-        )
-        return NeedleCalibrationSettings(
-            meter_type=config.meter_type,
-            visa_resource=config.visa_resource,
-            keithley_source_resource=config.keithley_source_resource,
-            keithley_voltmeter_resource=config.keithley_voltmeter_resource,
-            measurement_function=config.measurement_function,
-            range_mode=config.range_mode,
-            auto_range_enabled=config.auto_range_enabled,
-            impedance_range=config.impedance_range,
-            dcr_range=config.dcr_range,
-            frequency_hz=config.frequency_hz,
-            level_mode=config.level_mode,
-            voltage_level_v=config.voltage_level_v,
-            current_level_a=config.current_level_a,
-            source_resistance_ohm=config.source_resistance_ohm,
-            aperture_rate=config.aperture_rate,
-            aperture_averages=config.aperture_averages,
-            trigger_source=config.trigger_source,
-            trigger_delay_s=config.trigger_delay_s,
-            bias_enabled=config.bias_enabled,
-            bias_level_v=config.bias_level_v,
-            monitor1=config.monitor1,
-            monitor2=config.monitor2,
-            alc_enabled=config.alc_enabled,
-            short_threshold_ohm=config.short_threshold_ohm,
-            poll_interval_ms=config.poll_interval_ms,
-            feedrate_mm_min=config.feedrate_mm_min,
-            contact_zone_mm=config.contact_zone_mm,
-            raise_position_mm=config.raise_position_mm,
-            raise_position_configured=config.raise_position_configured,
-            down_position_mm=config.down_position_mm,
-            down_position_configured=config.down_position_configured,
-            chip_position=self._saved_stage_position_from_config(
-                config.chip_position
-            ),
-            stone_position=self._saved_stage_position_from_config(
-                config.stone_position
-            ),
-        )
-
-    def _needle_calibration_defaults(self) -> NeedleCalibrationDefaults:
-        return NeedleCalibrationDefaults(
-            meter_type=self.DEFAULT_LCR_METER_TYPE,
-            visa_resource=self.DEFAULT_LCR_VISA_RESOURCE,
-            keithley_source_resource=self.DEFAULT_KEITHLEY_SOURCE_RESOURCE,
-            keithley_voltmeter_resource=self.DEFAULT_KEITHLEY_VOLTMETER_RESOURCE,
-            measurement_function=self.DEFAULT_LCR_MEASUREMENT_FUNCTION,
-            range_mode=self.DEFAULT_LCR_RANGE_MODE,
-            auto_range_enabled=self.DEFAULT_LCR_AUTO_RANGE_ENABLED,
-            impedance_range=self.DEFAULT_LCR_IMPEDANCE_RANGE,
-            dcr_range=self.DEFAULT_LCR_DCR_RANGE,
-            frequency_hz=self.DEFAULT_LCR_FREQUENCY_HZ,
-            level_mode=self.DEFAULT_LCR_LEVEL_MODE,
-            voltage_level_v=self.DEFAULT_LCR_VOLTAGE_LEVEL_V,
-            current_level_a=self.DEFAULT_LCR_CURRENT_LEVEL_A,
-            source_resistance_ohm=self.DEFAULT_LCR_SOURCE_RESISTANCE_OHM,
-            aperture_rate=self.DEFAULT_LCR_APERTURE_RATE,
-            aperture_averages=self.DEFAULT_LCR_APERTURE_AVERAGES,
-            trigger_source=self.DEFAULT_LCR_TRIGGER_SOURCE,
-            trigger_delay_s=self.DEFAULT_LCR_TRIGGER_DELAY_S,
-            bias_enabled=self.DEFAULT_LCR_BIAS_ENABLED,
-            bias_level_v=self.DEFAULT_LCR_BIAS_LEVEL_V,
-            monitor=self.DEFAULT_LCR_MONITOR,
-            alc_enabled=self.DEFAULT_LCR_ALC_ENABLED,
-            short_threshold_ohm=self.DEFAULT_SHORT_THRESHOLD_OHM,
-            poll_interval_ms=self.DEFAULT_LCR_POLL_INTERVAL_MS,
-            feedrate_mm_min=self.DEFAULT_NEEDLE_FEEDRATE_MM_MIN,
-            contact_zone_mm=self.DEFAULT_NEEDLE_CONTACT_ZONE_MM,
             min_feedrate_mm_min=self.MIN_FEEDRATE_MM_MIN,
-            meter_types=LCR_METER_TYPES,
-            measurement_functions=LCR_MEASUREMENT_FUNCTIONS,
-            range_modes=LCR_RANGE_MODES,
-            level_modes=LCR_LEVEL_MODES,
-            source_resistances_ohm=LCR_SOURCE_RESISTANCES_OHM,
-            aperture_rates=LCR_APERTURE_RATES,
-            trigger_sources=LCR_TRIGGER_SOURCES,
-            monitor_parameters=LCR_MONITOR_PARAMETERS,
         )
 
     def _parse_axis_a_calibration(self, raw_calibration) -> AxisACalibrationSettings:
@@ -930,46 +846,6 @@ class SettingsManager:
             }
         )
 
-    @staticmethod
-    def _coerce_bool(value, *, default: bool) -> bool:
-        return coerce_bool(value, default=default)
-
-    @staticmethod
-    def _coerce_float(value, *, default: float) -> float:
-        return coerce_float(value, default=default)
-
-    @staticmethod
-    def _coerce_int(value, *, default: int) -> int:
-        return coerce_int(value, default=default)
-
-    @staticmethod
-    def _finite_float(value, *, default: float) -> float:
-        return finite_float(value, default=default)
-
-    @staticmethod
-    def _positive_float(value, *, default: float) -> float:
-        return positive_float(value, default=default)
-
-    @staticmethod
-    def _normalise_choice(value, *, choices: tuple, default: str) -> str:
-        return normalise_choice(value, choices=choices, default=default)
-
-    def _parse_saved_stage_position(self, raw_position) -> SavedStagePositionSettings:
-        """Normalise a persisted XYZ bookmark used by calibration workflows."""
-
-        return self._saved_stage_position_from_config(
-            parse_saved_stage_position(raw_position)
-        )
-
-    @staticmethod
-    def _saved_stage_position_from_config(config) -> SavedStagePositionSettings:
-        return SavedStagePositionSettings(
-            x_mm=config.x_mm,
-            y_mm=config.y_mm,
-            z_mm=config.z_mm,
-            configured=config.configured,
-        )
-
     def _parse_coordinate_system(self, raw_coordinate_system) -> CoordinateSystemSettings:
         """Normalise persisted coordinate-system settings."""
 
@@ -982,124 +858,6 @@ class SettingsManager:
                 work_coordinate_systems=WORK_COORDINATE_SYSTEMS,
             )
         )
-
-    def _parse_objectives(self, raw_objectives) -> ObjectivesSettings:
-        """Normalise persisted objective profiles."""
-
-        active_name = DEFAULT_ACTIVE_OBJECTIVE
-        apply_offsets_on_change = True
-        raw_profiles = None
-        if isinstance(raw_objectives, dict):
-            raw_active = raw_objectives.get("active_name", active_name)
-            normalized_active = normalize_objective_name(raw_active)
-            if normalized_active:
-                active_name = normalized_active
-            apply_offsets_on_change = self._coerce_bool(
-                raw_objectives.get(
-                    "apply_offsets_on_change",
-                    apply_offsets_on_change,
-                ),
-                default=apply_offsets_on_change,
-            )
-            raw_profiles = raw_objectives.get("objectives")
-
-        profiles: Dict[str, ObjectiveCalibrationSettings] = {}
-        profile_map = raw_profiles if isinstance(raw_profiles, dict) else {}
-        names: list[str] = []
-        for raw_name in profile_map:
-            name = normalize_objective_name(raw_name)
-            if name and name not in names:
-                names.append(name)
-        if not names:
-            names = list(OBJECTIVE_NAMES)
-        if active_name not in names and profile_map:
-            active_name = names[0]
-        elif active_name not in names:
-            names.append(active_name)
-        for name in names:
-            raw_profile = None
-            for raw_key, candidate in profile_map.items():
-                if normalize_objective_name(raw_key) == name:
-                    raw_profile = candidate
-                    break
-            profiles[name] = self._parse_objective_profile(name, raw_profile)
-        return ObjectivesSettings(
-            active_name=active_name,
-            apply_offsets_on_change=apply_offsets_on_change,
-            objectives=profiles,
-        )
-
-    def _parse_objective_profile(
-        self,
-        name: str,
-        raw_profile,
-    ) -> ObjectiveCalibrationSettings:
-        """Normalise one objective profile."""
-
-        defaults = default_objective(name)
-        if not isinstance(raw_profile, dict):
-            return defaults
-        matrix = self._parse_pixels_to_mm(raw_profile.get("pixels_to_mm"))
-        xy_configured = self._coerce_bool(
-            raw_profile.get("xy_calibration_configured", bool(matrix)),
-            default=bool(matrix),
-        )
-        if not matrix:
-            xy_configured = False
-        return ObjectiveCalibrationSettings(
-            name=name,
-            magnification=self._positive_float(
-                raw_profile.get("magnification", defaults.magnification),
-                default=defaults.magnification,
-            ),
-            xy_offset_x_mm=self._finite_float(
-                raw_profile.get("xy_offset_x_mm", defaults.xy_offset_x_mm),
-                default=defaults.xy_offset_x_mm,
-            ),
-            xy_offset_y_mm=self._finite_float(
-                raw_profile.get("xy_offset_y_mm", defaults.xy_offset_y_mm),
-                default=defaults.xy_offset_y_mm,
-            ),
-            xy_offset_configured=self._coerce_bool(
-                raw_profile.get(
-                    "xy_offset_configured",
-                    defaults.xy_offset_configured,
-                ),
-                default=defaults.xy_offset_configured,
-            ),
-            z_offset_mm=self._finite_float(
-                raw_profile.get("z_offset_mm", defaults.z_offset_mm),
-                default=defaults.z_offset_mm,
-            ),
-            z_offset_configured=self._coerce_bool(
-                raw_profile.get(
-                    "z_offset_configured",
-                    defaults.z_offset_configured,
-                ),
-                default=defaults.z_offset_configured,
-            ),
-            pixels_to_mm=matrix,
-            xy_calibration_configured=xy_configured,
-            autofocus_range_mm=self._positive_float(
-                raw_profile.get(
-                    "autofocus_range_mm",
-                    defaults.autofocus_range_mm,
-                ),
-                default=defaults.autofocus_range_mm,
-            ),
-            autofocus_fine_step_mm=self._positive_float(
-                raw_profile.get(
-                    "autofocus_fine_step_mm",
-                    defaults.autofocus_fine_step_mm,
-                ),
-                default=defaults.autofocus_fine_step_mm,
-            ),
-        )
-
-    def _parse_pixels_to_mm(self, raw_matrix) -> List[List[float]]:
-        """Return a validated 2x2 pixels-to-mm matrix."""
-
-        return parse_pixels_to_mm_matrix(raw_matrix)
 
     @classmethod
     def _should_keep_control_binding(cls, binding: KeyBinding) -> bool:
@@ -1120,97 +878,18 @@ class SettingsManager:
             )
         ]
 
-    def _parse_feedrate_groups(
-        self,
-        raw_feedrates,
-        legacy_presets,
-    ) -> Tuple[FeedrateGroup, FeedrateGroup]:
-        linear_config, rotary_config = parse_feedrate_groups(
-            raw_feedrates,
-            legacy_presets,
-            linear_group=self.LINEAR_GROUP,
-            rotary_group=self.ROTARY_GROUP,
-            linear_defaults=self.DEFAULT_LINEAR_FEEDRATE_PRESETS,
-            rotary_defaults=self.DEFAULT_ROTARY_FEEDRATE_PRESETS,
-            default_feedrate=self.DEFAULT_FEEDRATE_DEFAULT,
-            min_feedrate=self.MIN_FEEDRATE_MM_MIN,
-        )
-        return (
-            FeedrateGroup(
-                presets=linear_config.presets,
-                default=linear_config.default,
-            ),
-            FeedrateGroup(
-                presets=rotary_config.presets,
-                default=rotary_config.default,
-            ),
-        )
-
-    def _group_from_raw(
-        self, raw_group, *, fallback: Tuple[float, ...]
-    ) -> FeedrateGroup:
-        """Build a feedrate group dataclass from persisted data."""
-
-        config = feedrate_group_from_raw(
-            raw_group,
-            fallback=fallback,
-            default_feedrate=self.DEFAULT_FEEDRATE_DEFAULT,
-            min_feedrate=self.MIN_FEEDRATE_MM_MIN,
-        )
-        return FeedrateGroup(presets=config.presets, default=config.default)
-
-    def _parse_feedrate_list(
-        self, raw_presets, *, fallback: Tuple[float, ...]
-    ) -> List[float]:
-        """Normalise a preset list to positive unique floats preserving order."""
-
-        return parse_feedrate_list(
-            raw_presets,
-            fallback=fallback,
-            min_feedrate=self.MIN_FEEDRATE_MM_MIN,
-        )
-
-    def _normalise_feedrate_group(
-        self, group: FeedrateGroup, *, fallback: Tuple[float, ...]
-    ) -> FeedrateGroup:
-        """Ensure the feedrate group contains valid presets and defaults."""
-
-        config = normalise_feedrate_group(
-            FeedrateGroupConfig(presets=list(group.presets), default=group.default),
-            fallback=fallback,
-            default_feedrate=self.DEFAULT_FEEDRATE_DEFAULT,
-            min_feedrate=self.MIN_FEEDRATE_MM_MIN,
-        )
-        return FeedrateGroup(presets=config.presets, default=config.default)
-
-    def _select_default(
-        self, candidate: float, presets: List[float], *, fallback: Tuple[float, ...]
-    ) -> float:
-        """Choose a positive default value.
-
-        The joystick feedrate slider is continuous, so the persisted default
-        must not be forced back to one of the preset values.
-        """
-
-        return select_feedrate_default(
-            candidate,
-            default_feedrate=self.DEFAULT_FEEDRATE_DEFAULT,
-            min_feedrate=self.MIN_FEEDRATE_MM_MIN,
-        )
-
     def _normalise_settings(self, settings: Settings) -> Settings:
         """Return a copy of the settings with runtime values normalised."""
 
         clone = settings.clone()
         clone.api = self._parse_api(clone.api.to_dict())
         clone.telegram = self._parse_telegram(clone.telegram.to_dict())
-        clone.feedrates = FeedrateSettings(
-            linear=self._normalise_feedrate_group(
-                clone.feedrates.linear, fallback=self.DEFAULT_LINEAR_FEEDRATE_PRESETS
-            ),
-            rotary=self._normalise_feedrate_group(
-                clone.feedrates.rotary, fallback=self.DEFAULT_ROTARY_FEEDRATE_PRESETS
-            ),
+        clone.feedrates = normalise_feedrate_settings(
+            clone.feedrates,
+            linear_defaults=self.DEFAULT_LINEAR_FEEDRATE_PRESETS,
+            rotary_defaults=self.DEFAULT_ROTARY_FEEDRATE_PRESETS,
+            default_feedrate=self.DEFAULT_FEEDRATE_DEFAULT,
+            min_feedrate=self.MIN_FEEDRATE_MM_MIN,
         )
         clone.oscillation = self._parse_oscillation(clone.oscillation.to_dict())
         clone.jog = self._parse_jog(clone.jog.to_dict())
@@ -1226,7 +905,7 @@ class SettingsManager:
         clone.axis_z_calibration = self._parse_axis_z_calibration(
             clone.axis_z_calibration.to_dict()
         )
-        clone.objectives = self._parse_objectives(clone.objectives.to_dict())
+        clone.objectives = parse_objectives_settings(clone.objectives.to_dict())
         clone.design_last_directory = clone.design_last_directory.strip()
         return clone
 

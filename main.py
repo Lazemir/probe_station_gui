@@ -319,9 +319,9 @@ from probe_station_gui.camera import microscope_scan
 from probe_station_gui.settings.manager import (
     Settings,
     SettingsManager,
-    normalize_objective_name,
     ordered_objective_names,
 )
+from probe_station_gui.settings.objective_config import normalize_objective_name
 from probe_station_gui.notifications.telegram import (
     TelegramBotCommandService,
     TelegramBotRequest,

@@ -7,7 +7,7 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
-from probe_station_gui.settings.manager import normalize_objective_name
+from probe_station_gui.settings.objective_config import normalize_objective_name
 from probe_station_gui.stage.controller import StageControllerError
 
 

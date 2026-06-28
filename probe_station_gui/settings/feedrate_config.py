@@ -113,6 +113,48 @@ def parse_feedrate_groups(
     return linear_config, rotary_config
 
 
+def feedrate_group_from_config(config: FeedrateGroupConfig) -> FeedrateGroup:
+    """Convert normalised feedrate data to mutable settings."""
+
+    return FeedrateGroup(presets=list(config.presets), default=config.default)
+
+
+def normalise_feedrate_settings(
+    settings: FeedrateSettings,
+    *,
+    linear_defaults: tuple[float, ...],
+    rotary_defaults: tuple[float, ...],
+    default_feedrate: float,
+    min_feedrate: float,
+) -> FeedrateSettings:
+    """Normalise both feedrate groups in a settings object."""
+
+    return FeedrateSettings(
+        linear=feedrate_group_from_config(
+            normalise_feedrate_group(
+                FeedrateGroupConfig(
+                    presets=list(settings.linear.presets),
+                    default=settings.linear.default,
+                ),
+                fallback=linear_defaults,
+                default_feedrate=default_feedrate,
+                min_feedrate=min_feedrate,
+            )
+        ),
+        rotary=feedrate_group_from_config(
+            normalise_feedrate_group(
+                FeedrateGroupConfig(
+                    presets=list(settings.rotary.presets),
+                    default=settings.rotary.default,
+                ),
+                fallback=rotary_defaults,
+                default_feedrate=default_feedrate,
+                min_feedrate=min_feedrate,
+            )
+        ),
+    )
+
+
 def feedrate_group_from_raw(
     raw_group: object,
     *,

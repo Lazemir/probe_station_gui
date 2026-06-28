@@ -441,66 +441,6 @@ class ObjectiveSettingsTest(unittest.TestCase):
         self.assertEqual(restored.objectives["X20"].pixels_to_mm, profile.pixels_to_mm)
         self.assertTrue(restored.objectives["X20"].xy_offset_configured)
 
-    def test_parse_objectives_rejects_invalid_matrix(self) -> None:
-        manager = object.__new__(SettingsManager)
-
-        parsed = manager._parse_objectives(
-            {
-                "active_name": "x10",
-                "objectives": {
-                    "X10": {
-                        "pixels_to_mm": [[1.0, 2.0], [2.0, 4.0]],
-                        "xy_calibration_configured": True,
-                    }
-                },
-            }
-        )
-
-        self.assertEqual(parsed.active_name, "X10")
-        self.assertFalse(parsed.objectives["X10"].xy_calibration_configured)
-        self.assertEqual(parsed.objectives["X10"].pixels_to_mm, [])
-
-    def test_parse_objectives_preserves_custom_profile(self) -> None:
-        manager = object.__new__(SettingsManager)
-
-        parsed = manager._parse_objectives(
-            {
-                "active_name": "x100",
-                "objectives": {
-                    "x100": {
-                        "pixels_to_mm": [[0.0001, 0.0], [0.0, 0.00011]],
-                        "xy_calibration_configured": True,
-                    }
-                },
-            }
-        )
-
-        self.assertEqual(parsed.active_name, "X100")
-        self.assertIn("X100", parsed.objectives)
-        self.assertTrue(parsed.objectives["X100"].xy_calibration_configured)
-        self.assertEqual(
-            parsed.objectives["X100"].pixels_to_mm,
-            [[0.0001, 0.0], [0.0, 0.00011]],
-        )
-
-    def test_parse_objectives_uses_remaining_profile_when_active_was_deleted(self) -> None:
-        manager = object.__new__(SettingsManager)
-
-        parsed = manager._parse_objectives(
-            {
-                "active_name": "X50",
-                "objectives": {
-                    "X10": {
-                        "xy_calibration_configured": False,
-                    }
-                },
-            }
-        )
-
-        self.assertEqual(parsed.active_name, "X10")
-        self.assertEqual(list(parsed.objectives), ["X10"])
-
-
 class ApiSettingsTest(unittest.TestCase):
     def test_api_settings_round_trip(self) -> None:
         settings = ApiSettings(
