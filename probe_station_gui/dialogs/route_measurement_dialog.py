@@ -96,6 +96,9 @@ from probe_station_gui.dialogs.route_measurement_result_views import (
     RouteMeasurementHistogram as _RouteMeasurementHistogram,
     RouteMeasurementRawDataDialog,
 )
+from probe_station_gui.dialogs.route_measurement_operation_state import (
+    route_measurement_operation_state,
+)
 from probe_station_gui.dialogs.route_measurement_widgets import (
     SIPrefixSpinBox as _SIPrefixSpinBox,
 )
@@ -1183,36 +1186,30 @@ class RouteMeasurementDialog(RouteMeasurementProfileMixin, QDialog):
             self._save_settings_file()
 
     def _update_operation_state(self) -> None:
-        mode = str(self._operation_combo.currentData() or ROUTE_OPERATION_MEASURE)
-        photo_enabled = route_operation_photo_enabled(mode)
-        measure_enabled = route_operation_measure_enabled(mode)
-        route_active = photo_enabled or measure_enabled
-        can_edit = not self._running or self._waiting
-        self._photo_dir_edit.setEnabled(photo_enabled and can_edit)
-        self._photo_browse_button.setEnabled(photo_enabled and can_edit)
-        self._photo_settle_spin.setEnabled(photo_enabled and can_edit)
-        self._photo_autofocus_checkbox.setEnabled(route_active and can_edit)
+        state = route_measurement_operation_state(
+            mode=str(self._operation_combo.currentData() or ROUTE_OPERATION_MEASURE),
+            running=self._running,
+            waiting=self._waiting,
+            autofocus_checked=self._photo_autofocus_checkbox.isChecked(),
+            previous_ok_only_checked=self._previous_ok_only_checkbox.isChecked(),
+        )
+        self._photo_dir_edit.setEnabled(state.photo_controls_enabled)
+        self._photo_browse_button.setEnabled(state.photo_controls_enabled)
+        self._photo_settle_spin.setEnabled(state.photo_controls_enabled)
+        self._photo_autofocus_checkbox.setEnabled(state.photo_autofocus_enabled)
         self._photo_autofocus_range_spin.setEnabled(
-            route_active
-            and self._photo_autofocus_checkbox.isChecked()
-            and can_edit
+            state.photo_autofocus_range_enabled
         )
-        self._csv_path_edit.setEnabled(measure_enabled and can_edit)
-        self._csv_browse_button.setEnabled(measure_enabled and can_edit)
-        self._previous_csv_path_edit.setEnabled(
-            measure_enabled
-            and self._previous_ok_only_checkbox.isChecked()
-            and can_edit
+        self._csv_path_edit.setEnabled(state.measurement_controls_enabled)
+        self._csv_browse_button.setEnabled(state.measurement_controls_enabled)
+        self._previous_csv_path_edit.setEnabled(state.previous_csv_enabled)
+        self._previous_csv_browse_button.setEnabled(state.previous_csv_enabled)
+        self._previous_ok_only_checkbox.setEnabled(
+            state.measurement_controls_enabled
         )
-        self._previous_csv_browse_button.setEnabled(
-            measure_enabled
-            and self._previous_ok_only_checkbox.isChecked()
-            and can_edit
-        )
-        self._previous_ok_only_checkbox.setEnabled(measure_enabled and can_edit)
-        self._meter_combo.setEnabled(measure_enabled and can_edit)
-        self._gwinstek_page.setEnabled(measure_enabled and can_edit)
-        self._keithley_page.setEnabled(measure_enabled and can_edit)
+        self._meter_combo.setEnabled(state.measurement_controls_enabled)
+        self._gwinstek_page.setEnabled(state.measurement_controls_enabled)
+        self._keithley_page.setEnabled(state.measurement_controls_enabled)
         for widget in (
             self._initial_measurement_count_spin,
             self._followup_measurement_count_spin,
@@ -1225,7 +1222,7 @@ class RouteMeasurementDialog(RouteMeasurementProfileMixin, QDialog):
             self._contact_max_relative_mad_spin,
             self._contact_max_relative_p95_step_spin,
         ):
-            widget.setEnabled(measure_enabled and can_edit)
+            widget.setEnabled(state.measurement_controls_enabled)
 
     def _update_meter_page(self) -> None:
         meter_type = str(self._meter_combo.currentData() or ROUTE_METER_KEITHLEY)
