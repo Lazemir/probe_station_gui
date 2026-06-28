@@ -2,8 +2,8 @@
 
 Updated: 2026-06-28
 Branch: `codex/refactor-stage-controller`
-Current completed task: Task 42, contact seek, saved-position, and sample workflows.
-Active next task: Task 43, serial/controller connection UI flow.
+Current completed task: Task 43, serial/controller connection UI flow.
+Active next task: Task 44, route/UI residue cleanup.
 
 This plan supersedes the original 5-task architecture sketch. It reflects the current code shape after Tasks 1-38 and the current LOC audit.
 
@@ -11,7 +11,7 @@ This plan supersedes the original 5-task architecture sketch. It reflects the cu
 
 `main.py`:
 
-- `radon raw main.py`: `LOC 7961`, `SLOC 7413`
+- `radon raw main.py`: `LOC 7720`, `SLOC 7172`
 - baseline before the current Phase 1 contract: `LOC 8948`, `SLOC 8400`
 - Binding target contract: `.superpowers/sdd/main-loc-contract.md`
 
@@ -66,7 +66,7 @@ Contract: `.superpowers/sdd/main-loc-contract.md`
 | 40 | Coordinate move lifecycle/cancel | `Main.on_move_finished`, `_has_cancelable_operation`, `_cancel_stage_coordinate_action` mix task lifecycle, UI state, and stage coordinate cleanup. | Extract coordinate move lifecycle/cancel decision helpers into a stage UI adapter module; keep controller calls in `Main`. | Coordinate feedrate/app tests, stage coordinate target tests, full suite. | `main.py <= 8550 LOC`; remove at least one lizard warning. |
 | 41 | Microscope scan workflow | `Main` owns scan start, run loop, settle, tile capture, mosaic save, manifest write, finish UI. | Move scan planning/filesystem payload helpers into a microscope scan module; keep thread/Qt updates in `Main`. | Existing microscope scan/app tests plus new pure tests for manifest/tile payloads. | Completed as LOC-gate exception: `8371 LOC`; Wily cyclomatic `1591 -> 1587`. |
 | 42 | Contact seek and saved positions | `Main` owns contact seek request/run/finish plus saved needle/surface/sample position helpers. | Extract contact seek presentation/result planning, saved-position payload helpers, and sample handling stage sequences while preserving owner-level tunables. | Contact seek/app tests, stage needle settings tests, full suite. | Completed: `main.py 8371 -> 7961 LOC`; Wily cyclomatic `1587 -> 1502`; target passed. |
-| 43 | Serial/controller connection UI flow | `Main` owns serial connected/disconnected, auto-connect, startup sync, reboot recovery, feedrate preferences, controller-state persistence glue. | Move connection-state UI orchestration into a main-window adapter module; keep actual serial/stage behavior unchanged. | Serial connection/terminal/stage controller tests, app smoke, full suite. | `main.py <= 7750 LOC`. |
+| 43 | Serial/controller connection UI flow | `Main` owns serial connected/disconnected, auto-connect, startup sync, reboot recovery, feedrate preferences, controller-state persistence glue. | Move connection-state UI orchestration into a main-window adapter module; keep actual serial/stage behavior unchanged. | Serial connection/terminal/stage controller tests, app smoke, full suite. | Completed: `main.py 7961 -> 7720 LOC`; Wily cyclomatic `1502 -> 1451`; target passed. |
 | 44 | Route/UI residue cleanup | Many thin `Main` wrappers remain after route/design/API/Telegram/objective extraction. | Delete/consolidate wrappers that no longer add locality; move cohesive adapter groups to existing modules. | Full route/app/API/Telegram/design focused suites, full suite. | `main.py <= 7550 LOC`. |
 
 Phase 1 is complete only when:
@@ -120,10 +120,10 @@ These are intentionally not part of the behavior-preserving refactor passes:
 
 ## Next Action
 
-Start Task 43 from the `main.py` LOC contract:
+Start Task 44 from the `main.py` LOC contract:
 
-1. Create a Task 43 brief with current behavior, structural improvement, validation checks, baseline metrics, and LOC target.
+1. Create a Task 44 brief with current behavior, structural improvement, validation checks, baseline metrics, and LOC target.
 2. Use subagents for implementation review/spec review where useful.
 3. Run Wily metrics from a disposable UTF-8 temp clone/cache.
 4. Run full `pytest tests` and configured ruff.
-5. Commit Task 43 separately.
+5. Commit Task 44 separately.

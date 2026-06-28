@@ -356,6 +356,9 @@ from probe_station_gui.views.main_window_auxiliary import (
 from probe_station_gui.views.main_window_docks import create_main_window_docks
 from probe_station_gui.views.main_window_menus import setup_main_window_menus
 from probe_station_gui.views import (
+    main_window_connection_flow as connection_flow,
+)
+from probe_station_gui.views import (
     main_window_needle_calibration as needle_calibration_ui,
 )
 
@@ -3235,196 +3238,37 @@ class Main(QMainWindow):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def on_serial_connected(self, serial_port) -> None:
-        if self.serial_connection and self.serial_connection.is_open:
-            self.serial_connection.close()
-        self.serial_connection = serial_port
-        self.serial_port_name = serial_port.port
-        try:
-            baud_rate = int(serial_port.baudrate)
-        except TypeError:
-            baud_rate = int(float(serial_port.baudrate))
-        self.serial_baud_rate = baud_rate
-        logger.info(
-            "Serial connected: %s @ %s baud",
-            self.serial_connection.port,
-            self.serial_connection.baudrate,
-        )
-        self._stage_unhomed_display_origins.clear()
-        self._last_reported_b_position = None
-        cached_state = self.settings_manager.load_controller_state()
-        self._controller_state_persistence_suspended = True
-        try:
-            self.stage_controller.set_serial(self.serial_connection)
-        finally:
-            self._controller_state_persistence_suspended = False
-        self._restore_persisted_controller_state(
-            cached_state,
-            cache_already_loaded=True,
-        )
-        if self.joystick_panel and self.joystick_dock:
-            self.joystick_panel.set_serial(self.serial_connection)
-            self.joystick_dock.setVisible(True)
-            self.joystick_dock.raise_()
-            if self.joystick_dock.isFloating():
-                self.joystick_dock.activateWindow()
-        if self.serial_terminal_panel:
-            self.serial_terminal_panel.set_serial(self.serial_connection)
-        QTimer.singleShot(0, self._run_serial_startup_sync)
-        self._refresh_design_position()
+        connection_flow.on_serial_connected(self, serial_port)
 
     def on_serial_disconnected(self) -> None:
-        self._stop_jog_before_serial_close("serial disconnect")
-        if self.serial_connection and self.serial_connection.is_open:
-            self.serial_connection.close()
-        self.serial_connection = None
-        self._persist_serial_connection_state(False)
-        self._stage_unhomed_display_origins.clear()
-        self._last_reported_b_position = None
-        self._manual_jog_timer.stop()
-        self._manual_jog_prediction.reset_tracking()
-        self._controller_reboot_recovery_scheduled = False
-        self._clear_coordinate_move_tracking(clear_pending=True, reset_override=False)
-        self._clear_pending_homing_queue()
-        self._clear_stage_motion_axes()
-        self._clear_planned_move_prediction(clear_wait_state=True)
-        self._update_stage_coordinate_apply_state()
-        logger.info("Serial disconnected")
-        self.stage_controller.request_stop_oscillation()
-        self._controller_state_persistence_suspended = True
-        try:
-            self.stage_controller.set_serial(None)
-        finally:
-            self._controller_state_persistence_suspended = False
-        self._update_stage_position_display(None)
-        auto_retry = self.sender() is not self.serial_connection_panel
-        if self.serial_connection_panel:
-            self.serial_connection_panel.handle_external_disconnect(auto_retry=auto_retry)
-        if self.joystick_panel:
-            self.joystick_panel.set_serial(None)
-        if self.serial_terminal_panel:
-            self.serial_terminal_panel.set_serial(None)
-        if self.contact_calibration_window is not None:
-            self.contact_calibration_window.set_current_stage_position(None)
-            self.contact_calibration_window.set_current_needle_lowering(None)
-        if self.oscillation_panel:
-            self.oscillation_panel.set_running(False, "")
-        self._reset_manual_alignment(cancel_pick=True)
-        self._invalidate_design_registration(
-            "Design registration cleared after serial disconnect."
-        )
-        self._update_design_position(None)
+        connection_flow.on_serial_disconnected(self)
 
     def _auto_connect_if_possible(self) -> None:
-        if self.serial_connection_panel and not self.serial_connection:
-            if self.settings_manager.serial_auto_connect_enabled():
-                logger.debug(
-                    "Attempting serial auto-connect because previous session closed connected"
-                )
-                self.serial_connection_panel.auto_connect()
-            else:
-                logger.debug(
-                    "Skipping serial auto-connect because previous session was disconnected"
-                )
-        if self.lcr_controller is not None and not self.lcr_controller.is_connected():
-            if self.settings_manager.meter_auto_connect_enabled():
-                logger.debug(
-                    "Attempting measurement-instrument auto-connect because "
-                    "previous session closed connected"
-                )
-                self.lcr_controller.request_connect()
-            else:
-                logger.debug(
-                    "Skipping measurement-instrument auto-connect because previous "
-                    "session was disconnected"
-                )
+        connection_flow.auto_connect_if_possible(self)
 
     def _run_serial_startup_sync(self) -> None:
-        if self.serial_connection is None or not self.serial_connection.is_open:
-            return
-        self.stage_controller.request_startup_sync(
-            auto_home_a=True,
-            clear_unverified_state=False,
-        )
-        self._schedule_cancel_state_refresh()
+        connection_flow.run_serial_startup_sync(self)
 
     def _apply_axis_feedrate_limits(self, rates: object) -> None:
-        if not isinstance(rates, dict):
-            return
-        self.stage_controller.apply_axis_max_feedrates(rates)
-        applied_rates = self.stage_controller.axis_max_feedrates()
-        if self.joystick_panel is not None:
-            self.joystick_panel.set_axis_feedrate_limits(applied_rates)
+        connection_flow.apply_axis_feedrate_limits(self, rates)
 
     def _current_axis_feedrate_limits(self) -> dict[str, float]:
         return self.stage_controller.axis_max_feedrates()
 
     def _on_axis_max_feedrates_changed(self, rates: object) -> None:
-        self._apply_axis_feedrate_limits(rates)
-        if self.stage_controller.axis_max_feedrates():
-            self._apply_joystick_feedrate_preferences()
+        connection_flow.on_axis_max_feedrates_changed(self, rates)
 
     def _apply_joystick_feedrate_preferences(self) -> None:
-        if self.joystick_panel is None:
-            return
-        needle_settings = self.settings_manager.needle_calibration_configuration()
-        feedrates = self.settings_manager.feedrate_configuration()
-        self.joystick_panel.apply_feedrate_settings(
-            feedrates.linear.presets,
-            feedrates.linear.default,
-            feedrates.rotary.presets,
-            feedrates.rotary.default,
-        )
-        self.joystick_panel.apply_needle_settings(needle_settings.feedrate_mm_min)
-        jog = self.settings_manager.jog_configuration()
-        self.joystick_panel.apply_jog_settings(
-            jog.linear_distance_mm,
-            jog.rotary_distance_deg,
-            jog.motion_safety_disabled,
-            jog.manual_axis,
-            jog.manual_axis_distance_mm,
-            jog.manual_axis_mode,
-            jog.manual_axis_feedrate_mm_min,
-            jog.focus_feedrate_mm_min,
-            jog.turntable_feedrate_mm_min,
-            jog.mode,
-            focus_step_feedrate_mm_min=jog.focus_step_feedrate_mm_min,
-            needle_step_feedrate_mm_min=jog.needles_step_feedrate_mm_min,
-            turntable_step_feedrate_mm_min=jog.turntable_step_feedrate_mm_min,
-        )
-        logger.debug(
-            "Joystick jog settings reapplied: mode=%s linear_distance_mm=%s rotary_distance_deg=%s safety_disabled=%s manual_axis=%s manual_axis_distance_mm=%s manual_mode=%s xy_step_feedrate_mm_min=%s focus_jog_feedrate_mm_min=%s focus_step_feedrate_mm_min=%s needle_step_feedrate_mm_min=%s turntable_jog_feedrate_mm_min=%s turntable_step_feedrate_mm_min=%s",
-            jog.mode,
-            jog.linear_distance_mm,
-            jog.rotary_distance_deg,
-            jog.motion_safety_disabled,
-            jog.manual_axis,
-            jog.manual_axis_distance_mm,
-            jog.manual_axis_mode,
-            jog.manual_axis_feedrate_mm_min,
-            jog.focus_feedrate_mm_min,
-            jog.focus_step_feedrate_mm_min,
-            jog.needles_step_feedrate_mm_min,
-            jog.turntable_feedrate_mm_min,
-            jog.turntable_step_feedrate_mm_min,
-        )
+        connection_flow.apply_joystick_feedrate_preferences(self)
 
     def _on_controller_reboot_detected(self) -> None:
-        self._stage_unhomed_display_origins.clear()
-        self._pending_persisted_design_state = None
-        self._pending_persisted_design_position = None
-        self._invalidate_design_registration(
-            "Design registration cleared after controller reboot."
-        )
+        connection_flow.on_controller_reboot_detected(self)
 
     def _on_controller_reboot_ready(self) -> None:
-        if self._controller_reboot_recovery_scheduled:
-            return
-        self._controller_reboot_recovery_scheduled = True
-        QTimer.singleShot(0, self._run_controller_reboot_recovery)
+        connection_flow.on_controller_reboot_ready(self)
 
     def _run_controller_reboot_recovery(self) -> None:
-        self._controller_reboot_recovery_scheduled = False
-        self._run_serial_startup_sync()
+        connection_flow.run_controller_reboot_recovery(self)
 
     def _prime_keyboard_focus(self) -> None:
         if not self.isVisible():
@@ -3443,109 +3287,29 @@ class Main(QMainWindow):
         *,
         cache_already_loaded: bool = False,
     ) -> None:
-        if self.serial_connection is None or not self.serial_connection.is_open:
-            return
-        if not cache_already_loaded:
-            cached_state = self.settings_manager.load_controller_state()
-        if not cached_state:
-            logger.info("No cached controller homing state found for this connection.")
-            return
-        if not self.stage_controller.cached_controller_session_is_current(cached_state):
-            self.settings_manager.clear_controller_state()
-            self.stage_controller.clear_cached_controller_state()
-            self._pending_persisted_design_state = None
-            self._pending_persisted_design_position = None
-            self._show_status(
-                "Controller session changed. Cleared cached homing state."
-            )
-            return
-        logger.info(
-            "Controller session marker matches; restoring cached homing state pending live status."
+        connection_flow.restore_persisted_controller_state(
+            self,
+            cached_state,
+            cache_already_loaded=cache_already_loaded,
         )
-        self._prepare_persisted_design_restore(cached_state)
-        self.stage_controller.import_cached_controller_state(cached_state)
-        self._apply_axis_feedrate_limits(self._current_axis_feedrate_limits())
-        self._show_status("Restored cached homing state; reading live coordinates.")
 
     def _persist_controller_state(self, *_args) -> None:
-        if self._controller_state_persistence_suspended:
-            logger.debug("Skipping controller state persistence while serial state resets.")
-            return
-        state = self._controller_state_with_design()
-        self.settings_manager.save_controller_state(state)
+        connection_flow.persist_controller_state(self, *_args)
 
     def _persist_controller_state_if_available(self) -> None:
-        if self._controller_state_persistence_suspended:
-            return
-        state = self._controller_state_with_design()
-        if state is None:
-            return
-        self.settings_manager.save_controller_state(state)
+        connection_flow.persist_controller_state_if_available(self)
 
     def _controller_state_with_design(self) -> dict[str, object] | None:
-        state = self.stage_controller.export_cached_controller_state()
-        if state is None:
-            return None
-        design_state = self._design_session.export_persisted_state()
-        if design_state is not None:
-            state["design_session"] = design_state
-        return state
+        return connection_flow.controller_state_with_design(self)
 
     def _prepare_persisted_design_restore(self, cached_state: dict[str, object]) -> None:
-        design_state = cached_state.get("design_session")
-        cached_position = design_navigation.coerce_position_tuple(
-            cached_state.get("last_stage_position")
-        )
-        if not isinstance(design_state, dict) or cached_position is None:
-            self._pending_persisted_design_state = None
-            self._pending_persisted_design_position = None
-            return
-        self._pending_persisted_design_state = dict(design_state)
-        self._pending_persisted_design_position = cached_position
+        connection_flow.prepare_persisted_design_restore(self, cached_state)
 
     def _maybe_restore_persisted_design(self, position: tuple[float, ...]) -> None:
-        design_state = self._pending_persisted_design_state
-        expected_position = self._pending_persisted_design_position
-        if design_state is None:
-            return
-        self._pending_persisted_design_state = None
-        self._pending_persisted_design_position = None
-        if self._design_session.document is not None:
-            return
-        decision = design_navigation.prepare_persisted_design_restore(
-            design_state, expected_position=expected_position, actual_position=position,
-            document_loaded=False, axis_names=self.STAGE_AXIS_NAMES,
-            tolerance=self.DESIGN_RESTORE_POSITION_TOLERANCE,
-            file_is_current=self._persisted_design_file_is_current,
-        )
-        if decision.axes_to_mark_unhomed:
-            removed_axes = self.stage_controller.mark_axes_unhomed(decision.axes_to_mark_unhomed)
-            if removed_axes:
-                axes_label = ", ".join(sorted(removed_axes))
-                if removed_axes == {"Z"}:
-                    self._show_status("Controller Z coordinate changed. Cleared cached Z homing.", 5000)
-                else:
-                    self._show_status(f"Controller {axes_label} coordinate changed. Cleared cached homing.", 5000)
-        if decision.status_message is not None:
-            self._show_status(decision.status_message, decision.status_timeout_ms)
-        if decision.clear_cached_design:
-            self._save_controller_state_without_design()
-            return
-        if decision.should_start_load and decision.design_path is not None:
-            self._start_design_document_load(
-                decision.design_path, restore_state=decision.restore_state, show_window=False
-            )
+        connection_flow.maybe_restore_persisted_design(self, position)
 
     def _save_controller_state_without_design(self) -> None:
-        state = self.stage_controller.export_cached_controller_state()
-        if state is None:
-            cached_state = self.settings_manager.load_controller_state()
-            if isinstance(cached_state, dict):
-                cached_state.pop("design_session", None)
-                self.settings_manager.save_controller_state(cached_state)
-            return
-        state.pop("design_session", None)
-        self.settings_manager.save_controller_state(state)
+        connection_flow.save_controller_state_without_design(self)
 
     @staticmethod
     def _coerce_position_tuple(value: object) -> tuple[float, ...] | None:
@@ -3556,11 +3320,7 @@ class Main(QMainWindow):
         return design_navigation.persisted_design_file_is_current(state)
 
     def _persist_serial_connection_state(self, connected: bool) -> None:
-        self.settings_manager.save_serial_connection_state(
-            connected,
-            port=self.serial_port_name,
-            baud_rate=self.serial_baud_rate,
-        )
+        connection_flow.persist_serial_connection_state(self, connected)
 
     def _persist_lcr_connection_state(
         self,
@@ -3568,15 +3328,14 @@ class Main(QMainWindow):
         *,
         description: str = "",
     ) -> None:
-        self.settings_manager.save_meter_connection_state(
+        connection_flow.persist_lcr_connection_state(
+            self,
             connected,
-            meter_type=self.lcr_controller.meter_type(),
-            description=description or self.lcr_controller.connection_label(),
+            description=description,
         )
 
     def _request_lcr_disconnect(self) -> None:
-        self._persist_lcr_connection_state(False)
-        self.lcr_controller.request_disconnect()
+        connection_flow.request_lcr_disconnect(self)
 
     def _setup_menus(self) -> None:
         setup_main_window_menus(self)
