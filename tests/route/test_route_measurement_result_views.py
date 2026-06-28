@@ -7,6 +7,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication
 
 from probe_station_gui.dialogs.route_measurement_result_views import (
@@ -69,6 +70,19 @@ def test_histogram_series_follow_mode(qt_app: QApplication) -> None:
     assert [(label, values) for label, _color, values in differential_series] == [
         ("differential", [2.0])
     ]
+
+
+def test_histogram_data_expands_flat_sample_range(qt_app: QApplication) -> None:
+    _ = qt_app
+    histogram = RouteMeasurementHistogram()
+
+    data = histogram._histogram_data([("flat", QColor(43, 140, 96), [10.0, 10.0])])
+
+    assert data is not None
+    assert data.minimum < 10.0 < data.maximum
+    assert data.values == [10.0, 10.0]
+    assert sum(data.counts[0]) == 2
+    assert data.max_count >= 1
 
 
 def test_raw_data_dialog_populates_and_copies_rows(qt_app: QApplication) -> None:

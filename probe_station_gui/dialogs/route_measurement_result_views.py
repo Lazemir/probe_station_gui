@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter
@@ -30,6 +31,21 @@ from probe_station_gui.route.measurement_display import (
 )
 
 
+@dataclass(frozen=True)
+class _HistogramData:
+    series: list[tuple[str, QColor, list[float]]]
+    values: list[float]
+    minimum: float
+    maximum: float
+    bin_count: int
+    counts: list[list[int]]
+    max_count: int
+    scale: float
+    unit: str
+    x_ticks: tuple[float, float, float]
+    x_decimals: int
+
+
 class RouteMeasurementHistogram(QWidget):
     """Small histogram preview for the raw samples of the latest point."""
 
@@ -51,12 +67,42 @@ class RouteMeasurementHistogram(QWidget):
         painter = QPainter(self)
         painter.fillRect(self.rect(), self.palette().base())
         series = self._series()
-        values = [value for _label, _color, data in series for value in data]
-        if not values:
+        data = self._histogram_data(series)
+        if data is None:
             painter.setPen(self.palette().mid().color())
             painter.drawText(self.rect(), Qt.AlignCenter, "No raw data")
             return
 
+        metrics = painter.fontMetrics()
+        plot = self._plot_rect(metrics, data.max_count, len(data.series))
+        if plot.width() <= 0 or plot.height() <= 0:
+            return
+        axis_color = self.palette().mid().color()
+        grid_color = self._grid_color(axis_color)
+        bar_width = plot.width() / data.bin_count
+
+        self._draw_axes(painter, plot, axis_color)
+        self._draw_count_axis(
+            painter,
+            plot,
+            metrics,
+            data.max_count,
+            axis_color,
+            grid_color,
+        )
+        self._draw_sample_axis_title(painter, plot, metrics, axis_color)
+        self._draw_resistance_axis(painter, plot, metrics, data, axis_color)
+        self._draw_legend(painter, plot, metrics, data.series, axis_color)
+        self._draw_bars(painter, plot, data, bar_width)
+        self._draw_axes(painter, plot, axis_color)
+
+    def _histogram_data(
+        self,
+        series: list[tuple[str, QColor, list[float]]],
+    ) -> _HistogramData | None:
+        values = [value for _label, _color, data in series for value in data]
+        if not values:
+            return None
         minimum = min(values)
         maximum = max(values)
         if minimum == maximum:
@@ -70,26 +116,50 @@ class RouteMeasurementHistogram(QWidget):
         ]
         max_count = max((max(item) if item else 0 for item in counts), default=1)
         max_count = max(1, max_count)
-
-        metrics = painter.fontMetrics()
-        left_margin = max(64, metrics.horizontalAdvance(str(max_count)) + 34)
-        top_margin = 26 if len(series) > 1 else 18
-        bottom_margin = 42
-        plot = self.rect().adjusted(left_margin, top_margin, -12, -bottom_margin)
-        if plot.width() <= 0 or plot.height() <= 0:
-            return
         scale, unit = _resistance_axis_unit(values)
         x_ticks = (minimum, minimum + (maximum - minimum) * 0.5, maximum)
         x_decimals = _axis_tick_decimals((maximum - minimum) / scale)
-        bar_width = plot.width() / bin_count
-        axis_color = self.palette().mid().color()
+        return _HistogramData(
+            series=series,
+            values=values,
+            minimum=minimum,
+            maximum=maximum,
+            bin_count=bin_count,
+            counts=counts,
+            max_count=max_count,
+            scale=scale,
+            unit=unit,
+            x_ticks=x_ticks,
+            x_decimals=x_decimals,
+        )
+
+    def _plot_rect(self, metrics, max_count: int, series_count: int) -> QRectF:
+        left_margin = max(64, metrics.horizontalAdvance(str(max_count)) + 34)
+        top_margin = 26 if series_count > 1 else 18
+        bottom_margin = 42
+        return self.rect().adjusted(left_margin, top_margin, -12, -bottom_margin)
+
+    @staticmethod
+    def _grid_color(axis_color: QColor) -> QColor:
         grid_color = QColor(axis_color)
         grid_color.setAlpha(90)
+        return grid_color
 
+    @staticmethod
+    def _draw_axes(painter: QPainter, plot: QRectF, axis_color: QColor) -> None:
         painter.setPen(axis_color)
         painter.drawLine(plot.bottomLeft(), plot.bottomRight())
         painter.drawLine(plot.bottomLeft(), plot.topLeft())
 
+    @staticmethod
+    def _draw_count_axis(
+        painter: QPainter,
+        plot: QRectF,
+        metrics,
+        max_count: int,
+        axis_color: QColor,
+        grid_color: QColor,
+    ) -> None:
         for tick in _count_axis_ticks(max_count):
             y = plot.bottom() - plot.height() * (tick / max_count)
             painter.setPen(grid_color if tick > 0 else axis_color)
@@ -103,6 +173,13 @@ class RouteMeasurementHistogram(QWidget):
             )
             painter.drawText(label_rect, Qt.AlignRight | Qt.AlignVCenter, str(tick))
 
+    @staticmethod
+    def _draw_sample_axis_title(
+        painter: QPainter,
+        plot: QRectF,
+        metrics,
+        axis_color: QColor,
+    ) -> None:
         painter.save()
         painter.setPen(axis_color)
         painter.translate(4, plot.bottom())
@@ -114,21 +191,31 @@ class RouteMeasurementHistogram(QWidget):
         )
         painter.restore()
 
+    def _draw_resistance_axis(
+        self,
+        painter: QPainter,
+        plot: QRectF,
+        metrics,
+        data: _HistogramData,
+        axis_color: QColor,
+    ) -> None:
         painter.setPen(axis_color)
-        for tick in x_ticks:
-            x = plot.left() + plot.width() * ((tick - minimum) / (maximum - minimum))
+        for tick in data.x_ticks:
+            x = plot.left() + plot.width() * (
+                (tick - data.minimum) / (data.maximum - data.minimum)
+            )
             painter.drawLine(
                 int(round(x)),
                 plot.bottom(),
                 int(round(x)),
                 plot.bottom() + 4,
             )
-            label = f"{tick / scale:.{x_decimals}f}"
+            label = f"{tick / data.scale:.{data.x_decimals}f}"
             label_width = max(56, metrics.horizontalAdvance(label) + 8)
-            if tick == minimum:
+            if tick == data.minimum:
                 label_x = plot.left()
                 alignment = Qt.AlignLeft | Qt.AlignVCenter
-            elif tick == maximum:
+            elif tick == data.maximum:
                 label_x = plot.right() - label_width
                 alignment = Qt.AlignRight | Qt.AlignVCenter
             else:
@@ -145,36 +232,56 @@ class RouteMeasurementHistogram(QWidget):
             plot.width(),
             metrics.height(),
         )
-        painter.drawText(x_axis_title_rect, Qt.AlignCenter, self._x_axis_label(unit))
+        painter.drawText(
+            x_axis_title_rect,
+            Qt.AlignCenter,
+            self._x_axis_label(data.unit),
+        )
 
-        if len(series) > 1:
-            legend_x = plot.right()
-            for label, color, _data in reversed(series):
-                text_width = metrics.horizontalAdvance(label)
-                legend_x -= text_width + 22
-                painter.setPen(QColor(color).darker(125))
-                painter.setBrush(QColor(color))
-                painter.drawRect(QRectF(legend_x, 6, 10, 10))
-                painter.setPen(axis_color)
-                painter.drawText(
-                    QRectF(legend_x + 14, 3, text_width + 4, metrics.height()),
-                    Qt.AlignLeft | Qt.AlignVCenter,
-                    label,
-                )
-                legend_x -= 8
+    @staticmethod
+    def _draw_legend(
+        painter: QPainter,
+        plot: QRectF,
+        metrics,
+        series: list[tuple[str, QColor, list[float]]],
+        axis_color: QColor,
+    ) -> None:
+        if len(series) <= 1:
+            return
+        legend_x = plot.right()
+        for label, color, _data in reversed(series):
+            text_width = metrics.horizontalAdvance(label)
+            legend_x -= text_width + 22
+            painter.setPen(QColor(color).darker(125))
+            painter.setBrush(QColor(color))
+            painter.drawRect(QRectF(legend_x, 6, 10, 10))
+            painter.setPen(axis_color)
+            painter.drawText(
+                QRectF(legend_x + 14, 3, text_width + 4, metrics.height()),
+                Qt.AlignLeft | Qt.AlignVCenter,
+                label,
+            )
+            legend_x -= 8
 
-        for series_index, (_label, color, _data) in enumerate(series):
-            count_row = counts[series_index]
+    @staticmethod
+    def _draw_bars(
+        painter: QPainter,
+        plot: QRectF,
+        data: _HistogramData,
+        bar_width: float,
+    ) -> None:
+        for series_index, (_label, color, _data) in enumerate(data.series):
+            count_row = data.counts[series_index]
             color = QColor(color)
-            color.setAlpha(150 if len(series) > 1 else 190)
+            color.setAlpha(150 if len(data.series) > 1 else 190)
             painter.setPen(color.darker(125))
             painter.setBrush(color)
             for index, count in enumerate(count_row):
                 if count <= 0:
                     continue
-                height = plot.height() * (count / max_count)
-                if len(series) > 1:
-                    width = max(1.0, bar_width / len(series))
+                height = plot.height() * (count / data.max_count)
+                if len(data.series) > 1:
+                    width = max(1.0, bar_width / len(data.series))
                     x = plot.left() + index * bar_width + series_index * width
                 else:
                     width = max(1.0, bar_width - 2.0)
@@ -186,9 +293,6 @@ class RouteMeasurementHistogram(QWidget):
                     height,
                 )
                 painter.drawRect(rect)
-        painter.setPen(axis_color)
-        painter.drawLine(plot.bottomLeft(), plot.bottomRight())
-        painter.drawLine(plot.bottomLeft(), plot.topLeft())
 
     def _x_axis_label(self, unit: str) -> str:
         return _resistance_x_axis_label(self._mode, unit)
