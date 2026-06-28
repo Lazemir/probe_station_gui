@@ -166,12 +166,12 @@ from probe_station_gui.stage.manual_jog_prediction import (
     ManualJogPredictionState,
 )
 from probe_station_gui.stage.motion_prediction import motion_progress
-from probe_station_gui.stage.position_presenter import (
-    stage_position_display_plan,
-    stage_position_signal_plan,
-)
+from probe_station_gui.stage import position_update as stage_position_update
 from probe_station_gui.shared.wheel_guard import GuardedComboBox as QComboBox
 from probe_station_gui.stage.controller import StageControllerError
+from probe_station_gui.views import (
+    main_window_stage_position_panel as stage_position_panel_adapter,
+)
 from probe_station_gui.views.stage_position_panel import (
     StagePositionPanel,
     format_stage_axis_value,
@@ -3059,76 +3059,37 @@ class Main(QMainWindow):
         )
 
     def _create_stage_position_widget(self) -> QWidget:
-        panel = StagePositionPanel(self.STAGE_AXIS_NAMES, self)
-        panel.axis_escape_pressed.connect(self._on_stage_axis_escape_pressed)
-        panel.axis_editing_finished.connect(self._on_stage_axis_editing_finished)
-        panel.axis_text_edited.connect(self._update_stage_coordinate_apply_state)
-        panel.input_mode_changed.connect(self._on_stage_coordinate_mode_changed)
-        panel.apply_requested.connect(self._apply_pending_stage_coordinate_targets)
-        panel.cancel_requested.connect(self._cancel_stage_coordinate_action)
-        self._stage_position_panel = panel
-        self._stage_axis_fields = panel.axis_fields
-        self._stage_axis_base_styles = panel.base_styles
-        self._pending_stage_axis_targets = panel.pending_targets
-        return panel
+        return stage_position_panel_adapter.create_stage_position_widget(self)
 
     def _display_axis_value_from_raw(self, axis_name: str, raw_value: float) -> float:
-        if not hasattr(self, "stage_controller"):
-            return float(raw_value)
-        return self.stage_controller.calibrated_axis_display_value(axis_name.strip().upper(), float(raw_value))
+        return stage_position_panel_adapter.display_axis_value_from_raw(
+            self,
+            axis_name,
+            raw_value,
+        )
 
     def _raw_axis_value_from_display(
         self,
         axis_name: str,
         display_value: float,
     ) -> float:
-        if not hasattr(self, "stage_controller"):
-            return float(display_value)
-        return self.stage_controller.calibrated_axis_raw_value(axis_name.strip().upper(), float(display_value))
+        return stage_position_panel_adapter.raw_axis_value_from_display(
+            self,
+            axis_name,
+            display_value,
+        )
 
     def _refresh_stage_axis_styles(self) -> None:
-        panel = getattr(self, "_stage_position_panel", None)
-        if panel is None:
-            return
-        panel.refresh_axis_styles(self._stage_motion_axes, self._stage_motion_blink_dimmed)
+        stage_position_panel_adapter.refresh_stage_axis_styles(self)
 
     def _set_stage_motion_axes(self, axes: object) -> None:
-        if isinstance(axes, str):
-            raw_axes = [axes]
-        elif isinstance(axes, (set, list, tuple)):
-            raw_axes = list(axes)
-        else:
-            raw_axes = []
-        motion_axes = {
-            str(axis).strip().upper()
-            for axis in raw_axes
-            if str(axis).strip().upper() in self.STAGE_AXIS_NAMES
-        }
-        if not motion_axes:
-            self._clear_stage_motion_axes()
-            return
-        self._stage_motion_axes = motion_axes
-        self._stage_motion_blink_dimmed = False
-        if not self._stage_motion_blink_timer.isActive():
-            self._stage_motion_blink_timer.start()
-        self._refresh_stage_axis_styles()
+        stage_position_panel_adapter.set_stage_motion_axes(self, axes)
 
     def _clear_stage_motion_axes(self) -> None:
-        if self._stage_motion_blink_timer.isActive():
-            self._stage_motion_blink_timer.stop()
-        if not self._stage_motion_axes and not self._stage_motion_blink_dimmed:
-            return
-        self._stage_motion_axes.clear()
-        self._stage_motion_blink_dimmed = False
-        self._refresh_stage_axis_styles()
+        stage_position_panel_adapter.clear_stage_motion_axes(self)
 
     def _advance_stage_motion_blink(self) -> None:
-        if not self._stage_motion_axes:
-            self._stage_motion_blink_timer.stop()
-            self._stage_motion_blink_dimmed = False
-            return
-        self._stage_motion_blink_dimmed = not self._stage_motion_blink_dimmed
-        self._refresh_stage_axis_styles()
+        stage_position_panel_adapter.advance_stage_motion_blink(self)
 
     def _on_stage_axis_escape_pressed(self, axis_name: str) -> None:
         panel = getattr(self, "_stage_position_panel", None)
@@ -4443,98 +4404,28 @@ class Main(QMainWindow):
 
     @staticmethod
     def _stage_xy_from_position(position: object | None) -> tuple[float, float] | None:
-        if not isinstance(position, (tuple, list)) or len(position) < 2:
-            return None
-        try:
-            return (float(position[0]), float(position[1]))
-        except (TypeError, ValueError):
-            return None
+        return stage_position_update.stage_xy_from_position(position)
 
     def _position_with_stage_xy(
         self, stage_xy: tuple[float, float], *, base_position: object | None = None
     ) -> tuple[float, ...]:
-        position = base_position
-        if not isinstance(position, (tuple, list)) or len(position) < 2:
-            position = self.stage_controller.latest_stage_position()
-        try:
-            values = (
-                [float(value) for value in position]
-                if isinstance(position, (tuple, list)) and len(position) >= 2
-                else []
-            )
-        except (TypeError, ValueError):
-            values = []
-        if len(values) < 2:
-            values = [float(stage_xy[0]), float(stage_xy[1])]
-        else:
-            values[0] = float(stage_xy[0])
-            values[1] = float(stage_xy[1])
-        return tuple(values)
+        return stage_position_update.position_with_stage_xy(
+            self,
+            stage_xy,
+            base_position=base_position,
+        )
 
     def _seed_motion_prediction_position(self) -> tuple[float, ...] | None:
-        return self._manual_jog_prediction.seed_position(
-            coordinate_move_stage_position=self._coordinate_targets.stage_position,
-            latest_stage_position=self.stage_controller.latest_stage_position(),
-            current_design_stage_xy=self._current_design_stage_xy,
-        )
+        return stage_position_update.seed_motion_prediction_position(self)
 
     def _publish_stage_position_estimate(self, position: tuple[float, ...] | None) -> None:
-        stage_xy = self._stage_xy_from_position(position)
-        design_stage_xy = stage_xy if stage_xy is not None and self._can_display_design_position() else None
-        self._update_stage_position_display(position)
-        self._update_coordinate_display(center_xy=design_stage_xy)
-        self._update_design_position(design_stage_xy)
+        stage_position_update.publish_stage_position_estimate(self, position)
 
     def _preferred_design_stage_xy(self) -> tuple[float, float] | None:
-        if self._coordinate_targets.stage_position is not None:
-            stage_xy = self._stage_xy_from_position(self._coordinate_targets.stage_position)
-            if stage_xy is not None:
-                return stage_xy
-        stage_xy = self._manual_jog_prediction.predicted_stage_xy(time.monotonic())
-        if stage_xy is not None:
-            return stage_xy
-        if (
-            self._planned_move_started_at is not None
-            and self._planned_move_stage_xy is not None
-        ):
-            return self._planned_move_stage_xy
-        stage_xy = self._manual_jog_prediction.resolve_waiting_stage_xy(
-            now=time.monotonic(),
-            latest_state=self.stage_controller.latest_stage_state(),
-            last_status_timestamp=self.stage_controller.last_status_timestamp(),
-        )
-        if stage_xy is not None:
-            return stage_xy
-        if self._planned_move_waiting_for_fresh_status:
-            last_status_timestamp = self.stage_controller.last_status_timestamp()
-            if (
-                last_status_timestamp is not None
-                and self._planned_move_stop_status_timestamp is not None
-                and last_status_timestamp > self._planned_move_stop_status_timestamp
-            ):
-                self._planned_move_waiting_for_fresh_status = False
-                self._planned_move_stop_status_timestamp = None
-            elif self._planned_move_stage_xy is not None:
-                return self._planned_move_stage_xy
-            else:
-                self._planned_move_waiting_for_fresh_status = False
-                self._planned_move_stop_status_timestamp = None
-        latest = self.stage_controller.latest_stage_position()
-        if latest is None or len(latest) < 2 or not self.stage_controller.axes_are_homed({"X", "Y"}):
-            return None
-        return (float(latest[0]), float(latest[1]))
+        return stage_position_update.preferred_design_stage_xy(self)
 
     def _preferred_design_display_stage_xy(self) -> tuple[float, float] | None:
-        stage_xy = self._preferred_design_stage_xy()
-        if stage_xy is not None:
-            return stage_xy
-        latest = self.stage_controller.latest_stage_position()
-        if self._can_display_design_position() and latest is not None and len(latest) >= 2:
-            try:
-                return (float(latest[0]), float(latest[1]))
-            except (TypeError, ValueError):
-                return None
-        return self._current_design_stage_xy if self._can_display_design_position() else None
+        return stage_position_update.preferred_design_display_stage_xy(self)
 
     def _can_display_design_position(self) -> bool:
         registration = self._design_session.registration
@@ -7024,198 +6915,10 @@ class Main(QMainWindow):
         self._persist_controller_state_if_available()
 
     def _on_stage_position_changed(self, position: object) -> None:
-        if not isinstance(position, tuple) or len(position) < 2:
-            self._update_stage_position_display(position)
-            return
-        logger.debug("TIMING stage_position_changed position=%s", position)
-        current_position = self._coerce_position_tuple(position)
-        if current_position is not None:
-            self._maybe_restore_persisted_design(current_position)
-        now = time.monotonic()
-        latest_state = (self.stage_controller.latest_stage_state() or "").lower()
-        xy_homed = self.stage_controller.axes_are_homed({"X", "Y"})
-        xyz_homed = self.stage_controller.axes_are_homed({"X", "Y", "Z"})
-        manual_prediction_available = self._manual_jog_prediction.prediction_available(now)
-        design_session = getattr(self, "_design_session", None)
-        registration = getattr(design_session, "registration", None)
-        signal_plan = stage_position_signal_plan(
-            position,
-            latest_state=latest_state,
-            coordinate_move_axis_active=(
-                self._coordinate_targets.has_active_move()
-            ),
-            xy_homed=xy_homed,
-            xyz_homed=xyz_homed,
-            manual_jog_prediction_available=manual_prediction_available,
-            can_display_design_position=(
-                self._can_display_design_position()
-                if not xy_homed and not manual_prediction_available
-                else False
-            ),
-            last_reported_b_position=self._last_reported_b_position,
-            tolerance_deg=self.B_POSITION_CHANGE_TOLERANCE_DEG,
-            pending_alignment_preparation=self._pending_alignment_preparation,
-            registration_valid=bool(
-                registration is not None and getattr(registration, "valid", False)
-            ),
-            manual_jog_stage_position=self._manual_jog_prediction.stage_position,
-            coordinate_move_stage_position=self._coordinate_targets.stage_position,
-            planned_move_started_at=self._planned_move_started_at,
-            planned_move_waiting_for_fresh_status=(
-                self._planned_move_waiting_for_fresh_status
-            ),
-            planned_move_stage_xy=self._planned_move_stage_xy,
-            manual_jog_waiting_for_fresh_status=(
-                self._manual_jog_prediction.waiting_for_fresh_status
-            ),
-            stage_xy_from_position=self._stage_xy_from_position,
-            position_with_stage_xy=self._position_with_stage_xy,
-        )
-        if signal_plan.status.mark_coordinate_move_active:
-            self._coordinate_targets.seen_active_state = True
-        if self.contact_calibration_window is not None:
-            self.contact_calibration_window.set_current_stage_position(
-                signal_plan.status.contact_calibration_position
-            )
-        center_xy = signal_plan.status.center_xy
-        if signal_plan.status.use_unhomed_fallback:
-            self._update_stage_position_display(position)
-            self._manual_jog_prediction.stage_position = None
-            self._manual_jog_prediction.stage_xy = None
-            self._planned_move_stage_xy = None
-            self._update_coordinate_display(center_xy=None)
-            self._update_design_position(signal_plan.status.unhomed_design_position)
-            if latest_state == "idle":
-                self._finish_coordinate_move_if_idle(position)
-                self._clear_stage_motion_axes()
-            return
-        if signal_plan.b_axis.invalidate_reason is not None:
-            self._invalidate_design_registration(signal_plan.b_axis.invalidate_reason)
-        if signal_plan.b_axis.current_b is not None:
-            self._last_reported_b_position = signal_plan.b_axis.current_b
-        if signal_plan.defer_manual_jog_stop_sample:
-            logger.debug(
-                "MOTION PREDICTION deferred_stop_sample stage=%s state=%s",
-                self._format_optional_point(center_xy),
-                latest_state,
-            )
-            return
-        ignore_result = self._manual_jog_prediction.ignore_idle_status_sample(
-            actual_stage_xy=center_xy,
-            now=now,
-            latest_state=latest_state,
-            last_jog_write_timestamp=self.stage_controller.last_jog_write_timestamp(),
-        )
-        if ignore_result.ignore:
-            logger.debug(
-                "MOTION PREDICTION ignored_idle_sample stage=%s age=%.3f state=%s",
-                self._format_optional_point(center_xy),
-                ignore_result.age_s,
-                ignore_result.state,
-            )
-            return
-        predicted_stage_xy = signal_plan.reconcile.predicted_stage_xy
-        if predicted_stage_xy is not None:
-            self._log_design_position_reconcile(predicted_stage_xy, center_xy)
-            if signal_plan.reconcile.use_predicted_xy_directly:
-                center_xy = predicted_stage_xy
-            elif signal_plan.reconcile.smooth_to_actual:
-                smoothed_stage_xy = self._manual_jog_prediction.smooth_actual_stage_xy(
-                    predicted_stage_xy,
-                    center_xy,
-                    latest_state=latest_state,
-                )
-                if smoothed_stage_xy != center_xy:
-                    delta_x = float(center_xy[0] - predicted_stage_xy[0])
-                    delta_y = float(center_xy[1] - predicted_stage_xy[1])
-                    delta_norm = math.hypot(delta_x, delta_y)
-                    logger.debug(
-                        "MOTION PREDICTION reconcile_smoothed predicted_stage=%s actual_stage=%s smoothed_stage=%s delta_norm=%.4f alpha=%.2f",
-                        self._format_optional_point(predicted_stage_xy),
-                        self._format_optional_point(center_xy),
-                        self._format_optional_point(smoothed_stage_xy),
-                        delta_norm,
-                        self.MANUAL_JOG_RECONCILE_SMOOTH_ALPHA,
-                    )
-                center_xy = smoothed_stage_xy
-        display_position = self._position_with_stage_xy(
-            center_xy,
-            base_position=position,
-        )
-        self._manual_jog_prediction.stage_position = display_position
-        self._manual_jog_prediction.stage_xy = center_xy
-        if not signal_plan.prediction.planned_move_active:
-            self._planned_move_stage_xy = center_xy
-        if self._manual_jog_prediction.waiting_for_fresh_status and latest_state == "idle":
-            learn_result = self._manual_jog_prediction.learn_stop_tail(
-                self._manual_jog_prediction.stop_tail_position
-                or signal_plan.prediction.predicted_position,
-                display_position,
-            )
-            if learn_result is not None:
-                logger.debug(
-                    "MOTION PREDICTION stop_tail_learn old=%.4f residual=%.4f learned=%.4f new=%.4f",
-                    learn_result.old_tail_s,
-                    learn_result.residual_s,
-                    learn_result.learned_tail_s,
-                    learn_result.new_tail_s,
-                )
-            self._manual_jog_prediction.clear_waiting_status()
-            self._manual_jog_prediction.clear_stop_prediction()
-        if self._planned_move_waiting_for_fresh_status:
-            self._planned_move_waiting_for_fresh_status = False
-            self._planned_move_stop_status_timestamp = None
-        if self._manual_jog_prediction.prediction_active(now):
-            self._manual_jog_prediction.last_timestamp = now
-        self._publish_stage_position_estimate(display_position)
-        if latest_state == "idle":
-            self._finish_coordinate_move_if_idle(display_position)
-            self._clear_stage_motion_axes()
+        stage_position_update.on_stage_position_changed(self, position)
 
     def _update_stage_position_display(self, position: object | None) -> None:
-        panel = getattr(self, "_stage_position_panel", None)
-        plan = stage_position_display_plan(
-            position,
-            axis_names=self.STAGE_AXIS_NAMES,
-            available_axes=self._stage_axis_fields,
-            homed_axes=self.stage_controller.homed_axes()
-            if isinstance(position, tuple) and len(position) >= 2
-            else set(),
-            limit_axes=self._stage_limit_axes,
-            pending_targets=self._pending_stage_axis_targets,
-            display_axis_value=self._display_axis_value_from_raw,
-            feedrate_mm_min=self._current_linear_feedrate(),
-        )
-        if plan.reset_all:
-            self._stage_unhomed_display_origins.clear()
-            self._stage_axis_raw_values.clear()
-            self._stage_axis_display_values.clear()
-            self._stage_axis_homed.clear()
-            self._stage_axis_base_styles.clear()
-            if panel is None:
-                return
-            panel.base_styles.clear()
-            panel.pending_targets.clear()
-            panel.return_commits.clear()
-            self._clear_stage_motion_axes()
-            panel.set_fields_available(False)
-            self._update_stage_coordinate_apply_state()
-            return
-        self._stage_axis_homed = set(plan.homed_axes)
-        for axis_plan in plan.axis_updates:
-            self._stage_axis_raw_values[axis_plan.axis] = axis_plan.raw_value
-            if axis_plan.axis not in plan.homed_axes:
-                self._stage_unhomed_display_origins.setdefault(axis_plan.axis, axis_plan.raw_value)
-            self._stage_axis_base_styles[axis_plan.axis] = (axis_plan.base_background, axis_plan.base_foreground)
-            self._stage_axis_display_values[axis_plan.axis] = axis_plan.display_value
-        if panel is None:
-            return
-        panel.apply_display_plan(plan)
-        if not plan.fields_available:
-            panel.set_fields_available(False)
-            self._update_stage_coordinate_apply_state()
-            return
-        self._update_stage_coordinate_apply_state()
+        stage_position_panel_adapter.update_stage_position_display(self, position)
 
     def _on_stage_axis_editing_finished(self, axis_name: str) -> bool | None:
         panel = getattr(self, "_stage_position_panel", None)
