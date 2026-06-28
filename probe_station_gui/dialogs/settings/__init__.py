@@ -10,6 +10,7 @@ from probe_station_gui.dialogs.settings.feedrates import (
     FeedrateSettingsWidget,
 )
 from probe_station_gui.dialogs.settings.jog import JogSettingsWidget
+from probe_station_gui.dialogs.settings.measurement import MeasurementSettingsWidget
 
 __all__ = [
     "ControlsSettingsWidget",
@@ -18,4 +19,5 @@ __all__ = [
     "JogSettingsWidget",
     "KeyBindingListEditor",
     "KeyCaptureDialog",
+    "MeasurementSettingsWidget",
 ]
