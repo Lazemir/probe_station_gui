@@ -14,7 +14,7 @@ Task 55 whole-branch hardening compared `main` with the current refactor branch.
 
 The refactor intentionally removed legacy compatibility wrappers at the user's direction. Treat public API changed as `yes` for those old module-level wrappers; package-level lazy exports and active application-facing APIs remain covered. Known residual risks after Task 55: duplicate-block cleanup is still needed in `api/server.py` and route tests; vulture candidates are suspicious rather than automatically true; the existing serial-terminal ordinary-command needles-state invalidation gap appears inherited from `main`; hardware smoke has not been run.
 
-The active refactoring roadmap is `.superpowers/sdd/refactor-plan.md`; it tracks the remaining `main.py`, production-monolith, test-monolith, and final hardening phases. The active `main.py` size contract is `.superpowers/sdd/main-loc-contract.md`. Treat it as binding for the remaining refactor track: baseline `main.py` is `8948 LOC` by `radon raw` at `19ccb0b`, and the current target is `<= 7550 LOC` after the planned main-focused passes. If a pass misses its target by more than `50` LOC, the next pass must compensate or the contract must be amended with a concrete reason.
+The active refactoring roadmap is `.superpowers/sdd/refactor-plan.md`; it tracks the `main.py`, production-monolith, test-monolith, and final hardening phases. The final branch handoff is `docs/superpowers/plans/2026-06-30-architecture-refactor-handoff.md`. The active `main.py` size contract is `.superpowers/sdd/main-loc-contract.md`. Treat it as the completed contract for this refactor track: baseline `main.py` was `8948 LOC` by `radon raw` at `19ccb0b`, and the target `<= 7550 LOC` was met at `7545 LOC`.
 
 ## Language
 

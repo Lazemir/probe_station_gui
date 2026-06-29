@@ -2,8 +2,8 @@
 
 Updated: 2026-06-30
 Branch: `codex/refactor-stage-controller`
-Current completed task: Task 55, whole-branch metrics and final review.
-Active next task: Task 56, documentation cleanup and final handoff.
+Current completed task: Task 56, documentation cleanup and final handoff.
+Active next task: none; stop for human review or explicit follow-up track.
 
 This plan supersedes the original 5-task architecture sketch. It reflects the current code shape after Tasks 1-38 and the current LOC audit.
 
@@ -20,7 +20,7 @@ Largest production files by physical line count:
 | File | Lines | Current problem |
 | --- | ---: | --- |
 | `main.py` | 7545 | still central, but Phase 1 target is met; remaining work should avoid using it as the only sink |
-| `probe_station_gui/route/measurement.py` | 2479 | route runner still coordinates route point orchestration and confirmation, but contact lifecycle/readout/recording policy are now separate modules |
+| `probe_station_gui/route/measurement.py` | 2267 | route runner still coordinates route point orchestration and confirmation, but contact lifecycle/readout/recording policy are now separate modules |
 | `probe_station_gui/views/joystick_window.py` | 2254 | jog execution, keyboard handling, serial commands, homing/needle UI, and panel state remain; feedrate panel and helper widgets are isolated |
 | `probe_station_gui/views/design_navigator_panel.py` | 1849 | route editing/tool state and layout-window adapter remain; plot rendering and enablement policy are now isolated |
 | `probe_station_measure/instrument_drivers/Keithley/Keithley_2400_2182A.py` | 1698 | external driver wrapper likely needs an adapter/facade pass before editing internals |
@@ -111,7 +111,7 @@ Goal: test files should be navigable by responsibility. This is not cosmetic: re
 | Task | Scope | Current behavior | Structural improvement | Validation check | Target |
 | --- | --- | --- | --- | --- | --- |
 | 55 | Whole-branch metrics and review | Branch contains many behavior-preserving refactor passes. | Compare branch against `main`, run whole-branch code review, and identify cleanup/follow-up tasks. | Full tests, ruff, Wily/radon/lizard vs `main`, import smoke, final reviewer. | Completed: Wily/radon/lizard/vulture/coverage comparison recorded in `.superpowers/sdd/task-55-report.md`; final review findings fixed by removing shallow route-contact wrappers, centralizing app import-reset support, and deleting stale `route_external_runtime_settings`; full suite `1240 passed, 2 skipped`, configured ruff passed, coverage `75%`. No unresolved blocking/important findings remain. Residual follow-ups: duplicate blocks regressed `383 -> 406`, inherited serial-terminal needles-state invalidation gap, suspicious vulture candidates, hardware smoke not run. |
-| 56 | Documentation cleanup | Refactor reports/contracts are scattered across SDD files and context. | Summarize final architecture seams, metrics, and remaining known risks in `CONTEXT.md`/docs. | Docs review and final status check. | Handoff is enough for future agents/humans. |
+| 56 | Documentation cleanup | Refactor reports/contracts were scattered across SDD files and context. | Summarize final architecture seams, metrics, and remaining known risks in `CONTEXT.md`/docs. | Docs review and final status check. | Completed: final handoff added at `docs/superpowers/plans/2026-06-30-architecture-refactor-handoff.md`; `CONTEXT.md` points to the handoff and records the completed `main.py` contract. |
 
 ## Separate Migration Tasks
 
@@ -126,8 +126,9 @@ These are intentionally not part of the behavior-preserving refactor passes:
 
 ## Next Action
 
-Continue Phase 4 with Task 56:
+HTML-plan refactor track is complete for this branch. Stop for human review unless the user explicitly starts one of the follow-up tracks:
 
-1. Consolidate the final architecture notes from `CONTEXT.md`, SDD reports, and the HTML plan into a short handoff.
-2. Name the remaining follow-up tasks explicitly: duplicate cleanup, suspicious dead-code audit, inherited serial-terminal needles-state invalidation review, and hardware smoke.
-3. Run final status checks before stopping the branch for human review.
+1. Duplicate cleanup for API server and route-test blocks.
+2. Suspicious dead-code audit from vulture candidates.
+3. Serial-terminal needles-state invalidation behavior decision.
+4. Hardware smoke on the actual probe station.
