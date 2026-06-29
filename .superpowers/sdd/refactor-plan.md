@@ -2,8 +2,8 @@
 
 Updated: 2026-06-29
 Branch: `codex/refactor-stage-controller`
-Current completed task: Task 52b, stage status/session test split.
-Active next task: Task 52c, finish splitting stage controller tests below the size target.
+Current completed task: Task 52c, stage jog/motion test split.
+Active next task: Task 53, split route measurement tests.
 
 This plan supersedes the original 5-task architecture sketch. It reflects the current code shape after Tasks 1-38 and the current LOC audit.
 
@@ -35,7 +35,7 @@ Largest test files:
 | File | Lines | Current problem |
 | --- | ---: | --- |
 | `tests/route/test_measurement.py` | 3978 | route runner characterization is monolithic |
-| `tests/stage/test_controller.py` | 2063 | stage controller tests are partially split; startup/absolute/status/autofocus/objective/jog/motion groups remain together |
+| `tests/stage/test_controller.py` | 1501 | remaining startup/absolute/status/autofocus/objective tests are still together, but stage controller test files are now below the size target |
 | `tests/app/test_main_route_measurement_session.py` | 1445 | largest remaining app split file; route session/start tests are isolated and below target |
 | `tests/app/test_main_meter_contact_actions.py` | 1306 | meter/contact API action tests are isolated and below target |
 | `tests/instruments/meters/test_lcr.py` | 1251 | LCR worker/capability/adapter tests mixed |
@@ -97,7 +97,7 @@ Goal: test files should be navigable by responsibility. This is not cosmetic: re
 | Task | Scope | Current behavior | Structural improvement | Validation check | Target |
 | --- | --- | --- | --- | --- | --- |
 | 51 | `tests/app/test_main_coordinate_feedrate.py` | Many unrelated `Main` adapter behaviors lived in one 6585-line file. | Split by feature area: API coordinate moves, route API, manual jog prediction, stage panel, route control, Telegram/app adapter. | Run split files plus full suite; ensure no shared fixture behavior changes. | Completed: 51a extracted shared app-test support to `tests/app/main_coordinate_feedrate_support.py` (`test_main_coordinate_feedrate.py 6585 -> 5696 LOC`, Wily cyclomatic `389 -> 200`, new support module `947 LOC` / Wily cyclomatic `185`, full suite `1240 passed, 2 skipped`, direct unittest execution preserved). 51b split stage/coordinate/cancel/home tracking tests into `tests/app/test_main_stage_coordinate_controls.py` (`test_main_coordinate_feedrate.py 5696 -> 4941 LOC`, Wily cyclomatic `200 -> 158`, new file `766 LOC` / Wily cyclomatic `44`, 12 stale imports removed, full suite `1240 passed, 2 skipped`, direct unittest execution preserved). 51c split API Route Control tests into `tests/app/test_main_route_control.py` (`test_main_coordinate_feedrate.py 4941 -> 3711 LOC`, Wily cyclomatic `158 -> 99`, new file `1249 LOC` / Wily cyclomatic `61`, 4 stale imports removed, full suite `1240 passed, 2 skipped`, direct unittest execution preserved). 51d split route session/start tests into `tests/app/test_main_route_measurement_session.py` (`test_main_coordinate_feedrate.py 3711 -> 2292 LOC`, Wily cyclomatic `99 -> 65`, Wily MI `0 -> 5.41`, new file `1445 LOC` / Wily cyclomatic `36` / MI `13.42`, full suite `1240 passed, 2 skipped`, direct unittest execution preserved). 51e split raw meter/contact API action tests into `tests/app/test_main_meter_contact_actions.py` (`test_main_coordinate_feedrate.py 2292 -> 1002 LOC`, Wily cyclomatic `65 -> 31`, Wily MI `5.41 -> 20.60`, new file `1306 LOC` / Wily cyclomatic `36` / MI `16.48`, full suite `1240 passed, 2 skipped`, direct unittest execution preserved). Target passed: no app test file in this split is above 1800 lines; former app monolith is `1002 LOC`. |
-| 52 | `tests/stage/test_controller.py` | Stage controller tests are not split by current module responsibilities. | Split by controller seam: status/session, motion commands, needle actions, connection state, cache/import. | Stage test subset and full suite. | In progress: 52a extracted shared stage controller test support and split A-axis/needles integration tests into `tests/stage/test_controller_axis_needles.py` (`test_controller.py 4056 -> 2751 LOC`, Wily cyclomatic `257 -> 141`, new axis/needles file `1112 LOC` / MI `11.25`, support file `267 LOC` / MI `35.18`, full suite `1240 passed, 2 skipped`). 52b split status refresh, startup sync, and reconnect/cache tests into `tests/stage/test_controller_status_session.py` (`test_controller.py 2751 -> 2063 LOC`, Wily cyclomatic `141 -> 110`, new status/session file `714 LOC` / MI `22.14`, full suite `1240 passed, 2 skipped`). Target remains: no stage controller test file above 1600 lines. |
+| 52 | `tests/stage/test_controller.py` | Stage controller tests are not split by current module responsibilities. | Split by controller seam: status/session, motion commands, needle actions, connection state, cache/import. | Stage test subset and full suite. | Completed: 52a extracted shared stage controller test support and split A-axis/needles integration tests into `tests/stage/test_controller_axis_needles.py` (`test_controller.py 4056 -> 2751 LOC`, Wily cyclomatic `257 -> 141`, new axis/needles file `1112 LOC` / MI `11.25`, support file `267 LOC` / MI `35.18`, full suite `1240 passed, 2 skipped`). 52b split status refresh, startup sync, and reconnect/cache tests into `tests/stage/test_controller_status_session.py` (`test_controller.py 2751 -> 2063 LOC`, Wily cyclomatic `141 -> 110`, new status/session file `714 LOC` / MI `22.14`, full suite `1240 passed, 2 skipped`). 52c split jog queue and motion-safety-bypass tests into `tests/stage/test_controller_jog_motion.py` (`test_controller.py 2063 -> 1501 LOC`, Wily cyclomatic `110 -> 70`, Wily MI `0 -> 4.65`, new jog/motion file `589 LOC` / MI `21.23`, full suite `1240 passed, 2 skipped`). Target passed: no stage controller test file above 1600 lines. |
 | 53 | `tests/route/test_measurement.py` | Route runner characterization is monolithic. | Split by lifecycle: start/finish, contact seek/placement, interrupt/pause, recording/artifacts, config. | Route test subset and full suite. | No route measurement test file above 1600 lines. |
 | 54 | Instrument tests | LCR and Keithley tests mix capabilities, worker behavior, and driver behavior. | Split LCR worker/capability/adapter tests and Keithley driver tests by behavior. | Instrument test subset and full suite. | No instrument test file above 900 lines. |
 
@@ -121,11 +121,11 @@ These are intentionally not part of the behavior-preserving refactor passes:
 
 ## Next Action
 
-Continue Phase 3 with Task 52c:
+Continue Phase 3 with Task 53:
 
-1. Use a read-only explorer first to confirm the next contiguous responsibility split from the remaining `tests/stage/test_controller.py`.
-2. Preferred candidate: move `StageControllerJogQueueTest` and `StageControllerMotionSafetyBypassTest` into a new jog/motion test module. This tail split should remove about 550 LOC and put the original file below the 1600-line target.
-3. Remaining candidate groups after that: startup limits/feed override, absolute/status parsing, autofocus, and objective calibration.
-4. Reuse `tests/stage/controller_test_support.py`; avoid importing split tests from each other.
-5. Preserve direct file execution and module-style `unittest` execution for split files.
-6. Run focused stage split files, direct execution where applicable, full `pytest tests`, configured ruff, Wily/radon/lizard metrics, and commit before the next split.
+1. Use read-only explorers first to map `tests/route/test_measurement.py` by route runner responsibility and choose the first contiguous split.
+2. Candidate groups: route start/finish, contact seek/placement, pause/interrupt propagation, recording/artifacts, config/runtime settings.
+3. Preserve route Pause/Resume/Interrupt semantics exactly; these are safety-critical per `AGENTS.md`.
+4. Avoid importing split tests from each other; extract shared route test support only if repeated setup blocks make a split brittle.
+5. Preserve direct file execution if the source file already supports it.
+6. Run focused route split files, full `pytest tests`, configured ruff, Wily/radon/lizard/vulture metrics, and commit each split before the next one.
