@@ -1,24 +1,11 @@
-import sys
 import time
 import types
 import unittest
 
-
-def _restore_real_imports_for_main() -> None:
-    for name in list(sys.modules):
-        if name == "PySide6" or name.startswith("PySide6."):
-            del sys.modules[name]
-    serial_module = sys.modules.get("serial")
-    if serial_module is not None and not hasattr(serial_module, "__path__"):
-        for name in list(sys.modules):
-            if name == "serial" or name.startswith("serial."):
-                del sys.modules[name]
-    for name in list(sys.modules):
-        if name == "probe_station_gui" or name.startswith("probe_station_gui."):
-            del sys.modules[name]
+from tests.app.import_reset import restore_real_imports_for_main
 
 
-_restore_real_imports_for_main()
+restore_real_imports_for_main(clear_probe_station_gui=True)
 from main import Main
 from probe_station_gui.stage.coordinate_targets import (
     CoordinateTargetConfig,

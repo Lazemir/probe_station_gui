@@ -5,7 +5,7 @@ from probe_station_gui.route.operation_modes import (
     ROUTE_OPERATION_PHOTO,
 )
 from probe_station_gui.route.runtime_settings import (
-    route_external_runtime_settings,
+    route_common_runtime_settings,
     route_measurement_runtime_settings,
     route_runtime_requires_meter_configuration,
     route_waiting_restart_required,
@@ -39,8 +39,8 @@ def _configuration(**overrides):
     return SimpleNamespace(**data)
 
 
-def test_route_external_runtime_settings_use_common_settings_only() -> None:
-    assert route_external_runtime_settings(_configuration()) == {
+def test_route_common_runtime_settings_include_external_session_settings() -> None:
+    assert route_common_runtime_settings(_configuration()) == {
         "measurement_count": 7,
         "initial_measurement_count": 3,
         "max_relative_rms": 0.02,

@@ -1,9 +1,9 @@
 # Architecture Refactoring Plan
 
-Updated: 2026-06-29
+Updated: 2026-06-30
 Branch: `codex/refactor-stage-controller`
-Current completed task: Task 54a, LCR meter test split.
-Active next task: Task 55, whole-branch metrics and final review.
+Current completed task: Task 55, whole-branch metrics and final review.
+Active next task: Task 56, documentation cleanup and final handoff.
 
 This plan supersedes the original 5-task architecture sketch. It reflects the current code shape after Tasks 1-38 and the current LOC audit.
 
@@ -110,7 +110,7 @@ Goal: test files should be navigable by responsibility. This is not cosmetic: re
 
 | Task | Scope | Current behavior | Structural improvement | Validation check | Target |
 | --- | --- | --- | --- | --- | --- |
-| 55 | Whole-branch metrics and review | Branch contains many behavior-preserving refactor passes. | Compare branch against `main`, run whole-branch code review, and identify cleanup/follow-up tasks. | Full tests, ruff, Wily/radon/lizard vs `main`, import smoke, final reviewer. | No unresolved blocking/important findings. |
+| 55 | Whole-branch metrics and review | Branch contains many behavior-preserving refactor passes. | Compare branch against `main`, run whole-branch code review, and identify cleanup/follow-up tasks. | Full tests, ruff, Wily/radon/lizard vs `main`, import smoke, final reviewer. | Completed: Wily/radon/lizard/vulture/coverage comparison recorded in `.superpowers/sdd/task-55-report.md`; final review findings fixed by removing shallow route-contact wrappers, centralizing app import-reset support, and deleting stale `route_external_runtime_settings`; full suite `1240 passed, 2 skipped`, configured ruff passed, coverage `75%`. No unresolved blocking/important findings remain. Residual follow-ups: duplicate blocks regressed `383 -> 406`, inherited serial-terminal needles-state invalidation gap, suspicious vulture candidates, hardware smoke not run. |
 | 56 | Documentation cleanup | Refactor reports/contracts are scattered across SDD files and context. | Summarize final architecture seams, metrics, and remaining known risks in `CONTEXT.md`/docs. | Docs review and final status check. | Handoff is enough for future agents/humans. |
 
 ## Separate Migration Tasks
@@ -126,9 +126,8 @@ These are intentionally not part of the behavior-preserving refactor passes:
 
 ## Next Action
 
-Continue Phase 4 with Task 55:
+Continue Phase 4 with Task 56:
 
-1. Run whole-branch status and metric comparison against `main` using Wily from a disposable UTF-8 temp clone/cache.
-2. Compare largest files, largest functions, cyclomatic complexity, Maintainability Index, lizard warnings, vulture candidates, ruff, tests, and coverage.
-3. Run final code review over the branch scope with subagents, focusing on behavior-preserving seams, compatibility wrappers, route-control safety, import/direct-execution assumptions, and newly introduced support modules.
-4. Record final metrics, known residual risks, and any follow-up tasks in `CONTEXT.md` / SDD report before finishing the branch.
+1. Consolidate the final architecture notes from `CONTEXT.md`, SDD reports, and the HTML plan into a short handoff.
+2. Name the remaining follow-up tasks explicitly: duplicate cleanup, suspicious dead-code audit, inherited serial-terminal needles-state invalidation review, and hardware smoke.
+3. Run final status checks before stopping the branch for human review.

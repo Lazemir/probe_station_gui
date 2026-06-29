@@ -1,4 +1,3 @@
-import sys
 import csv
 import json
 import subprocess
@@ -10,31 +9,11 @@ import types
 import unittest
 from unittest import mock
 import zlib
-from pathlib import Path
+
+from tests.app.import_reset import restore_real_imports_for_main
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-
-
-def _restore_real_imports_for_main() -> None:
-    for name in list(sys.modules):
-        if name == "PySide6" or name.startswith("PySide6."):
-            del sys.modules[name]
-    serial_module = sys.modules.get("serial")
-    if serial_module is not None and not hasattr(serial_module, "__path__"):
-        for name in list(sys.modules):
-            if name == "serial" or name.startswith("serial."):
-                del sys.modules[name]
-    package = sys.modules.get("probe_station_gui")
-    if package is not None and not hasattr(package, "__path__"):
-        for name in list(sys.modules):
-            if name == "probe_station_gui" or name.startswith("probe_station_gui."):
-                del sys.modules[name]
-
-
-_restore_real_imports_for_main()
+restore_real_imports_for_main()
 import main as main_module
 from main import Main
 from probe_station_gui.design.contact_navigation import api_route_adjusted_stage_xy

@@ -7,7 +7,7 @@ from typing import Any
 
 from probe_station_gui.route.control_state import ApiRouteControlState
 from probe_station_gui.route.runtime_settings import (
-    route_external_runtime_settings,
+    route_common_runtime_settings,
     route_measurement_runtime_settings,
     route_runtime_requires_meter_configuration,
     route_waiting_restart_required,
@@ -82,7 +82,7 @@ def route_confirmation_runtime_plan(
             setup_changed=setup_changed,
         ),
         runtime_settings=(
-            route_external_runtime_settings(configuration)
+            route_common_runtime_settings(configuration)
             if external_session
             else route_measurement_runtime_settings(configuration)
         ),

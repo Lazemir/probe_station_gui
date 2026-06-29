@@ -60,7 +60,8 @@ def measure_samples(
     initial_after_measurement = (
         after_measurement if owner._measurement_count <= initial_count else None
     )
-    samples = owner._read_measurement_samples(
+    samples = read_measurement_samples(
+        owner,
         initial_count,
         start_index=1,
         prepare_task=prepare_task,
@@ -68,28 +69,32 @@ def measure_samples(
     )
     if samples is None:
         return None
-    if not owner._auto_contact_seek_on_bad_contact or owner._samples_are_short(samples):
-        return owner._complete_measurement_samples(
+    if not owner._auto_contact_seek_on_bad_contact or samples_are_short(samples):
+        return complete_measurement_samples(
+            owner,
             samples,
             after_measurement=after_measurement,
         )
-    if owner._samples_have_bad_contact(samples):
-        return owner._seek_contact_from_current_position(
+    if samples_have_bad_contact(owner, samples):
+        return seek_contact_from_current_position(
+            owner,
             initial_samples=samples,
             position=position,
             total=total,
             after_measurement=after_measurement,
         )
-    completed_samples = owner._complete_measurement_samples(
+    completed_samples = complete_measurement_samples(
+        owner,
         samples,
         after_measurement=after_measurement,
     )
     if (
         completed_samples is None
-        or owner._completed_measurement_is_acceptable(completed_samples)
+        or completed_measurement_is_acceptable(owner, completed_samples)
     ):
         return completed_samples
-    return owner._seek_contact_from_current_position(
+    return seek_contact_from_current_position(
+        owner,
         initial_samples=completed_samples,
         position=position,
         total=total,
@@ -107,11 +112,12 @@ def complete_measurement_samples(
     remaining_count = owner._measurement_count - len(samples)
     if (
         remaining_count <= 0
-        or owner._samples_are_short(samples)
-        or owner._samples_have_bad_contact(samples)
+        or samples_are_short(samples)
+        or samples_have_bad_contact(owner, samples)
     ):
         return samples
-    extra_samples = owner._read_measurement_samples(
+    extra_samples = read_measurement_samples(
+        owner,
         remaining_count,
         start_index=len(samples) + 1,
         prepare_task=owner._start_measurement_prepare_task(remaining_count),
@@ -142,7 +148,7 @@ def seek_contact_from_current_position(
     adjust = getattr(owner._stage_controller, "run_external_needles_adjust", None)
     if not callable(lower_to_depth) and not callable(adjust):
         return initial_samples
-    initial_quality = owner._contact_quality_from_samples(initial_samples)
+    initial_quality = contact_quality_from_samples(owner, initial_samples)
     _status_contact_seek_start(
         owner,
         initial_quality=initial_quality,
@@ -152,7 +158,8 @@ def seek_contact_from_current_position(
     )
     owner._contact_seek_active.set()
     try:
-        return owner._run_contact_seek_attempts(
+        return run_contact_seek_attempts(
+            owner,
             initial_samples=initial_samples,
             initial_quality=initial_quality,
             position=position,
@@ -225,7 +232,8 @@ def run_contact_seek_attempts(
         attempts_completed += 1
         last_depth_mm = float(attempt.depth_mm)
         last_axis_a_lowering_mm = attempt_measurement.axis_a_lowering_mm
-        resolution = owner._resolve_contact_seek_attempt(
+        resolution = resolve_contact_seek_attempt(
+            owner,
             samples=attempt_measurement.samples,
             depth_label=f"{attempt.depth_mm:.4f} mm below down",
             position=position,
@@ -236,7 +244,8 @@ def run_contact_seek_attempts(
         samples = resolution.samples
         last_status = resolution.final_status
         if resolution.found:
-            owner._set_contact_seek_result(
+            set_contact_seek_result(
+                owner,
                 found=True,
                 status="found" if last_status != "short" else "short",
                 attempts=attempts_completed,
@@ -280,7 +289,8 @@ def _measure_contact_seek_attempt(
     )
     if owner._route_point_stop_requested():
         return None
-    if not owner._press_contact_seek_attempt(
+    if not press_contact_seek_attempt(
+        owner,
         attempt,
         lower_to_depth=lower_to_depth,
         adjust=adjust,
@@ -288,7 +298,7 @@ def _measure_contact_seek_attempt(
         return False
     if owner._route_point_stop_requested():
         return None
-    return owner._read_contact_seek_attempt_measurement(prepare_task)
+    return read_contact_seek_attempt_measurement(owner, prepare_task)
 
 
 def _set_exhausted_contact_seek_result(
@@ -306,7 +316,8 @@ def _set_exhausted_contact_seek_result(
         f"Route measurement: point {position}/{total} contact seek did not "
         f"find stable contact within {owner._auto_contact_seek_max_total_mm:.3f} mm."
     )
-    owner._set_contact_seek_result(
+    set_contact_seek_result(
+        owner,
         found=False,
         status="not_found",
         attempts=attempts_completed,
@@ -342,8 +353,9 @@ def read_contact_seek_attempt_measurement(
 ) -> ContactSeekAttemptMeasurement | None:
     if not owner._sleep_contact_settle():
         return None
-    axis_a_lowering_mm = owner._latest_axis_a_lowering()
-    samples = owner._read_measurement_samples(
+    axis_a_lowering_mm = latest_axis_a_lowering(owner)
+    samples = read_measurement_samples(
+        owner,
         owner._initial_measurement_count(),
         start_index=1,
         prepare_task=prepare_task,
@@ -364,7 +376,7 @@ def resolve_contact_seek_attempt(
     position: int,
     total: int,
 ) -> ContactSeekAttemptResolution:
-    if owner._samples_are_short(samples):
+    if samples_are_short(samples):
         owner._status(
             f"Route measurement: point {position}/{total} "
             f"{depth_label}, short-circuit detected."
@@ -374,7 +386,7 @@ def resolve_contact_seek_attempt(
             final_status="short",
             found=True,
         )
-    quality = owner._contact_quality_from_samples(samples)
+    quality = contact_quality_from_samples(owner, samples)
     _status_contact_seek_attempt_quality(
         owner,
         quality=quality,
@@ -423,19 +435,19 @@ def _resolve_completed_contact_seek_samples(
     position: int,
     total: int,
 ) -> ContactSeekAttemptResolution:
-    completed_samples = owner._complete_measurement_samples(samples)
+    completed_samples = complete_measurement_samples(owner, samples)
     if completed_samples is None:
         return ContactSeekAttemptResolution(
             samples=None,
             final_status=quality.status,
         )
-    if owner._completed_measurement_is_acceptable(completed_samples):
+    if completed_measurement_is_acceptable(owner, completed_samples):
         return ContactSeekAttemptResolution(
             samples=completed_samples,
-            final_status=owner._contact_status_for_samples(completed_samples),
+            final_status=contact_status_for_samples(owner, completed_samples),
             found=True,
         )
-    if owner._samples_have_bad_contact(completed_samples):
+    if samples_have_bad_contact(owner, completed_samples):
         return _bad_contact_seek_resolution(
             owner,
             samples=completed_samples,
@@ -443,7 +455,7 @@ def _resolve_completed_contact_seek_samples(
             position=position,
             total=total,
         )
-    if owner._samples_exceed_relative_rms_limit(completed_samples):
+    if samples_exceed_relative_rms_limit(owner, completed_samples):
         return _unstable_contact_seek_resolution(
             owner,
             samples=completed_samples,
@@ -465,7 +477,7 @@ def _bad_contact_seek_resolution(
     position: int,
     total: int,
 ) -> ContactSeekAttemptResolution:
-    full_quality = owner._contact_quality_from_samples(samples)
+    full_quality = contact_quality_from_samples(owner, samples)
     owner._status(
         f"Route measurement: point {position}/{total} full "
         f"measurement at {depth_label} failed contact check "
@@ -489,7 +501,7 @@ def _unstable_contact_seek_resolution(
     position: int,
     total: int,
 ) -> ContactSeekAttemptResolution:
-    relative_rms = owner._relative_rms_from_samples(samples)
+    relative_rms = relative_rms_from_samples(samples)
     owner._status(
         f"Route measurement: point {position}/{total} full "
         f"measurement at {depth_label} relative RMS "
@@ -539,20 +551,20 @@ def contact_status_for_samples(
     owner: Any,
     samples: list[RouteMeasurementSample] | tuple[RouteMeasurementSample, ...],
 ) -> str:
-    if owner._samples_are_short(samples):
+    if samples_are_short(samples):
         return "short"
-    return owner._contact_quality_from_samples(samples).status
+    return contact_quality_from_samples(owner, samples).status
 
 
 def completed_measurement_is_acceptable(
     owner: Any,
     samples: list[RouteMeasurementSample],
 ) -> bool:
-    if owner._samples_are_short(samples):
+    if samples_are_short(samples):
         return True
-    if owner._samples_have_bad_contact(samples):
+    if samples_have_bad_contact(owner, samples):
         return False
-    return not owner._samples_exceed_relative_rms_limit(samples)
+    return not samples_exceed_relative_rms_limit(owner, samples)
 
 
 def samples_exceed_relative_rms_limit(
@@ -561,7 +573,7 @@ def samples_exceed_relative_rms_limit(
 ) -> bool:
     if owner._max_relative_rms is None:
         return False
-    relative_rms = owner._relative_rms_from_samples(samples)
+    relative_rms = relative_rms_from_samples(samples)
     return math.isfinite(relative_rms) and relative_rms > owner._max_relative_rms
 
 
@@ -574,7 +586,7 @@ def record_status_for_samples(
     samples: list[RouteMeasurementSample],
     contact_quality: RouteContactQuality,
 ) -> str:
-    if owner._samples_are_short(samples):
+    if samples_are_short(samples):
         return "short"
     if contact_quality.good is False:
         return "bad_contact"
@@ -686,7 +698,7 @@ def _read_individual_measurement_samples(
     for index in range(start_index, start_index + count):
         if owner._route_point_stop_requested():
             return None
-        samples.append(owner._read_measurement_sample(index))
+        samples.append(read_measurement_sample(owner, index))
         if owner._route_point_stop_requested():
             return None
     return samples
@@ -721,7 +733,7 @@ def samples_have_bad_contact(
     owner: Any,
     samples: list[RouteMeasurementSample] | tuple[RouteMeasurementSample, ...],
 ) -> bool:
-    return owner._contact_quality_from_samples(samples).good is False
+    return contact_quality_from_samples(owner, samples).good is False
 
 
 __all__ = [

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import sys
 import types
 from pathlib import Path
 
@@ -9,22 +8,10 @@ import numpy as np
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-
-def _restore_real_imports_for_main() -> None:
-    for name in list(sys.modules):
-        if name == "PySide6" or name.startswith("PySide6."):
-            del sys.modules[name]
-    serial_module = sys.modules.get("serial")
-    if serial_module is not None and not hasattr(serial_module, "__path__"):
-        for name in list(sys.modules):
-            if name == "serial" or name.startswith("serial."):
-                del sys.modules[name]
-    for name in list(sys.modules):
-        if name == "probe_station_gui" or name.startswith("probe_station_gui."):
-            del sys.modules[name]
+from tests.app.import_reset import restore_real_imports_for_main
 
 
-_restore_real_imports_for_main()
+restore_real_imports_for_main(clear_probe_station_gui=True)
 
 import main as main_module
 from main import Main

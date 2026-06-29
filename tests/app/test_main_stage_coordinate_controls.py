@@ -3,7 +3,7 @@ import types
 import unittest
 from unittest import mock
 
-from main_coordinate_feedrate_support import (
+from tests.app.main_coordinate_feedrate_support import (
     Main,
     _FakeJoystick,
     _FakeLineEdit,

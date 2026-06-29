@@ -34,10 +34,19 @@ def record_for_point(
     point: RouteMeasurementPoint,
     samples: list[RouteMeasurementSample],
 ) -> RouteMeasurementRecord:
-    stats = owner._resistance_stats_from_samples(samples)
+    from probe_station_gui.route import contact_measurement
+
+    stats = contact_measurement.resistance_stats_from_samples(samples)
     if stats.complete_finite_batch:
-        contact_quality = owner._contact_quality_from_samples(samples)
-        status = owner._record_status_for_samples(samples, contact_quality)
+        contact_quality = contact_measurement.contact_quality_from_samples(
+            owner,
+            samples,
+        )
+        status = contact_measurement.record_status_for_samples(
+            owner,
+            samples,
+            contact_quality,
+        )
     else:
         status = "overload"
         contact_quality = None

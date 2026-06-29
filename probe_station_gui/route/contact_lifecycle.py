@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from probe_station_gui.route import measurement_recording
+from probe_station_gui.route import contact_measurement, measurement_recording
 from probe_station_gui.route.measurement_payloads import focus_result_to_dict
 from probe_station_gui.route.measurement_records import (
     RouteContactPlacementResult,
@@ -187,7 +187,8 @@ def measure_contact_placement_record(
     if not owner._sleep_contact_settle():
         raise RuntimeError("Contact placement stopped.")
     owner._status(f"Route contact: point {position}/{total} checking contact.")
-    samples = owner._measure_samples(
+    samples = contact_measurement.measure_samples(
+        owner,
         position=position,
         total=total,
         prepare_task=None,
@@ -410,7 +411,8 @@ def measure_current_contact(
         if not owner._sleep_contact_settle():
             raise RuntimeError(f"{action_label} stopped.")
         owner._status(f"{action_label}: point {position}/{total} checking contact.")
-        samples = owner._measure_samples(
+        samples = contact_measurement.measure_samples(
+            owner,
             position=position,
             total=total,
             prepare_task=prepare_task,

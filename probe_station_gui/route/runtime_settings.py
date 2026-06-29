@@ -26,10 +26,6 @@ def route_common_runtime_settings(configuration: object) -> dict[str, Any]:
     }
 
 
-def route_external_runtime_settings(configuration: object) -> dict[str, Any]:
-    return route_common_runtime_settings(configuration)
-
-
 def route_measurement_runtime_settings(configuration: object) -> dict[str, Any]:
     settings = route_common_runtime_settings(configuration)
     meter = getattr(configuration, "meter")
@@ -62,7 +58,6 @@ def route_waiting_restart_required(
 
 __all__ = [
     "route_common_runtime_settings",
-    "route_external_runtime_settings",
     "route_measurement_runtime_settings",
     "route_runtime_requires_meter_configuration",
     "route_waiting_restart_required",

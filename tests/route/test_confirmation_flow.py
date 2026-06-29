@@ -6,7 +6,7 @@ from probe_station_gui.route.operation_modes import (
     ROUTE_OPERATION_PHOTO,
 )
 from probe_station_gui.route.runtime_settings import (
-    route_external_runtime_settings,
+    route_common_runtime_settings,
     route_measurement_runtime_settings,
 )
 
@@ -151,7 +151,7 @@ def test_runtime_plan_uses_external_runtime_settings_for_external_runner() -> No
         setup_changed=False,
     )
 
-    assert plan.runtime_settings == route_external_runtime_settings(configuration)
+    assert plan.runtime_settings == route_common_runtime_settings(configuration)
     assert plan.meter_configuration_required is True
 
 

@@ -2,7 +2,7 @@ import threading
 import types
 import unittest
 
-from main_coordinate_feedrate_support import (
+from tests.app.main_coordinate_feedrate_support import (
     Main,
     RouteMeasurementDialog,
     RouteMeasurementPoint,

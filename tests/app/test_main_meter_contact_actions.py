@@ -2,7 +2,7 @@ import types
 import unittest
 from unittest import mock
 
-from main_coordinate_feedrate_support import (
+from tests.app.main_coordinate_feedrate_support import (
     LCRMeterError,
     Main,
     RouteContactPlacementResult,
