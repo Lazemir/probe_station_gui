@@ -699,7 +699,7 @@ class Main(QMainWindow):
             self._open_design_window_from_minimap_point
         )
         self.view.design_minimap_double_clicked.connect(
-            lambda: self._toggle_design_layout_window(True)
+            lambda: toggle_design_layout_window(self, True)
         )
         self.grabber.frame_ready.connect(self._on_camera_frame)
         self.grabber.error.connect(self.on_error)
@@ -748,13 +748,13 @@ class Main(QMainWindow):
         self.stage_controller.stage_position_changed.connect(self._on_stage_position_changed)
         self.stage_controller.needle_height_changed.connect(self._on_needle_height_changed)
         self.stage_controller.axis_max_feedrates_changed.connect(
-            self._on_axis_max_feedrates_changed
+            lambda rates: connection_flow.on_axis_max_feedrates_changed(self, rates)
         )
         self.stage_controller.controller_reboot_detected.connect(
-            self._on_controller_reboot_detected
+            lambda: connection_flow.on_controller_reboot_detected(self)
         )
         self.stage_controller.controller_reboot_ready.connect(
-            self._on_controller_reboot_ready
+            lambda: connection_flow.on_controller_reboot_ready(self)
         )
         self.stage_controller.oscillation_state_changed.connect(
             self._on_oscillation_state_changed
@@ -791,10 +791,10 @@ class Main(QMainWindow):
             self._save_pending_linear_feedrate_default
         )
 
-        self._create_dock_widgets()
+        create_main_window_docks(self)
         _startup_trace("dock widgets created")
 
-        self._setup_menus()
+        setup_main_window_menus(self)
         _startup_trace("menus created")
         self._apply_settings()
         _startup_trace("settings applied")
@@ -803,7 +803,7 @@ class Main(QMainWindow):
         _startup_trace("API server configured")
 
         QTimer.singleShot(0, self._start_api_server)
-        QTimer.singleShot(0, self._auto_connect_if_possible)
+        QTimer.singleShot(0, lambda: connection_flow.auto_connect_if_possible(self))
         QTimer.singleShot(0, self._prime_keyboard_focus)
         QTimer.singleShot(0, self._start_camera_thread)
         QTimer.singleShot(1500, self._preload_design_layout_window)
@@ -3239,39 +3239,6 @@ class Main(QMainWindow):
             path.touch()
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
-    def on_serial_connected(self, serial_port) -> None:
-        connection_flow.on_serial_connected(self, serial_port)
-
-    def on_serial_disconnected(self) -> None:
-        connection_flow.on_serial_disconnected(self)
-
-    def _auto_connect_if_possible(self) -> None:
-        connection_flow.auto_connect_if_possible(self)
-
-    def _run_serial_startup_sync(self) -> None:
-        connection_flow.run_serial_startup_sync(self)
-
-    def _apply_axis_feedrate_limits(self, rates: object) -> None:
-        connection_flow.apply_axis_feedrate_limits(self, rates)
-
-    def _current_axis_feedrate_limits(self) -> dict[str, float]:
-        return self.stage_controller.axis_max_feedrates()
-
-    def _on_axis_max_feedrates_changed(self, rates: object) -> None:
-        connection_flow.on_axis_max_feedrates_changed(self, rates)
-
-    def _apply_joystick_feedrate_preferences(self) -> None:
-        connection_flow.apply_joystick_feedrate_preferences(self)
-
-    def _on_controller_reboot_detected(self) -> None:
-        connection_flow.on_controller_reboot_detected(self)
-
-    def _on_controller_reboot_ready(self) -> None:
-        connection_flow.on_controller_reboot_ready(self)
-
-    def _run_controller_reboot_recovery(self) -> None:
-        connection_flow.run_controller_reboot_recovery(self)
-
     def _prime_keyboard_focus(self) -> None:
         if not self.isVisible():
             return
@@ -3283,35 +3250,8 @@ class Main(QMainWindow):
         super().showEvent(event)
         QTimer.singleShot(0, self._prime_keyboard_focus)
 
-    def _restore_persisted_controller_state(
-        self,
-        cached_state: dict | None = None,
-        *,
-        cache_already_loaded: bool = False,
-    ) -> None:
-        connection_flow.restore_persisted_controller_state(
-            self,
-            cached_state,
-            cache_already_loaded=cache_already_loaded,
-        )
-
-    def _persist_controller_state(self, *_args) -> None:
-        connection_flow.persist_controller_state(self, *_args)
-
-    def _persist_controller_state_if_available(self) -> None:
-        connection_flow.persist_controller_state_if_available(self)
-
-    def _controller_state_with_design(self) -> dict[str, object] | None:
-        return connection_flow.controller_state_with_design(self)
-
-    def _prepare_persisted_design_restore(self, cached_state: dict[str, object]) -> None:
-        connection_flow.prepare_persisted_design_restore(self, cached_state)
-
     def _maybe_restore_persisted_design(self, position: tuple[float, ...]) -> None:
         connection_flow.maybe_restore_persisted_design(self, position)
-
-    def _save_controller_state_without_design(self) -> None:
-        connection_flow.save_controller_state_without_design(self)
 
     @staticmethod
     def _coerce_position_tuple(value: object) -> tuple[float, ...] | None:
@@ -3320,39 +3260,6 @@ class Main(QMainWindow):
     @staticmethod
     def _persisted_design_file_is_current(state: dict[str, object]) -> bool:
         return design_navigation.persisted_design_file_is_current(state)
-
-    def _persist_serial_connection_state(self, connected: bool) -> None:
-        connection_flow.persist_serial_connection_state(self, connected)
-
-    def _persist_lcr_connection_state(
-        self,
-        connected: bool,
-        *,
-        description: str = "",
-    ) -> None:
-        connection_flow.persist_lcr_connection_state(
-            self,
-            connected,
-            description=description,
-        )
-
-    def _request_lcr_disconnect(self) -> None:
-        connection_flow.request_lcr_disconnect(self)
-
-    def _setup_menus(self) -> None:
-        setup_main_window_menus(self)
-
-    def _toggle_design_layout_window(self, visible: bool) -> None:
-        toggle_design_layout_window(self, visible)
-
-    def _on_design_layout_window_visibility_changed(self, visible: bool) -> None:
-        sync_design_layout_window_action(self, visible)
-
-    def _toggle_contact_calibration_window(self, visible: bool) -> None:
-        toggle_contact_calibration_window(self, visible)
-
-    def _on_contact_calibration_window_visibility_changed(self, visible: bool) -> None:
-        sync_contact_calibration_window_action(self, visible)
 
     def _on_design_layout_point_selected(
         self, slot: int, x_value: float, y_value: float
@@ -3379,12 +3286,15 @@ class Main(QMainWindow):
         )
 
     def _apply_settings(self) -> None:
-        self._apply_axis_feedrate_limits(self._current_axis_feedrate_limits())
+        connection_flow.apply_axis_feedrate_limits(
+            self,
+            self.stage_controller.axis_max_feedrates(),
+        )
         if self.joystick_panel:
             bindings = self.settings_manager.control_bindings()
             self.joystick_panel.apply_control_bindings(bindings)
             logger.debug("Joystick bindings reapplied from settings")
-            self._apply_joystick_feedrate_preferences()
+            connection_flow.apply_joystick_feedrate_preferences(self)
         jog = self.settings_manager.jog_configuration()
         self.stage_controller.set_motion_safety_disabled(jog.motion_safety_disabled)
         needle_settings = self.settings_manager.needle_calibration_configuration()
@@ -4665,7 +4575,7 @@ class Main(QMainWindow):
             self._design_load_restore_states[generation] = dict(restore_state)
         self._design_load_show_window[generation] = bool(show_window)
         if show_window:
-            self._toggle_design_layout_window(True)
+            toggle_design_layout_window(self, True)
         if self.design_layout_window is not None and show_window:
             self.design_layout_window.set_status_message("Loading design...")
         elif self.design_navigator_panel:
@@ -4696,7 +4606,7 @@ class Main(QMainWindow):
         except DesignModelError as exc:
             self._show_status(str(exc), 6000)
             if restore_state is not None:
-                self._save_controller_state_without_design()
+                connection_flow.save_controller_state_without_design(self)
             return
         if not plan.accepted:
             self._apply_design_load_failure_plan(plan, show_window)
@@ -4718,8 +4628,8 @@ class Main(QMainWindow):
         self._refresh_design_panel()
         self._refresh_design_position()
         if show_window:
-            self._toggle_design_layout_window(True)
-        self._persist_controller_state_if_available()
+            toggle_design_layout_window(self, True)
+        connection_flow.persist_controller_state_if_available(self)
         self._show_navigation_status(plan)
         self._restore_route_measurement_state_after_design_load()
 
@@ -4731,7 +4641,7 @@ class Main(QMainWindow):
         elif self.design_navigator_panel:
             self.design_navigator_panel.set_status_message(message)
         if plan.clear_cached_design:
-            self._save_controller_state_without_design()
+            connection_flow.save_controller_state_without_design(self)
 
     def _show_navigation_status(self, plan: object) -> None:
         message = getattr(plan, "status_message", None)
@@ -6194,7 +6104,7 @@ class Main(QMainWindow):
             return
         self._last_selected_design_point = plan.last_selected_design_point
         self._refresh_design_panel()
-        self._persist_controller_state_if_available()
+        connection_flow.persist_controller_state_if_available(self)
 
     def _save_route_measurement_current_point(self, point_number: int) -> None:
         try:
@@ -6377,7 +6287,7 @@ class Main(QMainWindow):
         y_value: float,
     ) -> None:
         _ = float(x_value), float(y_value)
-        self._toggle_design_layout_window(True)
+        toggle_design_layout_window(self, True)
 
     def _move_to_design_coordinate(
         self, design_xy: tuple[float, float], *, source_label: str
@@ -6445,7 +6355,7 @@ class Main(QMainWindow):
             self.design_layout_window.set_stage_registration_marks(p.source_stage_marks)
         self._refresh_manual_alignment_ui()
         self._update_design_position(self._current_design_stage_xy)
-        self._persist_controller_state_if_available()
+        connection_flow.persist_controller_state_if_available(self)
 
     def _on_stage_position_changed(self, position: object) -> None:
         stage_position_update.on_stage_position_changed(self, position)
@@ -7178,7 +7088,11 @@ class Main(QMainWindow):
         self, connected: bool, backend_name: str, description: str
     ) -> None:
         if connected:
-            self._persist_lcr_connection_state(True, description=description)
+            connection_flow.persist_lcr_connection_state(
+                self,
+                True,
+                description=description,
+            )
         if self.serial_connection_panel is not None:
             self.serial_connection_panel.set_lcr_connection_state(
                 connected, backend_name, description

@@ -1,11 +1,13 @@
 import time
 import types
 import unittest
+from unittest import mock
 
 from tests.app.import_reset import restore_real_imports_for_main
 
 
 restore_real_imports_for_main(clear_probe_station_gui=True)
+import main as main_module
 from main import Main
 from probe_station_gui.stage.coordinate_targets import (
     CoordinateTargetConfig,
@@ -60,6 +62,9 @@ class _DesignRestoreStageController:
         removed = self.homed_axes.intersection(normalized)
         self.homed_axes -= removed
         return set(removed)
+
+    def export_cached_controller_state(self) -> dict[str, object]:
+        return {"design_session": {"document_path": "C:\\designs\\sample.gds"}}
 
 
 def _make_main(
@@ -162,8 +167,8 @@ def _make_design_restore_main(
     window._design_session = types.SimpleNamespace(document=None)
     window._show_status = lambda message, _timeout=0: statuses.append(message)
     window._persisted_design_file_is_current = lambda _state: True
-    window._save_controller_state_without_design = (
-        lambda: saved_without_design.append(True)
+    window.settings_manager = types.SimpleNamespace(
+        save_controller_state=lambda _state: saved_without_design.append(True)
     )
     window._start_design_document_load = (
         lambda path, **kwargs: starts.append((path, dict(kwargs)))
@@ -428,10 +433,15 @@ class MainPersistedDesignRestoreTest(unittest.TestCase):
             _make_design_restore_main((1.0, 2.0, 3.0, 4.0, 5.0))
         )
 
-        Main._maybe_restore_persisted_design(
-            window,
-            (1.0, 2.0, 9.0, 0.0, 8.0),
-        )
+        with mock.patch.object(
+            main_module.connection_flow.design_navigation,
+            "persisted_design_file_is_current",
+            return_value=True,
+        ):
+            Main._maybe_restore_persisted_design(
+                window,
+                (1.0, 2.0, 9.0, 0.0, 8.0),
+            )
 
         self.assertEqual(stage_controller.unhomed_requests, [{"Z"}])
         self.assertEqual(stage_controller.homed_axes, {"X", "Y", "A"})
@@ -457,10 +467,15 @@ class MainPersistedDesignRestoreTest(unittest.TestCase):
         )
         stage_controller.homed_axes.remove("Z")
 
-        Main._maybe_restore_persisted_design(
-            window,
-            (1.0, 2.0, 9.0, 4.0, 5.0),
-        )
+        with mock.patch.object(
+            main_module.connection_flow.design_navigation,
+            "persisted_design_file_is_current",
+            return_value=True,
+        ):
+            Main._maybe_restore_persisted_design(
+                window,
+                (1.0, 2.0, 9.0, 4.0, 5.0),
+            )
 
         self.assertEqual(stage_controller.unhomed_requests, [{"Z"}])
         self.assertEqual(stage_controller.homed_axes, {"X", "Y", "A"})

@@ -57,6 +57,12 @@ class _RestoreStageController:
     def import_cached_controller_state(self, cached_state: dict) -> None:
         self.events.append(("import_cache", cached_state))
 
+    def apply_axis_max_feedrates(self, rates: object) -> None:
+        self.events.append(("apply_rates", rates))
+
+    def axis_max_feedrates(self) -> dict[str, float]:
+        return {"X": 900.0}
+
 
 class _Settings:
     def __init__(self, events: list[object], cached_state: dict | None = None) -> None:
@@ -220,6 +226,11 @@ def test_on_serial_connected_preserves_attach_order(monkeypatch) -> None:
         "QTimer",
         SimpleNamespace(singleShot=lambda delay, callback: timer_calls.append((delay, callback))),
     )
+    monkeypatch.setattr(
+        connection_flow,
+        "restore_persisted_controller_state",
+        lambda _owner, state, **kwargs: events.append(("restore", state, kwargs)),
+    )
     owner = _owner(events)
     owner.serial_connection = _Serial(events, port="OLD")
     serial_port = _Serial(events, port="COM9")
@@ -238,7 +249,9 @@ def test_on_serial_connected_preserves_attach_order(monkeypatch) -> None:
     assert ("joystick", "COM9") in events
     assert ("terminal", "COM9") in events
     assert ("refresh_design",) in events
-    assert timer_calls == [(0, owner._run_serial_startup_sync)]
+    assert len(timer_calls) == 1
+    assert timer_calls[0][0] == 0
+    assert callable(timer_calls[0][1])
     assert owner._controller_state_persistence_suspended is False
 
 
@@ -252,7 +265,7 @@ def test_on_serial_disconnected_preserves_detach_cleanup_order() -> None:
     assert events[:4] == [
         ("stop_jog", "serial disconnect"),
         ("serial_close", "COM9"),
-        ("persist_serial_wrapper", False, None),
+        ("save_serial", False, "", 0),
         ("manual_timer_stop",),
     ]
     assert ("stage_set_serial", None) in events
@@ -301,7 +314,12 @@ def test_startup_sync_and_reboot_recovery_are_guarded(monkeypatch) -> None:
 
     connection_flow.run_controller_reboot_recovery(owner)
     assert owner._controller_reboot_recovery_scheduled is False
-    assert ("startup_callback",) in events
+    assert events.count(
+        (
+            "startup_sync",
+            {"auto_home_a": True, "clear_unverified_state": False},
+        )
+    ) == 2
 
 
 def test_feedrate_limit_and_auto_connect_decisions() -> None:
@@ -331,17 +349,24 @@ def test_feedrate_limit_and_auto_connect_decisions() -> None:
 def test_request_lcr_disconnect_persists_before_disconnect() -> None:
     events: list[object] = []
     owner = SimpleNamespace(
-        _persist_lcr_connection_state=lambda connected: events.append(
-            ("persist_lcr", connected)
+        settings_manager=SimpleNamespace(
+            save_meter_connection_state=lambda connected, **kwargs: events.append(
+                ("save_meter", connected, kwargs)
+            )
         ),
         lcr_controller=SimpleNamespace(
+            meter_type=lambda: "gwinstek",
+            connection_label=lambda: "LCR",
             request_disconnect=lambda: events.append(("disconnect_lcr",))
         ),
     )
 
     connection_flow.request_lcr_disconnect(owner)
 
-    assert events == [("persist_lcr", False), ("disconnect_lcr",)]
+    assert events == [
+        ("save_meter", False, {"meter_type": "gwinstek", "description": "LCR"}),
+        ("disconnect_lcr",),
+    ]
 
 
 def test_restore_persisted_controller_state_clears_stale_cache() -> None:
@@ -373,17 +398,22 @@ def test_restore_persisted_controller_state_clears_stale_cache() -> None:
     assert owner._pending_persisted_design_position is None
 
 
-def test_restore_persisted_controller_state_imports_current_cache() -> None:
+def test_restore_persisted_controller_state_imports_current_cache(monkeypatch) -> None:
     events: list[object] = []
+    monkeypatch.setattr(
+        connection_flow,
+        "prepare_persisted_design_restore",
+        lambda _owner, state: events.append(("prepare_design_restore", state)),
+    )
     owner = SimpleNamespace(
         serial_connection=SimpleNamespace(is_open=True),
         settings_manager=SimpleNamespace(load_controller_state=lambda: {"session": "ok"}),
         stage_controller=_RestoreStageController(events, current=True),
-        _prepare_persisted_design_restore=lambda state: events.append(
-            ("prepare_design_restore", state)
+        joystick_panel=SimpleNamespace(
+            set_axis_feedrate_limits=lambda rates: events.append(
+                ("joystick_rates", rates)
+            )
         ),
-        _apply_axis_feedrate_limits=lambda rates: events.append(("apply_rates", rates)),
-        _current_axis_feedrate_limits=lambda: {"X": 900.0},
         _show_status=lambda message: events.append(("status", message)),
     )
 
@@ -394,5 +424,6 @@ def test_restore_persisted_controller_state_imports_current_cache() -> None:
         ("prepare_design_restore", {"session": "ok"}),
         ("import_cache", {"session": "ok"}),
         ("apply_rates", {"X": 900.0}),
+        ("joystick_rates", {"X": 900.0}),
         ("status", "Restored cached homing state; reading live coordinates."),
     ]

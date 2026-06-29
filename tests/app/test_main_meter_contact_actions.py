@@ -219,7 +219,7 @@ class MainMeterContactActionsTest(unittest.TestCase):
         window.settings_manager = _SettingsManager()
         window.lcr_controller = lcr
 
-        Main._auto_connect_if_possible(window)
+        main_module.connection_flow.auto_connect_if_possible(window)
 
         self.assertEqual(lcr.request_count, 1)
 
@@ -475,7 +475,7 @@ class MainMeterContactActionsTest(unittest.TestCase):
         def run_needles_action(action: str, feedrate: float | None) -> None:
             calls.append(("needles", action, feedrate))
             if action == "lift":
-                raise StageControllerError("lift failed")
+                raise main_module.StageControllerError("lift failed")
 
         window = Main.__new__(Main)
         window.stage_controller = types.SimpleNamespace(
@@ -731,7 +731,7 @@ class MainMeterContactActionsTest(unittest.TestCase):
 
         def run_move(_x_mm: float, _y_mm: float) -> None:
             calls.append(("move", 1.25, 2.5))
-            raise StageControllerError("Stage is busy.")
+            raise main_module.StageControllerError("Stage is busy.")
 
         window = Main.__new__(Main)
         window.stage_controller = types.SimpleNamespace(
@@ -777,7 +777,7 @@ class MainMeterContactActionsTest(unittest.TestCase):
         def run_needles_action(action: str, feedrate: float | None) -> None:
             calls.append(("needles", action, feedrate))
             if action == "lift":
-                raise StageControllerError("lift failed")
+                raise main_module.StageControllerError("lift failed")
 
         window = Main.__new__(Main)
         window.stage_controller = types.SimpleNamespace(

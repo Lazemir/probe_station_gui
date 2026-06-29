@@ -12,6 +12,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import QApplication, QDockWidget, QMainWindow
 
+from probe_station_gui.views import main_window_menus
 from probe_station_gui.views.main_window_menus import setup_main_window_menus
 
 
@@ -109,8 +110,19 @@ def _visible_menu_action_labels(window: QMainWindow) -> list[str]:
 
 
 def test_setup_main_window_menus_preserves_labels_and_shortcuts(
+    monkeypatch: pytest.MonkeyPatch,
     qt_app: QApplication,
 ) -> None:
+    monkeypatch.setattr(
+        main_window_menus,
+        "toggle_design_layout_window",
+        lambda owner, visible: owner._record("design", bool(visible)),
+    )
+    monkeypatch.setattr(
+        main_window_menus,
+        "toggle_contact_calibration_window",
+        lambda owner, visible: owner._record("contact", bool(visible)),
+    )
     window = _MenuOwner()
 
     setup_main_window_menus(window)

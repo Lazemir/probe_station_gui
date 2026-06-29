@@ -112,21 +112,25 @@ def _make_window() -> tuple[Main, _FakeStageController, list[str]]:
     )
     window.settings_manager = _FakeSettingsManager()
     window._show_status = lambda message, _timeout=0: statuses.append(message)
-    window._save_controller_state_without_design = lambda: statuses.append("saved_without_design")
-    window._persist_controller_state_if_available = lambda: statuses.append("persisted")
     window._reset_manual_alignment = lambda **_kwargs: statuses.append("reset_alignment")
     window._set_design_snap_enabled = lambda enabled: setattr(window, "_design_snap_enabled", bool(enabled))
     window._refresh_design_panel = lambda: statuses.append("refresh_panel")
     window._refresh_design_position = lambda: statuses.append("refresh_position")
-    window._toggle_design_layout_window = lambda _show: statuses.append("toggle_window")
     window._restore_route_measurement_state_after_design_load = lambda: statuses.append("restore_route")
     window._raw_stage_xy_from_design_xy = lambda _design_xy: (1.5, -2.0)
     window._clear_planned_move_prediction = lambda **_kwargs: statuses.append("clear_prediction")
     return window, stage_controller, statuses
 
 
-def test_maybe_restore_persisted_design_clears_design_and_unhomes_xy_when_xy_changed() -> None:
+def test_maybe_restore_persisted_design_clears_design_and_unhomes_xy_when_xy_changed(
+    monkeypatch,
+) -> None:
     window, stage_controller, statuses = _make_window()
+    monkeypatch.setattr(
+        main_module.connection_flow,
+        "save_controller_state_without_design",
+        lambda _owner: statuses.append("saved_without_design"),
+    )
     window._pending_persisted_design_state = {"document_path": "C:\\designs\\sample.gds"}
     window._pending_persisted_design_position = (1.0, 2.0, 3.0)
 
@@ -138,8 +142,15 @@ def test_maybe_restore_persisted_design_clears_design_and_unhomes_xy_when_xy_cha
     assert any("Controller X/Y coordinates changed" in item for item in statuses)
 
 
-def test_on_design_document_loaded_error_saves_controller_state_without_design_when_restoring() -> None:
+def test_on_design_document_loaded_error_saves_controller_state_without_design_when_restoring(
+    monkeypatch,
+) -> None:
     window, _stage_controller, statuses = _make_window()
+    monkeypatch.setattr(
+        main_module.connection_flow,
+        "save_controller_state_without_design",
+        lambda _owner: statuses.append("saved_without_design"),
+    )
     window._design_load_restore_states[1] = {"document_path": "missing.gds"}
     window._design_load_show_window[1] = False
 
@@ -148,8 +159,16 @@ def test_on_design_document_loaded_error_saves_controller_state_without_design_w
     assert statuses == ["boom", "saved_without_design"]
 
 
-def test_on_design_document_loaded_success_refreshes_persists_and_restores_route(tmp_path: Path) -> None:
+def test_on_design_document_loaded_success_refreshes_persists_and_restores_route(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     window, _stage_controller, statuses = _make_window()
+    monkeypatch.setattr(
+        main_module.connection_flow,
+        "persist_controller_state_if_available",
+        lambda _owner: statuses.append("persisted"),
+    )
     document = _make_document(tmp_path)
     panel = _FakeDesignPanel()
     window.design_navigator_panel = panel

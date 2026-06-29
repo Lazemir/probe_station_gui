@@ -5,6 +5,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 
+import main as main_module
 from main import Main
 from probe_station_gui.views.design_navigator_panel import _DesignPlotPane
 
@@ -83,10 +84,14 @@ def test_design_navigation_double_click_moves() -> None:
     assert pane.move_requested.emissions == [(11.0, 22.0)]
 
 
-def test_minimap_single_click_handler_opens_design_window() -> None:
+def test_minimap_single_click_handler_opens_design_window(monkeypatch) -> None:
     window = Main.__new__(Main)
     calls: list[bool] = []
-    window._toggle_design_layout_window = lambda show: calls.append(bool(show))
+    monkeypatch.setattr(
+        main_module,
+        "toggle_design_layout_window",
+        lambda _owner, show: calls.append(bool(show)),
+    )
 
     Main._open_design_window_from_minimap_point(window, 1.25, 2.5)
 

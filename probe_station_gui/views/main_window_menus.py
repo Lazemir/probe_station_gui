@@ -7,6 +7,11 @@ from typing import Any, Protocol
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QKeySequence
 
+from probe_station_gui.views.main_window_auxiliary import (
+    toggle_contact_calibration_window,
+    toggle_design_layout_window,
+)
+
 
 class MainWindowMenuOwner(Protocol):
     ALIGNMENT_CAPTURE_SHORTCUT: str
@@ -33,8 +38,6 @@ class MainWindowMenuOwner(Protocol):
     def _show_connection_dialog(self) -> None: ...
     def _request_sample_load(self) -> None: ...
     def _request_sample_unload(self) -> None: ...
-    def _toggle_design_layout_window(self, visible: bool) -> None: ...
-    def _toggle_contact_calibration_window(self, visible: bool) -> None: ...
     def _show_surface_map_window(self) -> None: ...
     def _show_microscope_scan_dialog(self) -> None: ...
     def _show_click_calibration_dialog(self) -> None: ...
@@ -85,7 +88,7 @@ def _add_navigation_actions(owner: MainWindowMenuOwner, navigation_menu: Any) ->
     owner._design_layout_window_action = QAction("Design Window", owner)
     owner._design_layout_window_action.setCheckable(True)
     owner._design_layout_window_action.toggled.connect(
-        owner._toggle_design_layout_window
+        lambda visible: toggle_design_layout_window(owner, visible)
     )
     navigation_menu.addAction(owner._design_layout_window_action)
 
@@ -96,7 +99,7 @@ def _add_calibration_actions(owner: MainWindowMenuOwner, calibration_menu: Any) 
     )
     owner._contact_calibration_window_action.setCheckable(True)
     owner._contact_calibration_window_action.toggled.connect(
-        owner._toggle_contact_calibration_window
+        lambda visible: toggle_contact_calibration_window(owner, visible)
     )
     calibration_menu.addAction(owner._contact_calibration_window_action)
 

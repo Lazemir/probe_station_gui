@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Protocol
 
+from probe_station_gui.views import main_window_connection_flow as connection_flow
+
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +35,6 @@ class MainWindowShutdownOwner(Protocol):
     _microscope_scan_stop_requested: Any
     _route_measurement_dialog: Any
 
-    def _persist_serial_connection_state(self, connected: bool) -> None: ...
-    def _persist_lcr_connection_state(self, connected: bool) -> None: ...
-    def _persist_controller_state(self) -> None: ...
     def _stop_telegram_bot_service(self) -> None: ...
     def _save_pending_linear_feedrate_default(self) -> None: ...
     def _stop_jog_before_serial_close(self, reason: str) -> None: ...
@@ -70,10 +69,10 @@ def _persist_shutdown_state(
     serial_was_connected: bool,
     lcr_was_connected: bool,
 ) -> None:
-    owner._persist_serial_connection_state(serial_was_connected)
-    owner._persist_lcr_connection_state(lcr_was_connected)
+    connection_flow.persist_serial_connection_state(owner, serial_was_connected)
+    connection_flow.persist_lcr_connection_state(owner, lcr_was_connected)
     if serial_was_connected:
-        owner._persist_controller_state()
+        connection_flow.persist_controller_state(owner)
 
 
 def _stop_services_and_timers(owner: MainWindowShutdownOwner) -> None:

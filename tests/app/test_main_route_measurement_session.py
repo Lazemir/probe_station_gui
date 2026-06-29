@@ -425,7 +425,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             )
             window._last_selected_design_point = None
             window._refresh_design_panel = lambda: None
-            window._persist_controller_state_if_available = lambda: None
+            window._controller_state_persistence_suspended = True
             window._show_status = (
                 lambda message, _timeout_ms=None: statuses.append(str(message))
             )
@@ -703,7 +703,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             needle_2_design=(99.0, 199.0),
         )
         stage = types.SimpleNamespace()
-        old_runner = RouteMeasurementRunner(
+        old_runner = main_module.RouteMeasurementRunner(
             points=[point],
             csv_path="NUL",
             stage_controller=stage,
@@ -774,7 +774,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
 
         self.assertTrue(response["accepted"], response)
         self.assertTrue(old_thread.joined)
-        self.assertIsInstance(new_runner, RouteExternalMeasurementSessionRunner)
+        self.assertIsInstance(new_runner, main_module.RouteExternalMeasurementSessionRunner)
         self.assertEqual(new_runner.route_offset_xy(), (0.125, -0.25))
         self.assertEqual(lcr.configurations, [RouteMeterConfiguration()])
         self.assertEqual(response["state"], "waiting_paused")
@@ -801,7 +801,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             "current_contact": {"label": "P004"},
         }
 
-        class _FakeExternalRunner(RouteExternalMeasurementSessionRunner):
+        class _FakeExternalRunner(main_module.RouteExternalMeasurementSessionRunner):
             def __init__(self) -> None:
                 pass
 
@@ -831,7 +831,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             "current_contact": {"label": "P004"},
         }
 
-        class _FakeExternalRunner(RouteExternalMeasurementSessionRunner):
+        class _FakeExternalRunner(main_module.RouteExternalMeasurementSessionRunner):
             def __init__(self) -> None:
                 pass
 
@@ -855,7 +855,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
 
     def test_api_route_start_rejects_when_waiting_gui_runner_does_not_stop(self) -> None:
         point = _route_start_point()
-        runner = RouteMeasurementRunner(
+        runner = main_module.RouteMeasurementRunner(
             points=[point],
             csv_path="NUL",
             stage_controller=types.SimpleNamespace(),

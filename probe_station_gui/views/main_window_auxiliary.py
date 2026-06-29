@@ -82,7 +82,6 @@ class MainWindowAuxiliaryOwner(Protocol):
     def _on_design_layout_point_selected(self, *args: Any) -> None: ...
     def _move_to_design_window_point(self, *args: Any) -> None: ...
     def _add_design_route_point(self, *args: Any) -> None: ...
-    def _on_design_layout_window_visibility_changed(self, *args: Any) -> None: ...
 
 
 def show_surface_map_window(
@@ -430,7 +429,7 @@ def _connect_design_layout_window_signals(
         owner.design_navigator_panel.set_hover_snap
     )
     owner.design_layout_window.visibility_changed.connect(
-        owner._on_design_layout_window_visibility_changed
+        lambda visible: sync_design_layout_window_action(owner, visible)
     )
 
 

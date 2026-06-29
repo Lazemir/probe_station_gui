@@ -53,12 +53,19 @@ class _FakeStageController:
         self.motion_safety_disabled: list[bool] = []
         self.requests: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
         self.reset_sources: list[str] = []
+        self.applied_axis_rates: list[dict[str, float]] = []
 
     def _record_request(self, name: str, *args: object, **kwargs: object) -> None:
         self.requests.append((name, tuple(args), dict(kwargs)))
 
     def set_motion_safety_disabled(self, value: bool) -> None:
         self.motion_safety_disabled.append(bool(value))
+
+    def axis_max_feedrates(self) -> dict[str, float]:
+        return {"X": 200.0}
+
+    def apply_axis_max_feedrates(self, rates: object) -> None:
+        self.applied_axis_rates.append(dict(rates))
 
     def reset_controller(self, *, source: str) -> None:
         self.reset_sources.append(source)
@@ -359,9 +366,6 @@ class _FakeDock:
 class _DockOwner:
     _NOOP_HANDLER_NAMES = (
         "_on_manual_terminal_command",
-        "on_serial_connected",
-        "on_serial_disconnected",
-        "_request_lcr_disconnect",
         "_on_resistance_standby_enabled_changed",
         "_request_home_axis_from_ui",
         "_request_home_all_from_ui",
@@ -384,13 +388,11 @@ class _DockOwner:
         "_on_manual_jog_command_changed",
         "_on_manual_jog_stopped",
         "_on_homing_status_changed",
-        "_persist_controller_state",
         "_on_limit_axes_changed",
         "_on_homing_action_started",
         "_on_homing_action_finished",
         "_on_needles_action_started",
         "_on_needles_action_finished",
-        "_on_contact_calibration_window_visibility_changed",
         "_save_surface_position",
         "_move_to_surface_position",
         "_request_contact_seek",
@@ -437,12 +439,6 @@ class _DockOwner:
             self.noop_calls.append((name, tuple(args), dict(kwargs)))
 
         return handler
-
-    def _current_axis_feedrate_limits(self) -> dict[str, float]:
-        return {"X": 200.0}
-
-    def _apply_axis_feedrate_limits(self, limits: object) -> None:
-        self.axis_limit_calls.append(limits)
 
     def _refresh_manual_alignment_ui(self) -> None:
         self.refresh_calls.append("manual_alignment")
@@ -507,6 +503,6 @@ def test_create_main_window_docks_assigns_owner_attrs_and_dock_names(monkeypatch
     assert owner.joystick_dock.widget() is owner.joystick_panel
     assert owner.alignment_dock.widget() is owner.alignment_panel
     assert owner.oscillation_panel is owner.contact_calibration_window.oscillation_panel
-    assert owner.axis_limit_calls == [{"X": 200.0}]
+    assert owner.stage_controller.applied_axis_rates == [{"X": 200.0}]
     assert owner.stage_controller.motion_safety_disabled == [True]
     assert owner.refresh_calls == ["manual_alignment", "coordinate", "design_panel"]

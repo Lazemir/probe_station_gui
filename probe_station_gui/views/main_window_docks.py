@@ -22,6 +22,11 @@ from probe_station_gui.views.contact_oscillation_window import (
 from probe_station_gui.views.dock_widgets import CollapsibleDockWidget
 from probe_station_gui.views.resistance_monitor_panel import ResistanceMonitorPanel
 from probe_station_gui.views.serial_connection_panel import SerialConnectionPanel
+from probe_station_gui.views import main_window_connection_flow as connection_flow
+from probe_station_gui.views.main_window_auxiliary import (
+    sync_contact_calibration_window_action,
+    toggle_design_layout_window,
+)
 
 
 class MainWindowDockOwner(Protocol):
@@ -45,12 +50,7 @@ class MainWindowDockOwner(Protocol):
     def addDockWidget(self, area: Any, dock: Any) -> None: ...  # noqa: N802
     def splitDockWidget(self, first: Any, second: Any, orientation: Any) -> None: ...  # noqa: N802
     def resizeDocks(self, docks: list[Any], sizes: list[int], orientation: Any) -> None: ...  # noqa: N802
-    def _current_axis_feedrate_limits(self) -> Any: ...
-    def _apply_axis_feedrate_limits(self, limits: Any) -> None: ...
     def _on_manual_terminal_command(self, *args: Any) -> None: ...
-    def on_serial_connected(self, *args: Any) -> None: ...
-    def on_serial_disconnected(self, *args: Any) -> None: ...
-    def _request_lcr_disconnect(self, *args: Any) -> None: ...
     def _on_resistance_standby_enabled_changed(self, *args: Any) -> None: ...
     def _request_home_axis_from_ui(self, *args: Any) -> None: ...
     def _request_home_all_from_ui(self, *args: Any) -> None: ...
@@ -74,13 +74,11 @@ class MainWindowDockOwner(Protocol):
     def _on_manual_jog_stopped(self, *args: Any) -> None: ...
     def _invalidate_design_registration(self, message: str) -> None: ...
     def _on_homing_status_changed(self, *args: Any) -> None: ...
-    def _persist_controller_state(self, *args: Any) -> None: ...
     def _on_limit_axes_changed(self, *args: Any) -> None: ...
     def _on_homing_action_started(self, *args: Any) -> None: ...
     def _on_homing_action_finished(self, *args: Any) -> None: ...
     def _on_needles_action_started(self, *args: Any) -> None: ...
     def _on_needles_action_finished(self, *args: Any) -> None: ...
-    def _on_contact_calibration_window_visibility_changed(self, *args: Any) -> None: ...
     def _save_surface_position(self, *args: Any) -> None: ...
     def _move_to_surface_position(self, *args: Any) -> None: ...
     def _request_contact_seek(self, *args: Any) -> None: ...
@@ -90,7 +88,6 @@ class MainWindowDockOwner(Protocol):
     def _on_lcr_reading_summary_updated(self, *args: Any) -> None: ...
     def _on_lcr_reading_updated(self, *args: Any) -> None: ...
     def _save_oscillation_configuration(self, *args: Any) -> None: ...
-    def _toggle_design_layout_window(self, visible: bool) -> None: ...
     def _request_alignment_capture(self, *args: Any) -> None: ...
     def _reset_alignment_capture_points(self, *args: Any) -> None: ...
     def _cancel_manual_alignment_pick(self, *args: Any) -> None: ...
@@ -145,13 +142,17 @@ def _create_serial_connection_dialog(owner: MainWindowDockOwner) -> None:
     close_button_row.addWidget(close_button)
     dialog_layout.addLayout(close_button_row)
 
-    owner.serial_connection_panel.connected.connect(owner.on_serial_connected)
-    owner.serial_connection_panel.disconnected.connect(owner.on_serial_disconnected)
+    owner.serial_connection_panel.connected.connect(
+        lambda serial_port: connection_flow.on_serial_connected(owner, serial_port)
+    )
+    owner.serial_connection_panel.disconnected.connect(
+        lambda: connection_flow.on_serial_disconnected(owner)
+    )
     owner.serial_connection_panel.lcr_connect_requested.connect(
         owner.lcr_controller.request_connect
     )
     owner.serial_connection_panel.lcr_disconnect_requested.connect(
-        owner._request_lcr_disconnect
+        lambda: connection_flow.request_lcr_disconnect(owner)
     )
 
 
@@ -182,7 +183,10 @@ def _create_resistance_dock(owner: MainWindowDockOwner) -> None:
 def _create_joystick_dock(owner: MainWindowDockOwner) -> None:
     owner.joystick_panel = JoystickWindow(owner)
     owner.joystick_panel.set_stage_controller(owner.stage_controller)
-    owner._apply_axis_feedrate_limits(owner._current_axis_feedrate_limits())
+    connection_flow.apply_axis_feedrate_limits(
+        owner,
+        owner.stage_controller.axis_max_feedrates(),
+    )
     _apply_joystick_settings(owner)
     _connect_joystick_panel(owner)
     _connect_stage_controller_to_joystick(owner)
@@ -316,7 +320,7 @@ def _connect_stage_controller_to_joystick(owner: MainWindowDockOwner) -> None:
     _connect_stage_homing_signals(owner)
     _connect_stage_limit_and_needle_signals(owner)
     owner.stage_controller.stage_position_changed.connect(
-        owner._persist_controller_state
+        lambda *args: connection_flow.persist_controller_state(owner, *args)
     )
 
 
@@ -328,7 +332,7 @@ def _connect_stage_homing_signals(owner: MainWindowDockOwner) -> None:
         owner._on_homing_status_changed
     )
     owner.stage_controller.homing_status_changed.connect(
-        owner._persist_controller_state
+        lambda *args: connection_flow.persist_controller_state(owner, *args)
     )
     owner.stage_controller.homing_action_started.connect(
         owner.joystick_panel.set_homing_action_started
@@ -356,7 +360,7 @@ def _connect_stage_limit_and_needle_signals(owner: MainWindowDockOwner) -> None:
         owner.joystick_panel.set_needles_state
     )
     owner.stage_controller.needles_state_changed.connect(
-        owner._persist_controller_state
+        lambda *args: connection_flow.persist_controller_state(owner, *args)
     )
     owner.stage_controller.needles_zone_changed.connect(
         owner.joystick_panel.set_needles_zone
@@ -378,7 +382,7 @@ def _connect_stage_limit_and_needle_signals(owner: MainWindowDockOwner) -> None:
 def _create_contact_calibration_window(owner: MainWindowDockOwner) -> None:
     owner.contact_calibration_window = ContactOscillationWindow()
     owner.contact_calibration_window.visibility_changed.connect(
-        owner._on_contact_calibration_window_visibility_changed
+        lambda visible: sync_contact_calibration_window_action(owner, visible)
     )
     owner.contact_calibration_window.autofocus_requested.connect(
         owner.stage_controller.request_autofocus
@@ -421,7 +425,7 @@ def _create_contact_calibration_window(owner: MainWindowDockOwner) -> None:
 def _create_alignment_dock(owner: MainWindowDockOwner) -> None:
     owner.alignment_panel = AlignmentPanel(owner)
     owner.alignment_panel.open_design_window_requested.connect(
-        lambda: owner._toggle_design_layout_window(True)
+        lambda: toggle_design_layout_window(owner, True)
     )
     owner.alignment_panel.capture_point_requested.connect(
         owner._request_alignment_capture

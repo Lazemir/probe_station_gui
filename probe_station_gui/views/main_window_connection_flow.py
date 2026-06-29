@@ -38,7 +38,8 @@ def on_serial_connected(owner: object, serial_port: object) -> None:
         owner.stage_controller.set_serial(owner.serial_connection)
     finally:
         owner._controller_state_persistence_suspended = False
-    owner._restore_persisted_controller_state(
+    restore_persisted_controller_state(
+        owner,
         cached_state,
         cache_already_loaded=True,
     )
@@ -50,7 +51,7 @@ def on_serial_connected(owner: object, serial_port: object) -> None:
             owner.joystick_dock.activateWindow()
     if owner.serial_terminal_panel:
         owner.serial_terminal_panel.set_serial(owner.serial_connection)
-    QTimer.singleShot(0, owner._run_serial_startup_sync)
+    QTimer.singleShot(0, lambda: run_serial_startup_sync(owner))
     owner._refresh_design_position()
 
 
@@ -59,7 +60,7 @@ def on_serial_disconnected(owner: object) -> None:
     if owner.serial_connection and owner.serial_connection.is_open:
         owner.serial_connection.close()
     owner.serial_connection = None
-    owner._persist_serial_connection_state(False)
+    persist_serial_connection_state(owner, False)
     owner._stage_unhomed_display_origins.clear()
     owner._last_reported_b_position = None
     owner._manual_jog_timer.stop()
@@ -142,9 +143,9 @@ def apply_axis_feedrate_limits(owner: object, rates: object) -> None:
 
 
 def on_axis_max_feedrates_changed(owner: object, rates: object) -> None:
-    owner._apply_axis_feedrate_limits(rates)
+    apply_axis_feedrate_limits(owner, rates)
     if owner.stage_controller.axis_max_feedrates():
-        owner._apply_joystick_feedrate_preferences()
+        apply_joystick_feedrate_preferences(owner)
 
 
 def apply_joystick_feedrate_preferences(owner: object) -> None:
@@ -211,12 +212,12 @@ def on_controller_reboot_ready(owner: object) -> None:
     if owner._controller_reboot_recovery_scheduled:
         return
     owner._controller_reboot_recovery_scheduled = True
-    QTimer.singleShot(0, owner._run_controller_reboot_recovery)
+    QTimer.singleShot(0, lambda: run_controller_reboot_recovery(owner))
 
 
 def run_controller_reboot_recovery(owner: object) -> None:
     owner._controller_reboot_recovery_scheduled = False
-    owner._run_serial_startup_sync()
+    run_serial_startup_sync(owner)
 
 
 def restore_persisted_controller_state(
@@ -242,9 +243,9 @@ def restore_persisted_controller_state(
     logger.info(
         "Controller session marker matches; restoring cached homing state pending live status."
     )
-    owner._prepare_persisted_design_restore(cached_state)
+    prepare_persisted_design_restore(owner, cached_state)
     owner.stage_controller.import_cached_controller_state(cached_state)
-    owner._apply_axis_feedrate_limits(owner._current_axis_feedrate_limits())
+    apply_axis_feedrate_limits(owner, owner.stage_controller.axis_max_feedrates())
     owner._show_status("Restored cached homing state; reading live coordinates.")
 
 
@@ -252,14 +253,14 @@ def persist_controller_state(owner: object, *_args: object) -> None:
     if owner._controller_state_persistence_suspended:
         logger.debug("Skipping controller state persistence while serial state resets.")
         return
-    state = owner._controller_state_with_design()
+    state = controller_state_with_design(owner)
     owner.settings_manager.save_controller_state(state)
 
 
 def persist_controller_state_if_available(owner: object) -> None:
     if owner._controller_state_persistence_suspended:
         return
-    state = owner._controller_state_with_design()
+    state = controller_state_with_design(owner)
     if state is None:
         return
     owner.settings_manager.save_controller_state(state)
@@ -310,7 +311,7 @@ def maybe_restore_persisted_design(
         document_loaded=False,
         axis_names=owner.STAGE_AXIS_NAMES,
         tolerance=owner.DESIGN_RESTORE_POSITION_TOLERANCE,
-        file_is_current=owner._persisted_design_file_is_current,
+        file_is_current=design_navigation.persisted_design_file_is_current,
     )
     if decision.axes_to_mark_unhomed:
         removed_axes = owner.stage_controller.mark_axes_unhomed(
@@ -331,7 +332,7 @@ def maybe_restore_persisted_design(
     if decision.status_message is not None:
         owner._show_status(decision.status_message, decision.status_timeout_ms)
     if decision.clear_cached_design:
-        owner._save_controller_state_without_design()
+        save_controller_state_without_design(owner)
         return
     if decision.should_start_load and decision.design_path is not None:
         owner._start_design_document_load(
@@ -375,5 +376,5 @@ def persist_lcr_connection_state(
 
 
 def request_lcr_disconnect(owner: object) -> None:
-    owner._persist_lcr_connection_state(False)
+    persist_lcr_connection_state(owner, False)
     owner.lcr_controller.request_disconnect()

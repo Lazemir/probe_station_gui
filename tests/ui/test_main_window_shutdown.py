@@ -29,8 +29,23 @@ class _AliveThread:
         self.joined = True
 
 
-def test_close_event_preserves_shutdown_order() -> None:
+def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
     events: list[object] = []
+    monkeypatch.setattr(
+        shutdown_ui.connection_flow,
+        "persist_serial_connection_state",
+        lambda _owner, connected: events.append(("persist_serial", connected)),
+    )
+    monkeypatch.setattr(
+        shutdown_ui.connection_flow,
+        "persist_lcr_connection_state",
+        lambda _owner, connected: events.append(("persist_lcr", connected)),
+    )
+    monkeypatch.setattr(
+        shutdown_ui.connection_flow,
+        "persist_controller_state",
+        lambda _owner: events.append(("persist_controller",)),
+    )
     serial = _Serial(events)
     route_thread = _AliveThread(events, "route_thread")
     scan_thread = _AliveThread(events, "scan_thread")
@@ -84,13 +99,6 @@ def test_close_event_preserves_shutdown_order() -> None:
             request_stop_oscillation=lambda: events.append(("stop_oscillation",)),
             shutdown=lambda: events.append(("stage_shutdown",)),
         ),
-        _persist_serial_connection_state=lambda connected: events.append(
-            ("persist_serial", connected)
-        ),
-        _persist_lcr_connection_state=lambda connected: events.append(
-            ("persist_lcr", connected)
-        ),
-        _persist_controller_state=lambda: events.append(("persist_controller",)),
         _stop_telegram_bot_service=lambda: events.append(("telegram_stop",)),
         _save_pending_linear_feedrate_default=lambda: events.append(
             ("save_feedrate",)
