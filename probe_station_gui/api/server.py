@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 _AXIS_NAMES = ("X", "Y", "Z", "A", "B", "C")
 _MAX_SWEEP_POINTS = 1000
+_NO_PAYLOAD = object()
 
 
 def _axis_targets_from_payload(payload: dict[str, Any]) -> dict[str, float]:
@@ -212,7 +213,7 @@ class ProbeStationApiServer:
             logger.exception("FastAPI control API stopped unexpectedly.")
 
     def _create_app(self):
-        from fastapi import Body, FastAPI, Header, HTTPException
+        from fastapi import Body, Depends, FastAPI, Header, HTTPException
         from fastapi.responses import HTMLResponse, Response
         import uvicorn
 
@@ -249,21 +250,243 @@ class ProbeStationApiServer:
 """
             )
 
-        @app.get("/api/v1/stage/status")
-        def stage_status(
+        def api_auth_headers(
             authorization: str | None = Header(default=None),
             x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+        ) -> tuple[str | None, str | None]:
+            return authorization, x_api_key
+
+        def authorize_request(
+            permission: str,
+            auth_headers: tuple[str | None, str | None],
+        ) -> None:
+            authorization, x_api_key = auth_headers
+            self._authorize(permission, authorization, x_api_key)
+
+        def dispatch_command_result(
+            action: str,
+            payload: object = _NO_PAYLOAD,
         ) -> dict[str, Any]:
-            self._authorize(API_PERMISSION_STAGE_READ, authorization, x_api_key)
+            request: dict[str, Any] = {"action": action}
+            if payload is not _NO_PAYLOAD:
+                request["payload"] = payload
+            result = self._call_command(request)
+            _raise_for_rejected(result)
+            return result
+
+        def command_result(
+            permission: str,
+            auth_headers: tuple[str | None, str | None],
+            action: str,
+            payload: object = _NO_PAYLOAD,
+        ) -> dict[str, Any]:
+            authorize_request(permission, auth_headers)
+            return dispatch_command_result(action, payload)
+
+        def contact_payload(
+            contact_number: int,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            body = dict(payload or {})
+            body["contact_number"] = int(contact_number)
+            return body
+
+        def visa_payload(
+            role: str,
+            operation: str,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                **dict(payload or {}),
+                "role": role,
+                "operation": operation,
+            }
+
+        def binary_response(
+            result: dict[str, Any],
+            *,
+            invalid_message: str,
+            media_type: str | None = None,
+            headers: dict[str, str] | None = None,
+        ) -> Response:
+            data = result.get("data", b"")
+            if not isinstance(data, (bytes, bytearray)):
+                raise HTTPException(
+                    status_code=500,
+                    detail={"message": invalid_message},
+                )
+            content_type = str(
+                result.get("content_type") or media_type or "application/octet-stream"
+            )
+            return Response(
+                content=bytes(data),
+                media_type=content_type,
+                headers=headers,
+            )
+
+        def endpoint_named(name: str, endpoint: Callable[..., Any]) -> Callable[..., Any]:
+            endpoint.__name__ = name
+            return endpoint
+
+        def add_command_route(
+            path: str,
+            *,
+            method: str,
+            name: str,
+            permission: str,
+            action: str,
+        ) -> None:
+            def endpoint(
+                auth_headers: tuple[str | None, str | None] = Depends(api_auth_headers),
+            ) -> dict[str, Any]:
+                return command_result(permission, auth_headers, action)
+
+            app.add_api_route(
+                path,
+                endpoint_named(name, endpoint),
+                methods=[method],
+            )
+
+        def add_body_command_route(
+            path: str,
+            *,
+            name: str,
+            permission: str,
+            action: str,
+            required: bool = False,
+        ) -> None:
+            if required:
+
+                def endpoint(
+                    payload: dict[str, Any] = Body(...),
+                    auth_headers: tuple[str | None, str | None] = Depends(
+                        api_auth_headers
+                    ),
+                ) -> dict[str, Any]:
+                    return command_result(
+                        permission,
+                        auth_headers,
+                        action,
+                        dict(payload or {}),
+                    )
+
+            else:
+
+                def endpoint(
+                    payload: dict[str, Any] | None = Body(default=None),
+                    auth_headers: tuple[str | None, str | None] = Depends(
+                        api_auth_headers
+                    ),
+                ) -> dict[str, Any]:
+                    return command_result(
+                        permission,
+                        auth_headers,
+                        action,
+                        dict(payload or {}),
+                    )
+
+            app.add_api_route(
+                path,
+                endpoint_named(name, endpoint),
+                methods=["POST"],
+            )
+
+        def add_contact_command_route(
+            path: str,
+            *,
+            name: str,
+            action: str,
+        ) -> None:
+            def endpoint(
+                contact_number: int,
+                payload: dict[str, Any] | None = Body(default=None),
+                auth_headers: tuple[str | None, str | None] = Depends(api_auth_headers),
+            ) -> dict[str, Any]:
+                return command_result(
+                    API_PERMISSION_ROUTE_MEASURE,
+                    auth_headers,
+                    action,
+                    contact_payload(contact_number, payload),
+                )
+
+            app.add_api_route(
+                path,
+                endpoint_named(name, endpoint),
+                methods=["POST"],
+            )
+
+        def add_visa_command_route(
+            path: str,
+            *,
+            name: str,
+            operation: str,
+            required: bool = False,
+            raw_response: bool = False,
+        ) -> None:
+            if required:
+
+                def endpoint(
+                    role: str,
+                    payload: dict[str, Any] = Body(...),
+                    auth_headers: tuple[str | None, str | None] = Depends(
+                        api_auth_headers
+                    ),
+                ) -> dict[str, Any] | Response:
+                    result = command_result(
+                        API_PERMISSION_ROUTE_MEASURE,
+                        auth_headers,
+                        "visa_operation",
+                        visa_payload(role, operation, payload),
+                    )
+                    if raw_response:
+                        return binary_response(
+                            result,
+                            invalid_message="VISA raw response is invalid.",
+                        )
+                    return result
+
+            else:
+
+                def endpoint(
+                    role: str,
+                    payload: dict[str, Any] | None = Body(default=None),
+                    auth_headers: tuple[str | None, str | None] = Depends(
+                        api_auth_headers
+                    ),
+                ) -> dict[str, Any] | Response:
+                    result = command_result(
+                        API_PERMISSION_ROUTE_MEASURE,
+                        auth_headers,
+                        "visa_operation",
+                        visa_payload(role, operation, payload),
+                    )
+                    if raw_response:
+                        return binary_response(
+                            result,
+                            invalid_message="VISA raw response is invalid.",
+                        )
+                    return result
+
+            app.add_api_route(
+                path,
+                endpoint_named(name, endpoint),
+                methods=["POST"],
+                response_model=None,
+            )
+
+        @app.get("/api/v1/stage/status")
+        def stage_status(
+            auth_headers: tuple[str | None, str | None] = Depends(api_auth_headers),
+        ) -> dict[str, Any]:
+            authorize_request(API_PERMISSION_STAGE_READ, auth_headers)
             return self._status_callback()
 
         @app.post("/api/v1/stage/move")
         def move_stage(
             payload: dict[str, Any] = Body(...),
-            authorization: str | None = Header(default=None),
-            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+            auth_headers: tuple[str | None, str | None] = Depends(api_auth_headers),
         ) -> dict[str, Any]:
-            self._authorize(API_PERMISSION_STAGE_WRITE, authorization, x_api_key)
+            authorize_request(API_PERMISSION_STAGE_WRITE, auth_headers)
             try:
                 targets = _axis_targets_from_payload(payload)
                 mode = _coordinate_mode_from_payload(payload)
@@ -289,208 +512,94 @@ class ProbeStationApiServer:
                 _raise_for_rejected(result)
             return result
 
-        @app.post("/api/v1/stage/focus/local")
-        def local_stage_focus(
-            payload: dict[str, Any] | None = Body(default=None),
-            authorization: str | None = Header(default=None),
-            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-        ) -> dict[str, Any]:
-            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
-            result = self._call_command(
-                {
-                    "action": "stage_local_focus",
-                    "payload": dict(payload or {}),
-                }
-            )
-            _raise_for_rejected(result)
-            return result
-
-        @app.get("/api/v1/route/contacts")
-        def list_route_contacts(
-            authorization: str | None = Header(default=None),
-            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-        ) -> dict[str, Any]:
-            self._authorize(API_PERMISSION_ROUTE_READ, authorization, x_api_key)
-            result = self._call_command({"action": "list_contacts"})
-            _raise_for_rejected(result)
-            return result
-
-        @app.post("/api/v1/route/contacts/{contact_number}/move")
-        def move_to_route_contact(
-            contact_number: int,
-            payload: dict[str, Any] | None = Body(default=None),
-            authorization: str | None = Header(default=None),
-            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-        ) -> dict[str, Any]:
-            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
-            body = dict(payload or {})
-            body["contact_number"] = int(contact_number)
-            result = self._call_command(
-                {
-                    "action": "move_to_contact",
-                    "payload": body,
-                }
-            )
-            _raise_for_rejected(result)
-            return result
-
-        @app.post("/api/v1/route/contacts/{contact_number}/needles")
-        def route_contact_needles(
-            contact_number: int,
-            payload: dict[str, Any] | None = Body(default=None),
-            authorization: str | None = Header(default=None),
-            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-        ) -> dict[str, Any]:
-            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
-            body = dict(payload or {})
-            body["contact_number"] = int(contact_number)
-            result = self._call_command(
-                {
-                    "action": "contact_needles",
-                    "payload": body,
-                }
-            )
-            _raise_for_rejected(result)
-            return result
-
-        @app.post("/api/v1/route/contacts/{contact_number}/check")
-        def check_route_contact(
-            contact_number: int,
-            payload: dict[str, Any] | None = Body(default=None),
-            authorization: str | None = Header(default=None),
-            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-        ) -> dict[str, Any]:
-            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
-            body = dict(payload or {})
-            body["contact_number"] = int(contact_number)
-            result = self._call_command(
-                {
-                    "action": "check_contact",
-                    "payload": body,
-                }
-            )
-            _raise_for_rejected(result)
-            return result
-
-        @app.post("/api/v1/route/contacts/{contact_number}/focus")
-        def focus_route_contact(
-            contact_number: int,
-            payload: dict[str, Any] | None = Body(default=None),
-            authorization: str | None = Header(default=None),
-            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-        ) -> dict[str, Any]:
-            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
-            body = dict(payload or {})
-            body["contact_number"] = int(contact_number)
-            result = self._call_command(
-                {
-                    "action": "route_contact_focus",
-                    "payload": body,
-                }
-            )
-            _raise_for_rejected(result)
-            return result
+        add_body_command_route(
+            "/api/v1/stage/focus/local",
+            name="local_stage_focus",
+            permission=API_PERMISSION_ROUTE_MEASURE,
+            action="stage_local_focus",
+        )
+        add_command_route(
+            "/api/v1/route/contacts",
+            method="GET",
+            name="list_route_contacts",
+            permission=API_PERMISSION_ROUTE_READ,
+            action="list_contacts",
+        )
+        add_contact_command_route(
+            "/api/v1/route/contacts/{contact_number}/move",
+            name="move_to_route_contact",
+            action="move_to_contact",
+        )
+        add_contact_command_route(
+            "/api/v1/route/contacts/{contact_number}/needles",
+            name="route_contact_needles",
+            action="contact_needles",
+        )
+        add_contact_command_route(
+            "/api/v1/route/contacts/{contact_number}/check",
+            name="check_route_contact",
+            action="check_contact",
+        )
+        add_contact_command_route(
+            "/api/v1/route/contacts/{contact_number}/focus",
+            name="focus_route_contact",
+            action="route_contact_focus",
+        )
 
         @app.get("/api/v1/route/contacts/{contact_number}/photo")
         def route_contact_photo(
             contact_number: int,
-            authorization: str | None = Header(default=None),
-            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+            auth_headers: tuple[str | None, str | None] = Depends(api_auth_headers),
         ) -> Response:
-            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
-            result = self._call_command(
-                {
-                    "action": "route_contact_photo",
-                    "payload": {"contact_number": int(contact_number)},
-                }
+            result = command_result(
+                API_PERMISSION_ROUTE_MEASURE,
+                auth_headers,
+                "route_contact_photo",
+                contact_payload(contact_number),
             )
-            _raise_for_rejected(result)
-            data = result.get("data", b"")
-            if not isinstance(data, (bytes, bytearray)):
-                raise HTTPException(
-                    status_code=500,
-                    detail={"message": "Contact photo data is invalid."},
-                )
-            content_type = str(result.get("content_type") or "application/octet-stream")
             filename = str(result.get("filename") or f"contact_{contact_number}.jpg")
-            headers = {
-                "Content-Disposition": f'attachment; filename="{filename}"',
-                "X-Contact-Number": str(contact_number),
-            }
-            return Response(
-                content=bytes(data),
-                media_type=content_type,
-                headers=headers,
+            return binary_response(
+                result,
+                invalid_message="Contact photo data is invalid.",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{filename}"',
+                    "X-Contact-Number": str(contact_number),
+                },
             )
 
-        @app.post("/api/v1/route/contacts/{contact_number}/seek")
-        def seek_route_contact(
-            contact_number: int,
-            payload: dict[str, Any] | None = Body(default=None),
-            authorization: str | None = Header(default=None),
-            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-        ) -> dict[str, Any]:
-            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
-            body = dict(payload or {})
-            body["contact_number"] = int(contact_number)
-            result = self._call_command(
-                {
-                    "action": "contact_seek",
-                    "payload": body,
-                }
-            )
-            _raise_for_rejected(result)
-            return result
+        add_contact_command_route(
+            "/api/v1/route/contacts/{contact_number}/seek",
+            name="seek_route_contact",
+            action="contact_seek",
+        )
 
-        @app.get("/api/v1/route/control")
-        def api_route_control_status(
-            authorization: str | None = Header(default=None),
-            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-        ) -> dict[str, Any]:
-            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
-            result = self._call_command({"action": "api_route_control_status"})
-            _raise_for_rejected(result)
-            return result
-
-        @app.post("/api/v1/route/control")
-        def api_route_control_action(
-            payload: dict[str, Any] | None = Body(default=None),
-            authorization: str | None = Header(default=None),
-            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-        ) -> dict[str, Any]:
-            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
-            result = self._call_command(
-                {
-                    "action": "api_route_control_action",
-                    "payload": dict(payload or {}),
-                }
-            )
-            _raise_for_rejected(result)
-            return result
-
-        @app.post("/api/v1/meter/configure")
-        def configure_meter(
-            payload: dict[str, Any] = Body(...),
-            authorization: str | None = Header(default=None),
-            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-        ) -> dict[str, Any]:
-            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
-            result = self._call_command(
-                {
-                    "action": "configure_meter",
-                    "payload": dict(payload or {}),
-                }
-            )
-            _raise_for_rejected(result)
-            return result
+        add_command_route(
+            "/api/v1/route/control",
+            method="GET",
+            name="api_route_control_status",
+            permission=API_PERMISSION_ROUTE_MEASURE,
+            action="api_route_control_status",
+        )
+        add_body_command_route(
+            "/api/v1/route/control",
+            name="api_route_control_action",
+            permission=API_PERMISSION_ROUTE_MEASURE,
+            action="api_route_control_action",
+        )
+        add_body_command_route(
+            "/api/v1/meter/configure",
+            name="configure_meter",
+            permission=API_PERMISSION_ROUTE_MEASURE,
+            action="configure_meter",
+            required=True,
+        )
 
         @app.post("/api/v1/measurements/raw-sweep")
         def raw_voltage_sweep(
             payload: dict[str, Any] = Body(...),
-            authorization: str | None = Header(default=None),
-            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+            auth_headers: tuple[str | None, str | None] = Depends(api_auth_headers),
         ) -> dict[str, Any]:
-            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
+            authorize_request(API_PERMISSION_ROUTE_MEASURE, auth_headers)
             try:
                 voltages = _voltage_sweep_from_payload(payload)
             except (TypeError, ValueError) as exc:
@@ -500,240 +609,97 @@ class ProbeStationApiServer:
                 ) from exc
             body = dict(payload or {})
             body["voltages_v"] = voltages
-            result = self._call_command(
-                {
-                    "action": "raw_voltage_sweep",
-                    "payload": body,
-                }
-            )
-            _raise_for_rejected(result)
-            return result
+            return dispatch_command_result("raw_voltage_sweep", body)
 
-        @app.get("/api/v1/visa/resources")
-        def list_visa_resources(
-            authorization: str | None = Header(default=None),
-            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-        ) -> dict[str, Any]:
-            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
-            result = self._call_command({"action": "visa_list_resources"})
-            _raise_for_rejected(result)
-            return result
+        add_command_route(
+            "/api/v1/visa/resources",
+            method="GET",
+            name="list_visa_resources",
+            permission=API_PERMISSION_ROUTE_MEASURE,
+            action="visa_list_resources",
+        )
+        add_visa_command_route(
+            "/api/v1/visa/resources/{role}/write",
+            name="visa_write",
+            operation="write",
+            required=True,
+        )
+        add_visa_command_route(
+            "/api/v1/visa/resources/{role}/query",
+            name="visa_query",
+            operation="query",
+            required=True,
+        )
+        add_visa_command_route(
+            "/api/v1/visa/resources/{role}/read",
+            name="visa_read",
+            operation="read",
+        )
+        add_visa_command_route(
+            "/api/v1/visa/resources/{role}/read-raw",
+            name="visa_read_raw",
+            operation="read_raw",
+            raw_response=True,
+        )
+        add_visa_command_route(
+            "/api/v1/visa/resources/{role}/clear",
+            name="visa_clear",
+            operation="clear",
+        )
 
-        @app.post("/api/v1/visa/resources/{role}/write")
-        def visa_write(
-            role: str,
-            payload: dict[str, Any] = Body(...),
-            authorization: str | None = Header(default=None),
-            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-        ) -> dict[str, Any]:
-            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
-            result = self._call_command(
-                {
-                    "action": "visa_operation",
-                    "payload": {
-                        **dict(payload or {}),
-                        "role": role,
-                        "operation": "write",
-                    },
-                }
-            )
-            _raise_for_rejected(result)
-            return result
-
-        @app.post("/api/v1/visa/resources/{role}/query")
-        def visa_query(
-            role: str,
-            payload: dict[str, Any] = Body(...),
-            authorization: str | None = Header(default=None),
-            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-        ) -> dict[str, Any]:
-            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
-            result = self._call_command(
-                {
-                    "action": "visa_operation",
-                    "payload": {
-                        **dict(payload or {}),
-                        "role": role,
-                        "operation": "query",
-                    },
-                }
-            )
-            _raise_for_rejected(result)
-            return result
-
-        @app.post("/api/v1/visa/resources/{role}/read")
-        def visa_read(
-            role: str,
-            payload: dict[str, Any] | None = Body(default=None),
-            authorization: str | None = Header(default=None),
-            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-        ) -> dict[str, Any]:
-            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
-            result = self._call_command(
-                {
-                    "action": "visa_operation",
-                    "payload": {
-                        **dict(payload or {}),
-                        "role": role,
-                        "operation": "read",
-                    },
-                }
-            )
-            _raise_for_rejected(result)
-            return result
-
-        @app.post("/api/v1/visa/resources/{role}/read-raw")
-        def visa_read_raw(
-            role: str,
-            payload: dict[str, Any] | None = Body(default=None),
-            authorization: str | None = Header(default=None),
-            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-        ) -> Response:
-            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
-            result = self._call_command(
-                {
-                    "action": "visa_operation",
-                    "payload": {
-                        **dict(payload or {}),
-                        "role": role,
-                        "operation": "read_raw",
-                    },
-                }
-            )
-            _raise_for_rejected(result)
-            data = result.get("data", b"")
-            if not isinstance(data, (bytes, bytearray)):
-                raise HTTPException(
-                    status_code=500,
-                    detail={"message": "VISA raw response is invalid."},
-                )
-            return Response(content=bytes(data), media_type="application/octet-stream")
-
-        @app.post("/api/v1/visa/resources/{role}/clear")
-        def visa_clear(
-            role: str,
-            payload: dict[str, Any] | None = Body(default=None),
-            authorization: str | None = Header(default=None),
-            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-        ) -> dict[str, Any]:
-            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
-            result = self._call_command(
-                {
-                    "action": "visa_operation",
-                    "payload": {
-                        **dict(payload or {}),
-                        "role": role,
-                        "operation": "clear",
-                    },
-                }
-            )
-            _raise_for_rejected(result)
-            return result
-
-        @app.post("/api/v1/route/sessions")
-        def start_route_session(
-            payload: dict[str, Any] | None = Body(default=None),
-            authorization: str | None = Header(default=None),
-            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-        ) -> dict[str, Any]:
-            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
-            result = self._call_command(
-                {
-                    "action": "start_route_session",
-                    "payload": dict(payload or {}),
-                }
-            )
-            _raise_for_rejected(result)
-            return result
-
-        @app.get("/api/v1/route/sessions/current")
-        def route_session_status(
-            authorization: str | None = Header(default=None),
-            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-        ) -> dict[str, Any]:
-            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
-            result = self._call_command({"action": "route_session_status"})
-            _raise_for_rejected(result)
-            return result
-
-        @app.post("/api/v1/route/sessions/current/actions")
-        def route_session_action(
-            payload: dict[str, Any] = Body(...),
-            authorization: str | None = Header(default=None),
-            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-        ) -> dict[str, Any]:
-            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
-            result = self._call_command(
-                {
-                    "action": "route_session_action",
-                    "payload": dict(payload or {}),
-                }
-            )
-            _raise_for_rejected(result)
-            return result
-
-        @app.post("/api/v1/route/sessions/current/result")
-        def route_session_result(
-            payload: dict[str, Any] = Body(...),
-            authorization: str | None = Header(default=None),
-            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-        ) -> dict[str, Any]:
-            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
-            result = self._call_command(
-                {
-                    "action": "route_session_result",
-                    "payload": dict(payload or {}),
-                }
-            )
-            _raise_for_rejected(result)
-            return result
-
-        @app.post("/api/v1/route/sessions/current/seek")
-        def route_session_seek(
-            payload: dict[str, Any] | None = Body(default=None),
-            authorization: str | None = Header(default=None),
-            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-        ) -> dict[str, Any]:
-            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
-            result = self._call_command(
-                {
-                    "action": "route_session_seek",
-                    "payload": dict(payload or {}),
-                }
-            )
-            _raise_for_rejected(result)
-            return result
+        add_body_command_route(
+            "/api/v1/route/sessions",
+            name="start_route_session",
+            permission=API_PERMISSION_ROUTE_MEASURE,
+            action="start_route_session",
+        )
+        add_command_route(
+            "/api/v1/route/sessions/current",
+            method="GET",
+            name="route_session_status",
+            permission=API_PERMISSION_ROUTE_MEASURE,
+            action="route_session_status",
+        )
+        add_body_command_route(
+            "/api/v1/route/sessions/current/actions",
+            name="route_session_action",
+            permission=API_PERMISSION_ROUTE_MEASURE,
+            action="route_session_action",
+            required=True,
+        )
+        add_body_command_route(
+            "/api/v1/route/sessions/current/result",
+            name="route_session_result",
+            permission=API_PERMISSION_ROUTE_MEASURE,
+            action="route_session_result",
+            required=True,
+        )
+        add_body_command_route(
+            "/api/v1/route/sessions/current/seek",
+            name="route_session_seek",
+            permission=API_PERMISSION_ROUTE_MEASURE,
+            action="route_session_seek",
+        )
 
         @app.get("/api/v1/route/sessions/current/artifacts/{artifact_id}")
         def route_session_artifact(
             artifact_id: str,
-            authorization: str | None = Header(default=None),
-            x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+            auth_headers: tuple[str | None, str | None] = Depends(api_auth_headers),
         ) -> Response:
-            self._authorize(API_PERMISSION_ROUTE_MEASURE, authorization, x_api_key)
-            result = self._call_command(
-                {
-                    "action": "route_session_artifact",
-                    "payload": {"artifact_id": artifact_id},
-                }
+            result = command_result(
+                API_PERMISSION_ROUTE_MEASURE,
+                auth_headers,
+                "route_session_artifact",
+                {"artifact_id": artifact_id},
             )
-            _raise_for_rejected(result)
-            data = result.get("data", b"")
-            if not isinstance(data, (bytes, bytearray)):
-                raise HTTPException(
-                    status_code=500,
-                    detail={"message": "Route artifact data is invalid."},
-                )
-            content_type = str(result.get("content_type") or "application/octet-stream")
             filename = str(result.get("filename") or f"{artifact_id}.bin")
-            headers = {
-                "Content-Disposition": f'attachment; filename="{filename}"',
-                "X-Artifact-Id": str(result.get("artifact_id") or artifact_id),
-            }
-            return Response(
-                content=bytes(data),
-                media_type=content_type,
-                headers=headers,
+            return binary_response(
+                result,
+                invalid_message="Route artifact data is invalid.",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{filename}"',
+                    "X-Artifact-Id": str(result.get("artifact_id") or artifact_id),
+                },
             )
 
         app.add_api_route(
