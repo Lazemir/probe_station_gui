@@ -1268,23 +1268,14 @@ class Main(QMainWindow):
 
     def _api_stage_status(self) -> dict[str, Any]:
         latest_position = self.stage_controller.latest_stage_position()
-        return {
-            "accepted": True,
-            "connected": bool(self.serial_connection is not None and getattr(self.serial_connection, "is_open", False)),
-            "busy": self.stage_controller.is_busy(),
-            "state": self.stage_controller.latest_stage_state(),
-            "coordinate_display": self.stage_controller.coordinate_display_name(),
-            "homed_axes": sorted(self.stage_controller.homed_axes()),
-            "position": api_axis_value_map(latest_position, axis_names=self.STAGE_AXIS_NAMES),
-            "display_position": {axis: float(value) for axis, value in self._stage_axis_display_values.items()},
-            "pending_targets": {
-                axis: float(values[1])
-                for axis, values in self._pending_stage_axis_targets.items()
+        return self._stage_status_payload(
+            latest_position,
+            display_position={
+                axis: float(value)
+                for axis, value in self._stage_axis_display_values.items()
             },
-            "active_coordinate_axis": self._coordinate_targets.active_axis,
-            "active_coordinate_axes": sorted(self._coordinate_targets.active_axes),
-            "current_feedrate_mm_min": self._current_linear_feedrate(),
-        }
+            accepted=True,
+        )
 
     def _surface_map_stage_status(self) -> dict[str, Any]:
         latest_position = self.stage_controller.latest_stage_position()
@@ -1295,22 +1286,47 @@ class Main(QMainWindow):
         if isinstance(latest_position, (tuple, list)):
             for axis, value in zip(self.STAGE_AXIS_NAMES, latest_position):
                 display_position.setdefault(axis, float(value))
-        return {
-            "connected": bool(self.serial_connection is not None and getattr(self.serial_connection, "is_open", False)),
-            "busy": self.stage_controller.is_busy(),
-            "state": self.stage_controller.latest_stage_state(),
-            "coordinate_display": self.stage_controller.coordinate_display_name(),
-            "homed_axes": sorted(self.stage_controller.homed_axes()),
-            "position": api_axis_value_map(latest_position, axis_names=self.STAGE_AXIS_NAMES),
-            "display_position": display_position,
-            "pending_targets": {
-                axis: float(values[1])
-                for axis, values in self._pending_stage_axis_targets.items()
-            },
-            "active_coordinate_axis": self._coordinate_targets.active_axis,
-            "active_coordinate_axes": sorted(self._coordinate_targets.active_axes),
-            "current_feedrate_mm_min": self._current_linear_feedrate(),
-        }
+        return self._stage_status_payload(
+            latest_position,
+            display_position=display_position,
+            accepted=False,
+        )
+
+    def _stage_status_payload(
+        self,
+        latest_position: object,
+        *,
+        display_position: dict[str, float],
+        accepted: bool,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        if accepted:
+            payload["accepted"] = True
+        payload.update(
+            {
+                "connected": bool(
+                    self.serial_connection is not None
+                    and getattr(self.serial_connection, "is_open", False)
+                ),
+                "busy": self.stage_controller.is_busy(),
+                "state": self.stage_controller.latest_stage_state(),
+                "coordinate_display": self.stage_controller.coordinate_display_name(),
+                "homed_axes": sorted(self.stage_controller.homed_axes()),
+                "position": api_axis_value_map(
+                    latest_position,
+                    axis_names=self.STAGE_AXIS_NAMES,
+                ),
+                "display_position": display_position,
+                "pending_targets": {
+                    axis: float(values[1])
+                    for axis, values in self._pending_stage_axis_targets.items()
+                },
+                "active_coordinate_axis": self._coordinate_targets.active_axis,
+                "active_coordinate_axes": sorted(self._coordinate_targets.active_axes),
+                "current_feedrate_mm_min": self._current_linear_feedrate(),
+            }
+        )
+        return payload
 
     def _surface_map_move_to_xy(
         self,
@@ -1492,21 +1508,78 @@ class Main(QMainWindow):
     def _api_check_contact(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._api_measure_current_contact(payload, seek=False)
 
-    def _api_stage_local_focus(self, payload: dict[str, Any]) -> dict[str, Any]:
-        try:
-            focus_range_mm = payload_float(
+    def _api_focus_settings_from_payload(
+        self,
+        payload: dict[str, Any],
+    ) -> tuple[float, float | None]:
+        return (
+            payload_float(
                 payload,
                 "range_mm",
                 "focus_range_mm",
                 "photo_autofocus_range_mm",
                 default=0.03,
                 minimum=0.001,
-            )
-            focus_step_mm = payload_optional_float(
+            ),
+            payload_optional_float(
                 payload,
                 "step_mm",
                 "focus_step_mm",
                 minimum=0.001,
+            ),
+        )
+
+    def _api_focus_needles_rejection(
+        self,
+        message: str,
+        *,
+        contact: Any | None = None,
+    ) -> dict[str, Any] | None:
+        needles_known = bool(getattr(self.stage_controller, "_needles_known", False))
+        needles_up = bool(getattr(self.stage_controller, "_needles_up", False))
+        needles_zone = getattr(self.stage_controller, "_needles_zone", None)
+        if needles_known and needles_up and needles_zone == "raise":
+            return None
+        response: dict[str, Any] = {
+            "accepted": False,
+            "status_code": 409,
+            "message": message,
+        }
+        if contact is not None:
+            response["contact"] = contact
+        response.update(
+            {
+                "needles_known": needles_known,
+                "needles_up": needles_up,
+                "needles_zone": needles_zone or "unknown",
+            }
+        )
+        return response
+
+    def _api_contact_context_from_payload(
+        self,
+        payload: dict[str, Any],
+    ) -> tuple[int | None, Any | None, dict[str, Any] | None]:
+        contact_number = api_contact_number_from_payload(payload)
+        if contact_number is None:
+            return (
+                None,
+                None,
+                {
+                    "accepted": False,
+                    "status_code": 400,
+                    "message": "Provide a positive contact_number.",
+                },
+            )
+        context_result = self._api_contact_context(contact_number)
+        if not context_result.get("accepted", False):
+            return contact_number, None, context_result
+        return contact_number, context_result["contact"], None
+
+    def _api_stage_local_focus(self, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            focus_range_mm, focus_step_mm = self._api_focus_settings_from_payload(
+                payload
             )
         except ValueError as exc:
             return {
@@ -1519,21 +1592,12 @@ class Main(QMainWindow):
         try:
             self.stage_controller.begin_external_task("API local autofocus")
             active_stage_task = True
-            needles_known = bool(getattr(self.stage_controller, "_needles_known", False))
-            needles_up = bool(getattr(self.stage_controller, "_needles_up", False))
-            needles_zone = getattr(self.stage_controller, "_needles_zone", None)
-            if not (needles_known and needles_up and needles_zone == "raise"):
-                return {
-                    "accepted": False,
-                    "status_code": 409,
-                    "message": (
-                        "Local autofocus requires fully raised needles "
-                        "(known needle zone 'raise')."
-                    ),
-                    "needles_known": needles_known,
-                    "needles_up": needles_up,
-                    "needles_zone": needles_zone or "unknown",
-                }
+            needles_rejection = self._api_focus_needles_rejection(
+                "Local autofocus requires fully raised needles "
+                "(known needle zone 'raise')."
+            )
+            if needles_rejection is not None:
+                return needles_rejection
             result = self.stage_controller.run_external_local_autofocus(
                 range_mm=focus_range_mm,
                 step_mm=focus_step_mm,
@@ -1557,31 +1621,14 @@ class Main(QMainWindow):
         }
 
     def _api_route_contact_focus(self, payload: dict[str, Any]) -> dict[str, Any]:
-        contact_number = api_contact_number_from_payload(payload)
-        if contact_number is None:
-            return {
-                "accepted": False,
-                "status_code": 400,
-                "message": "Provide a positive contact_number.",
-            }
-        context_result = self._api_contact_context(contact_number)
-        if not context_result.get("accepted", False):
-            return context_result
-        contact = context_result["contact"]
+        _contact_number, contact, context_error = self._api_contact_context_from_payload(
+            payload
+        )
+        if context_error is not None:
+            return context_error
         try:
-            focus_range_mm = payload_float(
-                payload,
-                "range_mm",
-                "focus_range_mm",
-                "photo_autofocus_range_mm",
-                default=0.03,
-                minimum=0.001,
-            )
-            focus_step_mm = payload_optional_float(
-                payload,
-                "step_mm",
-                "focus_step_mm",
-                minimum=0.001,
+            focus_range_mm, focus_step_mm = self._api_focus_settings_from_payload(
+                payload
             )
         except ValueError as exc:
             return {
@@ -1595,22 +1642,13 @@ class Main(QMainWindow):
         try:
             self.stage_controller.begin_external_task("API route contact focus")
             active_stage_task = True
-            needles_known = bool(getattr(self.stage_controller, "_needles_known", False))
-            needles_up = bool(getattr(self.stage_controller, "_needles_up", False))
-            needles_zone = getattr(self.stage_controller, "_needles_zone", None)
-            if not (needles_known and needles_up and needles_zone == "raise"):
-                return {
-                    "accepted": False,
-                    "status_code": 409,
-                    "message": (
-                        "Route contact focus requires fully raised needles "
-                        "(known needle zone 'raise')."
-                    ),
-                    "contact": contact,
-                    "needles_known": needles_known,
-                    "needles_up": needles_up,
-                    "needles_zone": needles_zone or "unknown",
-                }
+            needles_rejection = self._api_focus_needles_rejection(
+                "Route contact focus requires fully raised needles "
+                "(known needle zone 'raise').",
+                contact=contact,
+            )
+            if needles_rejection is not None:
+                return needles_rejection
             result = self.stage_controller.run_external_local_autofocus(
                 range_mm=focus_range_mm,
                 step_mm=focus_step_mm,
@@ -1636,17 +1674,11 @@ class Main(QMainWindow):
         }
 
     def _api_route_contact_photo(self, payload: dict[str, Any]) -> dict[str, Any]:
-        contact_number = api_contact_number_from_payload(payload)
-        if contact_number is None:
-            return {
-                "accepted": False,
-                "status_code": 400,
-                "message": "Provide a positive contact_number.",
-            }
-        context_result = self._api_contact_context(contact_number)
-        if not context_result.get("accepted", False):
-            return context_result
-        contact = context_result["contact"]
+        contact_number, contact, context_error = self._api_contact_context_from_payload(
+            payload
+        )
+        if context_error is not None:
+            return context_error
         photo = self._latest_camera_frame_photo()
         if photo is None:
             return {
