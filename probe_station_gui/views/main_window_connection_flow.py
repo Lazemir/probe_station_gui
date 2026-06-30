@@ -7,6 +7,8 @@ import logging
 from PySide6.QtCore import QTimer
 
 from probe_station_gui.design import navigation_adapter as design_navigation
+from probe_station_gui.views import main_window_homing as homing_ui
+from probe_station_gui.views import main_window_stage_position_panel as stage_position_panel
 
 
 logger = logging.getLogger(__name__)
@@ -56,7 +58,9 @@ def on_serial_connected(owner: object, serial_port: object) -> None:
 
 
 def on_serial_disconnected(owner: object) -> None:
-    owner._stop_jog_before_serial_close("serial disconnect")
+    from probe_station_gui.views.main_window_shutdown import stop_jog_before_serial_close
+
+    stop_jog_before_serial_close(owner, "serial disconnect")
     if owner.serial_connection and owner.serial_connection.is_open:
         owner.serial_connection.close()
     owner.serial_connection = None
@@ -67,8 +71,8 @@ def on_serial_disconnected(owner: object) -> None:
     owner._manual_jog_prediction.reset_tracking()
     owner._controller_reboot_recovery_scheduled = False
     owner._clear_coordinate_move_tracking(clear_pending=True, reset_override=False)
-    owner._clear_pending_homing_queue()
-    owner._clear_stage_motion_axes()
+    homing_ui.clear_pending_homing_queue(owner)
+    stage_position_panel.clear_stage_motion_axes(owner)
     owner._clear_planned_move_prediction(clear_wait_state=True)
     owner._update_stage_coordinate_apply_state()
     logger.info("Serial disconnected")

@@ -37,8 +37,6 @@ class MainWindowShutdownOwner(Protocol):
 
     def _stop_telegram_bot_service(self) -> None: ...
     def _save_pending_linear_feedrate_default(self) -> None: ...
-    def _stop_jog_before_serial_close(self, reason: str) -> None: ...
-    def _close_auxiliary_windows(self, *, force_route_dialog: bool = False) -> None: ...
     def _route_runtime_presenter(self) -> Any: ...
 
 
@@ -57,7 +55,7 @@ def close_event(owner: MainWindowShutdownOwner, event: Any) -> None:
     _stop_microscope_scan(owner)
     _close_serial_and_panels(owner)
     _shutdown_controllers(owner)
-    owner._close_auxiliary_windows(force_route_dialog=True)
+    close_auxiliary_windows(owner, force_route_dialog=True)
     if owner.serial_connection_panel:
         owner.serial_connection_panel.shutdown()
     event.accept()
@@ -108,7 +106,7 @@ def _stop_microscope_scan(owner: MainWindowShutdownOwner) -> None:
 
 
 def _close_serial_and_panels(owner: MainWindowShutdownOwner) -> None:
-    owner._stop_jog_before_serial_close("application shutdown")
+    stop_jog_before_serial_close(owner, "application shutdown")
     owner.grabber.stop()
     owner.thread.quit()
     owner.thread.wait()

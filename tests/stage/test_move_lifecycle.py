@@ -33,6 +33,7 @@ class _StageController:
         self.cancelled_motions: list[str] = []
         self.feed_override_resets = 0
         self.last_status_time = 11.0
+        self.home_axis_requests: list[str] = []
 
     def is_busy(self) -> bool:
         return self.busy
@@ -51,6 +52,10 @@ class _StageController:
 
     def queue_feed_override_reset(self) -> None:
         self.feed_override_resets += 1
+
+    def request_home_axis(self, axis: str) -> bool:
+        self.home_axis_requests.append(str(axis))
+        return True
 
 
 class _View:
@@ -132,6 +137,7 @@ class _Preparation:
 
 
 class _Owner:
+    STAGE_AXIS_NAMES = AXES
     MANUAL_JOG_SETTLE_POLL_DELAYS_MS = (40, 120)
 
     def __init__(self) -> None:
@@ -184,9 +190,22 @@ class _Owner:
         self.design_position_refreshes = 0
         self.alignment_panel_collapses = 0
         self.quick_alignment_collapses = 0
+        self._stage_motion_axes: set[str] = set()
+        self._stage_motion_blink_dimmed = False
+        self._stage_motion_blink_timer = types.SimpleNamespace(
+            isActive=lambda: False,
+            stop=lambda: None,
+            start=lambda: None,
+        )
+        self._stage_position_panel = types.SimpleNamespace(
+            refresh_axis_styles=lambda _axes, _dimmed: self._refresh_stage_axis_styles()
+        )
 
     def _controller_reports_active_motion(self) -> bool:
         return self.stage_controller.latest_stage_state().lower() in {"run", "jog"}
+
+    def _controller_latest_state_blocks_motion(self) -> bool:
+        return False
 
     def _surface_map_capture_running(self) -> bool:
         return self._surface_map_running
@@ -435,7 +454,7 @@ def test_move_finish_normal_failure_clears_tracking_and_cross_then_reports_statu
 
     assert owner.view.cleared_target_crosses == 1
     assert owner._coordinate_targets.has_active_move() is False
-    assert owner.stage_motion_clears == 1
+    assert owner._stage_motion_axes == set()
     assert owner.statuses == [("Limit reached.", 5000)]
     assert owner.cancel_refreshes == 1
 
@@ -475,4 +494,4 @@ def test_finish_coordinate_move_if_idle_schedules_pending_homing_action() -> Non
 
     assert owner._coordinate_targets.has_active_move() is False
     assert scheduled == [0]
-    assert owner.homing_starts == 1
+    assert owner.stage_controller.home_axis_requests == ["Z"]

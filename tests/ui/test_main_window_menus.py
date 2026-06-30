@@ -123,6 +123,16 @@ def test_setup_main_window_menus_preserves_labels_and_shortcuts(
         "toggle_contact_calibration_window",
         lambda owner, visible: owner._record("contact", bool(visible)),
     )
+    monkeypatch.setattr(
+        main_window_menus,
+        "show_surface_map_window",
+        lambda owner: owner._record("surface"),
+    )
+    monkeypatch.setattr(
+        main_window_menus,
+        "show_microscope_scan_dialog",
+        lambda owner: owner._record("microscope"),
+    )
     window = _MenuOwner()
 
     setup_main_window_menus(window)

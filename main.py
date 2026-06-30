@@ -66,7 +66,6 @@ _startup_trace("stdlib imports done")
 from PySide6.QtCore import (
     QBuffer,
     QIODevice,
-    QLocale,
     QThread,
     QTimer,
     Qt,
@@ -76,11 +75,8 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QAction,
     QDesktopServices,
-    QDoubleValidator,
     QIcon,
     QImage,
-    QKeySequence,
-    QShortcut,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -92,7 +88,6 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
-    QPushButton,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -151,7 +146,6 @@ from probe_station_gui.instruments.meters.lcr import (
 from probe_station_gui.stage.api_moves import (
     api_axis_value_map, api_coordinate_move_busy_response, api_coordinate_move_plan,
     api_coordinate_move_start_failed_response, api_coordinate_move_success_response,
-    api_move_feedrate,
 )
 from probe_station_gui.stage.coordinate_targets import (
     CoordinateTargetConfig,
@@ -185,8 +179,6 @@ from probe_station_gui.route.model import (
 from probe_station_gui.route.measurement import (
     ROUTE_OPERATION_MEASURE,
     ROUTE_OPERATION_PHOTO,
-    ROUTE_OPERATION_PHOTO_THEN_MEASURE,
-    RouteContactQualityLimits,
     RouteContactHeightRecord,
     RouteExternalMeasurementSessionRunner,
     RouteMeasurementPoint,
@@ -265,7 +257,6 @@ from probe_station_gui.route.meter_config import (
 )
 from probe_station_gui.route.measurement_settings import RouteMeasurementSettingsStore
 from probe_station_gui.route.session_start import (
-    ApiRouteSessionLaunchState,
     GuiRouteLaunchState,
     GuiRouteStartPreflight,
     RouteExternalSessionStartSettings,
@@ -299,18 +290,14 @@ from probe_station_gui.route.formatting import (
 )
 from probe_station_gui.route.artifact_rows import (
     ROUTE_CONTACT_HEIGHT_MAP_FIELDS,
-    ROUTE_PHOTO_FOCUS_MAP_FIELDS,
     route_contact_height_map_path,
     route_contact_height_map_row,
-    route_photo_focus_map_path,
-    route_photo_focus_map_row,
 )
 from probe_station_gui.camera.imaging import (
     MicroscopeCaptureResult,
     MicroscopeScanPlan,
     MicroscopeScanTile,
     objective_scale_calibration,
-    route_photo_filename,
     save_microscope_image,
     stitch_scan_tiles,
     utc_timestamp,
@@ -344,13 +331,7 @@ from probe_station_gui.views.resistance_monitor_panel import ResistanceMonitorPa
 from probe_station_gui.views.serial_connection_panel import SerialConnectionPanel
 from probe_station_gui.views.main_window_auxiliary import (
     create_design_layout_window,
-    open_settings_dialog,
-    show_microscope_scan_dialog,
     show_connection_dialog,
-    show_surface_map_window,
-    sync_contact_calibration_window_action,
-    sync_design_layout_window_action,
-    toggle_contact_calibration_window,
     toggle_design_layout_window,
 )
 from probe_station_gui.views.main_window_docks import create_main_window_docks
@@ -358,7 +339,6 @@ from probe_station_gui.views.main_window_menus import setup_main_window_menus
 from probe_station_gui.views import (
     main_window_connection_flow as connection_flow,
 )
-from probe_station_gui.views import main_window_homing as homing_ui
 from probe_station_gui.views import (
     main_window_needle_calibration as needle_calibration_ui,
 )
@@ -405,7 +385,6 @@ if TYPE_CHECKING:
     from probe_station_gui.route.measurement_config import (
         RouteMeasurementRunConfiguration,
     )
-    from probe_station_gui.dialogs.settings_dialog import SettingsDialog
     from probe_station_gui.views.surface_map_panel import SurfaceMapWindow
     from probe_station_gui.views.design_navigator_panel import (
         DesignLayoutWindow,
@@ -673,7 +652,9 @@ class Main(QMainWindow):
         self.statusBar()
         self._objective_widget = self._create_objective_widget()
         self.statusBar().addPermanentWidget(self._objective_widget, 0)
-        self._stage_position_widget = self._create_stage_position_widget()
+        self._stage_position_widget = stage_position_panel_adapter.create_stage_position_widget(
+            self
+        )
         self.statusBar().addPermanentWidget(self._stage_position_widget, 0)
         self._status_log = QPlainTextEdit(self)
         self._status_log.setReadOnly(True)
@@ -722,13 +703,41 @@ class Main(QMainWindow):
         )
         self.microscope_scan_status.connect(self._on_microscope_scan_status)
         self.microscope_scan_finished.connect(self._on_microscope_scan_finished)
-        self.contact_seek_status.connect(self._on_contact_seek_status)
-        self.contact_seek_calibration_found.connect(
-            self._on_contact_seek_calibration_found
+        self.contact_seek_status.connect(
+            lambda message: needle_calibration_ui.on_contact_seek_status(
+                self,
+                message,
+            )
         )
-        self.contact_seek_finished.connect(self._on_contact_seek_finished)
+        self.contact_seek_calibration_found.connect(
+            lambda lowering_mm, detail: (
+                needle_calibration_ui.on_contact_seek_calibration_found(
+                    self,
+                    lowering_mm,
+                    detail,
+                )
+            )
+        )
+        self.contact_seek_finished.connect(
+            lambda success, message: needle_calibration_ui.on_contact_seek_finished(
+                self,
+                success,
+                message,
+            )
+        )
         self.sample_handling_status.connect(self._show_status)
-        self.sample_handling_finished.connect(self._on_sample_handling_finished)
+        self.sample_handling_finished.connect(
+            lambda success, message, offer_autofocus, focus_z_mm: (
+                needle_calibration_ui.on_sample_handling_finished(
+                    self,
+                    success,
+                    message,
+                    offer_autofocus,
+                    focus_z_mm,
+                    message_box=QMessageBox,
+                )
+            )
+        )
 
         self.stage_controller = StageController()
         self.stage_controller.status_message.connect(self._show_status)
@@ -780,7 +789,9 @@ class Main(QMainWindow):
         self._manual_jog_timer.timeout.connect(self._advance_motion_prediction)
         self._stage_motion_blink_timer = QTimer(self)
         self._stage_motion_blink_timer.setInterval(self.STAGE_COORDINATE_BLINK_MS)
-        self._stage_motion_blink_timer.timeout.connect(self._advance_stage_motion_blink)
+        self._stage_motion_blink_timer.timeout.connect(
+            lambda: stage_position_panel_adapter.advance_stage_motion_blink(self)
+        )
         self._pending_click_timer = QTimer(self)
         self._pending_click_timer.setInterval(self.CLICK_TO_MOVE_PENDING_RETRY_MS)
         self._pending_click_timer.timeout.connect(self._retry_pending_click_to_move)
@@ -1860,7 +1871,7 @@ class Main(QMainWindow):
                 self.stage_controller.cancel_active_motion(reason)
         except Exception:
             logger.exception("Failed to cancel API route control active motion.")
-        self._clear_stage_motion_axes()
+        stage_position_panel_adapter.clear_stage_motion_axes(self)
         try:
             self._clear_planned_move_prediction(clear_wait_state=True)
         except Exception:
@@ -2779,7 +2790,7 @@ class Main(QMainWindow):
         self._design_layout_preload_started = False
         self._design_layout_window_class = design_layout_window_class
         if self._design_layout_window_requested:
-            self._create_design_layout_window(design_layout_window_class)
+            create_design_layout_window(self, design_layout_window_class)
 
     def on_click(self, dx: float, dy: float, rel_x: float, rel_y: float) -> None:
         if self._manual_alignment_pick_slot is not None:
@@ -2820,7 +2831,7 @@ class Main(QMainWindow):
             return False
         accepted = self.stage_controller.request_move(dx, dy)
         if accepted:
-            self._set_stage_motion_axes({"X", "Y"})
+            stage_position_panel_adapter.set_stage_motion_axes(self, {"X", "Y"})
         return bool(accepted)
 
     def _queue_pending_click_to_move(
@@ -3104,39 +3115,6 @@ class Main(QMainWindow):
             (float(camera_stage_xy[0]), float(camera_stage_xy[1]))
         )
 
-    def _create_stage_position_widget(self) -> QWidget:
-        return stage_position_panel_adapter.create_stage_position_widget(self)
-
-    def _display_axis_value_from_raw(self, axis_name: str, raw_value: float) -> float:
-        return stage_position_panel_adapter.display_axis_value_from_raw(
-            self,
-            axis_name,
-            raw_value,
-        )
-
-    def _raw_axis_value_from_display(
-        self,
-        axis_name: str,
-        display_value: float,
-    ) -> float:
-        return stage_position_panel_adapter.raw_axis_value_from_display(
-            self,
-            axis_name,
-            display_value,
-        )
-
-    def _refresh_stage_axis_styles(self) -> None:
-        stage_position_panel_adapter.refresh_stage_axis_styles(self)
-
-    def _set_stage_motion_axes(self, axes: object) -> None:
-        stage_position_panel_adapter.set_stage_motion_axes(self, axes)
-
-    def _clear_stage_motion_axes(self) -> None:
-        stage_position_panel_adapter.clear_stage_motion_axes(self)
-
-    def _advance_stage_motion_blink(self) -> None:
-        stage_position_panel_adapter.advance_stage_motion_blink(self)
-
     def _on_stage_axis_escape_pressed(self, axis_name: str) -> None:
         panel = getattr(self, "_stage_position_panel", None)
         if panel is None:
@@ -3149,7 +3127,7 @@ class Main(QMainWindow):
         if field is not None:
             field.deselect()
             field.clearFocus()
-        self._refresh_stage_axis_styles()
+        stage_position_panel_adapter.refresh_stage_axis_styles(self)
         self._update_stage_coordinate_apply_state()
         self.view.setFocus(Qt.OtherFocusReason)
 
@@ -3245,12 +3223,6 @@ class Main(QMainWindow):
         self._update_stage_coordinate_apply_state()
         return had_changes
 
-    def _cancel_stage_coordinate_action(self) -> None:
-        stage_move_lifecycle.cancel_stage_coordinate_action(
-            self,
-            focus_reason=Qt.OtherFocusReason,
-        )
-
     def _append_status_log(self, message: str) -> None:
         if not message:
             return
@@ -3337,7 +3309,7 @@ class Main(QMainWindow):
         self.stage_controller.apply_axis_z_calibration(
             self.settings_manager.axis_z_calibration_configuration()
         )
-        self._apply_needle_calibration_runtime(needle_settings)
+        needle_calibration_ui.apply_needle_calibration_runtime(self, needle_settings)
         coordinate_settings = self.settings_manager.coordinate_system_configuration()
         self.stage_controller.apply_coordinate_system_configuration(
             position_mode=coordinate_settings.position_mode,
@@ -3397,15 +3369,6 @@ class Main(QMainWindow):
             self._configure_api_server_from_settings(start_if_enabled=True)
         self._configure_telegram_bot_from_settings()
         self._update_coordinate_display(cursor_xy=None)
-
-    def _apply_needle_calibration_runtime(self, needle_settings: object) -> None:
-        needle_calibration_ui.apply_needle_calibration_runtime(self, needle_settings)
-
-    def _open_settings_dialog(self, initial_tab: object = None) -> None:
-        open_settings_dialog(self, initial_tab)
-
-    def _show_connection_dialog(self, tab_name: object = None) -> None:
-        show_connection_dialog(self, tab_name)
 
     def _apply_settings_from_dialog(self, new_settings: object) -> None:
         if not isinstance(new_settings, Settings):
@@ -3539,8 +3502,20 @@ class Main(QMainWindow):
             new_name,
             self.stage_controller.latest_stage_position(),
             self.stage_controller.is_busy(),
-            display_axis_value_from_raw=self._display_axis_value_from_raw,
-            raw_axis_value_from_display=self._raw_axis_value_from_display,
+            display_axis_value_from_raw=(
+                lambda axis, raw: stage_position_panel_adapter.display_axis_value_from_raw(
+                    self,
+                    axis,
+                    raw,
+                )
+            ),
+            raw_axis_value_from_display=(
+                lambda axis, display: stage_position_panel_adapter.raw_axis_value_from_display(
+                    self,
+                    axis,
+                    display,
+                )
+            ),
         )
         if plan.status:
             self._show_plan_status(plan)
@@ -4074,12 +4049,12 @@ class Main(QMainWindow):
     def show_serial_terminal_window(self) -> None:
         if not self.serial_terminal_panel:
             return
-        self._show_connection_dialog("terminal")
+        show_connection_dialog(self, "terminal")
         self.serial_terminal_panel.setFocus(Qt.ActiveWindowFocusReason)
 
     def _on_manual_motion_axis(self, axis: str) -> None:
         axis_name = axis.upper()
-        self._set_stage_motion_axes({axis_name})
+        stage_position_panel_adapter.set_stage_motion_axes(self, {axis_name})
         if axis_name == "B":
             self._invalidate_design_registration(
                 "Design registration cleared after manual B-axis motion."
@@ -4105,7 +4080,7 @@ class Main(QMainWindow):
         if result.zero_distance:
             logger.debug("MOTION PREDICTION stop_requested command=%s", commanded_distances)
             self._manual_jog_timer.stop()
-            self._clear_stage_motion_axes()
+            stage_position_panel_adapter.clear_stage_motion_axes(self)
             self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
             return
         if result.clear_coordinate_move_tracking:
@@ -4117,7 +4092,10 @@ class Main(QMainWindow):
                 clear_pending=False,
                 reset_override=False,
             )
-        self._set_stage_motion_axes(set(result.motion_axes))
+        stage_position_panel_adapter.set_stage_motion_axes(
+            self,
+            set(result.motion_axes),
+        )
         prediction = self._manual_jog_prediction
         design_stage_xy = (
             self._design_xy_from_raw_stage_xy(prediction.stage_xy)
@@ -4502,7 +4480,7 @@ class Main(QMainWindow):
         self._planned_move_ends_at = started_at + max(duration_s, 0.05)
         self._planned_move_waiting_for_fresh_status = False
         self._planned_move_stop_status_timestamp = None
-        self._set_stage_motion_axes({"X", "Y"})
+        stage_position_panel_adapter.set_stage_motion_axes(self, {"X", "Y"})
         logger.debug(
             "MOTION PREDICTION planned_move_start source=%s origin=%s target=%s distance=%.4f duration=%.4f feedrate=%.3f",
             source_label,
@@ -5810,7 +5788,7 @@ class Main(QMainWindow):
             runner.request_current_point_correction()
         if not waiting:
             self.stage_controller.cancel_active_task(reason)
-            self._clear_stage_motion_axes()
+            stage_position_panel_adapter.clear_stage_motion_axes(self)
             self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
 
     def _on_route_measurement_status(self, message: str) -> None:
@@ -6408,7 +6386,7 @@ class Main(QMainWindow):
         def reject(message: str, timeout_ms: int) -> bool:
             panel.pop_pending_target(axis)
             panel.reset_axis_field(axis, self._stage_axis_display_values.get(axis))
-            self._refresh_stage_axis_styles()
+            stage_position_panel_adapter.refresh_stage_axis_styles(self)
             self._update_stage_coordinate_apply_state()
             self._show_status(message, timeout_ms)
             return False
@@ -6434,7 +6412,7 @@ class Main(QMainWindow):
         if commit_from_return:
             self.view.setFocus(Qt.OtherFocusReason)
         panel.set_pending_target(axis, raw_target, resolved_display_target)
-        self._refresh_stage_axis_styles()
+        stage_position_panel_adapter.refresh_stage_axis_styles(self)
         self._update_stage_coordinate_apply_state()
         return True
 
@@ -6535,7 +6513,10 @@ class Main(QMainWindow):
                 "Design registration cleared after B-axis coordinate motion."
             )
         self._coordinate_targets.apply_start_plan(plan)
-        self._set_stage_motion_axes(set(plan.ordered_axes))
+        stage_position_panel_adapter.set_stage_motion_axes(
+            self,
+            set(plan.ordered_axes),
+        )
         self._apply_coordinate_common_feedrate_plan(plan.common_feedrate)
         self._update_stage_coordinate_apply_state()
         accepted = self.stage_controller.request_absolute_axis_targets_move(
@@ -6584,7 +6565,7 @@ class Main(QMainWindow):
                 reset_override=False,
             )
             if decision.clear_stage_motion_axes:
-                self._clear_stage_motion_axes()
+                stage_position_panel_adapter.clear_stage_motion_axes(self)
             return
         self._advance_coordinate_move_prediction()
         if not self._coordinate_targets.has_active_move():
@@ -6659,7 +6640,11 @@ class Main(QMainWindow):
         axis = axis_name.strip().upper()
         if axis not in self._stage_axis_raw_values:
             return None
-        return self._raw_axis_value_from_display(axis, display_target)
+        return stage_position_panel_adapter.raw_axis_value_from_display(
+            self,
+            axis,
+            display_target,
+        )
 
     def _resolve_stage_axis_target(
         self,
@@ -6687,12 +6672,6 @@ class Main(QMainWindow):
             homed_axes=self._stage_axis_homed,
             axis_display_limits=self.stage_controller.axis_display_limits,
         )
-
-    def _on_limit_axes_changed(self, axes: object) -> None:
-        homing_ui.on_limit_axes_changed(self, axes)
-
-    def _on_homing_status_changed(self, _homed_axes: object) -> None:
-        homing_ui.on_homing_status_changed(self, _homed_axes)
 
     def _refresh_controller_status(self) -> None:
         if self.serial_connection is None or not self.serial_connection.is_open:
@@ -6795,57 +6774,8 @@ class Main(QMainWindow):
         height_vec = inverse @ np.asarray([0.0, float(stage_fov[1])], dtype=float)
         return (float(np.linalg.norm(width_vec)), float(np.linalg.norm(height_vec)))
 
-    def _request_home_axis_from_ui(self, axis: str) -> None:
-        homing_ui.request_home_axis_from_ui(self, axis)
-
-    def _request_home_all_from_ui(self) -> None:
-        homing_ui.request_home_all_from_ui(self)
-
-    def _queue_or_start_homing_axes(self, axes: list[str]) -> None:
-        homing_ui.queue_or_start_homing_axes(self, axes)
-
-    def _start_next_pending_homing_action(self) -> None:
-        homing_ui.start_next_pending_homing_action(self)
-
-    def _clear_pending_homing_queue(self) -> None:
-        homing_ui.clear_pending_homing_queue(self)
-
-    def _refresh_pending_homing_ui(self) -> None:
-        homing_ui.refresh_pending_homing_ui(self)
-
-    def _on_homing_action_finished(
-        self, success: bool, _message: str, axis_key: str
-    ) -> None:
-        homing_ui.on_homing_action_finished(self, success, _message, axis_key)
-
-    def _on_homing_action_started(self, axis_key: str) -> None:
-        homing_ui.on_homing_action_started(self, axis_key)
-
-    def _on_needles_action_started(self, _action: str) -> None:
-        homing_ui.on_needles_action_started(self, _action)
-
-    def _on_needles_action_finished(
-        self, _success: bool, _message: str, _action: str
-    ) -> None:
-        homing_ui.on_needles_action_finished(self, _success, _message, _action)
-
     def closeEvent(self, event) -> None:  # type: ignore[override]
         shutdown_ui.close_event(self, event)
-
-    def _close_auxiliary_windows(self, *, force_route_dialog: bool = False) -> None:
-        shutdown_ui.close_auxiliary_windows(self, force_route_dialog=force_route_dialog)
-
-    def _stop_jog_before_serial_close(self, reason: str) -> None:
-        shutdown_ui.stop_jog_before_serial_close(self, reason)
-
-    def _create_dock_widgets(self) -> None:
-        create_main_window_docks(self)
-
-    def _show_surface_map_window(self) -> None:
-        show_surface_map_window(self)
-
-    def _show_microscope_scan_dialog(self) -> None:
-        show_microscope_scan_dialog(self)
 
     def _default_microscope_scan_output_dir(self) -> str:
         return microscope_scan.default_output_dir(self._design_session.document)
@@ -7097,12 +7027,6 @@ class Main(QMainWindow):
             self.microscope_scan_dialog.set_status(message)
         self._show_status(message, 10000 if success else 8000)
 
-    def _create_design_layout_window(
-        self,
-        design_layout_window_class: object | None = None,
-    ) -> None:
-        create_design_layout_window(self, design_layout_window_class)
-
     def _move_to_design_window_point(self, x_value: float, y_value: float) -> None:
         design_xy = (float(x_value), float(y_value))
         if not self._move_to_design_coordinate(design_xy, source_label="design window"):
@@ -7168,19 +7092,10 @@ class Main(QMainWindow):
         ):
             lcr_controller.set_live_polling_enabled(True)
 
-    def _request_contact_seek(self) -> None:
-        needle_calibration_ui.request_contact_seek(
-            self,
-            thread_factory=threading.Thread,
-        )
-
     def _cancel_contact_seek(self) -> None:
         self._contact_seek_stop_requested.set()
         self.stage_controller.cancel_active_motion("Contact seek cancel requested.")
         self._show_status("Contact seek cancel requested.")
-
-    def _run_contact_seek(self) -> None:
-        needle_calibration_ui.run_contact_seek(self)
 
     def _contact_seek_measure_quality(self, count: int):
         raw_batch = self.lcr_controller.read_route_measurement_batch_now(int(count))
@@ -7189,30 +7104,6 @@ class Main(QMainWindow):
             for index, raw in enumerate(raw_batch, start=1)
         )
         return summarize_route_contact_quality(samples)
-
-    def _confirm_and_save_contact_seek(self, label: str, moved_mm: float) -> bool:
-        return needle_calibration_ui.confirm_and_save_contact_seek(
-            self,
-            label,
-            moved_mm,
-        )
-
-    def _on_contact_seek_status(self, message: str) -> None:
-        needle_calibration_ui.on_contact_seek_status(self, message)
-
-    def _on_contact_seek_calibration_found(
-        self,
-        lowering_mm: float,
-        detail: str,
-    ) -> None:
-        needle_calibration_ui.on_contact_seek_calibration_found(
-            self,
-            lowering_mm,
-            detail,
-        )
-
-    def _on_contact_seek_finished(self, success: bool, message: str) -> None:
-        needle_calibration_ui.on_contact_seek_finished(self, success, message)
 
     def _display_a_for_needle_lowering(self, lowering_mm: float | None) -> float | None:
         if lowering_mm is None:
@@ -7230,52 +7121,6 @@ class Main(QMainWindow):
 
     def _on_design_snap_enabled_changed(self, enabled: bool) -> None:
         self._set_design_snap_enabled(enabled)
-
-    def _save_current_needle_height(self) -> None:
-        needle_calibration_ui.save_current_needle_height(self)
-
-    def _save_needle_position_from_display_a_coordinate(
-        self,
-        action: str,
-        a_coordinate: float,
-    ) -> None:
-        needle_calibration_ui.save_needle_position_from_display_a_coordinate(
-            self,
-            action,
-            a_coordinate,
-        )
-
-    def _save_needle_down_position_from_raw_a_coordinate(
-        self,
-        a_coordinate: float,
-    ) -> None:
-        self._save_needle_position_from_raw_a_coordinate("lower", a_coordinate)
-
-    def _save_needle_down_position_from_lowering(
-        self,
-        lowering_mm: float,
-    ) -> None:
-        needle_calibration_ui.save_needle_down_position_from_lowering(
-            self,
-            lowering_mm,
-        )
-
-    def _save_needle_position_from_raw_a_coordinate(
-        self,
-        action: str,
-        a_coordinate: float,
-    ) -> None:
-        needle_calibration_ui.save_needle_position_from_raw_a_coordinate(
-            self,
-            action,
-            a_coordinate,
-        )
-
-    def _save_surface_position(self, target: str) -> None:
-        needle_calibration_ui.save_surface_position(self, target)
-
-    def _move_to_surface_position(self, target: str) -> None:
-        needle_calibration_ui.move_to_surface_position(self, target)
 
     def _sample_handling_active(self) -> bool:
         thread = getattr(self, "_sample_handling_thread", None)
@@ -7333,19 +7178,6 @@ class Main(QMainWindow):
             getattr(self, "_design_session", None)
         )
 
-    def _request_sample_unload(self) -> None:
-        needle_calibration_ui.request_sample_unload(
-            self,
-            message_box=QMessageBox,
-            thread_factory=threading.Thread,
-        )
-
-    def _request_sample_load(self) -> None:
-        needle_calibration_ui.request_sample_load(
-            self,
-            thread_factory=threading.Thread,
-        )
-
     def _run_sample_unload(
         self,
         xy_feedrate: float,
@@ -7380,21 +7212,6 @@ class Main(QMainWindow):
             load_y_mm=self.SAMPLE_LOAD_Y_MM,
         )
 
-    def _on_sample_handling_finished(
-        self,
-        success: bool,
-        message: str,
-        offer_autofocus: bool,
-        focus_z_mm: object,
-    ) -> None:
-        needle_calibration_ui.on_sample_handling_finished(
-            self,
-            success,
-            message,
-            offer_autofocus,
-            focus_z_mm,
-            message_box=QMessageBox,
-        )
 
     def _on_oscillation_state_changed(self, running: bool, axis: str) -> None:
         if self.oscillation_panel:

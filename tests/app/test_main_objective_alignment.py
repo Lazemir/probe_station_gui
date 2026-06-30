@@ -63,6 +63,12 @@ class _Stage:
     def request_status_refresh(self) -> None:
         self.status_refreshes += 1
 
+    def calibrated_axis_display_value(self, _axis: str, raw_value: float) -> float:
+        return float(raw_value) + 100.0
+
+    def calibrated_axis_raw_value(self, _axis: str, display_value: float) -> float:
+        return float(display_value) - 100.0
+
     def apply_objective_configuration(self, *args: object) -> None:
         self.applied_objectives.append(args)
 
@@ -106,8 +112,6 @@ def _window() -> tuple[Main, _Stage, _SettingsManager, list[str]]:
     window._objective_offset_reference = None
     window._design_session = types.SimpleNamespace(document=None)
     window._current_linear_feedrate = lambda: 123.0
-    window._display_axis_value_from_raw = lambda _axis, raw: raw + 100.0
-    window._raw_axis_value_from_display = lambda _axis, display: display - 100.0
     window._refresh_design_position = lambda: setattr(
         window,
         "_design_refreshes",

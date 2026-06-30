@@ -59,8 +59,14 @@ class _Owner:
         self._stage_limit_axes = set()
         self._stage_axis_base_styles = {}
         self._pending_stage_axis_targets = {}
-        self._stage_motion_axes = set()
+        self._stage_motion_axes = {"X"}
         self._stage_motion_blink_dimmed = False
+        self._stage_motion_blink_timer = types.SimpleNamespace(isActive=lambda: False)
+        self._stage_position_panel = types.SimpleNamespace(
+            refresh_axis_styles=lambda _axes, _dimmed: self.calls.append(
+                ("clear_motion", None)
+            )
+        )
         self._coordinate_targets = CoordinateTargetMoveState(
             CoordinateTargetConfig(
                 axis_names=AXES,
@@ -152,9 +158,6 @@ class _Owner:
 
     def _finish_coordinate_move_if_idle(self, position: object | None = None) -> None:
         self.calls.append(("finish", position))
-
-    def _clear_stage_motion_axes(self) -> None:
-        self.calls.append(("clear_motion", None))
 
     def _publish_stage_position_estimate(
         self,

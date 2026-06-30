@@ -8,6 +8,7 @@ import time
 from typing import Any, Protocol
 
 from probe_station_gui.stage.position_presenter import stage_position_signal_plan
+from probe_station_gui.views import main_window_stage_position_panel as stage_position_panel
 
 
 logger = logging.getLogger("main")
@@ -55,7 +56,6 @@ class StagePositionUpdateOwner(Protocol):
     ) -> None: ...
     def _format_optional_point(self, point: tuple[float, float] | None) -> str: ...
     def _finish_coordinate_move_if_idle(self, position: object | None = None) -> None: ...
-    def _clear_stage_motion_axes(self) -> None: ...
     def _update_stage_position_display(self, position: object | None) -> None: ...
     def _publish_stage_position_estimate(
         self,
@@ -254,7 +254,7 @@ def on_stage_position_changed(
     owner._publish_stage_position_estimate(display_position)
     if latest_state == "idle":
         owner._finish_coordinate_move_if_idle(display_position)
-        owner._clear_stage_motion_axes()
+        stage_position_panel.clear_stage_motion_axes(owner)
 
 
 def _build_stage_position_signal_plan(
@@ -326,7 +326,7 @@ def _apply_unhomed_fallback(
     owner._update_design_position(signal_plan.status.unhomed_design_position)
     if latest_state == "idle":
         owner._finish_coordinate_move_if_idle(position)
-        owner._clear_stage_motion_axes()
+        stage_position_panel.clear_stage_motion_axes(owner)
 
 
 def _ignore_manual_idle_sample(

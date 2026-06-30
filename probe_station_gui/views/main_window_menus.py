@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Protocol
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtWidgets import QMessageBox
 
+from probe_station_gui.views import main_window_needle_calibration as needle_calibration_ui
 from probe_station_gui.views.main_window_auxiliary import (
+    open_settings_dialog,
+    show_connection_dialog,
+    show_microscope_scan_dialog,
+    show_surface_map_window,
     toggle_contact_calibration_window,
     toggle_design_layout_window,
 )
@@ -33,13 +40,7 @@ class MainWindowMenuOwner(Protocol):
 
     def menuBar(self) -> Any: ...  # noqa: N802 - Qt naming
     def addAction(self, action: Any) -> None: ...  # noqa: N802 - Qt naming
-    def _open_settings_dialog(self) -> None: ...
     def _open_status_log(self) -> None: ...
-    def _show_connection_dialog(self) -> None: ...
-    def _request_sample_load(self) -> None: ...
-    def _request_sample_unload(self) -> None: ...
-    def _show_surface_map_window(self) -> None: ...
-    def _show_microscope_scan_dialog(self) -> None: ...
     def _show_click_calibration_dialog(self) -> None: ...
     def _on_measure_action_toggled(self, checked: bool) -> None: ...
     def _capture_manual_alignment_center_shortcut(self) -> None: ...
@@ -64,7 +65,7 @@ def setup_main_window_menus(owner: MainWindowMenuOwner) -> None:
 
 def _add_application_actions(owner: MainWindowMenuOwner, app_menu: Any) -> None:
     settings_action = QAction("Settings", owner)
-    settings_action.triggered.connect(owner._open_settings_dialog)
+    settings_action.triggered.connect(lambda _checked=False: open_settings_dialog(owner))
     app_menu.addAction(settings_action)
 
     open_log_action = QAction("Open Status Log", owner)
@@ -72,17 +73,30 @@ def _add_application_actions(owner: MainWindowMenuOwner, app_menu: Any) -> None:
     app_menu.addAction(open_log_action)
 
     serial_connection_action = QAction("Connection", owner)
-    serial_connection_action.triggered.connect(owner._show_connection_dialog)
+    serial_connection_action.triggered.connect(
+        lambda _checked=False: show_connection_dialog(owner)
+    )
     app_menu.addAction(serial_connection_action)
 
 
 def _add_navigation_actions(owner: MainWindowMenuOwner, navigation_menu: Any) -> None:
     owner._sample_load_action = QAction("Load Sample", owner)
-    owner._sample_load_action.triggered.connect(owner._request_sample_load)
+    owner._sample_load_action.triggered.connect(
+        lambda _checked=False: needle_calibration_ui.request_sample_load(
+            owner,
+            thread_factory=threading.Thread,
+        )
+    )
     navigation_menu.addAction(owner._sample_load_action)
 
     owner._sample_unload_action = QAction("Unload Sample", owner)
-    owner._sample_unload_action.triggered.connect(owner._request_sample_unload)
+    owner._sample_unload_action.triggered.connect(
+        lambda _checked=False: needle_calibration_ui.request_sample_unload(
+            owner,
+            message_box=QMessageBox,
+            thread_factory=threading.Thread,
+        )
+    )
     navigation_menu.addAction(owner._sample_unload_action)
 
     owner._design_layout_window_action = QAction("Design Window", owner)
@@ -104,12 +118,14 @@ def _add_calibration_actions(owner: MainWindowMenuOwner, calibration_menu: Any) 
     calibration_menu.addAction(owner._contact_calibration_window_action)
 
     owner._surface_map_window_action = QAction("Surface Map", owner)
-    owner._surface_map_window_action.triggered.connect(owner._show_surface_map_window)
+    owner._surface_map_window_action.triggered.connect(
+        lambda _checked=False: show_surface_map_window(owner)
+    )
     calibration_menu.addAction(owner._surface_map_window_action)
 
     owner._microscope_scan_action = QAction("Microscope Scan", owner)
     owner._microscope_scan_action.triggered.connect(
-        owner._show_microscope_scan_dialog
+        lambda _checked=False: show_microscope_scan_dialog(owner)
     )
     calibration_menu.addAction(owner._microscope_scan_action)
 

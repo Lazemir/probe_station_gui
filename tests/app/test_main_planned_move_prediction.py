@@ -139,7 +139,10 @@ def _make_main(
         tuple(float(value) for value in position)
     )
     window._finish_coordinate_move_if_idle = lambda _position: None
-    window._clear_stage_motion_axes = lambda: None
+    window._stage_motion_axes = set()
+    window._stage_motion_blink_dimmed = False
+    window._stage_motion_blink_timer = types.SimpleNamespace(isActive=lambda: False)
+    window._stage_position_panel = None
 
     return window, published, reconciles, smooth_calls
 
@@ -330,7 +333,10 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
         window._update_design_position = lambda stage_xy: design_updates.append(stage_xy)
         window._can_display_design_position = lambda: True
         window._finish_coordinate_move_if_idle = lambda position: finished.append(position)
-        window._clear_stage_motion_axes = lambda: cleared.append("clear")
+        window._stage_motion_axes = {"X"}
+        window._stage_position_panel = types.SimpleNamespace(
+            refresh_axis_styles=lambda _axes, _dimmed: cleared.append("clear")
+        )
 
         Main._on_stage_position_changed(window, (1.0, 2.0, 3.0))
 
@@ -417,7 +423,10 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
         window._finish_coordinate_move_if_idle = lambda position: calls.append(
             f"finish:{position[:2]}"
         )
-        window._clear_stage_motion_axes = lambda: calls.append("clear")
+        window._stage_motion_axes = {"X"}
+        window._stage_position_panel = types.SimpleNamespace(
+            refresh_axis_styles=lambda _axes, _dimmed: calls.append("clear")
+        )
 
         Main._on_stage_position_changed(window, (1.0, 2.0, 3.0))
 

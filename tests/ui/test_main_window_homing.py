@@ -46,6 +46,13 @@ def _owner(events: list[object]) -> SimpleNamespace:
         _planned_move_waiting_for_fresh_status=False,
         _pending_homing_axes=[],
         _homing_active_key=None,
+        _stage_motion_axes=set(),
+        _stage_motion_blink_dimmed=False,
+        _stage_motion_blink_timer=SimpleNamespace(
+            isActive=lambda: False,
+            start=lambda: events.append(("blink_start",)),
+            stop=lambda: events.append(("blink_stop",)),
+        ),
         _coordinate_targets=SimpleNamespace(has_active_move=lambda: False),
         joystick_panel=SimpleNamespace(
             set_pending_homing_actions=lambda axes: events.append(
@@ -58,18 +65,10 @@ def _owner(events: list[object]) -> SimpleNamespace:
         _update_stage_position_display=lambda position: events.append(
             ("display", position)
         ),
-        _refresh_pending_homing_ui=lambda: homing_ui.refresh_pending_homing_ui(owner),
         _update_stage_coordinate_apply_state=lambda: events.append(("apply_state",)),
-        _clear_stage_motion_axes=lambda: events.append(("clear_motion",)),
         _invalidate_design_registration=lambda message: events.append(
             ("invalidate", message)
         ),
-        _set_stage_motion_axes=lambda axes: events.append(
-            ("motion_axes", tuple(sorted(axes)))
-        ),
-    )
-    owner._start_next_pending_homing_action = (
-        lambda: homing_ui.start_next_pending_homing_action(owner)
     )
     stage_controller.owner = owner
     return owner
@@ -99,10 +98,14 @@ def test_queue_starts_first_axis_and_preserves_remainder_when_start_signal_is_sy
     assert timer_calls == []
 
 
-def test_axis_home_request_uses_owner_queue_method() -> None:
+def test_axis_home_request_normalizes_axis_before_queue(monkeypatch) -> None:
     events: list[object] = []
     owner = _owner(events)
-    owner._queue_or_start_homing_axes = lambda axes: events.append(("queue", axes))
+    monkeypatch.setattr(
+        homing_ui,
+        "queue_or_start_homing_axes",
+        lambda _owner, axes: events.append(("queue", axes)),
+    )
 
     homing_ui.request_home_axis_from_ui(owner, " x ")
     homing_ui.request_home_axis_from_ui(owner, "bad")
@@ -127,7 +130,9 @@ def test_queue_defers_when_controller_is_busy(monkeypatch) -> None:
 
     assert owner._pending_homing_axes == ["Z"]
     assert ("home_axis", "Z") not in events
-    assert timer_calls == [(homing_ui.HOMING_RETRY_DELAY_MS, owner._start_next_pending_homing_action)]
+    assert len(timer_calls) == 1
+    assert timer_calls[0][0] == homing_ui.HOMING_RETRY_DELAY_MS
+    assert callable(timer_calls[0][1])
 
 
 def test_failed_homing_finish_clears_queue_without_scheduling_next(monkeypatch) -> None:
@@ -143,12 +148,13 @@ def test_failed_homing_finish_clears_queue_without_scheduling_next(monkeypatch) 
     owner = _owner(events)
     owner._homing_active_key = "X"
     owner._pending_homing_axes = ["Z"]
+    owner._stage_motion_axes = {"X"}
 
     homing_ui.on_homing_action_finished(owner, False, "failed", "X")
 
     assert owner._homing_active_key is None
     assert owner._pending_homing_axes == []
-    assert ("clear_motion",) in events
+    assert owner._stage_motion_axes == set()
     assert timer_calls == []
 
 
@@ -167,6 +173,7 @@ def test_successful_homing_finish_invalidates_registration_and_schedules_next(
     owner = _owner(events)
     owner._homing_active_key = "X"
     owner._pending_homing_axes = ["Z"]
+    owner._stage_motion_axes = {"X"}
 
     homing_ui.on_homing_action_finished(owner, True, "ok", "X")
 
@@ -175,8 +182,10 @@ def test_successful_homing_finish_invalidates_registration_and_schedules_next(
         "invalidate",
         "Design registration cleared after homing X.",
     ) in events
-    assert ("clear_motion",) in events
-    assert timer_calls == [(0, owner._start_next_pending_homing_action)]
+    assert owner._stage_motion_axes == set()
+    assert len(timer_calls) == 1
+    assert timer_calls[0][0] == 0
+    assert callable(timer_calls[0][1])
 
 
 def test_limit_axis_update_normalizes_axes_and_preserves_manual_jog_prediction() -> None:

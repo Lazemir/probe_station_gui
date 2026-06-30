@@ -31,6 +31,9 @@ class _StageController:
     def request_stop_oscillation(self) -> None:
         self.events.append(("stop_oscillation",))
 
+    def force_jog_stop(self, *, timeout: float) -> None:
+        self.events.append(("force_jog_stop", timeout))
+
     def request_startup_sync(self, **kwargs: object) -> None:
         self.events.append(("startup_sync", kwargs))
 
@@ -114,6 +117,9 @@ class _Panel:
     def auto_connect(self) -> None:
         self.events.append((self.name, "auto_connect"))
 
+    def stop_jog(self) -> None:
+        self.events.append(("stop_jog", "serial disconnect"))
+
     def set_current_stage_position(self, value: object) -> None:
         self.events.append((self.name, "stage_position", value))
 
@@ -163,6 +169,11 @@ def _owner(events: list[object]) -> SimpleNamespace:
         _controller_reboot_recovery_scheduled=False,
         _pending_persisted_design_state={"design": True},
         _pending_persisted_design_position=(1.0, 2.0, 3.0),
+        _pending_homing_axes=[],
+        _homing_active_key=None,
+        _stage_motion_axes=set(),
+        _stage_motion_blink_dimmed=False,
+        _stage_motion_blink_timer=SimpleNamespace(isActive=lambda: False),
     )
     stage_controller.owner = owner
     owner._restore_persisted_controller_state = (
@@ -173,7 +184,6 @@ def _owner(events: list[object]) -> SimpleNamespace:
         ("reboot_recovery_callback",)
     )
     owner._refresh_design_position = lambda: events.append(("refresh_design",))
-    owner._stop_jog_before_serial_close = lambda reason: events.append(("stop_jog", reason))
     owner._persist_serial_connection_state = (
         lambda connected: events.append(
             ("persist_serial_wrapper", connected, owner.serial_connection)
@@ -188,8 +198,6 @@ def _owner(events: list[object]) -> SimpleNamespace:
     owner._clear_coordinate_move_tracking = (
         lambda **kwargs: events.append(("clear_coordinate_tracking", kwargs))
     )
-    owner._clear_pending_homing_queue = lambda: events.append(("clear_homing",))
-    owner._clear_stage_motion_axes = lambda: events.append(("clear_motion_axes",))
     owner._clear_planned_move_prediction = (
         lambda **kwargs: events.append(("clear_prediction", kwargs))
     )
@@ -264,10 +272,11 @@ def test_on_serial_disconnected_preserves_detach_cleanup_order() -> None:
 
     assert events[:4] == [
         ("stop_jog", "serial disconnect"),
+        ("force_jog_stop", 0.8),
         ("serial_close", "COM9"),
         ("save_serial", False, "", 0),
-        ("manual_timer_stop",),
     ]
+    assert ("manual_timer_stop",) in events
     assert ("stage_set_serial", None) in events
     assert ("serial_panel", "external_disconnect", True) in events
     assert ("joystick", None) in events

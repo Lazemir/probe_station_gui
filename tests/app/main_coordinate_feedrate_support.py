@@ -654,12 +654,10 @@ def _make_main(current_feedrate: float = 120.0) -> tuple[
     window._pending_stage_axis_targets = panel.pending_targets
     window._stage_axis_base_styles = panel.base_styles
     window._stage_axis_return_commits = panel.return_commits
-    window._set_stage_motion_axes = lambda axes: setattr(
-        window, "_motion_axes", set(axes)
-    )
+    window._stage_motion_axes = set()
+    window._stage_motion_blink_dimmed = False
+    window._stage_motion_blink_timer = timer
     window._update_stage_coordinate_apply_state = lambda: None
-    window._refresh_stage_axis_styles = lambda: None
-    window._clear_stage_motion_axes = lambda: None
     window._clear_planned_move_prediction = lambda *, clear_wait_state: None
     window._schedule_status_refreshes = lambda _delays: None
     window._schedule_cancel_state_refresh = lambda: None
@@ -853,14 +851,15 @@ def _make_cancel_main() -> tuple[Main, _FakeStageController, _FakeButton, list[s
     window._pending_stage_axis_targets = panel.pending_targets
     window._stage_axis_base_styles = panel.base_styles
     window._stage_axis_return_commits = panel.return_commits
+    window._stage_motion_axes = set()
+    window._stage_motion_blink_dimmed = False
+    window._stage_motion_blink_timer = _FakeTimer()
     window._show_status = (
         lambda message, _timeout_ms=None: statuses.append(str(message))
     )
-    window._clear_stage_motion_axes = lambda: None
     window._clear_planned_move_prediction = lambda *, clear_wait_state: None
     window._schedule_status_refreshes = lambda _delays: None
     window._schedule_cancel_state_refresh = lambda: None
-    window._refresh_stage_axis_styles = lambda: None
     return window, stage_controller, cancel_button, statuses
 
 
@@ -889,7 +888,6 @@ def _make_stage_position_display_main() -> tuple[Main, _FakeStageController]:
     window._pending_stage_axis_targets = panel.pending_targets
     window._stage_axis_base_styles = panel.base_styles
     window._stage_axis_return_commits = panel.return_commits
-    window._clear_stage_motion_axes = lambda: None
     window._update_stage_coordinate_apply_state = lambda: None
     window._set_stage_position_fields_available = (
         lambda available: setattr(window, "_fields_available", bool(available))

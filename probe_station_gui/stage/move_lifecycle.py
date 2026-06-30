@@ -5,6 +5,9 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Protocol
 
+from probe_station_gui.views import main_window_homing as homing_ui
+from probe_station_gui.views import main_window_stage_position_panel as stage_position_panel
+
 
 logger = logging.getLogger("main")
 
@@ -43,8 +46,6 @@ class StageMoveLifecycleOwner(Protocol):
     def _sample_handling_active(self) -> bool: ...
     def _clear_pending_click_to_move(self, *, clear_cross: bool) -> None: ...
     def _cancel_manual_alignment_pick(self) -> None: ...
-    def _clear_pending_homing_queue(self) -> None: ...
-    def _clear_stage_motion_axes(self) -> None: ...
     def _clear_planned_move_prediction(self, *, clear_wait_state: bool) -> None: ...
     def _clear_pending_stage_coordinate_targets(self) -> bool: ...
     def _schedule_status_refreshes(self, delays_ms: tuple[int, ...]) -> None: ...
@@ -56,9 +57,7 @@ class StageMoveLifecycleOwner(Protocol):
     def _refresh_design_position(self) -> None: ...
     def _collapse_alignment_panel_if_ready(self) -> None: ...
     def _collapse_alignment_panel_if_design_open(self) -> None: ...
-    def _refresh_stage_axis_styles(self) -> None: ...
     def _update_stage_coordinate_apply_state(self) -> None: ...
-    def _start_next_pending_homing_action(self) -> None: ...
 
 
 ScheduleSingleShot = Callable[[int, Callable[[], None]], Any]
@@ -150,7 +149,7 @@ def clear_coordinate_move_tracking(
         joystick_panel.clear_temporary_linear_feedrate_bounds()
         if hasattr(joystick_panel, "clear_common_feedrate_target"):
             joystick_panel.clear_common_feedrate_target()
-    owner._refresh_stage_axis_styles()
+    stage_position_panel.refresh_stage_axis_styles(owner)
     owner._update_stage_coordinate_apply_state()
 
 
@@ -172,7 +171,10 @@ def finish_coordinate_move_if_idle(
         owner._coordinate_targets.stage_position = decision.stage_position
     clear_coordinate_move_tracking(owner, clear_pending=False, reset_override=True)
     if owner._pending_homing_axes:
-        schedule_single_shot(0, owner._start_next_pending_homing_action)
+        schedule_single_shot(
+            0,
+            lambda: homing_ui.start_next_pending_homing_action(owner),
+        )
 
 
 def on_move_finished(
@@ -197,7 +199,7 @@ def on_move_finished(
             clear_pending=not success,
             reset_override=True,
         )
-        owner._clear_stage_motion_axes()
+        stage_position_panel.clear_stage_motion_axes(owner)
     if message:
         owner._show_status(message, 5000)
     owner._schedule_cancel_state_refresh()
@@ -222,7 +224,7 @@ def _cancel_pending_ui_intents(owner: StageMoveLifecycleOwner) -> bool:
         owner._pending_quick_alignment_rotation = False
         cancelled_any = True
     if owner._pending_homing_axes or owner._homing_active_key is not None:
-        owner._clear_pending_homing_queue()
+        homing_ui.clear_pending_homing_queue(owner)
         cancelled_any = True
     return cancelled_any
 
@@ -271,7 +273,7 @@ def _cancel_active_coordinate_move(
         clear_pending=True,
         reset_override=True,
     )
-    owner._clear_stage_motion_axes()
+    stage_position_panel.clear_stage_motion_axes(owner)
     owner._clear_pending_stage_coordinate_targets()
     owner.view.setFocus(focus_reason)
     owner._schedule_status_refreshes(owner.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
@@ -283,13 +285,13 @@ def _cancel_controller_activity(owner: StageMoveLifecycleOwner) -> bool:
     cancelled_any = False
     if owner._controller_reports_active_motion():
         owner.stage_controller.cancel_active_motion("Motion cancel requested.")
-        owner._clear_stage_motion_axes()
+        stage_position_panel.clear_stage_motion_axes(owner)
         owner._clear_planned_move_prediction(clear_wait_state=True)
         cancelled_any = True
         owner._schedule_status_refreshes(owner.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
     if owner.stage_controller.is_busy():
         owner.stage_controller.cancel_active_task("Operation cancel requested.")
-        owner._clear_stage_motion_axes()
+        stage_position_panel.clear_stage_motion_axes(owner)
         owner._clear_planned_move_prediction(clear_wait_state=True)
         cancelled_any = True
         owner._schedule_status_refreshes(owner.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)

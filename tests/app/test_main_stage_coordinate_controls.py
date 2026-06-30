@@ -17,6 +17,11 @@ from tests.app.main_coordinate_feedrate_support import (
     api_move_feedrate,
     main_module,
 )
+from probe_station_gui.views import main_window_homing as homing_ui
+from probe_station_gui.views import main_window_needle_calibration as needle_calibration_ui
+from probe_station_gui.views import (
+    main_window_stage_position_panel as stage_position_panel_adapter,
+)
 
 
 class MainStageCoordinateControlsTest(unittest.TestCase):
@@ -157,7 +162,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
             lambda message, _timeout_ms=None: statuses.append(str(message))
         )
 
-        Main._save_needle_down_position_from_lowering(window, 2.885)
+        needle_calibration_ui.save_needle_down_position_from_lowering(window, 2.885)
 
         self.assertEqual(full_apply_called, [])
         self.assertEqual(settings_manager.saved_count, 1)
@@ -517,7 +522,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
 
         self.assertIsNone(window._coordinate_targets.active_axis)
         self.assertEqual(window._coordinate_targets.active_axes, set())
-        self.assertEqual(window._motion_axes, {"X"})
+        self.assertEqual(window._stage_motion_axes, {"X"})
 
     def test_manual_jog_start_pauses_terminal_poll_and_publishes_seeded_position(
         self,
@@ -635,7 +640,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         window, stage_controller, _cancel_button, statuses = _make_cancel_main()
         stage_controller.busy = True
 
-        Main._cancel_stage_coordinate_action(window)
+        stage_position_panel_adapter.cancel_stage_coordinate_action(window)
 
         self.assertEqual(
             stage_controller.cancelled_tasks,
@@ -652,7 +657,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
             lambda *, clear_pending, reset_override: window._coordinate_targets.clear_tracking()
         )
 
-        Main._cancel_stage_coordinate_action(window)
+        stage_position_panel_adapter.cancel_stage_coordinate_action(window)
 
         self.assertEqual(
             stage_controller.cancelled_motions,
@@ -664,7 +669,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         window, stage_controller, _cancel_button, statuses = _make_cancel_main()
         stage_controller.latest_state = "Jog"
 
-        Main._cancel_stage_coordinate_action(window)
+        stage_position_panel_adapter.cancel_stage_coordinate_action(window)
 
         self.assertEqual(
             stage_controller.cancelled_motions,
@@ -681,7 +686,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         )
         window._refresh_pending_homing_ui = lambda: None
 
-        Main._request_home_all_from_ui(window)
+        homing_ui.request_home_all_from_ui(window)
 
         self.assertEqual(stage_controller.home_all_requests, 1)
         self.assertEqual(stage_controller.status_message.messages, [])
@@ -692,7 +697,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         stage_controller.last_status_time = time.monotonic()
         window._refresh_pending_homing_ui = lambda: None
 
-        Main._request_home_all_from_ui(window)
+        homing_ui.request_home_all_from_ui(window)
 
         self.assertEqual(stage_controller.home_all_requests, 1)
         self.assertEqual(stage_controller.home_axis_requests, [])
@@ -703,9 +708,9 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         window, stage_controller, _cancel_button, _statuses = _make_cancel_main()
         window._refresh_pending_homing_ui = lambda: None
 
-        Main._request_home_axis_from_ui(window, "X")
+        homing_ui.request_home_axis_from_ui(window, "X")
         window._homing_active_key = "X"
-        Main._request_home_axis_from_ui(window, "Z")
+        homing_ui.request_home_axis_from_ui(window, "Z")
 
         self.assertEqual(stage_controller.home_all_requests, 0)
         self.assertEqual(stage_controller.home_axis_requests, ["X"])

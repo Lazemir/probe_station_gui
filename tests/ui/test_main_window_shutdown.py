@@ -83,6 +83,7 @@ def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
             wait=lambda: events.append(("camera_thread_wait",)),
         ),
         joystick_panel=SimpleNamespace(
+            stop_jog=lambda: events.append(("stop_jog", "application shutdown", serial.is_open)),
             set_serial=lambda serial_connection: events.append(
                 ("joystick_serial", serial_connection)
             )
@@ -96,6 +97,7 @@ def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
             shutdown=lambda: events.append(("serial_panel_shutdown",))
         ),
         stage_controller=SimpleNamespace(
+            force_jog_stop=lambda **kwargs: events.append(("force_jog_stop", kwargs)),
             request_stop_oscillation=lambda: events.append(("stop_oscillation",)),
             shutdown=lambda: events.append(("stage_shutdown",)),
         ),
@@ -103,12 +105,17 @@ def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
         _save_pending_linear_feedrate_default=lambda: events.append(
             ("save_feedrate",)
         ),
-        _stop_jog_before_serial_close=lambda reason: events.append(
-            ("stop_jog", reason, serial.is_open)
+        _route_measurement_dialog=SimpleNamespace(
+            close=lambda: events.append(("route_close",))
         ),
-        _close_auxiliary_windows=lambda **kwargs: events.append(
-            ("close_aux", kwargs)
+        _route_runtime_presenter=lambda: SimpleNamespace(
+            set_running=lambda running: events.append(("running", running))
         ),
+        design_layout_window=None,
+        contact_calibration_window=None,
+        surface_map_window=None,
+        microscope_scan_dialog=None,
+        serial_connection_dialog=None,
     )
     event = SimpleNamespace(accept=lambda: events.append(("event_accept",)))
 
@@ -130,6 +137,7 @@ def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
         ("scan_stop_requested",),
         ("scan_thread", "join", 2.0),
         ("stop_jog", "application shutdown", True),
+        ("force_jog_stop", {"timeout": 0.8}),
         ("grabber_stop",),
         ("camera_thread_quit",),
         ("camera_thread_wait",),
@@ -139,7 +147,8 @@ def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
         ("stop_oscillation",),
         ("stage_shutdown",),
         ("lcr_shutdown",),
-        ("close_aux", {"force_route_dialog": True}),
+        ("running", False),
+        ("route_close",),
         ("serial_panel_shutdown",),
         ("event_accept",),
     ]

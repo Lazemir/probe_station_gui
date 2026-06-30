@@ -7,6 +7,8 @@ from typing import Any, Protocol
 
 from PySide6.QtCore import QTimer
 
+from probe_station_gui.views import main_window_stage_position_panel as stage_position_panel
+
 
 VALID_HOME_AXES = {"X", "Y", "Z", "A"}
 REGISTRATION_INVALIDATING_HOME_KEYS = {"X", "Y", "B", "ALL"}
@@ -29,13 +31,8 @@ class MainWindowHomingOwner(Protocol):
     def _update_stage_position_display(self, position: object) -> None: ...
     def _position_with_stage_xy(self, stage_xy: tuple[float, float]) -> object: ...
     def _controller_latest_state_blocks_motion(self) -> bool: ...
-    def _queue_or_start_homing_axes(self, axes: list[str]) -> None: ...
-    def _start_next_pending_homing_action(self) -> None: ...
-    def _refresh_pending_homing_ui(self) -> None: ...
     def _update_stage_coordinate_apply_state(self) -> None: ...
-    def _clear_stage_motion_axes(self) -> None: ...
     def _invalidate_design_registration(self, message: str) -> None: ...
-    def _set_stage_motion_axes(self, axes: set[str]) -> None: ...
 
 
 def on_limit_axes_changed(owner: MainWindowHomingOwner, axes: object) -> None:
@@ -73,13 +70,13 @@ def request_home_axis_from_ui(owner: MainWindowHomingOwner, axis: str) -> None:
     axis_name = axis.strip().upper()
     if axis_name not in VALID_HOME_AXES:
         return
-    owner._queue_or_start_homing_axes([axis_name])
+    queue_or_start_homing_axes(owner, [axis_name])
 
 
 def request_home_all_from_ui(owner: MainWindowHomingOwner) -> None:
     if owner.stage_controller.request_home_all():
         owner._pending_homing_axes.clear()
-        owner._refresh_pending_homing_ui()
+        refresh_pending_homing_ui(owner)
 
 
 def queue_or_start_homing_axes(
@@ -94,39 +91,57 @@ def queue_or_start_homing_axes(
         if not owner.stage_controller.request_home_axis(first_axis):
             normalized.insert(0, first_axis)
     owner._pending_homing_axes.extend(normalized)
-    owner._refresh_pending_homing_ui()
+    refresh_pending_homing_ui(owner)
     owner._update_stage_coordinate_apply_state()
     if owner._pending_homing_axes and owner._homing_active_key is None:
-        QTimer.singleShot(HOMING_RETRY_DELAY_MS, owner._start_next_pending_homing_action)
+        QTimer.singleShot(
+            HOMING_RETRY_DELAY_MS,
+            lambda: start_next_pending_homing_action(owner),
+        )
 
 
 def start_next_pending_homing_action(owner: MainWindowHomingOwner) -> None:
     if owner._homing_active_key is not None or not owner._pending_homing_axes:
         return
     if owner.stage_controller.is_busy() or owner._coordinate_targets.has_active_move():
-        QTimer.singleShot(HOMING_RETRY_DELAY_MS, owner._start_next_pending_homing_action)
+        QTimer.singleShot(
+            HOMING_RETRY_DELAY_MS,
+            lambda: start_next_pending_homing_action(owner),
+        )
         return
     if owner._controller_latest_state_blocks_motion():
-        QTimer.singleShot(HOMING_RETRY_DELAY_MS, owner._start_next_pending_homing_action)
+        QTimer.singleShot(
+            HOMING_RETRY_DELAY_MS,
+            lambda: start_next_pending_homing_action(owner),
+        )
         return
     axis = owner._pending_homing_axes.pop(0)
-    owner._refresh_pending_homing_ui()
+    refresh_pending_homing_ui(owner)
     if not owner.stage_controller.request_home_axis(axis):
         owner._pending_homing_axes.insert(0, axis)
-        owner._refresh_pending_homing_ui()
-        QTimer.singleShot(HOMING_RETRY_DELAY_MS, owner._start_next_pending_homing_action)
+        refresh_pending_homing_ui(owner)
+        QTimer.singleShot(
+            HOMING_RETRY_DELAY_MS,
+            lambda: start_next_pending_homing_action(owner),
+        )
 
 
 def clear_pending_homing_queue(owner: MainWindowHomingOwner) -> None:
     owner._homing_active_key = None
     owner._pending_homing_axes.clear()
-    owner._refresh_pending_homing_ui()
+    refresh_pending_homing_ui(owner)
     owner._update_stage_coordinate_apply_state()
 
 
 def refresh_pending_homing_ui(owner: MainWindowHomingOwner) -> None:
-    if owner.joystick_panel is not None:
-        owner.joystick_panel.set_pending_homing_actions(set(owner._pending_homing_axes))
+    joystick_panel = getattr(owner, "joystick_panel", None)
+    set_pending_homing_actions = getattr(
+        joystick_panel,
+        "set_pending_homing_actions",
+        None,
+    )
+    if callable(set_pending_homing_actions):
+        set_pending_homing_actions(set(owner._pending_homing_axes))
 
 
 def on_homing_action_finished(
@@ -140,19 +155,19 @@ def on_homing_action_finished(
         owner._homing_active_key = None
     if not success:
         owner._pending_homing_axes.clear()
-        owner._refresh_pending_homing_ui()
-        owner._clear_stage_motion_axes()
+        refresh_pending_homing_ui(owner)
+        stage_position_panel.clear_stage_motion_axes(owner)
         owner._update_stage_coordinate_apply_state()
         return
     if key in REGISTRATION_INVALIDATING_HOME_KEYS:
         owner._invalidate_design_registration(
             f"Design registration cleared after homing {key}."
         )
-    owner._clear_stage_motion_axes()
-    owner._refresh_pending_homing_ui()
+    stage_position_panel.clear_stage_motion_axes(owner)
+    refresh_pending_homing_ui(owner)
     owner._update_stage_coordinate_apply_state()
     if owner._pending_homing_axes:
-        QTimer.singleShot(0, owner._start_next_pending_homing_action)
+        QTimer.singleShot(0, lambda: start_next_pending_homing_action(owner))
 
 
 def on_homing_action_started(owner: MainWindowHomingOwner, axis_key: str) -> None:
@@ -160,16 +175,16 @@ def on_homing_action_started(owner: MainWindowHomingOwner, axis_key: str) -> Non
     owner._homing_active_key = key
     if key in owner._pending_homing_axes:
         owner._pending_homing_axes.remove(key)
-        owner._refresh_pending_homing_ui()
+        refresh_pending_homing_ui(owner)
     if key == "ALL":
-        owner._set_stage_motion_axes({"X", "Y", "Z", "A"})
+        stage_position_panel.set_stage_motion_axes(owner, {"X", "Y", "Z", "A"})
     elif key in owner.STAGE_AXIS_NAMES:
-        owner._set_stage_motion_axes({key})
+        stage_position_panel.set_stage_motion_axes(owner, {key})
     owner._update_stage_coordinate_apply_state()
 
 
 def on_needles_action_started(owner: MainWindowHomingOwner, _action: str) -> None:
-    owner._set_stage_motion_axes({"A"})
+    stage_position_panel.set_stage_motion_axes(owner, {"A"})
     owner._update_stage_coordinate_apply_state()
 
 
@@ -179,7 +194,7 @@ def on_needles_action_finished(
     _message: str,
     _action: str,
 ) -> None:
-    owner._clear_stage_motion_axes()
+    stage_position_panel.clear_stage_motion_axes(owner)
     owner._update_stage_coordinate_apply_state()
 
 

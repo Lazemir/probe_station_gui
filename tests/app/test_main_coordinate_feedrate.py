@@ -29,6 +29,8 @@ from tests.app.main_coordinate_feedrate_support import (
     request_route_measurement_for_point,
     route_measurement_dialog_module,
 )
+from probe_station_gui.views import main_window_needle_calibration as needle_calibration_ui
+from probe_station_gui.views import main_window_shutdown as shutdown_ui
 
 class MainCoordinateFeedrateTest(unittest.TestCase):
     def test_combine_telegram_contact_photos_side_by_side(self) -> None:
@@ -521,7 +523,11 @@ assert image.height() == 4
         )
         main_module.threading.Thread = _FakeThread
         try:
-            Main._request_sample_unload(window)
+            needle_calibration_ui.request_sample_unload(
+                window,
+                message_box=main_module.QMessageBox,
+                thread_factory=main_module.threading.Thread,
+            )
         finally:
             main_module.QMessageBox = original_box
             main_module.threading.Thread = original_thread
@@ -561,7 +567,11 @@ assert image.height() == 4
         )
         main_module.threading.Thread = _FakeThread
         try:
-            Main._request_sample_unload(window)
+            needle_calibration_ui.request_sample_unload(
+                window,
+                message_box=main_module.QMessageBox,
+                thread_factory=main_module.threading.Thread,
+            )
         finally:
             main_module.QMessageBox = original_box
             main_module.threading.Thread = original_thread
@@ -612,7 +622,11 @@ assert image.height() == 4
         )
         main_module.threading.Thread = _FakeThread
         try:
-            Main._request_sample_unload(window)
+            needle_calibration_ui.request_sample_unload(
+                window,
+                message_box=main_module.QMessageBox,
+                thread_factory=main_module.threading.Thread,
+            )
         finally:
             main_module.QMessageBox = original_box
             main_module.threading.Thread = original_thread
@@ -932,7 +946,7 @@ assert image.height() == 4
         window.surface_map_window = None
         window.microscope_scan_dialog = None
 
-        Main._close_auxiliary_windows(window, force_route_dialog=True)
+        shutdown_ui.close_auxiliary_windows(window, force_route_dialog=True)
 
         self.assertEqual(calls, [("running", False), ("close", None)])
 

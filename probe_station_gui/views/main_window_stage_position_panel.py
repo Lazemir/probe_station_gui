@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from PySide6.QtCore import Qt
+
 from probe_station_gui.stage.position_presenter import stage_position_display_plan
 from probe_station_gui.views.stage_position_panel import StagePositionPanel
 
@@ -29,9 +31,7 @@ class MainWindowStagePositionPanelOwner(Protocol):
     def _update_stage_coordinate_apply_state(self) -> None: ...
     def _on_stage_coordinate_mode_changed(self) -> None: ...
     def _apply_pending_stage_coordinate_targets(self) -> None: ...
-    def _cancel_stage_coordinate_action(self) -> None: ...
     def _current_linear_feedrate(self) -> float: ...
-    def _display_axis_value_from_raw(self, axis_name: str, raw_value: float) -> float: ...
 
 
 def create_stage_position_widget(
@@ -43,7 +43,7 @@ def create_stage_position_widget(
     panel.axis_text_edited.connect(owner._update_stage_coordinate_apply_state)
     panel.input_mode_changed.connect(owner._on_stage_coordinate_mode_changed)
     panel.apply_requested.connect(owner._apply_pending_stage_coordinate_targets)
-    panel.cancel_requested.connect(owner._cancel_stage_coordinate_action)
+    panel.cancel_requested.connect(lambda: cancel_stage_coordinate_action(owner))
     owner._stage_position_panel = panel
     owner._stage_axis_fields = panel.axis_fields
     owner._stage_axis_base_styles = panel.base_styles
@@ -56,9 +56,14 @@ def display_axis_value_from_raw(
     axis_name: str,
     raw_value: float,
 ) -> float:
-    if not hasattr(owner, "stage_controller"):
+    converter = getattr(
+        getattr(owner, "stage_controller", None),
+        "calibrated_axis_display_value",
+        None,
+    )
+    if not callable(converter):
         return float(raw_value)
-    return owner.stage_controller.calibrated_axis_display_value(
+    return converter(
         axis_name.strip().upper(),
         float(raw_value),
     )
@@ -69,9 +74,14 @@ def raw_axis_value_from_display(
     axis_name: str,
     display_value: float,
 ) -> float:
-    if not hasattr(owner, "stage_controller"):
+    converter = getattr(
+        getattr(owner, "stage_controller", None),
+        "calibrated_axis_raw_value",
+        None,
+    )
+    if not callable(converter):
         return float(display_value)
-    return owner.stage_controller.calibrated_axis_raw_value(
+    return converter(
         axis_name.strip().upper(),
         float(display_value),
     )
@@ -107,17 +117,24 @@ def set_stage_motion_axes(
         return
     owner._stage_motion_axes = motion_axes
     owner._stage_motion_blink_dimmed = False
-    if not owner._stage_motion_blink_timer.isActive():
-        owner._stage_motion_blink_timer.start()
+    blink_timer = getattr(owner, "_stage_motion_blink_timer", None)
+    if blink_timer is not None and not blink_timer.isActive():
+        blink_timer.start()
     refresh_stage_axis_styles(owner)
 
 
 def clear_stage_motion_axes(owner: MainWindowStagePositionPanelOwner) -> None:
-    if owner._stage_motion_blink_timer.isActive():
-        owner._stage_motion_blink_timer.stop()
-    if not owner._stage_motion_axes and not owner._stage_motion_blink_dimmed:
+    blink_timer = getattr(owner, "_stage_motion_blink_timer", None)
+    if blink_timer is not None and blink_timer.isActive():
+        blink_timer.stop()
+    motion_axes = getattr(owner, "_stage_motion_axes", None)
+    blink_dimmed = bool(getattr(owner, "_stage_motion_blink_dimmed", False))
+    if not motion_axes and not blink_dimmed:
         return
-    owner._stage_motion_axes.clear()
+    if motion_axes is None:
+        owner._stage_motion_axes = set()
+    else:
+        motion_axes.clear()
     owner._stage_motion_blink_dimmed = False
     refresh_stage_axis_styles(owner)
 
@@ -147,7 +164,11 @@ def update_stage_position_display(
         ),
         limit_axes=owner._stage_limit_axes,
         pending_targets=owner._pending_stage_axis_targets,
-        display_axis_value=owner._display_axis_value_from_raw,
+        display_axis_value=lambda axis_name, raw_value: display_axis_value_from_raw(
+            owner,
+            axis_name,
+            raw_value,
+        ),
         feedrate_mm_min=owner._current_linear_feedrate(),
     )
     if plan.reset_all:
@@ -188,8 +209,18 @@ def update_stage_position_display(
     owner._update_stage_coordinate_apply_state()
 
 
+def cancel_stage_coordinate_action(owner: MainWindowStagePositionPanelOwner) -> None:
+    from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
+
+    stage_move_lifecycle.cancel_stage_coordinate_action(
+        owner,
+        focus_reason=Qt.OtherFocusReason,
+    )
+
+
 __all__ = [
     "advance_stage_motion_blink",
+    "cancel_stage_coordinate_action",
     "clear_stage_motion_axes",
     "create_stage_position_widget",
     "display_axis_value_from_raw",

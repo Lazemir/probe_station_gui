@@ -7,6 +7,7 @@ import logging
 from probe_station_gui.route import contact_seek as manual_contact_seek
 from probe_station_gui.stage import calibration_positions, sample_handling
 from probe_station_gui.stage.controller import StageControllerError
+from probe_station_gui.views import main_window_stage_position_panel as stage_position_panel
 
 
 logger = logging.getLogger(__name__)
@@ -105,7 +106,7 @@ def apply_needle_calibration_runtime(
 def save_needle_calibration_settings(owner: object, settings: object) -> None:
     owner.settings_manager.replace(settings)
     owner.settings_manager.save()
-    owner._apply_needle_calibration_runtime(settings.needle_calibration)
+    apply_needle_calibration_runtime(owner, settings.needle_calibration)
 
 
 def save_current_needle_height(owner: object) -> None:
@@ -241,7 +242,7 @@ def request_contact_seek(owner: object, *, thread_factory) -> None:
     if contact_window is not None:
         contact_window.set_contact_seek_running(True)
         contact_window.set_contact_seek_result("Starting.")
-    thread = thread_factory(target=owner._run_contact_seek, daemon=True)
+    thread = thread_factory(target=lambda: run_contact_seek(owner), daemon=True)
     owner._contact_seek_thread = thread
     thread.start()
 
@@ -258,7 +259,7 @@ def on_contact_seek_calibration_found(
     lowering_mm: float,
     detail: str,
 ) -> None:
-    owner._save_needle_down_position_from_lowering(float(lowering_mm))
+    save_needle_down_position_from_lowering(owner, float(lowering_mm))
     contact_window = getattr(owner, "contact_calibration_window", None)
     if contact_window is not None:
         contact_window.set_contact_seek_result(detail)
@@ -448,7 +449,7 @@ def on_sample_handling_finished(
     owner._sample_handling_thread = None
     if message:
         owner._show_status(message, 7000)
-    owner._clear_stage_motion_axes()
+    stage_position_panel.clear_stage_motion_axes(owner)
     owner._update_stage_coordinate_apply_state()
     owner._schedule_cancel_state_refresh()
     prompt_plan = sample_handling.sample_autofocus_prompt(

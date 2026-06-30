@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Protocol
 
 from PySide6.QtCore import Qt
@@ -23,6 +24,8 @@ from probe_station_gui.views.dock_widgets import CollapsibleDockWidget
 from probe_station_gui.views.resistance_monitor_panel import ResistanceMonitorPanel
 from probe_station_gui.views.serial_connection_panel import SerialConnectionPanel
 from probe_station_gui.views import main_window_connection_flow as connection_flow
+from probe_station_gui.views import main_window_homing as homing_ui
+from probe_station_gui.views import main_window_needle_calibration as needle_calibration_ui
 from probe_station_gui.views.main_window_auxiliary import (
     sync_contact_calibration_window_action,
     toggle_design_layout_window,
@@ -52,10 +55,6 @@ class MainWindowDockOwner(Protocol):
     def resizeDocks(self, docks: list[Any], sizes: list[int], orientation: Any) -> None: ...  # noqa: N802
     def _on_manual_terminal_command(self, *args: Any) -> None: ...
     def _on_resistance_standby_enabled_changed(self, *args: Any) -> None: ...
-    def _request_home_axis_from_ui(self, *args: Any) -> None: ...
-    def _request_home_all_from_ui(self, *args: Any) -> None: ...
-    def _save_current_needle_height(self, *args: Any) -> None: ...
-    def _save_needle_position_from_display_a_coordinate(self, *args: Any) -> None: ...
     def _zero_b_axis(self, *args: Any) -> None: ...
     def _on_manual_axis_move_requested(self, *args: Any) -> None: ...
     def _save_manual_axis_jog_settings(self, *args: Any) -> None: ...
@@ -73,15 +72,6 @@ class MainWindowDockOwner(Protocol):
     def _on_manual_jog_command_changed(self, *args: Any) -> None: ...
     def _on_manual_jog_stopped(self, *args: Any) -> None: ...
     def _invalidate_design_registration(self, message: str) -> None: ...
-    def _on_homing_status_changed(self, *args: Any) -> None: ...
-    def _on_limit_axes_changed(self, *args: Any) -> None: ...
-    def _on_homing_action_started(self, *args: Any) -> None: ...
-    def _on_homing_action_finished(self, *args: Any) -> None: ...
-    def _on_needles_action_started(self, *args: Any) -> None: ...
-    def _on_needles_action_finished(self, *args: Any) -> None: ...
-    def _save_surface_position(self, *args: Any) -> None: ...
-    def _move_to_surface_position(self, *args: Any) -> None: ...
-    def _request_contact_seek(self, *args: Any) -> None: ...
     def _cancel_contact_seek(self, *args: Any) -> None: ...
     def _on_lcr_connection_changed(self, *args: Any) -> None: ...
     def _on_lcr_reading_started(self, *args: Any) -> None: ...
@@ -252,9 +242,11 @@ def _connect_joystick_motion_actions(owner: MainWindowDockOwner) -> None:
         owner.stage_controller.request_autofocus
     )
     owner.joystick_panel.home_axis_requested.connect(
-        owner._request_home_axis_from_ui
+        lambda axis: homing_ui.request_home_axis_from_ui(owner, axis)
     )
-    owner.joystick_panel.home_all_requested.connect(owner._request_home_all_from_ui)
+    owner.joystick_panel.home_all_requested.connect(
+        lambda: homing_ui.request_home_all_from_ui(owner)
+    )
     owner.joystick_panel.needles_raise_requested.connect(
         owner.stage_controller.request_needles_raise
     )
@@ -265,10 +257,16 @@ def _connect_joystick_motion_actions(owner: MainWindowDockOwner) -> None:
         owner.stage_controller.request_needles_lower
     )
     owner.joystick_panel.needle_current_lower_contact_save_requested.connect(
-        owner._save_current_needle_height
+        lambda: needle_calibration_ui.save_current_needle_height(owner)
     )
     owner.joystick_panel.needle_contact_coordinate_save_requested.connect(
-        owner._save_needle_position_from_display_a_coordinate
+        lambda action, a_coordinate: (
+            needle_calibration_ui.save_needle_position_from_display_a_coordinate(
+                owner,
+                action,
+                a_coordinate,
+            )
+        )
     )
     owner.joystick_panel.zero_b_requested.connect(owner._zero_b_axis)
 
@@ -329,7 +327,7 @@ def _connect_stage_homing_signals(owner: MainWindowDockOwner) -> None:
         owner.joystick_panel.set_homing_status
     )
     owner.stage_controller.homing_status_changed.connect(
-        owner._on_homing_status_changed
+        lambda *args: homing_ui.on_homing_status_changed(owner, *args)
     )
     owner.stage_controller.homing_status_changed.connect(
         lambda *args: connection_flow.persist_controller_state(owner, *args)
@@ -338,18 +336,20 @@ def _connect_stage_homing_signals(owner: MainWindowDockOwner) -> None:
         owner.joystick_panel.set_homing_action_started
     )
     owner.stage_controller.homing_action_started.connect(
-        owner._on_homing_action_started
+        lambda *args: homing_ui.on_homing_action_started(owner, *args)
     )
     owner.stage_controller.homing_action_finished.connect(
         owner.joystick_panel.set_homing_action_finished
     )
     owner.stage_controller.homing_action_finished.connect(
-        owner._on_homing_action_finished
+        lambda *args: homing_ui.on_homing_action_finished(owner, *args)
     )
 
 
 def _connect_stage_limit_and_needle_signals(owner: MainWindowDockOwner) -> None:
-    owner.stage_controller.limit_axes_changed.connect(owner._on_limit_axes_changed)
+    owner.stage_controller.limit_axes_changed.connect(
+        lambda *args: homing_ui.on_limit_axes_changed(owner, *args)
+    )
     owner.stage_controller.limit_axes_changed.connect(
         owner.joystick_panel.set_limit_axes
     )
@@ -369,13 +369,13 @@ def _connect_stage_limit_and_needle_signals(owner: MainWindowDockOwner) -> None:
         owner.joystick_panel.set_needles_action_started
     )
     owner.stage_controller.needles_action_started.connect(
-        owner._on_needles_action_started
+        lambda *args: homing_ui.on_needles_action_started(owner, *args)
     )
     owner.stage_controller.needles_action_finished.connect(
         owner.joystick_panel.set_needles_action_finished
     )
     owner.stage_controller.needles_action_finished.connect(
-        owner._on_needles_action_finished
+        lambda *args: homing_ui.on_needles_action_finished(owner, *args)
     )
 
 
@@ -388,13 +388,16 @@ def _create_contact_calibration_window(owner: MainWindowDockOwner) -> None:
         owner.stage_controller.request_autofocus
     )
     owner.contact_calibration_window.save_surface_position_requested.connect(
-        owner._save_surface_position
+        lambda target: needle_calibration_ui.save_surface_position(owner, target)
     )
     owner.contact_calibration_window.move_to_surface_position_requested.connect(
-        owner._move_to_surface_position
+        lambda target: needle_calibration_ui.move_to_surface_position(owner, target)
     )
     owner.contact_calibration_window.contact_seek_requested.connect(
-        owner._request_contact_seek
+        lambda: needle_calibration_ui.request_contact_seek(
+            owner,
+            thread_factory=threading.Thread,
+        )
     )
     owner.contact_calibration_window.contact_seek_cancel_requested.connect(
         owner._cancel_contact_seek
