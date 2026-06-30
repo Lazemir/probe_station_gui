@@ -27,6 +27,11 @@ from dataclasses import dataclass
 import re
 from typing import Optional
 
+from probe_station_gui.instruments.meters.lcr_helpers import (
+    format_source_level_value,
+    normalize_resource_name,
+)
+
 try:  # pragma: no cover - optional dependency at runtime
     import pyvisa
 except ImportError:  # pragma: no cover - optional dependency at runtime
@@ -85,20 +90,9 @@ SUPPORTED_SOURCE_RESISTANCES = (30, 50, 100)
 DEFAULT_TIMEOUT_S = 5.0
 DEFAULT_BAUD_RATE = 115200
 DEFAULT_TERMINATOR = "\r\n"
-COM_RESOURCE_PATTERN = re.compile(r"^COM(?P<port>\d+)$", re.IGNORECASE)
 FLOAT_PATTERN = re.compile(
     r"^\s*[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?(?:[a-zA-Z]+)?\s*$"
 )
-
-
-def normalize_resource_name(resource_name: str) -> str:
-    """Translate ``COM4``-style names into VISA ASRL resources."""
-
-    candidate = (resource_name or "").strip()
-    match = COM_RESOURCE_PATTERN.fullmatch(candidate)
-    if match:
-        return f"ASRL{int(match.group('port'))}::INSTR"
-    return candidate
 
 
 def _parse_float(token: str) -> float:
@@ -122,17 +116,8 @@ def _format_bool(value: bool) -> str:
     return "ON" if bool(value) else "OFF"
 
 
-def format_source_level_value(value: float) -> str:
-    """Format source levels in the form accepted by the LCR-76200 firmware."""
-
-    numeric = float(value)
-    if numeric == 0.0 or abs(numeric) >= 0.1:
-        return f"{numeric:.12g}"
-    for scale, suffix in ((1e3, "m"), (1e6, "u"), (1e9, "n")):
-        scaled = numeric * scale
-        if 1.0 <= abs(scaled) < 1000.0:
-            return f"{scaled:.12g}{suffix}"
-    return f"{numeric:.12g}"
+def _format_upper_token(value: object) -> str:
+    return str(value).strip().upper()
 
 
 def _parse_bias_response(token: str) -> Optional[float]:
@@ -273,6 +258,23 @@ if VisaInstrument is not None and Enum is not None and Ints is not None and Numb
             except Exception:
                 pass
 
+        def _add_uppercase_enum_parameter(
+            self,
+            name: str,
+            *,
+            set_cmd: str,
+            get_cmd: str,
+            values: tuple[str, ...],
+        ) -> None:
+            self.add_parameter(
+                name,
+                set_cmd=set_cmd,
+                get_cmd=get_cmd,
+                vals=Enum(*values),
+                get_parser=_format_upper_token,
+                set_parser=_format_upper_token,
+            )
+
         def _install_parameters(self) -> None:
             self.add_parameter(
                 "function",
@@ -301,29 +303,23 @@ if VisaInstrument is not None and Enum is not None and Ints is not None and Numb
                 get_parser=int,
                 vals=Ints(0, 8),
             )
-            self.add_parameter(
+            self._add_uppercase_enum_parameter(
                 "range_mode",
                 set_cmd="FUNC:RANG:AUTO {}",
                 get_cmd="FUNC:RANG:AUTO?",
-                vals=Enum(*SUPPORTED_RANGE_MODES),
-                get_parser=lambda value: value.strip().upper(),
-                set_parser=lambda value: str(value).strip().upper(),
+                values=SUPPORTED_RANGE_MODES,
             )
-            self.add_parameter(
+            self._add_uppercase_enum_parameter(
                 "monitor1_mode",
                 set_cmd="FUNC:MON1 {}",
                 get_cmd="FUNC:MON1?",
-                vals=Enum(*SUPPORTED_MONITORS),
-                get_parser=lambda value: value.strip().upper(),
-                set_parser=lambda value: str(value).strip().upper(),
+                values=SUPPORTED_MONITORS,
             )
-            self.add_parameter(
+            self._add_uppercase_enum_parameter(
                 "monitor2_mode",
                 set_cmd="FUNC:MON2 {}",
                 get_cmd="FUNC:MON2?",
-                vals=Enum(*SUPPORTED_MONITORS),
-                get_parser=lambda value: value.strip().upper(),
-                set_parser=lambda value: str(value).strip().upper(),
+                values=SUPPORTED_MONITORS,
             )
             self.add_parameter(
                 "frequency_hz",
@@ -371,13 +367,11 @@ if VisaInstrument is not None and Enum is not None and Ints is not None and Numb
                 get_cmd="LEV:MODE?",
                 get_parser=lambda value: value.strip().lower(),
             )
-            self.add_parameter(
+            self._add_uppercase_enum_parameter(
                 "aperture_rate",
                 set_cmd="APER {}",
                 get_cmd="APER:RATE?",
-                vals=Enum(*SUPPORTED_APERTURE_RATES),
-                get_parser=lambda value: value.strip().upper(),
-                set_parser=lambda value: str(value).strip().upper(),
+                values=SUPPORTED_APERTURE_RATES,
             )
             self.add_parameter(
                 "aperture_averages",
@@ -386,13 +380,11 @@ if VisaInstrument is not None and Enum is not None and Ints is not None and Numb
                 get_parser=int,
                 vals=Ints(0, 256),
             )
-            self.add_parameter(
+            self._add_uppercase_enum_parameter(
                 "trigger_source",
                 set_cmd="TRIG:SOUR {}",
                 get_cmd="TRIG:SOUR?",
-                vals=Enum(*SUPPORTED_TRIGGER_SOURCES),
-                get_parser=lambda value: value.strip().upper(),
-                set_parser=lambda value: str(value).strip().upper(),
+                values=SUPPORTED_TRIGGER_SOURCES,
             )
             self.add_parameter(
                 "trigger_delay_s",

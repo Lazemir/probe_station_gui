@@ -71,6 +71,9 @@ class GWInstekLCR76200ParsingTest(unittest.TestCase):
         self.assertEqual(driver_module.format_source_level_value(0.3), "0.3")
         self.assertEqual(driver_module.format_source_level_value(1.0), "1")
 
+    def test_format_upper_token_matches_parameter_parser_behavior(self) -> None:
+        self.assertEqual(driver_module._format_upper_token(" int "), "INT")
+
 
 if __name__ == "__main__":
     unittest.main()
