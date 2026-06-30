@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import threading
 import time
 from typing import TYPE_CHECKING, Any, cast
 
@@ -42,37 +41,20 @@ class StageControllerClickMoveMixin:
     def request_move(self, dx_pixels: float, dy_pixels: float) -> bool:
         """Begin an asynchronous move so the clicked point aligns with the cross."""
 
-        with self._task_lock:
-            active_thread = getattr(self, "_active_thread", None)
-            if active_thread and active_thread.is_alive():
-                self.status_message.emit("Stage is busy. Ignoring the new click.")
-                return False
-            self._cancel_event.clear()
-            thread = threading.Thread(
-                target=self._run_move,
-                args=(dx_pixels, dy_pixels),
-                daemon=True,
-            )
-            setattr(self, "_active_thread", thread)
-            thread.start()
-            return True
+        return self._start_background_task(
+            target=self._run_move,
+            args=(dx_pixels, dy_pixels),
+            busy_message="Stage is busy. Ignoring the new click.",
+        )
 
     def request_move_to_xy(self, target_x_mm: float, target_y_mm: float) -> None:
         """Move to an absolute X/Y coordinate in the configured report mode."""
 
-        with self._task_lock:
-            active_thread = getattr(self, "_active_thread", None)
-            if active_thread and active_thread.is_alive():
-                self.status_message.emit("Stage is busy. Ignoring absolute move request.")
-                return
-            self._cancel_event.clear()
-            thread = threading.Thread(
-                target=self._run_move_to_xy,
-                args=(float(target_x_mm), float(target_y_mm)),
-                daemon=True,
-            )
-            setattr(self, "_active_thread", thread)
-            thread.start()
+        self._start_background_task(
+            target=self._run_move_to_xy,
+            args=(float(target_x_mm), float(target_y_mm)),
+            busy_message="Stage is busy. Ignoring absolute move request.",
+        )
 
     def request_move_to_xyz(
         self,
@@ -84,25 +66,17 @@ class StageControllerClickMoveMixin:
     ) -> None:
         """Move to an absolute X/Y/Z point using a safe intermediate Z level."""
 
-        with self._task_lock:
-            active_thread = getattr(self, "_active_thread", None)
-            if active_thread and active_thread.is_alive():
-                self.status_message.emit("Stage is busy. Ignoring XYZ move request.")
-                return
-            self._cancel_event.clear()
-            thread = threading.Thread(
-                target=self._run_move_to_xyz,
-                args=(
-                    float(target_x_mm),
-                    float(target_y_mm),
-                    float(target_z_mm),
-                    None if transit_z_mm is None else float(transit_z_mm),
-                    str(label),
-                ),
-                daemon=True,
-            )
-            setattr(self, "_active_thread", thread)
-            thread.start()
+        self._start_background_task(
+            target=self._run_move_to_xyz,
+            args=(
+                float(target_x_mm),
+                float(target_y_mm),
+                float(target_z_mm),
+                None if transit_z_mm is None else float(transit_z_mm),
+                str(label),
+            ),
+            busy_message="Stage is busy. Ignoring XYZ move request.",
+        )
 
     def current_fov_size_mm(self) -> tuple[float, float] | None:
         """Estimate the camera field of view in millimeters from click calibration."""

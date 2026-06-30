@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import threading
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import numpy as np
@@ -35,19 +34,11 @@ class StageControllerMotionCommandsMixin:
     def request_rotate_b(self, delta_deg: float) -> None:
         """Rotate the B axis by a relative angle in the background."""
 
-        with self._task_lock:
-            active_thread = getattr(self, "_active_thread", None)
-            if active_thread and active_thread.is_alive():
-                self.status_message.emit("Stage is busy. Ignoring B rotation request.")
-                return
-            self._cancel_event.clear()
-            thread = threading.Thread(
-                target=self._run_rotate_b,
-                args=(float(delta_deg),),
-                daemon=True,
-            )
-            setattr(self, "_active_thread", thread)
-            thread.start()
+        self._start_background_task(
+            target=self._run_rotate_b,
+            args=(float(delta_deg),),
+            busy_message="Stage is busy. Ignoring B rotation request.",
+        )
 
     def request_manual_axis_move(
         self,
@@ -78,26 +69,17 @@ class StageControllerMotionCommandsMixin:
         except (TypeError, ValueError):
             self.status_message.emit(f"Unsupported manual feedrate: {feedrate}")
             return False
-        with self._task_lock:
-            active_thread = getattr(self, "_active_thread", None)
-            if active_thread and active_thread.is_alive():
-                self.status_message.emit("Stage is busy. Ignoring manual axis move.")
-                return False
-            self._cancel_event.clear()
-            thread = threading.Thread(
-                target=self._run_manual_axis_move,
-                args=(
-                    axis,
-                    float(distance_mm),
-                    mode,
-                    effective_feedrate,
-                    bool(allow_unhomed),
-                ),
-                daemon=True,
-            )
-            setattr(self, "_active_thread", thread)
-            thread.start()
-            return True
+        return self._start_background_task(
+            target=self._run_manual_axis_move,
+            args=(
+                axis,
+                float(distance_mm),
+                mode,
+                effective_feedrate,
+                bool(allow_unhomed),
+            ),
+            busy_message="Stage is busy. Ignoring manual axis move.",
+        )
 
     def request_absolute_axis_move(
         self,
@@ -148,20 +130,11 @@ class StageControllerMotionCommandsMixin:
         except (TypeError, ValueError):
             self.status_message.emit(f"Unsupported manual feedrate: {feedrate}")
             return False
-        with self._task_lock:
-            active_thread = getattr(self, "_active_thread", None)
-            if active_thread and active_thread.is_alive():
-                self.status_message.emit("Stage is busy. Ignoring coordinate move.")
-                return False
-            self._cancel_event.clear()
-            thread = threading.Thread(
-                target=self._run_absolute_axis_targets_move,
-                args=(dict(normalized), effective_feedrate, bool(allow_unhomed)),
-                daemon=True,
-            )
-            setattr(self, "_active_thread", thread)
-            thread.start()
-            return True
+        return self._start_background_task(
+            target=self._run_absolute_axis_targets_move,
+            args=(dict(normalized), effective_feedrate, bool(allow_unhomed)),
+            busy_message="Stage is busy. Ignoring coordinate move.",
+        )
 
     def request_oscillation(
         self, mode: str, amplitude_mm: float, feedrate: float, turns_per_sweep: float = 3.0
@@ -169,24 +142,16 @@ class StageControllerMotionCommandsMixin:
         """Start one of the repeated motion patterns."""
 
         mode_key = mode.upper().strip()
-        with self._task_lock:
-            active_thread = getattr(self, "_active_thread", None)
-            if active_thread and active_thread.is_alive():
-                self.status_message.emit("Stage is busy. Ignoring oscillation request.")
-                return
-            self._cancel_event.clear()
-            thread = threading.Thread(
-                target=self._run_oscillation,
-                args=(
-                    mode_key,
-                    float(amplitude_mm),
-                    float(feedrate),
-                    float(turns_per_sweep),
-                ),
-                daemon=True,
-            )
-            setattr(self, "_active_thread", thread)
-            thread.start()
+        self._start_background_task(
+            target=self._run_oscillation,
+            args=(
+                mode_key,
+                float(amplitude_mm),
+                float(feedrate),
+                float(turns_per_sweep),
+            ),
+            busy_message="Stage is busy. Ignoring oscillation request.",
+        )
 
     def request_stop_oscillation(self) -> None:
         """Stop the active oscillation task if one is running."""

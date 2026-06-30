@@ -11,7 +11,7 @@ from queue import PriorityQueue
 import re
 import threading
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 import serial
 from PySide6.QtCore import QObject, Signal
@@ -793,6 +793,30 @@ class StageController(
 
         with self._task_lock:
             return bool(self._active_thread and self._active_thread.is_alive())
+
+    def _start_background_task(
+        self,
+        *,
+        target: Callable[..., None],
+        args: tuple[object, ...] = (),
+        busy_message: str,
+        before_create: Callable[[], None] | None = None,
+        before_start: Callable[[], None] | None = None,
+    ) -> bool:
+        with self._task_lock:
+            active_thread = getattr(self, "_active_thread", None)
+            if active_thread and active_thread.is_alive():
+                self.status_message.emit(busy_message)
+                return False
+            if before_create is not None:
+                before_create()
+            self._cancel_event.clear()
+            thread = threading.Thread(target=target, args=args, daemon=True)
+            self._active_thread = thread
+            if before_start is not None:
+                before_start()
+            thread.start()
+            return True
 
     def begin_external_task(self, label: str) -> None:
         """Reserve the controller for a higher-level blocking workflow."""

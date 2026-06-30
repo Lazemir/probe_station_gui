@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import threading
 from typing import TYPE_CHECKING, Any
 
 from probe_station_gui.stage.errors import StageControllerError
@@ -24,21 +23,16 @@ class StageControllerHomingStartupMixin:
     ) -> None:
         """Load controller state after connect and optionally home A."""
 
-        with self._task_lock:
-            active_thread = getattr(self, "_active_thread", None)
-            if active_thread and active_thread.is_alive():
-                self.status_message.emit("Stage is busy. Skipping startup sync.")
-                return
-            if clear_unverified_state:
-                self._clear_unverified_controller_state_locked()
-            self._cancel_event.clear()
-            thread = threading.Thread(
-                target=self._run_startup_sync,
-                args=(bool(auto_home_a),),
-                daemon=True,
-            )
-            setattr(self, "_active_thread", thread)
-            thread.start()
+        self._start_background_task(
+            target=self._run_startup_sync,
+            args=(bool(auto_home_a),),
+            busy_message="Stage is busy. Skipping startup sync.",
+            before_create=(
+                self._clear_unverified_controller_state_locked
+                if clear_unverified_state
+                else None
+            ),
+        )
 
     def request_home_axis(self, axis: str) -> bool:
         """Home a specific axis via a background task."""
@@ -46,36 +40,22 @@ class StageControllerHomingStartupMixin:
         axis = axis.upper().strip()
         if not axis:
             return False
-        with self._task_lock:
-            active_thread = getattr(self, "_active_thread", None)
-            if active_thread and active_thread.is_alive():
-                self.status_message.emit("Stage is busy. Ignoring home request.")
-                return False
-            self._cancel_event.clear()
-            thread = threading.Thread(
-                target=self._run_home, args=(f"$H{axis}", axis), daemon=True
-            )
-            setattr(self, "_active_thread", thread)
-            self.homing_action_started.emit(axis)
-            thread.start()
-            return True
+        return self._start_background_task(
+            target=self._run_home,
+            args=(f"$H{axis}", axis),
+            busy_message="Stage is busy. Ignoring home request.",
+            before_start=lambda: self.homing_action_started.emit(axis),
+        )
 
     def request_home_all(self) -> bool:
         """Home all axes via a background task."""
 
-        with self._task_lock:
-            active_thread = getattr(self, "_active_thread", None)
-            if active_thread and active_thread.is_alive():
-                self.status_message.emit("Stage is busy. Ignoring home request.")
-                return False
-            self._cancel_event.clear()
-            thread = threading.Thread(
-                target=self._run_home, args=("$H", "ALL"), daemon=True
-            )
-            setattr(self, "_active_thread", thread)
-            self.homing_action_started.emit("ALL")
-            thread.start()
-            return True
+        return self._start_background_task(
+            target=self._run_home,
+            args=("$H", "ALL"),
+            busy_message="Stage is busy. Ignoring home request.",
+            before_start=lambda: self.homing_action_started.emit("ALL"),
+        )
 
     def _run_home(self, command: str, axis_key: str) -> None:
         self.movement_started.emit()
