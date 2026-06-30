@@ -7,6 +7,7 @@ from typing import Any, Protocol
 
 from PySide6.QtWidgets import QDialog
 
+from probe_station_gui.camera import microscope_scan
 from probe_station_gui.route.dialog_adapter import (
     route_measurement_point_request_handler_for_owner,
 )
@@ -34,11 +35,11 @@ class MainWindowAuxiliaryOwner(Protocol):
     lcr_controller: Any
     grabber: Any
     _api_key_store: Any
+    _design_session: Any
 
     def _surface_map_stage_status(self) -> Any: ...
     def _surface_map_move_to_xy(self, *args: Any) -> Any: ...
     def _update_stage_coordinate_apply_state(self) -> None: ...
-    def _default_microscope_scan_output_dir(self) -> str: ...
     def _start_microscope_scan(self, *args: Any) -> None: ...
     def _request_stop_microscope_scan(self) -> None: ...
     def _clear_microscope_scan_dialog(self) -> None: ...
@@ -122,7 +123,7 @@ def show_microscope_scan_dialog(
 
         dialog_class = MicroscopeScanDialog
 
-    default_dir = owner._default_microscope_scan_output_dir()
+    default_dir = microscope_scan.default_output_dir(owner._design_session.document)
     if owner.microscope_scan_dialog is None:
         dialog = dialog_class(
             default_output_dir=default_dir,

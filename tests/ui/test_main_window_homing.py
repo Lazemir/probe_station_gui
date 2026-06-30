@@ -188,12 +188,19 @@ def test_successful_homing_finish_invalidates_registration_and_schedules_next(
     assert callable(timer_calls[0][1])
 
 
-def test_limit_axis_update_normalizes_axes_and_preserves_manual_jog_prediction() -> None:
+def test_limit_axis_update_normalizes_axes_and_preserves_manual_jog_prediction(
+    monkeypatch,
+) -> None:
     events: list[object] = []
     owner = _owner(events)
     owner._manual_jog_prediction = SimpleNamespace(
         prediction_available=lambda _now: True,
         stage_position=(9.0, 8.0, 7.0),
+    )
+    monkeypatch.setattr(
+        homing_ui.stage_position_panel,
+        "update_stage_position_display",
+        lambda _owner, position: events.append(("display", position)),
     )
 
     homing_ui.on_limit_axes_changed(owner, ["x", "bad", "B"])

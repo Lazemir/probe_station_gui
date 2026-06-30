@@ -741,7 +741,13 @@ class Main(QMainWindow):
 
         self.stage_controller = StageController()
         self.stage_controller.status_message.connect(self._show_status)
-        self.stage_controller.movement_finished.connect(self.on_move_finished)
+        self.stage_controller.movement_finished.connect(
+            lambda success, message: stage_move_lifecycle.on_move_finished(
+                self,
+                success,
+                message,
+            )
+        )
         self.stage_controller.click_move_started.connect(self._on_click_move_started)
         self.stage_controller.absolute_xy_move_started.connect(
             self._on_absolute_xy_move_started
@@ -754,7 +760,12 @@ class Main(QMainWindow):
             self._on_objective_mismatch_detected
         )
         self.stage_controller.autofocus_finished.connect(self.on_autofocus_finished)
-        self.stage_controller.stage_position_changed.connect(self._on_stage_position_changed)
+        self.stage_controller.stage_position_changed.connect(
+            lambda position: stage_position_update.on_stage_position_changed(
+                self,
+                position,
+            )
+        )
         self.stage_controller.needle_height_changed.connect(self._on_needle_height_changed)
         self.stage_controller.axis_max_feedrates_changed.connect(
             lambda rates: connection_flow.on_axis_max_feedrates_changed(self, rates)
@@ -3134,7 +3145,10 @@ class Main(QMainWindow):
     def _on_stage_coordinate_mode_changed(self) -> None:
         if self._pending_stage_axis_targets and self._stage_position_panel is not None:
             self._stage_position_panel.clear_pending_target_state()
-            self._update_stage_position_display(self.stage_controller.latest_stage_position())
+            stage_position_panel_adapter.update_stage_position_display(
+                self,
+                self.stage_controller.latest_stage_position(),
+            )
             self._show_status("Cleared pending coordinate edits after input mode change.", 2000)
         self._update_stage_coordinate_apply_state()
 
@@ -3150,9 +3164,6 @@ class Main(QMainWindow):
     def _microscope_scan_running(self) -> bool:
         thread = getattr(self, "_microscope_scan_thread", None)
         return thread is not None and thread.is_alive()
-
-    def _has_cancelable_operation(self) -> bool:
-        return stage_move_lifecycle.has_cancelable_operation(self)
 
     def _controller_reports_active_motion(self) -> bool:
         if not hasattr(self, "stage_controller"):
@@ -3213,7 +3224,10 @@ class Main(QMainWindow):
         controller_busy = hasattr(self, "stage_controller") and self.stage_controller.is_busy()
         active = self._coordinate_targets.has_active_move() or controller_busy
         available = panel.has_pending_or_modified_fields()
-        panel.set_action_buttons_enabled(available and not active, available or self._has_cancelable_operation())
+        panel.set_action_buttons_enabled(
+            available and not active,
+            available or stage_move_lifecycle.has_cancelable_operation(self),
+        )
 
     def _clear_pending_stage_coordinate_targets(self) -> bool:
         panel = getattr(self, "_stage_position_panel", None)
@@ -3253,17 +3267,6 @@ class Main(QMainWindow):
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
         QTimer.singleShot(0, self._prime_keyboard_focus)
-
-    def _maybe_restore_persisted_design(self, position: tuple[float, ...]) -> None:
-        connection_flow.maybe_restore_persisted_design(self, position)
-
-    @staticmethod
-    def _coerce_position_tuple(value: object) -> tuple[float, ...] | None:
-        return design_navigation.coerce_position_tuple(value)
-
-    @staticmethod
-    def _persisted_design_file_is_current(state: dict[str, object]) -> bool:
-        return design_navigation.persisted_design_file_is_current(state)
 
     def _on_design_layout_point_selected(
         self, slot: int, x_value: float, y_value: float
@@ -3946,31 +3949,6 @@ class Main(QMainWindow):
                 self._format_active_coordinate_label("Cursor", cursor_xy),
             )
 
-    @staticmethod
-    def _stage_xy_from_position(position: object | None) -> tuple[float, float] | None:
-        return stage_position_update.stage_xy_from_position(position)
-
-    def _position_with_stage_xy(
-        self, stage_xy: tuple[float, float], *, base_position: object | None = None
-    ) -> tuple[float, ...]:
-        return stage_position_update.position_with_stage_xy(
-            self,
-            stage_xy,
-            base_position=base_position,
-        )
-
-    def _seed_motion_prediction_position(self) -> tuple[float, ...] | None:
-        return stage_position_update.seed_motion_prediction_position(self)
-
-    def _publish_stage_position_estimate(self, position: tuple[float, ...] | None) -> None:
-        stage_position_update.publish_stage_position_estimate(self, position)
-
-    def _preferred_design_stage_xy(self) -> tuple[float, float] | None:
-        return stage_position_update.preferred_design_stage_xy(self)
-
-    def _preferred_design_display_stage_xy(self) -> tuple[float, float] | None:
-        return stage_position_update.preferred_design_display_stage_xy(self)
-
     def _can_display_design_position(self) -> bool:
         registration = self._design_session.registration
         return bool(
@@ -4088,7 +4066,8 @@ class Main(QMainWindow):
                 "Coordinate move tracking cleared after manual jog command: %s",
                 commanded_distances,
             )
-            self._clear_coordinate_move_tracking(
+            stage_move_lifecycle.clear_coordinate_move_tracking(
+                self,
                 clear_pending=False,
                 reset_override=False,
             )
@@ -4114,7 +4093,10 @@ class Main(QMainWindow):
             result.stage_source,
         )
         if result.publish_position is not None:
-            self._publish_stage_position_estimate(result.publish_position)
+            stage_position_update.publish_stage_position_estimate(
+                self,
+                result.publish_position,
+            )
         if result.start_timer and not self._manual_jog_timer.isActive():
             self._manual_jog_timer.start()
 
@@ -4375,7 +4357,10 @@ class Main(QMainWindow):
                 result.velocity_xy[1],
             )
         if result.publish_position is not None:
-            self._publish_stage_position_estimate(result.publish_position)
+            stage_position_update.publish_stage_position_estimate(
+                self,
+                result.publish_position,
+            )
         if result.stop_timer:
             self._manual_jog_timer.stop()
 
@@ -4384,10 +4369,17 @@ class Main(QMainWindow):
             monotonic_s=time.monotonic(),
         )
         if decision.clear_tracking:
-            self._clear_coordinate_move_tracking(clear_pending=False, reset_override=True)
+            stage_move_lifecycle.clear_coordinate_move_tracking(
+                self,
+                clear_pending=False,
+                reset_override=True,
+            )
             return
         if decision.publish_position is not None:
-            self._publish_stage_position_estimate(decision.publish_position)
+            stage_position_update.publish_stage_position_estimate(
+                self,
+                decision.publish_position,
+            )
 
     def _advance_planned_move_prediction(self) -> None:
         if (
@@ -4410,8 +4402,12 @@ class Main(QMainWindow):
             float(origin_x + (target_x - origin_x) * progress),
             float(origin_y + (target_y - origin_y) * progress),
         )
-        self._publish_stage_position_estimate(
-            self._position_with_stage_xy(self._planned_move_stage_xy)
+        stage_position_update.publish_stage_position_estimate(
+            self,
+            stage_position_update.position_with_stage_xy(
+                self,
+                self._planned_move_stage_xy,
+            ),
         )
         if progress >= 1.0:
             self._planned_move_waiting_for_fresh_status = (
@@ -4444,7 +4440,7 @@ class Main(QMainWindow):
         source_label: str,
         feedrate_mm_min: float | None = None,
     ) -> None:
-        origin_stage_xy = self._preferred_design_stage_xy()
+        origin_stage_xy = stage_position_update.preferred_design_stage_xy(self)
         if origin_stage_xy is None:
             origin_stage_xy = self._current_design_stage_xy
         if origin_stage_xy is None:
@@ -4490,8 +4486,9 @@ class Main(QMainWindow):
             duration_s,
             feedrate,
         )
-        self._publish_stage_position_estimate(
-            self._position_with_stage_xy(origin_stage_xy)
+        stage_position_update.publish_stage_position_estimate(
+            self,
+            stage_position_update.position_with_stage_xy(self, origin_stage_xy),
         )
         if not self._manual_jog_timer.isActive():
             self._manual_jog_timer.start()
@@ -4520,9 +4517,6 @@ class Main(QMainWindow):
     def _on_stage_task_started(self) -> None:
         self._show_status("Moving stage...")
         self._update_stage_coordinate_apply_state()
-
-    def on_move_finished(self, success: bool, message: str) -> None:
-        stage_move_lifecycle.on_move_finished(self, success, message)
 
     def on_autofocus_finished(self, success: bool, message: str) -> None:
         if message:
@@ -5748,7 +5742,7 @@ class Main(QMainWindow):
                 self._show_route_runtime_status(position_plan.message, position_plan.timeout_ms)
                 return None
             position = latest
-        stage_xy = self._stage_xy_from_position(position)
+        stage_xy = stage_position_update.stage_xy_from_position(position)
         xy_plan = route_shift_stage_xy_plan(stage_xy_available=stage_xy is not None)
         if xy_plan.message:
             self._show_route_runtime_status(xy_plan.message, xy_plan.timeout_ms)
@@ -6367,12 +6361,6 @@ class Main(QMainWindow):
         self._update_design_position(self._current_design_stage_xy)
         connection_flow.persist_controller_state_if_available(self)
 
-    def _on_stage_position_changed(self, position: object) -> None:
-        stage_position_update.on_stage_position_changed(self, position)
-
-    def _update_stage_position_display(self, position: object | None) -> None:
-        stage_position_panel_adapter.update_stage_position_display(self, position)
-
     def _on_stage_axis_editing_finished(self, axis_name: str) -> bool | None:
         panel = getattr(self, "_stage_position_panel", None)
         if panel is None or panel.is_programmatic_update:
@@ -6490,7 +6478,7 @@ class Main(QMainWindow):
             targets=targets,
             feedrate_mm_min=feedrate_mm_min,
             source_label=source_label,
-            seed_position=self._seed_motion_prediction_position(),
+            seed_position=stage_position_update.seed_motion_prediction_position(self),
             latest_stage_position=self.stage_controller.latest_stage_position(),
             axis_target_limit_error=self._stage_axis_target_limit_error,
             axis_max_feedrates=self.stage_controller.axis_max_feedrates(),
@@ -6524,13 +6512,17 @@ class Main(QMainWindow):
             feedrate=plan.feedrate_mm_min,
         )
         if not accepted:
-            self._clear_coordinate_move_tracking(
+            stage_move_lifecycle.clear_coordinate_move_tracking(
+                self,
                 clear_pending=False,
                 reset_override=True,
             )
             return False
         self._show_status(plan.status.message, plan.status.timeout_ms)
-        self._publish_stage_position_estimate(plan.publish_position)
+        stage_position_update.publish_stage_position_estimate(
+            self,
+            plan.publish_position,
+        )
         if not self._manual_jog_timer.isActive():
             self._manual_jog_timer.start()
         return True
@@ -6560,7 +6552,8 @@ class Main(QMainWindow):
         if decision.log_debug_message is not None:
             logger.debug(decision.log_debug_message)
         if decision.clear_stale_tracking:
-            self._clear_coordinate_move_tracking(
+            stage_move_lifecycle.clear_coordinate_move_tracking(
+                self,
                 clear_pending=False,
                 reset_override=False,
             )
@@ -6603,15 +6596,6 @@ class Main(QMainWindow):
             1500,
         )
 
-    def _clear_coordinate_move_tracking(
-        self, *, clear_pending: bool, reset_override: bool
-    ) -> None:
-        stage_move_lifecycle.clear_coordinate_move_tracking(
-            self,
-            clear_pending=clear_pending,
-            reset_override=reset_override,
-        )
-
     def _start_next_pending_stage_axis_move(self) -> None:
         if self._coordinate_targets.has_active_move() or not self._pending_stage_axis_targets:
             return
@@ -6625,14 +6609,6 @@ class Main(QMainWindow):
         axis = next(iter(self._pending_stage_axis_targets.keys()))
         raw_target, display_target = self._pending_stage_axis_targets.pop(axis)
         self._start_coordinate_axis_move(axis, raw_target, display_target)
-
-    def _finish_coordinate_move_if_idle(self, position: object | None) -> None:
-        stage_move_lifecycle.finish_coordinate_move_if_idle(
-            self,
-            position,
-            monotonic_s=time.monotonic(),
-            schedule_single_shot=QTimer.singleShot,
-        )
 
     def _raw_target_from_display_value(
         self, axis_name: str, display_target: float
@@ -6684,7 +6660,9 @@ class Main(QMainWindow):
         if self.serial_connection is None or not self.serial_connection.is_open:
             self._update_design_position(None)
             return
-        preferred_stage_xy = self._preferred_design_display_stage_xy()
+        preferred_stage_xy = stage_position_update.preferred_design_display_stage_xy(
+            self
+        )
         if preferred_stage_xy is None:
             self.stage_controller.request_status_refresh()
             return
@@ -6776,9 +6754,6 @@ class Main(QMainWindow):
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         shutdown_ui.close_event(self, event)
-
-    def _default_microscope_scan_output_dir(self) -> str:
-        return microscope_scan.default_output_dir(self._design_session.document)
 
     def _clear_microscope_scan_dialog(self) -> None:
         self.microscope_scan_dialog = None
@@ -7166,7 +7141,7 @@ class Main(QMainWindow):
             action,
             stage_ready=self._stage_serial_ready(),
             sample_active=self._sample_handling_active(),
-            cancelable_operation=self._has_cancelable_operation(),
+            cancelable_operation=stage_move_lifecycle.has_cancelable_operation(self),
         )
         if not decision.accepted:
             self._show_status(decision.status_message, 4000)

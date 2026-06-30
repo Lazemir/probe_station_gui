@@ -17,6 +17,8 @@ from tests.app.main_coordinate_feedrate_support import (
     api_move_feedrate,
     main_module,
 )
+from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
+from probe_station_gui.stage import position_update as stage_position_update
 from probe_station_gui.views import main_window_homing as homing_ui
 from probe_station_gui.views import main_window_needle_calibration as needle_calibration_ui
 from probe_station_gui.views import (
@@ -35,7 +37,10 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         window._pending_stage_axis_targets = panel.pending_targets
         window._stage_axis_return_commits = panel.return_commits
 
-        Main._update_stage_position_display(window, (1.0, 2.0, 3.0))
+        stage_position_panel_adapter.update_stage_position_display(
+            window,
+            (1.0, 2.0, 3.0),
+        )
 
         self.assertEqual(window._stage_axis_raw_values, {"X": 1.0, "Y": 2.0, "Z": 3.0})
         self.assertEqual(
@@ -57,7 +62,10 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         x_field.setModified(True)
         window._pending_stage_axis_targets["X"] = (7.5, 7.777)
 
-        Main._update_stage_position_display(window, (1.0, 2.0, 3.0))
+        stage_position_panel_adapter.update_stage_position_display(
+            window,
+            (1.0, 2.0, 3.0),
+        )
 
         self.assertEqual(x_field.text(), "7.777")
         self.assertTrue(x_field.isModified())
@@ -72,7 +80,10 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         stage_controller.homed_axes = lambda: {"X", "Y", "Z"}
         window._stage_limit_axes = {"X"}
 
-        Main._update_stage_position_display(window, (1.0, 2.0, 3.0))
+        stage_position_panel_adapter.update_stage_position_display(
+            window,
+            (1.0, 2.0, 3.0),
+        )
 
         self.assertEqual(window._stage_axis_base_styles["X"], ("#c62828", "#ffffff"))
         self.assertEqual(
@@ -96,15 +107,19 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         window.stage_controller = types.SimpleNamespace(
             latest_stage_position=lambda: latest_position,
         )
-        window._update_stage_position_display = lambda position: display_updates.append(
-            tuple(float(value) for value in position)
-        )
         window._show_status = lambda message, timeout_ms=None: statuses.append(
             f"{message}|{timeout_ms}"
         )
         window._update_stage_coordinate_apply_state = lambda: None
 
-        Main._on_stage_coordinate_mode_changed(window)
+        with mock.patch.object(
+            main_module.stage_position_panel_adapter,
+            "update_stage_position_display",
+            side_effect=lambda _owner, position: display_updates.append(
+                tuple(float(value) for value in position)
+            ),
+        ):
+            Main._on_stage_coordinate_mode_changed(window)
 
         self.assertEqual(panel.pending_targets, {})
         self.assertEqual(panel.pending_only_clear_count, 1)
@@ -467,7 +482,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
             [({"X": 5.0}, 120.0), ({"X": 5.0}, 180.0)],
         )
 
-        Main.on_move_finished(window, False, "Operation cancelled.")
+        stage_move_lifecycle.on_move_finished(window, False, "Operation cancelled.")
 
         self.assertFalse(window._coordinate_targets.reissue_cancel_pending)
         self.assertEqual(window._coordinate_targets.active_axis, "X")
@@ -533,12 +548,16 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         window.serial_terminal_panel = types.SimpleNamespace(
             set_live_poll_paused=lambda paused_state: paused.append(bool(paused_state))
         )
-        window._publish_stage_position_estimate = lambda position: published.append(
-            tuple(float(value) for value in position)
-        )
         stage_controller.latest_position = (1.0, 2.0, 3.0, 0.0, 0.0, 0.0)
 
-        Main._on_manual_jog_command_changed(window, (("X", 2.0),), 60.0)
+        with mock.patch.object(
+            main_module.stage_position_update,
+            "publish_stage_position_estimate",
+            side_effect=lambda _owner, position: published.append(
+                tuple(float(value) for value in position)
+            ),
+        ):
+            Main._on_manual_jog_command_changed(window, (("X", 2.0),), 60.0)
 
         self.assertEqual(paused, [True])
         self.assertEqual(published, [(1.0, 2.0, 3.0, 0.0, 0.0, 0.0)])
@@ -630,9 +649,13 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         window._pending_stage_axis_targets = panel.pending_targets
         window.stage_controller = types.SimpleNamespace(is_busy=lambda: False)
         window._coordinate_targets = _coordinate_target_state()
-        window._has_cancelable_operation = lambda: True
 
-        Main._update_stage_coordinate_apply_state(window)
+        with mock.patch.object(
+            stage_move_lifecycle,
+            "has_cancelable_operation",
+            return_value=True,
+        ):
+            Main._update_stage_coordinate_apply_state(window)
 
         self.assertEqual(panel.action_button_states[-1], (True, True))
 
@@ -653,9 +676,6 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         window, stage_controller, _cancel_button, _statuses = _make_cancel_main()
         window._coordinate_targets.active_axis = "X"
         window._coordinate_targets.active_axes = {"X"}
-        window._clear_coordinate_move_tracking = (
-            lambda *, clear_pending, reset_override: window._coordinate_targets.clear_tracking()
-        )
 
         stage_position_panel_adapter.cancel_stage_coordinate_action(window)
 
@@ -727,7 +747,12 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         stage_controller.latest_state = "Idle"
         window._coordinate_targets.started_at = None
 
-        Main._finish_coordinate_move_if_idle(window, (0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+        stage_move_lifecycle.finish_coordinate_move_if_idle(
+            window,
+            (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            monotonic_s=time.monotonic(),
+            schedule_single_shot=lambda _delay, callback: callback(),
+        )
 
         self.assertEqual(window._coordinate_targets.active_axis, "X")
         self.assertEqual(window._coordinate_targets.active_axes, {"X", "Y"})
@@ -744,7 +769,12 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         window._coordinate_targets.started_at = None
         window._coordinate_targets.seen_active_state = True
 
-        Main._finish_coordinate_move_if_idle(window, (5.0, -2.0, 0.0, 0.0, 0.0, 0.0))
+        stage_move_lifecycle.finish_coordinate_move_if_idle(
+            window,
+            (5.0, -2.0, 0.0, 0.0, 0.0, 0.0),
+            monotonic_s=time.monotonic(),
+            schedule_single_shot=lambda _delay, callback: callback(),
+        )
 
         self.assertIsNone(window._coordinate_targets.active_axis)
 
@@ -760,9 +790,11 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         window._coordinate_targets.started_at = None
         window._coordinate_targets.seen_active_state = True
 
-        Main._finish_coordinate_move_if_idle(
+        stage_move_lifecycle.finish_coordinate_move_if_idle(
             window,
             (0.0, 0.0, 0.0, -0.004, 0.0, 0.0),
+            monotonic_s=time.monotonic(),
+            schedule_single_shot=lambda _delay, callback: callback(),
         )
 
         self.assertEqual(window._coordinate_targets.active_axis, "A")

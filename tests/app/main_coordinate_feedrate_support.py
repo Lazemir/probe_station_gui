@@ -512,6 +512,9 @@ class _FakeStageController:
     def latest_stage_position(self) -> tuple[float, ...]:
         return self.latest_position
 
+    def homed_axes(self) -> set[str]:
+        return {"X", "Y", "Z"}
+
     def last_status_timestamp(self) -> float | None:
         return self.last_status_time
 
@@ -596,13 +599,18 @@ def _make_main(current_feedrate: float = 120.0) -> tuple[
     joystick = _FakeJoystick(current_feedrate)
     timer = _FakeTimer()
     statuses: list[str] = []
-    estimates: list[tuple[float, ...]] = []
 
     window.stage_controller = stage_controller
     window.joystick_panel = joystick
     window.serial_terminal_panel = None
     window._pending_stage_axis_targets = {}
     window._stage_axis_fields = {}
+    window._stage_unhomed_display_origins = {}
+    window._stage_axis_raw_values = {}
+    window._stage_axis_display_values = {}
+    window._stage_axis_homed = set()
+    window._stage_axis_base_styles = {}
+    window._stage_limit_axes = set()
     window._coordinate_targets = _coordinate_target_state()
     window._pending_homing_axes = []
     window._pending_click_to_move = None
@@ -627,14 +635,7 @@ def _make_main(current_feedrate: float = 120.0) -> tuple[
         )
     )
     window._manual_jog_timer = timer
-    window._seed_motion_prediction_position = lambda: (
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-    )
+    window._current_linear_feedrate = lambda: current_feedrate
     window._stage_axis_target_limit_error = lambda _axis, _target: None
     window.view = _FakeView()
 
@@ -664,9 +665,9 @@ def _make_main(current_feedrate: float = 120.0) -> tuple[
     window._show_status = (
         lambda message, _timeout_ms=None: statuses.append(str(message))
     )
-    window._publish_stage_position_estimate = (
-        lambda position: estimates.append(tuple(float(value) for value in position))
-    )
+    window._can_display_design_position = lambda: False
+    window._update_coordinate_display = lambda **_kwargs: None
+    window._update_design_position = lambda _stage_xy: None
     window._design_xy_from_raw_stage_xy = lambda _stage_xy: None
     return window, stage_controller, joystick, timer, statuses
 

@@ -7,7 +7,12 @@ import math
 import time
 from typing import Any, Protocol
 
+from PySide6.QtCore import QTimer
+
+from probe_station_gui.design import navigation_adapter as design_navigation
+from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
 from probe_station_gui.stage.position_presenter import stage_position_signal_plan
+from probe_station_gui.views import main_window_connection_flow as connection_flow
 from probe_station_gui.views import main_window_stage_position_panel as stage_position_panel
 
 
@@ -31,16 +36,7 @@ class StagePositionUpdateOwner(Protocol):
     contact_calibration_window: Any
     stage_controller: Any
 
-    def _coerce_position_tuple(self, value: object) -> tuple[float, ...] | None: ...
-    def _stage_xy_from_position(self, position: object | None) -> tuple[float, float] | None: ...
-    def _position_with_stage_xy(
-        self,
-        stage_xy: tuple[float, float],
-        *,
-        base_position: object | None = None,
-    ) -> tuple[float, ...]: ...
     def _can_display_design_position(self) -> bool: ...
-    def _maybe_restore_persisted_design(self, position: tuple[float, ...]) -> None: ...
     def _update_coordinate_display(
         self,
         *,
@@ -55,12 +51,6 @@ class StagePositionUpdateOwner(Protocol):
         actual_stage_xy: tuple[float, float],
     ) -> None: ...
     def _format_optional_point(self, point: tuple[float, float] | None) -> str: ...
-    def _finish_coordinate_move_if_idle(self, position: object | None = None) -> None: ...
-    def _update_stage_position_display(self, position: object | None) -> None: ...
-    def _publish_stage_position_estimate(
-        self,
-        position: tuple[float, ...] | None,
-    ) -> None: ...
 
 
 def stage_xy_from_position(position: object | None) -> tuple[float, float] | None:
@@ -111,13 +101,13 @@ def publish_stage_position_estimate(
     owner: StagePositionUpdateOwner,
     position: tuple[float, ...] | None,
 ) -> None:
-    stage_xy = owner._stage_xy_from_position(position)
+    stage_xy = stage_xy_from_position(position)
     design_stage_xy = (
         stage_xy
         if stage_xy is not None and owner._can_display_design_position()
         else None
     )
-    owner._update_stage_position_display(position)
+    stage_position_panel.update_stage_position_display(owner, position)
     owner._update_coordinate_display(center_xy=design_stage_xy)
     owner._update_design_position(design_stage_xy)
 
@@ -126,7 +116,7 @@ def preferred_design_stage_xy(
     owner: StagePositionUpdateOwner,
 ) -> tuple[float, float] | None:
     if owner._coordinate_targets.stage_position is not None:
-        stage_xy = owner._stage_xy_from_position(owner._coordinate_targets.stage_position)
+        stage_xy = stage_xy_from_position(owner._coordinate_targets.stage_position)
         if stage_xy is not None:
             return stage_xy
     stage_xy = owner._manual_jog_prediction.predicted_stage_xy(time.monotonic())
@@ -196,12 +186,12 @@ def on_stage_position_changed(
     position: object,
 ) -> None:
     if not isinstance(position, tuple) or len(position) < 2:
-        owner._update_stage_position_display(position)
+        stage_position_panel.update_stage_position_display(owner, position)
         return
     logger.debug("TIMING stage_position_changed position=%s", position)
-    current_position = owner._coerce_position_tuple(position)
+    current_position = design_navigation.coerce_position_tuple(position)
     if current_position is not None:
-        owner._maybe_restore_persisted_design(current_position)
+        connection_flow.maybe_restore_persisted_design(owner, current_position)
     now = time.monotonic()
     latest_state = (owner.stage_controller.latest_stage_state() or "").lower()
     xy_homed = owner.stage_controller.axes_are_homed({"X", "Y"})
@@ -239,7 +229,8 @@ def on_stage_position_changed(
     if _ignore_manual_idle_sample(owner, center_xy, now, latest_state):
         return
     center_xy = _reconciled_stage_xy(owner, signal_plan, center_xy, latest_state)
-    display_position = owner._position_with_stage_xy(
+    display_position = position_with_stage_xy(
+        owner,
         center_xy,
         base_position=position,
     )
@@ -251,9 +242,14 @@ def on_stage_position_changed(
         now,
         latest_state,
     )
-    owner._publish_stage_position_estimate(display_position)
+    publish_stage_position_estimate(owner, display_position)
     if latest_state == "idle":
-        owner._finish_coordinate_move_if_idle(display_position)
+        stage_move_lifecycle.finish_coordinate_move_if_idle(
+            owner,
+            display_position,
+            monotonic_s=time.monotonic(),
+            schedule_single_shot=QTimer.singleShot,
+        )
         stage_position_panel.clear_stage_motion_axes(owner)
 
 
@@ -295,8 +291,14 @@ def _build_stage_position_signal_plan(
         manual_jog_waiting_for_fresh_status=(
             owner._manual_jog_prediction.waiting_for_fresh_status
         ),
-        stage_xy_from_position=owner._stage_xy_from_position,
-        position_with_stage_xy=owner._position_with_stage_xy,
+        stage_xy_from_position=stage_xy_from_position,
+        position_with_stage_xy=lambda stage_xy, *, base_position=None: (
+            position_with_stage_xy(
+                owner,
+                stage_xy,
+                base_position=base_position,
+            )
+        ),
     )
 
 
@@ -318,14 +320,19 @@ def _apply_unhomed_fallback(
     latest_state: str,
 ) -> None:
     _ = center_xy
-    owner._update_stage_position_display(position)
+    stage_position_panel.update_stage_position_display(owner, position)
     owner._manual_jog_prediction.stage_position = None
     owner._manual_jog_prediction.stage_xy = None
     owner._planned_move_stage_xy = None
     owner._update_coordinate_display(center_xy=None)
     owner._update_design_position(signal_plan.status.unhomed_design_position)
     if latest_state == "idle":
-        owner._finish_coordinate_move_if_idle(position)
+        stage_move_lifecycle.finish_coordinate_move_if_idle(
+            owner,
+            position,
+            monotonic_s=time.monotonic(),
+            schedule_single_shot=QTimer.singleShot,
+        )
         stage_position_panel.clear_stage_motion_axes(owner)
 
 

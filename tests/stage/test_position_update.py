@@ -166,20 +166,42 @@ class _Owner:
         self.calls.append(("publish", position))
 
 
-def test_invalid_stage_position_uses_display_only_owner_seam() -> None:
+def test_invalid_stage_position_uses_display_only_owner_seam(monkeypatch) -> None:
     owner = _Owner()
+    monkeypatch.setattr(
+        position_update.stage_position_panel,
+        "update_stage_position_display",
+        lambda _owner, position: owner.calls.append(("display", position)),
+    )
 
     position_update.on_stage_position_changed(owner, ["bad"])
 
     assert owner.calls == [("display", ["bad"])]
 
 
-def test_unhomed_fallback_clears_prediction_and_keeps_idle_finish_order() -> None:
+def test_unhomed_fallback_clears_prediction_and_keeps_idle_finish_order(
+    monkeypatch,
+) -> None:
     owner = _Owner()
     owner.stage_controller.homed = set()
     owner._manual_jog_prediction.stage_position = (9.0, 9.0, 3.0)
     owner._manual_jog_prediction.stage_xy = (9.0, 9.0)
     owner._planned_move_stage_xy = (8.0, 8.0)
+    monkeypatch.setattr(
+        position_update.connection_flow,
+        "maybe_restore_persisted_design",
+        lambda _owner, position: owner.calls.append(("restore", position)),
+    )
+    monkeypatch.setattr(
+        position_update.stage_position_panel,
+        "update_stage_position_display",
+        lambda _owner, position: owner.calls.append(("display", position)),
+    )
+    monkeypatch.setattr(
+        position_update.stage_move_lifecycle,
+        "finish_coordinate_move_if_idle",
+        lambda _owner, position, **_kwargs: owner.calls.append(("finish", position)),
+    )
 
     position_update.on_stage_position_changed(owner, (1.0, 2.0, 3.0))
 

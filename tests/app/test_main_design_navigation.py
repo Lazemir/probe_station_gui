@@ -134,7 +134,10 @@ def test_maybe_restore_persisted_design_clears_design_and_unhomes_xy_when_xy_cha
     window._pending_persisted_design_state = {"document_path": "C:\\designs\\sample.gds"}
     window._pending_persisted_design_position = (1.0, 2.0, 3.0)
 
-    Main._maybe_restore_persisted_design(window, (1.25, 2.5, 3.0))
+    main_module.connection_flow.maybe_restore_persisted_design(
+        window,
+        (1.25, 2.5, 3.0),
+    )
 
     assert stage_controller.unhomed_requests == [{"X", "Y"}]
     assert stage_controller.homed_axes == {"Z"}

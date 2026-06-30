@@ -17,6 +17,7 @@ from probe_station_gui.stage.manual_jog_prediction import (
     ManualJogPredictionConfig,
     ManualJogPredictionState,
 )
+from probe_station_gui.stage import position_update
 
 
 class _FakeStageController:
@@ -46,6 +47,9 @@ class _FakeStageController:
 
     def is_busy(self) -> bool:
         return False
+
+    def homed_axes(self) -> set[str]:
+        return {"X", "Y", "Z"}
 
     def request_move_to_xy(self, target_x_mm: float, target_y_mm: float) -> None:
         self.move_requests.append((float(target_x_mm), float(target_y_mm)))
@@ -114,8 +118,8 @@ def _make_main(
         )
     )
 
-    window._coerce_position_tuple = lambda position: tuple(position)
-    window._maybe_restore_persisted_design = lambda _position: None
+    window._pending_persisted_design_state = None
+    window._pending_persisted_design_position = None
     window._log_design_position_reconcile = (
         lambda predicted, actual: reconciles.append((predicted, actual))
     )
@@ -135,10 +139,24 @@ def _make_main(
         )
 
     window._manual_jog_prediction.smooth_actual_stage_xy = smooth
-    window._publish_stage_position_estimate = lambda position: published.append(
-        tuple(float(value) for value in position)
+    window._stage_axis_fields = {}
+    window._stage_unhomed_display_origins = {}
+    window._stage_axis_raw_values = {}
+    window._stage_axis_display_values = {}
+    window._stage_axis_homed = set()
+    window._stage_axis_base_styles = {}
+    window._stage_limit_axes = set()
+    window._pending_stage_axis_targets = {}
+    window._current_linear_feedrate = lambda: 123.0
+    window._update_stage_coordinate_apply_state = lambda: None
+    window._update_coordinate_display = lambda **_kwargs: None
+    window._update_design_position = lambda stage_xy: (
+        published.append(tuple(float(value) for value in stage_xy))
+        if stage_xy is not None
+        else None
     )
-    window._finish_coordinate_move_if_idle = lambda _position: None
+    window._can_display_design_position = lambda: True
+    window._pending_homing_axes = []
     window._stage_motion_axes = set()
     window._stage_motion_blink_dimmed = False
     window._stage_motion_blink_timer = types.SimpleNamespace(isActive=lambda: False)
@@ -169,7 +187,6 @@ def _make_design_restore_main(
     window._pending_persisted_design_position = expected_position
     window._design_session = types.SimpleNamespace(document=None)
     window._show_status = lambda message, _timeout=0: statuses.append(message)
-    window._persisted_design_file_is_current = lambda _state: True
     window.settings_manager = types.SimpleNamespace(
         save_controller_state=lambda _state: saved_without_design.append(True)
     )
@@ -186,13 +203,14 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
         finished: list[object] = []
         cleared: list[str] = []
 
-        window._update_stage_position_display = lambda position: display_updates.append(
-            position
-        )
-        window._finish_coordinate_move_if_idle = lambda position: finished.append(position)
         window._clear_stage_motion_axes = lambda: cleared.append("clear")
 
-        Main._on_stage_position_changed(window, ["not", "a", "tuple"])
+        with mock.patch.object(
+            position_update.stage_position_panel,
+            "update_stage_position_display",
+            side_effect=lambda _owner, position: display_updates.append(position),
+        ):
+            position_update.on_stage_position_changed(window, ["not", "a", "tuple"])
 
         self.assertEqual(display_updates, [["not", "a", "tuple"]])
         self.assertEqual(published, [])
@@ -243,7 +261,7 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
     def test_active_planned_move_status_keeps_predicted_position(self) -> None:
         window, published, reconciles, smooth_calls = _make_main(state="run")
 
-        Main._on_stage_position_changed(window, (0.0, 0.0, 4.0, 0.0, 0.0))
+        position_update.on_stage_position_changed(window, (0.0, 0.0, 4.0, 0.0, 0.0))
 
         self.assertEqual(window._planned_move_stage_xy, (5.0, 5.0))
         self.assertEqual(window._manual_jog_prediction.stage_xy, (5.0, 5.0))
@@ -256,7 +274,7 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
         window._planned_move_started_at = None
         window._planned_move_waiting_for_fresh_status = True
 
-        Main._on_stage_position_changed(window, (0.0, 0.0, 4.0, 0.0, 0.0))
+        position_update.on_stage_position_changed(window, (0.0, 0.0, 4.0, 0.0, 0.0))
 
         self.assertEqual(window._planned_move_stage_xy, (0.0, 0.0))
         self.assertFalse(window._planned_move_waiting_for_fresh_status)
@@ -275,7 +293,7 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
         prediction.stop_axis_velocities = {"X": 1.0}
         prediction.stop_tail_s = 0.1
 
-        Main._on_stage_position_changed(window, (6.0, 7.0, 4.0, 0.0, 0.0))
+        position_update.on_stage_position_changed(window, (6.0, 7.0, 4.0, 0.0, 0.0))
 
         self.assertFalse(prediction.waiting_for_fresh_status)
         self.assertIsNone(prediction.stop_status_timestamp)
@@ -294,7 +312,7 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
         prediction.command_started_at = now - 0.01
         window.stage_controller.last_jog_write_time = now - 0.01
 
-        Main._on_stage_position_changed(window, (0.0, 0.0, 4.0, 0.0, 0.0))
+        position_update.on_stage_position_changed(window, (0.0, 0.0, 4.0, 0.0, 0.0))
 
         self.assertEqual(published, [])
         self.assertEqual(reconciles, [])
@@ -307,7 +325,7 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
             Main.MANUAL_JOG_IGNORE_IDLE_AFTER_COMMAND_S + 0.1
         )
 
-        Main._on_stage_position_changed(window, (0.0, 0.0, 4.0, 0.0, 0.0))
+        position_update.on_stage_position_changed(window, (0.0, 0.0, 4.0, 0.0, 0.0))
 
         self.assertEqual(reconciles, [((5.0, 5.0), (0.0, 0.0))])
         self.assertEqual(published[-1][:2], (0.0, 0.0))
@@ -326,19 +344,31 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
         window._manual_jog_prediction.stage_position = (9.0, 9.0, 9.0)
         window._manual_jog_prediction.stage_xy = (9.0, 9.0)
         window._planned_move_stage_xy = (8.0, 8.0)
-        window._update_stage_position_display = lambda position: displayed.append(position)
         window._update_coordinate_display = (
             lambda *, center_xy=None, cursor_xy=None: coordinate_updates.append(center_xy)
         )
         window._update_design_position = lambda stage_xy: design_updates.append(stage_xy)
         window._can_display_design_position = lambda: True
-        window._finish_coordinate_move_if_idle = lambda position: finished.append(position)
         window._stage_motion_axes = {"X"}
         window._stage_position_panel = types.SimpleNamespace(
             refresh_axis_styles=lambda _axes, _dimmed: cleared.append("clear")
         )
 
-        Main._on_stage_position_changed(window, (1.0, 2.0, 3.0))
+        with (
+            mock.patch.object(
+                position_update.stage_position_panel,
+                "update_stage_position_display",
+                side_effect=lambda _owner, position: displayed.append(position),
+            ),
+            mock.patch.object(
+                position_update.stage_move_lifecycle,
+                "finish_coordinate_move_if_idle",
+                side_effect=lambda _owner, position, **_kwargs: finished.append(
+                    position
+                ),
+            ),
+        ):
+            position_update.on_stage_position_changed(window, (1.0, 2.0, 3.0))
 
         self.assertEqual(displayed, [(1.0, 2.0, 3.0)])
         self.assertIsNone(window._manual_jog_prediction.stage_position)
@@ -361,7 +391,7 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
         )
         window._last_reported_b_position = 5.0
 
-        Main._on_stage_position_changed(window, (0.0, 0.0, 4.0, 0.0, 5.5))
+        position_update.on_stage_position_changed(window, (0.0, 0.0, 4.0, 0.0, 5.5))
 
         self.assertEqual(
             invalidations,
@@ -378,7 +408,7 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
         )
         below_tolerance._last_reported_b_position = 5.0
 
-        Main._on_stage_position_changed(below_tolerance, (0.0, 0.0, 4.0, 0.0, 5.0))
+        position_update.on_stage_position_changed(below_tolerance, (0.0, 0.0, 4.0, 0.0, 5.0))
 
         pending_alignment, _published, _reconciles, _smooth_calls = _make_main(
             state="run"
@@ -392,7 +422,7 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
         )
         pending_alignment._last_reported_b_position = 5.0
 
-        Main._on_stage_position_changed(pending_alignment, (0.0, 0.0, 4.0, 0.0, 5.5))
+        position_update.on_stage_position_changed(pending_alignment, (0.0, 0.0, 4.0, 0.0, 5.5))
 
         invalid_registration, _published, _reconciles, _smooth_calls = _make_main(
             state="run"
@@ -405,7 +435,7 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
         )
         invalid_registration._last_reported_b_position = 5.0
 
-        Main._on_stage_position_changed(invalid_registration, (0.0, 0.0, 4.0, 0.0, 5.5))
+        position_update.on_stage_position_changed(invalid_registration, (0.0, 0.0, 4.0, 0.0, 5.5))
 
         self.assertEqual(
             invalidations,
@@ -417,18 +447,28 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
         calls: list[str] = []
         window._planned_move_started_at = None
         window._planned_move_stage_xy = None
-        window._publish_stage_position_estimate = lambda position: calls.append(
-            f"publish:{position[:2]}"
-        )
-        window._finish_coordinate_move_if_idle = lambda position: calls.append(
-            f"finish:{position[:2]}"
-        )
         window._stage_motion_axes = {"X"}
         window._stage_position_panel = types.SimpleNamespace(
             refresh_axis_styles=lambda _axes, _dimmed: calls.append("clear")
         )
 
-        Main._on_stage_position_changed(window, (1.0, 2.0, 3.0))
+        with (
+            mock.patch.object(
+                position_update,
+                "publish_stage_position_estimate",
+                side_effect=lambda _owner, position: calls.append(
+                    f"publish:{position[:2]}"
+                ),
+            ),
+            mock.patch.object(
+                position_update.stage_move_lifecycle,
+                "finish_coordinate_move_if_idle",
+                side_effect=lambda _owner, position, **_kwargs: calls.append(
+                    f"finish:{position[:2]}"
+                ),
+            ),
+        ):
+            position_update.on_stage_position_changed(window, (1.0, 2.0, 3.0))
 
         self.assertEqual(
             calls,
@@ -447,7 +487,7 @@ class MainPersistedDesignRestoreTest(unittest.TestCase):
             "persisted_design_file_is_current",
             return_value=True,
         ):
-            Main._maybe_restore_persisted_design(
+            main_module.connection_flow.maybe_restore_persisted_design(
                 window,
                 (1.0, 2.0, 9.0, 0.0, 8.0),
             )
@@ -481,7 +521,7 @@ class MainPersistedDesignRestoreTest(unittest.TestCase):
             "persisted_design_file_is_current",
             return_value=True,
         ):
-            Main._maybe_restore_persisted_design(
+            main_module.connection_flow.maybe_restore_persisted_design(
                 window,
                 (1.0, 2.0, 9.0, 4.0, 5.0),
             )
@@ -507,7 +547,7 @@ class MainPersistedDesignRestoreTest(unittest.TestCase):
             _make_design_restore_main((1.0, 2.0, 3.0, 4.0, 5.0))
         )
 
-        Main._maybe_restore_persisted_design(
+        main_module.connection_flow.maybe_restore_persisted_design(
             window,
             (1.5, 2.5, 3.0, 4.0, 5.0),
         )

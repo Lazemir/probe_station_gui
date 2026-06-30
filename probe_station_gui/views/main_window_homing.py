@@ -28,8 +28,6 @@ class MainWindowHomingOwner(Protocol):
     joystick_panel: Any
     stage_controller: Any
 
-    def _update_stage_position_display(self, position: object) -> None: ...
-    def _position_with_stage_xy(self, stage_xy: tuple[float, float]) -> object: ...
     def _controller_latest_state_blocks_motion(self) -> bool: ...
     def _update_stage_coordinate_apply_state(self) -> None: ...
     def _invalidate_design_registration(self, message: str) -> None: ...
@@ -39,9 +37,12 @@ def on_limit_axes_changed(owner: MainWindowHomingOwner, axes: object) -> None:
     owner._stage_limit_axes = _normalized_limit_axes(owner, axes)
     predicted_position = _manual_jog_predicted_position(owner)
     if predicted_position is not None:
-        owner._update_stage_position_display(predicted_position)
+        stage_position_panel.update_stage_position_display(owner, predicted_position)
         return
-    owner._update_stage_position_display(owner.stage_controller.latest_stage_position())
+    stage_position_panel.update_stage_position_display(
+        owner,
+        owner.stage_controller.latest_stage_position(),
+    )
 
 
 def on_homing_status_changed(
@@ -50,7 +51,7 @@ def on_homing_status_changed(
 ) -> None:
     predicted_position = _manual_jog_predicted_position(owner)
     if predicted_position is not None:
-        owner._update_stage_position_display(predicted_position)
+        stage_position_panel.update_stage_position_display(owner, predicted_position)
         return
     if (
         owner._planned_move_stage_xy is not None
@@ -59,11 +60,20 @@ def on_homing_status_changed(
             or owner._planned_move_waiting_for_fresh_status
         )
     ):
-        owner._update_stage_position_display(
-            owner._position_with_stage_xy(owner._planned_move_stage_xy)
+        from probe_station_gui.stage.position_update import position_with_stage_xy
+
+        stage_position_panel.update_stage_position_display(
+            owner,
+            position_with_stage_xy(
+                owner,
+                owner._planned_move_stage_xy,
+            ),
         )
         return
-    owner._update_stage_position_display(owner.stage_controller.latest_stage_position())
+    stage_position_panel.update_stage_position_display(
+        owner,
+        owner.stage_controller.latest_stage_position(),
+    )
 
 
 def request_home_axis_from_ui(owner: MainWindowHomingOwner, axis: str) -> None:

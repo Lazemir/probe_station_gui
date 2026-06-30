@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
+from probe_station_gui.views import main_window_auxiliary as auxiliary_ui
 from probe_station_gui.views.main_window_auxiliary import (
     create_design_layout_window,
     show_connection_dialog,
@@ -131,10 +133,7 @@ class _MicroscopeScanOwner:
         self.default_dir = default_dir
         self.default_dir_calls = 0
         self.calls: list[tuple[str, object]] = []
-
-    def _default_microscope_scan_output_dir(self) -> str:
-        self.default_dir_calls += 1
-        return self.default_dir
+        self._design_session = SimpleNamespace(document=object())
 
     def _start_microscope_scan(self, configuration: object) -> None:
         self.calls.append(("scan", configuration))
@@ -147,9 +146,19 @@ class _MicroscopeScanOwner:
         self.microscope_scan_dialog = None
 
 
-def test_show_microscope_scan_dialog_reuses_until_finished() -> None:
+def test_show_microscope_scan_dialog_reuses_until_finished(monkeypatch) -> None:
     _FakeMicroscopeScanDialog.instances.clear()
     owner = _MicroscopeScanOwner("C:/scan-output")
+
+    def default_output_dir(_document: object) -> str:
+        owner.default_dir_calls += 1
+        return owner.default_dir
+
+    monkeypatch.setattr(
+        auxiliary_ui.microscope_scan,
+        "default_output_dir",
+        default_output_dir,
+    )
 
     show_microscope_scan_dialog(owner, dialog_class=_FakeMicroscopeScanDialog)
     show_microscope_scan_dialog(owner, dialog_class=_FakeMicroscopeScanDialog)

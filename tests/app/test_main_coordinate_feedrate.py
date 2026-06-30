@@ -5,6 +5,7 @@ import tempfile
 import threading
 import types
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from tests.app.main_coordinate_feedrate_support import (
@@ -503,7 +504,6 @@ assert image.height() == 4
         )
         window._stage_serial_ready = lambda: True
         window._sample_handling_active = lambda: False
-        window._has_cancelable_operation = lambda: False
         window._invalidate_design_registration = lambda reason: invalidations.append(
             reason
         )
@@ -523,11 +523,16 @@ assert image.height() == 4
         )
         main_module.threading.Thread = _FakeThread
         try:
-            needle_calibration_ui.request_sample_unload(
-                window,
-                message_box=main_module.QMessageBox,
-                thread_factory=main_module.threading.Thread,
-            )
+            with mock.patch.object(
+                main_module.stage_move_lifecycle,
+                "has_cancelable_operation",
+                return_value=False,
+            ):
+                needle_calibration_ui.request_sample_unload(
+                    window,
+                    message_box=main_module.QMessageBox,
+                    thread_factory=main_module.threading.Thread,
+                )
         finally:
             main_module.QMessageBox = original_box
             main_module.threading.Thread = original_thread
@@ -544,7 +549,6 @@ assert image.height() == 4
         )
         window._stage_serial_ready = lambda: True
         window._sample_handling_active = lambda: False
-        window._has_cancelable_operation = lambda: False
         window._invalidate_design_registration = lambda reason: events.append(
             ("invalidate", reason)
         )
@@ -567,11 +571,16 @@ assert image.height() == 4
         )
         main_module.threading.Thread = _FakeThread
         try:
-            needle_calibration_ui.request_sample_unload(
-                window,
-                message_box=main_module.QMessageBox,
-                thread_factory=main_module.threading.Thread,
-            )
+            with mock.patch.object(
+                main_module.stage_move_lifecycle,
+                "has_cancelable_operation",
+                return_value=False,
+            ):
+                needle_calibration_ui.request_sample_unload(
+                    window,
+                    message_box=main_module.QMessageBox,
+                    thread_factory=main_module.threading.Thread,
+                )
         finally:
             main_module.QMessageBox = original_box
             main_module.threading.Thread = original_thread
@@ -597,7 +606,6 @@ assert image.height() == 4
         window._design_session = types.SimpleNamespace(registration=None)
         window._stage_serial_ready = lambda: True
         window._sample_handling_active = lambda: False
-        window._has_cancelable_operation = lambda: False
         window._invalidate_design_registration = lambda reason: invalidations.append(
             reason
         )
@@ -622,11 +630,16 @@ assert image.height() == 4
         )
         main_module.threading.Thread = _FakeThread
         try:
-            needle_calibration_ui.request_sample_unload(
-                window,
-                message_box=main_module.QMessageBox,
-                thread_factory=main_module.threading.Thread,
-            )
+            with mock.patch.object(
+                main_module.stage_move_lifecycle,
+                "has_cancelable_operation",
+                return_value=False,
+            ):
+                needle_calibration_ui.request_sample_unload(
+                    window,
+                    message_box=main_module.QMessageBox,
+                    thread_factory=main_module.threading.Thread,
+                )
         finally:
             main_module.QMessageBox = original_box
             main_module.threading.Thread = original_thread

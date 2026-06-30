@@ -267,8 +267,24 @@ def test_on_serial_disconnected_preserves_detach_cleanup_order() -> None:
     events: list[object] = []
     owner = _owner(events)
     owner.serial_connection = _Serial(events, port="COM9")
+    original_clear = connection_flow.stage_move_lifecycle.clear_coordinate_move_tracking
+    original_display = connection_flow.stage_position_panel.update_stage_position_display
+    connection_flow.stage_move_lifecycle.clear_coordinate_move_tracking = (
+        lambda _owner, **kwargs: events.append(("clear_coordinate_tracking", kwargs))
+    )
+    connection_flow.stage_position_panel.update_stage_position_display = (
+        lambda _owner, value: events.append(("stage_display", value))
+    )
 
-    connection_flow.on_serial_disconnected(owner)
+    try:
+        connection_flow.on_serial_disconnected(owner)
+    finally:
+        connection_flow.stage_move_lifecycle.clear_coordinate_move_tracking = (
+            original_clear
+        )
+        connection_flow.stage_position_panel.update_stage_position_display = (
+            original_display
+        )
 
     assert events[:4] == [
         ("stop_jog", "serial disconnect"),

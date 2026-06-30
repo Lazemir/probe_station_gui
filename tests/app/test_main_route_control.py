@@ -147,12 +147,11 @@ class MainRouteControlTest(unittest.TestCase):
             "accepted": True,
             "point": point,
         }
-        window._stage_xy_from_position = lambda _position: (1.75, 2.25)
         window._show_status = (
             lambda message, _timeout_ms=None: statuses.append(str(message))
         )
         window.stage_controller = types.SimpleNamespace(
-            current_stage_position=lambda: (0.0, 0.0, 0.0),
+            current_stage_position=lambda: (1.75, 2.25, 0.0),
             latest_stage_position=lambda: None,
             is_busy=lambda: False,
         )
@@ -649,12 +648,11 @@ class MainRouteControlTest(unittest.TestCase):
             "accepted": True,
             "point": point,
         }
-        window._stage_xy_from_position = lambda _position: (1.75, 2.25)
         window._show_status = (
             lambda message, _timeout_ms=None: statuses.append(str(message))
         )
         window.stage_controller = types.SimpleNamespace(
-            current_stage_position=lambda: (0.0, 0.0, 0.0),
+            current_stage_position=lambda: (1.75, 2.25, 0.0),
             latest_stage_position=lambda: None,
             is_busy=lambda: False,
         )
@@ -802,7 +800,6 @@ class MainRouteControlTest(unittest.TestCase):
         window.design_navigator_panel = None
         window._api_route_control_active = False
         window._api_route_offset_xy = (0.0, 0.0)
-        window._stage_xy_from_position = lambda position: (position[0], position[1])
         window._show_status = (
             lambda message, _timeout_ms=None: statuses.append(str(message))
         )
@@ -846,7 +843,6 @@ class MainRouteControlTest(unittest.TestCase):
         window.design_navigator_panel = None
         window._api_route_control_active = False
         window._api_route_offset_xy = (0.0, 0.0)
-        window._stage_xy_from_position = lambda _position: None
         window._show_status = (
             lambda message, _timeout_ms=None: statuses.append(str(message))
         )
@@ -887,7 +883,6 @@ class MainRouteControlTest(unittest.TestCase):
         window.design_navigator_panel = None
         window._api_route_control_active = False
         window._api_route_offset_xy = (9.0, 8.0)
-        window._stage_xy_from_position = lambda _position: (1.75, 2.25)
         window._show_status = (
             lambda message, _timeout_ms=None: statuses.append(str(message))
         )
@@ -930,7 +925,6 @@ class MainRouteControlTest(unittest.TestCase):
         window.design_navigator_panel = None
         window._api_route_control_active = False
         window._api_route_offset_xy = (9.0, 8.0)
-        window._stage_xy_from_position = lambda _position: (1.75, 2.25)
         window._show_status = (
             lambda message, _timeout_ms=None: statuses.append(str(message))
         )
@@ -977,7 +971,6 @@ class MainRouteControlTest(unittest.TestCase):
         )
         window._api_route_control_active = False
         window._api_route_offset_xy = (0.0, 0.0)
-        window._stage_xy_from_position = lambda _position: (1.75, 2.25)
         window._show_status = (
             lambda message, _timeout_ms=None: statuses.append(str(message))
         )
@@ -1021,12 +1014,11 @@ class MainRouteControlTest(unittest.TestCase):
             "point": point,
         }
         window._api_route_control_action = lambda payload: actions.append(dict(payload))
-        window._stage_xy_from_position = lambda _position: (1.75, 2.25)
         window._show_status = (
             lambda message, _timeout_ms=None: statuses.append(str(message))
         )
         window.stage_controller = types.SimpleNamespace(
-            current_stage_position=lambda: (0.0, 0.0, 0.0),
+            current_stage_position=lambda: (1.75, 2.25, 0.0),
             latest_stage_position=lambda: None,
             is_busy=lambda: False,
         )
