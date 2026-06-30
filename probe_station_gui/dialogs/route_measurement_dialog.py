@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from probe_station_gui.instruments.meters.lcr import (
+from probe_station_gui.route.meter_config import (
     GWInstekRouteMeterSettings,
     KeithleyRouteMeterSettings,
     ROUTE_METER_GWINSTEK,

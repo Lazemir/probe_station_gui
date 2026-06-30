@@ -9,7 +9,7 @@ import threading
 import time
 import weakref
 from contextlib import contextmanager
-from typing import Callable, Iterator, Optional
+from typing import Callable, Iterator, Optional, TypeVar
 
 from PySide6.QtCore import QObject, Signal
 
@@ -22,7 +22,6 @@ from probe_station_gui.instruments.meters.gwinstek_session import (
     GWInstekLCRSession as _GWInstekLCRSession,
 )
 from probe_station_gui.instruments.meters.lcr_helpers import (
-    callable_accepts_keyword as _callable_accepts_keyword,
     gpib_interface_resources_for as _gpib_interface_resources_for,
     normalize_resource_name,
     session_visa_resource_roles as _session_visa_resource_roles,
@@ -40,8 +39,6 @@ from probe_station_gui.instruments.meters.lcr_visa import (
     session_visa_operation as _run_session_visa_operation,
 )
 from probe_station_gui.route.meter_config import (
-    GWInstekRouteMeterSettings,
-    KeithleyRouteMeterSettings,
     ROUTE_METER_GWINSTEK,
     ROUTE_METER_KEITHLEY,
     ROUTE_METER_LABELS,
@@ -53,6 +50,7 @@ from probe_station_gui.route.meter_config import (
 logger = logging.getLogger(__name__)
 
 _LCR_METER_CONTROLLERS: "weakref.WeakSet[LCRMeterController]" = weakref.WeakSet()
+_SessionOperationResult = TypeVar("_SessionOperationResult")
 
 
 def _shutdown_lcr_meter_controllers() -> None:
@@ -740,26 +738,22 @@ class LCRMeterController(QObject):
         self,
         restart_polling: bool,
     ) -> dict[str, object]:
-        session = self._session
-        if session is None:
-            raise LCRMeterError("Measurement instrument is not connected.")
-        self._stop_polling_session()
-        self.reading_started.emit(1)
-        try:
+        session = self._connected_session_on_worker()
+
+        def read_measurement() -> dict[str, object]:
             measurement = _read_route_measurement_from_session(
                 session,
                 cannot_read_message="Measurement instrument cannot read route values.",
             )
-        except Exception as exc:
-            error = self._lcr_error(exc)
-            self._disconnect_session()
-            self.connection_changed.emit(False, "", str(error))
-            self.status_message.emit(f"Instrument read failed: {error}")
-            raise error from exc
-        finally:
-            if restart_polling and self._session is session:
-                self._stop_polling.clear()
-                self._start_polling_thread()
+            return dict(measurement)
+
+        measurement = self._run_connected_session_operation(
+            session,
+            read_measurement,
+            failure_status="Instrument read failed",
+            restart_polling=restart_polling,
+            before_operation=lambda: self.reading_started.emit(1),
+        )
         primary_value = float(measurement["differential_resistance_ohm"])
         self._emit_reading_summary(primary_value, 1)
         return measurement
@@ -786,35 +780,31 @@ class LCRMeterController(QObject):
         voltages_v: list[float] | tuple[float, ...],
         restart_polling: bool,
     ) -> dict[str, object]:
-        session = self._session
-        if session is None:
-            raise LCRMeterError("Measurement instrument is not connected.")
+        session = self._connected_session_on_worker()
         voltage_list_reader = getattr(session, "measure_voltage_list", None)
         if not callable(voltage_list_reader):
             raise LCRMeterError(
                 "Raw voltage sweeps require a Keithley 2400 + 2182A instrument."
             )
-        self._stop_polling_session()
-        self.reading_started.emit(max(1, len(voltages_v)))
-        try:
+
+        def read_sweep() -> dict[str, object]:
             points = [
                 _voltage_sweep_point_to_dict(point)
                 for point in voltage_list_reader(voltages_v)
             ]
-            measurement = {
+            return {
                 "source_voltages_v": [float(value) for value in voltages_v],
                 "points": points,
             }
-        except Exception as exc:
-            error = self._lcr_error(exc)
-            self._disconnect_session()
-            self.connection_changed.emit(False, "", str(error))
-            self.status_message.emit(f"Instrument read failed: {error}")
-            raise error from exc
-        finally:
-            if restart_polling and self._session is session:
-                self._stop_polling.clear()
-                self._start_polling_thread()
+
+        measurement = self._run_connected_session_operation(
+            session,
+            read_sweep,
+            failure_status="Instrument read failed",
+            restart_polling=restart_polling,
+            before_operation=lambda: self.reading_started.emit(max(1, len(voltages_v))),
+        )
+        points = list(measurement["points"])
         primary_value = self._mean_resistance_from_measurements(points)
         self._emit_reading_summary(primary_value, len(points))
         return measurement
@@ -845,31 +835,59 @@ class LCRMeterController(QObject):
         restart_polling: bool,
         after_measurement: object | None,
     ) -> list[dict[str, object]]:
+        session = self._connected_session_on_worker()
+
+        def read_batch() -> list[dict[str, object]]:
+            return list(
+                _read_route_measurement_batch_from_session(
+                    session,
+                    count,
+                    after_measurement=after_measurement,
+                    cannot_read_message="Measurement instrument cannot read route values.",
+                )
+            )
+
+        measurements = self._run_connected_session_operation(
+            session,
+            read_batch,
+            failure_status="Instrument read failed",
+            restart_polling=restart_polling,
+            before_operation=lambda: self.reading_started.emit(count),
+        )
+        primary_value = self._mean_resistance_from_measurements(measurements)
+        self._emit_reading_summary(primary_value, len(measurements))
+        return measurements
+
+    def _connected_session_on_worker(self) -> object:
         session = self._session
         if session is None:
             raise LCRMeterError("Measurement instrument is not connected.")
+        return session
+
+    def _run_connected_session_operation(
+        self,
+        session: object,
+        operation: Callable[[], _SessionOperationResult],
+        *,
+        failure_status: str,
+        restart_polling: bool = False,
+        before_operation: Callable[[], None] | None = None,
+    ) -> _SessionOperationResult:
         self._stop_polling_session()
-        self.reading_started.emit(count)
+        if before_operation is not None:
+            before_operation()
         try:
-            measurements = _read_route_measurement_batch_from_session(
-                session,
-                count,
-                after_measurement=after_measurement,
-                cannot_read_message="Measurement instrument cannot read route values.",
-            )
+            return operation()
         except Exception as exc:
             error = self._lcr_error(exc)
             self._disconnect_session()
             self.connection_changed.emit(False, "", str(error))
-            self.status_message.emit(f"Instrument read failed: {error}")
+            self.status_message.emit(f"{failure_status}: {error}")
             raise error from exc
         finally:
             if restart_polling and self._session is session:
                 self._stop_polling.clear()
                 self._start_polling_thread()
-        primary_value = self._mean_resistance_from_measurements(measurements)
-        self._emit_reading_summary(primary_value, len(measurements))
-        return measurements
 
     def prepare_route_measurement_batch_now(
         self,
@@ -892,22 +910,20 @@ class LCRMeterController(QObject):
         count: int,
         source_list_count: int | None,
     ) -> None:
-        session = self._session
-        if session is None:
-            raise LCRMeterError("Measurement instrument is not connected.")
-        self._stop_polling_session()
-        try:
+        session = self._connected_session_on_worker()
+
+        def prepare_batch() -> None:
             _prepare_route_measurement_batch_on_session(
                 session,
                 count,
                 source_list_count=source_list_count,
             )
-        except Exception as exc:
-            error = self._lcr_error(exc)
-            self._disconnect_session()
-            self.connection_changed.emit(False, "", str(error))
-            self.status_message.emit(f"Instrument preparation failed: {error}")
-            raise error from exc
+
+        self._run_connected_session_operation(
+            session,
+            prepare_batch,
+            failure_status="Instrument preparation failed",
+        )
 
     def _emit_reading_summary(self, primary_value: float, sample_count: int) -> None:
         count = max(1, int(sample_count))
@@ -1006,11 +1022,9 @@ class LCRMeterController(QObject):
         read_termination: str | None = None,
         write_termination: str | None = None,
     ) -> object:
-        session = self._session
-        if session is None:
-            raise LCRMeterError("Measurement instrument is not connected.")
-        self._stop_polling_session()
-        try:
+        session = self._connected_session_on_worker()
+
+        def run_visa_operation() -> object:
             return _session_visa_operation(
                 session,
                 role,
@@ -1020,12 +1034,12 @@ class LCRMeterController(QObject):
                 read_termination=read_termination,
                 write_termination=write_termination,
             )
-        except Exception as exc:
-            error = self._lcr_error(exc)
-            self._disconnect_session()
-            self.connection_changed.emit(False, "", str(error))
-            self.status_message.emit(f"Instrument VISA operation failed: {error}")
-            raise error from exc
+
+        return self._run_connected_session_operation(
+            session,
+            run_visa_operation,
+            failure_status="Instrument VISA operation failed",
+        )
 
     def request_connect(self) -> None:
         """Open the configured measurement instrument in a background thread."""

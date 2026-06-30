@@ -73,15 +73,17 @@ _install_pyside6_stubs_if_missing()
 import probe_station_gui.instruments.meters.lcr as lcr_module
 from PySide6.QtCore import Qt
 from probe_station_gui.instruments.meters.lcr import (
-    GWInstekRouteMeterSettings,
-    KeithleyRouteMeterSettings,
     LCRMeterError,
     LCRMeterController,
+    RouteMeter,
+    _LCRSession,
+)
+from probe_station_gui.route.meter_config import (
+    GWInstekRouteMeterSettings,
+    KeithleyRouteMeterSettings,
     ROUTE_METER_GWINSTEK,
     ROUTE_METER_KEITHLEY,
-    RouteMeter,
     RouteMeterConfiguration,
-    _LCRSession,
 )
 
 _restore_pyside6_modules()
