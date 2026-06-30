@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 
+from probe_station_gui.settings.value_parsing import coerce_bool as _coerce_bool
+from probe_station_gui.settings.value_parsing import coerce_float as _coerce_float
+from probe_station_gui.settings.value_parsing import coerce_int as _coerce_int
+from probe_station_gui.settings.value_parsing import normalise_choice as _normalise_choice
+
 
 LCR_MEASUREMENT_FUNCTIONS: tuple[str, ...] = (
     "Cs-Rs",
@@ -771,39 +776,4 @@ def parse_saved_stage_position(raw_position: object) -> SavedStagePositionConfig
 def _strip_string(value: object, *, default: str) -> str:
     if isinstance(value, str):
         return value.strip()
-    return default
-
-
-def _normalise_choice(value: object, *, choices: tuple, default: str) -> str:
-    if isinstance(value, str):
-        candidate = value.strip()
-        for choice in choices:
-            if candidate.upper() == str(choice).upper():
-                return str(choice)
-    return default
-
-
-def _coerce_bool(value: object, *, default: bool) -> bool:
-    if isinstance(value, str):
-        return value.strip().lower() not in {"", "0", "false", "off", "no"}
-    if value is None:
-        return default
-    return bool(value)
-
-
-def _coerce_float(value: object, *, default: float) -> float:
-    try:
-        if isinstance(value, (int, float, str)):
-            return float(value)
-    except (TypeError, ValueError):
-        pass
-    return default
-
-
-def _coerce_int(value: object, *, default: int) -> int:
-    try:
-        if isinstance(value, (int, float, str)):
-            return int(float(value))
-    except (TypeError, ValueError):
-        pass
     return default

@@ -6,6 +6,9 @@ import math
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
+from probe_station_gui.settings.value_parsing import coerce_bool as _coerce_bool
+from probe_station_gui.settings.value_parsing import coerce_float as _coerce_float
+
 
 @dataclass
 class AxisACalibrationConfig:
@@ -379,21 +382,4 @@ def _clone_axis_z(defaults: AxisZCalibrationConfig) -> AxisZCalibrationConfig:
 def _strip_string(value: object, *, default: str) -> str:
     if isinstance(value, str):
         return value.strip()
-    return default
-
-
-def _coerce_bool(value: object, *, default: bool) -> bool:
-    if isinstance(value, str):
-        return value.strip().lower() not in {"", "0", "false", "off", "no"}
-    if value is None:
-        return default
-    return bool(value)
-
-
-def _coerce_float(value: object, *, default: float) -> float:
-    try:
-        if isinstance(value, (int, float, str)):
-            return float(value)
-    except (TypeError, ValueError):
-        pass
     return default

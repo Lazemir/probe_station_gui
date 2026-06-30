@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from probe_station_gui.settings.value_parsing import coerce_bool as _coerce_bool
+from probe_station_gui.settings.value_parsing import coerce_float as _coerce_float
+
 
 @dataclass(frozen=True)
 class JogSettingsDefaults:
@@ -238,23 +241,6 @@ def parse_jog_settings(raw_jog: object, defaults: JogSettingsDefaults) -> JogSet
         turntable_feedrate_mm_min=turntable_feedrate,
         turntable_step_feedrate_mm_min=turntable_step_feedrate,
     )
-
-
-def _coerce_bool(value: object, *, default: bool) -> bool:
-    if isinstance(value, str):
-        return value.strip().lower() not in {"", "0", "false", "off", "no"}
-    if value is None:
-        return default
-    return bool(value)
-
-
-def _coerce_float(value: object, *, default: float) -> float:
-    try:
-        if isinstance(value, (int, float, str)):
-            return float(value)
-    except (TypeError, ValueError):
-        pass
-    return default
 
 
 def _normalise_feedrate(value: float, *, default: float, minimum: float) -> float:
