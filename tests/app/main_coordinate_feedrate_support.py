@@ -40,6 +40,7 @@ from probe_station_gui.route.measurement_settings import (
     RouteMeasurementSettingsStore,
 )
 from probe_station_gui.route.dialog_adapter import (
+    RouteMeasurementPointRequestCallbacks,
     request_route_measurement_for_point,
 )
 from probe_station_gui.instruments.meters.lcr import LCRMeterError, RouteMeterConfiguration

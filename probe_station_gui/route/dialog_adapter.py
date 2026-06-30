@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 from probe_station_gui.route.measurement_settings import RouteMeasurementSettingsStore
 
@@ -68,6 +68,17 @@ class RouteDialogHandlers:
     move_requested: Callable[..., None]
     current_point_changed: Callable[[int], None]
     finished: Callable[[int], None]
+
+
+@dataclass(frozen=True)
+class RouteMeasurementPointRequestCallbacks:
+    open_dialog: Callable[..., None]
+    current_dialog: Callable[[], object | None]
+    submit_confirmation: Callable[[str], None]
+    request_point_correction: Callable[..., None]
+    start_measurement: Callable[[object], None]
+    set_pending_point: Callable[[int], None]
+    clear_pending_point: Callable[[], None]
 
 
 def route_dialog_handlers(owner: object) -> RouteDialogHandlers:
@@ -325,55 +336,37 @@ def request_route_measurement_for_point(
     point_number: int,
     thread_active: bool,
     waiting: bool,
-    open_dialog: Callable[..., None],
-    current_dialog: Callable[[], object | None],
-    submit_confirmation: Callable[[str], None],
-    request_point_correction: Callable[..., None],
-    start_measurement: Callable[[object], None],
-    set_pending_point: Callable[[int], None],
-    clear_pending_point: Callable[[], None],
+    callbacks: RouteMeasurementPointRequestCallbacks,
 ) -> None:
     point_number = int(point_number)
     if thread_active:
         if waiting:
-            clear_pending_point()
-            submit_confirmation(f"jump:{point_number}")
+            callbacks.clear_pending_point()
+            callbacks.submit_confirmation(f"jump:{point_number}")
             return
-        set_pending_point(point_number)
-        request_point_correction(pending_point_number=point_number)
+        callbacks.set_pending_point(point_number)
+        callbacks.request_point_correction(pending_point_number=point_number)
         return
-    open_dialog(start_context=False)
-    dialog = current_dialog()
+    callbacks.open_dialog(start_context=False)
+    dialog = callbacks.current_dialog()
     if dialog is None:
         return
     dialog.set_current_point(point_number)
-    start_measurement(dialog.current_configuration())
+    callbacks.start_measurement(dialog.current_configuration())
 
 
 def route_measurement_point_request_handler(
     *,
     thread_active: Callable[[], bool],
     waiting: Callable[[], bool],
-    open_dialog: Callable[..., None],
-    current_dialog: Callable[[], object | None],
-    submit_confirmation: Callable[[str], None],
-    request_point_correction: Callable[..., None],
-    start_measurement: Callable[[object], None],
-    set_pending_point: Callable[[int], None],
-    clear_pending_point: Callable[[], None],
+    callbacks: RouteMeasurementPointRequestCallbacks,
 ) -> Callable[[int], None]:
     def handler(point_number: int) -> None:
         request_route_measurement_for_point(
             point_number=point_number,
             thread_active=thread_active(),
             waiting=waiting(),
-            open_dialog=open_dialog,
-            current_dialog=current_dialog,
-            submit_confirmation=submit_confirmation,
-            request_point_correction=request_point_correction,
-            start_measurement=start_measurement,
-            set_pending_point=set_pending_point,
-            clear_pending_point=clear_pending_point,
+            callbacks=callbacks,
         )
 
     return handler
@@ -386,13 +379,21 @@ def route_measurement_point_request_handler_for_owner(owner: object) -> Callable
             and owner._route_measurement_thread.is_alive()
         ),
         waiting=lambda: bool(getattr(owner, "_route_measurement_waiting", False)),
-        open_dialog=getattr(owner, "_open_route_measurement_dialog"),
-        current_dialog=lambda: getattr(owner, "_route_measurement_dialog", None),
-        submit_confirmation=getattr(owner, "_submit_route_measurement_confirmation"),
-        request_point_correction=getattr(owner, "_request_route_measurement_point_correction"),
-        start_measurement=getattr(owner, "_start_route_measurement"),
-        set_pending_point=lambda point: setattr(owner, "_pending_route_measure_point", point),
-        clear_pending_point=lambda: setattr(owner, "_pending_route_measure_point", None),
+        callbacks=RouteMeasurementPointRequestCallbacks(
+            open_dialog=getattr(owner, "_open_route_measurement_dialog"),
+            current_dialog=lambda: getattr(owner, "_route_measurement_dialog", None),
+            submit_confirmation=getattr(owner, "_submit_route_measurement_confirmation"),
+            request_point_correction=getattr(
+                owner, "_request_route_measurement_point_correction"
+            ),
+            start_measurement=getattr(owner, "_start_route_measurement"),
+            set_pending_point=lambda point: setattr(
+                owner, "_pending_route_measure_point", point
+            ),
+            clear_pending_point=lambda: setattr(
+                owner, "_pending_route_measure_point", None
+            ),
+        ),
     )
 
 
@@ -436,6 +437,7 @@ __all__ = [
     "RouteDialogDefaults",
     "RouteDialogOpenState",
     "RouteDialogRestorePlan",
+    "RouteMeasurementPointRequestCallbacks",
     "RouteMeasurementSessionCancelPlan",
     "RouteMeasurementSessionStartPlan",
     "current_route_measurement_configuration",

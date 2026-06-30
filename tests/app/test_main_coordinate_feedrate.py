@@ -10,6 +10,7 @@ from pathlib import Path
 from tests.app.main_coordinate_feedrate_support import (
     Main,
     ObjectiveCalibrationSettings,
+    RouteMeasurementPointRequestCallbacks,
     RouteContactHeightRecord,
     RouteContactQuality,
     RouteContactSeekResult,
@@ -757,16 +758,20 @@ assert image.height() == 4
             point_number=91,
             thread_active=True,
             waiting=False,
-            open_dialog=window._open_route_measurement_dialog,
-            current_dialog=lambda: window._route_measurement_dialog,
-            submit_confirmation=window._submit_route_measurement_confirmation,
-            request_point_correction=window._request_route_measurement_point_correction,
-            start_measurement=window._start_route_measurement,
-            set_pending_point=lambda point: setattr(
-                window, "_pending_route_measure_point", point
-            ),
-            clear_pending_point=lambda: setattr(
-                window, "_pending_route_measure_point", None
+            callbacks=RouteMeasurementPointRequestCallbacks(
+                open_dialog=window._open_route_measurement_dialog,
+                current_dialog=lambda: window._route_measurement_dialog,
+                submit_confirmation=window._submit_route_measurement_confirmation,
+                request_point_correction=(
+                    window._request_route_measurement_point_correction
+                ),
+                start_measurement=window._start_route_measurement,
+                set_pending_point=lambda point: setattr(
+                    window, "_pending_route_measure_point", point
+                ),
+                clear_pending_point=lambda: setattr(
+                    window, "_pending_route_measure_point", None
+                ),
             ),
         )
 

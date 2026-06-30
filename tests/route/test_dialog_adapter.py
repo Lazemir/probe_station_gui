@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from probe_station_gui.route.dialog_adapter import (
+    RouteMeasurementPointRequestCallbacks,
     current_route_measurement_configuration,
     request_route_measurement_for_point,
     restart_waiting_route_measurement,
@@ -12,6 +13,27 @@ from probe_station_gui.route.dialog_adapter import (
     route_measurement_session_cancel_plan,
     route_measurement_session_start_plan,
 )
+
+
+def _point_request_callbacks(
+    *,
+    open_dialog=lambda **_kwargs: None,
+    current_dialog=lambda: None,
+    submit_confirmation=lambda _action: None,
+    request_point_correction=lambda **_kwargs: None,
+    start_measurement=lambda _config: None,
+    set_pending_point=lambda _point: None,
+    clear_pending_point=lambda: None,
+) -> RouteMeasurementPointRequestCallbacks:
+    return RouteMeasurementPointRequestCallbacks(
+        open_dialog=open_dialog,
+        current_dialog=current_dialog,
+        submit_confirmation=submit_confirmation,
+        request_point_correction=request_point_correction,
+        start_measurement=start_measurement,
+        set_pending_point=set_pending_point,
+        clear_pending_point=clear_pending_point,
+    )
 
 
 class RouteDialogAdapterTest(unittest.TestCase):
@@ -159,13 +181,13 @@ class RouteDialogAdapterTest(unittest.TestCase):
             point_number=9,
             thread_active=False,
             waiting=False,
-            open_dialog=lambda *, start_context: calls.append(("open", start_context)),
-            current_dialog=lambda: dialog,
-            submit_confirmation=lambda _action: None,
-            request_point_correction=lambda **_kwargs: None,
-            start_measurement=lambda config: calls.append(("start", config)),
-            set_pending_point=lambda _point: None,
-            clear_pending_point=lambda: None,
+            callbacks=_point_request_callbacks(
+                open_dialog=lambda *, start_context: calls.append(
+                    ("open", start_context)
+                ),
+                current_dialog=lambda: dialog,
+                start_measurement=lambda config: calls.append(("start", config)),
+            ),
         )
 
         self.assertEqual(
@@ -180,13 +202,18 @@ class RouteDialogAdapterTest(unittest.TestCase):
             point_number=11,
             thread_active=True,
             waiting=True,
-            open_dialog=lambda *, start_context: calls.append(("open", start_context)),
-            current_dialog=lambda: None,
-            submit_confirmation=lambda action: calls.append(("jump", action)),
-            request_point_correction=lambda **_kwargs: calls.append(("interrupt", _kwargs)),
-            start_measurement=lambda config: calls.append(("start", config)),
-            set_pending_point=lambda point: calls.append(("pending", point)),
-            clear_pending_point=lambda: calls.append(("clear",)),
+            callbacks=_point_request_callbacks(
+                open_dialog=lambda *, start_context: calls.append(
+                    ("open", start_context)
+                ),
+                submit_confirmation=lambda action: calls.append(("jump", action)),
+                request_point_correction=lambda **_kwargs: calls.append(
+                    ("interrupt", _kwargs)
+                ),
+                start_measurement=lambda config: calls.append(("start", config)),
+                set_pending_point=lambda point: calls.append(("pending", point)),
+                clear_pending_point=lambda: calls.append(("clear",)),
+            ),
         )
 
         self.assertEqual(calls, [("clear",), ("jump", "jump:11")])
