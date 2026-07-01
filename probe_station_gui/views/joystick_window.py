@@ -429,10 +429,10 @@ class JoystickWindow(JoystickFeedrateMixin, QWidget):
         self._set_linear_feedrate(self._linear_default, reissue_if_active=False)
 
         grid_layout = QGridLayout()
-        self.up_button = QPushButton("РІвЂ вЂ", self)
-        self.left_button = QPushButton("РІвЂ С’", self)
-        self.right_button = QPushButton("РІвЂ вЂ™", self)
-        self.down_button = QPushButton("РІвЂ вЂњ", self)
+        self.up_button = QPushButton("↑", self)
+        self.left_button = QPushButton("←", self)
+        self.right_button = QPushButton("→", self)
+        self.down_button = QPushButton("↓", self)
 
         grid_layout.addWidget(self.up_button, 0, 1)
         grid_layout.addWidget(self.left_button, 1, 0)
@@ -461,8 +461,8 @@ class JoystickWindow(JoystickFeedrateMixin, QWidget):
         axis_layout.addWidget(self.axis_a_positive_button, 1, 2)
 
         turntable_label = QLabel("Turntable (B):", self)
-        self.rotate_negative_button = QPushButton("РІвЂ С”", self)
-        self.rotate_positive_button = QPushButton("РІвЂ В»", self)
+        self.rotate_negative_button = QPushButton("↺", self)
+        self.rotate_positive_button = QPushButton("↻", self)
         self.zero_b_button = QPushButton("Zero B", self)
         self.rotate_negative_button.setToolTip("Rotate B counter-clockwise")
         self.rotate_positive_button.setToolTip("Rotate B clockwise")

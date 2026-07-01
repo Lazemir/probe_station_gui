@@ -1,4 +1,7 @@
+import ast
+import inspect
 import sys
+import textwrap
 import types
 import unittest
 
@@ -304,7 +307,63 @@ class _FakeSerialConnection:
         self.flush_count += 1
 
 
+def _button_constructor_labels(*attribute_names: str) -> dict[str, str]:
+    source = textwrap.dedent(inspect.getsource(JoystickWindow.__init__))
+    tree = ast.parse(source)
+    wanted = set(attribute_names)
+    labels: dict[str, str] = {}
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if not (
+            isinstance(target, ast.Attribute)
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "self"
+            and target.attr in wanted
+        ):
+            continue
+        value = node.value
+        if not (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id == "QPushButton"
+            and value.args
+            and isinstance(value.args[0], ast.Constant)
+            and isinstance(value.args[0].value, str)
+        ):
+            continue
+        labels[target.attr] = value.args[0].value
+
+    return labels
+
+
 class JoystickFeedrateTest(unittest.TestCase):
+    def test_motion_button_labels_use_unicode_symbols(self) -> None:
+        labels = _button_constructor_labels(
+            "up_button",
+            "left_button",
+            "right_button",
+            "down_button",
+            "rotate_negative_button",
+            "rotate_positive_button",
+        )
+
+        self.assertEqual(
+            labels,
+            {
+                "up_button": "↑",
+                "left_button": "←",
+                "right_button": "→",
+                "down_button": "↓",
+                "rotate_negative_button": "↺",
+                "rotate_positive_button": "↻",
+            },
+        )
+
     def test_feed_target_labels_do_not_duplicate_selected_mode(self) -> None:
         labels = [
             JoystickWindow.FEED_TARGET_LABELS[target]
