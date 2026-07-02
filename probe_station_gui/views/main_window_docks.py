@@ -365,6 +365,9 @@ def _connect_stage_limit_and_needle_signals(owner: MainWindowDockOwner) -> None:
     owner.stage_controller.needles_zone_changed.connect(
         owner.joystick_panel.set_needles_zone
     )
+    owner.stage_controller.needles_zone_changed.connect(
+        lambda *args: connection_flow.persist_controller_state(owner, *args)
+    )
     owner.stage_controller.needles_action_started.connect(
         owner.joystick_panel.set_needles_action_started
     )

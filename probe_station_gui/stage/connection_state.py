@@ -146,6 +146,7 @@ class StageControllerConnectionMixin:
             "homed_axes": sorted(self._homed_axes),
             "needles_up": bool(self._needles_up),
             "needles_known": bool(self._needles_known),
+            "needles_zone": self._needles_zone,
             "controller_session_marker": self._controller_session_marker,
             "axis_limits": {
                 axis: [float(values[0]), float(values[1])]
@@ -174,6 +175,16 @@ class StageControllerConnectionMixin:
                     homed_axes.add(value.strip().upper())
         needles_up = bool(data.get("needles_up", False))
         needles_known = bool(data.get("needles_known", False))
+        needles_zone_raw = data.get("needles_zone")
+        needles_zone = (
+            needles_zone_raw.strip().lower()
+            if isinstance(needles_zone_raw, str)
+            else None
+        )
+        if needles_zone not in {"raise", "lift", "lower"}:
+            needles_zone = None
+        if needles_zone is not None:
+            needles_up = needles_zone == "raise"
         marker = self._parse_cached_controller_session_marker(data)
         axis_limits = self._parse_cached_axis_limits(data.get("axis_limits"))
         axis_max_feedrates = self._parse_cached_axis_max_feedrates(
@@ -197,13 +208,14 @@ class StageControllerConnectionMixin:
         if axis_max_feedrates:
             self._axis_max_feedrates = axis_max_feedrates
         self._update_homing_status(homed_axes)
-        self._set_needles_state(needles_up, known=needles_known)
+        self._set_needles_state(needles_up, known=needles_known, zone=needles_zone)
         self._refresh_axis_a_ready_from_state()
         logger.info(
-            "Restored cached controller state pending live status: homed_axes=%s needles_up=%s needles_known=%s marker=%s axis_limits=%s axis_max_feedrates=%s coordinate_system=%s",
+            "Restored cached controller state pending live status: homed_axes=%s needles_up=%s needles_known=%s needles_zone=%s marker=%s axis_limits=%s axis_max_feedrates=%s coordinate_system=%s",
             sorted(homed_axes),
             needles_up,
             needles_known,
+            needles_zone,
             marker,
             sorted(axis_limits),
             sorted(axis_max_feedrates),

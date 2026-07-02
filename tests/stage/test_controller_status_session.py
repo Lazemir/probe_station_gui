@@ -467,6 +467,35 @@ class StageControllerReconnectStateTest(unittest.TestCase):
         self.assertTrue(controller._controller_state_stale)
         self.assertFalse(controller._axis_a_ready)
 
+    def test_cached_controller_state_preserves_fine_needles_zone(self) -> None:
+        controller = StageController()
+        zones = []
+        controller.needles_zone_changed = types.SimpleNamespace(
+            emit=lambda zone: zones.append(zone)
+        )
+
+        controller.import_cached_controller_state(
+            {
+                "homed_axes": ["A"],
+                "needles_up": True,
+                "needles_known": True,
+                "needles_zone": "lift",
+                "controller_session_marker": 321,
+            }
+        )
+
+        self.assertFalse(controller._needles_up)
+        self.assertTrue(controller._needles_known)
+        self.assertEqual(controller._needles_zone, "lift")
+        self.assertEqual(zones[-1], "lift")
+
+        exported = controller.export_cached_controller_state()
+        self.assertIsNotNone(exported)
+        assert exported is not None
+        self.assertFalse(exported["needles_up"])
+        self.assertTrue(exported["needles_known"])
+        self.assertEqual(exported["needles_zone"], "lift")
+
     def test_set_serial_allows_position_signal_slot_to_query_busy(self) -> None:
         controller = StageController()
         busy_values = []

@@ -24,7 +24,7 @@ sys.modules.pop("probe_station_gui.views.joystick_window", None)
 sys.modules.pop("probe_station_gui.views.serial_terminal_window", None)
 sys.modules.pop("probe_station_gui.views.main_window_docks", None)
 
-from probe_station_gui.views import main_window_docks
+from probe_station_gui.views import main_window_docks  # noqa: E402
 
 
 class _Signal:
@@ -506,3 +506,40 @@ def test_create_main_window_docks_assigns_owner_attrs_and_dock_names(monkeypatch
     assert owner.stage_controller.applied_axis_rates == [{"X": 200.0}]
     assert owner.stage_controller.motion_safety_disabled == [True]
     assert owner.refresh_calls == ["manual_alignment", "coordinate", "design_panel"]
+
+
+def test_needles_zone_change_persists_controller_state(monkeypatch) -> None:
+    monkeypatch.setattr(main_window_docks, "QDialog", _FakeDialog)
+    monkeypatch.setattr(main_window_docks, "QHBoxLayout", _FakeLayout)
+    monkeypatch.setattr(main_window_docks, "QPushButton", _FakeButton)
+    monkeypatch.setattr(main_window_docks, "QTabWidget", _FakeTabs)
+    monkeypatch.setattr(main_window_docks, "QVBoxLayout", _FakeLayout)
+    monkeypatch.setattr(
+        main_window_docks, "SerialConnectionPanel", _FakeSerialConnectionPanel
+    )
+    monkeypatch.setattr(
+        main_window_docks, "SerialTerminalWindow", _FakeSerialTerminalWindow
+    )
+    monkeypatch.setattr(
+        main_window_docks, "ResistanceMonitorPanel", _FakeResistanceMonitorPanel
+    )
+    monkeypatch.setattr(main_window_docks, "JoystickWindow", _FakeJoystickWindow)
+    monkeypatch.setattr(
+        main_window_docks, "ContactOscillationWindow", _FakeContactOscillationWindow
+    )
+    monkeypatch.setattr(main_window_docks, "AlignmentPanel", _FakeAlignmentPanel)
+    monkeypatch.setattr(main_window_docks, "CollapsibleDockWidget", _FakeDock)
+    owner = _DockOwner()
+    saved: list[object] = []
+    owner.stage_controller.export_cached_controller_state = lambda: {
+        "needles_zone": "lift"
+    }
+    owner._design_session = SimpleNamespace(export_persisted_state=lambda: None)
+    owner._controller_state_persistence_suspended = False
+    owner.settings_manager.save_controller_state = lambda state: saved.append(state)
+
+    main_window_docks.create_main_window_docks(owner)
+    for slot in owner.stage_controller.needles_zone_changed.connections:
+        slot("lift")
+
+    assert saved == [{"needles_zone": "lift"}]
