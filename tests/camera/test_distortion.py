@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QColor, QImage
@@ -10,6 +11,7 @@ from probe_station_gui.camera.distortion import (
     detect_bright_grid,
     distortion_payload_from_points,
     fit_distortion_from_grid_frames,
+    _projection_line_centers,
 )
 
 
@@ -77,6 +79,18 @@ def test_detect_bright_grid_finds_visible_lines() -> None:
     assert len(detection.intersections_px) == 9
     assert detection.vertical_lines_px[1] == pytest.approx(105.0, abs=2.0)
     assert detection.horizontal_lines_px[1] == pytest.approx(95.0, abs=2.0)
+
+
+def test_projection_line_centers_prefers_strong_grid_bands() -> None:
+    projection = np.zeros(1200, dtype=float)
+    for center in (120, 540, 960):
+        projection[center - 8 : center + 9] = 1.0
+    for center in range(180, 900, 80):
+        projection[center : center + 2] = 0.45
+
+    centers = _projection_line_centers(projection)
+
+    assert centers == pytest.approx((120, 540, 960), abs=1.0)
 
 
 def test_partial_grid_frames_fit_distortion_payload() -> None:

@@ -257,7 +257,7 @@ def _projection_line_centers(projection: object) -> tuple[float, ...]:
     if maximum <= 0.0 or not math.isfinite(maximum):
         return ()
     active = values >= max(maximum * 0.35, float(values.mean() + values.std()))
-    centers: list[float] = []
+    components: list[tuple[float, float]] = []
     index = 0
     while index < active.size:
         if not active[index]:
@@ -271,24 +271,58 @@ def _projection_line_centers(projection: object) -> tuple[float, ...]:
         positions = np.arange(start, stop, dtype=float)
         weight_sum = float(weights.sum())
         if weight_sum <= 0.0:
-            centers.append(float((start + stop - 1) * 0.5))
+            center = float((start + stop - 1) * 0.5)
         else:
-            centers.append(float((positions * weights).sum() / weight_sum))
-    return tuple(_merge_close_positions(centers, min_gap_px=12.0))
+            center = float((positions * weights).sum() / weight_sum)
+        components.append((center, weight_sum))
+    min_gap_px = max(12.0, float(values.size) / 50.0)
+    components = _merge_close_components(components, min_gap_px=min_gap_px)
+    components = _strongest_components(components, max_count=5)
+    return tuple(center for center, _score in components)
 
 
-def _merge_close_positions(
-    positions: Sequence[float],
+def _merge_close_components(
+    components: Sequence[tuple[float, float]],
     *,
     min_gap_px: float,
-) -> list[float]:
-    merged: list[float] = []
-    for value in sorted(float(item) for item in positions):
-        if not merged or abs(value - merged[-1]) >= min_gap_px:
-            merged.append(value)
+) -> list[tuple[float, float]]:
+    merged: list[tuple[float, float]] = []
+    for center, score in sorted(
+        ((float(item[0]), max(0.0, float(item[1]))) for item in components),
+        key=lambda item: item[0],
+    ):
+        if not merged or abs(center - merged[-1][0]) >= min_gap_px:
+            merged.append((center, score))
         else:
-            merged[-1] = (merged[-1] + value) * 0.5
+            old_center, old_score = merged[-1]
+            total_score = old_score + score
+            if total_score <= 0.0:
+                merged[-1] = ((old_center + center) * 0.5, 0.0)
+            else:
+                merged[-1] = (
+                    (old_center * old_score + center * score) / total_score,
+                    total_score,
+                )
     return merged
+
+
+def _strongest_components(
+    components: Sequence[tuple[float, float]],
+    *,
+    max_count: int,
+) -> list[tuple[float, float]]:
+    values = list(components)
+    if not values:
+        return []
+    max_score = max(score for _center, score in values)
+    if max_score > 0.0:
+        strong = [item for item in values if item[1] >= max_score * 0.2]
+        if len(strong) >= 2:
+            values = strong
+    if len(values) <= max_count:
+        return sorted(values, key=lambda item: item[0])
+    strongest = sorted(values, key=lambda item: item[1], reverse=True)[:max_count]
+    return sorted(strongest, key=lambda item: item[0])
 
 
 def _regularized_positions(positions: Sequence[float]) -> tuple[float, ...]:
