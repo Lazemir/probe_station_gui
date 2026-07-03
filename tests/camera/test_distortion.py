@@ -93,6 +93,16 @@ def test_projection_line_centers_prefers_strong_grid_bands() -> None:
     assert centers == pytest.approx((120, 540, 960), abs=1.0)
 
 
+def test_projection_line_centers_rejects_non_grid_edge_band() -> None:
+    projection = np.zeros(1500, dtype=float)
+    for center in (27, 102, 530, 958, 1386):
+        projection[center - 7 : center + 8] = 1.0
+
+    centers = _projection_line_centers(projection)
+
+    assert centers == pytest.approx((102, 530, 958, 1386), abs=1.0)
+
+
 def test_partial_grid_frames_fit_distortion_payload() -> None:
     frames = [
         GridCalibrationFrame(

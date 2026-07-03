@@ -452,7 +452,7 @@ def _projection_line_centers(projection: object) -> tuple[float, ...]:
     min_gap_px = max(12.0, float(values.size) / 50.0)
     components = _merge_close_components(components, min_gap_px=min_gap_px)
     components = _strongest_components(components, max_count=5)
-    return tuple(center for center, _score in components)
+    return _regular_grid_subset(tuple(center for center, _score in components))
 
 
 def _merge_close_components(
@@ -507,6 +507,30 @@ def _regularized_positions(positions: Sequence[float]) -> tuple[float, ...]:
     last = values[-1]
     step = (last - first) / float(len(values) - 1)
     return tuple(first + step * index for index in range(len(values)))
+
+
+def _regular_grid_subset(positions: Sequence[float]) -> tuple[float, ...]:
+    values = tuple(sorted(float(value) for value in positions))
+    if len(values) <= 3:
+        return values
+
+    from itertools import combinations
+
+    for count in range(len(values), 2, -1):
+        candidates: list[tuple[float, float, tuple[float, ...]]] = []
+        for subset in combinations(values, count):
+            step = (subset[-1] - subset[0]) / float(count - 1)
+            if step <= 0.0:
+                continue
+            target = _regularized_positions(subset)
+            errors = [abs(value - expected) for value, expected in zip(subset, target)]
+            max_error = max(errors)
+            tolerance = max(12.0, abs(step) * 0.12)
+            if max_error <= tolerance:
+                candidates.append((max_error / abs(step), -abs(subset[-1] - subset[0]), subset))
+        if candidates:
+            return min(candidates, key=lambda item: (item[0], item[1]))[2]
+    return values
 
 
 def _homography_residuals(
