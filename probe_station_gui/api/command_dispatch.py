@@ -68,6 +68,7 @@ class ApiCommandDispatchHandlers:
     route_session_result: PayloadHandler
     route_session_seek: NoPayloadHandler
     route_session_artifact: PayloadHandler
+    lens_distortion_calibration: PayloadHandler
 
 
 @dataclass(frozen=True)
@@ -142,6 +143,7 @@ def dispatch_api_command_request(
         "route_session_action": handlers.route_session_action,
         "route_session_result": handlers.route_session_result,
         "route_session_artifact": handlers.route_session_artifact,
+        "lens_distortion_calibration": handlers.lens_distortion_calibration,
     }
     if action in payload_handlers:
         return payload_handlers[action](payload)

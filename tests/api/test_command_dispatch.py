@@ -38,6 +38,7 @@ PAYLOAD_ACTIONS = (
     ("route_session_action", "route_session_action"),
     ("route_session_result", "route_session_result"),
     ("route_session_artifact", "route_session_artifact"),
+    ("lens_distortion_calibration", "lens_distortion_calibration"),
 )
 
 
@@ -78,6 +79,10 @@ def _command_handlers(
         route_session_seek=lambda: _response("route_session_seek"),
         route_session_artifact=lambda payload: _response(
             "route_session_artifact",
+            payload,
+        ),
+        lens_distortion_calibration=lambda payload: _response(
+            "lens_distortion_calibration",
             payload,
         ),
     )

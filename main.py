@@ -1232,6 +1232,7 @@ class Main(QMainWindow):
             route_session_result=self._api_route_session_result,
             route_session_seek=self._api_route_session_seek,
             route_session_artifact=self._api_route_session_artifact,
+            lens_distortion_calibration=self._api_lens_distortion_calibration,
         )
 
     def _dispatch_api_command_request(
@@ -2645,6 +2646,42 @@ class Main(QMainWindow):
 
     def _api_route_session_artifact(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._api_route_artifacts_store().artifact_response(payload)
+
+    def _api_lens_distortion_calibration(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if bool(payload.get("reset", False)):
+            self._reset_lens_distortion_calibration()
+            return {
+                "accepted": True,
+                "status_code": 200,
+                "message": "Lens distortion calibration reset requested.",
+            }
+        if self._lens_distortion_calibration_running():
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Lens distortion calibration is already running.",
+            }
+        if not self._stage_serial_ready():
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Connect the stage controller before calibration.",
+            }
+        if self.stage_controller.is_busy():
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Stage is busy; lens distortion calibration not started.",
+            }
+        self._start_lens_distortion_calibration()
+        return {
+            "accepted": True,
+            "status_code": 202,
+            "message": "Lens distortion calibration started.",
+        }
 
     def _api_route_artifacts_payload(self) -> list[dict[str, object]]:
         return self._api_route_artifacts_store().public_payloads()

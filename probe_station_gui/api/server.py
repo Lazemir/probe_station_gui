@@ -518,6 +518,12 @@ class ProbeStationApiServer:
             permission=API_PERMISSION_ROUTE_MEASURE,
             action="stage_local_focus",
         )
+        add_body_command_route(
+            "/api/v1/calibration/lens-distortion",
+            name="lens_distortion_calibration",
+            permission=API_PERMISSION_STAGE_WRITE,
+            action="lens_distortion_calibration",
+        )
         add_command_route(
             "/api/v1/route/contacts",
             method="GET",
