@@ -175,22 +175,71 @@ def fit_distortion_from_grid_frames(
     source_points: list[Point2D] = []
     target_points: list[Point2D] = []
     capture_offsets: list[list[float]] = []
+    frame_candidates: list[dict[str, object]] = []
     for item in frames:
         detection = detect_bright_grid(item.frame)
         if len(detection.vertical_lines_px) < 2 or len(detection.horizontal_lines_px) < 2:
             continue
-        capture_offsets.append(
-            [float(item.stage_offset_mm[0]), float(item.stage_offset_mm[1])]
+        frame_source, frame_target = _grid_points_from_detection(detection)
+        if len(frame_source) < 8:
+            continue
+        offset = [float(item.stage_offset_mm[0]), float(item.stage_offset_mm[1])]
+        candidate = _distortion_payload_with_residuals(
+            frame_size=frame_size,
+            source_points=frame_source,
+            target_points=frame_target,
+            grid_spacing_um=grid_spacing_um,
         )
-        target_x = _regularized_positions(detection.vertical_lines_px)
-        target_y = _regularized_positions(detection.horizontal_lines_px)
-        for row, source_y in enumerate(detection.horizontal_lines_px):
-            for column, source_x in enumerate(detection.vertical_lines_px):
-                source_points.append((float(source_x), float(source_y)))
-                target_points.append((float(target_x[column]), float(target_y[row])))
+        candidate["capture_offsets_mm"] = [offset]
+        candidate["fit_frame_count"] = 1
+        frame_candidates.append(candidate)
+        capture_offsets.append(offset)
+        source_points.extend(frame_source)
+        target_points.extend(frame_target)
 
     if len(source_points) < 8:
         raise ValueError("Grid coverage is too small.")
+    payload = _distortion_payload_with_residuals(
+        frame_size=frame_size,
+        source_points=source_points,
+        target_points=target_points,
+        grid_spacing_um=grid_spacing_um,
+    )
+    payload["capture_offsets_mm"] = capture_offsets
+    payload["fit_frame_count"] = len(capture_offsets)
+    if frame_candidates:
+        best_payload = min(
+            frame_candidates,
+            key=lambda item: float(item.get("residual_mean_px", math.inf)),
+        )
+        combined_mean = float(payload.get("residual_mean_px", math.inf))
+        best_mean = float(best_payload.get("residual_mean_px", math.inf))
+        if combined_mean > max(8.0, best_mean * 4.0):
+            return best_payload
+    return payload
+
+
+def _grid_points_from_detection(
+    detection: GridDetection,
+) -> tuple[list[Point2D], list[Point2D]]:
+    source_points: list[Point2D] = []
+    target_points: list[Point2D] = []
+    target_x = _regularized_positions(detection.vertical_lines_px)
+    target_y = _regularized_positions(detection.horizontal_lines_px)
+    for row, source_y in enumerate(detection.horizontal_lines_px):
+        for column, source_x in enumerate(detection.vertical_lines_px):
+            source_points.append((float(source_x), float(source_y)))
+            target_points.append((float(target_x[column]), float(target_y[row])))
+    return source_points, target_points
+
+
+def _distortion_payload_with_residuals(
+    *,
+    frame_size: tuple[int, int],
+    source_points: Sequence[Sequence[float]],
+    target_points: Sequence[Sequence[float]],
+    grid_spacing_um: float,
+) -> dict[str, object]:
     payload = distortion_payload_from_points(
         frame_size=frame_size,
         source_points=source_points,
@@ -203,7 +252,6 @@ def fit_distortion_from_grid_frames(
         correction.source_points,
         correction.target_points,
     )
-    payload["capture_offsets_mm"] = capture_offsets
     payload["residual_mean_px"] = (
         float(sum(residuals) / len(residuals)) if residuals else 0.0
     )
