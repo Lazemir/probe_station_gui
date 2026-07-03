@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+from copy import deepcopy
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
@@ -84,6 +85,8 @@ class ObjectiveCalibrationSettings:
     z_offset_configured: bool = False
     pixels_to_mm: list[list[float]] = field(default_factory=list)
     xy_calibration_configured: bool = False
+    distortion_correction: dict[str, object] = field(default_factory=dict)
+    distortion_correction_configured: bool = False
     autofocus_range_mm: float = 1.0
     autofocus_fine_step_mm: float = 0.02
 
@@ -100,6 +103,8 @@ class ObjectiveCalibrationSettings:
             z_offset_configured=self.z_offset_configured,
             pixels_to_mm=[list(row) for row in self.pixels_to_mm],
             xy_calibration_configured=self.xy_calibration_configured,
+            distortion_correction=deepcopy(self.distortion_correction),
+            distortion_correction_configured=self.distortion_correction_configured,
             autofocus_range_mm=self.autofocus_range_mm,
             autofocus_fine_step_mm=self.autofocus_fine_step_mm,
         )
@@ -117,6 +122,8 @@ class ObjectiveCalibrationSettings:
             "z_offset_configured": self.z_offset_configured,
             "pixels_to_mm": [list(row) for row in self.pixels_to_mm],
             "xy_calibration_configured": self.xy_calibration_configured,
+            "distortion_correction": deepcopy(self.distortion_correction),
+            "distortion_correction_configured": self.distortion_correction_configured,
             "autofocus_range_mm": self.autofocus_range_mm,
             "autofocus_fine_step_mm": self.autofocus_fine_step_mm,
         }
@@ -198,6 +205,40 @@ def parse_pixels_to_mm_matrix(raw_matrix: object) -> list[list[float]]:
     return rows
 
 
+def parse_distortion_correction_payload(raw_payload: object) -> dict[str, object]:
+    """Return a validated persisted lens distortion correction payload."""
+
+    if not isinstance(raw_payload, dict):
+        return {}
+    try:
+        model_version = int(raw_payload.get("model_version", 0))
+    except (TypeError, ValueError):
+        return {}
+    frame_size = raw_payload.get("frame_size")
+    if (
+        model_version <= 0
+        or not isinstance(frame_size, Iterable)
+        or isinstance(frame_size, (str, bytes))
+    ):
+        return {}
+    frame_values: list[int] = []
+    for raw_value in frame_size:
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            return {}
+        if value <= 0:
+            return {}
+        frame_values.append(value)
+    if len(frame_values) != 2:
+        return {}
+
+    payload = deepcopy(raw_payload)
+    payload["model_version"] = model_version
+    payload["frame_size"] = frame_values
+    return payload
+
+
 def parse_objective_profile(
     name: str,
     raw_profile: object,
@@ -214,6 +255,18 @@ def parse_objective_profile(
     )
     if not matrix:
         xy_configured = False
+    distortion_payload = parse_distortion_correction_payload(
+        raw_profile.get("distortion_correction")
+    )
+    distortion_configured = coerce_bool(
+        raw_profile.get(
+            "distortion_correction_configured",
+            bool(distortion_payload),
+        ),
+        default=bool(distortion_payload),
+    )
+    if not distortion_payload:
+        distortion_configured = False
     return ObjectiveCalibrationSettings(
         name=name,
         magnification=positive_float(
@@ -248,6 +301,8 @@ def parse_objective_profile(
         ),
         pixels_to_mm=matrix,
         xy_calibration_configured=xy_configured,
+        distortion_correction=distortion_payload,
+        distortion_correction_configured=distortion_configured,
         autofocus_range_mm=positive_float(
             raw_profile.get(
                 "autofocus_range_mm",

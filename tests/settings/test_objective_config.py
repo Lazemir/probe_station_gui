@@ -22,6 +22,27 @@ def test_objective_profile_clone_copies_pixels_to_mm_matrix() -> None:
     assert restored.pixels_to_mm == [[3.0, 0.0], [0.0, 2.0]]
 
 
+def test_objective_profile_clone_copies_distortion_payload() -> None:
+    profile = ObjectiveCalibrationSettings(
+        name="X50",
+        distortion_correction={
+            "model_version": 1,
+            "frame_size": [640, 480],
+            "source_points": [[10.0, 20.0], [30.0, 40.0]],
+        },
+        distortion_correction_configured=True,
+    )
+
+    restored = profile.clone()
+    restored.distortion_correction["frame_size"][0] = 320
+    restored.distortion_correction["source_points"][0][0] = 99.0
+
+    assert profile.distortion_correction["frame_size"] == [640, 480]
+    assert profile.distortion_correction["source_points"][0] == [10.0, 20.0]
+    assert restored.distortion_correction["frame_size"] == [320, 480]
+    assert restored.distortion_correction["source_points"][0] == [99.0, 20.0]
+
+
 def test_objectives_settings_orders_builtin_profiles_before_custom_profiles() -> None:
     settings = ObjectivesSettings(
         objectives={
@@ -99,6 +120,56 @@ def test_parse_objectives_preserves_custom_profile() -> None:
         [0.0001, 0.0],
         [0.0, 0.00011],
     ]
+
+
+def test_parse_objectives_preserves_valid_distortion_payload() -> None:
+    parsed = parse_objectives_settings(
+        {
+            "active_name": "x50",
+            "objectives": {
+                "X50": {
+                    "distortion_correction_configured": True,
+                    "distortion_correction": {
+                        "model_version": 1,
+                        "frame_size": [640, 480],
+                        "source_points": [[10.0, 20.0], [30.0, 40.0]],
+                        "target_points": [[11.0, 21.0], [31.0, 41.0]],
+                        "residual_mean_px": 0.2,
+                        "residual_max_px": 0.4,
+                    },
+                }
+            },
+        }
+    )
+
+    profile = parsed.objectives["X50"]
+    assert profile.distortion_correction_configured
+    assert profile.distortion_correction["frame_size"] == [640, 480]
+    assert profile.distortion_correction["source_points"] == [
+        [10.0, 20.0],
+        [30.0, 40.0],
+    ]
+
+
+def test_parse_objectives_rejects_invalid_distortion_payload() -> None:
+    parsed = parse_objectives_settings(
+        {
+            "active_name": "x50",
+            "objectives": {
+                "X50": {
+                    "distortion_correction_configured": True,
+                    "distortion_correction": {
+                        "model_version": 1,
+                        "frame_size": [640],
+                    },
+                }
+            },
+        }
+    )
+
+    profile = parsed.objectives["X50"]
+    assert not profile.distortion_correction_configured
+    assert profile.distortion_correction == {}
 
 
 def test_parse_objectives_uses_remaining_profile_when_active_was_deleted() -> None:
