@@ -17,7 +17,7 @@ from probe_station_gui.shared.wheel_guard import (
 )
 
 
-_XY_CALIBRATION_STATUS = {
+_CALIBRATION_STATUS = {
     True: "Configured",
     False: "Not configured",
 }
@@ -76,6 +76,8 @@ class ObjectivesSettingsWidget(QWidget):
         self._autofocus_fine_spin = self._positive_spin(" mm", decimals=4)
         self._xy_calibration_status = QLineEdit(self)
         self._xy_calibration_status.setReadOnly(True)
+        self._distortion_status = QLineEdit(self)
+        self._distortion_status.setReadOnly(True)
 
         layout.addRow(QLabel("Magnification", self), self._magnification_spin)
         layout.addRow(self._xy_configured_checkbox)
@@ -86,6 +88,7 @@ class ObjectivesSettingsWidget(QWidget):
         layout.addRow(QLabel("AF range", self), self._autofocus_range_spin)
         layout.addRow(QLabel("AF fine step", self), self._autofocus_fine_spin)
         layout.addRow(QLabel("Click calibration", self), self._xy_calibration_status)
+        layout.addRow(QLabel("Lens correction", self), self._distortion_status)
 
         self._profile_combo.currentIndexChanged.connect(
             lambda _index: self._on_profile_changed()
@@ -122,7 +125,10 @@ class ObjectivesSettingsWidget(QWidget):
         self._autofocus_range_spin.setValue(profile.autofocus_range_mm)
         self._autofocus_fine_spin.setValue(profile.autofocus_fine_step_mm)
         self._xy_calibration_status.setText(
-            _XY_CALIBRATION_STATUS[profile.xy_calibration_configured]
+            _CALIBRATION_STATUS[profile.xy_calibration_configured]
+        )
+        self._distortion_status.setText(
+            _CALIBRATION_STATUS[profile.distortion_correction_configured]
         )
 
     def _save_active_profile_edits(self) -> None:

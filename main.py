@@ -329,6 +329,7 @@ from probe_station_gui.views.contact_oscillation_window import (
     ContactOscillationWindow,
 )
 from probe_station_gui.dialogs.click_calibration_dialog import ClickCalibrationDialog
+from probe_station_gui.dialogs.lens_distortion_dialog import LensDistortionDialog
 from probe_station_gui.views.dock_widgets import CollapsibleDockWidget
 from probe_station_gui.views.oscillation_panel import OscillationPanel
 from probe_station_gui.views.resistance_monitor_panel import ResistanceMonitorPanel
@@ -544,7 +545,9 @@ class Main(QMainWindow):
         self._microscope_scan_action: QAction | None = None
         self._design_layout_window_action: QAction | None = None
         self._click_calibration_action: QAction | None = None
+        self._lens_distortion_calibration_action: QAction | None = None
         self._click_calibration_dialog: ClickCalibrationDialog | None = None
+        self._lens_distortion_dialog: LensDistortionDialog | None = None
         self._sample_load_action: QAction | None = None
         self._sample_unload_action: QAction | None = None
         self._objective_offset_reference: offsets.ObjectiveOffsetReference | None = None
@@ -3483,7 +3486,7 @@ class Main(QMainWindow):
         combo.setCurrentIndex(plan.selected_index)
         combo.blockSignals(False)
         if plan.refresh_calibration_ui:
-            self._refresh_click_calibration_ui()
+            self._refresh_objective_calibration_ui()
 
     def _on_objective_combo_changed(self, _index: int) -> None:
         combo = self._objective_combo
@@ -3504,7 +3507,7 @@ class Main(QMainWindow):
             allow_busy=allow_busy,
         )
         if plan.refresh_calibration_ui:
-            self._refresh_click_calibration_ui()
+            self._refresh_objective_calibration_ui()
             return
         if plan.restore_combo_name is not None:
             self._sync_objective_combo(plan.restore_combo_name)
@@ -3558,6 +3561,7 @@ class Main(QMainWindow):
         )
         self.stage_controller.apply_objective_configuration(active_objective, objectives)
         self._sync_objective_combo(objective_settings.active_name)
+        self._refresh_objective_calibration_ui()
         if self._design_session.document is not None:
             self._refresh_design_position()
 
@@ -3577,7 +3581,7 @@ class Main(QMainWindow):
         if getattr(plan, "refresh_design_position", False):
             self._refresh_design_position()
         if getattr(plan, "refresh_calibration_ui", False):
-            self._refresh_click_calibration_ui()
+            self._refresh_objective_calibration_ui()
         if show_status:
             self._show_plan_status(plan)
         return True
@@ -3599,6 +3603,17 @@ class Main(QMainWindow):
         self._click_calibration_dialog.show()
         self._click_calibration_dialog.raise_()
         self._click_calibration_dialog.activateWindow()
+
+    def _show_lens_distortion_dialog(self) -> None:
+        if self._lens_distortion_dialog is None:
+            dialog = LensDistortionDialog(self)
+            dialog.calibrate_requested.connect(self._start_lens_distortion_calibration)
+            dialog.reset_requested.connect(self._reset_lens_distortion_calibration)
+            self._lens_distortion_dialog = dialog
+        self._refresh_lens_distortion_ui()
+        self._lens_distortion_dialog.show()
+        self._lens_distortion_dialog.raise_()
+        self._lens_distortion_dialog.activateWindow()
 
     def _add_objective_profile(self) -> None:
         if self.stage_controller.is_busy():
@@ -3689,6 +3704,26 @@ class Main(QMainWindow):
             self._click_calibration_dialog.set_objectives(
                 self.settings_manager.objectives_configuration()
             )
+
+    def _refresh_lens_distortion_ui(self) -> None:
+        if self._lens_distortion_calibration_action is not None:
+            self._lens_distortion_calibration_action.setText(
+                "Lens Distortion Calibration"
+            )
+        if self._lens_distortion_dialog is not None:
+            self._lens_distortion_dialog.set_objectives(
+                self.settings_manager.objectives_configuration()
+            )
+
+    def _refresh_objective_calibration_ui(self) -> None:
+        self._refresh_click_calibration_ui()
+        self._refresh_lens_distortion_ui()
+
+    def _start_lens_distortion_calibration(self) -> None:
+        self._show_status("Lens distortion calibration is not running yet.", 4000)
+
+    def _reset_lens_distortion_calibration(self) -> None:
+        self._show_status("Lens distortion calibration reset is not running yet.", 4000)
 
     def _on_objective_calibration_updated(
         self, objective_name: str, pixels_to_mm: object

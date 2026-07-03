@@ -33,6 +33,7 @@ class MainWindowMenuOwner(Protocol):
     _surface_map_window_action: Any
     _microscope_scan_action: Any
     _click_calibration_action: Any
+    _lens_distortion_calibration_action: Any
     _ruler_action: Any
     _rect_action: Any
     _alignment_capture_action: Any
@@ -42,6 +43,7 @@ class MainWindowMenuOwner(Protocol):
     def addAction(self, action: Any) -> None: ...  # noqa: N802 - Qt naming
     def _open_status_log(self) -> None: ...
     def _show_click_calibration_dialog(self) -> None: ...
+    def _show_lens_distortion_dialog(self) -> None: ...
     def _on_measure_action_toggled(self, checked: bool) -> None: ...
     def _capture_manual_alignment_center_shortcut(self) -> None: ...
     def _cancel_manual_alignment_pick(self) -> None: ...
@@ -134,6 +136,14 @@ def _add_calibration_actions(owner: MainWindowMenuOwner, calibration_menu: Any) 
         owner._show_click_calibration_dialog
     )
     calibration_menu.addAction(owner._click_calibration_action)
+
+    owner._lens_distortion_calibration_action = QAction(
+        "Lens Distortion Calibration", owner
+    )
+    owner._lens_distortion_calibration_action.triggered.connect(
+        owner._show_lens_distortion_dialog
+    )
+    calibration_menu.addAction(owner._lens_distortion_calibration_action)
 
 
 def _add_dock_actions(

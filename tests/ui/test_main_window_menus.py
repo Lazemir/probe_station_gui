@@ -42,6 +42,7 @@ class _MenuOwner(QMainWindow):
         self._surface_map_window_action = None
         self._microscope_scan_action = None
         self._click_calibration_action = None
+        self._lens_distortion_calibration_action = None
         self._ruler_action = None
         self._rect_action = None
         self._alignment_capture_action = None
@@ -79,6 +80,9 @@ class _MenuOwner(QMainWindow):
 
     def _show_click_calibration_dialog(self) -> None:
         self._record("click_calibration")
+
+    def _show_lens_distortion_dialog(self) -> None:
+        self._record("lens_distortion")
 
     def _on_measure_action_toggled(self, checked: bool) -> None:
         self._record("measure", bool(checked))
@@ -158,6 +162,7 @@ def test_setup_main_window_menus_preserves_labels_and_shortcuts(
         "Surface Map",
         "Microscope Scan",
         "Click-to-Move Calibration",
+        "Lens Distortion Calibration",
         "Alignment",
     ]
     assert not any("..." in label or "\N{HORIZONTAL ELLIPSIS}" in label for label in labels)
@@ -179,10 +184,12 @@ def test_setup_main_window_menus_preserves_labels_and_shortcuts(
     window._contact_calibration_window_action.trigger()
     window._surface_map_window_action.trigger()
     window._microscope_scan_action.trigger()
+    window._lens_distortion_calibration_action.trigger()
 
     assert ("design", True) in window.calls
     assert ("contact", True) in window.calls
     assert ("surface", None) in window.calls
     assert ("microscope", None) in window.calls
+    assert ("lens_distortion", None) in window.calls
 
     window.close()

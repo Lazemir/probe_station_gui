@@ -48,6 +48,8 @@ def test_objectives_widget_saves_active_profile_edits() -> None:
                 magnification=20.0,
                 pixels_to_mm=[[1.0, 0.0], [0.0, 1.0]],
                 xy_calibration_configured=True,
+                distortion_correction={"model_version": 1, "frame_size": [640, 480]},
+                distortion_correction_configured=True,
             ),
         },
     )
@@ -55,6 +57,7 @@ def test_objectives_widget_saves_active_profile_edits() -> None:
 
     _set_combo_data(widget._profile_combo, "X20")
     assert widget._xy_calibration_status.text() == "Configured"
+    assert widget._distortion_status.text() == "Configured"
     _set_combo_data(widget._active_combo, "X20")
     widget._apply_offsets_checkbox.setChecked(False)
     widget._magnification_spin.setValue(21.5)
