@@ -25,6 +25,23 @@ class DistortionCorrection:
     residual_max_px: float = 0.0
 
 
+@dataclass(frozen=True)
+class GridDetection:
+    """Detected bright grid line centers and their intersections in one frame."""
+
+    vertical_lines_px: tuple[float, ...]
+    horizontal_lines_px: tuple[float, ...]
+    intersections_px: tuple[Point2D, ...]
+
+
+@dataclass(frozen=True)
+class GridCalibrationFrame:
+    """One captured calibration frame with its stage offset from the origin."""
+
+    frame: object
+    stage_offset_mm: Point2D
+
+
 def distortion_payload_from_points(
     *,
     frame_size: tuple[int, int],
@@ -124,6 +141,76 @@ def apply_distortion_correction(
     return result.copy()
 
 
+def detect_bright_grid(frame: object) -> GridDetection:
+    """Detect visible bright grid lines in a microscope calibration frame."""
+
+    import cv2
+    import numpy as np
+
+    gray = _gray_array(frame)
+    if gray.size == 0:
+        return GridDetection((), (), ())
+    blurred = cv2.GaussianBlur(gray, (0, 0), sigmaX=9.0, sigmaY=9.0)
+    enhanced = cv2.addWeighted(gray, 1.6, blurred, -0.6, 0.0)
+    threshold = max(float(np.percentile(enhanced, 92.0)), float(enhanced.max()) * 0.55)
+    mask = enhanced >= threshold
+    vertical = _projection_line_centers(mask.mean(axis=0))
+    horizontal = _projection_line_centers(mask.mean(axis=1))
+    intersections = tuple((x_pos, y_pos) for y_pos in horizontal for x_pos in vertical)
+    return GridDetection(
+        vertical_lines_px=vertical,
+        horizontal_lines_px=horizontal,
+        intersections_px=intersections,
+    )
+
+
+def fit_distortion_from_grid_frames(
+    frames: Sequence[GridCalibrationFrame],
+    *,
+    frame_size: tuple[int, int],
+    grid_spacing_um: float = 50.0,
+) -> dict[str, object]:
+    """Fit a correction payload from partial bright-grid calibration frames."""
+
+    source_points: list[Point2D] = []
+    target_points: list[Point2D] = []
+    capture_offsets: list[list[float]] = []
+    for item in frames:
+        detection = detect_bright_grid(item.frame)
+        if len(detection.vertical_lines_px) < 2 or len(detection.horizontal_lines_px) < 2:
+            continue
+        capture_offsets.append(
+            [float(item.stage_offset_mm[0]), float(item.stage_offset_mm[1])]
+        )
+        target_x = _regularized_positions(detection.vertical_lines_px)
+        target_y = _regularized_positions(detection.horizontal_lines_px)
+        for row, source_y in enumerate(detection.horizontal_lines_px):
+            for column, source_x in enumerate(detection.vertical_lines_px):
+                source_points.append((float(source_x), float(source_y)))
+                target_points.append((float(target_x[column]), float(target_y[row])))
+
+    if len(source_points) < 8:
+        raise ValueError("Grid coverage is too small.")
+    payload = distortion_payload_from_points(
+        frame_size=frame_size,
+        source_points=source_points,
+        target_points=target_points,
+        grid_spacing_um=grid_spacing_um,
+    )
+    correction = correction_from_payload(payload)
+    residuals = _homography_residuals(
+        correction.homography,
+        correction.source_points,
+        correction.target_points,
+    )
+    payload["capture_offsets_mm"] = capture_offsets
+    payload["residual_mean_px"] = (
+        float(sum(residuals) / len(residuals)) if residuals else 0.0
+    )
+    payload["residual_max_px"] = float(max(residuals)) if residuals else 0.0
+    return payload
+
+
 def _qimage_rgb32_array(image: QImage):
     import numpy as np
 
@@ -134,6 +221,99 @@ def _qimage_rgb32_array(image: QImage):
         (height, image.bytesPerLine())
     )
     return array[:, : width * 4].reshape((height, width, 4))
+
+
+def _gray_array(frame: object):
+    import cv2
+    import numpy as np
+
+    if isinstance(frame, QImage):
+        converted = frame.convertToFormat(QImage.Format_RGB888)
+        width = converted.width()
+        height = converted.height()
+        ptr = converted.constBits()
+        array = np.frombuffer(
+            ptr,
+            np.uint8,
+            count=converted.sizeInBytes(),
+        ).reshape((height, converted.bytesPerLine()))
+        rgb = array[:, : width * 3].reshape((height, width, 3))
+        return cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    array = np.asarray(frame)
+    if array.ndim == 2:
+        return array.astype(np.uint8, copy=False)
+    if array.ndim == 3 and array.shape[2] >= 3:
+        return cv2.cvtColor(array[:, :, :3].astype(np.uint8, copy=False), cv2.COLOR_RGB2GRAY)
+    return np.asarray([], dtype=np.uint8)
+
+
+def _projection_line_centers(projection: object) -> tuple[float, ...]:
+    import numpy as np
+
+    values = np.asarray(projection, dtype=float)
+    if values.size == 0:
+        return ()
+    maximum = float(values.max())
+    if maximum <= 0.0 or not math.isfinite(maximum):
+        return ()
+    active = values >= max(maximum * 0.35, float(values.mean() + values.std()))
+    centers: list[float] = []
+    index = 0
+    while index < active.size:
+        if not active[index]:
+            index += 1
+            continue
+        start = index
+        while index < active.size and active[index]:
+            index += 1
+        stop = index
+        weights = values[start:stop]
+        positions = np.arange(start, stop, dtype=float)
+        weight_sum = float(weights.sum())
+        if weight_sum <= 0.0:
+            centers.append(float((start + stop - 1) * 0.5))
+        else:
+            centers.append(float((positions * weights).sum() / weight_sum))
+    return tuple(_merge_close_positions(centers, min_gap_px=12.0))
+
+
+def _merge_close_positions(
+    positions: Sequence[float],
+    *,
+    min_gap_px: float,
+) -> list[float]:
+    merged: list[float] = []
+    for value in sorted(float(item) for item in positions):
+        if not merged or abs(value - merged[-1]) >= min_gap_px:
+            merged.append(value)
+        else:
+            merged[-1] = (merged[-1] + value) * 0.5
+    return merged
+
+
+def _regularized_positions(positions: Sequence[float]) -> tuple[float, ...]:
+    values = [float(value) for value in positions]
+    if len(values) <= 2:
+        return tuple(values)
+    first = values[0]
+    last = values[-1]
+    step = (last - first) / float(len(values) - 1)
+    return tuple(first + step * index for index in range(len(values)))
+
+
+def _homography_residuals(
+    homography: object,
+    source_points: Sequence[Point2D],
+    target_points: Sequence[Point2D],
+) -> list[float]:
+    import cv2
+    import numpy as np
+
+    source = np.asarray(source_points, dtype=np.float32).reshape((-1, 1, 2))
+    projected = cv2.perspectiveTransform(source, homography).reshape((-1, 2))
+    target = np.asarray(target_points, dtype=np.float32)
+    errors = np.linalg.norm(projected - target, axis=1)
+    return [float(value) for value in errors if math.isfinite(float(value))]
 
 
 def _valid_frame_size(raw_size: object) -> tuple[int, int]:
@@ -203,8 +383,12 @@ def _optional_nonnegative(value: object) -> float:
 
 __all__ = [
     "DistortionCorrection",
+    "GridCalibrationFrame",
+    "GridDetection",
     "MODEL_VERSION",
     "apply_distortion_correction",
     "correction_from_payload",
+    "detect_bright_grid",
     "distortion_payload_from_points",
+    "fit_distortion_from_grid_frames",
 ]
