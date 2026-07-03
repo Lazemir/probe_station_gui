@@ -76,20 +76,29 @@ class _FakeDialog:
         self.objectives.append(objectives)
 
 
+class _FakeFrame:
+    def width(self) -> int:
+        return 1920
+
+    def height(self) -> int:
+        return 1200
+
+
 def test_run_lens_distortion_calibration_captures_offset_grid(
     monkeypatch,
 ) -> None:
     window = Main.__new__(Main)
     stage = _FakeStage()
     finished: list[tuple[bool, str, object]] = []
-    frames = [object() for _ in Main.LENS_DISTORTION_CAPTURE_OFFSETS_MM]
+    frames = [_FakeFrame() for _ in Main.LENS_DISTORTION_CAPTURE_OFFSETS_MM]
     captured_offsets: list[tuple[float, float]] = []
 
     def wait_for_frame(*, after_counter=None, timeout_s=2.0):
         assert after_counter == 0
         return frames.pop(0), 1
 
-    def fit_grid(grid_frames):
+    def fit_grid(grid_frames, *, frame_size):
+        assert frame_size == (1920, 1200)
         captured_offsets.extend(frame.stage_offset_mm for frame in grid_frames)
         return {"model_version": 1, "frame_size": [640, 480]}
 

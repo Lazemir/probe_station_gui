@@ -3860,6 +3860,7 @@ class Main(QMainWindow):
                 needle_feedrate_value,
             )
             frames: list[GridCalibrationFrame] = []
+            frame_size: tuple[int, int] | None = None
             total = len(self.LENS_DISTORTION_CAPTURE_OFFSETS_MM)
             for index, offset in enumerate(
                 self.LENS_DISTORTION_CAPTURE_OFFSETS_MM, start=1
@@ -3881,9 +3882,13 @@ class Main(QMainWindow):
                 )
                 if frame is None:
                     raise RuntimeError("Camera frame timeout.")
+                if frame_size is None:
+                    frame_size = self._lens_distortion_frame_size(frame)
                 frames.append(GridCalibrationFrame(frame, (dx_mm, dy_mm)))
 
-            payload = fit_distortion_from_grid_frames(frames)
+            if frame_size is None:
+                raise RuntimeError("Camera frame is unavailable.")
+            payload = fit_distortion_from_grid_frames(frames, frame_size=frame_size)
             success = True
             message = "Lens distortion calibration saved. Recalibrate click-to-move."
         except Exception as exc:
@@ -3913,6 +3918,17 @@ class Main(QMainWindow):
         payload: dict[str, object] | None,
     ) -> None:
         self.lens_distortion_calibration_finished.emit(success, message, payload)
+
+    @staticmethod
+    def _lens_distortion_frame_size(frame: object) -> tuple[int, int]:
+        try:
+            width = int(frame.width())
+            height = int(frame.height())
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise RuntimeError("Camera frame size is unavailable.") from exc
+        if width <= 0 or height <= 0:
+            raise RuntimeError("Camera frame size is unavailable.")
+        return width, height
 
     def _on_lens_distortion_calibration_finished(
         self,
