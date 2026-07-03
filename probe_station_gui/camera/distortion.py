@@ -23,6 +23,10 @@ class DistortionCorrection:
     homography: object
     residual_mean_px: float = 0.0
     residual_max_px: float = 0.0
+    axis_source_x: tuple[float, ...] = ()
+    axis_target_x: tuple[float, ...] = ()
+    axis_source_y: tuple[float, ...] = ()
+    axis_target_y: tuple[float, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -89,6 +93,18 @@ def correction_from_payload(payload: object) -> DistortionCorrection:
         raise ValueError("source_points and target_points must have the same length.")
     if len(sources) < 4:
         raise ValueError("At least four point pairs are required.")
+    axis_source_x, axis_target_x = _optional_axis_pair(
+        payload,
+        "axis_source_x",
+        "axis_target_x",
+    )
+    axis_source_y, axis_target_y = _optional_axis_pair(
+        payload,
+        "axis_source_y",
+        "axis_target_y",
+    )
+    if bool(axis_source_x) != bool(axis_source_y):
+        raise ValueError("Distortion correction axis mapping is incomplete.")
 
     import cv2
     import numpy as np
@@ -105,6 +121,10 @@ def correction_from_payload(payload: object) -> DistortionCorrection:
         homography=homography,
         residual_mean_px=_optional_nonnegative(payload.get("residual_mean_px")),
         residual_max_px=_optional_nonnegative(payload.get("residual_max_px")),
+        axis_source_x=axis_source_x,
+        axis_target_x=axis_target_x,
+        axis_source_y=axis_source_y,
+        axis_target_y=axis_target_y,
     )
 
 
@@ -124,13 +144,21 @@ def apply_distortion_correction(
 
     image = frame.convertToFormat(QImage.Format_RGB32)
     array = _qimage_rgb32_array(image)
-    corrected = cv2.warpPerspective(
-        array,
-        correction.homography,
-        (expected_width, expected_height),
-        flags=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_REPLICATE,
-    )
+    if correction.axis_source_x and correction.axis_source_y:
+        corrected = _apply_axis_interpolation_correction(
+            array,
+            correction,
+            width=expected_width,
+            height=expected_height,
+        )
+    else:
+        corrected = cv2.warpPerspective(
+            array,
+            correction.homography,
+            (expected_width, expected_height),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_REPLICATE,
+        )
     result = QImage(
         corrected.data,
         expected_width,
@@ -184,10 +212,9 @@ def fit_distortion_from_grid_frames(
         if len(frame_source) < 8:
             continue
         offset = [float(item.stage_offset_mm[0]), float(item.stage_offset_mm[1])]
-        candidate = _distortion_payload_with_residuals(
+        candidate = _axis_distortion_payload_from_detection(
             frame_size=frame_size,
-            source_points=frame_source,
-            target_points=frame_target,
+            detection=detection,
             grid_spacing_um=grid_spacing_um,
         )
         candidate["capture_offsets_mm"] = [offset]
@@ -257,6 +284,105 @@ def _distortion_payload_with_residuals(
     )
     payload["residual_max_px"] = float(max(residuals)) if residuals else 0.0
     return payload
+
+
+def _axis_distortion_payload_from_detection(
+    *,
+    frame_size: tuple[int, int],
+    detection: GridDetection,
+    grid_spacing_um: float,
+) -> dict[str, object]:
+    source_points, target_points = _grid_points_from_detection(detection)
+    axis_source_x = tuple(float(value) for value in detection.vertical_lines_px)
+    axis_target_x = _regularized_positions(axis_source_x)
+    axis_source_y = tuple(float(value) for value in detection.horizontal_lines_px)
+    axis_target_y = _regularized_positions(axis_source_y)
+    payload = distortion_payload_from_points(
+        frame_size=frame_size,
+        source_points=source_points,
+        target_points=target_points,
+        grid_spacing_um=grid_spacing_um,
+    )
+    residuals = _axis_interpolation_residuals(
+        axis_source_x=axis_source_x,
+        axis_target_x=axis_target_x,
+        axis_source_y=axis_source_y,
+        axis_target_y=axis_target_y,
+        source_points=source_points,
+        target_points=target_points,
+    )
+    payload["residual_mean_px"] = (
+        float(sum(residuals) / len(residuals)) if residuals else 0.0
+    )
+    payload["residual_max_px"] = float(max(residuals)) if residuals else 0.0
+    payload["axis_source_x"] = [float(value) for value in axis_source_x]
+    payload["axis_target_x"] = [float(value) for value in axis_target_x]
+    payload["axis_source_y"] = [float(value) for value in axis_source_y]
+    payload["axis_target_y"] = [float(value) for value in axis_target_y]
+    return payload
+
+
+def _apply_axis_interpolation_correction(
+    array: object,
+    correction: DistortionCorrection,
+    *,
+    width: int,
+    height: int,
+):
+    import cv2
+    import numpy as np
+
+    target_x = np.arange(width, dtype=np.float32)
+    target_y = np.arange(height, dtype=np.float32)
+    source_x = _interp_with_extrapolation(
+        target_x,
+        correction.axis_target_x,
+        correction.axis_source_x,
+    ).astype(np.float32, copy=False)
+    source_y = _interp_with_extrapolation(
+        target_y,
+        correction.axis_target_y,
+        correction.axis_source_y,
+    ).astype(np.float32, copy=False)
+    map_x = np.tile(source_x.reshape(1, width), (height, 1))
+    map_y = np.tile(source_y.reshape(height, 1), (1, width))
+    return cv2.remap(
+        array,
+        map_x,
+        map_y,
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
+
+
+def _axis_interpolation_residuals(
+    *,
+    axis_source_x: Sequence[float],
+    axis_target_x: Sequence[float],
+    axis_source_y: Sequence[float],
+    axis_target_y: Sequence[float],
+    source_points: Sequence[Point2D],
+    target_points: Sequence[Point2D],
+) -> list[float]:
+    import numpy as np
+
+    source = np.asarray(source_points, dtype=np.float64)
+    target = np.asarray(target_points, dtype=np.float64)
+    if source.size == 0 or target.size == 0:
+        return []
+    mapped_x = _interp_with_extrapolation(
+        source[:, 0],
+        axis_source_x,
+        axis_target_x,
+    )
+    mapped_y = _interp_with_extrapolation(
+        source[:, 1],
+        axis_source_y,
+        axis_target_y,
+    )
+    mapped = np.column_stack((mapped_x, mapped_y))
+    errors = np.linalg.norm(mapped - target, axis=1)
+    return [float(value) for value in errors if math.isfinite(float(value))]
 
 
 def _qimage_rgb32_array(image: QImage):
@@ -396,6 +522,61 @@ def _homography_residuals(
     target = np.asarray(target_points, dtype=np.float32)
     errors = np.linalg.norm(projected - target, axis=1)
     return [float(value) for value in errors if math.isfinite(float(value))]
+
+
+def _optional_axis_pair(
+    payload: dict[str, object],
+    source_key: str,
+    target_key: str,
+) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    has_source = source_key in payload
+    has_target = target_key in payload
+    if not has_source and not has_target:
+        return (), ()
+    if not has_source or not has_target:
+        raise ValueError("Distortion correction axis mapping is incomplete.")
+    source = _valid_axis_points(payload.get(source_key), source_key)
+    target = _valid_axis_points(payload.get(target_key), target_key)
+    if len(source) != len(target):
+        raise ValueError("Distortion correction axis mapping lengths do not match.")
+    if len(source) < 2:
+        raise ValueError("Distortion correction axis mapping needs two points.")
+    return source, target
+
+
+def _valid_axis_points(raw_points: object, label: str) -> tuple[float, ...]:
+    if not isinstance(raw_points, Sequence) or isinstance(raw_points, (str, bytes)):
+        raise ValueError(f"{label} must be a numeric sequence.")
+    points = tuple(_finite_float(value, label) for value in raw_points)
+    if len(points) < 2:
+        raise ValueError(f"{label} needs at least two values.")
+    if any(next_value <= value for value, next_value in zip(points, points[1:])):
+        raise ValueError(f"{label} must be strictly increasing.")
+    return points
+
+
+def _interp_with_extrapolation(
+    values: object,
+    source_points: Sequence[float],
+    target_points: Sequence[float],
+):
+    import numpy as np
+
+    x_values = np.asarray(values, dtype=np.float64)
+    source = np.asarray(source_points, dtype=np.float64)
+    target = np.asarray(target_points, dtype=np.float64)
+    mapped = np.interp(x_values, source, target)
+    left = x_values < source[0]
+    if np.any(left):
+        mapped[left] = target[0] + (x_values[left] - source[0]) * (
+            (target[1] - target[0]) / (source[1] - source[0])
+        )
+    right = x_values > source[-1]
+    if np.any(right):
+        mapped[right] = target[-1] + (x_values[right] - source[-1]) * (
+            (target[-1] - target[-2]) / (source[-1] - source[-2])
+        )
+    return mapped
 
 
 def _valid_frame_size(raw_size: object) -> tuple[int, int]:

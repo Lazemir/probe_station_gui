@@ -129,6 +129,28 @@ def test_partial_grid_frames_fit_distortion_payload() -> None:
     assert payload["residual_max_px"] < 3.0
 
 
+def test_distorted_single_grid_frame_uses_axis_mapping() -> None:
+    frames = [
+        GridCalibrationFrame(
+            frame=_synthetic_grid_image(
+                frame_size=(340, 240),
+                vertical_lines=(35.0, 70.0, 205.0, 260.0),
+                horizontal_lines=(40.0, 120.0, 205.0),
+            ),
+            stage_offset_mm=(0.0, 0.0),
+        )
+    ]
+
+    payload = fit_distortion_from_grid_frames(frames, frame_size=(340, 240))
+
+    assert payload["axis_source_x"] == pytest.approx((35.0, 70.0, 205.0, 260.0))
+    assert payload["axis_target_x"] == pytest.approx((35.0, 110.0, 185.0, 260.0))
+    assert payload["axis_source_y"] == pytest.approx((40.0, 120.0, 205.0))
+    assert payload["residual_max_px"] == pytest.approx(0.0)
+    correction = correction_from_payload(payload)
+    assert correction.axis_source_x == pytest.approx((35.0, 70.0, 205.0, 260.0))
+
+
 def _synthetic_grid_image(
     *,
     frame_size: tuple[int, int],
