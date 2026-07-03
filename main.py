@@ -302,6 +302,10 @@ from probe_station_gui.camera.imaging import (
     stitch_scan_tiles,
     utc_timestamp,
 )
+from probe_station_gui.camera.distortion import (
+    apply_distortion_correction,
+    correction_from_payload,
+)
 from probe_station_gui.camera import microscope_scan
 from probe_station_gui.settings.manager import (
     Settings,
@@ -780,7 +784,6 @@ class Main(QMainWindow):
             self._on_oscillation_state_changed
         )
         self.stage_controller.movement_started.connect(self._on_stage_task_started)
-        self.grabber.frame_ready.connect(self.stage_controller.on_frame_ready)
         self.lcr_controller = LCRMeterController()
         self.lcr_controller.status_message.connect(self._show_status)
         self._design_position_timer = QTimer(self)
@@ -2974,12 +2977,26 @@ class Main(QMainWindow):
                     frame_gap,
                 )
         self._last_camera_frame_ui_timestamp = now
+        frame = self._correct_camera_frame_for_active_objective(qimg)
         with self._latest_camera_frame_condition:
-            self._latest_camera_frame = qimg.copy()
+            self._latest_camera_frame = frame.copy()
             self._latest_camera_frame_counter += 1
             self._latest_camera_frame_condition.notify_all()
-        self._latest_camera_frame_for_notifications = qimg
-        self.view.set_frame(qimg)
+        self._latest_camera_frame_for_notifications = frame
+        self.stage_controller.on_frame_ready(frame)
+        self.view.set_frame(frame)
+
+    def _correct_camera_frame_for_active_objective(self, qimg: QImage) -> QImage:
+        objective = self.settings_manager.active_objective_configuration()
+        if not bool(getattr(objective, "distortion_correction_configured", False)):
+            return qimg
+        payload = getattr(objective, "distortion_correction", {})
+        try:
+            correction = correction_from_payload(payload)
+            return apply_distortion_correction(qimg, correction)
+        except ValueError as exc:
+            logger.warning("Unable to apply lens distortion correction: %s", exc)
+            return qimg
 
     def _latest_camera_counter(self) -> int:
         with self._latest_camera_frame_condition:
