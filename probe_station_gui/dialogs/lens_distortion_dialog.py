@@ -39,12 +39,15 @@ class LensDistortionDialog(QDialog):
         self._status_label = self._value_label()
         self._mean_error_label = self._value_label()
         self._max_error_label = self._value_label()
+        self._message_label = QLabel("", self)
+        self._message_label.setWordWrap(True)
 
         form.addRow(QLabel("Objective", self), self._objective_label)
         form.addRow(QLabel("Lens correction", self), self._status_label)
         form.addRow(QLabel("Mean error", self), self._mean_error_label)
         form.addRow(QLabel("Max error", self), self._max_error_label)
         layout.addLayout(form)
+        layout.addWidget(self._message_label)
 
         button_layout = QHBoxLayout()
         self._calibrate_button = QPushButton("Calibrate", self)
@@ -60,6 +63,15 @@ class LensDistortionDialog(QDialog):
         self._reset_button.clicked.connect(self.reset_requested.emit)
         close_button.clicked.connect(self.close)
         self._set_empty()
+
+    def set_running(self, running: bool) -> None:
+        self._calibrate_button.setEnabled(not running)
+        self._reset_button.setEnabled(
+            not running and self._status_label.text() == "Configured"
+        )
+
+    def set_status(self, message: str) -> None:
+        self._message_label.setText(str(message or ""))
 
     def set_objectives(self, objectives: ObjectivesSettings) -> None:
         active_name = normalize_objective_name(objectives.active_name)

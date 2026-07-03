@@ -303,8 +303,10 @@ from probe_station_gui.camera.imaging import (
     utc_timestamp,
 )
 from probe_station_gui.camera.distortion import (
+    GridCalibrationFrame,
     apply_distortion_correction,
     correction_from_payload,
+    fit_distortion_from_grid_frames,
 )
 from probe_station_gui.camera import microscope_scan
 from probe_station_gui.settings.manager import (
@@ -414,6 +416,7 @@ class Main(QMainWindow):
     telegram_bot_request_received: Signal = Signal(object)
     microscope_scan_status: Signal = Signal(str)
     microscope_scan_finished: Signal = Signal(bool, str)
+    lens_distortion_calibration_finished: Signal = Signal(bool, str, object)
     contact_seek_status: Signal = Signal(str)
     contact_seek_calibration_found: Signal = Signal(float, str)
     contact_seek_finished: Signal = Signal(bool, str)
@@ -479,6 +482,20 @@ class Main(QMainWindow):
     SAMPLE_LOAD_Y_MM = sample_handling.SAMPLE_LOAD_Y_MM
     SAMPLE_UNLOAD_X_MM = sample_handling.SAMPLE_UNLOAD_X_MM
     SAMPLE_UNLOAD_Y_MM = sample_handling.SAMPLE_UNLOAD_Y_MM
+    LENS_DISTORTION_GRID_STEP_MM = 0.05
+    LENS_DISTORTION_CAPTURE_SETTLE_S = 0.12
+    LENS_DISTORTION_CAMERA_TIMEOUT_S = 2.0
+    LENS_DISTORTION_CAPTURE_OFFSETS_MM = (
+        (0.0, 0.0),
+        (-LENS_DISTORTION_GRID_STEP_MM, -LENS_DISTORTION_GRID_STEP_MM),
+        (0.0, -LENS_DISTORTION_GRID_STEP_MM),
+        (LENS_DISTORTION_GRID_STEP_MM, -LENS_DISTORTION_GRID_STEP_MM),
+        (-LENS_DISTORTION_GRID_STEP_MM, 0.0),
+        (LENS_DISTORTION_GRID_STEP_MM, 0.0),
+        (-LENS_DISTORTION_GRID_STEP_MM, LENS_DISTORTION_GRID_STEP_MM),
+        (0.0, LENS_DISTORTION_GRID_STEP_MM),
+        (LENS_DISTORTION_GRID_STEP_MM, LENS_DISTORTION_GRID_STEP_MM),
+    )
 
     def __init__(self) -> None:
         _startup_trace("Main.__init__ entered")
@@ -602,6 +619,8 @@ class Main(QMainWindow):
         self._last_camera_frame_ui_timestamp: float | None = None
         self._latest_camera_frame: QImage | None = None
         self._latest_camera_frame_counter = 0
+        self._latest_raw_camera_frame: QImage | None = None
+        self._latest_raw_camera_frame_counter = 0
         self._latest_camera_frame_condition = threading.Condition()
         self._latest_camera_frame_for_notifications: QImage | None = None
         self._stage_unhomed_display_origins: dict[str, float] = {}
@@ -650,6 +669,7 @@ class Main(QMainWindow):
         self._api_route_offset_xy: tuple[float, float] = (0.0, 0.0)
         self._microscope_scan_thread: threading.Thread | None = None
         self._microscope_scan_stop_requested = threading.Event()
+        self._lens_distortion_thread: threading.Thread | None = None
         self._sample_handling_thread: threading.Thread | None = None
         self._last_sample_focus_z_by_objective: dict[str, float] = {}
         self._route_telegram = RouteTelegramPhotoState()
@@ -710,6 +730,9 @@ class Main(QMainWindow):
         )
         self.microscope_scan_status.connect(self._on_microscope_scan_status)
         self.microscope_scan_finished.connect(self._on_microscope_scan_finished)
+        self.lens_distortion_calibration_finished.connect(
+            self._on_lens_distortion_calibration_finished
+        )
         self.contact_seek_status.connect(
             lambda message: needle_calibration_ui.on_contact_seek_status(
                 self,
@@ -2982,8 +3005,14 @@ class Main(QMainWindow):
         self._last_camera_frame_ui_timestamp = now
         frame = self._correct_camera_frame_for_active_objective(qimg)
         with self._latest_camera_frame_condition:
+            self._latest_raw_camera_frame = qimg.copy()
+            self._latest_raw_camera_frame_counter = (
+                int(getattr(self, "_latest_raw_camera_frame_counter", 0)) + 1
+            )
             self._latest_camera_frame = frame.copy()
-            self._latest_camera_frame_counter += 1
+            self._latest_camera_frame_counter = (
+                int(getattr(self, "_latest_camera_frame_counter", 0)) + 1
+            )
             self._latest_camera_frame_condition.notify_all()
         self._latest_camera_frame_for_notifications = frame
         self.stage_controller.on_frame_ready(frame)
@@ -3005,6 +3034,10 @@ class Main(QMainWindow):
         with self._latest_camera_frame_condition:
             return int(self._latest_camera_frame_counter)
 
+    def _latest_raw_camera_counter(self) -> int:
+        with self._latest_camera_frame_condition:
+            return int(getattr(self, "_latest_raw_camera_frame_counter", 0))
+
     def _wait_for_camera_frame(
         self,
         *,
@@ -3016,6 +3049,27 @@ class Main(QMainWindow):
             while True:
                 frame = self._latest_camera_frame
                 counter = int(self._latest_camera_frame_counter)
+                fresh_enough = after_counter is None or counter > int(after_counter)
+                if frame is not None and fresh_enough:
+                    return frame.copy(), counter
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    if frame is not None and after_counter is None:
+                        return frame.copy(), counter
+                    return None, counter
+                self._latest_camera_frame_condition.wait(min(remaining, 0.1))
+
+    def _wait_for_raw_camera_frame(
+        self,
+        *,
+        after_counter: int | None = None,
+        timeout_s: float = 2.0,
+    ) -> tuple[QImage | None, int]:
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        with self._latest_camera_frame_condition:
+            while True:
+                frame = getattr(self, "_latest_raw_camera_frame", None)
+                counter = int(getattr(self, "_latest_raw_camera_frame_counter", 0))
                 fresh_enough = after_counter is None or counter > int(after_counter)
                 if frame is not None and fresh_enough:
                     return frame.copy(), counter
@@ -3720,10 +3774,196 @@ class Main(QMainWindow):
         self._refresh_lens_distortion_ui()
 
     def _start_lens_distortion_calibration(self) -> None:
-        self._show_status("Lens distortion calibration is not running yet.", 4000)
+        if self._lens_distortion_calibration_running():
+            self._show_status("Lens distortion calibration is already running.", 4000)
+            return
+        if not self._stage_serial_ready():
+            self._show_status("Connect the stage controller before calibration.", 5000)
+            return
+        if self.stage_controller.is_busy():
+            self._show_status("Stage is busy; lens distortion calibration not started.", 5000)
+            return
+        try:
+            position = self.stage_controller.current_stage_position()
+        except StageControllerError as exc:
+            self._show_status(str(exc), 5000)
+            return
+        if len(position) < 2:
+            self._show_status("Unable to read X/Y stage position.", 5000)
+            return
+
+        start_xy = (float(position[0]), float(position[1]))
+        linear_feedrate = self._current_linear_feedrate()
+        needle_feedrate = self._current_needle_feedrate()
+        thread = threading.Thread(
+            target=self._run_lens_distortion_calibration,
+            args=(start_xy, linear_feedrate, needle_feedrate),
+            daemon=True,
+        )
+        self._lens_distortion_thread = thread
+        if self._lens_distortion_dialog is not None:
+            self._lens_distortion_dialog.set_running(True)
+            self._lens_distortion_dialog.set_status(
+                "Lens distortion calibration started."
+            )
+        self._show_status("Lens distortion calibration started.", 4000)
+        thread.start()
 
     def _reset_lens_distortion_calibration(self) -> None:
-        self._show_status("Lens distortion calibration reset is not running yet.", 4000)
+        if self._lens_distortion_calibration_running():
+            self._show_status("Wait for lens distortion calibration to finish.", 4000)
+            return
+        if self.stage_controller.is_busy():
+            self._show_status("Stage is busy; lens correction not reset.", 5000)
+            return
+        try:
+            self._save_active_objective_distortion(None)
+        except Exception as exc:
+            logger.exception("Unable to reset lens distortion correction")
+            self._show_status(f"Lens correction reset failed: {exc}", 8000)
+            return
+        self._show_status(
+            "Lens correction cleared. Recalibrate click-to-move.",
+            8000,
+        )
+
+    def _lens_distortion_calibration_running(self) -> bool:
+        thread = getattr(self, "_lens_distortion_thread", None)
+        return thread is not None and thread.is_alive()
+
+    def _run_lens_distortion_calibration(
+        self,
+        start_xy: tuple[float, float],
+        linear_feedrate: float | None = None,
+        needle_feedrate: float | None = None,
+    ) -> None:
+        payload: dict[str, object] | None = None
+        success = False
+        message = "Lens distortion calibration stopped."
+        reserved = False
+        feedrate = (
+            self._current_linear_feedrate()
+            if linear_feedrate is None
+            else float(linear_feedrate)
+        )
+        needle_feedrate_value = (
+            self._current_needle_feedrate()
+            if needle_feedrate is None
+            else float(needle_feedrate)
+        )
+        try:
+            self.stage_controller.begin_external_task("lens distortion calibration")
+            reserved = True
+            self._show_status("Lens distortion calibration: raising needles.")
+            self.stage_controller.run_external_needles_action(
+                "raise",
+                needle_feedrate_value,
+            )
+            frames: list[GridCalibrationFrame] = []
+            total = len(self.LENS_DISTORTION_CAPTURE_OFFSETS_MM)
+            for index, offset in enumerate(
+                self.LENS_DISTORTION_CAPTURE_OFFSETS_MM, start=1
+            ):
+                dx_mm, dy_mm = offset
+                self._show_status(
+                    f"Lens distortion calibration: capture {index}/{total}."
+                )
+                self.stage_controller.run_external_move_to_xy(
+                    start_xy[0] + dx_mm,
+                    start_xy[1] + dy_mm,
+                    feedrate=feedrate,
+                )
+                time.sleep(self.LENS_DISTORTION_CAPTURE_SETTLE_S)
+                before_counter = self._latest_raw_camera_counter()
+                frame, _counter = self._wait_for_raw_camera_frame(
+                    after_counter=before_counter,
+                    timeout_s=self.LENS_DISTORTION_CAMERA_TIMEOUT_S,
+                )
+                if frame is None:
+                    raise RuntimeError("Camera frame timeout.")
+                frames.append(GridCalibrationFrame(frame, (dx_mm, dy_mm)))
+
+            payload = fit_distortion_from_grid_frames(frames)
+            success = True
+            message = "Lens distortion calibration saved. Recalibrate click-to-move."
+        except Exception as exc:
+            logger.exception("Lens distortion calibration failed")
+            message = f"Lens distortion calibration failed: {exc}"
+        finally:
+            if reserved:
+                try:
+                    self._show_status("Lens distortion calibration: returning to start.")
+                    self.stage_controller.run_external_move_to_xy(
+                        start_xy[0],
+                        start_xy[1],
+                        feedrate=feedrate,
+                    )
+                except Exception as exc:
+                    logger.exception("Lens distortion calibration restore failed")
+                    success = False
+                    message = f"Lens distortion calibration restore failed: {exc}"
+                finally:
+                    self.stage_controller.finish_external_task()
+            self._emit_lens_distortion_finished(success, message, payload)
+
+    def _emit_lens_distortion_finished(
+        self,
+        success: bool,
+        message: str,
+        payload: dict[str, object] | None,
+    ) -> None:
+        self.lens_distortion_calibration_finished.emit(success, message, payload)
+
+    def _on_lens_distortion_calibration_finished(
+        self,
+        success: bool,
+        message: str,
+        payload: object,
+    ) -> None:
+        thread = getattr(self, "_lens_distortion_thread", None)
+        if thread is not None and not thread.is_alive():
+            thread.join(timeout=0.1)
+        self._lens_distortion_thread = None
+
+        if success:
+            try:
+                self._save_active_objective_distortion(payload)
+            except Exception as exc:
+                logger.exception("Unable to save lens distortion correction")
+                success = False
+                message = f"Lens distortion calibration save failed: {exc}"
+
+        if self._lens_distortion_dialog is not None:
+            self._lens_distortion_dialog.set_running(False)
+            self._lens_distortion_dialog.set_status(message)
+        self._show_status(message, 10000 if success else 8000)
+
+    def _save_active_objective_distortion(self, payload: object | None) -> None:
+        settings = self.settings_manager.settings.clone()
+        objectives = settings.objectives
+        active_name = normalize_objective_name(objectives.active_name)
+        if not active_name:
+            raise RuntimeError("No active objective selected.")
+        profile = objectives.objectives.get(active_name)
+        if profile is None:
+            raise RuntimeError(f"Objective profile {active_name} is missing.")
+
+        updated = profile.clone()
+        if payload is None:
+            updated.distortion_correction = {}
+            updated.distortion_correction_configured = False
+        elif isinstance(payload, dict):
+            updated.distortion_correction = dict(payload)
+            updated.distortion_correction_configured = True
+        else:
+            raise RuntimeError("Invalid lens correction payload.")
+        updated.pixels_to_mm = []
+        updated.xy_calibration_configured = False
+        objectives.objectives[active_name] = updated
+        self.settings_manager.replace(settings)
+        self.settings_manager.save()
+        self._apply_objective_settings()
+        self._refresh_objective_calibration_ui()
 
     def _on_objective_calibration_updated(
         self, objective_name: str, pixels_to_mm: object
