@@ -75,6 +75,7 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
         controller = StageController()
         try:
             controller._serial = _FakeSerial()
+            controller._position_reporting_mode = "machine"
             controller.apply_axis_a_calibration(
                 types.SimpleNamespace(
                     configured=True,
@@ -124,6 +125,7 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
         controller = StageController()
         try:
             controller._serial = _FakeSerial()
+            controller._position_reporting_mode = "machine"
             controller.apply_axis_max_feedrates({"A": 500.0})
             controller.apply_needle_calibration(down_position_mm=1.0)
             controller._query_status = lambda _serial: types.SimpleNamespace(
@@ -180,6 +182,7 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
         controller = StageController()
         try:
             controller._serial = _FakeSerial()
+            controller._position_reporting_mode = "machine"
             controller.apply_axis_max_feedrates({"A": 500.0})
             controller.apply_needle_calibration(
                 raise_position_mm=0.5,
@@ -235,10 +238,79 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
         finally:
             controller.shutdown()
 
+    def test_needles_raise_refreshes_work_offset_before_deciding_target(self) -> None:
+        controller = StageController()
+        try:
+            controller._serial = _FakeSerial()
+            controller._position_reporting_mode = "work"
+            controller.apply_axis_max_feedrates({"A": 500.0})
+            controller.apply_needle_calibration(down_position_mm=1.0)
+            refreshes = []
+
+            def _refresh_coordinate_system_state(
+                *,
+                apply_preference: bool = False,
+            ) -> None:
+                refreshes.append(apply_preference)
+                controller._active_work_coordinate_system = "G54"
+                controller._controller_coordinate_offsets["G54"] = (
+                    32.0,
+                    32.0,
+                    0.0,
+                    -2.028,
+                    0.0,
+                )
+
+            controller._refresh_coordinate_system_state = (
+                _refresh_coordinate_system_state
+            )
+            controller._query_status = lambda _serial: types.SimpleNamespace(
+                state="Idle",
+                position=None,
+                work_position=(0.0, 0.0, 0.664, 2.028, 0.0),
+                display_position=(0.0, 0.0, 0.664, 2.028, 0.0),
+                work_offset=None,
+                coordinate_system=None,
+                homed_axes={"A"},
+            )
+            observed = []
+            messages = []
+
+            def _send_absolute_axis_move(axis, value, **kwargs) -> None:
+                observed.append((axis, value, kwargs.get("feedrate")))
+
+            controller._send_absolute_axis_move = _send_absolute_axis_move
+            controller.needles_action_started = types.SimpleNamespace(
+                emit=lambda *_args, **_kwargs: None
+            )
+            controller.needles_action_finished = types.SimpleNamespace(
+                emit=lambda success, message, action: messages.append(
+                    (success, message, action)
+                )
+            )
+            controller.needle_height_changed = types.SimpleNamespace(
+                emit=lambda *_args, **_kwargs: None
+            )
+            controller.needles_state_changed = types.SimpleNamespace(
+                emit=lambda *_args, **_kwargs: None
+            )
+            controller.axis_a_ready_changed = types.SimpleNamespace(
+                emit=lambda *_args, **_kwargs: None
+            )
+
+            controller._run_needles_action("raise", feedrate=600.0)
+
+            self.assertEqual(refreshes, [True])
+            self.assertEqual(observed, [])
+            self.assertEqual(messages[-1], (True, "Needles already raised.", "raise"))
+        finally:
+            controller.shutdown()
+
     def test_needles_lift_moves_only_to_contact_zone_boundary(self) -> None:
         controller = StageController()
         try:
             controller._serial = _FakeSerial()
+            controller._position_reporting_mode = "machine"
             controller.apply_axis_max_feedrates({"A": 500.0})
             controller.apply_needle_calibration(
                 raise_position_mm=0.5,
@@ -294,6 +366,7 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
         controller = StageController()
         try:
             controller._serial = _FakeSerial()
+            controller._position_reporting_mode = "machine"
             controller.apply_axis_max_feedrates({"A": 500.0})
             controller.apply_needle_calibration(
                 raise_position_mm=0.5,

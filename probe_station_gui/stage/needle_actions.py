@@ -56,6 +56,37 @@ class StageControllerNeedleActionsMixin:
             min_feedrate=self.MIN_FEEDRATE,
         )
 
+    def _query_status_for_needle_axis_motion(self) -> _Status | None:
+        status = self._query_synced_status_for_absolute_motion(
+            refresh_coordinate_state=False,
+            axes=("A",),
+        )
+        if self._needle_axis_status_has_work_offset(status):
+            return status
+        return self._query_synced_status_for_absolute_motion(axes=("A",))
+
+    def _needle_axis_status_has_work_offset(self, status: _Status | None) -> bool:
+        if self._position_reporting_mode == "machine":
+            return True
+        if status is None:
+            return False
+        axis_index = self.AXIS_INDEX.get("A")
+        if axis_index is None:
+            return False
+        work_offset = getattr(status, "work_offset", None)
+        if work_offset is not None and axis_index < len(work_offset):
+            return True
+        coordinate_system = (
+            getattr(status, "coordinate_system", None)
+            or self._active_work_coordinate_system
+        )
+        if not coordinate_system:
+            return False
+        cached_offset = self._controller_coordinate_offsets.get(
+            str(coordinate_system).strip().upper()
+        )
+        return cached_offset is not None and axis_index < len(cached_offset)
+
     def _needle_target_lowering_for_action(self, action: str) -> float:
         return needle_target_lowering_for_action(
             action,
@@ -187,9 +218,7 @@ class StageControllerNeedleActionsMixin:
         action = str(action).strip().lower()
         with self._serial_session():
             if action in {"raise", "lift", "lower"}:
-                status = self._query_current_status_with_required_coordinates(
-                    axes=("A",),
-                )
+                status = self._query_status_for_needle_axis_motion()
                 current_a = self._axis_value_for_configured_mode(status, "A")
                 if status is None or current_a is None:
                     raise StageControllerError("Unable to read A position for needles.")
@@ -230,9 +259,7 @@ class StageControllerNeedleActionsMixin:
             if not math.isfinite(depth_mm):
                 raise StageControllerError("Needle search depth must be finite.")
             depth_mm = max(0.0, float(depth_mm))
-            status = self._query_current_status_with_required_coordinates(
-                axes=("A",),
-            )
+            status = self._query_status_for_needle_axis_motion()
             current_a = self._axis_value_for_configured_mode(status, "A")
             if status is None or current_a is None:
                 raise StageControllerError("Unable to read A position for needles.")
@@ -280,9 +307,7 @@ class StageControllerNeedleActionsMixin:
         with self._serial_session():
             if abs(step_mm) < 1e-6:
                 return "Needle position unchanged."
-            status = self._query_current_status_with_required_coordinates(
-                axes=("A",),
-            )
+            status = self._query_status_for_needle_axis_motion()
             if (
                 status is None
                 or self._axis_value_for_configured_mode(status, "A") is None
