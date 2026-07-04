@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
 from probe_station_gui.camera.imaging import (
     MicroscopeCaptureResult,
@@ -21,6 +22,13 @@ from probe_station_gui.design.model import DesignModelError
 
 
 Point2D = tuple[float, float]
+DEFAULT_FLAT_FIELD_BLUR_RADIUS_PX = 401
+DEFAULT_FLAT_FIELD_MAX_GAIN = 4.0
+DEFAULT_CAMERA_LOCK_SETTINGS: tuple[tuple[str, object], ...] = (
+    ("ExposureAuto", "Off"),
+    ("GainAuto", "Off"),
+    ("BalanceWhiteAuto", "Off"),
+)
 
 
 @dataclass(frozen=True)
@@ -41,6 +49,37 @@ class MicroscopeScanImageSavePlan:
     output_dir: Path
     filename_stem: str
     metadata: MicroscopeImageMetadata
+
+
+@dataclass(frozen=True)
+class FlatFieldScanOptions:
+    enabled: bool
+    mode: str = "scan"
+    blur_radius_px: int = DEFAULT_FLAT_FIELD_BLUR_RADIUS_PX
+    max_gain: float = DEFAULT_FLAT_FIELD_MAX_GAIN
+
+    def to_metadata(self) -> dict[str, object]:
+        return {
+            "enabled": bool(self.enabled),
+            "mode": self.mode,
+            "blur_radius_px": int(self.blur_radius_px),
+            "max_gain": float(self.max_gain),
+        }
+
+
+@dataclass(frozen=True)
+class CameraLockSettings:
+    enabled: bool
+    settings: tuple[tuple[str, object], ...] = ()
+
+    def to_metadata(self) -> dict[str, object]:
+        return {
+            "enabled": bool(self.enabled),
+            "settings": [
+                {"node_name": node_name, "value": value}
+                for node_name, value in self.settings
+            ],
+        }
 
 
 def default_output_dir(document: object | None, *, cwd: Path | None = None) -> str:
@@ -145,7 +184,7 @@ def centered_area_scan_plan(
     step_y = fov_h * (1.0 - overlap)
     center_x = float(center_stage_xy[0])
     center_y = float(center_stage_xy[1])
-    x_start = center_x - step_x * float(columns - 1) * 0.5
+    x_start = center_x + step_x * float(columns - 1) * 0.5
     y_top = center_y + step_y * float(rows - 1) * 0.5
 
     tiles: list[MicroscopeScanTile] = []
@@ -155,7 +194,7 @@ def centered_area_scan_plan(
             columns_for_row.reverse()
         y_value = y_top - step_y * float(row)
         for column in columns_for_row:
-            x_value = x_start + step_x * float(column)
+            x_value = x_start - step_x * float(column)
             tiles.append(
                 MicroscopeScanTile(
                     index=len(tiles) + 1,
@@ -177,6 +216,109 @@ def centered_area_scan_plan(
         row_count=rows,
         column_count=columns,
     )
+
+
+def centered_area_scan_plan_from_pixel_matrix(
+    *,
+    center_stage_xy: Point2D,
+    frame_size_px: tuple[int, int],
+    pixels_to_mm: Sequence[Sequence[float]],
+    row_count: int,
+    column_count: int,
+    overlap_fraction: float,
+) -> MicroscopeScanPlan:
+    """Build a centered area plan using the full pixel-to-stage calibration matrix."""
+
+    rows = _positive_int(row_count, "row_count")
+    columns = _positive_int(column_count, "column_count")
+    width_px = _positive_int(frame_size_px[0], "frame width")
+    height_px = _positive_int(frame_size_px[1], "frame height")
+    matrix = _coerce_pixel_matrix(pixels_to_mm)
+    overlap = min(max(float(overlap_fraction), 0.0), 0.95)
+    step_x_px = float(width_px) * (1.0 - overlap)
+    step_y_px = float(height_px) * (1.0 - overlap)
+    mid_col = float(columns - 1) * 0.5
+    mid_row = float(rows - 1) * 0.5
+    center_x = float(center_stage_xy[0])
+    center_y = float(center_stage_xy[1])
+
+    tiles: list[MicroscopeScanTile] = []
+    for row in range(rows):
+        columns_for_row = list(range(columns))
+        if row % 2 == 1:
+            columns_for_row.reverse()
+        for column in columns_for_row:
+            offset_x_px = (float(column) - mid_col) * step_x_px
+            offset_y_px = (float(row) - mid_row) * step_y_px
+            dx_mm, dy_mm = _pixel_delta_to_stage(matrix, -offset_x_px, offset_y_px)
+            tiles.append(
+                MicroscopeScanTile(
+                    index=len(tiles) + 1,
+                    row=row,
+                    column=column,
+                    stage_xy=(float(center_x + dx_mm), float(center_y + dy_mm)),
+                )
+            )
+    bounds = _stage_bounds_for_matrix_tiles(
+        [tile.stage_xy for tile in tiles],
+        frame_size_px=(width_px, height_px),
+        matrix=matrix,
+    )
+    x_vector = _pixel_delta_to_stage(matrix, float(width_px), 0.0)
+    y_vector = _pixel_delta_to_stage(matrix, 0.0, float(height_px))
+    return MicroscopeScanPlan(
+        tiles=tuple(tiles),
+        stage_bounds=bounds,
+        covered_stage_bounds=bounds,
+        fov_size_mm=(math.hypot(*x_vector), math.hypot(*y_vector)),
+        overlap_fraction=overlap,
+        row_count=rows,
+        column_count=columns,
+    )
+
+
+def flat_field_options_from_payload(
+    payload: Mapping[str, object],
+    *,
+    default_enabled: bool = False,
+) -> FlatFieldScanOptions:
+    value = payload.get("flat_field", default_enabled)
+    if isinstance(value, Mapping):
+        enabled = _bool_from_payload(value.get("enabled", default_enabled))
+        mode = str(value.get("mode") or "scan").strip().lower()
+        if mode not in {"scan", "self"}:
+            raise ValueError("flat_field.mode must be 'scan' or 'self'.")
+        blur_radius = _positive_int(
+            value.get("blur_radius_px", DEFAULT_FLAT_FIELD_BLUR_RADIUS_PX),
+            "flat_field.blur_radius_px",
+        )
+        if blur_radius % 2 == 0:
+            blur_radius += 1
+        max_gain = _positive_float(
+            value.get("max_gain", DEFAULT_FLAT_FIELD_MAX_GAIN),
+            "flat_field.max_gain",
+        )
+        return FlatFieldScanOptions(
+            enabled=enabled,
+            mode=mode,
+            blur_radius_px=blur_radius,
+            max_gain=max_gain,
+        )
+    return FlatFieldScanOptions(enabled=_bool_from_payload(value))
+
+
+def camera_lock_settings_from_payload(
+    payload: Mapping[str, object],
+    *,
+    default_enabled: bool = False,
+) -> CameraLockSettings:
+    value = payload.get("camera_lock", default_enabled)
+    if isinstance(value, Mapping):
+        enabled = _bool_from_payload(value.get("enabled", default_enabled))
+    else:
+        enabled = _bool_from_payload(value)
+    settings = DEFAULT_CAMERA_LOCK_SETTINGS if enabled else ()
+    return CameraLockSettings(enabled=enabled, settings=settings)
 
 
 def starting_status(plan: MicroscopeScanPlan) -> str:
@@ -216,7 +358,15 @@ def tile_image_save_plan(
     magnification: float | None,
     design_xy: Point2D | None,
     stage_position: tuple[float, ...] | None,
+    extra: Mapping[str, object] | None = None,
 ) -> MicroscopeScanImageSavePlan:
+    metadata_extra: dict[str, object] = {
+        "overlap_fraction": plan.overlap_fraction,
+        "row_count": plan.row_count,
+        "column_count": plan.column_count,
+    }
+    if extra:
+        metadata_extra.update(dict(extra))
     metadata = MicroscopeImageMetadata(
         title="Probe Station Design Scan",
         mode="design scan tile",
@@ -231,11 +381,7 @@ def tile_image_save_plan(
         stage_position=stage_position,
         stage_xy=tile.stage_xy,
         notes=("needles raised before scan",),
-        extra={
-            "overlap_fraction": plan.overlap_fraction,
-            "row_count": plan.row_count,
-            "column_count": plan.column_count,
-        },
+        extra=metadata_extra,
     )
     return MicroscopeScanImageSavePlan(
         output_dir=output_dir / "tiles",
@@ -256,7 +402,18 @@ def mosaic_image_save_plan(
     captured_at: str,
     objective_name: str,
     magnification: float | None,
+    extra: Mapping[str, object] | None = None,
 ) -> MicroscopeScanImageSavePlan:
+    metadata_extra: dict[str, object] = {
+        "overlap_fraction": plan.overlap_fraction,
+        "row_count": plan.row_count,
+        "column_count": plan.column_count,
+        "stage_bounds": list(plan.stage_bounds),
+        "covered_stage_bounds": list(plan.covered_stage_bounds),
+        "fov_size_mm": list(plan.fov_size_mm),
+    }
+    if extra:
+        metadata_extra.update(dict(extra))
     metadata = MicroscopeImageMetadata(
         title="Probe Station Design Scan Mosaic",
         mode="design scan mosaic",
@@ -265,14 +422,7 @@ def mosaic_image_save_plan(
         magnification=magnification,
         scan_tile_total=len(plan.tiles),
         notes=("stage-coordinate tile mosaic",),
-        extra={
-            "overlap_fraction": plan.overlap_fraction,
-            "row_count": plan.row_count,
-            "column_count": plan.column_count,
-            "stage_bounds": list(plan.stage_bounds),
-            "covered_stage_bounds": list(plan.covered_stage_bounds),
-            "fov_size_mm": list(plan.fov_size_mm),
-        },
+        extra=metadata_extra,
     )
     return MicroscopeScanImageSavePlan(
         output_dir=output_dir,
@@ -287,8 +437,9 @@ def manifest_payload(
     tile_results: Sequence[MicroscopeCaptureResult],
     mosaic_result: MicroscopeCaptureResult,
     created_at: str,
+    corrections: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "version": 1,
         "created_at": created_at,
         "tile_count": len(tile_results),
@@ -303,17 +454,31 @@ def manifest_payload(
             "metadata": str(mosaic_result.metadata_path),
         },
         "tiles": [
-            {
-                "index": tile.index,
-                "row": tile.row,
-                "column": tile.column,
-                "stage_xy": list(tile.stage_xy),
-                "image": str(result.image_path),
-                "metadata": str(result.metadata_path),
-            }
+            _manifest_tile_payload(tile, result)
             for tile, result in zip(plan.tiles, tile_results)
         ],
     }
+    if corrections:
+        payload["corrections"] = dict(corrections)
+    return payload
+
+
+def _manifest_tile_payload(
+    tile: MicroscopeScanTile,
+    result: MicroscopeCaptureResult,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "index": tile.index,
+        "row": tile.row,
+        "column": tile.column,
+        "stage_xy": list(tile.stage_xy),
+        "image": str(result.image_path),
+        "metadata": str(result.metadata_path),
+    }
+    raw_image_path = getattr(result, "raw_image_path", None)
+    if raw_image_path is not None:
+        payload["raw_image"] = str(raw_image_path)
+    return payload
 
 
 def write_manifest(
@@ -323,6 +488,7 @@ def write_manifest(
     tile_results: Sequence[MicroscopeCaptureResult],
     mosaic_result: MicroscopeCaptureResult,
     created_at: str | None = None,
+    corrections: Mapping[str, object] | None = None,
 ) -> Path:
     manifest_path = output_dir / "microscope-scan-manifest.json"
     data = manifest_payload(
@@ -330,6 +496,7 @@ def write_manifest(
         tile_results=tile_results,
         mosaic_result=mosaic_result,
         created_at=created_at or utc_timestamp(),
+        corrections=corrections,
     )
     with manifest_path.open("w", encoding="utf-8") as handle:
         json.dump(data, handle, indent=2, ensure_ascii=False)
@@ -363,12 +530,81 @@ def _positive_float(value: object, label: str) -> float:
     return number
 
 
+def _coerce_pixel_matrix(
+    value: Sequence[Sequence[float]],
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    try:
+        matrix = (
+            (float(value[0][0]), float(value[0][1])),
+            (float(value[1][0]), float(value[1][1])),
+        )
+    except (TypeError, ValueError, IndexError) as exc:
+        raise ValueError("pixels_to_mm must be a 2x2 matrix.") from exc
+    values = (matrix[0][0], matrix[0][1], matrix[1][0], matrix[1][1])
+    if not all(math.isfinite(item) for item in values):
+        raise ValueError("pixels_to_mm contains non-finite values.")
+    determinant = matrix[0][0] * matrix[1][1] - matrix[0][1] * matrix[1][0]
+    if abs(determinant) < 1e-18:
+        raise ValueError("pixels_to_mm matrix is singular.")
+    return matrix
+
+
+def _pixel_delta_to_stage(
+    matrix: tuple[tuple[float, float], tuple[float, float]],
+    dx_px: float,
+    dy_px: float,
+) -> Point2D:
+    return (
+        matrix[0][0] * float(dx_px) + matrix[0][1] * float(dy_px),
+        matrix[1][0] * float(dx_px) + matrix[1][1] * float(dy_px),
+    )
+
+
+def _stage_bounds_for_matrix_tiles(
+    centers: Sequence[Point2D],
+    *,
+    frame_size_px: tuple[int, int],
+    matrix: tuple[tuple[float, float], tuple[float, float]],
+) -> tuple[float, float, float, float]:
+    half_w = float(frame_size_px[0]) * 0.5
+    half_h = float(frame_size_px[1]) * 0.5
+    points: list[Point2D] = []
+    for center_x, center_y in centers:
+        for dx_px, dy_px in (
+            (-half_w, -half_h),
+            (half_w, -half_h),
+            (-half_w, half_h),
+            (half_w, half_h),
+        ):
+            dx_mm, dy_mm = _pixel_delta_to_stage(matrix, -dx_px, dy_px)
+            points.append((float(center_x + dx_mm), float(center_y + dy_mm)))
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _bool_from_payload(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if text in {"0", "false", "no", "off", "disabled", ""}:
+        return False
+    return bool(value)
+
+
 __all__ = [
+    "CameraLockSettings",
+    "FlatFieldScanOptions",
     "MicroscopeScanStartDecision",
     "MicroscopeScanStatus",
+    "camera_lock_settings_from_payload",
     "centered_area_scan_plan",
+    "centered_area_scan_plan_from_pixel_matrix",
     "completion_message",
     "default_output_dir",
+    "flat_field_options_from_payload",
     "output_dir_from_configuration",
     "scan_plan_decision",
     "scan_name_from_document",

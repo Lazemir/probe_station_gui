@@ -298,6 +298,9 @@ from probe_station_gui.camera.imaging import (
     MicroscopeCaptureResult,
     MicroscopeScanPlan,
     MicroscopeScanTile,
+    apply_flat_field_correction,
+    apply_self_flat_field_correction,
+    build_median_flat_field_profile,
     objective_scale_calibration,
     save_microscope_image,
     stitch_scan_tiles,
@@ -470,7 +473,9 @@ class Main(QMainWindow):
     MICROSCOPE_AREA_SCAN_DEFAULT_ROWS = 3
     MICROSCOPE_AREA_SCAN_DEFAULT_COLUMNS = 3
     MICROSCOPE_AREA_SCAN_MAX_TILES = 121
+    MICROSCOPE_AREA_SCAN_DEFAULT_OVERLAP_FRACTION = 0.10
     MICROSCOPE_AREA_SCAN_DEFAULT_SETTLE_S = 0.2
+    MICROSCOPE_SCAN_CAMERA_SETTINGS_TIMEOUT_S = 5.0
     CONTACT_SEEK_STEP_MM = (
         needle_calibration_ui.manual_contact_seek.DEFAULT_MANUAL_CONTACT_SEEK_STEP_MM
     )
@@ -2743,7 +2748,10 @@ class Main(QMainWindow):
                     f"Area scan is too large; maximum is {self.MICROSCOPE_AREA_SCAN_MAX_TILES} tiles."
                 )
             overlap_fraction = self._microscope_area_scan_float(
-                payload.get("overlap_fraction", 0.0),
+                payload.get(
+                    "overlap_fraction",
+                    self.MICROSCOPE_AREA_SCAN_DEFAULT_OVERLAP_FRACTION,
+                ),
                 "overlap_fraction",
                 minimum=0.0,
                 maximum=0.95,
@@ -2753,6 +2761,14 @@ class Main(QMainWindow):
                 "settle_s",
                 minimum=0.0,
                 maximum=10.0,
+            )
+            flat_field_options = microscope_scan.flat_field_options_from_payload(
+                payload,
+                default_enabled=True,
+            )
+            camera_lock_settings = microscope_scan.camera_lock_settings_from_payload(
+                payload,
+                default_enabled=True,
             )
         except ValueError as exc:
             return {
@@ -2764,21 +2780,36 @@ class Main(QMainWindow):
         output_dir = str(payload.get("output_dir") or "").strip()
         if not output_dir:
             output_dir = self._microscope_area_scan_default_output_dir()
-        fov_size_mm = (
-            float(frame.width()) * float(scale.pixel_size_x_mm),
-            float(frame.height()) * float(scale.pixel_size_y_mm),
-        )
-        plan = microscope_scan.centered_area_scan_plan(
-            center_stage_xy=(float(latest_position[0]), float(latest_position[1])),
-            fov_size_mm=fov_size_mm,
-            row_count=rows,
-            column_count=columns,
-            overlap_fraction=overlap_fraction,
-        )
+        center_stage_xy = (float(latest_position[0]), float(latest_position[1]))
+        frame_size_px = (int(frame.width()), int(frame.height()))
+        pixels_to_mm = getattr(scale, "pixels_to_mm", None)
+        if pixels_to_mm is not None:
+            plan = microscope_scan.centered_area_scan_plan_from_pixel_matrix(
+                center_stage_xy=center_stage_xy,
+                frame_size_px=frame_size_px,
+                pixels_to_mm=pixels_to_mm,
+                row_count=rows,
+                column_count=columns,
+                overlap_fraction=overlap_fraction,
+            )
+        else:
+            fov_size_mm = (
+                float(frame.width()) * float(scale.pixel_size_x_mm),
+                float(frame.height()) * float(scale.pixel_size_y_mm),
+            )
+            plan = microscope_scan.centered_area_scan_plan(
+                center_stage_xy=center_stage_xy,
+                fov_size_mm=fov_size_mm,
+                row_count=rows,
+                column_count=columns,
+                overlap_fraction=overlap_fraction,
+            )
         configuration = SimpleNamespace(
             output_dir=output_dir,
             overlap_fraction=overlap_fraction,
             settle_s=settle_s,
+            flat_field_options=flat_field_options,
+            camera_lock_settings=camera_lock_settings,
         )
         self._microscope_scan_stop_requested.clear()
         self._microscope_scan_thread = threading.Thread(
@@ -7342,11 +7373,28 @@ class Main(QMainWindow):
                 "Active objective has no calibrated microscope scale.",
             )
             return
-        captured_tiles: list[tuple[MicroscopeScanTile, QImage]] = []
-        tile_results: list[MicroscopeCaptureResult] = []
+        flat_field_options = getattr(
+            configuration,
+            "flat_field_options",
+            microscope_scan.FlatFieldScanOptions(enabled=False),
+        )
+        camera_lock_settings = getattr(
+            configuration,
+            "camera_lock_settings",
+            microscope_scan.CameraLockSettings(enabled=False),
+        )
+        corrections = self._microscope_scan_corrections_metadata(
+            flat_field_options=flat_field_options,
+            camera_lock_settings=camera_lock_settings,
+        )
+        captured_frames: list[tuple[MicroscopeScanTile, QImage, str]] = []
+        camera_restore_key: str | None = None
         try:
             output_dir.mkdir(parents=True, exist_ok=True)
             self.stage_controller.begin_external_task("microscope design scan")
+            camera_restore_key = self._apply_microscope_scan_camera_lock(
+                camera_lock_settings
+            )
             self.microscope_scan_status.emit("Microscope scan: raising needles.")
             self.stage_controller.run_external_needles_action(
                 "raise",
@@ -7366,15 +7414,33 @@ class Main(QMainWindow):
                 if not self._sleep_microscope_scan_settle(configuration.settle_s):
                     message = "Microscope scan stopped by user."
                     break
-                result = self._capture_microscope_scan_tile(
-                    tile,
-                    plan,
-                    output_dir=output_dir,
-                    scale=scale,
+                captured_frames.append(
+                    (tile, self._capture_microscope_scan_frame(), utc_timestamp())
                 )
-                tile_results.append(result)
-                captured_tiles.append((tile, result.raw_image))
             else:
+                flat_field_profile = self._flat_field_profile_for_microscope_scan(
+                    captured_frames,
+                    flat_field_options,
+                )
+                captured_tiles: list[tuple[MicroscopeScanTile, QImage]] = []
+                tile_results: list[MicroscopeCaptureResult] = []
+                for tile, frame, captured_at in captured_frames:
+                    corrected_frame = self._flat_field_microscope_scan_frame(
+                        frame,
+                        flat_field_options,
+                        flat_field_profile=flat_field_profile,
+                    )
+                    result = self._save_microscope_scan_tile(
+                        tile,
+                        plan,
+                        frame=corrected_frame,
+                        captured_at=captured_at,
+                        output_dir=output_dir,
+                        scale=scale,
+                        corrections=corrections,
+                    )
+                    tile_results.append(result)
+                    captured_tiles.append((tile, result.raw_image))
                 mosaic = stitch_scan_tiles(
                     plan=plan,
                     tile_images=captured_tiles,
@@ -7385,12 +7451,14 @@ class Main(QMainWindow):
                     plan,
                     output_dir=output_dir,
                     scale=scale,
+                    corrections=corrections,
                 )
                 manifest_path = microscope_scan.write_manifest(
                     output_dir=output_dir,
                     plan=plan,
                     tile_results=tile_results,
                     mosaic_result=mosaic_result,
+                    corrections=corrections,
                 )
                 success = True
                 message = microscope_scan.completion_message(
@@ -7402,6 +7470,18 @@ class Main(QMainWindow):
             logger.exception("Microscope scan failed")
             message = f"Microscope scan failed: {exc}"
         finally:
+            if camera_restore_key is not None:
+                restore_error = self._restore_microscope_scan_camera_lock(
+                    camera_restore_key
+                )
+                if restore_error:
+                    logger.error("Microscope scan camera restore failed: %s", restore_error)
+                    if success:
+                        success = False
+                        message = (
+                            "Microscope scan complete, but camera settings restore "
+                            f"failed: {restore_error}"
+                        )
             self.stage_controller.finish_external_task()
             self.microscope_scan_finished.emit(success, message)
 
@@ -7415,14 +7495,93 @@ class Main(QMainWindow):
                 return True
             time.sleep(min(remaining, 0.05))
 
-    def _capture_microscope_scan_tile(
+    def _apply_microscope_scan_camera_lock(
         self,
-        tile: MicroscopeScanTile,
-        plan: MicroscopeScanPlan,
+        camera_lock_settings: object,
+    ) -> str | None:
+        if not bool(getattr(camera_lock_settings, "enabled", False)):
+            return None
+        settings = tuple(getattr(camera_lock_settings, "settings", ()) or ())
+        if not settings:
+            return None
+        restore_key = f"microscope_scan_{uuid.uuid4().hex}"
+        self.microscope_scan_status.emit("Microscope scan: locking camera settings.")
+        result = self._wait_for_camera_settings_override(
+            restore_key=restore_key,
+            request=lambda: self.grabber.request_temporary_camera_settings(
+                settings,
+                restore_key=restore_key,
+            ),
+        )
+        if not bool(result.get("ok")):
+            raise RuntimeError(str(result.get("message") or "Camera settings lock failed."))
+        return restore_key
+
+    def _restore_microscope_scan_camera_lock(self, restore_key: str) -> str:
+        self.microscope_scan_status.emit("Microscope scan: restoring camera settings.")
+        try:
+            result = self._wait_for_camera_settings_override(
+                restore_key=restore_key,
+                request=lambda: self.grabber.request_restore_camera_settings(
+                    restore_key=restore_key,
+                ),
+            )
+        except Exception as exc:
+            return str(exc)
+        if not bool(result.get("ok")):
+            return str(result.get("message") or "Camera settings restore failed.")
+        return ""
+
+    def _wait_for_camera_settings_override(
+        self,
         *,
-        output_dir: Path,
-        scale: Any,
-    ) -> MicroscopeCaptureResult:
+        restore_key: str,
+        request: Any,
+    ) -> dict[str, Any]:
+        event = threading.Event()
+        result_holder: dict[str, Any] = {}
+
+        def on_changed(payload: object) -> None:
+            if not isinstance(payload, dict):
+                return
+            if str(payload.get("restore_key") or "") != restore_key:
+                return
+            result_holder.update(payload)
+            event.set()
+
+        self.grabber.camera_settings_override_changed.connect(
+            on_changed,
+            Qt.ConnectionType.DirectConnection,
+        )
+        try:
+            request()
+            if not event.wait(self.MICROSCOPE_SCAN_CAMERA_SETTINGS_TIMEOUT_S):
+                raise RuntimeError("Camera settings response timeout.")
+            return dict(result_holder)
+        finally:
+            try:
+                self.grabber.camera_settings_override_changed.disconnect(on_changed)
+            except (TypeError, RuntimeError):
+                pass
+
+    @staticmethod
+    def _microscope_scan_corrections_metadata(
+        *,
+        flat_field_options: object,
+        camera_lock_settings: object,
+    ) -> dict[str, object]:
+        corrections: dict[str, object] = {}
+        if hasattr(flat_field_options, "to_metadata"):
+            flat_metadata = flat_field_options.to_metadata()
+            if bool(flat_metadata.get("enabled")):
+                corrections["flat_field"] = flat_metadata
+        if hasattr(camera_lock_settings, "to_metadata"):
+            lock_metadata = camera_lock_settings.to_metadata()
+            if bool(lock_metadata.get("enabled")):
+                corrections["camera_lock"] = lock_metadata
+        return corrections
+
+    def _capture_microscope_scan_frame(self) -> QImage:
         before_counter = self._latest_camera_counter()
         frame, _counter = self._wait_for_camera_frame(
             after_counter=before_counter,
@@ -7430,6 +7589,19 @@ class Main(QMainWindow):
         )
         if frame is None:
             raise RuntimeError("Camera frame is unavailable.")
+        return frame
+
+    def _save_microscope_scan_tile(
+        self,
+        tile: MicroscopeScanTile,
+        plan: MicroscopeScanPlan,
+        *,
+        frame: QImage,
+        captured_at: str,
+        output_dir: Path,
+        scale: Any,
+        corrections: dict[str, object],
+    ) -> MicroscopeCaptureResult:
         objective_name, magnification = self._active_objective_metadata()
         save_plan = microscope_scan.tile_image_save_plan(
             output_dir=output_dir,
@@ -7438,13 +7610,14 @@ class Main(QMainWindow):
             ),
             tile=tile,
             plan=plan,
-            captured_at=utc_timestamp(),
+            captured_at=captured_at,
             objective_name=objective_name,
             magnification=magnification,
             design_xy=self._design_xy_from_raw_stage_xy(tile.stage_xy),
             stage_position=self._stage_position_for_image_metadata(
                 stage_xy=tile.stage_xy
             ),
+            extra={"corrections": corrections} if corrections else None,
         )
         return save_microscope_image(
             frame=frame,
@@ -7452,6 +7625,7 @@ class Main(QMainWindow):
             filename_stem=save_plan.filename_stem,
             metadata=save_plan.metadata,
             scale=scale,
+            save_raw=True,
         )
 
     def _save_microscope_scan_mosaic(
@@ -7461,6 +7635,7 @@ class Main(QMainWindow):
         *,
         output_dir: Path,
         scale: Any,
+        corrections: dict[str, object],
     ) -> MicroscopeCaptureResult:
         objective_name, magnification = self._active_objective_metadata()
         save_plan = microscope_scan.mosaic_image_save_plan(
@@ -7472,6 +7647,7 @@ class Main(QMainWindow):
             captured_at=utc_timestamp(),
             objective_name=objective_name,
             magnification=magnification,
+            extra={"corrections": corrections} if corrections else None,
         )
         return save_microscope_image(
             frame=mosaic,
@@ -7479,6 +7655,45 @@ class Main(QMainWindow):
             filename_stem=save_plan.filename_stem,
             metadata=save_plan.metadata,
             scale=scale,
+        )
+
+    @staticmethod
+    def _flat_field_profile_for_microscope_scan(
+        captured_frames: list[tuple[MicroscopeScanTile, QImage, str]],
+        flat_field_options: object,
+    ) -> object | None:
+        if not bool(getattr(flat_field_options, "enabled", False)):
+            return None
+        mode = str(getattr(flat_field_options, "mode", "scan") or "scan").lower()
+        if mode != "scan":
+            return None
+        frames = [frame for _tile, frame, _captured_at in captured_frames]
+        return build_median_flat_field_profile(
+            frames,
+            blur_radius_px=int(getattr(flat_field_options, "blur_radius_px", 401)),
+            max_gain=float(getattr(flat_field_options, "max_gain", 4.0)),
+        )
+
+    @staticmethod
+    def _flat_field_microscope_scan_frame(
+        frame: QImage,
+        flat_field_options: object,
+        *,
+        flat_field_profile: object | None = None,
+    ) -> QImage:
+        if not bool(getattr(flat_field_options, "enabled", False)):
+            return frame
+        mode = str(getattr(flat_field_options, "mode", "scan") or "scan").lower()
+        if mode == "scan":
+            if flat_field_profile is None:
+                raise RuntimeError("Flat-field profile is unavailable.")
+            return apply_flat_field_correction(frame, flat_field_profile)
+        if mode != "self":
+            raise RuntimeError(f"Unsupported flat-field mode: {mode}")
+        return apply_self_flat_field_correction(
+            frame,
+            blur_radius_px=int(getattr(flat_field_options, "blur_radius_px", 401)),
+            max_gain=float(getattr(flat_field_options, "max_gain", 4.0)),
         )
 
     def _on_microscope_scan_status(self, message: str) -> None:

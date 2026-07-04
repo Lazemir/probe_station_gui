@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import types
 
+import pytest
 from PySide6.QtGui import QImage
 
 from probe_station_gui.camera.imaging import (
@@ -44,13 +45,18 @@ def _plan() -> MicroscopeScanPlan:
     )
 
 
-def _capture_result(name: str) -> MicroscopeCaptureResult:
+def _capture_result(
+    name: str,
+    *,
+    raw_image_path: Path | None = None,
+) -> MicroscopeCaptureResult:
     image = QImage(2, 2, QImage.Format_RGB32)
     return MicroscopeCaptureResult(
         image_path=Path(f"C:/scan/{name}.png"),
         metadata_path=Path(f"C:/scan/{name}.json"),
         raw_image=image,
         metadata={},
+        raw_image_path=raw_image_path,
     )
 
 
@@ -152,16 +158,88 @@ def test_centered_area_scan_plan_builds_serpentine_grid() -> None:
     assert plan.column_count == 3
     assert plan.covered_stage_bounds == (8.5, 17.0, 11.5, 23.0)
     assert [(tile.row, tile.column, tile.stage_xy) for tile in plan.tiles] == [
-        (0, 0, (9.0, 22.0)),
+        (0, 0, (11.0, 22.0)),
         (0, 1, (10.0, 22.0)),
-        (0, 2, (11.0, 22.0)),
-        (1, 2, (11.0, 20.0)),
+        (0, 2, (9.0, 22.0)),
+        (1, 2, (9.0, 20.0)),
         (1, 1, (10.0, 20.0)),
-        (1, 0, (9.0, 20.0)),
-        (2, 0, (9.0, 18.0)),
+        (1, 0, (11.0, 20.0)),
+        (2, 0, (11.0, 18.0)),
         (2, 1, (10.0, 18.0)),
-        (2, 2, (11.0, 18.0)),
+        (2, 2, (9.0, 18.0)),
     ]
+
+
+def test_centered_area_scan_plan_from_pixel_matrix_preserves_camera_axes() -> None:
+    plan = microscope_scan.centered_area_scan_plan_from_pixel_matrix(
+        center_stage_xy=(0.0, 0.0),
+        frame_size_px=(10, 10),
+        pixels_to_mm=((0.1, 0.0), (0.02, -0.1)),
+        row_count=2,
+        column_count=2,
+        overlap_fraction=0.0,
+    )
+
+    assert [(tile.row, tile.column, tile.stage_xy) for tile in plan.tiles] == [
+        (0, 0, (0.5, 0.6)),
+        (0, 1, (-0.5, 0.4)),
+        (1, 1, (-0.5, -0.6)),
+        (1, 0, (0.5, -0.4)),
+    ]
+    assert plan.fov_size_mm == pytest.approx((1.019803902718557, 1.0))
+
+
+def test_flat_field_scan_options_accept_boolean_and_object_payloads() -> None:
+    defaults = microscope_scan.flat_field_options_from_payload(
+        {},
+        default_enabled=True,
+    )
+    assert defaults.enabled is True
+    assert defaults.mode == "scan"
+    assert defaults.blur_radius_px == 401
+    assert defaults.max_gain == 4.0
+
+    disabled = microscope_scan.flat_field_options_from_payload(
+        {"flat_field": False},
+        default_enabled=True,
+    )
+    assert disabled.enabled is False
+
+    configured = microscope_scan.flat_field_options_from_payload(
+        {
+            "flat_field": {
+                "enabled": True,
+                "mode": "self",
+                "blur_radius_px": 120,
+                "max_gain": 2.5,
+            }
+        },
+        default_enabled=False,
+    )
+    assert configured.enabled is True
+    assert configured.mode == "self"
+    assert configured.blur_radius_px == 121
+    assert configured.max_gain == 2.5
+
+
+def test_camera_lock_settings_default_to_fixed_auto_modes() -> None:
+    disabled = microscope_scan.camera_lock_settings_from_payload(
+        {"camera_lock": False},
+        default_enabled=True,
+    )
+    assert disabled.enabled is False
+    assert disabled.settings == ()
+
+    enabled = microscope_scan.camera_lock_settings_from_payload(
+        {},
+        default_enabled=True,
+    )
+    assert enabled.enabled is True
+    assert enabled.settings == (
+        ("ExposureAuto", "Off"),
+        ("GainAuto", "Off"),
+        ("BalanceWhiteAuto", "Off"),
+    )
 
 
 def test_tile_and_mosaic_save_plans_preserve_metadata_payloads() -> None:
@@ -216,7 +294,10 @@ def test_tile_and_mosaic_save_plans_preserve_metadata_payloads() -> None:
 
 def test_manifest_payload_lists_mosaic_and_tiles_in_plan_order() -> None:
     plan = _plan()
-    tile_results = [_capture_result("tile1"), _capture_result("tile2")]
+    tile_results = [
+        _capture_result("tile1", raw_image_path=Path("C:/scan/tile1_raw.png")),
+        _capture_result("tile2"),
+    ]
     mosaic = _capture_result("mosaic")
 
     payload = microscope_scan.manifest_payload(
@@ -224,6 +305,10 @@ def test_manifest_payload_lists_mosaic_and_tiles_in_plan_order() -> None:
         tile_results=tile_results,
         mosaic_result=mosaic,
         created_at="2026-06-28T12:02:00+03:00",
+        corrections={
+            "flat_field": {"enabled": True, "mode": "self"},
+            "camera_lock": {"enabled": True},
+        },
     )
 
     assert payload["version"] == 1
@@ -242,6 +327,7 @@ def test_manifest_payload_lists_mosaic_and_tiles_in_plan_order() -> None:
             "column": 0,
             "stage_xy": [1.0, 2.0],
             "image": "C:\\scan\\tile1.png",
+            "raw_image": "C:\\scan\\tile1_raw.png",
             "metadata": "C:\\scan\\tile1.json",
         },
         {
@@ -253,3 +339,7 @@ def test_manifest_payload_lists_mosaic_and_tiles_in_plan_order() -> None:
             "metadata": "C:\\scan\\tile2.json",
         },
     ]
+    assert payload["corrections"] == {
+        "flat_field": {"enabled": True, "mode": "self"},
+        "camera_lock": {"enabled": True},
+    }
