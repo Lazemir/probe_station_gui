@@ -9,6 +9,10 @@ _ORIGINAL_PYSIDE6 = {
     for name, module in sys.modules.items()
     if name == "PySide6" or name.startswith("PySide6.")
 }
+_MISSING_MODULE = object()
+_ORIGINAL_STUBBED_MODULES = {
+    name: sys.modules.get(name, _MISSING_MODULE) for name in ("cv2", "serial")
+}
 
 
 def _install_pyside6_stubs() -> None:
@@ -72,6 +76,11 @@ def _restore_pyside6_modules() -> None:
         if name == "PySide6" or name.startswith("PySide6."):
             del sys.modules[name]
     sys.modules.update(_ORIGINAL_PYSIDE6)
+    for name, original in _ORIGINAL_STUBBED_MODULES.items():
+        if original is _MISSING_MODULE:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = original
 
 
 def _load_stage_controller():
