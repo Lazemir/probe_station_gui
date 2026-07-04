@@ -11,6 +11,8 @@ from probe_station_gui.settings.needle_calibration_config import (
     LCR_APERTURE_RATES,
     LCR_MEASUREMENT_FUNCTIONS,
     LCR_METER_TYPE_GWINSTEK,
+    LCR_METER_TYPE_KEITHLEY,
+    LCR_METER_TYPE_KEITHLEY_2400,
     LCR_METER_TYPE_LABELS,
     LCR_METER_TYPES,
     LCR_MONITOR_PARAMETERS,
@@ -31,7 +33,8 @@ class MeasurementControlState:
     """Enabled-state policy for measurement-instrument settings controls."""
 
     visa_resource: bool
-    keithley_resources: bool
+    keithley_source_resource: bool
+    keithley_voltmeter_resource: bool
     function: bool
     range_mode: bool
     aperture: bool
@@ -62,6 +65,11 @@ def measurement_control_state(
     """Return enabled states for measurement controls without touching Qt widgets."""
 
     gwinstek_meter = meter_type == LCR_METER_TYPE_GWINSTEK
+    keithley_meter = meter_type in {
+        LCR_METER_TYPE_KEITHLEY_2400,
+        LCR_METER_TYPE_KEITHLEY,
+    }
+    keithley_pair = meter_type == LCR_METER_TYPE_KEITHLEY
     fixed_range = range_mode == "HOLD"
     dcr_mode = measurement_function == "DCR"
     ac_mode = gwinstek_meter and not dcr_mode
@@ -69,7 +77,8 @@ def measurement_control_state(
     current_level_mode = level_mode == "CURRENT"
     return MeasurementControlState(
         visa_resource=gwinstek_meter,
-        keithley_resources=not gwinstek_meter,
+        keithley_source_resource=keithley_meter,
+        keithley_voltmeter_resource=keithley_pair,
         function=gwinstek_meter,
         range_mode=gwinstek_meter,
         aperture=gwinstek_meter,
@@ -306,8 +315,10 @@ class MeasurementSettingsWidget(QWidget):
             bias_enabled=self._bias_checkbox.isChecked(),
         )
         self._visa_resource_edit.setEnabled(state.visa_resource)
-        self._keithley_source_resource_edit.setEnabled(state.keithley_resources)
-        self._keithley_voltmeter_resource_edit.setEnabled(state.keithley_resources)
+        self._keithley_source_resource_edit.setEnabled(state.keithley_source_resource)
+        self._keithley_voltmeter_resource_edit.setEnabled(
+            state.keithley_voltmeter_resource
+        )
         self._function_combo.setEnabled(state.function)
         self._range_mode_combo.setEnabled(state.range_mode)
         self._aperture_combo.setEnabled(state.aperture)

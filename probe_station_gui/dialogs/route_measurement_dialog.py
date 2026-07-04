@@ -34,6 +34,7 @@ from probe_station_gui.route.meter_config import (
     KeithleyRouteMeterSettings,
     ROUTE_METER_GWINSTEK,
     ROUTE_METER_KEITHLEY,
+    ROUTE_METER_KEITHLEY_2400,
     ROUTE_METER_LABELS,
     ROUTE_METER_TYPES,
     RouteMeterConfiguration,
@@ -1231,6 +1232,19 @@ class RouteMeasurementDialog(RouteMeasurementProfileMixin, QDialog):
             if meter_type == ROUTE_METER_GWINSTEK
             else self._keithley_page
         )
+        self._update_keithley_page_state()
+
+    def _update_keithley_page_state(self) -> None:
+        source_only = (
+            str(self._meter_combo.currentData() or ROUTE_METER_KEITHLEY)
+            == ROUTE_METER_KEITHLEY_2400
+        )
+        for widget in (
+            self._keithley_voltmeter_range_spin,
+            self._keithley_buffer_checkbox,
+            self._keithley_trigger_link_checkbox,
+        ):
+            widget.setEnabled(not source_only)
 
     def _update_gwinstek_state(self) -> None:
         function = self._gw_function_combo.currentText()
@@ -1349,6 +1363,7 @@ class RouteMeasurementDialog(RouteMeasurementProfileMixin, QDialog):
 
     def _meter_configuration(self) -> RouteMeterConfiguration:
         meter_type = str(self._meter_combo.currentData() or ROUTE_METER_KEITHLEY)
+        source_only = meter_type == ROUTE_METER_KEITHLEY_2400
         return RouteMeterConfiguration(
             meter_type=meter_type,
             gwinstek=GWInstekRouteMeterSettings(
@@ -1378,8 +1393,12 @@ class RouteMeasurementDialog(RouteMeasurementProfileMixin, QDialog):
                 nplc=float(self._keithley_nplc_spin.value()),
                 terminals=str(self._keithley_terminals_combo.currentData() or "rear"),
                 trigger_delay_s=float(self._keithley_delay_spin.value()),
-                use_buffer=self._keithley_buffer_checkbox.isChecked(),
-                use_trigger_link=self._keithley_trigger_link_checkbox.isChecked(),
+                use_buffer=False
+                if source_only
+                else self._keithley_buffer_checkbox.isChecked(),
+                use_trigger_link=False
+                if source_only
+                else self._keithley_trigger_link_checkbox.isChecked(),
             ),
         )
 

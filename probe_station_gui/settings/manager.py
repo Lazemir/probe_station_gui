@@ -46,6 +46,7 @@ from probe_station_gui.settings.needle_calibration_config import (
     LCR_MEASUREMENT_FUNCTIONS,
     LCR_METER_TYPE_GWINSTEK,
     LCR_METER_TYPE_KEITHLEY,
+    LCR_METER_TYPE_KEITHLEY_2400,
     LCR_METER_TYPES,
     LCR_MONITOR_PARAMETERS,
     LCR_RANGE_MODES,

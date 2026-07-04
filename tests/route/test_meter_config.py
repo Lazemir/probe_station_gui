@@ -3,6 +3,7 @@ from probe_station_gui.route.meter_config import (
     KeithleyRouteMeterSettings,
     ROUTE_METER_GWINSTEK,
     ROUTE_METER_KEITHLEY,
+    ROUTE_METER_KEITHLEY_2400,
     RouteMeterConfiguration,
     route_meter_configuration_from_payload,
     route_meter_type_from_payload,
@@ -19,6 +20,22 @@ def test_route_meter_configuration_describes_keithley_voltage_sweep() -> None:
     )
 
     assert configuration.measurement_type_label() == "Keithley voltage sweep +/-0.03 V"
+    assert configuration.nplc_label() == "7.5"
+
+
+def test_route_meter_configuration_describes_keithley_2400_voltage_sweep() -> None:
+    configuration = RouteMeterConfiguration(
+        meter_type=ROUTE_METER_KEITHLEY_2400,
+        keithley=KeithleyRouteMeterSettings(
+            measurement_voltage_v=0.03,
+            nplc=7.5,
+        ),
+    )
+
+    assert (
+        configuration.measurement_type_label()
+        == "Keithley 2400 voltage sweep +/-0.03 V"
+    )
     assert configuration.nplc_label() == "7.5"
 
 
@@ -43,6 +60,8 @@ def test_route_meter_type_from_payload_normalizes_api_aliases() -> None:
     assert route_meter_type_from_payload(None) is None
     assert route_meter_type_from_payload("configured") is None
     assert route_meter_type_from_payload("keithley") == ROUTE_METER_KEITHLEY
+    assert route_meter_type_from_payload("keithley_2400") == ROUTE_METER_KEITHLEY_2400
+    assert route_meter_type_from_payload("2400") == ROUTE_METER_KEITHLEY_2400
     assert route_meter_type_from_payload("2400_2182a") == ROUTE_METER_KEITHLEY
     assert route_meter_type_from_payload("lcr") == ROUTE_METER_GWINSTEK
     assert route_meter_type_from_payload("custom-meter") == "custom-meter"
@@ -70,6 +89,23 @@ def test_route_meter_configuration_from_payload_accepts_keithley_code_auto_range
     assert config.keithley.measurement_voltage_v == 0.03
     assert config.keithley.expected_resistance_ohm == 100_000.0
     assert config.keithley.maximum_current_a == 10e-6
+    assert config.keithley.nplc == 5
+
+
+def test_route_meter_configuration_from_payload_accepts_keithley_2400() -> None:
+    config = route_meter_configuration_from_payload(
+        {
+            "meter_type": "keithley_2400",
+            "measurement_voltage_v": 0.03,
+            "nplc": 5,
+        },
+        voltages_v=None,
+        current_meter_type=ROUTE_METER_GWINSTEK,
+        default_gwinstek_resource_name="COM9",
+    )
+
+    assert config.meter_type == ROUTE_METER_KEITHLEY_2400
+    assert config.keithley.measurement_voltage_v == 0.03
     assert config.keithley.nplc == 5
 
 

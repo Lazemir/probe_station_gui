@@ -26,7 +26,7 @@ from probe_station_gui.dialogs.route_measurement_defaults import (
     ROUTE_MEASUREMENT_PROFILE_VERSION,
 )
 from probe_station_gui.dialogs.route_measurement_widgets import SIPrefixSpinBox
-from probe_station_gui.instruments.meters.lcr import ROUTE_METER_KEITHLEY
+from probe_station_gui.instruments.meters.lcr import ROUTE_METER_KEITHLEY_TYPES
 from probe_station_gui.route.measurement import (
     ROUTE_OPERATION_MEASURE,
     RouteContactQualityLimits,
@@ -241,7 +241,7 @@ class RouteMeasurementProfileMixin:
         meter = data.get("meter")
         if not isinstance(meter, dict):
             return False
-        return meter.get("meter_type") == ROUTE_METER_KEITHLEY
+        return meter.get("meter_type") in ROUTE_METER_KEITHLEY_TYPES
 
     def _apply_default_keithley_route_settings(self) -> None:
         self._initial_measurement_count_spin.setValue(

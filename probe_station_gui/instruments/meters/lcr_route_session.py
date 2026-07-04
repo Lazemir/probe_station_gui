@@ -8,7 +8,7 @@ from probe_station_gui.instruments.meters.lcr_helpers import (
 )
 from probe_station_gui.route.meter_config import (
     ROUTE_METER_GWINSTEK,
-    ROUTE_METER_KEITHLEY,
+    ROUTE_METER_KEITHLEY_TYPES,
     RouteMeterConfiguration,
 )
 
@@ -30,7 +30,7 @@ def configure_route_session(
             raise RouteSessionError(gwinstek_error)
         _configure_gwinstek_session(session, configuration)
         return
-    if configuration.meter_type == ROUTE_METER_KEITHLEY:
+    if configuration.meter_type in ROUTE_METER_KEITHLEY_TYPES:
         if isinstance(session, gwinstek_session_type):
             raise RouteSessionError(keithley_error)
         _configure_keithley_session(session, configuration, keithley_error)

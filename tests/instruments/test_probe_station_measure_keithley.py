@@ -204,6 +204,38 @@ class KeithleyDriverTest(unittest.TestCase):
         self.assertAlmostEqual(readings[0].resistance_ohm, 29.0)
         self.assertNotIn(":TRIG:SOUR TLIN", source.writes)
 
+    def test_source_only_keithley_configures_voltage_and_current_readback(
+        self,
+    ) -> None:
+        source = _FakeHandle(
+            {
+                "FETC?": ["-0.00029,-0.0000095", "0.00028,0.0000095"],
+            }
+        )
+        meter = Keithley2400With2182A(
+            "GPIB0::1::INSTR",
+            None,
+            resource_manager=_FakeResourceManager(source, _FakeHandle()),
+        )
+
+        reading = meter.measure_pair(
+            Keithley2400With2182AConfig(
+                measurement_voltage_v=0.03,
+                use_buffer=True,
+                use_trigger_link=True,
+                compliance_current_a=9.5e-6,
+                current_range_a=10e-6,
+            )
+        )
+
+        self.assertAlmostEqual(reading.differential_resistance_ohm, 30.0)
+        self.assertIn(":SENS:FUNC:CONC ON", source.writes)
+        self.assertIn(':SENS:FUNC:ON "VOLT:DC"', source.writes)
+        self.assertIn(':SENS:FUNC:ON "CURR:DC"', source.writes)
+        self.assertIn(":FORM:ELEM VOLT,CURR", source.writes)
+        self.assertNotIn(":SENS:FUNC:CONC OFF", source.writes)
+        self.assertNotIn(':SENS:FUNC "CURR:DC"', source.writes)
+
     def test_visa_roles_reflect_optional_voltmeter(self) -> None:
         source_only = Keithley2400With2182A(
             "GPIB0::1::INSTR",

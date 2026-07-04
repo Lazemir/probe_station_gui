@@ -14,13 +14,20 @@ from probe_station_gui.route.payload_parsing import (
 
 
 ROUTE_METER_GWINSTEK = "gwinstek_lcr_76200"
+ROUTE_METER_KEITHLEY_2400 = "keithley_2400"
 ROUTE_METER_KEITHLEY = "keithley_2400_2182a"
+ROUTE_METER_KEITHLEY_TYPES: tuple[str, ...] = (
+    ROUTE_METER_KEITHLEY_2400,
+    ROUTE_METER_KEITHLEY,
+)
 ROUTE_METER_TYPES: tuple[str, ...] = (
     ROUTE_METER_GWINSTEK,
+    ROUTE_METER_KEITHLEY_2400,
     ROUTE_METER_KEITHLEY,
 )
 ROUTE_METER_LABELS: dict[str, str] = {
     ROUTE_METER_GWINSTEK: "GW Instek LCR-76200",
+    ROUTE_METER_KEITHLEY_2400: "Keithley 2400",
     ROUTE_METER_KEITHLEY: "Keithley 2400 + 2182A",
 }
 
@@ -51,7 +58,7 @@ class GWInstekRouteMeterSettings:
 
 @dataclass(frozen=True)
 class KeithleyRouteMeterSettings:
-    """Per-run four-wire resistance settings for a Keithley 2400 and 2182A."""
+    """Per-run resistance settings for Keithley 2400-based measurements."""
 
     source_resource: str = "GPIB0::1::INSTR"
     voltmeter_resource: str = "GPIB0::2::INSTR"
@@ -89,13 +96,16 @@ class RouteMeterConfiguration:
     def nplc_label(self) -> str:
         """Return the CSV integration-time label for this meter."""
 
-        if self.meter_type == ROUTE_METER_KEITHLEY:
+        if self.meter_type in ROUTE_METER_KEITHLEY_TYPES:
             return f"{float(self.keithley.nplc):g}"
         return ""
 
     def measurement_type_label(self) -> str:
         """Return a concise CSV label for the route measurement mode."""
 
+        if self.meter_type == ROUTE_METER_KEITHLEY_2400:
+            voltage = float(self.keithley.measurement_voltage_v)
+            return f"Keithley 2400 voltage sweep +/-{voltage:g} V"
         if self.meter_type == ROUTE_METER_KEITHLEY:
             voltage = float(self.keithley.measurement_voltage_v)
             return f"Keithley voltage sweep +/-{voltage:g} V"
@@ -144,6 +154,8 @@ def route_meter_type_from_payload(value: object) -> str | None:
     text = str(value).strip().lower()
     if text in {"", "current", "configured"}:
         return None
+    if text in {"keithley_2400", "2400", "source_meter", "source-meter"}:
+        return ROUTE_METER_KEITHLEY_2400
     if text in {"keithley", "keithley_2400_2182a", "2400_2182a"}:
         return ROUTE_METER_KEITHLEY
     if text in {"gwinstek", "lcr", "gwinstek_lcr_76200"}:
@@ -166,12 +178,12 @@ def route_meter_configuration_from_payload(
     )
     if meter_type is None:
         meter_type = current_meter_type
-    if meter_type == ROUTE_METER_KEITHLEY:
+    if meter_type in ROUTE_METER_KEITHLEY_TYPES:
         keithley_payload = meter_payload.get("keithley")
         if not isinstance(keithley_payload, dict):
             keithley_payload = meter_payload
         return RouteMeterConfiguration(
-            meter_type=ROUTE_METER_KEITHLEY,
+            meter_type=meter_type,
             keithley=_keithley_settings_from_payload(
                 keithley_payload,
                 voltages_v=voltages_v,
@@ -519,6 +531,8 @@ __all__ = [
     "KeithleyRouteMeterSettings",
     "ROUTE_METER_GWINSTEK",
     "ROUTE_METER_KEITHLEY",
+    "ROUTE_METER_KEITHLEY_2400",
+    "ROUTE_METER_KEITHLEY_TYPES",
     "ROUTE_METER_LABELS",
     "ROUTE_METER_TYPES",
     "RouteMeterConfiguration",

@@ -18,6 +18,7 @@ from probe_station_gui.settings.manager import Settings
 from probe_station_gui.settings.needle_calibration_config import (
     LCR_METER_TYPE_GWINSTEK,
     LCR_METER_TYPE_KEITHLEY,
+    LCR_METER_TYPE_KEITHLEY_2400,
     NeedleCalibrationSettings,
     SavedStagePositionSettings,
 )
@@ -46,7 +47,8 @@ def test_measurement_control_state_matches_existing_lcr_cases() -> None:
     )
 
     assert gwinstek_ac_auto.visa_resource
-    assert not gwinstek_ac_auto.keithley_resources
+    assert not gwinstek_ac_auto.keithley_source_resource
+    assert not gwinstek_ac_auto.keithley_voltmeter_resource
     assert gwinstek_ac_auto.frequency
     assert gwinstek_ac_auto.voltage_level
     assert not gwinstek_ac_auto.current_level
@@ -78,11 +80,26 @@ def test_measurement_control_state_matches_existing_lcr_cases() -> None:
     )
 
     assert not keithley.visa_resource
-    assert keithley.keithley_resources
+    assert keithley.keithley_source_resource
+    assert keithley.keithley_voltmeter_resource
     assert not keithley.function
     assert not keithley.range_mode
     assert not keithley.frequency
     assert not keithley.bias
+
+    keithley_2400 = measurement_control_state(
+        meter_type=LCR_METER_TYPE_KEITHLEY_2400,
+        measurement_function="R-X",
+        range_mode="HOLD",
+        level_mode="VOLTAGE",
+        bias_enabled=True,
+    )
+
+    assert not keithley_2400.visa_resource
+    assert keithley_2400.keithley_source_resource
+    assert not keithley_2400.keithley_voltmeter_resource
+    assert not keithley_2400.function
+    assert not keithley_2400.range_mode
 
 
 def test_measurement_widget_applies_existing_enabled_states() -> None:
@@ -127,6 +144,12 @@ def test_measurement_widget_applies_existing_enabled_states() -> None:
     assert not widget._function_combo.isEnabled()
     assert not widget._range_mode_combo.isEnabled()
     assert not widget._trigger_source_combo.isEnabled()
+
+    _set_combo_data(widget._meter_type_combo, LCR_METER_TYPE_KEITHLEY_2400)
+
+    assert not widget._visa_resource_edit.isEnabled()
+    assert widget._keithley_source_resource_edit.isEnabled()
+    assert not widget._keithley_voltmeter_resource_edit.isEnabled()
 
     widget.deleteLater()
 

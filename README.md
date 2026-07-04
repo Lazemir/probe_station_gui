@@ -30,7 +30,7 @@ Hardware:
 - a camera compatible with `rotpy` / Spinnaker;
 - a `FluidNC` controller connected over serial;
 - for contact checks and route measurements: a supported measurement instrument
-  (`GW Instek LCR-76200` or `Keithley 2400 + 2182A`).
+  (`GW Instek LCR-76200`, `Keithley 2400`, or `Keithley 2400 + 2182A`).
 
 Core Python packages:
 - `PySide6`
@@ -122,6 +122,8 @@ How to use it:
 The same panel contains the `Instrument` block. Configure the instrument type
 and resource in `Application` -> `Settings` -> `Measurement`, then press
 `Connect Instrument`.
+Choose `Keithley 2400` when only the source meter is connected, or
+`Keithley 2400 + 2182A` when the nanovoltmeter is available.
 
 After connection:
 - the control panels become active;
@@ -620,6 +622,9 @@ Invoke-RestMethod -Method Post `
 Current roles are `meter.source` for the required source meter and
 `meter.voltmeter` when a separate voltmeter is configured. Trigger Link setup is
 not part of the API; it stays inside the high-level meter driver.
+Use `meter_type="keithley_2400"` for source-meter-only measurements, or
+`meter_type="keithley"` / `meter_type="keithley_2400_2182a"` for the 2400+2182A
+pair.
 
 ### Python Client
 

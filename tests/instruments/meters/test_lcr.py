@@ -11,6 +11,7 @@ try:
         LCRMeterError,
         ROUTE_METER_GWINSTEK,
         ROUTE_METER_KEITHLEY,
+        ROUTE_METER_KEITHLEY_2400,
         RouteMeterConfiguration,
         _ConfiguringFakeInstrument,
         _DeletedSignalSource,
@@ -32,6 +33,7 @@ except ImportError:
         LCRMeterError,
         ROUTE_METER_GWINSTEK,
         ROUTE_METER_KEITHLEY,
+        ROUTE_METER_KEITHLEY_2400,
         RouteMeterConfiguration,
         _ConfiguringFakeInstrument,
         _DeletedSignalSource,
@@ -678,6 +680,40 @@ class LCRMeterTest(unittest.TestCase):
 
         self.assertIn("Keithley 2400 GPIB2::7::INSTR", label)
         self.assertIn("2182A GPIB2::8::INSTR", label)
+
+    def test_controller_connection_label_uses_keithley_2400_source_only(self) -> None:
+        controller = LCRMeterController()
+        controller.apply_configuration(
+            meter_type=ROUTE_METER_KEITHLEY_2400,
+            resource_name="COM4",
+            keithley_source_resource="GPIB2::7::INSTR",
+            keithley_voltmeter_resource="GPIB2::8::INSTR",
+            measurement_function="DCR",
+            range_mode="AUTO",
+            auto_range_enabled=True,
+            impedance_range=3,
+            dcr_range=4,
+            frequency_hz=50.0,
+            level_mode="VOLTAGE",
+            voltage_level_v=0.01,
+            current_level_a=0.0001,
+            source_resistance_ohm=100,
+            aperture_rate="SLOW",
+            aperture_averages=1,
+            trigger_source="INT",
+            trigger_delay_s=0.0,
+            bias_enabled=False,
+            bias_level_v=0.0,
+            monitor1="OFF",
+            monitor2="OFF",
+            alc_enabled=False,
+            short_threshold_ohm=10.0,
+            poll_interval_ms=250,
+        )
+
+        label = controller.connection_label()
+
+        self.assertEqual(label, "Keithley 2400 GPIB2::7::INSTR")
 
     def test_controller_applies_connected_keithley_route_settings(self) -> None:
         controller = LCRMeterController()

@@ -83,6 +83,7 @@ from probe_station_gui.route.meter_config import (
     KeithleyRouteMeterSettings,
     ROUTE_METER_GWINSTEK,
     ROUTE_METER_KEITHLEY,
+    ROUTE_METER_KEITHLEY_2400,
     RouteMeterConfiguration,
 )
 

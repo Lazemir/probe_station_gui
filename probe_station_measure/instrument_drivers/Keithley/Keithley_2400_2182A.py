@@ -989,15 +989,23 @@ class Keithley2400With2182A(AbstractOhmmeter):
             self._try_write(voltmeter, "FORM:ELEM READ")
             self._try_write(voltmeter, "TRAC:CLE")
 
-        self._try_write(source, ":SENS:FUNC:CONC OFF")
-        self._write(source, ':SENS:FUNC "CURR:DC"')
+        if voltmeter is None:
+            self._write(source, ":SENS:FUNC:CONC ON")
+            self._write(source, ':SENS:FUNC:ON "VOLT:DC"')
+            self._write(source, ':SENS:FUNC:ON "CURR:DC"')
+        else:
+            self._try_write(source, ":SENS:FUNC:CONC OFF")
+            self._write(source, ':SENS:FUNC "CURR:DC"')
         self._write(source, ":SOUR:FUNC VOLT")
         self._write(source, ":SOUR:VOLT:MODE FIX")
         self._write(source, f":SOUR:VOLT:RANG {cfg.source_voltage_range_v:.12g}")
         self._write(source, f":SENS:CURR:PROT {cfg.compliance_current_a:.12g}")
         self._write(source, f":SENS:CURR:RANG {cfg.current_range_a:.12g}")
         self._write(source, f":SENS:CURR:NPLC {cfg.nplc:.12g}")
-        self._try_write(source, ":FORM:ELEM VOLT,CURR")
+        if voltmeter is None:
+            self._write(source, ":FORM:ELEM VOLT,CURR")
+        else:
+            self._try_write(source, ":FORM:ELEM VOLT,CURR")
         if not self._source_output_context_enabled():
             self._write(source, ":SOUR:VOLT 0")
             self._write(source, ":OUTP ON")

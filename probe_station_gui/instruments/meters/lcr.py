@@ -41,6 +41,8 @@ from probe_station_gui.instruments.meters.lcr_visa import (
 from probe_station_gui.route.meter_config import (
     ROUTE_METER_GWINSTEK,
     ROUTE_METER_KEITHLEY,
+    ROUTE_METER_KEITHLEY_2400,
+    ROUTE_METER_KEITHLEY_TYPES,
     ROUTE_METER_LABELS,
     ROUTE_METER_TYPES,
     RouteMeterConfiguration,
@@ -71,6 +73,15 @@ KEITHLEY_LIVE_VOLTMETER_RANGE_V = 1.0
 KEITHLEY_LIVE_CURRENT_RANGE_A = 10e-6
 KEITHLEY_LIVE_COMPLIANCE_CURRENT_A = 9.5e-6
 KEITHLEY_LIVE_NPLC = 1.0
+
+
+def _keithley_voltmeter_resource_for_meter_type(
+    meter_type: str,
+    resource: str | None,
+) -> str:
+    if meter_type == ROUTE_METER_KEITHLEY:
+        return str(resource or "").strip()
+    return ""
 
 
 def _reset_gpib_interfaces_for_resources(*resources: str | None) -> None:
@@ -149,7 +160,7 @@ def _open_keithley_session(
     timeout_ms: int,
 ) -> object:
     try:
-        from probe_station_measure import Keithley2400With2182A
+        from probe_station_measure import Keithley2400SourceMeter, Keithley2400With2182A
     except ImportError as exc:
         raise LCRMeterError(
             "Keithley route measurements require optional dependency "
@@ -159,9 +170,14 @@ def _open_keithley_session(
     voltmeter = normalize_resource_name(voltmeter_resource or "")
     try:
         _reset_gpib_interfaces_for_resources(source, voltmeter)
+        if not voltmeter:
+            return Keithley2400SourceMeter(
+                source,
+                timeout_ms=timeout_ms,
+            )
         return Keithley2400With2182A(
             source,
-            voltmeter or None,
+            voltmeter,
             timeout_ms=timeout_ms,
         )
     except Exception as exc:  # pragma: no cover - backend specific failures
@@ -206,11 +222,14 @@ class RouteMeter:
                 raise
             self._session = session
             return
-        if self._configuration.meter_type == ROUTE_METER_KEITHLEY:
+        if self._configuration.meter_type in ROUTE_METER_KEITHLEY_TYPES:
             settings = self._configuration.keithley
             session = _open_keithley_session(
                 settings.source_resource,
-                settings.voltmeter_resource,
+                _keithley_voltmeter_resource_for_meter_type(
+                    self._configuration.meter_type,
+                    settings.voltmeter_resource,
+                ),
                 self._timeout_ms,
             )
             try:
@@ -264,7 +283,7 @@ class RouteMeter:
                 configuration,
                 gwinstek_session_type=_LCRSession,
                 gwinstek_error="Open route instrument is not a GW Instek LCR.",
-                keithley_error="Open route instrument is not a Keithley pair.",
+                keithley_error="Open route instrument is not a Keithley 2400.",
             )
         except _RouteSessionError as exc:
             raise LCRMeterError(str(exc)) from exc
@@ -480,7 +499,10 @@ class LCRMeterController(QObject):
         self._meter_type = meter_type
         self._resource_name = resource_name.strip()
         self._keithley_source_resource = keithley_source_resource.strip()
-        self._keithley_voltmeter_resource = keithley_voltmeter_resource.strip()
+        self._keithley_voltmeter_resource = _keithley_voltmeter_resource_for_meter_type(
+            meter_type,
+            keithley_voltmeter_resource,
+        )
         self._measurement_function = str(measurement_function).strip() or "DCR"
         self._range_mode = str(range_mode).strip().upper() or "HOLD"
         self._auto_range_enabled = bool(auto_range_enabled)
@@ -555,7 +577,7 @@ class LCRMeterController(QObject):
     def connection_label(self) -> str:
         """Return a human readable connection target for the configured meter."""
 
-        if self._meter_type == ROUTE_METER_KEITHLEY:
+        if self._meter_type in ROUTE_METER_KEITHLEY_TYPES:
             source = self._keithley_source_resource or "source not configured"
             if self._keithley_voltmeter_resource:
                 return (
@@ -604,7 +626,7 @@ class LCRMeterController(QObject):
         except Exception as exc:
             failure: BaseException = exc
             if (
-                configuration.meter_type == ROUTE_METER_KEITHLEY
+                configuration.meter_type in ROUTE_METER_KEITHLEY_TYPES
                 and bool(self._connection_key())
             ):
                 try:
@@ -640,7 +662,7 @@ class LCRMeterController(QObject):
                 configuration,
                 gwinstek_session_type=_LCRSession,
                 gwinstek_error="Connected instrument is not a GW Instek LCR.",
-                keithley_error="Connected instrument is not a Keithley pair.",
+                keithley_error="Connected instrument is not a Keithley 2400.",
             )
         except _RouteSessionError as exc:
             raise LCRMeterError(str(exc)) from exc
@@ -684,14 +706,17 @@ class LCRMeterController(QObject):
             self._monitor2 = str(settings.monitor2).strip().upper() or "OFF"
             self._alc_enabled = bool(settings.alc_enabled)
             return
-        if configuration.meter_type == ROUTE_METER_KEITHLEY:
+        if configuration.meter_type in ROUTE_METER_KEITHLEY_TYPES:
             settings = configuration.keithley
-            self._meter_type = ROUTE_METER_KEITHLEY
+            self._meter_type = configuration.meter_type
             self._resource_name = ""
             self._keithley_source_resource = str(settings.source_resource).strip()
-            self._keithley_voltmeter_resource = str(
-                settings.voltmeter_resource
-            ).strip()
+            self._keithley_voltmeter_resource = (
+                _keithley_voltmeter_resource_for_meter_type(
+                    configuration.meter_type,
+                    settings.voltmeter_resource,
+                )
+            )
             self._measurement_function = "DCR"
             self._range_mode = str(settings.range_mode).strip().upper() or "AUTO"
             self._auto_range_enabled = self._range_mode == "AUTO"
@@ -784,7 +809,7 @@ class LCRMeterController(QObject):
         voltage_list_reader = getattr(session, "measure_voltage_list", None)
         if not callable(voltage_list_reader):
             raise LCRMeterError(
-                "Raw voltage sweeps require a Keithley 2400 + 2182A instrument."
+                "Raw voltage sweeps require a Keithley 2400 instrument."
             )
 
         def read_sweep() -> dict[str, object]:
@@ -1154,7 +1179,7 @@ class LCRMeterController(QObject):
     def _connect_configured_session(self, *, resume_polling: bool = True) -> None:
         if self._meter_type == ROUTE_METER_GWINSTEK and not self._resource_name:
             raise LCRMeterError("GW Instek resource is empty. Set it in Settings.")
-        if self._meter_type == ROUTE_METER_KEITHLEY:
+        if self._meter_type in ROUTE_METER_KEITHLEY_TYPES:
             if not self._keithley_source_resource:
                 raise LCRMeterError(
                     "Keithley 2400 resource is empty. Set it in Settings."
@@ -1175,7 +1200,7 @@ class LCRMeterController(QObject):
             )
             if self._meter_type == ROUTE_METER_GWINSTEK:
                 self._configure_session(session)
-            elif self._meter_type == ROUTE_METER_KEITHLEY:
+            elif self._meter_type in ROUTE_METER_KEITHLEY_TYPES:
                 self._configure_keithley_live_session(session)
         except Exception:
             closer = getattr(session, "close", None)
@@ -1199,7 +1224,7 @@ class LCRMeterController(QObject):
             self._resume_live_polling()
 
     def _validate_connected_session_identity(self, instrument_id: str) -> None:
-        if self._meter_type != ROUTE_METER_KEITHLEY:
+        if self._meter_type not in ROUTE_METER_KEITHLEY_TYPES:
             return
         normalized = str(instrument_id or "")
         if normalized.startswith("2400 ") or "; 2400 " in normalized:
@@ -1240,7 +1265,7 @@ class LCRMeterController(QObject):
     def _configure_keithley_live_session(self, session: object) -> None:
         configure = getattr(session, "configure_measurement", None)
         if not callable(configure):
-            raise LCRMeterError("Connected instrument is not a Keithley pair.")
+            raise LCRMeterError("Connected instrument is not a Keithley 2400.")
         configure(
             keithley_measurement_voltage_v=KEITHLEY_LIVE_MEASUREMENT_VOLTAGE_V,
             keithley_range_mode=OHMMETER_RANGE_MANUAL,
@@ -1255,7 +1280,7 @@ class LCRMeterController(QObject):
         )
 
     def _open_configured_session(self) -> object:
-        if self._meter_type == ROUTE_METER_KEITHLEY:
+        if self._meter_type in ROUTE_METER_KEITHLEY_TYPES:
             return _open_keithley_session(
                 self._keithley_source_resource,
                 self._keithley_voltmeter_resource,
@@ -1264,11 +1289,13 @@ class LCRMeterController(QObject):
         return _LCRSession(self._resource_name, self.DEFAULT_TIMEOUT_MS)
 
     def _connection_key(self) -> str:
-        if self._meter_type == ROUTE_METER_KEITHLEY:
+        if self._meter_type in ROUTE_METER_KEITHLEY_TYPES:
             source = normalize_resource_name(self._keithley_source_resource)
             voltmeter = normalize_resource_name(self._keithley_voltmeter_resource)
             if not source:
                 return ""
+            if self._meter_type == ROUTE_METER_KEITHLEY_2400:
+                return f"{ROUTE_METER_KEITHLEY_2400}|{source}"
             return f"{ROUTE_METER_KEITHLEY}|{source}|{voltmeter}"
         resource = normalize_resource_name(self._resource_name)
         if not resource:

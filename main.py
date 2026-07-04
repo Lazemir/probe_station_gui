@@ -142,6 +142,7 @@ from probe_station_gui.instruments.meters.lcr import (
     LCRMeterError,
     ROUTE_METER_GWINSTEK,  # noqa: F401 - re-exported for legacy callers/tests
     ROUTE_METER_KEITHLEY,  # noqa: F401 - re-exported for legacy callers/tests
+    ROUTE_METER_KEITHLEY_2400,  # noqa: F401 - re-exported for legacy callers/tests
     RouteMeterConfiguration,
 )
 from probe_station_gui.stage.api_moves import (
