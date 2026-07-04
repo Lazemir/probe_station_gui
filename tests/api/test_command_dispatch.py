@@ -39,6 +39,7 @@ PAYLOAD_ACTIONS = (
     ("route_session_result", "route_session_result"),
     ("route_session_artifact", "route_session_artifact"),
     ("lens_distortion_calibration", "lens_distortion_calibration"),
+    ("microscope_area_scan", "microscope_area_scan"),
 )
 
 
@@ -85,6 +86,7 @@ def _command_handlers(
             "lens_distortion_calibration",
             payload,
         ),
+        microscope_area_scan=lambda payload: _response("microscope_area_scan", payload),
     )
 
 

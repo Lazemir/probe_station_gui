@@ -524,6 +524,12 @@ class ProbeStationApiServer:
             permission=API_PERMISSION_STAGE_WRITE,
             action="lens_distortion_calibration",
         )
+        add_body_command_route(
+            "/api/v1/camera/area-scan",
+            name="microscope_area_scan",
+            permission=API_PERMISSION_STAGE_WRITE,
+            action="microscope_area_scan",
+        )
         add_command_route(
             "/api/v1/route/contacts",
             method="GET",

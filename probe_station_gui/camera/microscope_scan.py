@@ -126,6 +126,59 @@ def scan_plan_decision(
     return MicroscopeScanStartDecision(accepted=True, plan=plan)
 
 
+def centered_area_scan_plan(
+    *,
+    center_stage_xy: Point2D,
+    fov_size_mm: Point2D,
+    row_count: int,
+    column_count: int,
+    overlap_fraction: float,
+) -> MicroscopeScanPlan:
+    """Build a serpentine tile plan centered on the current stage position."""
+
+    rows = _positive_int(row_count, "row_count")
+    columns = _positive_int(column_count, "column_count")
+    fov_w = _positive_float(fov_size_mm[0], "FOV width")
+    fov_h = _positive_float(fov_size_mm[1], "FOV height")
+    overlap = min(max(float(overlap_fraction), 0.0), 0.95)
+    step_x = fov_w * (1.0 - overlap)
+    step_y = fov_h * (1.0 - overlap)
+    center_x = float(center_stage_xy[0])
+    center_y = float(center_stage_xy[1])
+    x_start = center_x - step_x * float(columns - 1) * 0.5
+    y_top = center_y + step_y * float(rows - 1) * 0.5
+
+    tiles: list[MicroscopeScanTile] = []
+    for row in range(rows):
+        columns_for_row = list(range(columns))
+        if row % 2 == 1:
+            columns_for_row.reverse()
+        y_value = y_top - step_y * float(row)
+        for column in columns_for_row:
+            x_value = x_start + step_x * float(column)
+            tiles.append(
+                MicroscopeScanTile(
+                    index=len(tiles) + 1,
+                    row=row,
+                    column=column,
+                    stage_xy=(float(x_value), float(y_value)),
+                )
+            )
+    left = min(tile.stage_xy[0] for tile in tiles) - fov_w * 0.5
+    right = max(tile.stage_xy[0] for tile in tiles) + fov_w * 0.5
+    bottom = min(tile.stage_xy[1] for tile in tiles) - fov_h * 0.5
+    top = max(tile.stage_xy[1] for tile in tiles) + fov_h * 0.5
+    return MicroscopeScanPlan(
+        tiles=tuple(tiles),
+        stage_bounds=(float(left), float(bottom), float(right), float(top)),
+        covered_stage_bounds=(float(left), float(bottom), float(right), float(top)),
+        fov_size_mm=(fov_w, fov_h),
+        overlap_fraction=overlap,
+        row_count=rows,
+        column_count=columns,
+    )
+
+
 def starting_status(plan: MicroscopeScanPlan) -> str:
     return f"Microscope scan starting: {len(plan.tiles)} tiles."
 
@@ -290,9 +343,30 @@ def _rejected(message: str, timeout_ms: int) -> MicroscopeScanStartDecision:
     )
 
 
+def _positive_int(value: object, label: str) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a positive integer.") from exc
+    if number <= 0:
+        raise ValueError(f"{label} must be a positive integer.")
+    return number
+
+
+def _positive_float(value: object, label: str) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be positive.") from exc
+    if number <= 0.0:
+        raise ValueError(f"{label} must be positive.")
+    return number
+
+
 __all__ = [
     "MicroscopeScanStartDecision",
     "MicroscopeScanStatus",
+    "centered_area_scan_plan",
     "completion_message",
     "default_output_dir",
     "output_dir_from_configuration",

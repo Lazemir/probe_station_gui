@@ -148,6 +148,37 @@ class ApiServerHttpTest(unittest.TestCase):
         )
         self.assertEqual(response.json()["focus"], {"z": 1.2})
 
+    def test_area_scan_endpoint_delegates_to_command_callback(self) -> None:
+        calls = []
+
+        client = self._client(
+            command_callback=lambda request: (
+                calls.append(request)
+                or {"accepted": True, "status_code": 202, "output_dir": "C:/scan"}
+            )
+        )
+
+        response = client.post(
+            "/api/v1/camera/area-scan",
+            json={"rows": 3, "columns": 3, "overlap_fraction": 0.0},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            calls,
+            [
+                {
+                    "action": "microscope_area_scan",
+                    "payload": {
+                        "rows": 3,
+                        "columns": 3,
+                        "overlap_fraction": 0.0,
+                    },
+                }
+            ],
+        )
+        self.assertEqual(response.json()["output_dir"], "C:/scan")
+
     def test_move_endpoint_rejects_empty_or_rejected_moves(self) -> None:
         client = self._client(
             move_callback=lambda _request: {

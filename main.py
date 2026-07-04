@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 from typing import Any, TYPE_CHECKING
 
 _STARTUP_T0 = time.perf_counter()
@@ -466,6 +467,10 @@ class Main(QMainWindow):
     CAMERA_UI_FRAME_GAP_WARNING_S = 0.25
     CLICK_TO_MOVE_PENDING_RETRY_MS = 150
     CLICK_TARGET_ANIMATION_PADDING_S = 0.03
+    MICROSCOPE_AREA_SCAN_DEFAULT_ROWS = 3
+    MICROSCOPE_AREA_SCAN_DEFAULT_COLUMNS = 3
+    MICROSCOPE_AREA_SCAN_MAX_TILES = 121
+    MICROSCOPE_AREA_SCAN_DEFAULT_SETTLE_S = 0.2
     CONTACT_SEEK_STEP_MM = (
         needle_calibration_ui.manual_contact_seek.DEFAULT_MANUAL_CONTACT_SEEK_STEP_MM
     )
@@ -1233,6 +1238,7 @@ class Main(QMainWindow):
             route_session_seek=self._api_route_session_seek,
             route_session_artifact=self._api_route_session_artifact,
             lens_distortion_calibration=self._api_lens_distortion_calibration,
+            microscope_area_scan=self._api_microscope_area_scan,
         )
 
     def _dispatch_api_command_request(
@@ -2682,6 +2688,151 @@ class Main(QMainWindow):
             "status_code": 202,
             "message": "Lens distortion calibration started.",
         }
+
+    def _api_microscope_area_scan(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self._microscope_scan_running():
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Microscope scan is already running.",
+            }
+        if not self._stage_serial_ready():
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Connect the stage controller before scanning.",
+            }
+        if self.stage_controller.is_busy():
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Stage is busy; microscope area scan not started.",
+            }
+        scale = self._active_microscope_scale()
+        if scale is None:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Calibrate click-to-move for the active objective before scanning.",
+            }
+        frame, _counter = self._wait_for_camera_frame(timeout_s=0.5)
+        if frame is None:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Camera frame is unavailable; cannot scan.",
+            }
+        latest_position = self.stage_controller.latest_stage_position()
+        if latest_position is None or len(latest_position) < 2:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Unable to read X/Y stage position.",
+            }
+        try:
+            rows = self._microscope_area_scan_count(
+                payload.get("rows", self.MICROSCOPE_AREA_SCAN_DEFAULT_ROWS),
+                "rows",
+            )
+            columns = self._microscope_area_scan_count(
+                payload.get("columns", self.MICROSCOPE_AREA_SCAN_DEFAULT_COLUMNS),
+                "columns",
+            )
+            if rows * columns > self.MICROSCOPE_AREA_SCAN_MAX_TILES:
+                raise ValueError(
+                    f"Area scan is too large; maximum is {self.MICROSCOPE_AREA_SCAN_MAX_TILES} tiles."
+                )
+            overlap_fraction = self._microscope_area_scan_float(
+                payload.get("overlap_fraction", 0.0),
+                "overlap_fraction",
+                minimum=0.0,
+                maximum=0.95,
+            )
+            settle_s = self._microscope_area_scan_float(
+                payload.get("settle_s", self.MICROSCOPE_AREA_SCAN_DEFAULT_SETTLE_S),
+                "settle_s",
+                minimum=0.0,
+                maximum=10.0,
+            )
+        except ValueError as exc:
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": str(exc),
+            }
+
+        output_dir = str(payload.get("output_dir") or "").strip()
+        if not output_dir:
+            output_dir = self._microscope_area_scan_default_output_dir()
+        fov_size_mm = (
+            float(frame.width()) * float(scale.pixel_size_x_mm),
+            float(frame.height()) * float(scale.pixel_size_y_mm),
+        )
+        plan = microscope_scan.centered_area_scan_plan(
+            center_stage_xy=(float(latest_position[0]), float(latest_position[1])),
+            fov_size_mm=fov_size_mm,
+            row_count=rows,
+            column_count=columns,
+            overlap_fraction=overlap_fraction,
+        )
+        configuration = SimpleNamespace(
+            output_dir=output_dir,
+            overlap_fraction=overlap_fraction,
+            settle_s=settle_s,
+        )
+        self._microscope_scan_stop_requested.clear()
+        self._microscope_scan_thread = threading.Thread(
+            target=self._run_microscope_scan,
+            args=(configuration, plan),
+            name="MicroscopeAreaScan",
+            daemon=True,
+        )
+        self._microscope_scan_thread.start()
+        self._update_stage_coordinate_apply_state()
+        return {
+            "accepted": True,
+            "status_code": 202,
+            "message": f"Microscope area scan started: {rows * columns} tiles.",
+            "output_dir": output_dir,
+            "rows": rows,
+            "columns": columns,
+        }
+
+    @classmethod
+    def _microscope_area_scan_count(cls, value: object, label: str) -> int:
+        try:
+            count = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{label} must be a positive integer.") from exc
+        if count <= 0:
+            raise ValueError(f"{label} must be a positive integer.")
+        if count > cls.MICROSCOPE_AREA_SCAN_MAX_TILES:
+            raise ValueError(
+                f"{label} is too large; maximum is {cls.MICROSCOPE_AREA_SCAN_MAX_TILES}."
+            )
+        return count
+
+    @staticmethod
+    def _microscope_area_scan_float(
+        value: object,
+        label: str,
+        *,
+        minimum: float,
+        maximum: float,
+    ) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{label} must be numeric.") from exc
+        if not math.isfinite(number) or number < minimum or number > maximum:
+            raise ValueError(f"{label} must be between {minimum:g} and {maximum:g}.")
+        return number
+
+    @staticmethod
+    def _microscope_area_scan_default_output_dir() -> str:
+        root = Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return str(root / "ProbeStationGUI" / "MicroscopeScans" / f"area_scan_{timestamp}")
 
     def _api_route_artifacts_payload(self) -> list[dict[str, object]]:
         return self._api_route_artifacts_store().public_payloads()

@@ -139,6 +139,31 @@ def test_scan_plan_decision_reports_camera_and_transform_errors() -> None:
     )
 
 
+def test_centered_area_scan_plan_builds_serpentine_grid() -> None:
+    plan = microscope_scan.centered_area_scan_plan(
+        center_stage_xy=(10.0, 20.0),
+        fov_size_mm=(1.0, 2.0),
+        row_count=3,
+        column_count=3,
+        overlap_fraction=0.0,
+    )
+
+    assert plan.row_count == 3
+    assert plan.column_count == 3
+    assert plan.covered_stage_bounds == (8.5, 17.0, 11.5, 23.0)
+    assert [(tile.row, tile.column, tile.stage_xy) for tile in plan.tiles] == [
+        (0, 0, (9.0, 22.0)),
+        (0, 1, (10.0, 22.0)),
+        (0, 2, (11.0, 22.0)),
+        (1, 2, (11.0, 20.0)),
+        (1, 1, (10.0, 20.0)),
+        (1, 0, (9.0, 20.0)),
+        (2, 0, (9.0, 18.0)),
+        (2, 1, (10.0, 18.0)),
+        (2, 2, (11.0, 18.0)),
+    ]
+
+
 def test_tile_and_mosaic_save_plans_preserve_metadata_payloads() -> None:
     plan = _plan()
     tile_plan = microscope_scan.tile_image_save_plan(
