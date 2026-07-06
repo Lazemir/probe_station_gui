@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Sequence
 
 from PySide6.QtGui import QImage
@@ -27,6 +27,8 @@ class DistortionCorrection:
     axis_target_x: tuple[float, ...] = ()
     axis_source_y: tuple[float, ...] = ()
     axis_target_y: tuple[float, ...] = ()
+    axis_map_x: object | None = field(default=None, repr=False, compare=False)
+    axis_map_y: object | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -114,6 +116,17 @@ def correction_from_payload(payload: object) -> DistortionCorrection:
     homography, _mask = cv2.findHomography(source_array, target_array, 0)
     if homography is None or not np.isfinite(homography).all():
         raise ValueError("Distortion correction point pairs are degenerate.")
+    axis_map_x = None
+    axis_map_y = None
+    if axis_source_x and axis_source_y:
+        axis_map_x, axis_map_y = _axis_interpolation_maps(
+            width=frame_size[0],
+            height=frame_size[1],
+            axis_source_x=axis_source_x,
+            axis_target_x=axis_target_x,
+            axis_source_y=axis_source_y,
+            axis_target_y=axis_target_y,
+        )
     return DistortionCorrection(
         frame_size=frame_size,
         source_points=sources,
@@ -125,6 +138,8 @@ def correction_from_payload(payload: object) -> DistortionCorrection:
         axis_target_x=axis_target_x,
         axis_source_y=axis_source_y,
         axis_target_y=axis_target_y,
+        axis_map_x=axis_map_x,
+        axis_map_y=axis_map_y,
     )
 
 
@@ -142,8 +157,7 @@ def apply_distortion_correction(
 
     import cv2
 
-    image = frame.convertToFormat(QImage.Format_RGB32)
-    array = _qimage_rgb32_array(image)
+    _source_image, array, result_format = _qimage_array_for_correction(frame)
     if correction.axis_source_x and correction.axis_source_y:
         corrected = _apply_axis_interpolation_correction(
             array,
@@ -164,7 +178,7 @@ def apply_distortion_correction(
         expected_width,
         expected_height,
         int(corrected.strides[0]),
-        QImage.Format_RGB32,
+        result_format,
     )
     return result.copy()
 
@@ -330,22 +344,19 @@ def _apply_axis_interpolation_correction(
     height: int,
 ):
     import cv2
-    import numpy as np
 
-    target_x = np.arange(width, dtype=np.float32)
-    target_y = np.arange(height, dtype=np.float32)
-    source_x = _interp_with_extrapolation(
-        target_x,
-        correction.axis_target_x,
-        correction.axis_source_x,
-    ).astype(np.float32, copy=False)
-    source_y = _interp_with_extrapolation(
-        target_y,
-        correction.axis_target_y,
-        correction.axis_source_y,
-    ).astype(np.float32, copy=False)
-    map_x = np.tile(source_x.reshape(1, width), (height, 1))
-    map_y = np.tile(source_y.reshape(height, 1), (1, width))
+    if correction.axis_map_x is None or correction.axis_map_y is None:
+        map_x, map_y = _axis_interpolation_maps(
+            width=width,
+            height=height,
+            axis_source_x=correction.axis_source_x,
+            axis_target_x=correction.axis_target_x,
+            axis_source_y=correction.axis_source_y,
+            axis_target_y=correction.axis_target_y,
+        )
+    else:
+        map_x = correction.axis_map_x
+        map_y = correction.axis_map_y
     return cv2.remap(
         array,
         map_x,
@@ -353,6 +364,34 @@ def _apply_axis_interpolation_correction(
         interpolation=cv2.INTER_LINEAR,
         borderMode=cv2.BORDER_REPLICATE,
     )
+
+
+def _axis_interpolation_maps(
+    *,
+    width: int,
+    height: int,
+    axis_source_x: Sequence[float],
+    axis_target_x: Sequence[float],
+    axis_source_y: Sequence[float],
+    axis_target_y: Sequence[float],
+) -> tuple[object, object]:
+    import numpy as np
+
+    target_x = np.arange(width, dtype=np.float32)
+    target_y = np.arange(height, dtype=np.float32)
+    source_x = _interp_with_extrapolation(
+        target_x,
+        axis_target_x,
+        axis_source_x,
+    ).astype(np.float32, copy=False)
+    source_y = _interp_with_extrapolation(
+        target_y,
+        axis_target_y,
+        axis_source_y,
+    ).astype(np.float32, copy=False)
+    map_x = np.tile(source_x.reshape(1, width), (height, 1))
+    map_y = np.tile(source_y.reshape(height, 1), (1, width))
+    return map_x, map_y
 
 
 def _axis_interpolation_residuals(
@@ -395,6 +434,25 @@ def _qimage_rgb32_array(image: QImage):
         (height, image.bytesPerLine())
     )
     return array[:, : width * 4].reshape((height, width, 4))
+
+
+def _qimage_rgb888_array(image: QImage):
+    import numpy as np
+
+    width = image.width()
+    height = image.height()
+    ptr = image.constBits()
+    array = np.frombuffer(ptr, np.uint8, count=image.sizeInBytes()).reshape(
+        (height, image.bytesPerLine())
+    )
+    return array[:, : width * 3].reshape((height, width, 3))
+
+
+def _qimage_array_for_correction(frame: QImage):
+    if frame.format() == QImage.Format_RGB888:
+        return frame, _qimage_rgb888_array(frame), QImage.Format_RGB888
+    image = frame.convertToFormat(QImage.Format_RGB32)
+    return image, _qimage_rgb32_array(image), QImage.Format_RGB32
 
 
 def _gray_array(frame: object):

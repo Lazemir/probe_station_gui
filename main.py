@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import csv
 import importlib
+import json
 import math
 import os
 import re
@@ -308,6 +309,7 @@ from probe_station_gui.camera.imaging import (
     utc_timestamp,
 )
 from probe_station_gui.camera.distortion import (
+    DistortionCorrection,
     GridCalibrationFrame,
     apply_distortion_correction,
     correction_from_payload,
@@ -634,6 +636,8 @@ class Main(QMainWindow):
         self._latest_raw_camera_frame_counter = 0
         self._latest_camera_frame_condition = threading.Condition()
         self._latest_camera_frame_for_notifications: QImage | None = None
+        self._distortion_correction_cache_signature: tuple[str, str] | None = None
+        self._distortion_correction_cache_model: DistortionCorrection | None = None
         self._stage_unhomed_display_origins: dict[str, float] = {}
         self._stage_axis_fields: dict[str, QLineEdit] = {}
         self._stage_axis_raw_values: dict[str, float] = {}
@@ -3241,14 +3245,54 @@ class Main(QMainWindow):
     def _correct_camera_frame_for_active_objective(self, qimg: QImage) -> QImage:
         objective = self.settings_manager.active_objective_configuration()
         if not bool(getattr(objective, "distortion_correction_configured", False)):
+            self._clear_distortion_correction_cache()
             return qimg
         payload = getattr(objective, "distortion_correction", {})
         try:
-            correction = correction_from_payload(payload)
+            correction = self._distortion_correction_for_objective(objective, payload)
             return apply_distortion_correction(qimg, correction)
         except ValueError as exc:
             logger.warning("Unable to apply lens distortion correction: %s", exc)
+            self._clear_distortion_correction_cache()
             return qimg
+
+    def _distortion_correction_for_objective(
+        self,
+        objective: object,
+        payload: object,
+    ) -> DistortionCorrection:
+        signature = (
+            str(getattr(objective, "name", "")),
+            self._distortion_payload_signature(payload),
+        )
+        cached_signature = getattr(
+            self,
+            "_distortion_correction_cache_signature",
+            None,
+        )
+        cached_model = getattr(self, "_distortion_correction_cache_model", None)
+        if cached_signature == signature and cached_model is not None:
+            return cached_model
+        correction = correction_from_payload(payload)
+        self._distortion_correction_cache_signature = signature
+        self._distortion_correction_cache_model = correction
+        return correction
+
+    @staticmethod
+    def _distortion_payload_signature(payload: object) -> str:
+        try:
+            return json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+        except (TypeError, ValueError):
+            return repr(payload)
+
+    def _clear_distortion_correction_cache(self) -> None:
+        self._distortion_correction_cache_signature = None
+        self._distortion_correction_cache_model = None
 
     def _latest_camera_counter(self) -> int:
         with self._latest_camera_frame_condition:

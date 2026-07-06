@@ -161,7 +161,6 @@ class StageControllerStatusIOMixin:
             status.display_position = status.work_position
         else:
             status.display_position = status.position
-        self._last_stage_state = status.state
         self._last_status_timestamp = time.monotonic()
         self._controller_state_stale = False
         self._update_cached_positions(status)

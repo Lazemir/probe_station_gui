@@ -1004,14 +1004,18 @@ class StageController(
             )
 
     def _update_cached_positions(self, status: _Status) -> None:
+        previous_state = self._last_stage_state
+        self._last_stage_state = status.state
         if status.coordinate_system:
             self._active_work_coordinate_system = status.coordinate_system
         if status.position is not None:
             self._last_machine_position = tuple(float(v) for v in status.position)
         if status.display_position is not None:
+            previous_position = self._last_stage_position
             coords = tuple(float(v) for v in status.display_position)
             self._last_stage_position = coords
-            self.stage_position_changed.emit(coords)
+            if previous_position != coords or previous_state != status.state:
+                self.stage_position_changed.emit(coords)
         if (
             status.coordinate_system
             and status.work_offset is not None

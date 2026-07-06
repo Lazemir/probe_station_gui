@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import main as main_module
 from main import Main
 from probe_station_gui.settings.manager import Settings
@@ -172,3 +174,39 @@ def test_lens_distortion_finished_saves_payload_and_resets_click_calibration() -
     assert refresh_calls == ["refresh"]
     assert dialog.running == [False]
     assert statuses == [("done", 10000)]
+
+
+def test_camera_frame_distortion_correction_reuses_compiled_payload(
+    monkeypatch,
+) -> None:
+    window = Main.__new__(Main)
+    payload = {"model_version": 1, "frame_size": [640, 480]}
+    objective = SimpleNamespace(
+        name="X50",
+        distortion_correction_configured=True,
+        distortion_correction=payload,
+    )
+    window.settings_manager = SimpleNamespace(
+        active_objective_configuration=lambda: objective
+    )
+    compiled: list[object] = []
+    applied: list[object] = []
+
+    def compile_payload(raw_payload: object) -> object:
+        compiled.append(raw_payload)
+        return object()
+
+    def apply_correction(frame: object, correction: object) -> object:
+        applied.append(correction)
+        return frame
+
+    monkeypatch.setattr(main_module, "correction_from_payload", compile_payload)
+    monkeypatch.setattr(main_module, "apply_distortion_correction", apply_correction)
+
+    frame = object()
+    assert Main._correct_camera_frame_for_active_objective(window, frame) is frame
+    assert Main._correct_camera_frame_for_active_objective(window, frame) is frame
+
+    assert compiled == [payload]
+    assert len(applied) == 2
+    assert applied[0] is applied[1]

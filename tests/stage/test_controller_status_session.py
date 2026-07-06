@@ -221,6 +221,64 @@ class StageControllerStatusRefreshTest(unittest.TestCase):
         self.assertEqual(positions, [(0.0, 0.0, 3.84, 2.967, 0.0)])
         self.assertEqual(serial_connection.writes, [b"?\n"])
 
+    def test_cached_position_update_does_not_emit_duplicate_positions(self) -> None:
+        controller = StageController()
+        positions = []
+        controller.stage_position_changed = types.SimpleNamespace(
+            emit=lambda position: positions.append(position)
+        )
+        status = types.SimpleNamespace(
+            state="Idle",
+            position=(1.0, 2.0, 3.0, 4.0),
+            display_position=(1.0, 2.0, 3.0, 4.0),
+            coordinate_system=None,
+            work_offset=None,
+        )
+
+        try:
+            controller._update_cached_positions(status)
+            controller._update_cached_positions(status)
+        finally:
+            controller.shutdown()
+
+        self.assertEqual(controller._last_stage_position, (1.0, 2.0, 3.0, 4.0))
+        self.assertEqual(positions, [(1.0, 2.0, 3.0, 4.0)])
+
+    def test_cached_position_update_emits_when_state_changes_at_same_position(self) -> None:
+        controller = StageController()
+        positions = []
+        controller.stage_position_changed = types.SimpleNamespace(
+            emit=lambda position: positions.append(position)
+        )
+        running = types.SimpleNamespace(
+            state="Run",
+            position=(1.0, 2.0, 3.0, 4.0),
+            display_position=(1.0, 2.0, 3.0, 4.0),
+            coordinate_system=None,
+            work_offset=None,
+        )
+        idle = types.SimpleNamespace(
+            state="Idle",
+            position=(1.0, 2.0, 3.0, 4.0),
+            display_position=(1.0, 2.0, 3.0, 4.0),
+            coordinate_system=None,
+            work_offset=None,
+        )
+
+        try:
+            controller._update_cached_positions(running)
+            controller._update_cached_positions(idle)
+        finally:
+            controller.shutdown()
+
+        self.assertEqual(
+            positions,
+            [
+                (1.0, 2.0, 3.0, 4.0),
+                (1.0, 2.0, 3.0, 4.0),
+            ],
+        )
+
 
 class StageControllerStartupSyncTest(unittest.TestCase):
     def test_startup_sync_keeps_config_io_on_captured_serial(self) -> None:

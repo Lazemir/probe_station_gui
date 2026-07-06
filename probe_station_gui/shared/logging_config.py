@@ -4,16 +4,22 @@ from __future__ import annotations
 
 import atexit
 import logging
+import os
 import queue
 import re
-from logging.handlers import QueueHandler, QueueListener
+from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 from pathlib import Path
 
 _HANDLER_FLAG = "_probe_station_gui_managed"
 _FILTER_FLAG = "_probe_station_gui_sensitive_filter"
+_HOT_DEBUG_FILTER_FLAG = "_probe_station_gui_hot_debug_filter"
 _LISTENER: QueueListener | None = None
 _LISTENER_HANDLER: logging.Handler | None = None
 _LISTENER_PATH: Path | None = None
+_LOG_MAX_BYTES = 10 * 1024 * 1024
+_LOG_BACKUP_COUNT = 5
+_TRACE_LOG_ENV = "PROBE_STATION_GUI_TRACE_LOGS"
+_HOT_DEBUG_PREFIXES = ("SERIAL TRACE", "TIMING")
 _NOISY_EXTERNAL_LOGGERS = (
     "pyvisa",
     "qcodes",
@@ -45,12 +51,14 @@ def configure_logging(log_path: Path, level_name: str) -> None:
         handler = _ensure_handler_destination(handler, log_path, root_logger)
 
     handler.setLevel(numeric_level)
+    _ensure_hot_debug_filter(handler)
     _ensure_sensitive_filter(handler)
     handler.setFormatter(
         logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     )
     if _LISTENER_HANDLER is not None:
         _LISTENER_HANDLER.setLevel(numeric_level)
+        _ensure_hot_debug_filter(_LISTENER_HANDLER)
         _ensure_sensitive_filter(_LISTENER_HANDLER)
         _LISTENER_HANDLER.setFormatter(logging.Formatter("%(message)s"))
 
@@ -94,6 +102,36 @@ class _SensitiveLogFilter(logging.Filter):
         return value
 
 
+class _HotDebugFilter(logging.Filter):
+    """Keep high-rate trace instrumentation out of normal DEBUG logs."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno != logging.DEBUG:
+            return True
+        if _trace_logging_enabled():
+            return True
+        message = record.msg
+        if not isinstance(message, str):
+            return True
+        return not message.startswith(_HOT_DEBUG_PREFIXES)
+
+
+def _trace_logging_enabled() -> bool:
+    raw = os.getenv(_TRACE_LOG_ENV, "")
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _ensure_hot_debug_filter(handler: logging.Handler) -> None:
+    """Attach the hot-debug suppressor once to a managed handler."""
+
+    for existing in handler.filters:
+        if getattr(existing, _HOT_DEBUG_FILTER_FLAG, False):
+            return
+    log_filter = _HotDebugFilter()
+    setattr(log_filter, _HOT_DEBUG_FILTER_FLAG, True)
+    handler.addFilter(log_filter)
+
+
 def _ensure_sensitive_filter(handler: logging.Handler) -> None:
     """Attach the secret-redacting filter once to the handler."""
 
@@ -122,7 +160,13 @@ def _start_listener(
 
     global _LISTENER, _LISTENER_HANDLER, _LISTENER_PATH
     _stop_listener()
-    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    file_handler = RotatingFileHandler(
+        log_path,
+        maxBytes=_LOG_MAX_BYTES,
+        backupCount=_LOG_BACKUP_COUNT,
+        encoding="utf-8",
+        delay=True,
+    )
     setattr(file_handler, _HANDLER_FLAG, True)
     listener = QueueListener(log_queue, file_handler)
     listener.start()

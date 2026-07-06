@@ -4,6 +4,7 @@ from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtGui import QPainter, QPen
 
+from probe_station_gui.camera import distortion as distortion_module
 from probe_station_gui.camera.distortion import (
     GridCalibrationFrame,
     apply_distortion_correction,
@@ -40,6 +41,33 @@ def test_apply_distortion_correction_keeps_image_size() -> None:
     assert corrected.width() == 80
     assert corrected.height() == 60
     assert corrected.format() == QImage.Format_RGB32
+
+
+def test_apply_distortion_correction_preserves_rgb888_frame_format() -> None:
+    image = QImage(80, 60, QImage.Format_RGB888)
+    image.fill(QColor("black"))
+    payload = distortion_payload_from_points(
+        frame_size=(80, 60),
+        source_points=[
+            (10.0, 10.0),
+            (70.0, 10.0),
+            (10.0, 50.0),
+            (70.0, 50.0),
+        ],
+        target_points=[
+            (12.0, 11.0),
+            (68.0, 10.0),
+            (11.0, 48.0),
+            (69.0, 49.0),
+        ],
+        grid_spacing_um=50.0,
+    )
+
+    corrected = apply_distortion_correction(image, correction_from_payload(payload))
+
+    assert corrected.width() == 80
+    assert corrected.height() == 60
+    assert corrected.format() == QImage.Format_RGB888
 
 
 def test_correction_from_payload_rejects_frame_size_mismatch() -> None:
@@ -159,6 +187,37 @@ def test_distorted_single_grid_frame_uses_axis_mapping() -> None:
     assert payload["residual_max_px"] == pytest.approx(0.0)
     correction = correction_from_payload(payload)
     assert correction.axis_source_x == pytest.approx((35.0, 70.0, 205.0, 260.0))
+
+
+def test_axis_interpolation_maps_are_reused_during_apply(monkeypatch) -> None:
+    payload = fit_distortion_from_grid_frames(
+        [
+            GridCalibrationFrame(
+                frame=_synthetic_grid_image(
+                    frame_size=(120, 90),
+                    vertical_lines=(20.0, 40.0, 80.0, 100.0),
+                    horizontal_lines=(20.0, 45.0, 75.0),
+                ),
+                stage_offset_mm=(0.0, 0.0),
+            )
+        ],
+        frame_size=(120, 90),
+    )
+    correction = correction_from_payload(payload)
+    image = QImage(120, 90, QImage.Format_RGB32)
+    image.fill(QColor("black"))
+
+    def fail_if_recomputed(*_args, **_kwargs):
+        raise AssertionError("axis maps should be precomputed")
+
+    monkeypatch.setattr(
+        distortion_module,
+        "_axis_interpolation_maps",
+        fail_if_recomputed,
+    )
+
+    apply_distortion_correction(image, correction)
+    apply_distortion_correction(image, correction)
 
 
 def _synthetic_grid_image(
