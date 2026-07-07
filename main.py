@@ -12,12 +12,13 @@ import re
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
 import sys
 from types import SimpleNamespace
-from typing import Any, TYPE_CHECKING
+from typing import Any, Sequence, TYPE_CHECKING
 
 _STARTUP_T0 = time.perf_counter()
 _STARTUP_LAST_ELAPSED_MS = 0.0
@@ -304,6 +305,7 @@ from probe_station_gui.camera.imaging import (
     apply_self_flat_field_correction,
     build_median_flat_field_profile,
     objective_scale_calibration,
+    refine_scan_scale_from_tile_overlaps,
     save_microscope_image,
     stitch_scan_tiles,
     utc_timestamp,
@@ -313,7 +315,8 @@ from probe_station_gui.camera.distortion import (
     GridCalibrationFrame,
     apply_distortion_correction,
     correction_from_payload,
-    fit_distortion_from_grid_frames,
+    detect_bright_feature_bounds,
+    fit_stage_geometry_from_grid_frames,
 )
 from probe_station_gui.camera import microscope_scan
 from probe_station_gui.settings.manager import (
@@ -321,7 +324,10 @@ from probe_station_gui.settings.manager import (
     SettingsManager,
     ordered_objective_names,
 )
-from probe_station_gui.settings.objective_config import normalize_objective_name
+from probe_station_gui.settings.objective_config import (
+    normalize_objective_name,
+    parse_pixels_to_mm_matrix,
+)
 from probe_station_gui.notifications.telegram import (
     TelegramBotCommandService,
     TelegramBotRequest,
@@ -365,6 +371,14 @@ logger = logging.getLogger(__name__)
 
 APP_ICON_RESOURCE = "assets/app_icon.ico"
 WINDOWS_APP_USER_MODEL_ID = "ProbeStationGUI.ProbeStationGUI"
+
+
+@dataclass(frozen=True)
+class _MicroscopeScanCapturedFrame:
+    tile: MicroscopeScanTile
+    frame: QImage
+    captured_at: str
+    actual_stage_position: tuple[float, ...] | None
 
 
 def _application_icon() -> QIcon:
@@ -476,8 +490,13 @@ class Main(QMainWindow):
     MICROSCOPE_AREA_SCAN_DEFAULT_ROWS = 3
     MICROSCOPE_AREA_SCAN_DEFAULT_COLUMNS = 3
     MICROSCOPE_AREA_SCAN_MAX_TILES = 121
-    MICROSCOPE_AREA_SCAN_DEFAULT_OVERLAP_FRACTION = 0.10
+    MICROSCOPE_AREA_SCAN_DEFAULT_OVERLAP_FRACTION = 0.25
     MICROSCOPE_AREA_SCAN_DEFAULT_SETTLE_S = 0.2
+    MICROSCOPE_AREA_SCAN_DEFAULT_TILE_APPROACH_MM = 0.010
+    MICROSCOPE_AREA_SCAN_MAX_TILE_APPROACH_MM = 0.200
+    MICROSCOPE_AREA_SCAN_STITCH_DEBUG_STRUCTURE_MM = 1.0
+    MICROSCOPE_AREA_SCAN_STITCH_DEBUG_PLACEMENT_FRACTION = 1.0
+    MICROSCOPE_AREA_SCAN_STITCH_DEBUG_OVERLAP_FRACTION = 0.25
     MICROSCOPE_SCAN_CAMERA_SETTINGS_TIMEOUT_S = 5.0
     CONTACT_SEEK_STEP_MM = (
         needle_calibration_ui.manual_contact_seek.DEFAULT_MANUAL_CONTACT_SEEK_STEP_MM
@@ -496,19 +515,16 @@ class Main(QMainWindow):
     SAMPLE_UNLOAD_X_MM = sample_handling.SAMPLE_UNLOAD_X_MM
     SAMPLE_UNLOAD_Y_MM = sample_handling.SAMPLE_UNLOAD_Y_MM
     LENS_DISTORTION_GRID_STEP_MM = 0.05
+    LENS_DISTORTION_GRID_CELL_COUNT = 4
+    LENS_DISTORTION_CAPTURE_GRID_SIZE = 5
+    LENS_DISTORTION_FOV_FRACTION = 0.35
+    LENS_DISTORTION_EDGE_MARGIN_FRACTION = 0.85
+    LENS_DISTORTION_FEATURE_EDGE_MARGIN_FRACTION = 0.02
+    LENS_DISTORTION_MIN_CAPTURE_SHIFT_PX = 24.0
+    LENS_DISTORTION_MAX_RESIDUAL_MEAN_PX = 3.0
+    LENS_DISTORTION_MAX_RESIDUAL_MAX_PX = 12.0
     LENS_DISTORTION_CAPTURE_SETTLE_S = 0.12
     LENS_DISTORTION_CAMERA_TIMEOUT_S = 2.0
-    LENS_DISTORTION_CAPTURE_OFFSETS_MM = (
-        (0.0, 0.0),
-        (-LENS_DISTORTION_GRID_STEP_MM, -LENS_DISTORTION_GRID_STEP_MM),
-        (0.0, -LENS_DISTORTION_GRID_STEP_MM),
-        (LENS_DISTORTION_GRID_STEP_MM, -LENS_DISTORTION_GRID_STEP_MM),
-        (-LENS_DISTORTION_GRID_STEP_MM, 0.0),
-        (LENS_DISTORTION_GRID_STEP_MM, 0.0),
-        (-LENS_DISTORTION_GRID_STEP_MM, LENS_DISTORTION_GRID_STEP_MM),
-        (0.0, LENS_DISTORTION_GRID_STEP_MM),
-        (LENS_DISTORTION_GRID_STEP_MM, LENS_DISTORTION_GRID_STEP_MM),
-    )
 
     def __init__(self) -> None:
         _startup_trace("Main.__init__ entered")
@@ -1248,6 +1264,7 @@ class Main(QMainWindow):
             route_session_seek=self._api_route_session_seek,
             route_session_artifact=self._api_route_session_artifact,
             lens_distortion_calibration=self._api_lens_distortion_calibration,
+            click_to_move_calibration=self._api_click_to_move_calibration,
             microscope_area_scan=self._api_microscope_area_scan,
         )
 
@@ -2699,6 +2716,52 @@ class Main(QMainWindow):
             "message": "Lens distortion calibration started.",
         }
 
+    def _api_click_to_move_calibration(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        force = bool(payload.get("force", False))
+        try:
+            dx_px = float(payload.get("dx_px", 0.0))
+            dy_px = float(payload.get("dy_px", 0.0))
+        except (TypeError, ValueError):
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": "dx_px and dy_px must be numeric.",
+            }
+        if not math.isfinite(dx_px) or not math.isfinite(dy_px):
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": "dx_px and dy_px must be finite.",
+            }
+        if not self._stage_serial_ready():
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Connect the stage controller before calibration.",
+            }
+        if self.stage_controller.is_busy():
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Stage is busy; click-to-move calibration not started.",
+            }
+        if force:
+            self.stage_controller.reset_calibration("Click-to-move calibration reset.")
+        if not self._start_click_to_move(dx_px, dy_px):
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Click-to-move calibration not started.",
+            }
+        return {
+            "accepted": True,
+            "status_code": 202,
+            "message": "Click-to-move calibration started.",
+        }
+
     def _api_microscope_area_scan(self, payload: dict[str, Any]) -> dict[str, Any]:
         if self._microscope_scan_running():
             return {
@@ -2740,22 +2803,49 @@ class Main(QMainWindow):
                 "message": "Unable to read X/Y stage position.",
             }
         try:
-            rows = self._microscope_area_scan_count(
-                payload.get("rows", self.MICROSCOPE_AREA_SCAN_DEFAULT_ROWS),
-                "rows",
-            )
-            columns = self._microscope_area_scan_count(
-                payload.get("columns", self.MICROSCOPE_AREA_SCAN_DEFAULT_COLUMNS),
-                "columns",
-            )
-            if rows * columns > self.MICROSCOPE_AREA_SCAN_MAX_TILES:
-                raise ValueError(
-                    f"Area scan is too large; maximum is {self.MICROSCOPE_AREA_SCAN_MAX_TILES} tiles."
+            scan_pattern = self._microscope_area_scan_pattern(payload)
+            if scan_pattern == "stitch_debug":
+                rows = 3
+                columns = 3
+                overlap_default = self.MICROSCOPE_AREA_SCAN_STITCH_DEBUG_OVERLAP_FRACTION
+                structure_size_mm = self._microscope_area_scan_float(
+                    payload.get(
+                        "structure_size_mm",
+                        self.MICROSCOPE_AREA_SCAN_STITCH_DEBUG_STRUCTURE_MM,
+                    ),
+                    "structure_size_mm",
+                    minimum=0.0,
+                    maximum=100.0,
                 )
+                placement_fraction = self._microscope_area_scan_float(
+                    payload.get(
+                        "placement_fraction",
+                        self.MICROSCOPE_AREA_SCAN_STITCH_DEBUG_PLACEMENT_FRACTION,
+                    ),
+                    "placement_fraction",
+                    minimum=0.0,
+                    maximum=1.0,
+                )
+            else:
+                overlap_default = self.MICROSCOPE_AREA_SCAN_DEFAULT_OVERLAP_FRACTION
+                rows = self._microscope_area_scan_count(
+                    payload.get("rows", self.MICROSCOPE_AREA_SCAN_DEFAULT_ROWS),
+                    "rows",
+                )
+                columns = self._microscope_area_scan_count(
+                    payload.get("columns", self.MICROSCOPE_AREA_SCAN_DEFAULT_COLUMNS),
+                    "columns",
+                )
+                if rows * columns > self.MICROSCOPE_AREA_SCAN_MAX_TILES:
+                    raise ValueError(
+                        f"Area scan is too large; maximum is {self.MICROSCOPE_AREA_SCAN_MAX_TILES} tiles."
+                    )
+                structure_size_mm = None
+                placement_fraction = None
             overlap_fraction = self._microscope_area_scan_float(
                 payload.get(
                     "overlap_fraction",
-                    self.MICROSCOPE_AREA_SCAN_DEFAULT_OVERLAP_FRACTION,
+                    overlap_default,
                 ),
                 "overlap_fraction",
                 minimum=0.0,
@@ -2766,6 +2856,18 @@ class Main(QMainWindow):
                 "settle_s",
                 minimum=0.0,
                 maximum=10.0,
+            )
+            tile_approach_mm = self._microscope_area_scan_float(
+                payload.get(
+                    "tile_approach_mm",
+                    payload.get(
+                        "approach_mm",
+                        self.MICROSCOPE_AREA_SCAN_DEFAULT_TILE_APPROACH_MM,
+                    ),
+                ),
+                "tile_approach_mm",
+                minimum=0.0,
+                maximum=self.MICROSCOPE_AREA_SCAN_MAX_TILE_APPROACH_MM,
             )
             flat_field_options = microscope_scan.flat_field_options_from_payload(
                 payload,
@@ -2788,7 +2890,29 @@ class Main(QMainWindow):
         center_stage_xy = (float(latest_position[0]), float(latest_position[1]))
         frame_size_px = (int(frame.width()), int(frame.height()))
         pixels_to_mm = getattr(scale, "pixels_to_mm", None)
-        if pixels_to_mm is not None:
+        if scan_pattern == "stitch_debug":
+            if pixels_to_mm is None:
+                return {
+                    "accepted": False,
+                    "status_code": 409,
+                    "message": "Stitch debug scan requires full pixel-to-stage calibration.",
+                }
+            try:
+                plan = microscope_scan.stitch_debug_scan_plan_from_pixel_matrix(
+                    center_stage_xy=center_stage_xy,
+                    frame_size_px=frame_size_px,
+                    pixels_to_mm=pixels_to_mm,
+                    structure_size_mm=float(structure_size_mm),
+                    placement_fraction=float(placement_fraction),
+                    overlap_fraction=float(overlap_fraction),
+                )
+            except ValueError as exc:
+                return {
+                    "accepted": False,
+                    "status_code": 400,
+                    "message": str(exc),
+                }
+        elif pixels_to_mm is not None:
             plan = microscope_scan.centered_area_scan_plan_from_pixel_matrix(
                 center_stage_xy=center_stage_xy,
                 frame_size_px=frame_size_px,
@@ -2813,6 +2937,11 @@ class Main(QMainWindow):
             output_dir=output_dir,
             overlap_fraction=overlap_fraction,
             settle_s=settle_s,
+            tile_approach_mm=tile_approach_mm,
+            scan_pattern=scan_pattern,
+            refine_scale_from_overlaps=(scan_pattern != "stitch_debug"),
+            structure_size_mm=structure_size_mm,
+            placement_fraction=placement_fraction,
             flat_field_options=flat_field_options,
             camera_lock_settings=camera_lock_settings,
         )
@@ -2828,11 +2957,22 @@ class Main(QMainWindow):
         return {
             "accepted": True,
             "status_code": 202,
-            "message": f"Microscope area scan started: {rows * columns} tiles.",
+            "message": f"Microscope area scan started: {len(plan.tiles)} tiles.",
             "output_dir": output_dir,
             "rows": rows,
             "columns": columns,
+            "pattern": scan_pattern,
         }
+
+    @staticmethod
+    def _microscope_area_scan_pattern(payload: dict[str, Any]) -> str:
+        raw = payload.get("pattern", payload.get("scan_pattern", "grid"))
+        text = str(raw or "grid").strip().lower().replace("-", "_")
+        if text in {"grid", "area", "area_scan", "centered_area"}:
+            return "grid"
+        if text in {"stitch_debug", "stitching_debug", "debug_stitch"}:
+            return "stitch_debug"
+        raise ValueError("pattern must be 'grid' or 'stitch_debug'.")
 
     @classmethod
     def _microscope_area_scan_count(cls, value: object, label: str) -> int:
@@ -3365,10 +3505,18 @@ class Main(QMainWindow):
         stage_xy: tuple[float, float] | None = None,
     ) -> tuple[float, ...] | None:
         latest = self.stage_controller.latest_stage_position()
+        if stage_xy is not None:
+            x_mm = float(stage_xy[0])
+            y_mm = float(stage_xy[1])
+            if latest is not None:
+                values = list(latest)
+                if len(values) >= 2:
+                    values[0] = x_mm
+                    values[1] = y_mm
+                    return tuple(float(value) for value in values)
+            return (x_mm, y_mm)
         if latest is not None:
             return latest
-        if stage_xy is not None:
-            return (float(stage_xy[0]), float(stage_xy[1]))
         return None
 
     def _on_view_hover(
@@ -4016,20 +4164,22 @@ class Main(QMainWindow):
         self._persist_objective_plan(plan)
 
     def _refresh_click_calibration_ui(self) -> None:
-        if self._click_calibration_action is not None:
-            self._click_calibration_action.setText("Click-to-Move Calibration")
-        if self._click_calibration_dialog is not None:
-            self._click_calibration_dialog.set_objectives(
+        click_action = getattr(self, "_click_calibration_action", None)
+        if click_action is not None:
+            click_action.setText("Click-to-Move Calibration")
+        click_dialog = getattr(self, "_click_calibration_dialog", None)
+        if click_dialog is not None:
+            click_dialog.set_objectives(
                 self.settings_manager.objectives_configuration()
             )
 
     def _refresh_lens_distortion_ui(self) -> None:
-        if self._lens_distortion_calibration_action is not None:
-            self._lens_distortion_calibration_action.setText(
-                "Lens Distortion Calibration"
-            )
-        if self._lens_distortion_dialog is not None:
-            self._lens_distortion_dialog.set_objectives(
+        lens_action = getattr(self, "_lens_distortion_calibration_action", None)
+        if lens_action is not None:
+            lens_action.setText("Lens Distortion Calibration")
+        lens_dialog = getattr(self, "_lens_distortion_dialog", None)
+        if lens_dialog is not None:
+            lens_dialog.set_objectives(
                 self.settings_manager.objectives_configuration()
             )
 
@@ -4057,7 +4207,7 @@ class Main(QMainWindow):
             return
 
         start_xy = (float(position[0]), float(position[1]))
-        linear_feedrate = self._current_linear_feedrate()
+        linear_feedrate = self._coordinate_feedrate_for_axes(("X", "Y"))
         needle_feedrate = self._current_needle_feedrate()
         thread = threading.Thread(
             target=self._run_lens_distortion_calibration,
@@ -4106,7 +4256,7 @@ class Main(QMainWindow):
         message = "Lens distortion calibration stopped."
         reserved = False
         feedrate = (
-            self._current_linear_feedrate()
+            self._coordinate_feedrate_for_axes(("X", "Y"))
             if linear_feedrate is None
             else float(linear_feedrate)
         )
@@ -4123,12 +4273,21 @@ class Main(QMainWindow):
                 "raise",
                 needle_feedrate_value,
             )
+            scale = self._active_microscope_scale()
+            initial_frame, _counter = self._wait_for_raw_camera_frame(
+                timeout_s=self.LENS_DISTORTION_CAMERA_TIMEOUT_S,
+            )
+            if initial_frame is None:
+                raise RuntimeError("Camera frame timeout.")
+            frame_size = self._lens_distortion_frame_size(initial_frame)
+            capture_offsets = self._lens_distortion_capture_offsets_mm(
+                frame_size,
+                scale,
+                initial_frame=initial_frame,
+            )
             frames: list[GridCalibrationFrame] = []
-            frame_size: tuple[int, int] | None = None
-            total = len(self.LENS_DISTORTION_CAPTURE_OFFSETS_MM)
-            for index, offset in enumerate(
-                self.LENS_DISTORTION_CAPTURE_OFFSETS_MM, start=1
-            ):
+            total = len(capture_offsets)
+            for index, offset in enumerate(capture_offsets, start=1):
                 dx_mm, dy_mm = offset
                 self._show_status(
                     f"Lens distortion calibration: capture {index}/{total}."
@@ -4146,15 +4305,18 @@ class Main(QMainWindow):
                 )
                 if frame is None:
                     raise RuntimeError("Camera frame timeout.")
-                if frame_size is None:
-                    frame_size = self._lens_distortion_frame_size(frame)
+                current_frame_size = self._lens_distortion_frame_size(frame)
+                if current_frame_size != frame_size:
+                    raise RuntimeError("Camera frame size changed during calibration.")
                 frames.append(GridCalibrationFrame(frame, (dx_mm, dy_mm)))
 
-            if frame_size is None:
-                raise RuntimeError("Camera frame is unavailable.")
-            payload = fit_distortion_from_grid_frames(frames, frame_size=frame_size)
+            payload = self._fit_lens_distortion_payload(
+                frames,
+                frame_size=frame_size,
+                scale=scale,
+            )
             success = True
-            message = "Lens distortion calibration saved. Recalibrate click-to-move."
+            message = "Lens distortion calibration saved."
         except Exception as exc:
             logger.exception("Lens distortion calibration failed")
             message = f"Lens distortion calibration failed: {exc}"
@@ -4184,6 +4346,49 @@ class Main(QMainWindow):
         self.lens_distortion_calibration_finished.emit(success, message, payload)
 
     @staticmethod
+    def _fit_lens_distortion_payload(
+        frames: Sequence[GridCalibrationFrame],
+        *,
+        frame_size: tuple[int, int],
+        scale: object,
+    ) -> dict[str, object]:
+        pixels_to_mm = getattr(scale, "pixels_to_mm", None)
+        if pixels_to_mm is None:
+            raise RuntimeError(
+                "Lens distortion calibration requires click-to-move calibration."
+            )
+        fit = fit_stage_geometry_from_grid_frames(
+            frames,
+            frame_size=frame_size,
+            pixels_to_mm=pixels_to_mm,
+        )
+        payload = fit.to_payload()
+        Main._validate_lens_distortion_fit_payload(payload)
+        return payload
+
+    @staticmethod
+    def _validate_lens_distortion_fit_payload(payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        if str(payload.get("model_type") or "") != "stage_geometry":
+            return
+        try:
+            residual_mean_px = float(payload.get("residual_mean_px"))
+            residual_max_px = float(payload.get("residual_max_px"))
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(residual_mean_px) or not math.isfinite(residual_max_px):
+            raise RuntimeError("Lens distortion calibration residual is not finite.")
+        if (
+            residual_mean_px > float(Main.LENS_DISTORTION_MAX_RESIDUAL_MEAN_PX)
+            or residual_max_px > float(Main.LENS_DISTORTION_MAX_RESIDUAL_MAX_PX)
+        ):
+            raise RuntimeError(
+                "Lens distortion calibration residual is too high "
+                f"({residual_mean_px:.2f} px mean, {residual_max_px:.2f} px max)."
+            )
+
+    @staticmethod
     def _lens_distortion_frame_size(frame: object) -> tuple[int, int]:
         try:
             width = int(frame.width())
@@ -4193,6 +4398,183 @@ class Main(QMainWindow):
         if width <= 0 or height <= 0:
             raise RuntimeError("Camera frame size is unavailable.")
         return width, height
+
+    @classmethod
+    def _lens_distortion_capture_offsets_mm(
+        cls,
+        frame_size: tuple[int, int],
+        scale: object,
+        *,
+        initial_frame: object | None = None,
+    ) -> tuple[tuple[float, float], ...]:
+        if initial_frame is not None:
+            return cls._lens_distortion_capture_offsets_from_feature_bounds(
+                frame_size,
+                scale,
+                initial_frame,
+            )
+        extent_x, extent_y = cls._lens_distortion_capture_step_mm(frame_size, scale)
+        x_offsets = cls._lens_distortion_axis_offsets_mm(extent_x)
+        y_offsets = cls._lens_distortion_axis_offsets_mm(extent_y)
+        offsets: list[tuple[float, float]] = [(0.0, 0.0)]
+        for row_index, y_offset in enumerate(y_offsets):
+            row_x_offsets = x_offsets if row_index % 2 == 0 else tuple(reversed(x_offsets))
+            for x_offset in row_x_offsets:
+                if abs(x_offset) <= 1e-12 and abs(y_offset) <= 1e-12:
+                    continue
+                offsets.append((float(x_offset), float(y_offset)))
+        return tuple(offsets)
+
+    @classmethod
+    def _lens_distortion_capture_offsets_from_feature_bounds(
+        cls,
+        frame_size: tuple[int, int],
+        scale: object,
+        initial_frame: object,
+    ) -> tuple[tuple[float, float], ...]:
+        width_px, height_px = frame_size
+        bounds = detect_bright_feature_bounds(initial_frame)
+        if bounds is None:
+            raise RuntimeError("Lens distortion calibration structure was not detected.")
+        left = float(bounds.left)
+        top = float(bounds.top)
+        right = float(bounds.right)
+        bottom = float(bounds.bottom)
+        if (
+            not math.isfinite(left)
+            or not math.isfinite(top)
+            or not math.isfinite(right)
+            or not math.isfinite(bottom)
+            or left < 0.0
+            or top < 0.0
+            or right > float(width_px)
+            or bottom > float(height_px)
+            or right <= left
+            or bottom <= top
+        ):
+            raise RuntimeError("Lens distortion calibration structure bounds are invalid.")
+        edge_margin_px = max(
+            8.0,
+            min(float(width_px), float(height_px))
+            * float(cls.LENS_DISTORTION_FEATURE_EDGE_MARGIN_FRACTION),
+        )
+        safe_x_px = min(
+            left - edge_margin_px,
+            float(width_px) - right - edge_margin_px,
+        )
+        safe_y_px = min(
+            top - edge_margin_px,
+            float(height_px) - bottom - edge_margin_px,
+        )
+        max_shift_x_px = min(
+            safe_x_px * float(cls.LENS_DISTORTION_EDGE_MARGIN_FRACTION),
+            float(width_px) * float(cls.LENS_DISTORTION_FOV_FRACTION),
+        )
+        max_shift_y_px = min(
+            safe_y_px * float(cls.LENS_DISTORTION_EDGE_MARGIN_FRACTION),
+            float(height_px) * float(cls.LENS_DISTORTION_FOV_FRACTION),
+        )
+        min_shift = float(cls.LENS_DISTORTION_MIN_CAPTURE_SHIFT_PX)
+        if max_shift_x_px < min_shift or max_shift_y_px < min_shift:
+            raise RuntimeError(
+                "Lens distortion calibration structure is too close to the frame edge."
+            )
+        x_shifts = cls._lens_distortion_axis_offsets_mm(max_shift_x_px)
+        y_shifts = cls._lens_distortion_axis_offsets_mm(max_shift_y_px)
+        offsets: list[tuple[float, float]] = [(0.0, 0.0)]
+        for row_index, y_shift_px in enumerate(y_shifts):
+            row_x_shifts = (
+                x_shifts if row_index % 2 == 0 else tuple(reversed(x_shifts))
+            )
+            for x_shift_px in row_x_shifts:
+                if abs(x_shift_px) <= 1e-12 and abs(y_shift_px) <= 1e-12:
+                    continue
+                dx_mm, dy_mm = cls._lens_distortion_pixel_shift_to_stage_offset_mm(
+                    scale,
+                    x_shift_px,
+                    y_shift_px,
+                )
+                offsets.append((float(dx_mm), float(dy_mm)))
+        return tuple(offsets)
+
+    @staticmethod
+    def _lens_distortion_pixel_shift_to_stage_offset_mm(
+        scale: object,
+        shift_x_px: float,
+        shift_y_px: float,
+    ) -> tuple[float, float]:
+        pixel_delta = (float(shift_x_px), -float(shift_y_px))
+        converter = getattr(scale, "pixel_delta_to_stage_mm", None)
+        if callable(converter):
+            dx_mm, dy_mm = converter(*pixel_delta)
+            return (float(dx_mm), float(dy_mm))
+        matrix = parse_pixels_to_mm_matrix(getattr(scale, "pixels_to_mm", None))
+        if matrix:
+            return (
+                float(matrix[0][0]) * pixel_delta[0]
+                + float(matrix[0][1]) * pixel_delta[1],
+                float(matrix[1][0]) * pixel_delta[0]
+                + float(matrix[1][1]) * pixel_delta[1],
+            )
+        try:
+            pixel_size_x_mm = float(scale.pixel_size_x_mm)
+            pixel_size_y_mm = float(scale.pixel_size_y_mm)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "Lens distortion calibration requires click-to-move calibration."
+            ) from exc
+        return (pixel_delta[0] * pixel_size_x_mm, -pixel_delta[1] * pixel_size_y_mm)
+
+    @classmethod
+    def _lens_distortion_axis_offsets_mm(cls, extent_mm: float) -> tuple[float, ...]:
+        count = max(3, int(cls.LENS_DISTORTION_CAPTURE_GRID_SIZE))
+        if count % 2 == 0:
+            count += 1
+        extent = abs(float(extent_mm))
+        if not math.isfinite(extent) or extent <= 0.0:
+            return (0.0,)
+        midpoint = count // 2
+        if midpoint <= 0:
+            return (0.0,)
+        step = extent / float(midpoint)
+        return tuple((index - midpoint) * step for index in range(count))
+
+    @classmethod
+    def _lens_distortion_capture_step_mm(
+        cls,
+        frame_size: tuple[int, int],
+        scale: object,
+    ) -> tuple[float, float]:
+        width_px, height_px = frame_size
+        try:
+            fov_x_mm = abs(float(width_px) * float(scale.pixel_size_x_mm))
+            fov_y_mm = abs(float(height_px) * float(scale.pixel_size_y_mm))
+        except (AttributeError, TypeError, ValueError):
+            return (cls.LENS_DISTORTION_GRID_STEP_MM, cls.LENS_DISTORTION_GRID_STEP_MM)
+        return (
+            cls._lens_distortion_axis_step_mm(fov_x_mm),
+            cls._lens_distortion_axis_step_mm(fov_y_mm),
+        )
+
+    @classmethod
+    def _lens_distortion_axis_step_mm(cls, fov_mm: float) -> float:
+        base = float(cls.LENS_DISTORTION_GRID_STEP_MM)
+        try:
+            fov = float(fov_mm)
+        except (TypeError, ValueError):
+            return base
+        if not math.isfinite(fov) or fov <= 0.0:
+            return base
+        grid_span = base * float(cls.LENS_DISTORTION_GRID_CELL_COUNT)
+        max_center_offset = (fov - grid_span) * 0.5
+        safe_edge_step = max_center_offset * float(cls.LENS_DISTORTION_EDGE_MARGIN_FRACTION)
+        if safe_edge_step <= 0.0:
+            return 0.0
+        fov_step = fov * float(cls.LENS_DISTORTION_FOV_FRACTION)
+        candidate = min(fov_step, safe_edge_step)
+        if safe_edge_step >= base:
+            candidate = max(base, candidate)
+        return min(candidate, safe_edge_step)
 
     def _on_lens_distortion_calibration_finished(
         self,
@@ -4207,11 +4589,17 @@ class Main(QMainWindow):
 
         if success:
             try:
+                click_calibration_invalidated = (
+                    self._lens_distortion_payload_invalidates_click_calibration(payload)
+                )
                 self._save_active_objective_distortion(payload)
             except Exception as exc:
                 logger.exception("Unable to save lens distortion correction")
                 success = False
                 message = f"Lens distortion calibration save failed: {exc}"
+            else:
+                if click_calibration_invalidated:
+                    message = self._append_click_recalibration_message(message)
 
         if self._lens_distortion_dialog is not None:
             self._lens_distortion_dialog.set_running(False)
@@ -4235,25 +4623,78 @@ class Main(QMainWindow):
         elif isinstance(payload, dict):
             updated.distortion_correction = dict(payload)
             updated.distortion_correction_configured = True
+            calibrated_matrix = self._calibrated_pixels_to_mm_from_distortion_payload(
+                payload
+            )
+            if calibrated_matrix:
+                updated.pixels_to_mm = calibrated_matrix
+                updated.xy_calibration_configured = True
+            else:
+                updated.pixels_to_mm = []
+                updated.xy_calibration_configured = False
         else:
             raise RuntimeError("Invalid lens correction payload.")
-        updated.pixels_to_mm = []
-        updated.xy_calibration_configured = False
         objectives.objectives[active_name] = updated
         self.settings_manager.replace(settings)
         self.settings_manager.save()
         self._apply_objective_settings()
         self._refresh_objective_calibration_ui()
 
+    @staticmethod
+    def _calibrated_pixels_to_mm_from_distortion_payload(
+        payload: dict[str, object],
+    ) -> list[list[float]]:
+        return parse_pixels_to_mm_matrix(payload.get("calibrated_pixels_to_mm"))
+
+    @staticmethod
+    def _lens_distortion_payload_invalidates_click_calibration(payload: object) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        return not bool(Main._calibrated_pixels_to_mm_from_distortion_payload(payload))
+
+    @staticmethod
+    def _append_click_recalibration_message(message: str) -> str:
+        suffix = "Recalibrate click-to-move."
+        text = str(message)
+        if suffix in text:
+            return text
+        if not text:
+            return suffix
+        return f"{text} {suffix}"
+
     def _on_objective_calibration_updated(
         self, objective_name: str, pixels_to_mm: object
     ) -> None:
+        pixels_to_mm = self._objective_pixels_to_mm_for_calibration_update(
+            objective_name,
+            pixels_to_mm,
+        )
         plan = alignment.update_objective_calibration(
             self.settings_manager.settings, objective_name, pixels_to_mm
         )
         if plan.settings is None:
             return
         self._persist_objective_plan(plan)
+
+    def _objective_pixels_to_mm_for_calibration_update(
+        self,
+        objective_name: str,
+        pixels_to_mm: object,
+    ) -> object:
+        if not parse_pixels_to_mm_matrix(pixels_to_mm):
+            return pixels_to_mm
+        settings = self.settings_manager.settings
+        name = normalize_objective_name(objective_name)
+        profile = settings.objectives.objectives.get(name)
+        if profile is None or not bool(
+            getattr(profile, "distortion_correction_configured", False)
+        ):
+            return pixels_to_mm
+        payload = getattr(profile, "distortion_correction", {})
+        if not isinstance(payload, dict):
+            return pixels_to_mm
+        calibrated = self._calibrated_pixels_to_mm_from_distortion_payload(payload)
+        return calibrated or pixels_to_mm
 
     def _on_objective_mismatch_detected(
         self,
@@ -7432,7 +7873,16 @@ class Main(QMainWindow):
             flat_field_options=flat_field_options,
             camera_lock_settings=camera_lock_settings,
         )
-        captured_frames: list[tuple[MicroscopeScanTile, QImage, str]] = []
+        scan_pattern = str(getattr(configuration, "scan_pattern", "grid") or "grid")
+        refine_scale_from_overlaps = bool(
+            getattr(configuration, "refine_scale_from_overlaps", True)
+        )
+        if scan_pattern != "grid" or not refine_scale_from_overlaps:
+            corrections["scan"] = {
+                "pattern": scan_pattern,
+                "refine_scale_from_overlaps": refine_scale_from_overlaps,
+            }
+        captured_frames: list[_MicroscopeScanCapturedFrame] = []
         camera_restore_key: str | None = None
         try:
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -7452,15 +7902,22 @@ class Main(QMainWindow):
                 self.microscope_scan_status.emit(
                     microscope_scan.tile_status(tile, len(plan.tiles))
                 )
-                self.stage_controller.run_external_move_to_xy(
-                    tile.stage_xy[0],
-                    tile.stage_xy[1],
+                self._move_to_microscope_scan_tile(
+                    tile,
+                    tile_approach_mm=float(
+                        getattr(configuration, "tile_approach_mm", 0.0)
+                    ),
                 )
                 if not self._sleep_microscope_scan_settle(configuration.settle_s):
                     message = "Microscope scan stopped by user."
                     break
                 captured_frames.append(
-                    (tile, self._capture_microscope_scan_frame(), utc_timestamp())
+                    _MicroscopeScanCapturedFrame(
+                        tile=tile,
+                        frame=self._capture_microscope_scan_frame(),
+                        captured_at=utc_timestamp(),
+                        actual_stage_position=self._microscope_scan_actual_position(),
+                    )
                 )
             else:
                 flat_field_profile = self._flat_field_profile_for_microscope_scan(
@@ -7469,48 +7926,106 @@ class Main(QMainWindow):
                 )
                 captured_tiles: list[tuple[MicroscopeScanTile, QImage]] = []
                 tile_results: list[MicroscopeCaptureResult] = []
-                for tile, frame, captured_at in captured_frames:
+                for captured in captured_frames:
                     corrected_frame = self._flat_field_microscope_scan_frame(
-                        frame,
+                        captured.frame,
                         flat_field_options,
                         flat_field_profile=flat_field_profile,
                     )
                     result = self._save_microscope_scan_tile(
-                        tile,
+                        captured.tile,
                         plan,
                         frame=corrected_frame,
-                        captured_at=captured_at,
+                        captured_at=captured.captured_at,
                         output_dir=output_dir,
                         scale=scale,
                         corrections=corrections,
+                        actual_stage_position=captured.actual_stage_position,
                     )
                     tile_results.append(result)
-                    captured_tiles.append((tile, result.raw_image))
-                mosaic = stitch_scan_tiles(
-                    plan=plan,
-                    tile_images=captured_tiles,
-                    scale=scale,
-                )
-                mosaic_result = self._save_microscope_scan_mosaic(
-                    mosaic,
-                    plan,
-                    output_dir=output_dir,
-                    scale=scale,
-                    corrections=corrections,
-                )
+                    captured_tiles.append((captured.tile, result.raw_image))
+                if refine_scale_from_overlaps:
+                    stitch_scale = refine_scan_scale_from_tile_overlaps(
+                        captured_tiles,
+                        scale,
+                    )
+                else:
+                    stitch_scale = scale
+                diagnostic_mosaic_results: dict[str, MicroscopeCaptureResult] = {}
+                if scan_pattern == "stitch_debug":
+                    raw_images_by_label = {
+                        str(getattr(tile, "label", "") or ""): image
+                        for tile, image in captured_tiles
+                    }
+                    for group in microscope_scan.stitch_debug_mosaic_groups(plan):
+                        group_plan = microscope_scan.stitch_debug_mosaic_group_plan(
+                            plan,
+                            group,
+                        )
+                        group_tile_images = [
+                            (tile, raw_images_by_label[str(getattr(tile, "label", ""))])
+                            for tile in group_plan.tiles
+                        ]
+                        group_mosaic = stitch_scan_tiles(
+                            plan=group_plan,
+                            tile_images=group_tile_images,
+                            scale=stitch_scale,
+                        )
+                        diagnostic_mosaic_results[group.name] = (
+                            self._save_microscope_scan_mosaic(
+                                group_mosaic,
+                                group_plan,
+                                output_dir=output_dir,
+                                scale=stitch_scale,
+                                corrections=corrections,
+                                filename_suffix=group.name,
+                                extra={
+                                    "stitch_debug_group": group.name,
+                                    "stitch_debug_tiles": [
+                                        str(getattr(tile, "label", "") or "")
+                                        for tile in group_plan.tiles
+                                    ],
+                                },
+                            )
+                        )
+                    mosaic_result = next(iter(diagnostic_mosaic_results.values()))
+                else:
+                    mosaic = stitch_scan_tiles(
+                        plan=plan,
+                        tile_images=captured_tiles,
+                        scale=stitch_scale,
+                    )
+                    mosaic_result = self._save_microscope_scan_mosaic(
+                        mosaic,
+                        plan,
+                        output_dir=output_dir,
+                        scale=stitch_scale,
+                        corrections=corrections,
+                    )
                 manifest_path = microscope_scan.write_manifest(
                     output_dir=output_dir,
                     plan=plan,
                     tile_results=tile_results,
                     mosaic_result=mosaic_result,
                     corrections=corrections,
+                    diagnostic_mosaics=diagnostic_mosaic_results or None,
                 )
                 success = True
-                message = microscope_scan.completion_message(
-                    tile_count=len(tile_results),
-                    mosaic_result=mosaic_result,
-                    manifest_path=manifest_path,
-                )
+                if diagnostic_mosaic_results:
+                    paths = ", ".join(
+                        f"{name} {result.image_path}"
+                        for name, result in diagnostic_mosaic_results.items()
+                    )
+                    message = (
+                        f"Microscope seam debug complete: {len(tile_results)} tiles, "
+                        f"{paths}, manifest {manifest_path}."
+                    )
+                else:
+                    message = microscope_scan.completion_message(
+                        tile_count=len(tile_results),
+                        mosaic_result=mosaic_result,
+                        manifest_path=manifest_path,
+                    )
         except Exception as exc:
             logger.exception("Microscope scan failed")
             message = f"Microscope scan failed: {exc}"
@@ -7530,6 +8045,22 @@ class Main(QMainWindow):
             self.stage_controller.finish_external_task()
             self.microscope_scan_finished.emit(success, message)
 
+    def _move_to_microscope_scan_tile(
+        self,
+        tile: MicroscopeScanTile,
+        *,
+        tile_approach_mm: float,
+    ) -> None:
+        target_x = float(tile.stage_xy[0])
+        target_y = float(tile.stage_xy[1])
+        approach = max(0.0, float(tile_approach_mm))
+        if approach > 1e-9:
+            self.stage_controller.run_external_move_to_xy(
+                target_x - approach,
+                target_y - approach,
+            )
+        self.stage_controller.run_external_move_to_xy(target_x, target_y)
+
     def _sleep_microscope_scan_settle(self, settle_s: float) -> bool:
         deadline = time.monotonic() + max(0.0, float(settle_s))
         while True:
@@ -7539,6 +8070,18 @@ class Main(QMainWindow):
             if remaining <= 0.0:
                 return True
             time.sleep(min(remaining, 0.05))
+
+    def _microscope_scan_actual_position(self) -> tuple[float, ...] | None:
+        position = self.stage_controller.latest_stage_position()
+        if position is None or len(position) < 2:
+            return None
+        try:
+            values = tuple(float(value) for value in position)
+        except (TypeError, ValueError):
+            return None
+        if not all(math.isfinite(value) for value in values[:2]):
+            return None
+        return values
 
     def _apply_microscope_scan_camera_lock(
         self,
@@ -7646,8 +8189,14 @@ class Main(QMainWindow):
         output_dir: Path,
         scale: Any,
         corrections: dict[str, object],
+        actual_stage_position: tuple[float, ...] | None = None,
     ) -> MicroscopeCaptureResult:
         objective_name, magnification = self._active_objective_metadata()
+        extra: dict[str, object] = {}
+        if corrections:
+            extra["corrections"] = corrections
+        if actual_stage_position is not None:
+            extra["actual_stage_position"] = [float(value) for value in actual_stage_position]
         save_plan = microscope_scan.tile_image_save_plan(
             output_dir=output_dir,
             scan_name=microscope_scan.scan_name_from_document(
@@ -7662,7 +8211,7 @@ class Main(QMainWindow):
             stage_position=self._stage_position_for_image_metadata(
                 stage_xy=tile.stage_xy
             ),
-            extra={"corrections": corrections} if corrections else None,
+            extra=extra or None,
         )
         return save_microscope_image(
             frame=frame,
@@ -7681,8 +8230,15 @@ class Main(QMainWindow):
         output_dir: Path,
         scale: Any,
         corrections: dict[str, object],
+        filename_suffix: str = "",
+        extra: dict[str, object] | None = None,
     ) -> MicroscopeCaptureResult:
         objective_name, magnification = self._active_objective_metadata()
+        metadata_extra: dict[str, object] = {}
+        if corrections:
+            metadata_extra["corrections"] = corrections
+        if extra:
+            metadata_extra.update(extra)
         save_plan = microscope_scan.mosaic_image_save_plan(
             output_dir=output_dir,
             scan_name=microscope_scan.scan_name_from_document(
@@ -7692,7 +8248,8 @@ class Main(QMainWindow):
             captured_at=utc_timestamp(),
             objective_name=objective_name,
             magnification=magnification,
-            extra={"corrections": corrections} if corrections else None,
+            filename_suffix=filename_suffix,
+            extra=metadata_extra or None,
         )
         return save_microscope_image(
             frame=mosaic,
@@ -7704,19 +8261,41 @@ class Main(QMainWindow):
 
     @staticmethod
     def _flat_field_profile_for_microscope_scan(
-        captured_frames: list[tuple[MicroscopeScanTile, QImage, str]],
+        captured_frames: list[_MicroscopeScanCapturedFrame],
         flat_field_options: object,
     ) -> object | None:
         if not bool(getattr(flat_field_options, "enabled", False)):
             return None
         mode = str(getattr(flat_field_options, "mode", "scan") or "scan").lower()
-        if mode != "scan":
+        if mode == "self":
             return None
-        frames = [frame for _tile, frame, _captured_at in captured_frames]
+        if mode == "scan":
+            frames = [captured.frame for captured in captured_frames]
+            source = "scan_median"
+        elif mode == "reference":
+            reference_images = tuple(
+                str(path)
+                for path in getattr(flat_field_options, "reference_images", ())
+            )
+            if not reference_images:
+                raise RuntimeError("Flat-field reference images are not configured.")
+            frames = []
+            for reference_image in reference_images:
+                image_path = Path(reference_image).expanduser()
+                image = QImage(str(image_path))
+                if image.isNull():
+                    raise RuntimeError(
+                        f"Flat-field reference image is unreadable: {image_path}"
+                    )
+                frames.append(image.convertToFormat(QImage.Format_RGB32))
+            source = "reference"
+        else:
+            raise RuntimeError(f"Unsupported flat-field mode: {mode}")
         return build_median_flat_field_profile(
             frames,
             blur_radius_px=int(getattr(flat_field_options, "blur_radius_px", 401)),
             max_gain=float(getattr(flat_field_options, "max_gain", 4.0)),
+            source=source,
         )
 
     @staticmethod
@@ -7729,7 +8308,7 @@ class Main(QMainWindow):
         if not bool(getattr(flat_field_options, "enabled", False)):
             return frame
         mode = str(getattr(flat_field_options, "mode", "scan") or "scan").lower()
-        if mode == "scan":
+        if mode in {"scan", "reference"}:
             if flat_field_profile is None:
                 raise RuntimeError("Flat-field profile is unavailable.")
             return apply_flat_field_correction(frame, flat_field_profile)

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 import main as main_module
 from main import Main
 from probe_station_gui.settings.manager import Settings
@@ -86,55 +88,286 @@ class _FakeFrame:
         return 1200
 
 
+def test_lens_distortion_capture_offsets_cover_five_by_five_grid() -> None:
+    scale = SimpleNamespace(
+        pixel_size_x_mm=0.001174,
+        pixel_size_y_mm=0.001169,
+    )
+
+    offsets = Main._lens_distortion_capture_offsets_mm((1920, 1200), scale)
+
+    assert len(offsets) == 25
+    assert offsets[0] == (0.0, 0.0)
+    assert len({round(x, 9) for x, _y in offsets}) == 5
+    assert len({round(y, 9) for _x, y in offsets}) == 5
+    max_x = max(abs(x) for x, _y in offsets)
+    max_y = max(abs(y) for _x, y in offsets)
+    assert max_x <= (1920 * scale.pixel_size_x_mm - Main.LENS_DISTORTION_GRID_STEP_MM * Main.LENS_DISTORTION_GRID_CELL_COUNT) * 0.5
+    assert max_y <= (1200 * scale.pixel_size_y_mm - Main.LENS_DISTORTION_GRID_STEP_MM * Main.LENS_DISTORTION_GRID_CELL_COUNT) * 0.5
+
+
+def test_lens_distortion_capture_offsets_clamp_to_safe_edge_margin() -> None:
+    grid_span = Main.LENS_DISTORTION_GRID_STEP_MM * Main.LENS_DISTORTION_GRID_CELL_COUNT
+    fov_mm = grid_span + Main.LENS_DISTORTION_GRID_STEP_MM * 0.5
+    scale = SimpleNamespace(
+        pixel_size_x_mm=fov_mm / 1000.0,
+        pixel_size_y_mm=fov_mm / 1000.0,
+    )
+
+    offsets = Main._lens_distortion_capture_offsets_mm((1000, 1000), scale)
+
+    max_offset = max(abs(value) for offset in offsets for value in offset)
+    safe_edge = (fov_mm - grid_span) * 0.5 * Main.LENS_DISTORTION_EDGE_MARGIN_FRACTION
+    assert max_offset <= safe_edge
+
+
+def test_lens_distortion_capture_offsets_use_detected_feature_bounds(monkeypatch) -> None:
+    scale = SimpleNamespace(
+        pixels_to_mm=((-0.001, 0.0), (0.0, -0.001)),
+        pixel_size_x_mm=0.001,
+        pixel_size_y_mm=0.001,
+    )
+    frame = _FakeFrame()
+    monkeypatch.setattr(
+        main_module,
+        "detect_bright_feature_bounds",
+        lambda _frame: SimpleNamespace(left=250.0, top=150.0, right=750.0, bottom=650.0),
+    )
+
+    offsets = Main._lens_distortion_capture_offsets_mm(
+        (1000, 800),
+        scale,
+        initial_frame=frame,
+    )
+
+    edge_margin = max(
+        8.0,
+        800 * Main.LENS_DISTORTION_FEATURE_EDGE_MARGIN_FRACTION,
+    )
+    expected_x_px = (250.0 - edge_margin) * Main.LENS_DISTORTION_EDGE_MARGIN_FRACTION
+    expected_y_px = (150.0 - edge_margin) * Main.LENS_DISTORTION_EDGE_MARGIN_FRACTION
+    assert len(offsets) == 25
+    assert offsets[0] == (0.0, 0.0)
+    assert max(abs(x) for x, _y in offsets) == pytest.approx(expected_x_px * 0.001)
+    assert max(abs(y) for _x, y in offsets) == pytest.approx(expected_y_px * 0.001)
+
+
+def test_lens_distortion_capture_offsets_fail_when_feature_too_close_to_edge(
+    monkeypatch,
+) -> None:
+    scale = SimpleNamespace(
+        pixels_to_mm=((-0.001, 0.0), (0.0, -0.001)),
+        pixel_size_x_mm=0.001,
+        pixel_size_y_mm=0.001,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "detect_bright_feature_bounds",
+        lambda _frame: SimpleNamespace(left=8.0, top=150.0, right=900.0, bottom=650.0),
+    )
+
+    with pytest.raises(RuntimeError, match="too close"):
+        Main._lens_distortion_capture_offsets_mm(
+            (1000, 800),
+            scale,
+            initial_frame=_FakeFrame(),
+        )
+
+
 def test_run_lens_distortion_calibration_captures_offset_grid(
     monkeypatch,
 ) -> None:
     window = Main.__new__(Main)
     stage = _FakeStage()
     finished: list[tuple[bool, str, object]] = []
-    frames = [_FakeFrame() for _ in Main.LENS_DISTORTION_CAPTURE_OFFSETS_MM]
+    scale = SimpleNamespace(
+        pixels_to_mm=((0.1, 0.0), (0.0, 0.1)),
+        pixel_size_x_mm=0.001,
+        pixel_size_y_mm=0.001,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "detect_bright_feature_bounds",
+        lambda _frame: SimpleNamespace(left=500.0, top=300.0, right=1420.0, bottom=900.0),
+    )
+    expected_offsets = Main._lens_distortion_capture_offsets_mm(
+        (1920, 1200),
+        scale,
+        initial_frame=_FakeFrame(),
+    )
+    frames = [_FakeFrame() for _ in range(len(expected_offsets) + 1)]
     captured_offsets: list[tuple[float, float]] = []
 
     def wait_for_frame(*, after_counter=None, timeout_s=2.0):
-        assert after_counter == 0
+        assert after_counter in (None, 0)
         return frames.pop(0), 1
 
-    def fit_grid(grid_frames, *, frame_size):
+    class _Fit:
+        def __init__(self, grid_frames) -> None:
+            self.grid_frames = grid_frames
+
+        def to_payload(self) -> dict[str, object]:
+            captured_offsets.extend(
+                frame.stage_offset_mm for frame in self.grid_frames
+            )
+            return {
+                "model_version": 1,
+                "model_type": "stage_geometry",
+                "frame_size": [1920, 1200],
+                "pixels_to_mm": [[0.1, 0.0], [0.0, 0.1]],
+                "calibrated_pixels_to_mm": [[0.1, 0.0], [0.0, 0.1]],
+            }
+
+    def fit_geometry(grid_frames, *, frame_size, pixels_to_mm=None):
         assert frame_size == (1920, 1200)
-        captured_offsets.extend(frame.stage_offset_mm for frame in grid_frames)
-        return {"model_version": 1, "frame_size": [640, 480]}
+        assert pixels_to_mm == ((0.1, 0.0), (0.0, 0.1))
+        return _Fit(grid_frames)
 
     window.stage_controller = stage
     window._current_needle_feedrate = lambda: 71.0
-    window._current_linear_feedrate = lambda: 123.0
+    window._coordinate_feedrate_for_axes = lambda axes: 123.0
     window._latest_raw_camera_counter = lambda: 0
     window._wait_for_raw_camera_frame = wait_for_frame
+    window._active_microscope_scale = lambda: scale
     window._show_status = lambda _message, _timeout_ms=0: None
     window._emit_lens_distortion_finished = (
         lambda success, message, payload: finished.append((success, message, payload))
     )
-    monkeypatch.setattr(main_module, "fit_distortion_from_grid_frames", fit_grid)
+    monkeypatch.setattr(main_module, "fit_stage_geometry_from_grid_frames", fit_geometry)
     monkeypatch.setattr(main_module.time, "sleep", lambda _seconds: None)
 
     Main._run_lens_distortion_calibration(window, (10.0, 20.0))
 
     assert stage.events[0] == ("begin", "lens distortion calibration")
     assert stage.events[1] == ("needles", "raise", 71.0)
-    capture_moves = stage.events[2 : 2 + len(Main.LENS_DISTORTION_CAPTURE_OFFSETS_MM)]
+    capture_moves = stage.events[2 : 2 + len(expected_offsets)]
     assert capture_moves[0] == ("move", 10.0, 20.0, 123.0)
-    assert capture_moves[-1] == ("move", 10.05, 20.05, 123.0)
+    last_dx, last_dy = expected_offsets[-1]
+    assert capture_moves[-1] == ("move", 10.0 + last_dx, 20.0 + last_dy, 123.0)
     assert stage.events[-2:] == [("move", 10.0, 20.0, 123.0), ("finish",)]
-    assert captured_offsets == list(Main.LENS_DISTORTION_CAPTURE_OFFSETS_MM)
+    assert captured_offsets == list(expected_offsets)
     assert finished == [
         (
             True,
-            "Lens distortion calibration saved. Recalibrate click-to-move.",
-            {"model_version": 1, "frame_size": [640, 480]},
+            "Lens distortion calibration saved.",
+            {
+                "model_version": 1,
+                "model_type": "stage_geometry",
+                "frame_size": [1920, 1200],
+                "pixels_to_mm": [[0.1, 0.0], [0.0, 0.1]],
+                "calibrated_pixels_to_mm": [[0.1, 0.0], [0.0, 0.1]],
+            },
         )
     ]
 
 
-def test_lens_distortion_finished_saves_payload_and_resets_click_calibration() -> None:
+def test_fit_lens_distortion_payload_prefers_stage_geometry(monkeypatch) -> None:
+    frames = [
+        main_module.GridCalibrationFrame(_FakeFrame(), (0.0, 0.0)),
+        main_module.GridCalibrationFrame(_FakeFrame(), (0.1, 0.0)),
+    ]
+    scale = SimpleNamespace(
+        pixels_to_mm=((-0.001, 0.0), (0.0, -0.001)),
+    )
+    calls: list[tuple[object, ...]] = []
+
+    class _Fit:
+        def to_payload(self) -> dict[str, object]:
+            return {"model_version": 1, "model_type": "stage_geometry"}
+
+    def fit_geometry(grid_frames, *, frame_size, pixels_to_mm):
+        calls.append(("geometry", tuple(grid_frames), frame_size, pixels_to_mm))
+        return _Fit()
+
+    monkeypatch.setattr(main_module, "fit_stage_geometry_from_grid_frames", fit_geometry)
+
+    payload = Main._fit_lens_distortion_payload(
+        frames,
+        frame_size=(1920, 1200),
+        scale=scale,
+    )
+
+    assert payload == {"model_version": 1, "model_type": "stage_geometry"}
+    assert calls == [
+        (
+            "geometry",
+            tuple(frames),
+            (1920, 1200),
+            ((-0.001, 0.0), (0.0, -0.001)),
+        )
+    ]
+
+
+def test_fit_lens_distortion_payload_raises_when_stage_geometry_errors(
+    monkeypatch,
+) -> None:
+    frames = [
+        main_module.GridCalibrationFrame(_FakeFrame(), (0.0, 0.0)),
+        main_module.GridCalibrationFrame(_FakeFrame(), (0.1, 0.0)),
+    ]
+    scale = SimpleNamespace(
+        pixels_to_mm=((-0.001, 0.0), (0.0, -0.001)),
+    )
+
+    def fit_geometry(*_args, **_kwargs):
+        raise RuntimeError("scipy unavailable")
+
+    monkeypatch.setattr(main_module, "fit_stage_geometry_from_grid_frames", fit_geometry)
+
+    with pytest.raises(RuntimeError, match="scipy unavailable"):
+        Main._fit_lens_distortion_payload(
+            frames,
+            frame_size=(1920, 1200),
+            scale=scale,
+        )
+
+
+def test_fit_lens_distortion_payload_rejects_high_residual(monkeypatch) -> None:
+    frames = [
+        main_module.GridCalibrationFrame(_FakeFrame(), (0.0, 0.0)),
+        main_module.GridCalibrationFrame(_FakeFrame(), (0.1, 0.0)),
+    ]
+    scale = SimpleNamespace(
+        pixels_to_mm=((-0.001, 0.0), (0.0, -0.001)),
+    )
+
+    class _Fit:
+        def to_payload(self) -> dict[str, object]:
+            return {
+                "model_version": 1,
+                "model_type": "stage_geometry",
+                "residual_mean_px": 5.2,
+                "residual_max_px": 17.4,
+            }
+
+    def fit_geometry(*_args, **_kwargs):
+        return _Fit()
+
+    monkeypatch.setattr(main_module, "fit_stage_geometry_from_grid_frames", fit_geometry)
+
+    with pytest.raises(RuntimeError, match="residual is too high"):
+        Main._fit_lens_distortion_payload(
+            frames,
+            frame_size=(1920, 1200),
+            scale=scale,
+        )
+
+
+def test_fit_lens_distortion_payload_requires_click_calibration() -> None:
+    frames = [
+        main_module.GridCalibrationFrame(_FakeFrame(), (0.0, 0.0)),
+    ]
+    scale = SimpleNamespace()
+
+    with pytest.raises(RuntimeError, match="requires click-to-move calibration"):
+        Main._fit_lens_distortion_payload(
+            frames,
+            frame_size=(1920, 1200),
+            scale=scale,
+        )
+
+
+def test_lens_distortion_finished_resets_click_calibration_without_stage_matrix() -> None:
     window = Main.__new__(Main)
     manager = _FakeSettingsManager()
     manager.settings.objectives = ObjectivesSettings(
@@ -173,7 +406,149 @@ def test_lens_distortion_finished_saves_payload_and_resets_click_calibration() -
     assert apply_calls == ["apply"]
     assert refresh_calls == ["refresh"]
     assert dialog.running == [False]
+    assert statuses == [("done Recalibrate click-to-move.", 10000)]
+
+
+def test_lens_distortion_finished_applies_stage_calibrated_grid_matrix() -> None:
+    window = Main.__new__(Main)
+    manager = _FakeSettingsManager()
+    manager.settings.objectives = ObjectivesSettings(
+        active_name="X50",
+        objectives={
+            "X50": ObjectiveCalibrationSettings(
+                name="X50",
+                magnification=50.0,
+                pixels_to_mm=[[1.0, 0.0], [0.0, 1.0]],
+                xy_calibration_configured=True,
+            )
+        },
+    )
+    dialog = _FakeDialog()
+    apply_calls: list[str] = []
+    refresh_calls: list[str] = []
+    statuses: list[tuple[str, int]] = []
+    window.settings_manager = manager
+    window._lens_distortion_thread = _DeadThread()
+    window._lens_distortion_dialog = dialog
+    window._apply_objective_settings = lambda: apply_calls.append("apply")
+    window._refresh_objective_calibration_ui = lambda: refresh_calls.append("refresh")
+    window._show_status = (
+        lambda message, timeout_ms=0: statuses.append((str(message), int(timeout_ms)))
+    )
+    matrix = [[-0.000117, 0.0], [0.0, -0.000117]]
+    payload = {
+        "model_version": 1,
+        "frame_size": [640, 480],
+        "calibrated_pixels_to_mm": matrix,
+    }
+
+    Main._on_lens_distortion_calibration_finished(window, True, "done", payload)
+
+    profile = manager.settings.objectives.objectives["X50"]
+    assert profile.distortion_correction_configured is True
+    assert profile.distortion_correction == payload
+    assert profile.xy_calibration_configured is True
+    assert profile.pixels_to_mm == matrix
+    assert manager.saved_count == 1
+    assert apply_calls == ["apply"]
+    assert refresh_calls == ["refresh"]
+    assert dialog.running == [False]
     assert statuses == [("done", 10000)]
+
+
+def test_click_calibration_update_keeps_stage_calibrated_distortion_matrix() -> None:
+    window = Main.__new__(Main)
+    manager = _FakeSettingsManager()
+    calibrated = [[-0.000117, 0.0], [0.0, -0.000117]]
+    manager.settings.objectives = ObjectivesSettings(
+        active_name="X50",
+        objectives={
+            "X50": ObjectiveCalibrationSettings(
+                name="X50",
+                magnification=50.0,
+                pixels_to_mm=calibrated,
+                xy_calibration_configured=True,
+                distortion_correction={
+                    "model_version": 1,
+                    "frame_size": [640, 480],
+                    "calibrated_pixels_to_mm": calibrated,
+                },
+                distortion_correction_configured=True,
+            )
+        },
+    )
+    persisted = []
+    window.settings_manager = manager
+    window._persist_objective_plan = lambda plan: persisted.append(plan)
+
+    Main._on_objective_calibration_updated(
+        window,
+        "X50",
+        [[-0.000119, 0.0], [0.0, -0.000112]],
+    )
+
+    profile = persisted[0].settings.objectives.objectives["X50"]
+    assert profile.pixels_to_mm == calibrated
+
+
+def test_reset_lens_distortion_preserves_click_calibration() -> None:
+    window = Main.__new__(Main)
+    manager = _FakeSettingsManager()
+    matrix = [[1.0, 0.0], [0.0, 1.0]]
+    manager.settings.objectives = ObjectivesSettings(
+        active_name="X50",
+        objectives={
+            "X50": ObjectiveCalibrationSettings(
+                name="X50",
+                magnification=50.0,
+                pixels_to_mm=matrix,
+                xy_calibration_configured=True,
+                distortion_correction={"model_version": 1},
+                distortion_correction_configured=True,
+            )
+        },
+    )
+    apply_calls: list[str] = []
+    refresh_calls: list[str] = []
+    window.settings_manager = manager
+    window._apply_objective_settings = lambda: apply_calls.append("apply")
+    window._refresh_objective_calibration_ui = lambda: refresh_calls.append("refresh")
+
+    Main._save_active_objective_distortion(window, None)
+
+    profile = manager.settings.objectives.objectives["X50"]
+    assert profile.distortion_correction_configured is False
+    assert profile.distortion_correction == {}
+    assert profile.xy_calibration_configured is True
+    assert profile.pixels_to_mm == matrix
+    assert manager.saved_count == 1
+    assert apply_calls == ["apply"]
+    assert refresh_calls == ["refresh"]
+
+
+def test_api_click_to_move_calibration_force_resets_before_start() -> None:
+    window = Main.__new__(Main)
+    events: list[tuple[object, ...]] = []
+    window.stage_controller = SimpleNamespace(
+        is_busy=lambda: False,
+        reset_calibration=lambda reason: events.append(("reset", reason)),
+    )
+    window._stage_serial_ready = lambda: True
+    window._start_click_to_move = (
+        lambda dx_px, dy_px: events.append(("start", dx_px, dy_px)) or True
+    )
+
+    response = Main._api_click_to_move_calibration(
+        window,
+        {"dx_px": "1.5", "dy_px": "-2.0", "force": True},
+    )
+
+    assert response["accepted"] is True
+    assert response["status_code"] == 202
+    assert events == [
+        ("reset", "Click-to-move calibration reset."),
+        ("start", 1.5, -2.0),
+    ]
 
 
 def test_camera_frame_distortion_correction_reuses_compiled_payload(

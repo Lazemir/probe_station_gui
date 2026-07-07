@@ -641,7 +641,7 @@ class StageController(
         self._require_homed_axes(status, {axis})
         command = (
             f"G10 L20 P{p_value} {axis}"
-            f"{self._format_gcode_value(value, decimals=4)}"
+            f"{self._format_gcode_value(value, decimals=6)}"
         )
         self._write_current_command_and_wait(command)
         self._active_work_coordinate_system = coordinate_system

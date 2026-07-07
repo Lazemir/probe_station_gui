@@ -17,9 +17,14 @@ for _module_name in (
         del sys.modules[_module_name]
 
 from probe_station_gui.camera.imaging import (
+    MicroscopeScaleCalibration,
+    MicroscopeScanPlan,
     MicroscopeScanTile,
     build_design_scan_plan,
+    _phase_overlap_shift,
     _refine_scan_tile_pixel_placements,
+    refine_scan_scale_from_tile_overlaps,
+    stitch_scan_tiles,
 )
 
 
@@ -91,6 +96,138 @@ class MicroscopeImagingTest(unittest.TestCase):
             sidecar["MicroscopeImage"]["fov_um"],
             [160.0, 144.0],
         )
+
+    def test_refine_scan_scale_from_tile_overlaps_solves_global_matrix(self) -> None:
+        from PySide6.QtGui import QImage
+
+        image = QImage(200, 200, QImage.Format_RGB888)
+        image.fill(0)
+        scale = MicroscopeScaleCalibration(
+            pixel_size_x_um=0.118,
+            pixel_size_y_um=0.111,
+            source="test",
+            pixels_to_mm=(
+                (-0.000118, 0.0),
+                (0.0, -0.000111),
+            ),
+        )
+        tiles = (
+            (
+                MicroscopeScanTile(1, 0, 0, (0.0, 0.0)),
+                image,
+            ),
+            (
+                MicroscopeScanTile(2, 0, 1, (0.0116, 0.0)),
+                image,
+            ),
+            (
+                MicroscopeScanTile(3, 1, 0, (0.0, -0.0116)),
+                image,
+            ),
+        )
+        shifts = iter(
+            [
+                (-1.6949152542, 0.0, 0.5),
+                (0.0, 4.5045045045, 0.5),
+            ]
+        )
+        with patch(
+            "probe_station_gui.camera.imaging._phase_overlap_shift",
+            lambda *_args: next(shifts),
+        ):
+            refined = refine_scan_scale_from_tile_overlaps(tiles, scale)
+
+        assert refined is not scale
+        assert refined.pixels_to_mm is not None
+        self.assertAlmostEqual(refined.pixels_to_mm[0][0], -0.000116, places=9)
+        self.assertAlmostEqual(refined.pixels_to_mm[1][1], -0.000116, places=9)
+        self.assertIn("scan-overlap", refined.source)
+
+    def test_refine_scan_scale_from_tile_overlaps_rejects_periodic_outlier(
+        self,
+    ) -> None:
+        from PySide6.QtGui import QImage
+
+        image = QImage(200, 200, QImage.Format_RGB888)
+        image.fill(0)
+        scale = MicroscopeScaleCalibration(
+            pixel_size_x_um=0.118,
+            pixel_size_y_um=0.111,
+            source="test",
+            pixels_to_mm=(
+                (-0.000118, 0.0),
+                (0.0, -0.000111),
+            ),
+        )
+        tiles = (
+            (
+                MicroscopeScanTile(1, 0, 0, (0.0, 0.0)),
+                image,
+            ),
+            (
+                MicroscopeScanTile(2, 0, 1, (0.0116, 0.0)),
+                image,
+            ),
+            (
+                MicroscopeScanTile(3, 1, 0, (0.0, -0.0116)),
+                image,
+            ),
+            (
+                MicroscopeScanTile(4, 1, 1, (0.0116, -0.0116)),
+                image,
+            ),
+        )
+        shifts = iter(
+            [
+                (-1.6949152542, 0.0, 0.5),
+                (0.0, 4.5045045045, 0.5),
+                (0.0, -45.4954954955, 0.5),
+                (-1.6949152542, 0.0, 0.5),
+            ]
+        )
+        with patch(
+            "probe_station_gui.camera.imaging._phase_overlap_shift",
+            lambda *_args: next(shifts),
+        ):
+            refined = refine_scan_scale_from_tile_overlaps(tiles, scale)
+
+        assert refined is not scale
+        assert refined.pixels_to_mm is not None
+        self.assertAlmostEqual(refined.pixels_to_mm[0][0], -0.000116, places=9)
+        self.assertAlmostEqual(refined.pixels_to_mm[1][1], -0.000116, places=9)
+
+    def test_phase_overlap_shift_preserves_subpixel_translation(self) -> None:
+        import cv2
+
+        height = 160
+        width = 160
+        rng = np.random.default_rng(3)
+        gray = np.zeros((height, width), dtype=np.float32)
+        for _index in range(60):
+            x = int(rng.integers(20, width - 20))
+            y = int(rng.integers(20, height - 20))
+            radius = int(round(float(rng.uniform(1.5, 4.0))))
+            value = float(rng.uniform(80.0, 220.0))
+            cv2.circle(gray, (x, y), radius, value, -1)
+        gray = cv2.GaussianBlur(gray, (0, 0), sigmaX=1.0, sigmaY=1.0)
+        existing = np.dstack((gray, gray, gray)).clip(0, 255).astype(np.uint8)
+        transform = np.float32([[1.0, 0.0, 0.45], [0.0, 1.0, -0.65]])
+        current = cv2.warpAffine(
+            existing,
+            transform,
+            (width, height),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+
+        shift = _phase_overlap_shift(existing, current)
+
+        assert shift is not None
+        shift_x, shift_y, response = shift
+        self.assertGreater(response, 0.5)
+        self.assertAlmostEqual(shift_x, 0.45, delta=0.25)
+        self.assertAlmostEqual(shift_y, -0.65, delta=0.25)
 
     def test_save_microscope_image_can_write_raw_png_without_overlay(self) -> None:
         script = textwrap.dedent(
@@ -321,7 +458,7 @@ class MicroscopeImagingTest(unittest.TestCase):
         self.assertGreater(result["left_blue"], 220)
         self.assertGreater(result["right_red"], 220)
 
-    def test_stitch_scan_tiles_keeps_overlap_features_from_one_tile(self) -> None:
+    def test_stitch_scan_tiles_blends_overlap_low_frequency(self) -> None:
         script = textwrap.dedent(
             """
             import json
@@ -378,8 +515,182 @@ class MicroscopeImagingTest(unittest.TestCase):
 
         self.assertEqual(result["width"], 15)
         self.assertEqual(result["height"], 10)
-        self.assertGreater(max(result["overlap_red"], result["overlap_blue"]), 220)
-        self.assertLess(min(result["overlap_red"], result["overlap_blue"]), 35)
+        self.assertGreater(result["overlap_red"], 90)
+        self.assertGreater(result["overlap_blue"], 90)
+        self.assertLess(result["overlap_red"], 170)
+        self.assertLess(result["overlap_blue"], 170)
+
+    def test_stitch_scan_tiles_blends_bright_low_frequency_background(self) -> None:
+        script = textwrap.dedent(
+            """
+            import json
+            from PySide6.QtGui import QColor, QImage
+            from probe_station_gui.camera.imaging import (
+                MicroscopeScaleCalibration,
+                MicroscopeScanPlan,
+                MicroscopeScanTile,
+                stitch_scan_tiles,
+            )
+            plan = MicroscopeScanPlan(
+                tiles=(
+                    MicroscopeScanTile(index=1, row=0, column=0, stage_xy=(0.5, 0.5)),
+                    MicroscopeScanTile(index=2, row=0, column=1, stage_xy=(0.0, 0.5)),
+                ),
+                stage_bounds=(-0.5, 0.0, 1.0, 1.0),
+                covered_stage_bounds=(-0.5, 0.0, 1.0, 1.0),
+                fov_size_mm=(1.0, 1.0),
+                overlap_fraction=0.5,
+                row_count=1,
+                column_count=2,
+            )
+            scale = MicroscopeScaleCalibration(
+                pixel_size_x_um=100.0,
+                pixel_size_y_um=100.0,
+            )
+            left = QImage(10, 10, QImage.Format_RGB32)
+            left.fill(QColor(230, 230, 230))
+            right = QImage(10, 10, QImage.Format_RGB32)
+            right.fill(QColor(170, 170, 170))
+            mosaic = stitch_scan_tiles(
+                plan=plan,
+                tile_images=((plan.tiles[0], left), (plan.tiles[1], right)),
+                scale=scale,
+            )
+            overlap = mosaic.pixelColor(7, 5)
+            print(json.dumps({"overlap_red": overlap.red()}))
+            """
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=".",
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        result = json.loads(completed.stdout.strip().splitlines()[-1])
+
+        self.assertGreater(result["overlap_red"], 180)
+        self.assertLess(result["overlap_red"], 220)
+
+    def test_stitch_scan_tiles_preserves_low_weight_bright_feature(self) -> None:
+        script = textwrap.dedent(
+            """
+            import json
+            from PySide6.QtGui import QColor, QImage
+            from probe_station_gui.camera.imaging import (
+                MicroscopeScaleCalibration,
+                MicroscopeScanPlan,
+                MicroscopeScanTile,
+                stitch_scan_tiles,
+            )
+            plan = MicroscopeScanPlan(
+                tiles=(
+                    MicroscopeScanTile(index=1, row=0, column=0, stage_xy=(0.5, 0.5)),
+                    MicroscopeScanTile(index=2, row=0, column=1, stage_xy=(0.0, 0.5)),
+                ),
+                stage_bounds=(-0.5, 0.0, 1.0, 1.0),
+                covered_stage_bounds=(-0.5, 0.0, 1.0, 1.0),
+                fov_size_mm=(1.0, 1.0),
+                overlap_fraction=0.5,
+                row_count=1,
+                column_count=2,
+            )
+            scale = MicroscopeScaleCalibration(
+                pixel_size_x_um=100.0,
+                pixel_size_y_um=100.0,
+            )
+            left = QImage(10, 10, QImage.Format_RGB32)
+            left.fill(QColor(55, 60, 45))
+            right = QImage(10, 10, QImage.Format_RGB32)
+            right.fill(QColor(55, 60, 45))
+            for y in range(10):
+                left.setPixelColor(8, y, QColor(255, 245, 120))
+            mosaic = stitch_scan_tiles(
+                plan=plan,
+                tile_images=((plan.tiles[0], left), (plan.tiles[1], right)),
+                scale=scale,
+            )
+            feature = mosaic.pixelColor(8, 5)
+            print(json.dumps({
+                "red": feature.red(),
+                "green": feature.green(),
+                "blue": feature.blue(),
+            }))
+            """
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=".",
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        result = json.loads(completed.stdout.strip().splitlines()[-1])
+
+        self.assertGreater(result["red"], 220)
+        self.assertGreater(result["green"], 210)
+        self.assertGreater(result["blue"], 90)
+
+    def test_stitch_scan_tiles_preserves_fractional_tile_placement(self) -> None:
+        script = textwrap.dedent(
+            """
+            import json
+            from PySide6.QtGui import QColor, QImage
+            from probe_station_gui.camera.imaging import (
+                MicroscopeScaleCalibration,
+                MicroscopeScanPlan,
+                MicroscopeScanTile,
+                stitch_scan_tiles,
+            )
+            plan = MicroscopeScanPlan(
+                tiles=(
+                    MicroscopeScanTile(index=1, row=0, column=0, stage_xy=(0.0, 0.0)),
+                    MicroscopeScanTile(index=2, row=0, column=1, stage_xy=(-0.96, 0.0)),
+                ),
+                stage_bounds=(-0.5, -0.5, 1.46, 0.5),
+                covered_stage_bounds=(-0.5, -0.5, 1.46, 0.5),
+                fov_size_mm=(1.0, 1.0),
+                overlap_fraction=0.0,
+                row_count=1,
+                column_count=2,
+            )
+            scale = MicroscopeScaleCalibration(
+                pixel_size_x_um=100.0,
+                pixel_size_y_um=100.0,
+            )
+            left = QImage(10, 10, QImage.Format_RGB32)
+            left.fill(QColor(255, 0, 0))
+            right = QImage(10, 10, QImage.Format_RGB32)
+            right.fill(QColor(0, 0, 255))
+            mosaic = stitch_scan_tiles(
+                plan=plan,
+                tile_images=((plan.tiles[0], left), (plan.tiles[1], right)),
+                scale=scale,
+            )
+            seam = mosaic.pixelColor(9, 5)
+            print(json.dumps({
+                "width": mosaic.width(),
+                "seam_red": seam.red(),
+                "seam_blue": seam.blue(),
+            }))
+            """
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=".",
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        result = json.loads(completed.stdout.strip().splitlines()[-1])
+
+        self.assertEqual(result["width"], 20)
+        self.assertGreater(result["seam_red"], 120)
+        self.assertGreater(result["seam_blue"], 20)
+        self.assertLess(result["seam_red"], 255)
 
     def test_stitch_scan_tiles_levels_tile_background_in_overlap(self) -> None:
         script = textwrap.dedent(
@@ -440,7 +751,81 @@ class MicroscopeImagingTest(unittest.TestCase):
         self.assertLessEqual(result["green_delta"], 4)
         self.assertLessEqual(result["blue_delta"], 4)
 
-    def test_stitch_scan_tiles_registers_overlap_before_cutting_seam(self) -> None:
+    def test_stitch_scan_tiles_levels_linear_tile_background_drift(self) -> None:
+        script = textwrap.dedent(
+            """
+            import json
+            import numpy as np
+            from PySide6.QtGui import QColor, QImage
+            from probe_station_gui.camera.imaging import (
+                MicroscopeScaleCalibration,
+                MicroscopeScanPlan,
+                MicroscopeScanTile,
+                stitch_scan_tiles,
+            )
+
+            width = 40
+            height = 24
+            world_width = 60
+            world = np.zeros((height, world_width), dtype=np.float32)
+            for y in range(height):
+                for x in range(world_width):
+                    world[y, x] = 92 + 0.35 * x + 0.2 * y
+
+            left = QImage(width, height, QImage.Format_RGB32)
+            right = QImage(width, height, QImage.Format_RGB32)
+            for y in range(height):
+                for x in range(width):
+                    left_value = int(round(world[y, x]))
+                    drift = -18.0 + 36.0 * x / (width - 1)
+                    right_value = int(round(world[y, x + 20] + drift))
+                    left.setPixelColor(x, y, QColor(left_value, left_value, left_value))
+                    right.setPixelColor(x, y, QColor(right_value, right_value, right_value))
+
+            plan = MicroscopeScanPlan(
+                tiles=(
+                    MicroscopeScanTile(index=1, row=0, column=0, stage_xy=(0.5, 0.5)),
+                    MicroscopeScanTile(index=2, row=0, column=1, stage_xy=(0.0, 0.5)),
+                ),
+                stage_bounds=(-0.5, 0.0, 1.0, 1.0),
+                covered_stage_bounds=(-0.5, 0.0, 1.0, 1.0),
+                fov_size_mm=(1.0, 1.0),
+                overlap_fraction=0.5,
+                row_count=1,
+                column_count=2,
+            )
+            scale = MicroscopeScaleCalibration(
+                pixel_size_x_um=25.0,
+                pixel_size_y_um=25.0,
+            )
+            mosaic = stitch_scan_tiles(
+                plan=plan,
+                tile_images=((plan.tiles[0], left), (plan.tiles[1], right)),
+                scale=scale,
+            )
+            sample_y = height // 2
+            far_right = mosaic.pixelColor(55, sample_y).red()
+            expected_far_right = int(round(world[sample_y, 55]))
+            print(json.dumps({
+                "far_right_delta": abs(far_right - expected_far_right),
+                "far_right": far_right,
+                "expected_far_right": expected_far_right,
+            }))
+            """
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=".",
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        result = json.loads(completed.stdout.strip().splitlines()[-1])
+
+        self.assertLessEqual(result["far_right_delta"], 8)
+
+    def test_stitch_scan_tiles_keeps_coordinate_placement_without_registration(self) -> None:
         script = textwrap.dedent(
             """
             import json
@@ -496,7 +881,7 @@ class MicroscopeImagingTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         result = json.loads(completed.stdout.strip().splitlines()[-1])
 
-        self.assertEqual(result["bright_columns"], [8])
+        self.assertEqual(result["bright_columns"], [6])
 
     def test_scan_tile_registration_rejects_implausible_shift(self) -> None:
         first = MicroscopeScanTile(index=1, row=0, column=0, stage_xy=(0.0, 0.0))

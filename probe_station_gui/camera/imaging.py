@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 from dataclasses import asdict, dataclass, field
@@ -16,11 +17,21 @@ from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen
 
 Point2D = tuple[float, float]
 STITCH_MAX_REGISTRATION_SHIFT_PX = 32.0
+STITCH_SCALE_REFINEMENT_MAX_SHIFT_PX = 96.0
+STITCH_SCALE_REFINEMENT_INLIER_PX = 12.0
+STITCH_SCALE_REFINEMENT_MIN_INLIER_FRACTION = 0.5
 STITCH_MAX_REGISTRATION_OVERLAP_FRACTION = 0.25
 STITCH_PHOTOMETRY_MIN_SAMPLES = 16
 STITCH_PHOTOMETRY_GAIN_MIN = 0.65
 STITCH_PHOTOMETRY_GAIN_MAX = 1.55
 STITCH_PHOTOMETRY_OFFSET_LIMIT = 28.0
+STITCH_PHOTOMETRY_PLANE_OFFSET_LIMIT = 24.0
+STITCH_PHOTOMETRY_PLANE_MAX_SAMPLES = 3000
+STITCH_BRIGHT_FEATURE_LUMINANCE_MIN = 160.0
+STITCH_BRIGHT_FEATURE_LOCAL_CONTRAST_MIN = 12.0
+STITCH_BRIGHT_FEATURE_GRADIENT_MIN = 20.0
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -168,6 +179,7 @@ class MicroscopeScanTile:
     row: int
     column: int
     stage_xy: Point2D
+    label: str = ""
 
 
 @dataclass(frozen=True)
@@ -428,6 +440,208 @@ def build_design_scan_plan(
     )
 
 
+def refine_scan_scale_from_tile_overlaps(
+    tile_images: Sequence[tuple[MicroscopeScanTile, QImage]],
+    scale: MicroscopeScaleCalibration,
+) -> MicroscopeScaleCalibration:
+    import cv2
+    import numpy as np
+
+    if len(tile_images) < 3:
+        return scale
+    try:
+        placements = _scan_tile_pixel_placements(tile_images, scale)
+    except (TypeError, ValueError):
+        return scale
+    stage_vectors: list[tuple[float, float]] = []
+    pixel_vectors: list[tuple[float, float]] = []
+    for first_index, first in enumerate(placements):
+        for second in placements[first_index + 1 :]:
+            if not _scan_tiles_are_axis_neighbors(first[0], second[0]):
+                continue
+            overlap = _overlap_patches(first, second)
+            if overlap is None:
+                continue
+            existing_patch, current_patch = overlap
+            shift = _phase_overlap_shift(existing_patch, current_patch)
+            if shift is None:
+                continue
+            shift_x, shift_y, response = shift
+            if response < 0.01 or not _registration_shift_is_plausible(
+                shift_x,
+                shift_y,
+                STITCH_SCALE_REFINEMENT_MAX_SHIFT_PX,
+            ):
+                continue
+            first_tile, first_left, first_top, _first_raw = first
+            second_tile, second_left, second_top, _second_raw = second
+            measured_left_delta = float(second_left - first_left) - float(shift_x)
+            measured_top_delta = float(second_top - first_top) - float(shift_y)
+            stage_vectors.append(
+                (
+                    float(second_tile.stage_xy[0]) - float(first_tile.stage_xy[0]),
+                    float(second_tile.stage_xy[1]) - float(first_tile.stage_xy[1]),
+                )
+            )
+            pixel_vectors.append((-measured_left_delta, measured_top_delta))
+    if len(stage_vectors) < 2:
+        return scale
+    stage = np.asarray(stage_vectors, dtype=float)
+    pixels = np.asarray(pixel_vectors, dtype=float)
+    if np.linalg.matrix_rank(stage) < 2:
+        return scale
+    fit = _robust_scan_overlap_stage_to_pixel_fit(stage, pixels)
+    if fit is None:
+        logger.info(
+            "Microscope scan overlap scale refinement skipped: pairs=%d "
+            "reason=no-consensus",
+            len(stage_vectors),
+        )
+        return scale
+    coefficients, inlier_mask, errors = fit
+    stage_to_pixel = coefficients.T
+    determinant = float(np.linalg.det(stage_to_pixel))
+    if not math.isfinite(determinant) or abs(determinant) < 1e-12:
+        return scale
+    pixels_to_mm = np.linalg.inv(stage_to_pixel)
+    if not np.isfinite(pixels_to_mm).all():
+        return scale
+    column_x = pixels_to_mm[:, 0]
+    column_y = pixels_to_mm[:, 1]
+    refined = MicroscopeScaleCalibration(
+        pixel_size_x_um=float(np.linalg.norm(column_x)) * 1000.0,
+        pixel_size_y_um=float(np.linalg.norm(column_y)) * 1000.0,
+        source=f"{scale.source}+scan-overlap" if scale.source else "scan-overlap",
+        pixels_to_mm=(
+            (float(pixels_to_mm[0, 0]), float(pixels_to_mm[0, 1])),
+            (float(pixels_to_mm[1, 0]), float(pixels_to_mm[1, 1])),
+        ),
+    )
+    inlier_errors = errors[inlier_mask]
+    logger.info(
+        "Microscope scan overlap scale refinement: pairs=%d inliers=%d "
+        "matrix=%s residual_mean_px=%.3f residual_max_px=%.3f "
+        "rejected_max_px=%.3f",
+        len(stage_vectors),
+        int(np.count_nonzero(inlier_mask)),
+        refined.pixels_to_mm,
+        float(np.mean(inlier_errors)),
+        float(np.max(inlier_errors)),
+        float(np.max(errors)),
+    )
+    return refined
+
+
+def _robust_scan_overlap_stage_to_pixel_fit(
+    stage: Any,
+    pixels: Any,
+) -> tuple[Any, Any, Any] | None:
+    import numpy as np
+
+    pair_count = int(stage.shape[0])
+    if pair_count < 2 or np.linalg.matrix_rank(stage) < 2:
+        return None
+    if pair_count == 2:
+        keep = np.ones(pair_count, dtype=bool)
+        coefficients = _least_squares_stage_to_pixel(stage, pixels, keep)
+        errors = np.linalg.norm(stage @ coefficients - pixels, axis=1)
+        return coefficients, keep, errors
+
+    best_keep: Any | None = None
+    best_score: tuple[int, float, float] | None = None
+    for first_index in range(pair_count):
+        for second_index in range(first_index + 1, pair_count):
+            sample_indices = np.asarray((first_index, second_index), dtype=int)
+            sample_stage = stage[sample_indices]
+            if np.linalg.matrix_rank(sample_stage) < 2:
+                continue
+            similarity = _similarity_stage_to_pixel_fit(
+                sample_stage,
+                pixels[sample_indices],
+            )
+            similarity_errors = _similarity_stage_to_pixel_errors(
+                stage,
+                pixels,
+                similarity,
+            )
+            keep = similarity_errors <= STITCH_SCALE_REFINEMENT_INLIER_PX
+            if np.count_nonzero(keep) < 2 or np.linalg.matrix_rank(stage[keep]) < 2:
+                continue
+            inlier_errors = similarity_errors[keep]
+            score = (
+                int(np.count_nonzero(keep)),
+                -float(np.median(inlier_errors)),
+                -float(np.max(inlier_errors)),
+            )
+            if best_score is None or score > best_score:
+                best_score = score
+                best_keep = keep
+
+    if best_keep is None:
+        return None
+
+    min_inliers = max(
+        2,
+        int(math.ceil(pair_count * STITCH_SCALE_REFINEMENT_MIN_INLIER_FRACTION)),
+    )
+    if int(np.count_nonzero(best_keep)) < min_inliers:
+        return None
+
+    coefficients = _least_squares_stage_to_pixel(stage, pixels, best_keep)
+    errors = np.linalg.norm(stage @ coefficients - pixels, axis=1)
+    return coefficients, best_keep, errors
+
+
+def _least_squares_stage_to_pixel(stage: Any, pixels: Any, keep: Any) -> Any:
+    import numpy as np
+
+    coefficients, _residuals, _rank, _singular = np.linalg.lstsq(
+        stage[keep],
+        pixels[keep],
+        rcond=None,
+    )
+    return coefficients
+
+
+def _similarity_stage_to_pixel_fit(stage: Any, pixels: Any) -> tuple[float, float]:
+    import numpy as np
+
+    rows: list[tuple[float, float]] = []
+    values: list[float] = []
+    for stage_delta, pixel_delta in zip(stage, pixels, strict=False):
+        dx_mm = float(stage_delta[0])
+        dy_mm = float(stage_delta[1])
+        dx_px = float(pixel_delta[0])
+        dy_px = float(pixel_delta[1])
+        rows.append((dx_mm, -dy_mm))
+        values.append(dx_px)
+        rows.append((dy_mm, dx_mm))
+        values.append(dy_px)
+    coefficients, _residuals, _rank, _singular = np.linalg.lstsq(
+        np.asarray(rows, dtype=float),
+        np.asarray(values, dtype=float),
+        rcond=None,
+    )
+    return float(coefficients[0]), float(coefficients[1])
+
+
+def _similarity_stage_to_pixel_errors(
+    stage: Any,
+    pixels: Any,
+    similarity: tuple[float, float],
+) -> Any:
+    import numpy as np
+
+    scale_cos, scale_sin = similarity
+    predicted = np.column_stack(
+        (
+            scale_cos * stage[:, 0] - scale_sin * stage[:, 1],
+            scale_sin * stage[:, 0] + scale_cos * stage[:, 1],
+        )
+    )
+    return np.linalg.norm(predicted - pixels, axis=1)
+
+
 def stitch_scan_tiles(
     *,
     plan: MicroscopeScanPlan,
@@ -436,13 +650,15 @@ def stitch_scan_tiles(
 ) -> QImage:
     """Place scan tiles into a single stage-coordinate mosaic."""
 
+    import cv2
     import numpy as np
 
     if not tile_images:
         raise ValueError("No scan tiles were captured.")
     placements = _normalize_scan_tile_photometry(
-        _refine_scan_tile_pixel_placements(
-            _scan_tile_pixel_placements(tile_images, scale)
+        _scan_tile_pixel_placements(
+            tile_images,
+            scale,
         )
     )
     min_left = min(placement[1] for placement in placements)
@@ -451,34 +667,179 @@ def stitch_scan_tiles(
     max_bottom = max(placement[2] + placement[3].shape[0] for placement in placements)
     width_px = max(1, int(math.ceil(max_right - min_left)))
     height_px = max(1, int(math.ceil(max_bottom - min_top)))
-    output = np.zeros((height_px, width_px, 3), dtype=np.uint8)
+    hard_output = np.zeros((height_px, width_px, 3), dtype=np.uint8)
+    weighted_sum = np.zeros((height_px, width_px, 3), dtype=np.float32)
+    weight_sum = np.zeros((height_px, width_px), dtype=np.float32)
+    coverage_count = np.zeros((height_px, width_px), dtype=np.uint16)
     scores = np.zeros((height_px, width_px), dtype=np.float32)
+    hard_feature_mask = np.zeros((height_px, width_px), dtype=bool)
+    best_feature_luma = np.full((height_px, width_px), -1.0, dtype=np.float32)
+    best_feature_rgb = np.zeros((height_px, width_px, 3), dtype=np.uint8)
     for _tile, left_px, top_px, raw in placements:
-        x_px = int(round(left_px - min_left))
-        y_px = int(round(top_px - min_top))
+        x_offset = float(left_px - min_left)
+        y_offset = float(top_px - min_top)
         raw_h, raw_w, _channels = raw.shape
-        dst_x0 = max(0, x_px)
-        dst_y0 = max(0, y_px)
-        dst_x1 = min(width_px, x_px + raw_w)
-        dst_y1 = min(height_px, y_px + raw_h)
+        dst_x0 = max(0, int(math.floor(x_offset)) - 1)
+        dst_y0 = max(0, int(math.floor(y_offset)) - 1)
+        dst_x1 = min(width_px, int(math.ceil(x_offset + raw_w)) + 1)
+        dst_y1 = min(height_px, int(math.ceil(y_offset + raw_h)) + 1)
         if dst_x0 >= dst_x1 or dst_y0 >= dst_y1:
             continue
-        src_x0 = dst_x0 - x_px
-        src_y0 = dst_y0 - y_px
-        src_x1 = src_x0 + (dst_x1 - dst_x0)
-        src_y1 = src_y0 + (dst_y1 - dst_y0)
         blend_weights = _tile_blend_weights(
             raw_w,
             raw_h,
             plan.overlap_fraction,
-        )[src_y0:src_y1, src_x0:src_x1]
+        )
+        source_view, blend_weights, feature_mask = _warp_tile_to_mosaic_roi(
+            raw,
+            blend_weights,
+            _bright_scan_feature_mask(raw).astype(np.float32, copy=False),
+            x_offset=x_offset - float(dst_x0),
+            y_offset=y_offset - float(dst_y0),
+            width_px=dst_x1 - dst_x0,
+            height_px=dst_y1 - dst_y0,
+        )
+        if not np.any(blend_weights > 1e-6):
+            continue
+        source_feature = feature_mask >= 0.25
+        weight_view = blend_weights[:, :, np.newaxis]
+        weighted_sum[dst_y0:dst_y1, dst_x0:dst_x1, :] += (
+            source_view.astype(np.float32, copy=False) * weight_view
+        )
+        weight_sum[dst_y0:dst_y1, dst_x0:dst_x1] += blend_weights
+        coverage_count[dst_y0:dst_y1, dst_x0:dst_x1] += (blend_weights > 1e-6).astype(
+            np.uint16,
+            copy=False,
+        )
         score_view = scores[dst_y0:dst_y1, dst_x0:dst_x1]
-        replace = blend_weights >= score_view
-        output_view = output[dst_y0:dst_y1, dst_x0:dst_x1, :]
-        source_view = raw[src_y0:src_y1, src_x0:src_x1, :]
-        output_view[replace] = source_view[replace]
+        replace = (blend_weights > 1e-6) & (blend_weights >= score_view)
+        hard_view = hard_output[dst_y0:dst_y1, dst_x0:dst_x1, :]
+        hard_view[replace] = source_view[replace]
+        feature_view = hard_feature_mask[dst_y0:dst_y1, dst_x0:dst_x1]
+        feature_view[replace] = source_feature[replace]
         score_view[replace] = blend_weights[replace]
+        if np.any(source_feature):
+            luma = (
+                source_view[:, :, 0].astype(np.float32) * 0.299
+                + source_view[:, :, 1].astype(np.float32) * 0.587
+                + source_view[:, :, 2].astype(np.float32) * 0.114
+            )
+            feature_score_view = best_feature_luma[dst_y0:dst_y1, dst_x0:dst_x1]
+            feature_replace = source_feature & (luma > feature_score_view)
+            feature_score_view[feature_replace] = luma[feature_replace]
+            feature_rgb_view = best_feature_rgb[dst_y0:dst_y1, dst_x0:dst_x1, :]
+            feature_rgb_view[feature_replace] = source_view[feature_replace]
+    averaged = np.divide(
+        weighted_sum,
+        np.maximum(weight_sum, 1e-6)[:, :, np.newaxis],
+        out=np.zeros_like(weighted_sum),
+        where=weight_sum[:, :, np.newaxis] > 0.0,
+    )
+    output = np.where(
+        hard_feature_mask[:, :, np.newaxis],
+        hard_output.astype(np.float32, copy=False),
+        averaged,
+    )
+    candidate_feature = (coverage_count <= 2) & (best_feature_luma >= 0.0)
+    if np.any(candidate_feature):
+        nearby_current_feature = cv2.dilate(
+            hard_feature_mask.astype(np.uint8, copy=False),
+            np.ones((5, 5), dtype=np.uint8),
+            iterations=1,
+        ).astype(bool)
+        two_tile_feature = candidate_feature & ~nearby_current_feature
+    else:
+        two_tile_feature = candidate_feature
+    output = np.where(
+        two_tile_feature[:, :, np.newaxis],
+        best_feature_rgb.astype(np.float32, copy=False),
+        output,
+    )
+    output = np.clip(output, 0.0, 255.0).astype(np.uint8)
     return _rgb_array_to_qimage(output)
+
+
+def _bright_scan_feature_mask(rgb: Any) -> Any:
+    import cv2
+    import numpy as np
+
+    luminance = (
+        rgb[:, :, 0].astype(np.float32) * 0.299
+        + rgb[:, :, 1].astype(np.float32) * 0.587
+        + rgb[:, :, 2].astype(np.float32) * 0.114
+    )
+    bright = luminance >= STITCH_BRIGHT_FEATURE_LUMINANCE_MIN
+    if min(luminance.shape[:2]) < 5 or not bool(np.any(bright)):
+        return bright
+
+    low_frequency = cv2.GaussianBlur(
+        luminance,
+        (0, 0),
+        sigmaX=2.0,
+        sigmaY=2.0,
+    )
+    local_contrast = luminance - low_frequency
+    gradient_x = cv2.Sobel(luminance, cv2.CV_32F, 1, 0, ksize=3)
+    gradient_y = cv2.Sobel(luminance, cv2.CV_32F, 0, 1, ksize=3)
+    gradient = cv2.magnitude(gradient_x, gradient_y)
+    feature = bright & (
+        (local_contrast >= STITCH_BRIGHT_FEATURE_LOCAL_CONTRAST_MIN)
+        | (gradient >= STITCH_BRIGHT_FEATURE_GRADIENT_MIN)
+    )
+    if not bool(np.any(feature)):
+        return feature
+    kernel = np.ones((3, 3), dtype=np.uint8)
+    dilated = cv2.dilate(feature.astype(np.uint8), kernel, iterations=1).astype(bool)
+    return dilated & bright
+
+
+def _warp_tile_to_mosaic_roi(
+    raw: Any,
+    weights: Any,
+    feature_mask: Any,
+    *,
+    x_offset: float,
+    y_offset: float,
+    width_px: int,
+    height_px: int,
+) -> tuple[Any, Any, Any]:
+    import cv2
+    import numpy as np
+
+    transform = np.asarray(
+        [[1.0, 0.0, float(x_offset)], [0.0, 1.0, float(y_offset)]],
+        dtype=np.float32,
+    )
+    size = (int(width_px), int(height_px))
+    warped_raw = cv2.warpAffine(
+        raw,
+        transform,
+        size,
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+    warped_weights = cv2.warpAffine(
+        weights.astype(np.float32, copy=False),
+        transform,
+        size,
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+    warped_feature_mask = cv2.warpAffine(
+        feature_mask.astype(np.float32, copy=False),
+        transform,
+        size,
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+    return (
+        warped_raw,
+        warped_weights.astype(np.float32, copy=False),
+        warped_feature_mask.astype(np.float32, copy=False),
+    )
 
 
 def _scan_tile_pixel_placements(
@@ -634,6 +995,12 @@ def _normalize_scan_tile_photometry(
                     0.0,
                     255.0,
                 ).astype(np.uint8)
+        plane = _estimate_overlap_photometry_plane(
+            normalized,
+            (tile, left_px, top_px, raw),
+        )
+        if plane is not None:
+            raw = _apply_photometry_plane(raw, plane)
         normalized.append((tile, left_px, top_px, raw))
     return normalized
 
@@ -666,6 +1033,147 @@ def _estimate_overlap_photometry_adjustment(
         STITCH_PHOTOMETRY_OFFSET_LIMIT,
     )
     return gain, offset, float(sample_count)
+
+
+def _estimate_overlap_photometry_plane(
+    normalized: list[tuple[MicroscopeScanTile, float, float, Any]],
+    current: tuple[MicroscopeScanTile, float, float, Any],
+) -> Any | None:
+    import numpy as np
+
+    tile, _left_px, _top_px, raw = current
+    rows: list[Any] = []
+    targets: list[list[Any]] = [[], [], []]
+    for existing in normalized:
+        if not _scan_tiles_are_axis_neighbors(existing[0], tile):
+            continue
+        overlap = _overlap_patches_with_current_origin(existing, current)
+        if overlap is None:
+            continue
+        existing_patch, current_patch, current_x0, current_y0 = overlap
+        mask = _photometry_overlap_mask(existing_patch, current_patch)
+        if int(mask.sum()) < STITCH_PHOTOMETRY_MIN_SAMPLES:
+            continue
+        existing_gray = _registration_gray(existing_patch)
+        current_gray = _registration_gray(current_patch)
+        existing_gradient = _sobel_magnitude(existing_gray)
+        current_gradient = _sobel_magnitude(current_gray)
+        mask = mask & (existing_gradient < 12.0) & (current_gradient < 12.0)
+        ys, xs = np.where(mask)
+        sample_count = int(len(xs))
+        if sample_count < STITCH_PHOTOMETRY_MIN_SAMPLES:
+            continue
+        step = max(1, sample_count // STITCH_PHOTOMETRY_PLANE_MAX_SAMPLES)
+        xs = xs[::step]
+        ys = ys[::step]
+        height, width = raw.shape[:2]
+        x_norm = (
+            (xs.astype(np.float32) + float(current_x0))
+            / max(1.0, width - 1.0)
+        ) * 2.0 - 1.0
+        y_norm = (
+            (ys.astype(np.float32) + float(current_y0))
+            / max(1.0, height - 1.0)
+        ) * 2.0 - 1.0
+        rows.append(
+            np.column_stack(
+                [
+                    np.ones_like(x_norm, dtype=np.float32),
+                    x_norm,
+                    y_norm,
+                ]
+            )
+        )
+        residual = (
+            existing_patch[ys, xs].astype(np.float32, copy=False)
+            - current_patch[ys, xs].astype(np.float32, copy=False)
+        )
+        for channel in range(3):
+            targets[channel].append(residual[:, channel])
+    if not rows:
+        return None
+    design = np.vstack(rows).astype(np.float32, copy=False)
+    if design.shape[0] < STITCH_PHOTOMETRY_MIN_SAMPLES:
+        return None
+    coefficients = []
+    for channel in range(3):
+        target = np.concatenate(targets[channel]).astype(np.float32, copy=False)
+        keep = _robust_plane_samples(target)
+        if int(keep.sum()) < STITCH_PHOTOMETRY_MIN_SAMPLES:
+            keep = np.ones(target.shape, dtype=bool)
+        coefficient, *_unused = np.linalg.lstsq(design[keep], target[keep], rcond=None)
+        coefficients.append(coefficient.astype(np.float32, copy=False))
+    return np.stack(coefficients, axis=0)
+
+
+def _overlap_patches_with_current_origin(
+    existing: tuple[MicroscopeScanTile, float, float, Any],
+    current: tuple[MicroscopeScanTile, float, float, Any],
+) -> tuple[Any, Any, int, int] | None:
+    _existing_tile, existing_left, existing_top, existing_raw = existing
+    _current_tile, current_left, current_top, current_raw = current
+    existing_h, existing_w = existing_raw.shape[:2]
+    current_h, current_w = current_raw.shape[:2]
+    left = max(existing_left, current_left)
+    top = max(existing_top, current_top)
+    right = min(existing_left + existing_w, current_left + current_w)
+    bottom = min(existing_top + existing_h, current_top + current_h)
+    overlap_w = int(round(right - left))
+    overlap_h = int(round(bottom - top))
+    if overlap_w < 4 or overlap_h < 4:
+        return None
+    x0 = int(round(left))
+    y0 = int(round(top))
+    existing_x = x0 - int(round(existing_left))
+    existing_y = y0 - int(round(existing_top))
+    current_x = x0 - int(round(current_left))
+    current_y = y0 - int(round(current_top))
+    existing_patch = existing_raw[
+        existing_y : existing_y + overlap_h,
+        existing_x : existing_x + overlap_w,
+    ]
+    current_patch = current_raw[
+        current_y : current_y + overlap_h,
+        current_x : current_x + overlap_w,
+    ]
+    if existing_patch.shape[:2] != current_patch.shape[:2]:
+        return None
+    return existing_patch, current_patch, current_x, current_y
+
+
+def _robust_plane_samples(values: Any) -> Any:
+    import numpy as np
+
+    median = float(np.median(values))
+    mad = float(np.median(np.abs(values - median)))
+    limit = max(5.0, 2.5 * 1.4826 * mad)
+    return np.abs(values - median) <= limit
+
+
+def _apply_photometry_plane(raw: Any, plane: Any) -> Any:
+    import numpy as np
+
+    height, width = raw.shape[:2]
+    yy, xx = np.mgrid[0:height, 0:width]
+    x_norm = (xx.astype(np.float32) / max(1.0, width - 1.0)) * 2.0 - 1.0
+    y_norm = (yy.astype(np.float32) / max(1.0, height - 1.0)) * 2.0 - 1.0
+    design = np.stack(
+        [
+            np.ones_like(x_norm, dtype=np.float32),
+            x_norm,
+            y_norm,
+        ],
+        axis=2,
+    )
+    corrected = raw.astype(np.float32, copy=False).copy()
+    for channel in range(3):
+        correction = np.sum(design * plane[channel].reshape((1, 1, 3)), axis=2)
+        corrected[:, :, channel] += np.clip(
+            correction,
+            -STITCH_PHOTOMETRY_PLANE_OFFSET_LIMIT,
+            STITCH_PHOTOMETRY_PLANE_OFFSET_LIMIT,
+        )
+    return np.clip(corrected, 0.0, 255.0).astype(np.uint8)
 
 
 def _photometry_overlap_mask(existing_patch: Any, current_patch: Any) -> Any:
@@ -717,13 +1225,7 @@ def _phase_overlap_shift(existing_patch: Any, current_patch: Any) -> tuple[float
         return None
     if response < 0.001:
         return None
-    refined_x, refined_y = _refine_integer_overlap_shift(
-        existing_gray,
-        current_gray,
-        shift_x,
-        shift_y,
-    )
-    return float(refined_x), float(refined_y), float(response)
+    return float(shift_x), float(shift_y), float(response)
 
 
 def _refine_integer_overlap_shift(
@@ -801,6 +1303,15 @@ def _registration_gray(rgb: Any) -> Any:
     return gray.astype(np.float32, copy=False)
 
 
+def _sobel_magnitude(gray: Any) -> Any:
+    import cv2
+
+    return cv2.magnitude(
+        cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3),
+        cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3),
+    )
+
+
 def stage_bounds_from_design_bounds(
     design_bounds: tuple[float, float, float, float],
     transform: Callable[[Point2D], Point2D | None],
@@ -853,9 +1364,11 @@ def scan_tile_filename(
 ) -> str:
     stamp = _timestamp_for_filename(captured_at)
     name = safe_filename_component(scan_name) or "design_scan"
+    label = safe_filename_component(getattr(tile, "label", ""))
+    label_part = f"_{label}" if label else ""
     return (
         f"{name}_tile_{tile.index:04d}_"
-        f"r{tile.row + 1:03d}_c{tile.column + 1:03d}_{stamp}"
+        f"r{tile.row + 1:03d}_c{tile.column + 1:03d}{label_part}_{stamp}"
     )
 
 
@@ -1221,6 +1734,7 @@ __all__ = [
     "build_median_flat_field_profile",
     "build_design_scan_plan",
     "objective_scale_calibration",
+    "refine_scan_scale_from_tile_overlaps",
     "render_microscope_overlay",
     "route_photo_filename",
     "save_microscope_image",

@@ -143,7 +143,7 @@ class StageControllerJogQueueTest(unittest.TestCase):
 
             self.assertEqual(
                 serial_connection.writes,
-                [b"\x85", b"$J=G90 G21 X1.5000 Y-2.0000 F180\n"],
+                [b"\x85", b"$J=G90 G21 X1.5 Y-2 F180\n"],
             )
         finally:
             controller.shutdown()
@@ -202,7 +202,7 @@ class StageControllerJogQueueTest(unittest.TestCase):
 
             self.assertEqual(
                 serial_connection.writes,
-                [b"\x85", b"$J=G90 G21 X1.5000 Y-2.0000 F180\n"],
+                [b"\x85", b"$J=G90 G21 X1.5 Y-2 F180\n"],
             )
         finally:
             release_thread.set()
@@ -265,7 +265,7 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
         controller._move_safety_check()
         controller._send_relative_move(MoveVector(a=0.25))
 
-        self.assertIn("G1 A0.2500 F600", commands)
+        self.assertIn("G1 A0.25 F600", commands)
 
     def test_disabled_motion_safety_allows_absolute_manual_axis_move(self) -> None:
         controller = StageController()
@@ -290,7 +290,7 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
         )
 
         self.assertIn("G90", commands)
-        self.assertIn("G1 B0.2500 F123.4", commands)
+        self.assertIn("G1 B0.25 F123.4", commands)
 
     def test_multi_axis_absolute_move_uses_single_g90_command(self) -> None:
         controller = StageController()
@@ -321,7 +321,7 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
         )
 
         self.assertIn("G90", commands)
-        self.assertIn("G1 X10.0000 Y-5.0000 F123.4", commands)
+        self.assertIn("G1 X10 Y-5 F123.4", commands)
 
     def test_coordinate_task_uses_cancelable_absolute_jog(self) -> None:
         controller = StageController()
@@ -355,7 +355,7 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
             25.0,
         )
 
-        self.assertIn("$J=G90 G21 X1.5000 Y-2.0000 F25", commands)
+        self.assertIn("$J=G90 G21 X1.5 Y-2 F25", commands)
         self.assertFalse(any(command.startswith("G1 ") for command in commands))
         self.assertEqual(target_idle_calls[0][0], {"X": 1.5, "Y": -2.0})
         self.assertEqual(movement_results[-1][0], True)
@@ -396,7 +396,7 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
         finally:
             controller.shutdown()
 
-        self.assertIn("$J=G90 G21 Z3.2500 F12.5", commands)
+        self.assertIn("$J=G90 G21 Z3.25 F12.5", commands)
         self.assertTrue(idle_calls)
         self.assertEqual(idle_calls[0][0], {"Z": 3.25})
         self.assertIn("Z+3.250", message)
@@ -422,7 +422,7 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
             as_jog=True,
         )
 
-        self.assertIn("$J=G90 G21 G53 X4.0000 F50", commands)
+        self.assertIn("$J=G90 G21 G53 X4 F50", commands)
 
     def test_homed_work_xy_target_uses_reported_wco_limits(self) -> None:
         controller = StageController()
@@ -477,7 +477,7 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
             allow_unhomed=True,
         )
 
-        self.assertIn("G1 X37.0000 F100", commands)
+        self.assertIn("G1 X37 F100", commands)
 
     def test_relative_manual_axis_move_is_resolved_to_absolute_g90(
         self,
@@ -511,7 +511,7 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
 
         controller._run_manual_axis_move("A", -0.02, "G91", 1.0)
 
-        self.assertEqual(commands, ["$J=G90 G21 A-0.1200 F1"])
+        self.assertEqual(commands, ["$J=G90 G21 A-0.12 F1"])
         self.assertEqual(movement_results[-1][0], True)
         self.assertIn("accepted", movement_results[-1][1])
 
@@ -547,7 +547,7 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
 
         controller._run_manual_axis_move("X", 0.25, "G91", 10.0)
 
-        self.assertEqual(commands, ["$J=G90 G21 X1.2500 F10"])
+        self.assertEqual(commands, ["$J=G90 G21 X1.25 F10"])
         self.assertEqual(movement_results[-1][0], True)
 
     def test_absolute_manual_axis_zero_target_is_sent(self) -> None:
@@ -576,7 +576,7 @@ class StageControllerMotionSafetyBypassTest(unittest.TestCase):
 
         controller._run_manual_axis_move("A", 0.0, "G90", 5.0)
 
-        self.assertEqual(commands, ["$J=G90 G21 A0.0000 F5"])
+        self.assertEqual(commands, ["$J=G90 G21 A0 F5"])
         self.assertEqual(movement_results[-1][0], True)
         self.assertIn("accepted", movement_results[-1][1])
 

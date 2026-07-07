@@ -527,7 +527,7 @@ class StageControllerMotionCommandsMixin:
             )
             self._check_relative_move_limits(move, allow_relative=allow_relative)
         move_parts: list[str] = [
-            f"{axis}{value:.4f}"
+            f"{axis}{self._format_gcode_value(value, decimals=6)}"
             for axis, value in move.items()
             if abs(value) >= 1e-6
         ]
@@ -714,7 +714,7 @@ class StageControllerMotionCommandsMixin:
         if move.is_zero():
             return
         move_parts: list[str] = [
-            f"{axis}{value:.4f}"
+            f"{axis}{self._format_gcode_value(value, decimals=6)}"
             for axis, value in move.items()
             if abs(value) >= 1e-6
         ]

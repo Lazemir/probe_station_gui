@@ -1158,7 +1158,7 @@ class StageControllerPriorityNeedlesActionTest(unittest.TestCase):
 
         self.assertEqual(
             serial_connection.writes,
-            [b"\x90", b"$J=G91 G21 X0.5000 Z-0.1000 F12.3\n"],
+            [b"\x90", b"$J=G91 G21 X0.5 Z-0.1 F12.3\n"],
         )
 
     def test_needles_lower_queues_during_oscillation(self) -> None:

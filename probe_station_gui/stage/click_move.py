@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import logging
 import time
 from typing import TYPE_CHECKING, Any, cast
 
@@ -16,7 +17,14 @@ from probe_station_gui.stage.autofocus_math import (
     qimage_to_gray,
 )
 from probe_station_gui.stage.errors import StageControllerError
+from probe_station_gui.stage.motion_command_planning import (
+    absolute_axis_target_limit_error,
+    clamped_motion_feedrate,
+)
 from probe_station_gui.stage.types import MoveVector
+
+
+logger = logging.getLogger(__name__)
 
 
 class StageControllerClickMoveMixin:
@@ -237,27 +245,44 @@ class StageControllerClickMoveMixin:
                 required_axes=2,
             )
             target_position = (float(target_x_mm), float(target_y_mm))
-            delta_x = float(target_position[0]) - float(current_position[0])
-            delta_y = float(target_position[1]) - float(current_position[1])
-            move = MoveVector(x=delta_x, y=delta_y)
-            if move.is_zero(tol=1e-5):
+            targets = {"X": target_position[0], "Y": target_position[1]}
+            if self._status_matches_axis_targets(status, targets, tolerance=1e-5):
                 return "Target already at requested X/Y."
+            self._ensure_axis_limits(required_axes=("X", "Y"))
+            for axis, target in targets.items():
+                limits = self._axis_limits_for_configured_mode(axis, status)
+                if limits and self._axis_software_limit_ready(status, axis):
+                    error = absolute_axis_target_limit_error(axis, target, limits)
+                    if error is not None:
+                        raise StageControllerError(error)
+            current_values = {
+                "X": float(current_position[0]),
+                "Y": float(current_position[1]),
+            }
+            effective_feedrate = clamped_motion_feedrate(
+                feedrate,
+                default_feedrate=self.DEFAULT_FEEDRATE,
+                min_feedrate=self.MIN_FEEDRATE,
+            )
             self.status_message.emit(
                 f"Moving to X={target_x_mm:.3f} mm, Y={target_y_mm:.3f} mm"
             )
-            self._send_relative_move(
-                move,
-                feedrate=feedrate,
-                as_jog=True,
-                motion_started_callback=lambda _move, feedrate: (
-                    self.absolute_xy_move_started.emit(
-                        float(target_x_mm),
-                        float(target_y_mm),
-                        float(feedrate),
-                    )
-                ),
+            self._write_current_command_and_wait(
+                self._absolute_axis_targets_jog_command(targets, effective_feedrate)
             )
-            self._wait_for_idle()
+            self.absolute_xy_move_started.emit(
+                float(target_x_mm),
+                float(target_y_mm),
+                float(effective_feedrate),
+            )
+            move_distance = self._absolute_move_distance_for_timeout(
+                targets,
+                current_values,
+            )
+            self._wait_for_idle_at_targets(
+                targets,
+                timeout=self._idle_timeout_for_distance(move_distance, effective_feedrate),
+            )
             self._query_current_status()
             return f"Arrived at X={target_x_mm:.3f} mm, Y={target_y_mm:.3f} mm."
 
@@ -297,21 +322,22 @@ class StageControllerClickMoveMixin:
                 self.status_message.emit(
                     f"Moving Z to safe transfer level {transit_z:.3f} mm before {label}."
                 )
-                self._send_relative_move(
-                    MoveVector(z=transit_z - current_z),
+                self._send_absolute_axis_targets_move(
+                    {"Z": transit_z},
                     as_jog=True,
                 )
                 current_z = transit_z
                 moved = True
 
-            delta_x = float(target_position[0]) - current_x
-            delta_y = float(target_position[1]) - current_y
-            xy_move = MoveVector(x=delta_x, y=delta_y)
-            if not xy_move.is_zero(tol=1e-5):
+            xy_targets = {"X": float(target_position[0]), "Y": float(target_position[1])}
+            if (
+                abs(float(target_position[0]) - current_x) >= 1e-5
+                or abs(float(target_position[1]) - current_y) >= 1e-5
+            ):
                 self.status_message.emit(
                     f"Moving to {label} X={target_x_mm:.3f} mm, Y={target_y_mm:.3f} mm"
                 )
-                self._send_relative_move(xy_move, as_jog=True)
+                self._send_absolute_axis_targets_move(xy_targets, as_jog=True)
                 current_x = float(target_position[0])
                 current_y = float(target_position[1])
                 moved = True
@@ -321,8 +347,8 @@ class StageControllerClickMoveMixin:
                 self.status_message.emit(
                     f"Moving Z to {label} focus height {target_z_mm:.3f} mm"
                 )
-                self._send_relative_move(
-                    MoveVector(z=delta_z),
+                self._send_absolute_axis_targets_move(
+                    {"Z": float(target_position[2])},
                     as_jog=True,
                 )
                 moved = True
@@ -596,6 +622,20 @@ class StageControllerClickMoveMixin:
                 response >= self.CALIBRATION_MIN_RESPONSE
                 and shift_pixels >= self.CALIBRATION_MIN_OBSERVATION_PIXELS
             )
+            logger.info(
+                "Click calibration %s observation: step_mm=%.9f "
+                "status_delta=(%.9f, %.9f) shift_px=(%.3f, %.3f) "
+                "shift_norm_px=%.3f response=%.4f reliable=%s",
+                axis,
+                float(step_mm),
+                float(mm_vector[0]),
+                float(mm_vector[1]),
+                float(shift_x),
+                float(shift_y),
+                float(shift_pixels),
+                float(response),
+                bool(reliable_shift),
+            )
             if reliable_shift:
                 pixel_vector = np.array([shift_x, shift_y], dtype=float)
                 observations.append((mm_vector, pixel_vector))
@@ -683,6 +723,12 @@ class StageControllerClickMoveMixin:
         pixel_vectors = np.vstack([item[1] for item in observations])
         if np.linalg.matrix_rank(stage_vectors) < 2:
             raise StageControllerError("Calibration observations are degenerate.")
+        axis_matrix = self._axis_slope_calibration_matrix(
+            stage_vectors,
+            pixel_vectors,
+        )
+        if axis_matrix is not None:
+            return axis_matrix
         coefficients, _residuals, _rank, _singular = np.linalg.lstsq(
             stage_vectors,
             pixel_vectors,
@@ -693,6 +739,14 @@ class StageControllerClickMoveMixin:
             raise StageControllerError("Calibration produced invalid values.")
         predicted = stage_vectors @ coefficients
         errors = np.linalg.norm(predicted - pixel_vectors, axis=1)
+        logger.info(
+            "Click calibration fit: observations=%d matrix=%s residual_mean_px=%.3f "
+            "residual_max_px=%.3f",
+            len(observations),
+            calibration_matrix.tolist(),
+            float(np.mean(errors)),
+            float(np.max(errors)),
+        )
         if len(errors) >= self.CALIBRATION_MIN_OBSERVATIONS + 2:
             median_error = float(np.median(errors))
             keep = errors <= max(2.0, median_error * 3.0)
@@ -703,6 +757,68 @@ class StageControllerClickMoveMixin:
                     rcond=None,
                 )
                 calibration_matrix = coefficients.T
+                predicted = stage_vectors[keep] @ coefficients
+                errors = np.linalg.norm(predicted - pixel_vectors[keep], axis=1)
+                logger.info(
+                    "Click calibration fit after outlier filter: observations=%d "
+                    "matrix=%s residual_mean_px=%.3f residual_max_px=%.3f",
+                    int(np.count_nonzero(keep)),
+                    calibration_matrix.tolist(),
+                    float(np.mean(errors)),
+                    float(np.max(errors)),
+                )
+        return calibration_matrix
+
+    @staticmethod
+    def _axis_slope_calibration_matrix(
+        stage_vectors: np.ndarray,
+        pixel_vectors: np.ndarray,
+    ) -> np.ndarray | None:
+        calibration_matrix = np.zeros((2, 2), dtype=float)
+        residuals: list[np.ndarray] = []
+        intercepts: list[np.ndarray] = []
+        counts: list[int] = []
+        for axis_index in (0, 1):
+            other_index = 1 - axis_index
+            primary = np.abs(stage_vectors[:, axis_index])
+            secondary = np.abs(stage_vectors[:, other_index])
+            mask = (primary > 1e-9) & (primary >= secondary)
+            count = int(np.count_nonzero(mask))
+            if count < 2:
+                return None
+            axis_deltas = stage_vectors[mask, axis_index]
+            if float(np.ptp(axis_deltas)) <= 1e-9:
+                return None
+            design = np.column_stack(
+                [
+                    axis_deltas,
+                    np.ones(count, dtype=float),
+                ]
+            )
+            coefficients, _residuals, _rank, _singular = np.linalg.lstsq(
+                design,
+                pixel_vectors[mask],
+                rcond=None,
+            )
+            slope = coefficients[0]
+            intercept = coefficients[1]
+            calibration_matrix[:, axis_index] = slope
+            predicted = design @ coefficients
+            residuals.append(np.linalg.norm(predicted - pixel_vectors[mask], axis=1))
+            intercepts.append(intercept)
+            counts.append(count)
+        if not np.isfinite(calibration_matrix).all():
+            raise StageControllerError("Calibration produced invalid values.")
+        all_residuals = np.concatenate(residuals) if residuals else np.zeros(0)
+        logger.info(
+            "Click calibration axis-slope fit: counts=%s matrix=%s "
+            "intercepts_px=%s residual_mean_px=%.3f residual_max_px=%.3f",
+            counts,
+            calibration_matrix.tolist(),
+            [intercept.tolist() for intercept in intercepts],
+            float(np.mean(all_residuals)) if all_residuals.size else 0.0,
+            float(np.max(all_residuals)) if all_residuals.size else 0.0,
+        )
         return calibration_matrix
 
     def _move_from_calibration_to_target(

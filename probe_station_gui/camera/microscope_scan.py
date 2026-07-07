@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
@@ -14,6 +14,7 @@ from probe_station_gui.camera.imaging import (
     MicroscopeScanPlan,
     MicroscopeScanTile,
     build_design_scan_plan,
+    safe_filename_component,
     scan_tile_filename,
     stage_bounds_from_design_bounds,
     utc_timestamp,
@@ -57,14 +58,18 @@ class FlatFieldScanOptions:
     mode: str = "scan"
     blur_radius_px: int = DEFAULT_FLAT_FIELD_BLUR_RADIUS_PX
     max_gain: float = DEFAULT_FLAT_FIELD_MAX_GAIN
+    reference_images: tuple[str, ...] = ()
 
     def to_metadata(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "enabled": bool(self.enabled),
             "mode": self.mode,
             "blur_radius_px": int(self.blur_radius_px),
             "max_gain": float(self.max_gain),
         }
+        if self.reference_images:
+            payload["reference_images"] = [str(path) for path in self.reference_images]
+        return payload
 
 
 @dataclass(frozen=True)
@@ -80,6 +85,12 @@ class CameraLockSettings:
                 for node_name, value in self.settings
             ],
         }
+
+
+@dataclass(frozen=True)
+class StitchDebugMosaicGroup:
+    name: str
+    tiles: tuple[MicroscopeScanTile, ...]
 
 
 def default_output_dir(document: object | None, *, cwd: Path | None = None) -> str:
@@ -277,6 +288,155 @@ def centered_area_scan_plan_from_pixel_matrix(
     )
 
 
+def stitch_debug_scan_plan_from_pixel_matrix(
+    *,
+    center_stage_xy: Point2D,
+    frame_size_px: tuple[int, int],
+    pixels_to_mm: Sequence[Sequence[float]],
+    structure_size_mm: float,
+    placement_fraction: float = 1.0,
+    overlap_fraction: float = 0.0,
+) -> MicroscopeScanPlan:
+    """Build a seam-focused stitch-debug plan around a centered structure."""
+
+    width_px = _positive_int(frame_size_px[0], "frame width")
+    height_px = _positive_int(frame_size_px[1], "frame height")
+    matrix = _coerce_pixel_matrix(pixels_to_mm)
+    structure_size = _positive_float(structure_size_mm, "structure_size_mm")
+    try:
+        placement = float(placement_fraction)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("placement_fraction must be between 0 and 1.") from exc
+    if not math.isfinite(placement) or placement < 0.0 or placement > 1.0:
+        raise ValueError("placement_fraction must be between 0 and 1.")
+    try:
+        overlap = float(overlap_fraction)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("overlap_fraction must be between 0 and 0.95.") from exc
+    if not math.isfinite(overlap) or overlap < 0.0 or overlap > 0.95:
+        raise ValueError("overlap_fraction must be between 0 and 0.95.")
+
+    x_vector = _pixel_delta_to_stage(matrix, float(width_px), 0.0)
+    y_vector = _pixel_delta_to_stage(matrix, 0.0, float(height_px))
+    fov_x_mm = math.hypot(*x_vector)
+    fov_y_mm = math.hypot(*y_vector)
+    if structure_size >= fov_x_mm or structure_size >= fov_y_mm:
+        raise ValueError("structure_size_mm must be smaller than the camera FOV.")
+    seam_offset_fraction = (1.0 - overlap) * placement
+    edge_x_px = float(width_px) * 0.5 * seam_offset_fraction
+    edge_y_px = float(height_px) * 0.5 * seam_offset_fraction
+    center_x = float(center_stage_xy[0])
+    center_y = float(center_stage_xy[1])
+    positions = (
+        (1, 1, 0.0, 0.0, "control"),
+        (1, 0, edge_x_px, 0.0, "vertical_left"),
+        (1, 2, -edge_x_px, 0.0, "vertical_right"),
+        (0, 1, 0.0, edge_y_px, "horizontal_top"),
+        (2, 1, 0.0, -edge_y_px, "horizontal_bottom"),
+        (0, 0, edge_x_px, edge_y_px, "corner_top_left"),
+        (0, 2, -edge_x_px, edge_y_px, "corner_top_right"),
+        (2, 0, edge_x_px, -edge_y_px, "corner_bottom_left"),
+        (2, 2, -edge_x_px, -edge_y_px, "corner_bottom_right"),
+    )
+    tiles: list[MicroscopeScanTile] = []
+    for row, column, image_dx_px, image_dy_px, label in positions:
+        dx_mm, dy_mm = _pixel_delta_to_stage(matrix, -image_dx_px, image_dy_px)
+        tiles.append(
+            MicroscopeScanTile(
+                index=len(tiles) + 1,
+                row=row,
+                column=column,
+                stage_xy=(float(center_x + dx_mm), float(center_y + dy_mm)),
+                label=label,
+            )
+        )
+    bounds = _stage_bounds_for_matrix_tiles(
+        [tile.stage_xy for tile in tiles],
+        frame_size_px=(width_px, height_px),
+        matrix=matrix,
+    )
+    return MicroscopeScanPlan(
+        tiles=tuple(tiles),
+        stage_bounds=bounds,
+        covered_stage_bounds=bounds,
+        fov_size_mm=(float(fov_x_mm), float(fov_y_mm)),
+        overlap_fraction=float(overlap),
+        row_count=3,
+        column_count=3,
+    )
+
+
+def stitch_debug_mosaic_groups(
+    plan: MicroscopeScanPlan,
+) -> tuple[StitchDebugMosaicGroup, ...]:
+    by_label = {
+        str(getattr(tile, "label", "") or ""): tile
+        for tile in plan.tiles
+    }
+
+    def tiles(*labels: str) -> tuple[MicroscopeScanTile, ...]:
+        try:
+            return tuple(by_label[label] for label in labels)
+        except KeyError as exc:
+            raise ValueError("Plan is not a stitch-debug seam test plan.") from exc
+
+    return (
+        StitchDebugMosaicGroup(
+            name="vertical_seam",
+            tiles=tiles("vertical_left", "vertical_right"),
+        ),
+        StitchDebugMosaicGroup(
+            name="horizontal_seam",
+            tiles=tiles("horizontal_top", "horizontal_bottom"),
+        ),
+        StitchDebugMosaicGroup(
+            name="corner_seam",
+            tiles=tiles(
+                "corner_top_left",
+                "corner_top_right",
+                "corner_bottom_left",
+                "corner_bottom_right",
+            ),
+        ),
+    )
+
+
+def stitch_debug_mosaic_group_plan(
+    parent_plan: MicroscopeScanPlan,
+    group: StitchDebugMosaicGroup,
+) -> MicroscopeScanPlan:
+    if not group.tiles:
+        raise ValueError("Stitch-debug mosaic group has no tiles.")
+    rows = {int(tile.row) for tile in group.tiles}
+    columns = {int(tile.column) for tile in group.tiles}
+    row_map = {row: index for index, row in enumerate(sorted(rows))}
+    column_map = {column: index for index, column in enumerate(sorted(columns))}
+    tiles = tuple(
+        replace(
+            tile,
+            row=row_map[int(tile.row)],
+            column=column_map[int(tile.column)],
+        )
+        for tile in group.tiles
+    )
+    half_w = float(parent_plan.fov_size_mm[0]) * 0.5
+    half_h = float(parent_plan.fov_size_mm[1]) * 0.5
+    left = min(float(tile.stage_xy[0]) for tile in tiles) - half_w
+    right = max(float(tile.stage_xy[0]) for tile in tiles) + half_w
+    bottom = min(float(tile.stage_xy[1]) for tile in tiles) - half_h
+    top = max(float(tile.stage_xy[1]) for tile in tiles) + half_h
+    bounds = (float(left), float(bottom), float(right), float(top))
+    return MicroscopeScanPlan(
+        tiles=tiles,
+        stage_bounds=bounds,
+        covered_stage_bounds=bounds,
+        fov_size_mm=parent_plan.fov_size_mm,
+        overlap_fraction=parent_plan.overlap_fraction,
+        row_count=len(row_map),
+        column_count=len(column_map),
+    )
+
+
 def flat_field_options_from_payload(
     payload: Mapping[str, object],
     *,
@@ -286,8 +446,13 @@ def flat_field_options_from_payload(
     if isinstance(value, Mapping):
         enabled = _bool_from_payload(value.get("enabled", default_enabled))
         mode = str(value.get("mode") or "scan").strip().lower()
-        if mode not in {"scan", "self"}:
-            raise ValueError("flat_field.mode must be 'scan' or 'self'.")
+        if mode not in {"scan", "self", "reference"}:
+            raise ValueError("flat_field.mode must be 'scan', 'self', or 'reference'.")
+        reference_images = _flat_field_reference_images_from_payload(value)
+        if enabled and mode == "reference" and not reference_images:
+            raise ValueError(
+                "flat_field.reference_images is required when mode is 'reference'."
+            )
         blur_radius = _positive_int(
             value.get("blur_radius_px", DEFAULT_FLAT_FIELD_BLUR_RADIUS_PX),
             "flat_field.blur_radius_px",
@@ -303,8 +468,31 @@ def flat_field_options_from_payload(
             mode=mode,
             blur_radius_px=blur_radius,
             max_gain=max_gain,
+            reference_images=reference_images,
         )
     return FlatFieldScanOptions(enabled=_bool_from_payload(value))
+
+
+def _flat_field_reference_images_from_payload(
+    payload: Mapping[str, object],
+) -> tuple[str, ...]:
+    values: list[str] = []
+    singular = payload.get("reference_image", payload.get("reference_image_path"))
+    if singular is not None:
+        values.append(_flat_field_reference_image_path(singular))
+    plural = payload.get("reference_images", payload.get("reference_image_paths"))
+    if plural is not None:
+        if isinstance(plural, (str, bytes)) or not isinstance(plural, Sequence):
+            raise ValueError("flat_field.reference_images must be a list of paths.")
+        values.extend(_flat_field_reference_image_path(item) for item in plural)
+    return tuple(values)
+
+
+def _flat_field_reference_image_path(value: object) -> str:
+    path = str(value or "").strip()
+    if not path:
+        raise ValueError("flat_field.reference_images must contain file paths.")
+    return path
 
 
 def camera_lock_settings_from_payload(
@@ -402,6 +590,7 @@ def mosaic_image_save_plan(
     captured_at: str,
     objective_name: str,
     magnification: float | None,
+    filename_suffix: str = "",
     extra: Mapping[str, object] | None = None,
 ) -> MicroscopeScanImageSavePlan:
     metadata_extra: dict[str, object] = {
@@ -426,7 +615,11 @@ def mosaic_image_save_plan(
     )
     return MicroscopeScanImageSavePlan(
         output_dir=output_dir,
-        filename_stem=f"{scan_name}_mosaic_{captured_at}",
+        filename_stem=(
+            f"{scan_name}_mosaic"
+            f"{'_' + safe_filename_component(filename_suffix) if filename_suffix else ''}"
+            f"_{captured_at}"
+        ),
         metadata=metadata,
     )
 
@@ -438,6 +631,7 @@ def manifest_payload(
     mosaic_result: MicroscopeCaptureResult,
     created_at: str,
     corrections: Mapping[str, object] | None = None,
+    diagnostic_mosaics: Mapping[str, MicroscopeCaptureResult] | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "version": 1,
@@ -458,6 +652,14 @@ def manifest_payload(
             for tile, result in zip(plan.tiles, tile_results)
         ],
     }
+    if diagnostic_mosaics:
+        payload["diagnostic_mosaics"] = {
+            str(name): {
+                "image": str(result.image_path),
+                "metadata": str(result.metadata_path),
+            }
+            for name, result in diagnostic_mosaics.items()
+        }
     if corrections:
         payload["corrections"] = dict(corrections)
     return payload
@@ -475,6 +677,9 @@ def _manifest_tile_payload(
         "image": str(result.image_path),
         "metadata": str(result.metadata_path),
     }
+    label = str(getattr(tile, "label", "") or "")
+    if label:
+        payload["label"] = label
     raw_image_path = getattr(result, "raw_image_path", None)
     if raw_image_path is not None:
         payload["raw_image"] = str(raw_image_path)
@@ -489,6 +694,7 @@ def write_manifest(
     mosaic_result: MicroscopeCaptureResult,
     created_at: str | None = None,
     corrections: Mapping[str, object] | None = None,
+    diagnostic_mosaics: Mapping[str, MicroscopeCaptureResult] | None = None,
 ) -> Path:
     manifest_path = output_dir / "microscope-scan-manifest.json"
     data = manifest_payload(
@@ -497,6 +703,7 @@ def write_manifest(
         mosaic_result=mosaic_result,
         created_at=created_at or utc_timestamp(),
         corrections=corrections,
+        diagnostic_mosaics=diagnostic_mosaics,
     )
     with manifest_path.open("w", encoding="utf-8") as handle:
         json.dump(data, handle, indent=2, ensure_ascii=False)
@@ -599,6 +806,7 @@ __all__ = [
     "FlatFieldScanOptions",
     "MicroscopeScanStartDecision",
     "MicroscopeScanStatus",
+    "StitchDebugMosaicGroup",
     "camera_lock_settings_from_payload",
     "centered_area_scan_plan",
     "centered_area_scan_plan_from_pixel_matrix",
@@ -612,6 +820,9 @@ __all__ = [
     "start_environment_decision",
     "start_scale_decision",
     "starting_status",
+    "stitch_debug_scan_plan_from_pixel_matrix",
+    "stitch_debug_mosaic_group_plan",
+    "stitch_debug_mosaic_groups",
     "mosaic_image_save_plan",
     "tile_image_save_plan",
     "tile_status",

@@ -40,7 +40,7 @@ def absolute_axis_targets_jog_command(
     if not ordered_targets:
         return ""
     move_parts = [
-        f"{axis}{value:.4f}"
+        f"{axis}{format_gcode_value(value, decimals=6)}"
         for axis, value in ordered_targets.items()
     ]
     command_parts = ["$J=G90", "G21"]

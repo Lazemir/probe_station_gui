@@ -137,7 +137,7 @@ class StageControllerStartupLimitsTest(unittest.TestCase):
 
             self.assertEqual(
                 serial_connection.writes,
-                [b"$J=G90 G21 G53 Z6.0000 F10\n"],
+                [b"$J=G90 G21 G53 Z6 F10\n"],
             )
         finally:
             controller.shutdown()
@@ -327,16 +327,16 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
         )
 
         self.assertEqual(len(callback_writes), 1)
-        self.assertTrue(callback_writes[0][-1].startswith(b"G1 X0.1000"))
+        self.assertTrue(callback_writes[0][-1].startswith(b"G1 X0.1"))
         self.assertFalse(any(command == b"G90\n" for command in callback_writes[0]))
         self.assertEqual(serial_connection.writes[-1], b"G90\n")
 
-    def test_absolute_xy_move_uses_relative_delta(self) -> None:
+    def test_absolute_xy_move_sends_absolute_machine_target(self) -> None:
         controller = StageController()
         controller._serial = _FakeSerial()
         controller._position_reporting_mode = "machine"
 
-        sent_moves = []
+        sent_commands = []
         statuses = [
             types.SimpleNamespace(
                 state="Idle",
@@ -353,17 +353,14 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
         ]
 
         controller._move_safety_check = lambda: None
-        controller._wait_for_idle = lambda: None
+        controller._ensure_axis_limits = lambda **_kwargs: None
+        controller._wait_for_idle_at_targets = lambda _targets, timeout: None
+        controller._write_current_command_and_wait = (
+            lambda command: sent_commands.append(command)
+        )
         controller._query_status = lambda _serial: statuses.pop(0)
         started_moves = []
 
-        def send_relative_move(move, **kwargs) -> None:
-            sent_moves.append(move)
-            callback = kwargs.get("motion_started_callback")
-            if callback is not None:
-                callback(move, 600.0)
-
-        controller._send_relative_move = send_relative_move
         controller.absolute_xy_move_started = types.SimpleNamespace(
             emit=lambda *args: started_moves.append(args)
         )
@@ -379,12 +376,61 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
 
         controller._run_move_to_xy(15.0, 26.0)
 
-        self.assertEqual(len(sent_moves), 1)
-        self.assertAlmostEqual(sent_moves[0].x, 5.0)
-        self.assertAlmostEqual(sent_moves[0].y, 6.0)
+        self.assertEqual(sent_commands, ["$J=G90 G21 G53 X15 Y26 F600"])
         self.assertEqual(started_moves, [(15.0, 26.0, 600.0)])
         self.assertEqual(movement_results[-1][0], True)
         self.assertIn("Arrived", movement_results[-1][1])
+
+    def test_absolute_xy_move_sends_target_not_delta_from_rounded_status(self) -> None:
+        controller = StageController()
+        controller._serial = _FakeSerial()
+        controller._position_reporting_mode = "work"
+
+        sent_commands = []
+        statuses = [
+            types.SimpleNamespace(
+                state="Idle",
+                position=(10.123, 20.765, 0.0),
+                display_position=(10.123, 20.765, 0.0),
+                work_position=(10.123, 20.765, 0.0),
+                homed_axes={"X", "Y"},
+            ),
+            types.SimpleNamespace(
+                state="Idle",
+                position=(15.123, 26.765, 0.0),
+                display_position=(15.123, 26.765, 0.0),
+                work_position=(15.123, 26.765, 0.0),
+                homed_axes={"X", "Y"},
+            ),
+        ]
+
+        controller._move_safety_check = lambda: None
+        controller._ensure_axis_limits = lambda **_kwargs: None
+        controller._wait_for_idle_at_targets = lambda _targets, timeout: None
+        controller._write_current_command_and_wait = (
+            lambda command: sent_commands.append(command)
+        )
+        controller._query_status = lambda _serial: statuses.pop(0)
+        controller.absolute_xy_move_started = types.SimpleNamespace(
+            emit=lambda *args: None
+        )
+        controller.movement_started = types.SimpleNamespace(emit=lambda *args, **kwargs: None)
+        controller.status_message = types.SimpleNamespace(emit=lambda *args, **kwargs: None)
+        movement_results = []
+        controller.movement_finished = types.SimpleNamespace(
+            emit=lambda success, message: movement_results.append((success, message))
+        )
+        controller.stage_position_changed = types.SimpleNamespace(
+            emit=lambda *args, **kwargs: None
+        )
+
+        controller._run_move_to_xy(15.1234567, 26.7654321)
+
+        self.assertEqual(
+            sent_commands,
+            ["$J=G90 G21 X15.123457 Y26.765432 F600"],
+        )
+        self.assertEqual(movement_results[-1][0], True)
 
     def test_absolute_xy_move_uses_work_basis_and_ignores_machine_position(self) -> None:
         controller = StageController()
@@ -399,7 +445,7 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
             0.0,
         )
 
-        sent_moves = []
+        sent_commands = []
         statuses = [
             types.SimpleNamespace(
                 state="Idle",
@@ -422,21 +468,18 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
         ]
 
         controller._move_safety_check = lambda: None
+        controller._ensure_axis_limits = lambda **_kwargs: None
         refresh_calls = []
         controller._refresh_coordinate_system_state = (
             lambda apply_preference=True: refresh_calls.append(apply_preference)
         )
-        controller._wait_for_idle = lambda: None
+        controller._wait_for_idle_at_targets = lambda _targets, timeout: None
+        controller._write_current_command_and_wait = (
+            lambda command: sent_commands.append(command)
+        )
         controller._query_status = lambda _serial: statuses.pop(0)
         started_moves = []
 
-        def send_relative_move(move, **kwargs) -> None:
-            sent_moves.append(move)
-            callback = kwargs.get("motion_started_callback")
-            if callback is not None:
-                callback(move, 600.0)
-
-        controller._send_relative_move = send_relative_move
         controller.absolute_xy_move_started = types.SimpleNamespace(
             emit=lambda *args: started_moves.append(args)
         )
@@ -449,9 +492,7 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
 
         controller._run_move_to_xy(29.887, 26.689)
 
-        self.assertEqual(len(sent_moves), 1)
-        self.assertAlmostEqual(sent_moves[0].x, 24.903)
-        self.assertAlmostEqual(sent_moves[0].y, 22.984)
+        self.assertEqual(sent_commands, ["$J=G90 G21 X29.887 Y26.689 F600"])
         self.assertEqual(started_moves, [(29.887, 26.689, 600.0)])
         self.assertEqual(movement_results[-1][0], True)
         self.assertEqual(refresh_calls, [])
@@ -647,7 +688,7 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
         controller._serial = _FakeSerial()
         controller._position_reporting_mode = "machine"
 
-        sent_moves = []
+        sent_targets = []
         statuses = [
             types.SimpleNamespace(
                 state="Idle",
@@ -666,8 +707,8 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
         controller._move_safety_check = lambda: None
         controller._wait_for_idle = lambda: None
         controller._query_status = lambda _serial: statuses.pop(0)
-        controller._send_relative_move = (
-            lambda move, **_kwargs: sent_moves.append(move)
+        controller._send_absolute_axis_targets_move = (
+            lambda targets, **kwargs: sent_targets.append((dict(targets), dict(kwargs)))
         )
         controller.movement_started = types.SimpleNamespace(emit=lambda *args, **kwargs: None)
         controller.status_message = types.SimpleNamespace(emit=lambda *args, **kwargs: None)
@@ -678,11 +719,14 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
 
         controller._run_move_to_xyz(30.0, 40.0, 6.0, 3.0, "stone position")
 
-        self.assertEqual(len(sent_moves), 3)
-        self.assertAlmostEqual(sent_moves[0].z, -5.0)
-        self.assertAlmostEqual(sent_moves[1].x, 20.0)
-        self.assertAlmostEqual(sent_moves[1].y, 20.0)
-        self.assertAlmostEqual(sent_moves[2].z, 3.0)
+        self.assertEqual(
+            sent_targets,
+            [
+                ({"Z": 3.0}, {"as_jog": True}),
+                ({"X": 30.0, "Y": 40.0}, {"as_jog": True}),
+                ({"Z": 6.0}, {"as_jog": True}),
+            ],
+        )
         self.assertEqual(movement_results[-1][0], True)
         self.assertIn("Arrived at stone position", movement_results[-1][1])
 
@@ -1469,6 +1513,44 @@ class StageControllerObjectiveTest(unittest.TestCase):
         self.assertAlmostEqual(moves[0], 0.005)
         self.assertTrue(all(move < 0.1 for move in moves))
         self.assertNotIn(1.0, moves)
+
+    def test_calibration_matrix_uses_axis_slope_when_observations_have_bias(self) -> None:
+        controller = StageController()
+        controller.CALIBRATION_MIN_OBSERVATIONS = 4
+        observations: list[tuple[np.ndarray, np.ndarray]] = []
+        for stage_x in (0.005, 0.010, 0.015, 0.020):
+            observations.append(
+                (
+                    np.array([stage_x, 0.0], dtype=float),
+                    np.array(
+                        [
+                            11.0 - 8400.0 * stage_x,
+                            -2.0 + 25.0 * stage_x,
+                        ],
+                        dtype=float,
+                    ),
+                )
+            )
+        for stage_y in (0.005, 0.010, 0.015, 0.020):
+            observations.append(
+                (
+                    np.array([0.0, stage_y], dtype=float),
+                    np.array(
+                        [
+                            4.0 + 18.0 * stage_y,
+                            -7.0 - 8700.0 * stage_y,
+                        ],
+                        dtype=float,
+                    ),
+                )
+            )
+
+        matrix = controller._calibration_matrix_from_observations(observations)
+
+        self.assertAlmostEqual(float(matrix[0, 0]), -8400.0)
+        self.assertAlmostEqual(float(matrix[1, 0]), 25.0)
+        self.assertAlmostEqual(float(matrix[0, 1]), 18.0)
+        self.assertAlmostEqual(float(matrix[1, 1]), -8700.0)
 
     def test_calibration_verify_step_uses_saved_matrix_scale(self) -> None:
         controller = StageController()

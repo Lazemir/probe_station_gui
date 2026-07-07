@@ -69,6 +69,7 @@ class ApiCommandDispatchHandlers:
     route_session_seek: NoPayloadHandler
     route_session_artifact: PayloadHandler
     lens_distortion_calibration: PayloadHandler
+    click_to_move_calibration: PayloadHandler
     microscope_area_scan: PayloadHandler
 
 
@@ -145,6 +146,7 @@ def dispatch_api_command_request(
         "route_session_result": handlers.route_session_result,
         "route_session_artifact": handlers.route_session_artifact,
         "lens_distortion_calibration": handlers.lens_distortion_calibration,
+        "click_to_move_calibration": handlers.click_to_move_calibration,
         "microscope_area_scan": handlers.microscope_area_scan,
     }
     if action in payload_handlers:

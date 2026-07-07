@@ -64,6 +64,8 @@ class MicroscopeView(QWidget):
         self.setMouseTracking(True)
         self._pix: QPixmap | None = None
         self._target_rel: tuple[float, float] | None = None
+        self._click_to_move_release_target: tuple[float, float, float, float] | None = None
+        self._click_to_move_release_cancelled = False
         self._target_pending = False
         self._target_blink_dimmed = False
         self._target_blink_timer = QTimer(self)
@@ -318,17 +320,10 @@ class MicroscopeView(QWidget):
         if not self._display_rect.contains(point):
             return
 
-        scale_x = self._display_rect.width() / self._pix.width()
-        scale_y = self._display_rect.height() / self._pix.height()
-        if scale_x <= 0 or scale_y <= 0:
+        click = self._image_click_coordinates(event.position())
+        if click is None:
             return
-
-        image_x = (event.position().x() - self._display_rect.left()) / scale_x
-        image_y = (event.position().y() - self._display_rect.top()) / scale_y
-        center_x = self._pix.width() / 2
-        center_y = self._pix.height() / 2
-        dx = image_x - center_x
-        dy = center_y - image_y
+        dx, dy, rel_x, rel_y = click
 
         if self._measure_mode is not None:
             if len(self._measure_points) == 0:
@@ -346,16 +341,39 @@ class MicroscopeView(QWidget):
             event.accept()
             return
 
-        rel_x = (event.position().x() - self._display_rect.left()) / self._display_rect.width()
-        rel_y = (event.position().y() - self._display_rect.top()) / self._display_rect.height()
-        rel_x = max(0.0, min(1.0, rel_x))
-        rel_y = max(0.0, min(1.0, rel_y))
-        if not self._alignment_mode:
-            self._clear_target_motion()
-            self.set_target_pending(False)
-            self._target_rel = (rel_x, rel_y)
+        if self._alignment_mode:
+            self.clicked.emit(dx, dy, rel_x, rel_y)
+            self.update()
+            event.accept()
+            return
+
+        self._arm_click_to_move_release(click)
+        event.accept()
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
+        if event.button() != Qt.LeftButton:
+            super().mouseReleaseEvent(event)
+            return
+        if self._click_to_move_release_cancelled:
+            self._click_to_move_release_cancelled = False
+            event.accept()
+            return
+        if self._click_to_move_release_target is None:
+            super().mouseReleaseEvent(event)
+            return
+        click = self._image_click_coordinates(event.position())
+        if click is None:
+            self._cancel_click_to_move_release(suppress_until_release=False)
+            event.accept()
+            return
+        self._click_to_move_release_target = None
+        dx, dy, rel_x, rel_y = click
+        self._clear_target_motion()
+        self.set_target_pending(False)
+        self._target_rel = (rel_x, rel_y)
         self.clicked.emit(dx, dy, rel_x, rel_y)
         self.update()
+        event.accept()
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
         point = event.position().toPoint()
@@ -373,28 +391,27 @@ class MicroscopeView(QWidget):
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
         if not self._pix or not self._display_rect:
+            if event.buttons() & Qt.LeftButton:
+                self._cancel_click_to_move_release(suppress_until_release=True)
             self.hover_left.emit()
             return
         point = event.position().toPoint()
         if not self._display_rect.contains(point):
+            if event.buttons() & Qt.LeftButton:
+                self._cancel_click_to_move_release(suppress_until_release=True)
             self.hover_left.emit()
             if self._measure_mode is not None and self._measure_hover is not None:
                 self._measure_hover = None
                 self.update()
             return
 
-        scale_x = self._display_rect.width() / self._pix.width()
-        scale_y = self._display_rect.height() / self._pix.height()
-        if scale_x <= 0 or scale_y <= 0:
+        click = self._image_click_coordinates(event.position())
+        if click is None:
+            if event.buttons() & Qt.LeftButton:
+                self._cancel_click_to_move_release(suppress_until_release=True)
             self.hover_left.emit()
             return
-
-        image_x = (event.position().x() - self._display_rect.left()) / scale_x
-        image_y = (event.position().y() - self._display_rect.top()) / scale_y
-        center_x = self._pix.width() / 2
-        center_y = self._pix.height() / 2
-        dx = image_x - center_x
-        dy = center_y - image_y
+        dx, dy, rel_x, rel_y = click
 
         if self._measure_mode is not None:
             # Ctrl + one point placed: lock ruler to nearest axis
@@ -412,22 +429,82 @@ class MicroscopeView(QWidget):
             self.update()
             return
 
-        rel_x = (event.position().x() - self._display_rect.left()) / self._display_rect.width()
-        rel_y = (event.position().y() - self._display_rect.top()) / self._display_rect.height()
-        rel_x = max(0.0, min(1.0, rel_x))
-        rel_y = max(0.0, min(1.0, rel_y))
+        if (event.buttons() & Qt.LeftButton) and self._click_to_move_release_target is not None:
+            self._click_to_move_release_target = click
+            self._target_rel = (rel_x, rel_y)
+            self.update()
         self.hovered.emit(dx, dy, rel_x, rel_y)
 
     def leaveEvent(self, event) -> None:  # type: ignore[override]
+        if self._click_to_move_release_target is not None:
+            self._cancel_click_to_move_release(suppress_until_release=True)
         self.hover_left.emit()
         super().leaveEvent(event)
 
     def clear_target_cross(self) -> None:
         """Remove the movable cross overlay."""
 
+        self._click_to_move_release_target = None
+        self._click_to_move_release_cancelled = False
         self._target_rel = None
         self._clear_target_motion()
         self.set_target_pending(False)
+        self.update()
+
+    def _image_click_coordinates(
+        self, position: QPointF
+    ) -> tuple[float, float, float, float] | None:
+        if not self._pix or not self._display_rect:
+            return None
+        if (
+            self._display_rect.width() <= 0
+            or self._display_rect.height() <= 0
+            or self._pix.width() <= 0
+            or self._pix.height() <= 0
+        ):
+            return None
+        if not self._display_rect.contains(position.toPoint()):
+            return None
+
+        scale_x = self._display_rect.width() / self._pix.width()
+        scale_y = self._display_rect.height() / self._pix.height()
+        if scale_x <= 0 or scale_y <= 0:
+            return None
+
+        image_x = (position.x() - self._display_rect.left()) / scale_x
+        image_y = (position.y() - self._display_rect.top()) / scale_y
+        center_x = self._pix.width() / 2
+        center_y = self._pix.height() / 2
+        dx = image_x - center_x
+        dy = center_y - image_y
+        rel_x = (position.x() - self._display_rect.left()) / self._display_rect.width()
+        rel_y = (position.y() - self._display_rect.top()) / self._display_rect.height()
+        rel_x = max(0.0, min(1.0, rel_x))
+        rel_y = max(0.0, min(1.0, rel_y))
+        return dx, dy, rel_x, rel_y
+
+    def _arm_click_to_move_release(
+        self, click: tuple[float, float, float, float]
+    ) -> None:
+        self._click_to_move_release_target = click
+        self._click_to_move_release_cancelled = False
+        _dx, _dy, rel_x, rel_y = click
+        self._clear_target_motion()
+        self.set_target_pending(False)
+        self._target_rel = (rel_x, rel_y)
+        self.update()
+
+    def _cancel_click_to_move_release(self, *, suppress_until_release: bool) -> None:
+        if (
+            self._click_to_move_release_target is None
+            and not self._click_to_move_release_cancelled
+        ):
+            return
+        self._click_to_move_release_target = None
+        self._click_to_move_release_cancelled = bool(suppress_until_release)
+        self._clear_target_motion()
+        self.set_target_pending(False)
+        self._target_rel = None
         self.update()
 
     def set_target_pending(self, pending: bool) -> None:

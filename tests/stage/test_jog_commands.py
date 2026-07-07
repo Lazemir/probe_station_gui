@@ -45,13 +45,24 @@ def test_jog_command_feedrate_uses_last_finite_feedrate_with_minimum() -> None:
 
 def test_absolute_axis_targets_jog_command_orders_axes_and_uses_machine_mode() -> None:
     command = absolute_axis_targets_jog_command(
-        {"Z": 6.0, "X": 1.25},
+        {"Z": 6.0, "X": 1.2500004},
         10.0,
         axis_order=AXIS_INDEX,
         machine_position_mode=True,
     )
 
-    assert command == "$J=G90 G21 G53 X1.2500 Z6.0000 F10"
+    assert command == "$J=G90 G21 G53 X1.25 Z6 F10"
+
+
+def test_absolute_axis_targets_jog_command_preserves_micron_precision() -> None:
+    command = absolute_axis_targets_jog_command(
+        {"X": 1.2345674},
+        10.0,
+        axis_order=AXIS_INDEX,
+        machine_position_mode=False,
+    )
+
+    assert command == "$J=G90 G21 X1.234567 F10"
 
 
 def test_relative_jog_command_to_absolute_uses_cached_position() -> None:
@@ -65,7 +76,7 @@ def test_relative_jog_command_to_absolute_uses_cached_position() -> None:
         axis_skip_reason=lambda _axis, _position: None,
     )
 
-    assert command == "$J=G90 G21 G53 Z6.0000 F10"
+    assert command == "$J=G90 G21 G53 Z6 F10"
 
 
 def test_relative_jog_command_to_absolute_preserves_command_when_axis_is_skipped() -> None:

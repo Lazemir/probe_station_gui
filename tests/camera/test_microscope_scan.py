@@ -189,6 +189,107 @@ def test_centered_area_scan_plan_from_pixel_matrix_preserves_camera_axes() -> No
     assert plan.fov_size_mm == pytest.approx((1.019803902718557, 1.0))
 
 
+def test_stitch_debug_scan_plan_places_structure_on_seams() -> None:
+    plan = microscope_scan.stitch_debug_scan_plan_from_pixel_matrix(
+        center_stage_xy=(10.0, 20.0),
+        frame_size_px=(1000, 800),
+        pixels_to_mm=((0.001, 0.0), (0.0, -0.001)),
+        structure_size_mm=0.4,
+        placement_fraction=1.0,
+    )
+
+    assert plan.row_count == 3
+    assert plan.column_count == 3
+    assert plan.fov_size_mm == pytest.approx((1.0, 0.8))
+    assert [
+        (tile.row, tile.column, tile.stage_xy, tile.label)
+        for tile in plan.tiles
+    ] == [
+        (1, 1, (10.0, 20.0), "control"),
+        (1, 0, (9.5, 20.0), "vertical_left"),
+        (1, 2, (10.5, 20.0), "vertical_right"),
+        (0, 1, (10.0, 19.6), "horizontal_top"),
+        (2, 1, (10.0, 20.4), "horizontal_bottom"),
+        (0, 0, (9.5, 19.6), "corner_top_left"),
+        (0, 2, (10.5, 19.6), "corner_top_right"),
+        (2, 0, (9.5, 20.4), "corner_bottom_left"),
+        (2, 2, (10.5, 20.4), "corner_bottom_right"),
+    ]
+    assert [
+        (group.name, [tile.label for tile in group.tiles])
+        for group in microscope_scan.stitch_debug_mosaic_groups(plan)
+    ] == [
+        ("vertical_seam", ["vertical_left", "vertical_right"]),
+        ("horizontal_seam", ["horizontal_top", "horizontal_bottom"]),
+        (
+            "corner_seam",
+            [
+                "corner_top_left",
+                "corner_top_right",
+                "corner_bottom_left",
+                "corner_bottom_right",
+            ],
+        ),
+    ]
+
+    group_plans = [
+        microscope_scan.stitch_debug_mosaic_group_plan(plan, group)
+        for group in microscope_scan.stitch_debug_mosaic_groups(plan)
+    ]
+    assert [
+        (
+            group_plan.row_count,
+            group_plan.column_count,
+            [(tile.row, tile.column, tile.label) for tile in group_plan.tiles],
+        )
+        for group_plan in group_plans
+    ] == [
+        (
+            1,
+            2,
+            [(0, 0, "vertical_left"), (0, 1, "vertical_right")],
+        ),
+        (
+            2,
+            1,
+            [(0, 0, "horizontal_top"), (1, 0, "horizontal_bottom")],
+        ),
+        (
+            2,
+            2,
+            [
+                (0, 0, "corner_top_left"),
+                (0, 1, "corner_top_right"),
+                (1, 0, "corner_bottom_left"),
+                (1, 1, "corner_bottom_right"),
+            ],
+        ),
+    ]
+
+
+def test_stitch_debug_scan_plan_can_place_structure_inside_overlap() -> None:
+    plan = microscope_scan.stitch_debug_scan_plan_from_pixel_matrix(
+        center_stage_xy=(10.0, 20.0),
+        frame_size_px=(1000, 800),
+        pixels_to_mm=((0.001, 0.0), (0.0, -0.001)),
+        structure_size_mm=0.4,
+        placement_fraction=1.0,
+        overlap_fraction=0.1,
+    )
+
+    assert plan.overlap_fraction == pytest.approx(0.1)
+    assert [
+        (tile.row, tile.column, tile.stage_xy, tile.label)
+        for tile in plan.tiles[:5]
+    ] == [
+        (1, 1, (10.0, 20.0), "control"),
+        (1, 0, (9.55, 20.0), "vertical_left"),
+        (1, 2, (10.45, 20.0), "vertical_right"),
+        (0, 1, (10.0, 19.64), "horizontal_top"),
+        (2, 1, (10.0, 20.36), "horizontal_bottom"),
+    ]
+
+
 def test_flat_field_scan_options_accept_boolean_and_object_payloads() -> None:
     defaults = microscope_scan.flat_field_options_from_payload(
         {},
@@ -220,6 +321,37 @@ def test_flat_field_scan_options_accept_boolean_and_object_payloads() -> None:
     assert configured.mode == "self"
     assert configured.blur_radius_px == 121
     assert configured.max_gain == 2.5
+
+
+def test_flat_field_scan_options_accept_reference_images() -> None:
+    configured = microscope_scan.flat_field_options_from_payload(
+        {
+            "flat_field": {
+                "enabled": True,
+                "mode": "reference",
+                "reference_images": ["C:/flat/east.png", "C:/flat/west.png"],
+                "blur_radius_px": 801,
+            }
+        },
+        default_enabled=False,
+    )
+
+    assert configured.enabled is True
+    assert configured.mode == "reference"
+    assert configured.reference_images == ("C:/flat/east.png", "C:/flat/west.png")
+    assert configured.blur_radius_px == 801
+    assert configured.to_metadata()["reference_images"] == [
+        "C:/flat/east.png",
+        "C:/flat/west.png",
+    ]
+
+
+def test_flat_field_reference_mode_requires_reference_images() -> None:
+    with pytest.raises(ValueError, match="reference_images is required"):
+        microscope_scan.flat_field_options_from_payload(
+            {"flat_field": {"enabled": True, "mode": "reference"}},
+            default_enabled=False,
+        )
 
 
 def test_camera_lock_settings_default_to_fixed_auto_modes() -> None:
@@ -291,6 +423,19 @@ def test_tile_and_mosaic_save_plans_preserve_metadata_payloads() -> None:
         3.5,
     ]
 
+    seam_mosaic_plan = microscope_scan.mosaic_image_save_plan(
+        output_dir=Path("C:/scan"),
+        scan_name="sample",
+        plan=plan,
+        captured_at="2026-06-28T12:01:00+03:00",
+        objective_name="10x",
+        magnification=10.0,
+        filename_suffix="vertical_seam",
+    )
+    assert seam_mosaic_plan.filename_stem == (
+        "sample_mosaic_vertical_seam_2026-06-28T12:01:00+03:00"
+    )
+
 
 def test_manifest_payload_lists_mosaic_and_tiles_in_plan_order() -> None:
     plan = _plan()
@@ -342,4 +487,25 @@ def test_manifest_payload_lists_mosaic_and_tiles_in_plan_order() -> None:
     assert payload["corrections"] == {
         "flat_field": {"enabled": True, "mode": "self"},
         "camera_lock": {"enabled": True},
+    }
+
+    diagnostic_payload = microscope_scan.manifest_payload(
+        plan=plan,
+        tile_results=tile_results,
+        mosaic_result=mosaic,
+        created_at="2026-06-28T12:02:00+03:00",
+        diagnostic_mosaics={
+            "vertical_seam": _capture_result("vertical"),
+            "horizontal_seam": _capture_result("horizontal"),
+        },
+    )
+    assert diagnostic_payload["diagnostic_mosaics"] == {
+        "vertical_seam": {
+            "image": "C:\\scan\\vertical.png",
+            "metadata": "C:\\scan\\vertical.json",
+        },
+        "horizontal_seam": {
+            "image": "C:\\scan\\horizontal.png",
+            "metadata": "C:\\scan\\horizontal.json",
+        },
     }

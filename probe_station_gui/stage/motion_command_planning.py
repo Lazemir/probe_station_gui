@@ -54,7 +54,7 @@ def absolute_axis_g1_command(targets: Mapping[str, float], feedrate: float) -> s
     """Build the G1 command for an ordered absolute target mapping."""
 
     move_parts = (
-        f"{axis}{float(value):.4f}"
+        f"{axis}{format_gcode_value(float(value), decimals=6)}"
         for axis, value in targets.items()
     )
     return "G1 " + " ".join(move_parts) + f" F{format_gcode_value(feedrate)}"

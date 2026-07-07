@@ -42,9 +42,12 @@ def test_clamped_motion_feedrate_uses_default_or_minimum() -> None:
 
 
 def test_absolute_axis_g1_command_formats_targets_and_feedrate() -> None:
-    command = absolute_axis_g1_command({"X": 10.0, "Y": -5.0}, 123.4)
+    command = absolute_axis_g1_command(
+        {"X": 10.0000004, "Y": -5.0000004, "Z": 1.2345674},
+        123.4,
+    )
 
-    assert command == "G1 X10.0000 Y-5.0000 F123.4"
+    assert command == "G1 X10 Y-5 Z1.234567 F123.4"
 
 
 def test_absolute_axis_target_limit_error_matches_controller_text() -> None:
