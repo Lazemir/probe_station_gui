@@ -1439,6 +1439,7 @@ class DesignNavigatorPanel(QWidget):
         int,
         bool,
         bool,
+        object,
     )
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -1718,7 +1719,7 @@ class DesignNavigatorPanel(QWidget):
             ["#", "Label", "Center", "N1", "N2"]
         )
         self._route_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self._route_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._route_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._route_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self._route_table.itemSelectionChanged.connect(
             self._on_route_selection_changed
@@ -2251,6 +2252,10 @@ class DesignNavigatorPanel(QWidget):
             self._route_array_cancel_button,
         ):
             widget.setEnabled(has_document and not route_running)
+        has_selection_array = len(self._selected_route_row_indices()) >= 2
+        self._route_array_replace_checkbox.setEnabled(
+            has_document and not route_running and not has_selection_array
+        )
 
     def _make_route_offset_spinbox(self, parent: QWidget) -> QDoubleSpinBox:
         spinbox = QDoubleSpinBox(parent)
@@ -2648,6 +2653,7 @@ class DesignNavigatorPanel(QWidget):
             self._route_array_dir2_count_spin.value(),
             self._route_array_serpentine_checkbox.isChecked(),
             self._route_array_replace_checkbox.isChecked(),
+            self._selected_route_row_indices(),
         )
         self._set_design_tool("select")
 
@@ -2716,7 +2722,22 @@ class DesignNavigatorPanel(QWidget):
         dir2 = dir2_override or self._route_array_dir2_step()
         count1 = int(count1_override or self._route_array_dir1_count_spin.value())
         count2 = int(count2_override or self._route_array_dir2_count_spin.value())
-        points = self._build_array_preview_points(origin, dir1, count1, dir2, count2)
+        selected_rows = self._selected_route_row_indices()
+        if self._route is not None and len(selected_rows) >= 2:
+            source_points = [
+                self._route.points[row].camera_center
+                for row in selected_rows
+                if 0 <= row < len(self._route.points)
+            ]
+            points = self._build_array_preview_points_for_sources(
+                source_points,
+                dir1,
+                count1,
+                dir2,
+                count2,
+            )
+        else:
+            points = self._build_array_preview_points(origin, dir1, count1, dir2, count2)
         self.route_preview_changed.emit((points, self._current_route_offset_vectors()))
 
     def _build_array_preview_points(
@@ -2752,6 +2773,23 @@ class DesignNavigatorPanel(QWidget):
                         + dir2_y * float(row_index),
                     )
                 )
+        return points
+
+    def _build_array_preview_points_for_sources(
+        self,
+        sources: list[Point2D],
+        dir1: Point2D,
+        count1: int,
+        dir2: Point2D,
+        count2: int,
+    ) -> list[Point2D]:
+        cells = self._build_array_preview_points((0.0, 0.0), dir1, count1, dir2, count2)
+        points: list[Point2D] = []
+        for cell in cells:
+            if abs(cell[0]) <= 1e-12 and abs(cell[1]) <= 1e-12:
+                continue
+            for source in sources:
+                points.append((source[0] + cell[0], source[1] + cell[1]))
         return points
 
     def _route_array_origin(self) -> Point2D:
@@ -2901,16 +2939,23 @@ class DesignNavigatorPanel(QWidget):
         )
 
     def _on_route_selection_changed(self) -> None:
-        selected_rows = self._route_table.selectionModel().selectedRows()
+        selected_rows = self._selected_route_row_indices()
         if not selected_rows:
             self._selected_route_point_index = -1
             self.route_selected.emit(-1)
             self._update_enabled_state()
             return
-        row = selected_rows[0].row()
+        row = selected_rows[0]
         self._selected_route_point_index = row
         self.route_selected.emit(row)
         self._update_enabled_state()
+        self._update_route_array_preview()
+
+    def _selected_route_row_indices(self) -> list[int]:
+        selection_model = self._route_table.selectionModel()
+        if selection_model is None:
+            return []
+        return sorted({index.row() for index in selection_model.selectedRows()})
 
     def _emit_route_measurement_jump_to_selected(self) -> None:
         if self._selected_route_point_index < 0:

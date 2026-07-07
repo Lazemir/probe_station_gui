@@ -8216,6 +8216,7 @@ class Main(QMainWindow):
         count_y: int,
         serpentine: bool,
         replace_existing: bool,
+        selected_indices: object = None,
     ) -> None:
         if self._design_session.document is None:
             self._show_status("Load a design before adding route points.", 5000)
@@ -8227,16 +8228,34 @@ class Main(QMainWindow):
             except DesignModelError as exc:
                 self._show_status(str(exc), 5000)
                 return
+        selection: list[int] = []
+        if isinstance(selected_indices, (list, tuple)):
+            for item in selected_indices:
+                try:
+                    selection.append(int(item))
+                except (TypeError, ValueError):
+                    continue
         try:
-            added = route.add_grid_points(
-                (float(origin_x), float(origin_y)),
-                (float(step_x_dx), float(step_x_dy)),
-                int(count_x),
-                (float(step_y_dx), float(step_y_dy)),
-                int(count_y),
-                serpentine=bool(serpentine),
-                clear_existing=bool(replace_existing),
-            )
+            if len(selection) >= 2:
+                added = route.add_array_copies_from_points(
+                    selection,
+                    (float(step_x_dx), float(step_x_dy)),
+                    int(count_x),
+                    (float(step_y_dx), float(step_y_dy)),
+                    int(count_y),
+                    serpentine=bool(serpentine),
+                )
+                replace_existing = False
+            else:
+                added = route.add_grid_points(
+                    (float(origin_x), float(origin_y)),
+                    (float(step_x_dx), float(step_x_dy)),
+                    int(count_x),
+                    (float(step_y_dx), float(step_y_dy)),
+                    int(count_y),
+                    serpentine=bool(serpentine),
+                    clear_existing=bool(replace_existing),
+                )
         except DesignModelError as exc:
             self._show_status(str(exc), 5000)
             return
@@ -8247,6 +8266,13 @@ class Main(QMainWindow):
             self._design_session.selected_route_point_index = -1
             self._last_selected_design_point = None
         self._refresh_design_panel()
+        if len(selection) >= 2:
+            self._show_status(
+                f"Added {len(added)} copied route points "
+                f"from {len(selection)} selected points.",
+                4000,
+            )
+            return
         mode = "Replaced route with" if replace_existing else "Added"
         self._show_status(
             f"{mode} {len(added)} array route points "
