@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QSize, Qt, Signal
+from PySide6.QtCore import QItemSelectionModel, QPointF, QSize, Qt, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -613,6 +613,9 @@ class DesignNavigatorPanel(QWidget):
         *,
         selected_route_point_index: int,
     ) -> None:
+        previous_route = self._route
+        previous_point_count = len(previous_route.points) if previous_route is not None else 0
+        previous_selected_rows = self._selected_route_row_indices()
         self._route = route
         self._selected_route_point_index = selected_route_point_index
         self._updating_route_controls = True
@@ -624,6 +627,15 @@ class DesignNavigatorPanel(QWidget):
                 self._route_table.setRowCount(0)
                 self._set_route_offset_values(0.0, 0.0, 0.0, 0.0)
             else:
+                rows_to_select: list[int]
+                if (
+                    route is previous_route
+                    and previous_point_count == len(route.points)
+                    and previous_selected_rows
+                ):
+                    rows_to_select = previous_selected_rows
+                else:
+                    rows_to_select = [selected_route_point_index]
                 path_text = str(route.path) if route.path is not None else "Unsaved route."
                 self._route_label.setText(f"{route.name} | {path_text}")
                 self._route_table.setRowCount(len(route.points))
@@ -648,8 +660,13 @@ class DesignNavigatorPanel(QWidget):
                         4,
                         QTableWidgetItem(self._format_point(needle_2)),
                     )
-                    if row == selected_route_point_index:
-                        self._route_table.selectRow(row)
+                selection_model = self._route_table.selectionModel()
+                if selection_model is not None:
+                    for row in sorted({row for row in rows_to_select if 0 <= row < len(route.points)}):
+                        selection_model.select(
+                            self._route_table.model().index(row, 0),
+                            QItemSelectionModel.Select | QItemSelectionModel.Rows,
+                        )
                 offsets = route.needle_offsets[:2]
                 if len(offsets) >= 2:
                     self._set_route_offset_values(

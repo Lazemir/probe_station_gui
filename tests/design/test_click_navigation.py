@@ -160,3 +160,27 @@ def test_route_array_request_includes_multi_selected_route_rows() -> None:
 
     assert emitted[-1][-1] == [0, 2]
     assert panel._selected_route_point_index == 0
+
+
+def test_route_multi_selection_survives_route_refresh() -> None:
+    _qt_app()
+    panel = DesignNavigatorPanel()
+    document = _make_document()
+    route = MeasurementRoute.default_for_document(document)
+    route.add_point((0.0, 0.0))
+    route.add_point((1.0, 0.0))
+    route.add_point((2.0, 0.0))
+    panel.set_document(document)
+    panel.set_route(route, selected_route_point_index=0)
+    panel.route_selected.connect(
+        lambda index: panel.set_route(route, selected_route_point_index=index)
+    )
+
+    selection_model = panel._route_table.selectionModel()
+    model = panel._route_table.model()
+    selection_model.select(
+        model.index(2, 0),
+        QItemSelectionModel.Select | QItemSelectionModel.Rows,
+    )
+
+    assert panel._selected_route_row_indices() == [0, 2]

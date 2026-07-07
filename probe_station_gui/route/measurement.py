@@ -96,6 +96,10 @@ class _BackgroundRouteTask:
             self._done.set()
 
 
+class _RouteMeasurementStopped(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class _RoutePointPreparation:
     point_interrupted: bool
@@ -156,6 +160,7 @@ class RouteMeasurementRunner:
     SHORT_CHECK_SAMPLE_COUNT = DEFAULT_SHORT_CHECK_SAMPLE_COUNT
     AUTO_CONTACT_SEEK_STEP_MM = DEFAULT_AUTO_CONTACT_SEEK_STEP_MM
     AUTO_CONTACT_SEEK_MAX_TOTAL_MM = DEFAULT_AUTO_CONTACT_SEEK_MAX_TOTAL_MM
+    CSV_WRITE_RETRY_INTERVAL_S = 1.0
 
     def __init__(
         self,
@@ -288,6 +293,7 @@ class RouteMeasurementRunner:
         self._waiting_condition = threading.Condition()
         self._waiting = False
         self._meter_output_context: object | None = None
+        self._csv_write_retry_interval_s = self.CSV_WRITE_RETRY_INTERVAL_S
 
     @property
     def csv_path(self) -> Path:
@@ -681,6 +687,8 @@ class RouteMeasurementRunner:
             if progress.position_index >= total:
                 success = True
                 message = self._route_completion_message(progress)
+        except _RouteMeasurementStopped as exc:
+            message = str(exc) or "Route measurement stopped by user."
         except Exception as exc:
             message = str(exc)
             self._status(f"Route measurement failed: {message}")
@@ -1076,6 +1084,44 @@ class RouteMeasurementRunner:
             total=total,
         )
         state.result_emitted = True
+
+    def _append_csv_record(self, record: RouteMeasurementRecord) -> None:
+        notice_shown = False
+        while True:
+            try:
+                self._csv_writer.append(record)
+                return
+            except PermissionError:
+                if self._route_point_stop_requested():
+                    raise _RouteMeasurementStopped(
+                        "Route measurement stopped by user."
+                    )
+                if not notice_shown:
+                    logger.warning(
+                        "Route measurement CSV write blocked; retrying.",
+                        exc_info=True,
+                    )
+                    self._status(
+                        f"CSV is open. Close the CSV to save: {self.csv_path}."
+                    )
+                    notice_shown = True
+                if not self._wait_before_csv_write_retry():
+                    raise _RouteMeasurementStopped(
+                        "Route measurement stopped by user."
+                    )
+
+    def _wait_before_csv_write_retry(self) -> bool:
+        retry_interval_s = max(0.0, float(self._csv_write_retry_interval_s))
+        if retry_interval_s <= 0.0:
+            return not self._route_point_stop_requested()
+        deadline = time.monotonic() + retry_interval_s
+        while True:
+            if self._route_point_stop_requested():
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                return True
+            self._stop_requested.wait(min(remaining, 0.05))
 
     def _cleanup_route_point_measurement_state(
         self,
@@ -1838,7 +1884,7 @@ class RouteMeasurementRunner:
             point=point,
             record=record,
         )
-        self._csv_writer.append(record)
+        self._append_csv_record(record)
         self._emit_contact_photo(point, record, position, total, True)
         self._emit_result(record, position, total, True)
         if (

@@ -1,5 +1,4 @@
 import csv
-import os
 import tempfile
 import threading
 import unittest
@@ -15,10 +14,10 @@ from probe_station_gui.route.measurement import (
     filter_route_points_by_previous_status,
     latest_route_measurement_statuses,
 )
+from probe_station_gui.route.measurement_csv import RouteMeasurementCsvWriter
 
 try:
     from .measurement_test_support import (
-        _FakeBatchRouteLCR,
         _FakeLCR,
         _FakeStage,
         _NotifyingStage,
@@ -28,7 +27,6 @@ try:
     )
 except ImportError:
     from measurement_test_support import (
-        _FakeBatchRouteLCR,
         _FakeLCR,
         _FakeStage,
         _NotifyingStage,
@@ -36,6 +34,18 @@ except ImportError:
         _point,
         _read_csv_rows_if_exists,
     )
+
+
+class _PermissionThenAppendWriter(RouteMeasurementCsvWriter):
+    def __init__(self, path: Path) -> None:
+        super().__init__(path)
+        self.attempts = 0
+
+    def append(self, record: object) -> None:
+        self.attempts += 1
+        if self.attempts == 1:
+            raise PermissionError(13, "Permission denied", str(self.path))
+        super().append(record)
 
 
 class RouteMeasurementRunnerTest(unittest.TestCase):
@@ -173,6 +183,40 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
         ]
         self.assertEqual(len(lift_calls), 3)
         self.assertNotIn(("needles", "raise", 75.0), stage.calls)
+
+    def test_runner_retries_csv_append_after_permission_error(self) -> None:
+        stage = _FakeStage()
+        lcr = _FakeLCR([42.0])
+        statuses: list[str] = []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "route.csv"
+            runner = RouteMeasurementRunner(
+                points=[_point(1)],
+                csv_path=csv_path,
+                stage_controller=stage,
+                lcr_controller=lcr,
+                needle_feedrate=75.0,
+                contact_settle_s=0.0,
+                status_callback=statuses.append,
+            )
+            writer = _PermissionThenAppendWriter(csv_path)
+            runner._csv_writer = writer
+            runner._csv_write_retry_interval_s = 0.0
+
+            success, message = runner.run()
+
+            self.assertTrue(success, message)
+            self.assertEqual(writer.attempts, 2)
+            self.assertTrue(
+                any("Close the CSV" in status for status in statuses),
+                statuses,
+            )
+            with csv_path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["structure_number"], "1")
+            self.assertEqual(rows[0]["resistance_ohm"], "42")
 
     def test_runner_uses_updated_csv_path_after_initial_wait(self) -> None:
         stage = _FakeStage()

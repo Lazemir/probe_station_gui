@@ -85,7 +85,7 @@ def record_route_point_measurement(
             record = replace(record, status="unstable")
         quality_rejected = True
     else:
-        owner._csv_writer.append(record)
+        owner._append_csv_record(record)
         record_saved = True
     owner._emit_contact_photo(
         point,
