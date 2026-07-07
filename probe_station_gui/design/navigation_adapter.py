@@ -500,6 +500,7 @@ def add_route_array_points(
     count_y: int,
     serpentine: bool,
     replace_existing: bool,
+    selected_indices: object = None,
 ) -> RouteEditPlan:
     if session.document is None:
         return RouteEditPlan(
@@ -509,21 +510,52 @@ def add_route_array_points(
     route = session.route
     if route is None:
         route = session.create_route()
-    added = route.add_grid_points(
-        (float(origin_x), float(origin_y)),
-        (float(step_x_dx), float(step_x_dy)),
-        int(count_x),
-        (float(step_y_dx), float(step_y_dy)),
-        int(count_y),
-        serpentine=bool(serpentine),
-        clear_existing=bool(replace_existing),
-    )
+    selection: list[int] = []
+    if isinstance(selected_indices, (list, tuple)):
+        for item in selected_indices:
+            try:
+                selection.append(int(item))
+            except (TypeError, ValueError):
+                continue
+    if len(selection) >= 2:
+        added = route.add_array_copies_from_points(
+            selection,
+            (float(step_x_dx), float(step_x_dy)),
+            int(count_x),
+            (float(step_y_dx), float(step_y_dy)),
+            int(count_y),
+            serpentine=bool(serpentine),
+        )
+        replace_existing = False
+    else:
+        added = route.add_grid_points(
+            (float(origin_x), float(origin_y)),
+            (float(step_x_dx), float(step_x_dy)),
+            int(count_x),
+            (float(step_y_dx), float(step_y_dy)),
+            int(count_y),
+            serpentine=bool(serpentine),
+            clear_existing=bool(replace_existing),
+        )
     if added:
         session.selected_route_point_index = len(route.points) - 1
         last_selected = added[-1].camera_center
     else:
         session.selected_route_point_index = -1
         last_selected = None
+    if len(selection) >= 2:
+        return RouteEditPlan(
+            True,
+            status_message=(
+                f"Added {len(added)} copied route points "
+                f"from {len(selection)} selected points."
+            ),
+            status_timeout_ms=4000,
+            route=route,
+            selected_route_point_index=session.selected_route_point_index,
+            added_points=tuple(added),
+            last_selected_design_point=last_selected,
+        )
     mode = "Replaced route with" if replace_existing else "Added"
     return RouteEditPlan(
         True,

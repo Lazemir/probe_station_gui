@@ -108,6 +108,103 @@ class MeasurementRouteTest(unittest.TestCase):
             ],
         )
 
+    def test_add_array_copies_from_points_keeps_source_cell(self) -> None:
+        route = MeasurementRoute.default_for_document(self._make_document())
+        first = route.add_point((10.0, 20.0), label="A")
+        second = route.add_point((12.0, 25.0), label="B")
+
+        added = route.add_array_copies_from_points(
+            [0, 1],
+            (100.0, 0.0),
+            2,
+            (0.0, 50.0),
+            2,
+        )
+
+        self.assertEqual(
+            [point.camera_center for point in route.points[:2]],
+            [(10.0, 20.0), (12.0, 25.0)],
+        )
+        self.assertEqual(
+            [point.camera_center for point in added],
+            [
+                (110.0, 20.0),
+                (112.0, 25.0),
+                (10.0, 70.0),
+                (12.0, 75.0),
+                (110.0, 70.0),
+                (112.0, 75.0),
+            ],
+        )
+        self.assertEqual(len(route.points), 8)
+        self.assertNotIn(first.id, [point.id for point in added])
+        self.assertNotIn(second.id, [point.id for point in added])
+        self.assertEqual([point.label for point in added[:2]], ["P003", "P004"])
+        self.assertEqual(added[0].metadata["array_source_point_id"], "p001")
+        self.assertEqual(added[1].metadata["array_source_point_id"], "p002")
+
+    def test_add_array_copies_from_points_serpentine_changes_cell_order(self) -> None:
+        route = MeasurementRoute.default_for_document(self._make_document())
+        route.add_point((0.0, 0.0))
+        route.add_point((1.0, 0.0))
+
+        added = route.add_array_copies_from_points(
+            [0, 1],
+            (10.0, 0.0),
+            3,
+            (0.0, 100.0),
+            2,
+            serpentine=True,
+        )
+
+        self.assertEqual(
+            [point.camera_center for point in added],
+            [
+                (10.0, 0.0),
+                (11.0, 0.0),
+                (20.0, 0.0),
+                (21.0, 0.0),
+                (20.0, 100.0),
+                (21.0, 100.0),
+                (10.0, 100.0),
+                (11.0, 100.0),
+                (0.0, 100.0),
+                (1.0, 100.0),
+            ],
+        )
+
+    def test_add_array_copies_from_points_uses_route_order(self) -> None:
+        route = MeasurementRoute.default_for_document(self._make_document())
+        route.add_point((0.0, 0.0))
+        route.add_point((1.0, 0.0))
+
+        added = route.add_array_copies_from_points(
+            [1, 0],
+            (10.0, 0.0),
+            2,
+            (0.0, 1.0),
+            1,
+        )
+
+        self.assertEqual(
+            [point.camera_center for point in added],
+            [(10.0, 0.0), (11.0, 0.0)],
+        )
+
+    def test_add_array_copies_from_points_rejects_missing_selection(self) -> None:
+        route = MeasurementRoute.default_for_document(self._make_document())
+        route.add_point((0.0, 0.0))
+        route.add_point((1.0, 0.0))
+
+        with self.assertRaises(RouteModelError):
+            route.add_array_copies_from_points(
+                [0, 9],
+                (10.0, 0.0),
+                2,
+                (0.0, 1.0),
+                1,
+            )
+
     def test_grid_points_reject_zero_step_for_multiple_points(self) -> None:
         route = MeasurementRoute.default_for_document(self._make_document())
 

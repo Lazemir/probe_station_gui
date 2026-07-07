@@ -372,6 +372,67 @@ class MeasurementRoute:
                 added.append(point)
         return added
 
+    def add_array_copies_from_points(
+        self,
+        template_indices: list[int],
+        step_x: Point2D,
+        count_x: int,
+        step_y: Point2D,
+        count_y: int,
+        *,
+        serpentine: bool = False,
+    ) -> list[RoutePoint]:
+        x_count = int(count_x)
+        y_count = int(count_y)
+        if x_count <= 0 or y_count <= 0:
+            raise RouteModelError("Array route point counts must be positive.")
+        if len(template_indices) < 2:
+            raise RouteModelError("Select at least two route points to copy a structure.")
+
+        seen_indices: set[int] = set()
+        for index in template_indices:
+            point_index = int(index)
+            if point_index in seen_indices:
+                continue
+            if not 0 <= point_index < len(self.points):
+                raise RouteModelError(
+                    "Selected route point is not in the current route."
+                )
+            seen_indices.add(point_index)
+        source_points = [self.points[index] for index in sorted(seen_indices)]
+
+        step_x_dx, step_x_dy = float(step_x[0]), float(step_x[1])
+        step_y_dx, step_y_dy = float(step_y[0]), float(step_y[1])
+        if x_count > 1 and abs(step_x_dx) <= 1e-12 and abs(step_x_dy) <= 1e-12:
+            raise RouteModelError("Array direction 1 step must be non-zero.")
+        if y_count > 1 and abs(step_y_dx) <= 1e-12 and abs(step_y_dy) <= 1e-12:
+            raise RouteModelError("Array direction 2 step must be non-zero.")
+
+        added: list[RoutePoint] = []
+        for y_index in range(y_count):
+            if serpentine and y_index % 2 == 1:
+                x_indices = range(x_count - 1, -1, -1)
+            else:
+                x_indices = range(x_count)
+            for x_index in x_indices:
+                if x_index == 0 and y_index == 0:
+                    continue
+                dx = step_x_dx * float(x_index) + step_y_dx * float(y_index)
+                dy = step_x_dy * float(x_index) + step_y_dy * float(y_index)
+                for source in source_points:
+                    metadata = dict(source.metadata)
+                    metadata["array_source_point_id"] = source.id
+                    point = self.add_point(
+                        (
+                            source.camera_center[0] + dx,
+                            source.camera_center[1] + dy,
+                        )
+                    )
+                    copied = replace(point, metadata=metadata)
+                    self.points[-1] = copied
+                    added.append(copied)
+        return added
+
     def remove_point_at(self, index: int) -> RoutePoint | None:
         if not 0 <= index < len(self.points):
             return None

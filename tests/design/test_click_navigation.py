@@ -1,13 +1,23 @@
 import os
 import types
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QItemSelectionModel, QPointF, QRectF, Qt
+from PySide6.QtWidgets import QAbstractItemView, QApplication
 
 import main as main_module
 from main import Main
-from probe_station_gui.views.design_navigator_panel import _DesignPlotPane
+from probe_station_gui.design.model import DesignDocument
+from probe_station_gui.route.model import MeasurementRoute
+from probe_station_gui.views.design_navigator_panel import (
+    DesignNavigatorPanel,
+    _DesignPlotPane,
+)
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class _FakeSignal:
@@ -68,6 +78,28 @@ def _navigation_pane() -> types.SimpleNamespace:
     return pane
 
 
+def _qt_app() -> QApplication:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    return app
+
+
+def _make_document() -> DesignDocument:
+    return DesignDocument(
+        path=REPO_ROOT / "tests" / "fixtures" / "synthetic.gds",
+        library=object(),
+        top_cell=object(),
+        top_cell_name="TOP",
+        cell_names=("TOP",),
+        dbu=1e-6,
+        user_unit=1e-9,
+        bounds=(0.0, 0.0, 100.0, 200.0),
+        polygons_by_layer={},
+        visible_layers=frozenset(),
+    )
+
+
 def test_design_navigation_single_click_does_not_move() -> None:
     pane = _navigation_pane()
 
@@ -96,3 +128,35 @@ def test_minimap_single_click_handler_opens_design_window(monkeypatch) -> None:
     Main._open_design_window_from_minimap_point(window, 1.25, 2.5)
 
     assert calls == [True]
+
+
+def test_route_array_request_includes_multi_selected_route_rows() -> None:
+    _qt_app()
+    panel = DesignNavigatorPanel()
+    document = _make_document()
+    route = MeasurementRoute.default_for_document(document)
+    route.add_point((0.0, 0.0))
+    route.add_point((1.0, 0.0))
+    route.add_point((2.0, 0.0))
+    panel.set_document(document)
+    panel.set_route(route, selected_route_point_index=0)
+
+    assert panel._route_table.selectionMode() == QAbstractItemView.ExtendedSelection
+
+    selection_model = panel._route_table.selectionModel()
+    model = panel._route_table.model()
+    selection_model.select(
+        model.index(0, 0),
+        QItemSelectionModel.Select | QItemSelectionModel.Rows,
+    )
+    selection_model.select(
+        model.index(2, 0),
+        QItemSelectionModel.Select | QItemSelectionModel.Rows,
+    )
+    emitted: list[tuple[object, ...]] = []
+    panel.route_array_requested.connect(lambda *args: emitted.append(args))
+
+    panel._emit_route_array_requested()
+
+    assert emitted[-1][-1] == [0, 2]
+    assert panel._selected_route_point_index == 0

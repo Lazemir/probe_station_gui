@@ -5808,12 +5808,13 @@ class Main(QMainWindow):
     def _add_route_array_points(
         self, origin_x: float, origin_y: float, step_x_dx: float, step_x_dy: float,
         count_x: int, step_y_dx: float, step_y_dy: float, count_y: int,
-        serpentine: bool, replace_existing: bool,
+        serpentine: bool, replace_existing: bool, selected_indices: object = None,
     ) -> None:
         try:
             plan = design_navigation.add_route_array_points(
                 self._design_session, origin_x, origin_y, step_x_dx, step_x_dy,
                 count_x, step_y_dx, step_y_dy, count_y, serpentine, replace_existing,
+                selected_indices,
             )
         except DesignModelError as exc:
             self._show_status(str(exc), 5000)
