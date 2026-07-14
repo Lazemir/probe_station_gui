@@ -36,6 +36,9 @@ lcr = [
     "qcodes",
     "keyring",
 ]
+klayout-prototype = [
+    "klayout==0.30.9",
+]
 
 [tool.setuptools]
 

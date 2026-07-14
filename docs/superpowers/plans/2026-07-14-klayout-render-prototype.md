@@ -29,7 +29,7 @@
 - Consumes: one optional positional GDS path and PySide6 mouse/resize events.
 - Produces: `python -m probe_station_gui.prototypes.klayout_design_viewer [design.gds]`, an interactive standalone prototype window.
 
-- [ ] **Step 1: Register the isolated optional dependency**
+- [x] **Step 1: Register the isolated optional dependency**
 
 Add the following optional dependency group without changing production
 dependencies:
@@ -40,7 +40,7 @@ klayout-prototype = [
 ]
 ```
 
-- [ ] **Step 2: Implement the render worker**
+- [x] **Step 2: Implement the render worker**
 
 Create a daemon thread that owns `klayout.lay.LayoutView`, calls
 `load_layout(path, False)` and `max_hier()`, emits cell bounds/layers/load time,
@@ -66,7 +66,7 @@ signals.frame_ready.emit(
 Layer visibility must be applied through `begin_layers()` and
 `set_layer_properties(iterator, properties)` before rendering.
 
-- [ ] **Step 3: Implement the snap worker**
+- [x] **Step 3: Implement the snap worker**
 
 Create a second daemon thread that owns `klayout.db.Layout`, loads the same
 file independently, and answers only its latest request. For every visible
@@ -84,7 +84,7 @@ Transform returned box, polygon, path, and edge geometry with
 segments, and emit the closest target inside the requested radius together
 with elapsed time and inspected shape count.
 
-- [ ] **Step 4: Implement the observable Qt canvas**
+- [x] **Step 4: Implement the observable Qt canvas**
 
 Create a `QWidget` that:
 
@@ -96,7 +96,7 @@ Create a `QWidget` that:
 - exposes Open, Fit, Clear points, visible-layer checkboxes, snap radius, and
   load/render/snap timings in a compact toolbar/status area.
 
-- [ ] **Step 5: Verify the command without hardware**
+- [x] **Step 5: Verify the command without hardware**
 
 Run:
 
@@ -111,7 +111,7 @@ snap readiness, performs one render and one local snap query, then exits.
 Expected: exit code 0, non-empty PNG data, both layers reported, and a snap
 query completing without production GUI or hardware imports.
 
-- [ ] **Step 6: Commit the prototype**
+- [x] **Step 6: Commit the prototype**
 
 ```powershell
 git add pyproject.toml probe_station_gui/prototypes docs/superpowers
@@ -127,7 +127,7 @@ git commit -m "prototype: try embedded KLayout rendering"
 - Consumes: the user's interactive verdict on rendering, labels, layer 2, and snap.
 - Produces: a durable keep/rewrite/delete decision before production integration.
 
-- [ ] **Step 1: Record the experiment question and launch command**
+- [x] **Step 1: Record the experiment question and launch command**
 
 Create a short note that labels the code as throwaway, lists the exact launch
 command, and leaves four unchecked verdict rows: pan/zoom quality, frame-label
@@ -137,4 +137,3 @@ latency, layer-2 latency, and snap responsiveness.
 
 After feedback, replace the unchecked rows with observations and one decision:
 delete, revise the prototype, or rewrite the validated approach for production.
-
