@@ -89,15 +89,13 @@ class KLayoutRenderWorker(QObject):
 
     def stop(self, timeout_s: float = 1.0) -> None:
         deadline = time.monotonic() + max(0.0, float(timeout_s))
-        self._stop_requested.set()
-        acquired_gate = self._emission_gate.acquire(
-            timeout=max(0.0, deadline - time.monotonic())
-        )
-        try:
-            thread = self._mark_stopping(deadline)
-        finally:
-            if acquired_gate:
-                self._emission_gate.release()
+        with self._emission_gate:
+            with self._condition:
+                self._stop_requested.set()
+                self._stopping = True
+                self._pending = None
+                thread = self._thread
+                self._condition.notify_all()
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=max(0.0, deadline - time.monotonic()))
 
@@ -176,25 +174,8 @@ class KLayoutRenderWorker(QObject):
         with self._emission_gate:
             if not self._may_emit(config):
                 return False
-            if self._stop_requested.is_set():
-                return False
             signal.emit(value)
             return True
-
-    def _mark_stopping(self, deadline: float) -> threading.Thread | None:
-        acquired = self._condition.acquire(
-            timeout=max(0.0, deadline - time.monotonic())
-        )
-        if not acquired:
-            return self._thread
-        try:
-            self._stopping = True
-            self._pending = None
-            thread = self._thread
-            self._condition.notify_all()
-            return thread
-        finally:
-            self._condition.release()
 
 
 class KLayoutSnapWorker(QObject):
@@ -229,15 +210,14 @@ class KLayoutSnapWorker(QObject):
 
     def stop(self, timeout_s: float = 1.0) -> None:
         deadline = time.monotonic() + max(0.0, float(timeout_s))
-        self._stop_requested.set()
-        acquired_gate = self._emission_gate.acquire(
-            timeout=max(0.0, deadline - time.monotonic())
-        )
-        try:
-            thread = self._mark_stopping(deadline)
-        finally:
-            if acquired_gate:
-                self._emission_gate.release()
+        with self._emission_gate:
+            with self._condition:
+                self._stop_requested.set()
+                self._stopping = True
+                self._hover = None
+                self._clicks.clear()
+                thread = self._thread
+                self._condition.notify_all()
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=max(0.0, deadline - time.monotonic()))
 
@@ -342,26 +322,8 @@ class KLayoutSnapWorker(QObject):
         with self._emission_gate:
             if not self._may_emit(config):
                 return False
-            if self._stop_requested.is_set():
-                return False
             signal.emit(value)
             return True
-
-    def _mark_stopping(self, deadline: float) -> threading.Thread | None:
-        acquired = self._condition.acquire(
-            timeout=max(0.0, deadline - time.monotonic())
-        )
-        if not acquired:
-            return self._thread
-        try:
-            self._stopping = True
-            self._hover = None
-            self._clicks.clear()
-            thread = self._thread
-            self._condition.notify_all()
-            return thread
-        finally:
-            self._condition.release()
 
 
 class _KLayoutRenderBackend:
