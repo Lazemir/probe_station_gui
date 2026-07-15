@@ -98,6 +98,12 @@ class _SnapWorker(QObject):
         self.stop_calls.append(timeout_s)
 
 
+class _BlockingStopSnapWorker(_SnapWorker):
+    def stop(self, timeout_s: float = 1.0) -> None:
+        super().stop(timeout_s)
+        time.sleep(max(0.0, float(timeout_s)))
+
+
 @pytest.fixture
 def pane(monkeypatch, qt_app: QApplication):
     _SnapWorker.instances.clear()
@@ -439,6 +445,40 @@ def test_retired_snap_worker_finalizes_on_creator_thread(
 
     assert worker not in pane._retired_snap_workers
     assert delete_threads == [creator_thread]
+
+
+@pytest.mark.parametrize("action", ["remove", "close"])
+def test_remove_and_close_never_wait_for_snap_worker_and_retire_on_creator(
+    monkeypatch: pytest.MonkeyPatch,
+    qt_app: QApplication,
+    tmp_path: Path,
+    action: str,
+) -> None:
+    _BlockingStopSnapWorker.instances.clear()
+    monkeypatch.setattr(plot_module, "KLayoutRasterController", _RasterController)
+    monkeypatch.setattr(plot_module, "KLayoutSnapWorker", _BlockingStopSnapWorker)
+    widget = plot_module._DesignPlotPane()
+    widget.set_document(_document(tmp_path / f"{action}.gds"))
+    worker = widget._snap_worker
+    creator_thread = threading.get_ident()
+    delete_threads: list[int] = []
+    worker.deleteLater = lambda: delete_threads.append(threading.get_ident())
+
+    started = time.monotonic()
+    if action == "remove":
+        widget.set_document(None)
+    else:
+        widget.close()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.1
+    assert worker.stop_calls == [0.0]
+    assert worker in widget._retired_snap_workers
+    worker.finished.emit()
+    qt_app.processEvents()
+    assert worker not in widget._retired_snap_workers
+    assert delete_threads == [creator_thread]
+    widget.deleteLater()
 
 
 def test_design_window_close_detaches_workers_and_reopen_restores_document(

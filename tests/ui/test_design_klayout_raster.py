@@ -407,7 +407,7 @@ def test_controller_rejects_stale_configuration_and_uncovered_viewport_frames(
     assert item.frame is None
 
 
-def test_same_path_reuses_worker_path_change_detaches_and_unload_joins_bounded(
+def test_same_path_reuses_worker_path_change_detaches_and_unload_is_nonblocking(
     qt_app: QApplication, tmp_path: Path
 ) -> None:
     view_box = _ViewBox()
@@ -437,7 +437,7 @@ def test_same_path_reuses_worker_path_change_detaches_and_unload_joins_bounded(
     assert workers[0].stop_calls == [0.0]
 
     controller.set_document(None)
-    assert workers[1].stop_calls == [0.5]
+    assert workers[1].stop_calls == [0.0]
     assert controller.config is None
 
 
@@ -523,6 +523,58 @@ def test_current_render_failure_retries_once_stale_failure_is_ignored_and_succes
     assert successes == [None]
 
 
+def test_failure_from_viewport_before_range_change_is_ignored_and_current_retry_covers_view(
+    qt_app: QApplication,
+    tmp_path: Path,
+) -> None:
+    view_box = _ViewBox()
+    worker = _RenderWorker()
+    controller, item = _controller(view_box, worker)
+    failures: list[RenderFailure] = []
+    controller.failed.connect(failures.append)
+    controller.set_document(_document(tmp_path / "viewport-failure.gds"))
+    stale_request = worker.requests[-1]
+
+    current_box = (200.0, 100.0, 300.0, 150.0)
+    view_box.change(current_box)
+    controller._active_timer.stop()
+    controller._settle_timer.stop()
+    worker.failed.emit(
+        RenderFailure(
+            stale_request.request_id,
+            stale_request.config.generation,
+            stale_request.viewport_generation,
+            stale_request.purpose,
+            "old viewport failed",
+        )
+    )
+
+    assert failures == []
+    assert worker.requests == [stale_request]
+
+    controller.request_exact()
+    current_request = worker.requests[-1]
+    worker.failed.emit(
+        RenderFailure(
+            current_request.request_id,
+            current_request.config.generation,
+            current_request.viewport_generation,
+            current_request.purpose,
+            "current viewport failed once",
+        )
+    )
+    retry = worker.requests[-1]
+
+    assert failures[-1].message == "current viewport failed once"
+    assert retry.request_id > current_request.request_id
+    assert retry.viewport_generation == controller._viewport_generation
+    assert retry.world_box == current_box
+    assert retry.purpose == "exact"
+    worker.frame_ready.emit(_frame(retry))
+    assert item.frame is not None
+    assert item.frame.world_box == current_box
+
+
 def test_running_worker_is_retained_until_creator_thread_finish(
     qt_app: QApplication,
     tmp_path: Path,
@@ -568,3 +620,33 @@ def test_running_worker_is_retained_until_creator_thread_finish(
 
     assert first not in controller._retired_workers
     assert first.delete_threads == [creator_thread]
+
+
+@pytest.mark.parametrize("action", ["remove", "shutdown"])
+def test_remove_and_shutdown_never_wait_for_render_worker(
+    qt_app: QApplication,
+    tmp_path: Path,
+    action: str,
+) -> None:
+    class BlockingStopWorker(_RenderWorker):
+        def stop(self, timeout_s: float = 1.0) -> None:
+            super().stop(timeout_s)
+            time.sleep(max(0.0, float(timeout_s)))
+
+    worker = BlockingStopWorker()
+    controller, _item = _controller(_ViewBox(), worker)
+    controller.set_document(_document(tmp_path / f"{action}.gds"))
+
+    started = time.monotonic()
+    if action == "remove":
+        controller.set_document(None)
+    else:
+        controller.shutdown()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.1
+    assert worker.stop_calls == [0.0]
+    assert worker in controller._retired_workers
+    worker.finished.emit()
+    qt_app.processEvents()
+    assert worker not in controller._retired_workers

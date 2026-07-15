@@ -396,7 +396,7 @@ class _DesignPlotPane(QWidget):
             self._latest_hover_request_id = 0
             self._pending_clicks.clear()
             self._set_hover_snap(None)
-            self._detach_file_backed_document(timeout_s=0.5)
+            self._detach_file_backed_document(timeout_s=0.0)
             self.set_status_message("No design loaded.")
             self._redraw_document()
         elif not same_document:
@@ -1574,7 +1574,7 @@ class _DesignPlotPane(QWidget):
             self._hover_timer.stop()
         if self._route_geometry_redraw_timer is not None:
             self._route_geometry_redraw_timer.stop()
-        self._stop_snap_worker(timeout_s=0.5)
+        self._stop_snap_worker(timeout_s=0.0)
         self._klayout_config = None
         if self._raster_controller is not None:
             self._raster_controller.shutdown()

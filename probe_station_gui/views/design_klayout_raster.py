@@ -146,7 +146,7 @@ class KLayoutRasterController(QObject):
             self._pending_zoom = False
             self._active_timer.stop()
             self._settle_timer.stop()
-            self._stop_worker(timeout_s=0.5)
+            self._stop_worker(timeout_s=0.0)
             self._raster_item.clear()
             return
         if not document.file_backed:
@@ -216,7 +216,7 @@ class KLayoutRasterController(QObject):
                 pass
         self._config_generation += 1
         self._config = None
-        self._stop_worker(timeout_s=0.5)
+        self._stop_worker(timeout_s=0.0)
         self._raster_item.clear()
 
     def _stop_worker(self, *, timeout_s: float) -> None:
@@ -390,15 +390,19 @@ class KLayoutRasterController(QObject):
             or failure.request_id != request.request_id
             or failure.config_generation != config.generation
             or failure.viewport_generation != request.viewport_generation
+            or failure.viewport_generation != self._viewport_generation
             or failure.purpose != request.purpose
         ):
             return
         self.failed.emit(failure)
         if self._latest_retry_count >= 1:
             return
+        viewport = self._current_viewport()
+        if viewport is None:
+            return
         self._submit(
-            request.world_box,
-            purpose=request.purpose,
+            viewport,
+            purpose="exact",
             retry_count=self._latest_retry_count + 1,
         )
 
