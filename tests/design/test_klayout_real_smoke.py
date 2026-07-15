@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 import threading
+import time
 
 import klayout.db as db
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage
+from PySide6.QtWidgets import QApplication
 import pytest
 
 from probe_station_gui.design.klayout_types import (
@@ -22,6 +25,28 @@ from probe_station_gui.design.klayout_workers import (
     KLayoutSnapWorker,
     _shape_contours,
 )
+
+
+@pytest.fixture(scope="module")
+def qt_app() -> QApplication:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    return app
+
+
+def _process_until(
+    app: QApplication,
+    predicate: Callable[[], bool],
+    timeout_s: float = 5.0,
+) -> None:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if predicate():
+            return
+        time.sleep(0.005)
+    raise AssertionError("timed out waiting for queued Qt delivery")
 
 
 def _write_hierarchical_design(path: Path) -> None:
@@ -73,6 +98,7 @@ def _config(
 
 def test_real_render_worker_produces_detached_nonempty_hierarchical_frame(
     tmp_path: Path,
+    qt_app: QApplication,
 ) -> None:
     design_path = tmp_path / "hierarchical.gds"
     _write_hierarchical_design(design_path)
@@ -100,7 +126,7 @@ def test_real_render_worker_produces_detached_nonempty_hierarchical_frame(
     )
 
     worker.submit(request)
-    assert ready.wait(5.0)
+    _process_until(qt_app, ready.is_set)
     ready.clear()
     top_only_config = _config(
         design_path,
@@ -119,7 +145,7 @@ def test_real_render_worker_produces_detached_nonempty_hierarchical_frame(
             density=10.0,
         )
     )
-    assert ready.wait(5.0)
+    _process_until(qt_app, ready.is_set)
     worker.stop()
 
     assert failures == []
@@ -165,6 +191,7 @@ def test_real_render_worker_produces_detached_nonempty_hierarchical_frame(
 
 def test_real_snap_worker_queries_hierarchical_geometry_and_rotates_results(
     tmp_path: Path,
+    qt_app: QApplication,
 ) -> None:
     design_path = tmp_path / "hierarchical.gds"
     _write_hierarchical_design(design_path)
@@ -191,7 +218,7 @@ def test_real_snap_worker_queries_hierarchical_geometry_and_rotates_results(
     )
 
     worker.submit_click(request)
-    assert ready.wait(5.0)
+    _process_until(qt_app, ready.is_set)
     worker.stop()
 
     assert failures == []
@@ -203,7 +230,10 @@ def test_real_snap_worker_queries_hierarchical_geometry_and_rotates_results(
     assert response.shapes_inspected == 1
 
 
-def test_real_snap_worker_ignores_text_origins(tmp_path: Path) -> None:
+def test_real_snap_worker_ignores_text_origins(
+    tmp_path: Path,
+    qt_app: QApplication,
+) -> None:
     design_path = tmp_path / "hierarchical.gds"
     _write_hierarchical_design(design_path)
     config = _config(design_path, layers={(3, 0)})
@@ -223,7 +253,7 @@ def test_real_snap_worker_ignores_text_origins(tmp_path: Path) -> None:
             radius=0.1,
         )
     )
-    assert ready.wait(5.0)
+    _process_until(qt_app, ready.is_set)
     worker.stop()
 
     assert responses[0].result.mode == "free"
@@ -242,6 +272,7 @@ def test_real_snap_worker_handles_polygon_and_path(
     tmp_path: Path,
     layer: tuple[int, int],
     point: tuple[float, float],
+    qt_app: QApplication,
 ) -> None:
     design_path = tmp_path / "shape-types.gds"
     _write_hierarchical_design(design_path)
@@ -267,7 +298,7 @@ def test_real_snap_worker_handles_polygon_and_path(
             radius=0.2,
         )
     )
-    assert ready.wait(5.0)
+    _process_until(qt_app, ready.is_set)
     worker.stop()
 
     assert failures == []

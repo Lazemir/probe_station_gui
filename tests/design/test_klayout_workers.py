@@ -7,6 +7,7 @@ import time
 from typing import Any, Callable
 
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
 import pytest
 
 from probe_station_gui.design.klayout_types import (
@@ -98,60 +99,31 @@ def _wait_until(predicate: Callable[[], bool], timeout_s: float = 2.0) -> None:
     raise AssertionError("timed out waiting for worker state")
 
 
-def _pause_after_eligible(worker: object) -> tuple[threading.Event, threading.Event]:
-    checked = threading.Event()
-    release = threading.Event()
-    original = getattr(worker, "_may_emit")
-
-    def paused(config: KLayoutConfig | None = None) -> bool:
-        allowed = original(config)
-        if allowed:
-            checked.set()
-            release.wait(2.0)
-        return allowed
-
-    setattr(worker, "_may_emit", paused)
-    return checked, release
+@pytest.fixture(scope="module")
+def qt_app() -> QApplication:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    return app
 
 
-class _ObservedRLock:
-    def __init__(self) -> None:
-        self._lock = threading.RLock()
-        self._observed_thread_id: int | None = None
-        self.observed_acquire = threading.Event()
-
-    def observe_current_thread(self) -> None:
-        self._observed_thread_id = threading.get_ident()
-
-    def acquire(self, blocking: bool = True, timeout: float = -1.0) -> bool:
-        if threading.get_ident() == self._observed_thread_id:
-            self.observed_acquire.set()
-        return self._lock.acquire(blocking, timeout)
-
-    def release(self) -> None:
-        self._lock.release()
-
-    def __enter__(self) -> _ObservedRLock:
-        self.acquire()
-        return self
-
-    def __exit__(self, *args: object) -> None:
-        self.release()
+def _process_until(
+    app: QApplication,
+    predicate: Callable[[], bool],
+    timeout_s: float = 2.0,
+) -> None:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if predicate():
+            return
+        time.sleep(0.005)
+    raise AssertionError("timed out waiting for queued Qt delivery")
 
 
-class _PausingSignal:
-    def __init__(self, events: list[str], label: str) -> None:
-        self._events = events
-        self._label = label
-        self.entered = threading.Event()
-        self.release = threading.Event()
-        self.delivered = threading.Event()
-
-    def emit(self, _value: object) -> None:
-        self.entered.set()
-        self.release.wait(1.0)
-        self._events.append(f"signal:{self._label}")
-        self.delivered.set()
+def _drain_events(app: QApplication) -> None:
+    for _ in range(5):
+        app.processEvents()
 
 
 class _RenderHarness:
@@ -216,7 +188,7 @@ class _SnapHarness:
         return Backend()
 
 
-def test_render_keeps_only_newest_pending_request() -> None:
+def test_render_keeps_only_newest_pending_request(qt_app: QApplication) -> None:
     harness = _RenderHarness(block_ids={1})
     worker = KLayoutRenderWorker(backend_factory=harness.factory)
     frames: list[RenderFrame] = []
@@ -227,14 +199,16 @@ def test_render_keeps_only_newest_pending_request() -> None:
     worker.submit(_render_request(2))
     worker.submit(_render_request(3))
     harness.release.set()
-    _wait_until(lambda: len(frames) == 2)
+    _process_until(qt_app, lambda: len(frames) == 2)
     worker.stop()
 
     assert [request_id for request_id, _thread_id in harness.render_calls] == [1, 3]
     assert [frame.request_id for frame in frames] == [1, 3]
 
 
-def test_snap_keeps_newest_hover_but_prioritizes_fifo_clicks() -> None:
+def test_snap_keeps_newest_hover_but_prioritizes_fifo_clicks(
+    qt_app: QApplication,
+) -> None:
     harness = _SnapHarness(block_ids={1})
     worker = KLayoutSnapWorker(backend_factory=harness.factory)
     responses: list[SnapResponse] = []
@@ -247,14 +221,16 @@ def test_snap_keeps_newest_hover_but_prioritizes_fifo_clicks() -> None:
     worker.submit_click(_snap_request(4, purpose="click"))
     worker.submit_click(_snap_request(5, purpose="click"))
     harness.release.set()
-    _wait_until(lambda: len(responses) == 4)
+    _process_until(qt_app, lambda: len(responses) == 4)
     worker.stop()
 
     assert [request_id for request_id, _thread_id in harness.snap_calls] == [1, 4, 5, 3]
     assert [response.request_id for response in responses] == [1, 4, 5, 3]
 
 
-def test_stale_hover_after_prioritized_click_does_not_exit_snap_thread() -> None:
+def test_stale_hover_after_prioritized_click_does_not_exit_snap_thread(
+    qt_app: QApplication,
+) -> None:
     harness = _SnapHarness()
     factory_entered = threading.Event()
     release_factory = threading.Event()
@@ -274,9 +250,15 @@ def test_stale_hover_after_prioritized_click_does_not_exit_snap_thread() -> None
     assert factory_entered.wait(1.0)
     worker.submit_click(_snap_request(2, purpose="click", config=config_b))
     release_factory.set()
-    _wait_until(lambda: [response.request_id for response in responses] == [2])
+    _process_until(
+        qt_app,
+        lambda: [response.request_id for response in responses] == [2],
+    )
     worker.submit_hover(_snap_request(3, config=config_b))
-    _wait_until(lambda: [response.request_id for response in responses] == [2, 3])
+    _process_until(
+        qt_app,
+        lambda: [response.request_id for response in responses] == [2, 3],
+    )
     worker.stop()
 
     assert [request_id for request_id, _thread_id in harness.snap_calls] == [2, 3]
@@ -318,7 +300,9 @@ def test_workers_lazily_create_independent_single_owner_daemon_threads() -> None
     assert set(snap_harness.close_threads) == {snap_owner}
 
 
-def test_new_configuration_replaces_stale_render_and_suppresses_its_late_frame() -> None:
+def test_new_configuration_replaces_stale_render_and_suppresses_its_late_frame(
+    qt_app: QApplication,
+) -> None:
     harness = _RenderHarness(block_ids={1})
     worker = KLayoutRenderWorker(backend_factory=harness.factory)
     frames: list[RenderFrame] = []
@@ -332,14 +316,16 @@ def test_new_configuration_replaces_stale_render_and_suppresses_its_late_frame()
     worker.submit(_render_request(3, config_2))
     harness.release.set()
     _wait_until(lambda: [item[0] for item in harness.render_calls] == [1, 3])
-    _wait_until(lambda: [frame.request_id for frame in frames] == [3])
+    _process_until(qt_app, lambda: [frame.request_id for frame in frames] == [3])
     worker.stop()
 
     assert [generation for generation, _thread_id in harness.ensure_calls] == [1, 2]
     assert len(harness.factory_threads) == 1
 
 
-def test_success_signals_are_never_emitted_while_condition_is_owned() -> None:
+def test_success_signals_are_never_emitted_while_condition_is_owned(
+    qt_app: QApplication,
+) -> None:
     render_harness = _RenderHarness()
     snap_harness = _SnapHarness()
     render_worker = KLayoutRenderWorker(backend_factory=render_harness.factory)
@@ -356,19 +342,39 @@ def test_success_signals_are_never_emitted_while_condition_is_owned() -> None:
         snap_worker._condition.release()
         checked.append("snap")
 
+    def assert_render_publication_unlocked(_value: object) -> None:
+        assert render_worker._condition.acquire(blocking=False)
+        render_worker._condition.release()
+        checked.append("render-private")
+
+    def assert_snap_publication_unlocked(_value: object) -> None:
+        assert snap_worker._condition.acquire(blocking=False)
+        snap_worker._condition.release()
+        checked.append("snap-private")
+
     render_worker.loaded.connect(assert_render_unlocked, Qt.ConnectionType.DirectConnection)
     render_worker.frame_ready.connect(assert_render_unlocked, Qt.ConnectionType.DirectConnection)
     snap_worker.loaded.connect(assert_snap_unlocked, Qt.ConnectionType.DirectConnection)
     snap_worker.snap_ready.connect(assert_snap_unlocked, Qt.ConnectionType.DirectConnection)
+    render_worker._publication_posted.connect(
+        assert_render_publication_unlocked,
+        Qt.ConnectionType.DirectConnection,
+    )
+    snap_worker._publication_posted.connect(
+        assert_snap_publication_unlocked,
+        Qt.ConnectionType.DirectConnection,
+    )
 
     render_worker.submit(_render_request(1))
     snap_worker.submit_hover(_snap_request(2))
-    _wait_until(lambda: len(checked) == 4)
+    _process_until(qt_app, lambda: len(checked) == 8)
     render_worker.stop()
     snap_worker.stop()
 
     assert checked.count("render") == 2
     assert checked.count("snap") == 2
+    assert checked.count("render-private") == 2
+    assert checked.count("snap-private") == 2
 
 
 def test_stop_is_bounded_and_suppresses_late_success_or_failure() -> None:
@@ -392,350 +398,156 @@ def test_stop_is_bounded_and_suppresses_late_success_or_failure() -> None:
     assert failures == []
 
 
-@pytest.mark.parametrize(
-    ("worker_type", "signal_name"),
-    [
-        (KLayoutRenderWorker, "loaded"),
-        (KLayoutRenderWorker, "frame_ready"),
-        (KLayoutRenderWorker, "failed"),
-        (KLayoutSnapWorker, "loaded"),
-        (KLayoutSnapWorker, "snap_ready"),
-        (KLayoutSnapWorker, "failed"),
-    ],
-    ids=[
-        "render-loaded",
-        "render-frame",
-        "render-failed",
-        "snap-loaded",
-        "snap-ready",
-        "snap-failed",
-    ],
-)
-def test_stop_waits_for_post_check_signal_delivery_before_returning(
-    worker_type: type[KLayoutRenderWorker] | type[KLayoutSnapWorker],
-    signal_name: str,
+def test_stop_returns_promptly_and_drops_queued_publications(
+    qt_app: QApplication,
 ) -> None:
-    worker = worker_type()
-    gate = _ObservedRLock()
-    worker._emission_gate = gate
-    events: list[str] = []
-    signal = _PausingSignal(events, signal_name)
-    emit_finished = threading.Event()
-    stop_finished = threading.Event()
-
-    def emit_signal() -> None:
-        worker._emit_if_current(signal, object())
-        emit_finished.set()
-
-    def stop_worker() -> None:
-        gate.observe_current_thread()
-        worker.stop(timeout_s=0.0)
-        events.append("stop")
-        stop_finished.set()
-
-    emit_thread = threading.Thread(target=emit_signal)
-    emit_thread.start()
-    assert signal.entered.wait(1.0)
-    stop_thread = threading.Thread(target=stop_worker)
-    stop_thread.start()
-    assert gate.observed_acquire.wait(1.0)
-    returned_while_emit_owned_gate = stop_finished.wait(0.1)
-    signal.release.set()
-    assert signal.delivered.wait(1.0)
-    assert emit_finished.wait(1.0)
-    assert stop_finished.wait(1.0)
-    emit_thread.join(1.0)
-    stop_thread.join(1.0)
-
-    assert returned_while_emit_owned_gate is False
-    assert events == [f"signal:{signal_name}", "stop"]
-
-
-def test_stop_after_loaded_eligibility_waits_for_loaded_delivery() -> None:
     harness = _RenderHarness()
     worker = KLayoutRenderWorker(backend_factory=harness.factory)
     loaded: list[KLayoutConfig] = []
-    events: list[str] = []
-
-    def collect_loaded(config: KLayoutConfig) -> None:
-        loaded.append(config)
-        events.append("loaded")
-
-    worker.loaded.connect(collect_loaded, Qt.ConnectionType.DirectConnection)
-    gate = _ObservedRLock()
-    worker._emission_gate = gate
-    checked, release_check = _pause_after_eligible(worker)
-    stop_finished = threading.Event()
-
-    worker.submit(_render_request(1))
-    assert checked.wait(1.0)
-
-    def stop_worker() -> None:
-        gate.observe_current_thread()
-        worker.stop(timeout_s=0.0)
-        events.append("stop")
-        stop_finished.set()
-
-    stop_thread = threading.Thread(target=stop_worker)
-    stop_thread.start()
-    assert gate.observed_acquire.wait(1.0)
-    assert stop_finished.is_set() is False
-    release_check.set()
-    assert stop_finished.wait(1.0)
-    stop_thread.join(1.0)
-    _wait_until(lambda: bool(harness.close_threads))
-
-    assert loaded == [_config()]
-    assert events == ["loaded", "stop"]
-
-
-def test_stop_after_frame_eligibility_waits_for_frame_delivery() -> None:
-    harness = _RenderHarness()
-    worker = KLayoutRenderWorker(backend_factory=harness.factory)
     frames: list[RenderFrame] = []
-    events: list[str] = []
+    failures: list[str] = []
+    frame_posted = threading.Event()
 
-    def collect_frame(frame: RenderFrame) -> None:
-        frames.append(frame)
-        if frame.request_id == 2:
-            events.append("frame")
+    def observe_publication(publication: object) -> None:
+        if getattr(publication, "kind") == "frame_ready":
+            frame_posted.set()
 
-    worker.frame_ready.connect(collect_frame, Qt.ConnectionType.DirectConnection)
-    worker.submit(_render_request(1))
-    _wait_until(lambda: [frame.request_id for frame in frames] == [1])
-    gate = _ObservedRLock()
-    worker._emission_gate = gate
-    checked, release_check = _pause_after_eligible(worker)
-    stop_finished = threading.Event()
-
-    worker.submit(_render_request(2))
-    assert checked.wait(1.0)
-
-    def stop_worker() -> None:
-        gate.observe_current_thread()
-        worker.stop(timeout_s=0.0)
-        events.append("stop")
-        stop_finished.set()
-
-    stop_thread = threading.Thread(target=stop_worker)
-    stop_thread.start()
-    assert gate.observed_acquire.wait(1.0)
-    assert stop_finished.is_set() is False
-    release_check.set()
-    assert stop_finished.wait(1.0)
-    stop_thread.join(1.0)
-    _wait_until(lambda: bool(harness.close_threads))
-
-    assert [frame.request_id for frame in frames] == [1, 2]
-    assert events == ["frame", "stop"]
-
-
-def test_stop_state_is_published_after_inflight_emit_releases_gate() -> None:
-    harness = _RenderHarness()
-    worker = KLayoutRenderWorker(backend_factory=harness.factory)
-    frames: list[RenderFrame] = []
+    worker._publication_posted.connect(
+        observe_publication,
+        Qt.ConnectionType.DirectConnection,
+    )
+    worker.loaded.connect(loaded.append, Qt.ConnectionType.DirectConnection)
     worker.frame_ready.connect(frames.append, Qt.ConnectionType.DirectConnection)
+    worker.failed.connect(failures.append, Qt.ConnectionType.DirectConnection)
+
     worker.submit(_render_request(1))
-    _wait_until(lambda: [frame.request_id for frame in frames] == [1])
-    gate = _ObservedRLock()
-    worker._emission_gate = gate
-    checked, release_check = _pause_after_eligible(worker)
-    worker.submit(_render_request(2))
-    assert checked.wait(1.0)
-    stop_finished = threading.Event()
+    assert frame_posted.wait(1.0)
+    assert loaded == [] and frames == [] and failures == []
+    started = time.monotonic()
+    worker.stop(timeout_s=0.0)
+    elapsed = time.monotonic() - started
+    _drain_events(qt_app)
+    _wait_until(lambda: bool(harness.close_threads))
 
-    def stop_worker() -> None:
-        gate.observe_current_thread()
-        worker.stop(timeout_s=1.0)
-        stop_finished.set()
-
-    stop_thread = threading.Thread(target=stop_worker)
-    stop_thread.start()
-    assert gate.observed_acquire.wait(1.0)
-    intent_during_emit = worker._stop_requested.is_set()
-    release_check.set()
-    assert stop_finished.wait(1.0)
-    stop_thread.join(1.0)
-
-    assert intent_during_emit is False
-    assert worker._stop_requested.is_set() is True
-    assert [frame.request_id for frame in frames] == [1, 2]
+    assert elapsed < 0.2
+    assert loaded == []
+    assert frames == []
+    assert failures == []
 
 
-def test_new_config_cannot_interleave_between_frame_eligibility_and_emit() -> None:
+def test_new_config_drops_queued_old_generation_before_gui_delivery(
+    qt_app: QApplication,
+) -> None:
     harness = _RenderHarness(block_ids={2})
     worker = KLayoutRenderWorker(backend_factory=harness.factory)
     frames: list[RenderFrame] = []
+    posted_frame_ids: list[int] = []
+    old_frame_posted = threading.Event()
+    new_frame_posted = threading.Event()
+
+    def observe_publication(publication: object) -> None:
+        if getattr(publication, "kind") != "frame_ready":
+            return
+        request_id = getattr(publication, "value").request_id
+        posted_frame_ids.append(request_id)
+        (old_frame_posted if request_id == 1 else new_frame_posted).set()
+
+    worker._publication_posted.connect(
+        observe_publication,
+        Qt.ConnectionType.DirectConnection,
+    )
     worker.frame_ready.connect(frames.append, Qt.ConnectionType.DirectConnection)
     config_a = _config(generation=1)
     config_b = replace(config_a, visible_layers=frozenset({(2, 0)}), generation=2)
+
     worker.submit(_render_request(1, config_a))
-    _wait_until(lambda: [frame.request_id for frame in frames] == [1])
-    gate = _ObservedRLock()
-    worker._emission_gate = gate
-    checked, release_check = _pause_after_eligible(worker)
-    worker.submit(_render_request(2, config_a))
+    assert old_frame_posted.wait(1.0)
+    worker.submit(_render_request(2, config_b))
     assert harness.entered.wait(1.0)
+    _drain_events(qt_app)
+    assert frames == []
     harness.release.set()
-    assert checked.wait(1.0)
-    submit_started = threading.Event()
-    submit_finished = threading.Event()
-
-    def submit_new_config() -> None:
-        gate.observe_current_thread()
-        submit_started.set()
-        worker.submit(_render_request(3, config_b))
-        submit_finished.set()
-
-    submit_thread = threading.Thread(target=submit_new_config)
-    submit_thread.start()
-    assert submit_started.wait(1.0)
-    assert gate.observed_acquire.wait(1.0)
-    assert submit_finished.is_set() is False
-    release_check.set()
-    assert submit_finished.wait(1.0)
-    _wait_until(lambda: any(frame.request_id == 3 for frame in frames))
-    submit_thread.join(1.0)
+    assert new_frame_posted.wait(1.0)
+    _process_until(qt_app, lambda: len(frames) == 1)
     worker.stop()
 
-    assert [frame.request_id for frame in frames] == [1, 2, 3]
+    assert posted_frame_ids == [1, 2]
+    assert [frame.request_id for frame in frames] == [2]
 
 
-def test_stop_after_snap_eligibility_waits_for_snap_delivery() -> None:
-    harness = _SnapHarness()
-    worker = KLayoutSnapWorker(backend_factory=harness.factory)
-    responses: list[SnapResponse] = []
-    events: list[str] = []
-
-    def collect_response(response: SnapResponse) -> None:
-        responses.append(response)
-        if response.request_id == 2:
-            events.append("snap")
-
-    worker.snap_ready.connect(collect_response, Qt.ConnectionType.DirectConnection)
-    worker.submit_hover(_snap_request(1))
-    _wait_until(lambda: [response.request_id for response in responses] == [1])
-    gate = _ObservedRLock()
-    worker._emission_gate = gate
-    checked, release_check = _pause_after_eligible(worker)
-    stop_finished = threading.Event()
-
-    worker.submit_hover(_snap_request(2))
-    assert checked.wait(1.0)
-
-    def stop_worker() -> None:
-        gate.observe_current_thread()
-        worker.stop(timeout_s=0.0)
-        events.append("stop")
-        stop_finished.set()
-
-    stop_thread = threading.Thread(target=stop_worker)
-    stop_thread.start()
-    assert gate.observed_acquire.wait(1.0)
-    assert stop_finished.is_set() is False
-    release_check.set()
-    assert stop_finished.wait(1.0)
-    stop_thread.join(1.0)
-    _wait_until(lambda: bool(harness.close_threads))
-
-    assert [response.request_id for response in responses] == [1, 2]
-    assert events == ["snap", "stop"]
-
-
-def test_new_config_cannot_interleave_between_snap_eligibility_and_emit() -> None:
-    harness = _SnapHarness(block_ids={2})
-    worker = KLayoutSnapWorker(backend_factory=harness.factory)
-    responses: list[SnapResponse] = []
-    worker.snap_ready.connect(responses.append, Qt.ConnectionType.DirectConnection)
-    config_a = _config(generation=1)
-    config_b = replace(config_a, visible_layers=frozenset({(2, 0)}), generation=2)
-    worker.submit_hover(_snap_request(1, config=config_a))
-    _wait_until(lambda: [response.request_id for response in responses] == [1])
-    gate = _ObservedRLock()
-    worker._emission_gate = gate
-    checked, release_check = _pause_after_eligible(worker)
-    worker.submit_hover(_snap_request(2, config=config_a))
-    assert harness.entered.wait(1.0)
-    harness.release.set()
-    assert checked.wait(1.0)
-    submit_started = threading.Event()
-    submit_finished = threading.Event()
-
-    def submit_new_config() -> None:
-        gate.observe_current_thread()
-        submit_started.set()
-        worker.submit_hover(_snap_request(3, config=config_b))
-        submit_finished.set()
-
-    submit_thread = threading.Thread(target=submit_new_config)
-    submit_thread.start()
-    assert submit_started.wait(1.0)
-    assert gate.observed_acquire.wait(1.0)
-    assert submit_finished.is_set() is False
-    release_check.set()
-    assert submit_finished.wait(1.0)
-    _wait_until(lambda: any(response.request_id == 3 for response in responses))
-    submit_thread.join(1.0)
-    worker.stop()
-
-    assert [response.request_id for response in responses] == [1, 2, 3]
-
-
-def test_stop_after_failure_eligibility_waits_for_failure_delivery() -> None:
-    entered = threading.Event()
-    release_backend = threading.Event()
-
-    class FailingBackend:
+def test_all_public_signals_are_delivered_on_worker_creator_thread(
+    qt_app: QApplication,
+) -> None:
+    class FailingRenderBackend:
         def ensure_config(self, _config: KLayoutConfig) -> None:
-            pass
+            raise RuntimeError("render config exploded")
 
         def render(self, _request: RenderRequest) -> RenderFrame:
-            entered.set()
-            release_backend.wait(1.0)
-            raise RuntimeError("late failure")
+            raise AssertionError("render must not run after config failure")
 
         def close(self) -> None:
             pass
 
-    worker = KLayoutRenderWorker(backend_factory=FailingBackend)
-    failures: list[str] = []
-    events: list[str] = []
+    class FailingSnapBackend:
+        def ensure_config(self, _config: KLayoutConfig) -> None:
+            raise RuntimeError("snap config exploded")
 
-    def collect_failure(message: str) -> None:
-        failures.append(message)
-        events.append("failure")
+        def snap(self, _request: SnapRequest) -> SnapResponse:
+            raise AssertionError("snap must not run after config failure")
 
-    worker.failed.connect(collect_failure, Qt.ConnectionType.DirectConnection)
-    worker.submit(_render_request(1))
-    assert entered.wait(1.0)
-    gate = _ObservedRLock()
-    worker._emission_gate = gate
-    checked, release_check = _pause_after_eligible(worker)
-    stop_finished = threading.Event()
+        def close(self) -> None:
+            pass
 
-    release_backend.set()
-    assert checked.wait(1.0)
+    creator_thread_id = threading.get_ident()
+    deliveries: list[tuple[str, int]] = []
 
-    def stop_worker() -> None:
-        gate.observe_current_thread()
-        worker.stop(timeout_s=0.0)
-        events.append("stop")
-        stop_finished.set()
+    def record(label: str) -> Callable[[object], None]:
+        return lambda _value: deliveries.append((label, threading.get_ident()))
 
-    stop_thread = threading.Thread(target=stop_worker)
-    stop_thread.start()
-    assert gate.observed_acquire.wait(1.0)
-    assert stop_finished.is_set() is False
-    release_check.set()
-    assert stop_finished.wait(1.0)
-    stop_thread.join(1.0)
-    _wait_until(lambda: worker._thread is not None and not worker._thread.is_alive())
+    render_worker = KLayoutRenderWorker(backend_factory=_RenderHarness().factory)
+    snap_worker = KLayoutSnapWorker(backend_factory=_SnapHarness().factory)
+    failed_render_worker = KLayoutRenderWorker(backend_factory=FailingRenderBackend)
+    failed_snap_worker = KLayoutSnapWorker(backend_factory=FailingSnapBackend)
+    render_worker.loaded.connect(record("render-loaded"), Qt.ConnectionType.DirectConnection)
+    render_worker.frame_ready.connect(
+        record("frame-ready"),
+        Qt.ConnectionType.DirectConnection,
+    )
+    snap_worker.loaded.connect(record("snap-loaded"), Qt.ConnectionType.DirectConnection)
+    snap_worker.snap_ready.connect(record("snap-ready"), Qt.ConnectionType.DirectConnection)
+    failed_render_worker.failed.connect(
+        record("render-failed"),
+        Qt.ConnectionType.DirectConnection,
+    )
+    failed_snap_worker.failed.connect(
+        record("snap-failed"),
+        Qt.ConnectionType.DirectConnection,
+    )
 
-    assert failures == ["RuntimeError: late failure"]
-    assert events == ["failure", "stop"]
+    render_worker.submit(_render_request(1))
+    snap_worker.submit_hover(_snap_request(2))
+    failed_render_worker.submit(_render_request(3))
+    failed_snap_worker.submit_hover(_snap_request(4))
+    _process_until(qt_app, lambda: len(deliveries) == 6)
+    render_worker.stop()
+    snap_worker.stop()
+    failed_render_worker.stop()
+    failed_snap_worker.stop()
+
+    assert {label for label, _thread_id in deliveries} == {
+        "render-loaded",
+        "frame-ready",
+        "snap-loaded",
+        "snap-ready",
+        "render-failed",
+        "snap-failed",
+    }
+    assert {thread_id for _label, thread_id in deliveries} == {creator_thread_id}
 
 
-def test_failed_signal_is_emitted_unlocked_and_worker_stops_after_backend_error() -> None:
+def test_failed_signal_is_emitted_unlocked_and_worker_stops_after_backend_error(
+    qt_app: QApplication,
+) -> None:
     class FailingBackend:
         def ensure_config(self, _config: KLayoutConfig) -> None:
             pass
@@ -756,7 +568,7 @@ def test_failed_signal_is_emitted_unlocked_and_worker_stops_after_backend_error(
 
     worker.failed.connect(collect_failure, Qt.ConnectionType.DirectConnection)
     worker.submit(_render_request(1))
-    _wait_until(lambda: bool(failures))
+    _process_until(qt_app, lambda: bool(failures))
     worker.stop()
 
     assert failures == ["RuntimeError: render exploded"]

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from pathlib import Path
 import threading
 import time
 from typing import Any, Protocol
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Qt, Signal, Slot
 from PySide6.QtGui import QImage, QTransform
 
 from .klayout_geometry import Segment2D, select_snap
@@ -48,12 +49,20 @@ SnapBackendFactory = Callable[[], _SnapBackend]
 _STOP_WORKER = object()
 
 
+@dataclass(frozen=True)
+class _Publication:
+    kind: str
+    value: object
+    config_generation: int | None
+
+
 class KLayoutRenderWorker(QObject):
     """Render on one lazily-created daemon thread with a newest-only slot."""
 
     loaded = Signal(object)
     frame_ready = Signal(object)
     failed = Signal(str)
+    _publication_posted = Signal(object)
 
     def __init__(
         self,
@@ -63,39 +72,40 @@ class KLayoutRenderWorker(QObject):
     ) -> None:
         super().__init__(parent)
         self._backend_factory = backend_factory or _KLayoutRenderBackend
-        self._emission_gate = threading.RLock()
         self._condition = threading.Condition(threading.Lock())
         self._stop_requested = threading.Event()
         self._pending: RenderRequest | None = None
         self._latest_config: KLayoutConfig | None = None
         self._stopping = False
         self._thread: threading.Thread | None = None
+        self._publication_posted.connect(
+            self._deliver_publication,
+            Qt.ConnectionType.QueuedConnection,
+        )
 
     def submit(self, request: RenderRequest) -> None:
-        with self._emission_gate:
-            with self._condition:
-                if self._stopping or self._stop_requested.is_set():
-                    return
-                self._pending = request
-                self._latest_config = request.config
-                if self._thread is None:
-                    self._thread = threading.Thread(
-                        target=self._run,
-                        name="klayout-render",
-                        daemon=True,
-                    )
-                    self._thread.start()
-                self._condition.notify()
+        with self._condition:
+            if self._stopping or self._stop_requested.is_set():
+                return
+            self._pending = request
+            self._latest_config = request.config
+            if self._thread is None:
+                self._thread = threading.Thread(
+                    target=self._run,
+                    name="klayout-render",
+                    daemon=True,
+                )
+                self._thread.start()
+            self._condition.notify()
 
     def stop(self, timeout_s: float = 1.0) -> None:
         deadline = time.monotonic() + max(0.0, float(timeout_s))
-        with self._emission_gate:
-            with self._condition:
-                self._stop_requested.set()
-                self._stopping = True
-                self._pending = None
-                thread = self._thread
-                self._condition.notify_all()
+        with self._condition:
+            self._stop_requested.set()
+            self._stopping = True
+            self._pending = None
+            thread = self._thread
+            self._condition.notify_all()
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=max(0.0, deadline - time.monotonic()))
 
@@ -112,27 +122,27 @@ class KLayoutRenderWorker(QObject):
                     if active_config != request.config:
                         backend.ensure_config(request.config)
                         active_config = request.config
-                        self._emit_if_current(
-                            self.loaded,
+                        self._post_publication(
+                            "loaded",
                             request.config,
                             request.config,
                         )
                     frame = backend.render(request)
                 except Exception as exc:
-                    self._emit_if_current(
-                        self.failed,
+                    self._post_publication(
+                        "failed",
                         f"{type(exc).__name__}: {exc}",
                         request.config,
                     )
                     continue
-                self._emit_if_current(
-                    self.frame_ready,
+                self._post_publication(
+                    "frame_ready",
                     frame,
                     request.config,
                 )
         except Exception as exc:
-            self._emit_if_current(
-                self.failed,
+            self._post_publication(
+                "failed",
                 f"{type(exc).__name__}: {exc}",
             )
         finally:
@@ -140,8 +150,8 @@ class KLayoutRenderWorker(QObject):
                 try:
                     backend.close()
                 except Exception as exc:
-                    self._emit_if_current(
-                        self.failed,
+                    self._post_publication(
+                        "failed",
                         f"{type(exc).__name__}: {exc}",
                     )
 
@@ -159,23 +169,31 @@ class KLayoutRenderWorker(QObject):
             self._pending = None
             return request
 
-    def _may_emit(self, config: KLayoutConfig | None = None) -> bool:
-        with self._condition:
-            return not self._stopping and not self._stop_requested.is_set() and (
-                config is None or config == self._latest_config
-            )
-
-    def _emit_if_current(
+    def _post_publication(
         self,
-        signal: Any,
+        kind: str,
         value: object,
         config: KLayoutConfig | None = None,
-    ) -> bool:
-        with self._emission_gate:
-            if not self._may_emit(config):
-                return False
-            signal.emit(value)
-            return True
+    ) -> None:
+        self._publication_posted.emit(
+            _Publication(
+                kind=kind,
+                value=value,
+                config_generation=None if config is None else config.generation,
+            )
+        )
+
+    @Slot(object)
+    def _deliver_publication(self, publication: _Publication) -> None:
+        with self._condition:
+            if self._stopping or self._stop_requested.is_set():
+                return
+            if publication.config_generation is not None and (
+                self._latest_config is None
+                or publication.config_generation != self._latest_config.generation
+            ):
+                return
+        getattr(self, publication.kind).emit(publication.value)
 
 
 class KLayoutSnapWorker(QObject):
@@ -184,6 +202,7 @@ class KLayoutSnapWorker(QObject):
     loaded = Signal(object)
     snap_ready = Signal(object)
     failed = Signal(str)
+    _publication_posted = Signal(object)
 
     def __init__(
         self,
@@ -193,7 +212,6 @@ class KLayoutSnapWorker(QObject):
     ) -> None:
         super().__init__(parent)
         self._backend_factory = backend_factory or _KLayoutSnapBackend
-        self._emission_gate = threading.RLock()
         self._condition = threading.Condition(threading.Lock())
         self._stop_requested = threading.Event()
         self._hover: SnapRequest | None = None
@@ -201,6 +219,10 @@ class KLayoutSnapWorker(QObject):
         self._latest_config: KLayoutConfig | None = None
         self._stopping = False
         self._thread: threading.Thread | None = None
+        self._publication_posted.connect(
+            self._deliver_publication,
+            Qt.ConnectionType.QueuedConnection,
+        )
 
     def submit_hover(self, request: SnapRequest) -> None:
         self._submit(request, click=False)
@@ -210,35 +232,33 @@ class KLayoutSnapWorker(QObject):
 
     def stop(self, timeout_s: float = 1.0) -> None:
         deadline = time.monotonic() + max(0.0, float(timeout_s))
-        with self._emission_gate:
-            with self._condition:
-                self._stop_requested.set()
-                self._stopping = True
-                self._hover = None
-                self._clicks.clear()
-                thread = self._thread
-                self._condition.notify_all()
+        with self._condition:
+            self._stop_requested.set()
+            self._stopping = True
+            self._hover = None
+            self._clicks.clear()
+            thread = self._thread
+            self._condition.notify_all()
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=max(0.0, deadline - time.monotonic()))
 
     def _submit(self, request: SnapRequest, *, click: bool) -> None:
-        with self._emission_gate:
-            with self._condition:
-                if self._stopping or self._stop_requested.is_set():
-                    return
-                self._latest_config = request.config
-                if click:
-                    self._clicks.append(request)
-                else:
-                    self._hover = request
-                if self._thread is None:
-                    self._thread = threading.Thread(
-                        target=self._run,
-                        name="klayout-snap",
-                        daemon=True,
-                    )
-                    self._thread.start()
-                self._condition.notify()
+        with self._condition:
+            if self._stopping or self._stop_requested.is_set():
+                return
+            self._latest_config = request.config
+            if click:
+                self._clicks.append(request)
+            else:
+                self._hover = request
+            if self._thread is None:
+                self._thread = threading.Thread(
+                    target=self._run,
+                    name="klayout-snap",
+                    daemon=True,
+                )
+                self._thread.start()
+            self._condition.notify()
 
     def _run(self) -> None:
         backend: _SnapBackend | None = None
@@ -253,27 +273,27 @@ class KLayoutSnapWorker(QObject):
                     if active_config != request.config:
                         backend.ensure_config(request.config)
                         active_config = request.config
-                        self._emit_if_current(
-                            self.loaded,
+                        self._post_publication(
+                            "loaded",
                             request.config,
                             request.config,
                         )
                     response = backend.snap(request)
                 except Exception as exc:
-                    self._emit_if_current(
-                        self.failed,
+                    self._post_publication(
+                        "failed",
                         f"{type(exc).__name__}: {exc}",
                         request.config,
                     )
                     continue
-                self._emit_if_current(
-                    self.snap_ready,
+                self._post_publication(
+                    "snap_ready",
                     response,
                     request.config,
                 )
         except Exception as exc:
-            self._emit_if_current(
-                self.failed,
+            self._post_publication(
+                "failed",
                 f"{type(exc).__name__}: {exc}",
             )
         finally:
@@ -281,8 +301,8 @@ class KLayoutSnapWorker(QObject):
                 try:
                     backend.close()
                 except Exception as exc:
-                    self._emit_if_current(
-                        self.failed,
+                    self._post_publication(
+                        "failed",
                         f"{type(exc).__name__}: {exc}",
                     )
 
@@ -307,23 +327,31 @@ class KLayoutSnapWorker(QObject):
                 if request is not None and request.config == self._latest_config:
                     return request
 
-    def _may_emit(self, config: KLayoutConfig | None = None) -> bool:
-        with self._condition:
-            return not self._stopping and not self._stop_requested.is_set() and (
-                config is None or config == self._latest_config
-            )
-
-    def _emit_if_current(
+    def _post_publication(
         self,
-        signal: Any,
+        kind: str,
         value: object,
         config: KLayoutConfig | None = None,
-    ) -> bool:
-        with self._emission_gate:
-            if not self._may_emit(config):
-                return False
-            signal.emit(value)
-            return True
+    ) -> None:
+        self._publication_posted.emit(
+            _Publication(
+                kind=kind,
+                value=value,
+                config_generation=None if config is None else config.generation,
+            )
+        )
+
+    @Slot(object)
+    def _deliver_publication(self, publication: _Publication) -> None:
+        with self._condition:
+            if self._stopping or self._stop_requested.is_set():
+                return
+            if publication.config_generation is not None and (
+                self._latest_config is None
+                or publication.config_generation != self._latest_config.generation
+            ):
+                return
+        getattr(self, publication.kind).emit(publication.value)
 
 
 class _KLayoutRenderBackend:
