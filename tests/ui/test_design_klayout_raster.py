@@ -353,9 +353,7 @@ def test_range_scheduler_coalesces_zoom_and_keeps_previous_frame_during_pan(
     view_box.change((10.0, 0.0, 90.0, 40.0))
     view_box.change((20.0, 5.0, 80.0, 35.0))
     qt_app.processEvents()
-    from PySide6.QtTest import QTest
-
-    QTest.qWait(25)
+    _process_until(qt_app, lambda: len(worker.requests) == 1, timeout_s=0.5)
 
     assert len(worker.requests) == 1
     assert worker.requests[0].world_box == (20.0, 5.0, 80.0, 35.0)

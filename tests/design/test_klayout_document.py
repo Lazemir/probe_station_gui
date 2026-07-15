@@ -46,18 +46,12 @@ def test_load_keeps_only_klayout_document_metadata(tmp_path: Path) -> None:
     assert document.snap_segment_ends.size == 0
 
 
-def test_file_backed_layer_and_cell_changes_do_not_extract_polygons(
+def test_file_backed_layer_and_cell_changes_do_not_materialize_polygons(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     design_path = tmp_path / "metadata.gds"
     _write_design(design_path)
     document = DesignDocument.load(design_path)
-
-    def fail_extract(_cell: object) -> None:
-        raise AssertionError("file-backed metadata changes must not extract polygons")
-
-    monkeypatch.setattr(DesignDocument, "_extract_polygons", fail_extract)
 
     filtered = document.with_visible_layers({(2, 3)})
     alternate = filtered.with_top_cell("TOP")
@@ -65,6 +59,7 @@ def test_file_backed_layer_and_cell_changes_do_not_extract_polygons(
     assert filtered.visible_layers == frozenset({(2, 3)})
     assert alternate.top_cell_name == "TOP"
     assert alternate.bounds == (1.0, 2.0, 11.0, 6.0)
+    assert filtered.polygons_by_layer == {}
     assert alternate.polygons_by_layer == {}
 
 

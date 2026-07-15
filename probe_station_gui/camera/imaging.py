@@ -926,8 +926,6 @@ def _overlap_patches(
         return None
     x0 = int(round(left))
     y0 = int(round(top))
-    x1 = x0 + overlap_w
-    y1 = y0 + overlap_h
     existing_x = x0 - int(round(existing_left))
     existing_y = y0 - int(round(existing_top))
     current_x = x0 - int(round(current_left))

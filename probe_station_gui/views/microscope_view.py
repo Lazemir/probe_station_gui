@@ -1340,7 +1340,7 @@ class MicroscopeView(QWidget):
         self._minimap_latest_request_id = request.request_id
         self._minimap_render_key = cache_key
         logger.debug(
-            "MINIMAP KLAYOUT scheduled request=%d size=%dx%d document=%s",
+            "KLayout minimap render scheduled request=%d size=%dx%d document=%s",
             request.request_id,
             pixel_width,
             pixel_height,
@@ -1372,7 +1372,7 @@ class MicroscopeView(QWidget):
         self._minimap_background_config_generation = config.generation
         self._minimap_background = QPixmap.fromImage(frame.image)
         logger.debug(
-            "MINIMAP KLAYOUT accepted request=%d elapsed_ms=%.2f",
+            "KLayout minimap render accepted request=%d elapsed_ms=%.2f",
             frame.request_id,
             frame.elapsed_ms,
         )
@@ -1381,7 +1381,7 @@ class MicroscopeView(QWidget):
     def _on_klayout_minimap_failed(self, message: str) -> None:
         self._minimap_render_key = None
         self._minimap_latest_request_id = None
-        logger.error("MINIMAP KLAYOUT failed: %s", message)
+        logger.error("KLayout minimap render failed: %s", message)
 
     def _minimap_static_overlay_for_size(self, size: QSize) -> QPixmap | None:
         if self._design_document is None:
@@ -1516,7 +1516,6 @@ class MicroscopeView(QWidget):
         offset_x = target_rect.left() + (target_rect.width() - width * scale) * 0.5
         offset_y = target_rect.top() + (target_rect.height() - height * scale) * 0.5
         point_count = 0
-        rendered_point_count = 0
         for layer_key, polygons in document.visible_polygons().items():
             painter.setPen(QPen(cls._layer_color(layer_key), 1))
             painter.setBrush(Qt.NoBrush)
@@ -1538,7 +1537,6 @@ class MicroscopeView(QWidget):
                     y_values = y_values[keep]
                 if len(x_values) < 2:
                     continue
-                rendered_point_count += int(len(x_values))
                 path = QPainterPath()
                 path.moveTo(QPointF(float(x_values[0]), float(y_values[0])))
                 for x_value, y_value in zip(x_values[1:], y_values[1:]):
@@ -1546,11 +1544,6 @@ class MicroscopeView(QWidget):
                 path.closeSubpath()
                 painter.drawPath(path)
         painter.end()
-        logger.debug(
-            "MINIMAP RENDER simplified points=%d rendered_points=%d",
-            point_count,
-            rendered_point_count,
-        )
         return image, point_count
 
     def _draw_design_route(self, painter: QPainter, rect: QRect) -> None:

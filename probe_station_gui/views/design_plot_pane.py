@@ -715,12 +715,6 @@ class _DesignPlotPane(QWidget):
         if len(geometry) < 3:
             return
         document.set_snap_geometry(*geometry)
-        logger.debug(
-            "DESIGN SNAP geometry ready vertices=%d segments=%d elapsed_ms=%.2f",
-            len(document.snap_vertices),
-            len(document.snap_segment_starts),
-            float(result or 0.0),
-        )
         if self._pending_hover_scene_pos is not None and not self._hover_timer.isActive():
             self._hover_timer.start()
 

@@ -402,7 +402,7 @@ class DesignDocument:
         if top_cell_name not in cell_by_name:
             raise DesignModelError(f"Cell '{top_cell_name}' was not found in '{path.name}'.")
         top_cell = cell_by_name[top_cell_name]
-        polygons_by_layer = cls._extract_polygons(top_cell)
+        polygons_by_layer = cls._extract_fixture_polygons(top_cell)
         if not polygons_by_layer:
             raise DesignModelError(f"Top cell '{top_cell_name}' has no polygon geometry.")
         if rotation_quarter_turns:
@@ -857,24 +857,11 @@ class DesignDocument:
         )
 
     @staticmethod
-    def _import_gdstk() -> Any:
-        try:
-            return importlib.import_module("gdstk")
-        except ImportError as exc:
-            raise DesignModelError(
-                "gdstk is not installed. Install it to enable GDS design navigation."
-            ) from exc
+    def _extract_fixture_polygons(
+        cell: Any,
+    ) -> dict[LayerKey, tuple[np.ndarray, ...]]:
+        """Read polygons from legacy in-memory fixtures without a GDS dependency."""
 
-    @staticmethod
-    def _select_geometry_cell(*cell_groups: Iterable[Any]) -> Any | None:
-        for cells in cell_groups:
-            for cell in cells:
-                if DesignDocument._extract_polygons(cell):
-                    return cell
-        return None
-
-    @staticmethod
-    def _extract_polygons(cell: Any) -> dict[LayerKey, tuple[np.ndarray, ...]]:
         polygons_by_layer: dict[LayerKey, list[np.ndarray]] = {}
         polygon_map: Any = None
         if hasattr(cell, "get_polygons"):
