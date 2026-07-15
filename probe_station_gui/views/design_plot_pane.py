@@ -23,7 +23,18 @@ from probe_station_gui.design.model import (
     Point2D,
     SnapResult,
 )
+from probe_station_gui.design.klayout_types import (
+    KLayoutConfig,
+    PendingClick,
+    SnapRequest,
+    SnapResponse,
+)
+from probe_station_gui.design.klayout_workers import KLayoutSnapWorker
 from probe_station_gui.route.model import MeasurementRoute
+from probe_station_gui.views.design_klayout_raster import (
+    KLayoutRasterController,
+    KLayoutRasterItem,
+)
 
 try:  # pragma: no cover - optional runtime dependency
     import pyqtgraph as pg
@@ -77,6 +88,15 @@ class _DesignPlotPane(QWidget):
         self._last_hover_log_at = 0.0
         self._last_hover_log_signature: tuple[float, float, str] | None = None
         self._snap_generation = 0
+        self._snap_request_id = 0
+        self._latest_hover_request_id = 0
+        self._pending_clicks: dict[int, PendingClick] = {}
+        self._snap_worker: KLayoutSnapWorker | None = None
+        self._snap_worker_path = None
+        self._klayout_config: KLayoutConfig | None = None
+        self._raster_item: KLayoutRasterItem | None = None
+        self._raster_controller: KLayoutRasterController | None = None
+        self._shutdown = False
         self._plot = None
         self._status_label: QLabel | None = None
         self._route_geometry_redraw_timer: QTimer | None = None
@@ -111,6 +131,16 @@ class _DesignPlotPane(QWidget):
         view_box.setMouseEnabled(x=True, y=True)
         self._plot.plotItem.hideAxis("bottom")
         self._plot.plotItem.hideAxis("left")
+
+        self._raster_item = KLayoutRasterItem()
+        self._plot.addItem(self._raster_item)
+        self._raster_controller = KLayoutRasterController(
+            view_box,
+            self._raster_item,
+            device_pixel_ratio=self._plot.devicePixelRatioF,
+            parent=self,
+        )
+        self._raster_controller.failed.connect(self._on_klayout_render_failed)
 
         self._route_item = self._plot.plot([], [], pen=pg.mkPen("#4dd0e1", width=2))
         self._probe_route_item = self._plot.plot(
@@ -356,16 +386,75 @@ class _DesignPlotPane(QWidget):
         self._document = document
         if document is None:
             self._snap_generation += 1
+            self._latest_hover_request_id = 0
+            self._pending_clicks.clear()
             self._set_hover_snap(None)
+            self._detach_file_backed_document(timeout_s=0.5)
             self.set_status_message("No design loaded.")
             self._redraw_document()
         elif not same_document:
             self._snap_generation += 1
+            self._latest_hover_request_id = 0
+            self._pending_clicks.clear()
             self._set_hover_snap(None)
             self.set_status_message("")
+            if document.file_backed:
+                self._configure_file_backed_document(document)
+            else:
+                self._detach_file_backed_document(timeout_s=0.0)
             self._redraw_document()
-            self._start_snap_geometry_build(document)
+            if not document.file_backed:
+                self._start_snap_geometry_build(document)
         self._redraw_overlays()
+
+    def _configure_file_backed_document(self, document: DesignDocument) -> None:
+        controller = self._raster_controller
+        if controller is None:
+            return
+        controller.set_document(document)
+        config = controller.config
+        self._klayout_config = config
+        if config is None:
+            return
+        if self._snap_worker is not None and self._snap_worker_path == config.path:
+            return
+        self._stop_snap_worker(timeout_s=0.0)
+        worker = KLayoutSnapWorker()
+        worker.snap_ready.connect(self._on_file_backed_snap_ready)
+        worker.failed.connect(self._on_klayout_snap_failed)
+        self._snap_worker = worker
+        self._snap_worker_path = config.path
+
+    def _detach_file_backed_document(self, *, timeout_s: float) -> None:
+        self._klayout_config = None
+        self._latest_hover_request_id = 0
+        self._pending_clicks.clear()
+        self._stop_snap_worker(timeout_s=timeout_s)
+        if self._raster_controller is not None:
+            self._raster_controller.set_document(None)
+
+    def _stop_snap_worker(self, *, timeout_s: float) -> None:
+        worker = self._snap_worker
+        self._snap_worker = None
+        self._snap_worker_path = None
+        if worker is None:
+            return
+        try:
+            worker.snap_ready.disconnect(self._on_file_backed_snap_ready)
+        except (RuntimeError, TypeError):
+            pass
+        try:
+            worker.failed.disconnect(self._on_klayout_snap_failed)
+        except (RuntimeError, TypeError):
+            pass
+        worker.stop(timeout_s=timeout_s)
+
+    def _on_klayout_render_failed(self, message: str) -> None:
+        logger.warning("KLayout design render failed: %s", message)
+        self.set_status_message("Design rendering failed.")
+
+    def _on_klayout_snap_failed(self, message: str) -> None:
+        logger.warning("KLayout design snap failed: %s", message)
 
     def set_status_message(self, message: str) -> None:
         if self._status_label is None or self._plot is None:
@@ -556,6 +645,10 @@ class _DesignPlotPane(QWidget):
         self._layer_items.clear()
         if self._document is None:
             return
+        if self._document.file_backed:
+            self.focus_bounds()
+            self._schedule_route_geometry_redraw()
+            return
         point_count = 0
         for layer_key, (x_data, y_data) in self._document.visible_plot_paths().items():
             if len(x_data) == 0:
@@ -577,6 +670,8 @@ class _DesignPlotPane(QWidget):
         )
 
     def _start_snap_geometry_build(self, document: DesignDocument) -> None:
+        if document.file_backed:
+            return
         if document.has_snap_geometry():
             return
         generation = self._snap_generation
@@ -1077,11 +1172,26 @@ class _DesignPlotPane(QWidget):
             slot = 1
         else:
             return
+        if route_pick:
+            action = "route_pick"
+            payload: tuple[object, ...] = (str(self._route_pick_mode),)
+        elif route_click:
+            action = "route_point"
+            payload = ()
+        elif slot is None:
+            action = "move"
+            payload = ()
+        else:
+            action = "calibration"
+            payload = (slot,)
         position = event.scenePos()
         if not self._plot.sceneBoundingRect().contains(position):
             return
         view_point = self._plot.getViewBox().mapSceneToView(position)
         raw_point = (float(view_point.x()), float(view_point.y()))
+        if bool(getattr(self._document, "file_backed", False)):
+            self._submit_file_backed_click(action, raw_point, payload)
+            return
         started = perf_counter()
         snap_result = self._resolve_snap_result(raw_point)
         elapsed_ms = (perf_counter() - started) * 1000.0
@@ -1115,7 +1225,63 @@ class _DesignPlotPane(QWidget):
                 snap_result.point[1],
             )
             return
-        self.calibration_point_selected.emit(slot, snap_result.point[0], snap_result.point[1])
+        self.calibration_point_selected.emit(
+            slot,
+            snap_result.point[0],
+            snap_result.point[1],
+        )
+
+    def _submit_file_backed_click(
+        self,
+        action: str,
+        raw_point: Point2D,
+        payload: tuple[object, ...] = (),
+    ) -> None:
+        free_result = SnapResult(point=raw_point, mode="free", distance=0.0)
+        if not self._snap_enabled:
+            self._set_hover_snap(free_result)
+            self._execute_click_action(action, payload, free_result)
+            return
+        config = self._klayout_config
+        worker = self._snap_worker
+        if config is None or worker is None:
+            return
+        snap_threshold = self._snap_distance_threshold()
+        radius = 0.0 if snap_threshold is None else max(0.0, snap_threshold)
+        self._snap_request_id += 1
+        request_id = self._snap_request_id
+        self._pending_clicks[request_id] = PendingClick(
+            request_id=request_id,
+            config_generation=config.generation,
+            action=str(action),
+            raw_point=raw_point,
+            payload=tuple(payload),
+        )
+        worker.submit_click(
+            SnapRequest(
+                request_id=request_id,
+                config=config,
+                point=raw_point,
+                radius=radius,
+                purpose="click",
+            )
+        )
+
+    def _execute_click_action(
+        self,
+        action: str,
+        payload: tuple[object, ...],
+        snap_result: SnapResult,
+    ) -> None:
+        x_value, y_value = snap_result.point
+        if action == "route_pick" and payload:
+            self.route_pick_requested.emit(str(payload[0]), x_value, y_value)
+        elif action == "route_point":
+            self.route_point_requested.emit(x_value, y_value)
+        elif action == "move":
+            self.move_requested.emit(x_value, y_value)
+        elif action == "calibration" and payload:
+            self.calibration_point_selected.emit(int(payload[0]), x_value, y_value)
 
     @staticmethod
     def _is_double_click_event(event) -> bool:
@@ -1143,16 +1309,75 @@ class _DesignPlotPane(QWidget):
             return
         view_point = self._plot.getViewBox().mapSceneToView(position)
         raw_point = (float(view_point.x()), float(view_point.y()))
+        if self._document.file_backed:
+            self._submit_file_backed_hover(raw_point)
+            return
         started = perf_counter()
         snap_result = self._resolve_snap_result(raw_point)
         elapsed_ms = (perf_counter() - started) * 1000.0
         self._set_hover_snap(snap_result)
         self._log_hover_snap(raw_point, snap_result, elapsed_ms)
 
+    def _submit_file_backed_hover(self, raw_point: Point2D) -> None:
+        if not self._snap_enabled:
+            self._set_hover_snap(None)
+            return
+        config = self._klayout_config
+        worker = self._snap_worker
+        snap_threshold = self._snap_distance_threshold()
+        if config is None or worker is None or snap_threshold is None:
+            self._set_hover_snap(None)
+            return
+        self._snap_request_id += 1
+        self._latest_hover_request_id = self._snap_request_id
+        worker.submit_hover(
+            SnapRequest(
+                request_id=self._snap_request_id,
+                config=config,
+                point=raw_point,
+                radius=max(0.0, snap_threshold),
+                purpose="hover",
+            )
+        )
+
+    def _on_file_backed_snap_ready(self, response: SnapResponse) -> None:
+        config = self._klayout_config
+        if config is None or response.config_generation != config.generation:
+            return
+        if response.purpose == "hover":
+            if response.request_id != self._latest_hover_request_id:
+                return
+            self._set_hover_snap(response.result)
+            self._log_hover_snap(
+                response.raw_point,
+                response.result,
+                response.elapsed_ms,
+            )
+            return
+        if response.purpose != "click":
+            return
+        pending = self._pending_clicks.pop(response.request_id, None)
+        if pending is None or pending.config_generation != config.generation:
+            return
+        self._set_hover_snap(response.result)
+        logger.debug(
+            "DESIGN SNAP click raw=(%.3f, %.3f) snapped=(%.3f, %.3f) mode=%s dist=%.4f elapsed_ms=%.2f",
+            pending.raw_point[0],
+            pending.raw_point[1],
+            response.result.point[0],
+            response.result.point[1],
+            response.result.mode,
+            response.result.distance,
+            response.elapsed_ms,
+        )
+        self._execute_click_action(pending.action, pending.payload, response.result)
+
     def _resolve_snap_result(self, raw_point: Point2D) -> SnapResult:
         if self._document is None:
             return SnapResult(point=raw_point, mode="free", distance=0.0)
         if not self._snap_enabled:
+            return SnapResult(point=raw_point, mode="free", distance=0.0)
+        if self._document.file_backed:
             return SnapResult(point=raw_point, mode="free", distance=0.0)
         if not self._document.has_snap_geometry():
             return SnapResult(point=raw_point, mode="free", distance=0.0)
@@ -1227,7 +1452,7 @@ class _DesignPlotPane(QWidget):
         point = self._hover_snap.point
         self._hover_item.setData([point[0]], [point[1]])
         if (
-            self._hover_snap.mode == "segment"
+            self._hover_snap.mode in {"segment", "segment_center"}
             and self._hover_snap.segment_start is not None
             and self._hover_snap.segment_end is not None
         ):
@@ -1270,6 +1495,27 @@ class _DesignPlotPane(QWidget):
         )
         self._last_hover_log_at = now
         self._last_hover_log_signature = signature
+
+    def shutdown(self) -> None:
+        """Detach both KLayout workers from the Qt creator thread."""
+
+        if self._shutdown:
+            return
+        self._shutdown = True
+        self._pending_clicks.clear()
+        self._latest_hover_request_id = 0
+        if hasattr(self, "_hover_timer"):
+            self._hover_timer.stop()
+        if self._route_geometry_redraw_timer is not None:
+            self._route_geometry_redraw_timer.stop()
+        self._stop_snap_worker(timeout_s=0.5)
+        self._klayout_config = None
+        if self._raster_controller is not None:
+            self._raster_controller.shutdown()
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        self.shutdown()
+        super().closeEvent(event)
 
     @staticmethod
     def _set_slot_item_data(item, point: Point2D | None) -> None:

@@ -865,7 +865,11 @@ class DesignNavigatorPanel(QWidget):
         if snap_result.mode == "free":
             self._snap_hint_label.setText("Hover snap: no nearby geometry, click uses the exact cursor position.")
             return
-        label = "Corner" if snap_result.mode == "vertex" else "Line"
+        label = {
+            "segment_center": "Center",
+            "segment": "Line",
+            "vertex": "Corner",
+        }.get(snap_result.mode, "Line")
         self._snap_hint_label.setText(
             f"Hover snap: {label} at X={snap_result.point[0]:.3f}, "
             f"Y={snap_result.point[1]:.3f} | distance {snap_result.distance:.4f}"
@@ -1744,6 +1748,7 @@ class DesignLayoutWindow(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         _ = parent
         super().__init__(None)
+        self._document: DesignDocument | None = None
         self.setWindowTitle("Design Window")
         self.setWindowFlag(Qt.Window, True)
         self.resize(1480, 920)
@@ -1802,8 +1807,13 @@ class DesignLayoutWindow(QWidget):
         root_layout.addLayout(content_layout, 1)
 
     def set_document(self, document: DesignDocument | None) -> None:
+        self._document = document
         self._main_view.set_document(document)
         self.navigator_panel.set_document(document)
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        self._main_view.set_document(None)
+        super().closeEvent(event)
 
     def set_targets(
         self,
@@ -1900,6 +1910,8 @@ class DesignLayoutWindow(QWidget):
         self.activateWindow()
 
     def showEvent(self, event) -> None:  # type: ignore[override]
+        if self._document is not None and self._main_view._document is None:
+            self._main_view.set_document(self._document)
         super().showEvent(event)
         self.visibility_changed.emit(True)
 
