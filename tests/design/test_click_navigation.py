@@ -10,6 +10,12 @@ from PySide6.QtWidgets import QAbstractItemView, QApplication
 import main as main_module
 from main import Main
 from probe_station_gui.design.model import DesignDocument
+from probe_station_gui.design.selection_model import (
+    MixedArrayRequest,
+    SelectionModel,
+    project_entities,
+    route_entity_id,
+)
 from probe_station_gui.route.model import MeasurementRoute
 from probe_station_gui.views.design_navigator_panel import (
     DesignNavigatorPanel,
@@ -130,7 +136,7 @@ def test_minimap_single_click_handler_opens_design_window(monkeypatch) -> None:
     assert calls == [True]
 
 
-def test_route_array_request_includes_multi_selected_route_rows() -> None:
+def test_route_array_request_uses_shared_selected_entity_ids() -> None:
     _qt_app()
     panel = DesignNavigatorPanel()
     document = _make_document()
@@ -140,6 +146,7 @@ def test_route_array_request_includes_multi_selected_route_rows() -> None:
     route.add_point((2.0, 0.0))
     panel.set_document(document)
     panel.set_route(route, selected_route_point_index=0)
+    panel.set_selectable_entities(project_entities(route, None))
 
     assert panel._route_table.selectionMode() == QAbstractItemView.ExtendedSelection
 
@@ -153,12 +160,19 @@ def test_route_array_request_includes_multi_selected_route_rows() -> None:
         model.index(2, 0),
         QItemSelectionModel.Select | QItemSelectionModel.Rows,
     )
-    emitted: list[tuple[object, ...]] = []
-    panel.route_array_requested.connect(lambda *args: emitted.append(args))
+    panel.set_selection(
+        SelectionModel(
+            frozenset({route_entity_id("p001"), route_entity_id("p003")})
+        )
+    )
+    emitted: list[MixedArrayRequest] = []
+    panel.mixed_array_requested.connect(emitted.append)
 
     panel._emit_route_array_requested()
 
-    assert emitted[-1][-1] == [0, 2]
+    assert emitted[-1].source_ids == frozenset(
+        {route_entity_id("p001"), route_entity_id("p003")}
+    )
     assert panel._selected_route_point_index == 0
 
 

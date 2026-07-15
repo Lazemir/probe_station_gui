@@ -9,8 +9,17 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
+from PySide6.QtCore import QItemSelectionModel
 from PySide6.QtWidgets import QApplication
 
+from probe_station_gui.design.selection_geometry import PointGeometry, SegmentGeometry
+from probe_station_gui.design.selection_model import (
+    EntityOwner,
+    SelectableDesignEntity,
+    SelectionModel,
+    markup_entity_id,
+    route_entity_id,
+)
 from probe_station_gui.route.model import MeasurementRoute, RouteDesignBinding, RoutePoint
 from probe_station_gui.views.design_navigator_panel import DesignNavigatorPanel
 
@@ -97,6 +106,197 @@ def test_design_navigator_enables_idle_route_controls_with_route_selection(
     assert not panel._route_save_shift_button.isEnabled()
     assert not panel._route_jump_selected_button.isEnabled()
 
+    panel.deleteLater()
+
+
+def test_design_tools_are_exclusive_and_markup_eye_is_independent(
+    qt_app: QApplication,
+) -> None:
+    panel = DesignNavigatorPanel()
+    panel._document = object()
+    panel._update_enabled_state()
+    tools: list[str] = []
+    panel.active_design_tool_changed.connect(tools.append)
+
+    assert panel._select_tool_button.isChecked()
+    assert panel._markup_visibility_button.isChecked()
+    panel._point_tool_button.click()
+    assert panel._point_tool_button.isChecked()
+    assert not panel._select_tool_button.isChecked()
+    panel._guide_tool_button.click()
+    assert panel._guide_tool_button.isChecked()
+    assert not panel._point_tool_button.isChecked()
+    panel._markup_visibility_button.click()
+
+    assert panel._guide_tool_button.isChecked()
+    assert tools[-2:] == ["point", "guide"]
+    panel.deleteLater()
+
+
+def test_point_guide_and_mutations_disable_while_route_is_running(
+    qt_app: QApplication,
+) -> None:
+    panel = DesignNavigatorPanel()
+    panel._document = object()
+    panel.set_route(_route(point_count=1), selected_route_point_index=0)
+    panel.set_selectable_entities(
+        [
+            SelectableDesignEntity(
+                route_entity_id("p001"),
+                EntityOwner.ROUTE,
+                "p001",
+                PointGeometry((0.0, 0.0)),
+                route_index=0,
+            ),
+            SelectableDesignEntity(
+                markup_entity_id("g1"),
+                EntityOwner.MARKUP,
+                "g1",
+                SegmentGeometry((0.0, 0.0), (1.0, 0.0)),
+            ),
+        ]
+    )
+    panel.set_selection(SelectionModel(frozenset({route_entity_id("p001")})))
+
+    assert panel._point_tool_button.isEnabled()
+    assert panel._guide_tool_button.isEnabled()
+    assert panel._selection_delete_button.isEnabled()
+    assert panel._route_array_create_button.isEnabled()
+
+    panel.set_route_measurement_running(True)
+
+    assert not panel._point_tool_button.isEnabled()
+    assert not panel._guide_tool_button.isEnabled()
+    assert not panel._selection_delete_button.isEnabled()
+    assert not panel._guide_clear_button.isEnabled()
+    assert not panel._guide_undo_button.isEnabled()
+    assert not panel._route_array_create_button.isEnabled()
+    panel.deleteLater()
+
+
+def test_array_page_is_selection_driven_without_origin_extent_or_replace(
+    qt_app: QApplication,
+) -> None:
+    panel = DesignNavigatorPanel()
+
+    assert not hasattr(panel, "_route_array_origin_x_spin")
+    assert not hasattr(panel, "_route_array_origin_y_spin")
+    assert not hasattr(panel, "_route_array_pick_origin_button")
+    assert not hasattr(panel, "_route_array_pick_extent1_button")
+    assert not hasattr(panel, "_route_array_pick_extent2_button")
+    assert not hasattr(panel, "_route_array_replace_checkbox")
+    panel.deleteLater()
+
+
+def test_array_create_requires_one_selected_visible_entity(
+    qt_app: QApplication,
+) -> None:
+    panel = DesignNavigatorPanel()
+    panel._document = object()
+    guide = SelectableDesignEntity(
+        markup_entity_id("g1"),
+        EntityOwner.MARKUP,
+        "g1",
+        SegmentGeometry((0.0, 0.0), (1.0, 0.0)),
+    )
+    panel.set_selectable_entities([guide])
+    panel._update_enabled_state()
+
+    assert not panel._route_array_create_button.isEnabled()
+    panel.set_selection(SelectionModel(frozenset({guide.id})))
+    assert panel._route_array_create_button.isEnabled()
+    panel.set_markup_visible(False)
+    assert not panel._route_array_create_button.isEnabled()
+    panel.deleteLater()
+
+
+def test_hidden_markup_can_still_be_cleared_when_guides_exist(
+    qt_app: QApplication,
+) -> None:
+    panel = DesignNavigatorPanel()
+    panel._document = object()
+
+    panel.set_markup_state(visible=False, guide_count=2)
+
+    assert panel._guide_clear_button.isEnabled()
+    assert not panel._route_array_create_button.isEnabled()
+    panel.deleteLater()
+
+
+def test_route_table_selection_and_shared_selection_are_bidirectional(
+    qt_app: QApplication,
+) -> None:
+    panel = DesignNavigatorPanel()
+    route = _route(point_count=2)
+    panel._document = object()
+    panel.set_route(route, selected_route_point_index=0)
+    entities = [
+        SelectableDesignEntity(
+            route_entity_id(point.id),
+            EntityOwner.ROUTE,
+            point.id,
+            PointGeometry(point.camera_center),
+            route_index=index,
+        )
+        for index, point in enumerate(route.points)
+    ]
+    panel.set_selectable_entities(entities)
+    panel.set_selection(
+        SelectionModel(frozenset(entity.id for entity in entities))
+    )
+
+    assert panel._selected_route_row_indices() == [0, 1]
+    requests: list[tuple[set[str], str]] = []
+    panel.selection_requested.connect(
+        lambda ids, mode: requests.append((set(ids), mode))
+    )
+    panel._route_table.clearSelection()
+    selection_model = panel._route_table.selectionModel()
+    selection_model.select(
+        panel._route_table.model().index(1, 0),
+        QItemSelectionModel.Select | QItemSelectionModel.Rows,
+    )
+
+    assert requests[-1] == ({route_entity_id("p002")}, "replace")
+    panel.deleteLater()
+
+
+def test_select_and_guide_actions_emit_laconic_commands(
+    qt_app: QApplication,
+) -> None:
+    panel = DesignNavigatorPanel()
+    panel._document = object()
+    panel._guide_undo_available = True
+    panel.set_selectable_entities(
+        [
+            SelectableDesignEntity(
+                route_entity_id("p001"),
+                EntityOwner.ROUTE,
+                "p001",
+                PointGeometry((0.0, 0.0)),
+                route_index=0,
+            ),
+            SelectableDesignEntity(
+                markup_entity_id("g1"),
+                EntityOwner.MARKUP,
+                "g1",
+                SegmentGeometry((0.0, 0.0), (1.0, 0.0)),
+            ),
+        ]
+    )
+    panel.set_selection(SelectionModel(frozenset({"route:p001"})))
+    panel.set_markup_state(visible=True, guide_count=1)
+    panel._update_enabled_state()
+    commands: list[str] = []
+    panel.delete_selection_requested.connect(lambda: commands.append("delete"))
+    panel.guide_undo_requested.connect(lambda: commands.append("undo"))
+    panel.guide_clear_requested.connect(lambda: commands.append("clear"))
+
+    panel._selection_delete_button.click()
+    panel._guide_undo_button.click()
+    panel._guide_clear_button.click()
+
+    assert commands == ["delete", "undo", "clear"]
     panel.deleteLater()
 
 

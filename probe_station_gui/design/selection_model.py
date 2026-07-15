@@ -86,6 +86,7 @@ class MixedArrayRequest:
     direction_2: tuple[float, float]
     count_2: int
     serpentine: bool = False
+    source_ids: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)

@@ -28,6 +28,7 @@ from probe_station_gui.route.model import (
     RouteDesignBinding,
     RoutePoint,
 )
+from probe_station_gui.views.design_navigator_panel import DesignLayoutWindow
 from probe_station_gui.views.design_plot_pane import _DesignPlotPane
 
 
@@ -273,3 +274,42 @@ def test_mixed_array_preview_draws_points_and_dashed_segments(
     assert pane._mixed_preview_segments == [
         SegmentGeometry((0.0, 0.0), (5.0, 0.0))
     ]
+
+
+def test_layout_window_applies_one_selection_to_canvas_and_table(
+    qt_app: QApplication,
+    tmp_path: Path,
+) -> None:
+    window = DesignLayoutWindow()
+    route = _route()
+    markup = _markup(tmp_path)
+    window.set_probe_route(route, selected_route_point_index=0)
+    window.set_markup(markup)
+    changes: list[SelectionModel] = []
+    window.selection_changed.connect(changes.append)
+
+    window._apply_selection_request({markup_entity_id("a")}, "replace")
+
+    assert window.selection.ids == frozenset({markup_entity_id("a")})
+    assert window._main_view._selection == window.selection
+    assert window.navigator_panel._selection == window.selection
+    assert window.navigator_panel._selected_route_row_indices() == []
+    assert changes[-1] == window.selection
+    window.close()
+    window.deleteLater()
+
+
+def test_layout_window_toolbar_drives_canvas_tool(
+    qt_app: QApplication,
+) -> None:
+    window = DesignLayoutWindow()
+    window.navigator_panel._document = object()
+    window.navigator_panel._update_enabled_state()
+
+    window.navigator_panel._point_tool_button.click()
+    assert window._main_view.active_design_tool == "point"
+    window.navigator_panel._guide_tool_button.click()
+    assert window._main_view.active_design_tool == "guide"
+
+    window.close()
+    window.deleteLater()

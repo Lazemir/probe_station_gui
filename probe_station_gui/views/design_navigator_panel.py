@@ -41,8 +41,6 @@ from PySide6.QtWidgets import (
 
 from probe_station_gui.route.run_ui import RouteRunControlState
 from probe_station_gui.design.navigation_geometry import (
-    array_preview_points,
-    count_from_endpoint,
     format_bounds,
     format_mark_label,
     format_point,
@@ -61,6 +59,16 @@ from probe_station_gui.design.model import (
     MeasurementTarget,
     Point2D,
     SnapResult,
+)
+from probe_station_gui.design.markup import MarkupDocument
+from probe_station_gui.design.selection_model import (
+    EntityOwner,
+    MixedArrayRequest,
+    SelectableDesignEntity,
+    SelectionModel,
+    plan_mixed_array,
+    project_entities,
+    route_entity_id,
 )
 from probe_station_gui.route.model import MeasurementRoute
 from probe_station_gui.views.design_navigator_enablement import (
@@ -105,6 +113,14 @@ class DesignNavigatorPanel(QWidget):
     route_preview_changed = Signal(object)
     tool_measure_preview_changed = Signal(object)
     tool_measurements_changed = Signal(object)
+    active_design_tool_changed = Signal(str)
+    selection_requested = Signal(object, str)
+    delete_selection_requested = Signal()
+    guide_undo_requested = Signal()
+    guide_clear_requested = Signal()
+    markup_visibility_changed = Signal(bool)
+    mixed_array_requested = Signal(object)
+    mixed_array_preview_changed = Signal(object, object)
     route_array_requested = Signal(
         float,
         float,
@@ -134,6 +150,11 @@ class DesignNavigatorPanel(QWidget):
         self._design_registration_active = False
         self._current_design_position: Point2D | None = None
         self._active_design_tool = "select"
+        self._selection = SelectionModel()
+        self._selectable_entities: tuple[SelectableDesignEntity, ...] = ()
+        self._markup_visible = True
+        self._markup_guide_count = 0
+        self._guide_undo_available = False
         self._route_pick_mode: str | None = None
         self._route_pick_anchor_mode: str | None = None
         self._route_pick_anchor_point: Point2D | None = None
@@ -242,6 +263,16 @@ class DesignNavigatorPanel(QWidget):
             "Select",
             self._make_tool_icon("select"),
         )
+        self._point_tool_button = self._make_tool_button(
+            self._tool_toolbar_widget,
+            "Point",
+            self._make_tool_icon("point"),
+        )
+        self._guide_tool_button = self._make_tool_button(
+            self._tool_toolbar_widget,
+            "Guide",
+            self._make_tool_icon("guide"),
+        )
         self._ruler_tool_button = self._make_tool_button(
             self._tool_toolbar_widget,
             "Measure",
@@ -259,13 +290,25 @@ class DesignNavigatorPanel(QWidget):
         )
         self._rotate_tool_button.setCheckable(False)
         self._tool_button_group.addButton(self._select_tool_button)
+        self._tool_button_group.addButton(self._point_tool_button)
+        self._tool_button_group.addButton(self._guide_tool_button)
         self._tool_button_group.addButton(self._ruler_tool_button)
         self._tool_button_group.addButton(self._array_tool_button)
+        self._markup_visibility_button = self._make_tool_button(
+            self._tool_toolbar_widget,
+            "Markup",
+            self._make_tool_icon("eye"),
+        )
+        self._markup_visibility_button.setToolTip("Show Markup")
+        self._markup_visibility_button.setChecked(True)
         self._select_tool_button.setChecked(True)
         tool_buttons.addWidget(self._select_tool_button)
+        tool_buttons.addWidget(self._point_tool_button)
+        tool_buttons.addWidget(self._guide_tool_button)
         tool_buttons.addWidget(self._ruler_tool_button)
         tool_buttons.addWidget(self._array_tool_button)
         tool_buttons.addWidget(self._rotate_tool_button)
+        tool_buttons.addWidget(self._markup_visibility_button)
         tool_buttons.addStretch(1)
         route_layout.addWidget(self._tool_toolbar_widget)
 
@@ -280,8 +323,26 @@ class DesignNavigatorPanel(QWidget):
         select_page = QWidget(self._tool_group)
         select_layout = QVBoxLayout(select_page)
         select_layout.setContentsMargins(0, 0, 0, 0)
-        select_layout.addWidget(QLabel("No tool active.", select_page))
+        self._selection_count_label = QLabel("Nothing selected.", select_page)
+        self._selection_delete_button = QPushButton("Delete", select_page)
+        select_layout.addWidget(self._selection_count_label)
+        select_layout.addWidget(self._selection_delete_button)
         self._tool_stack.addWidget(select_page)
+
+        point_page = QWidget(self._tool_group)
+        point_layout = QVBoxLayout(point_page)
+        point_layout.setContentsMargins(0, 0, 0, 0)
+        point_layout.addWidget(QLabel("Click to place route points.", point_page))
+        self._tool_stack.addWidget(point_page)
+
+        guide_page = QWidget(self._tool_group)
+        guide_layout = QHBoxLayout(guide_page)
+        guide_layout.setContentsMargins(0, 0, 0, 0)
+        self._guide_undo_button = QPushButton("Undo Last", guide_page)
+        self._guide_clear_button = QPushButton("Clear All", guide_page)
+        guide_layout.addWidget(self._guide_undo_button)
+        guide_layout.addWidget(self._guide_clear_button)
+        self._tool_stack.addWidget(guide_page)
 
         ruler_page = QWidget(self._tool_group)
         ruler_layout = QGridLayout(ruler_page)
@@ -303,8 +364,6 @@ class DesignNavigatorPanel(QWidget):
         array_page = QWidget(self._tool_group)
         array_layout = QGridLayout(array_page)
         array_layout.setContentsMargins(0, 0, 0, 0)
-        self._route_array_origin_x_spin = self._make_route_coordinate_spinbox(array_page)
-        self._route_array_origin_y_spin = self._make_route_coordinate_spinbox(array_page)
         self._route_array_dir1_step_x_spin = self._make_route_distance_spinbox(array_page)
         self._route_array_dir1_step_y_spin = self._make_route_angle_spinbox(array_page)
         self._route_array_dir2_step_x_spin = self._make_route_distance_spinbox(array_page)
@@ -319,21 +378,11 @@ class DesignNavigatorPanel(QWidget):
         self._route_array_dir2_count_spin.setRange(1, 10000)
         self._route_array_dir2_count_spin.setValue(1)
         self._route_array_serpentine_checkbox = QCheckBox("Serpentine", array_page)
-        self._route_array_replace_checkbox = QCheckBox("Replace", array_page)
-        self._route_array_pick_origin_button = self._make_icon_button(
-            array_page, "Pick Origin", "origin"
-        )
         self._route_array_pick_dir1_button = self._make_icon_button(
             array_page, "Pick Dir 1", "direction"
         )
-        self._route_array_pick_extent1_button = self._make_icon_button(
-            array_page, "Pick Extent 1", "extent"
-        )
         self._route_array_pick_dir2_button = self._make_icon_button(
             array_page, "Pick Dir 2", "direction"
-        )
-        self._route_array_pick_extent2_button = self._make_icon_button(
-            array_page, "Pick Extent 2", "extent"
         )
         self._route_array_create_button = self._make_icon_button(
             array_page, "Create", "accept"
@@ -341,31 +390,23 @@ class DesignNavigatorPanel(QWidget):
         self._route_array_cancel_button = self._make_icon_button(
             array_page, "Cancel", "cancel"
         )
-        array_layout.addWidget(QLabel("Origin X", array_page), 0, 0)
-        array_layout.addWidget(self._route_array_origin_x_spin, 0, 1)
-        array_layout.addWidget(QLabel("Y", array_page), 0, 2)
-        array_layout.addWidget(self._route_array_origin_y_spin, 0, 3)
-        array_layout.addWidget(QLabel("Dir 1 length", array_page), 1, 0)
-        array_layout.addWidget(self._route_array_dir1_step_x_spin, 1, 1)
-        array_layout.addWidget(QLabel("angle", array_page), 1, 2)
-        array_layout.addWidget(self._route_array_dir1_step_y_spin, 1, 3)
-        array_layout.addWidget(QLabel("Count 1", array_page), 2, 0)
-        array_layout.addWidget(self._route_array_dir1_count_spin, 2, 1)
-        array_layout.addWidget(self._route_array_pick_dir1_button, 2, 2, 1, 2)
-        array_layout.addWidget(QLabel("Dir 2 length", array_page), 3, 0)
-        array_layout.addWidget(self._route_array_dir2_step_x_spin, 3, 1)
-        array_layout.addWidget(QLabel("angle", array_page), 3, 2)
-        array_layout.addWidget(self._route_array_dir2_step_y_spin, 3, 3)
-        array_layout.addWidget(QLabel("Count 2", array_page), 4, 0)
-        array_layout.addWidget(self._route_array_dir2_count_spin, 4, 1)
-        array_layout.addWidget(self._route_array_pick_dir2_button, 4, 2, 1, 2)
-        array_layout.addWidget(self._route_array_pick_origin_button, 5, 0, 1, 2)
-        array_layout.addWidget(self._route_array_pick_extent1_button, 5, 2, 1, 2)
-        array_layout.addWidget(self._route_array_pick_extent2_button, 6, 0, 1, 2)
-        array_layout.addWidget(self._route_array_serpentine_checkbox, 6, 2, 1, 2)
-        array_layout.addWidget(self._route_array_replace_checkbox, 7, 0, 1, 2)
-        array_layout.addWidget(self._route_array_create_button, 7, 2)
-        array_layout.addWidget(self._route_array_cancel_button, 7, 3)
+        array_layout.addWidget(QLabel("Dir 1 length", array_page), 0, 0)
+        array_layout.addWidget(self._route_array_dir1_step_x_spin, 0, 1)
+        array_layout.addWidget(QLabel("angle", array_page), 0, 2)
+        array_layout.addWidget(self._route_array_dir1_step_y_spin, 0, 3)
+        array_layout.addWidget(QLabel("Count 1", array_page), 1, 0)
+        array_layout.addWidget(self._route_array_dir1_count_spin, 1, 1)
+        array_layout.addWidget(self._route_array_pick_dir1_button, 1, 2, 1, 2)
+        array_layout.addWidget(QLabel("Dir 2 length", array_page), 2, 0)
+        array_layout.addWidget(self._route_array_dir2_step_x_spin, 2, 1)
+        array_layout.addWidget(QLabel("angle", array_page), 2, 2)
+        array_layout.addWidget(self._route_array_dir2_step_y_spin, 2, 3)
+        array_layout.addWidget(QLabel("Count 2", array_page), 3, 0)
+        array_layout.addWidget(self._route_array_dir2_count_spin, 3, 1)
+        array_layout.addWidget(self._route_array_pick_dir2_button, 3, 2, 1, 2)
+        array_layout.addWidget(self._route_array_serpentine_checkbox, 4, 0, 1, 2)
+        array_layout.addWidget(self._route_array_create_button, 4, 2)
+        array_layout.addWidget(self._route_array_cancel_button, 4, 3)
         self._tool_stack.addWidget(array_page)
 
         tool_layout.addWidget(self._tool_stack)
@@ -496,6 +537,12 @@ class DesignNavigatorPanel(QWidget):
         self._select_tool_button.clicked.connect(
             lambda _checked=False: self._set_design_tool("select")
         )
+        self._point_tool_button.clicked.connect(
+            lambda _checked=False: self._set_design_tool("point")
+        )
+        self._guide_tool_button.clicked.connect(
+            lambda _checked=False: self._set_design_tool("guide")
+        )
         self._ruler_tool_button.clicked.connect(
             lambda _checked=False: self._set_design_tool("ruler")
         )
@@ -505,30 +552,27 @@ class DesignNavigatorPanel(QWidget):
         self._rotate_tool_button.clicked.connect(
             lambda _checked=False: self.design_rotate_requested.emit(1)
         )
+        self._markup_visibility_button.toggled.connect(
+            self._on_markup_visibility_toggled
+        )
+        self._selection_delete_button.clicked.connect(
+            self.delete_selection_requested.emit
+        )
+        self._guide_undo_button.clicked.connect(self.guide_undo_requested.emit)
+        self._guide_clear_button.clicked.connect(self.guide_clear_requested.emit)
         self._ruler_clear_button.clicked.connect(self._clear_ruler)
         self._ruler_cancel_button.clicked.connect(
             lambda _checked=False: self._set_design_tool("select")
         )
-        self._route_array_pick_origin_button.clicked.connect(
-            lambda _checked=False: self._start_route_pick_mode("array_origin")
-        )
         self._route_array_pick_dir1_button.clicked.connect(
             lambda _checked=False: self._start_route_pick_mode("array_dir1")
-        )
-        self._route_array_pick_extent1_button.clicked.connect(
-            lambda _checked=False: self._start_route_pick_mode("array_extent1")
         )
         self._route_array_pick_dir2_button.clicked.connect(
             lambda _checked=False: self._start_route_pick_mode("array_dir2")
         )
-        self._route_array_pick_extent2_button.clicked.connect(
-            lambda _checked=False: self._start_route_pick_mode("array_extent2")
-        )
         self._route_array_create_button.clicked.connect(self._emit_route_array_requested)
         self._route_array_cancel_button.clicked.connect(self._cancel_route_array)
         for widget in (
-            self._route_array_origin_x_spin,
-            self._route_array_origin_y_spin,
             self._route_array_dir1_step_x_spin,
             self._route_array_dir1_step_y_spin,
             self._route_array_dir1_count_spin,
@@ -536,12 +580,16 @@ class DesignNavigatorPanel(QWidget):
             self._route_array_dir2_step_y_spin,
             self._route_array_dir2_count_spin,
             self._route_array_serpentine_checkbox,
-            self._route_array_replace_checkbox,
         ):
             if hasattr(widget, "valueChanged"):
                 widget.valueChanged.connect(self._update_route_array_preview)
             else:
                 widget.toggled.connect(self._update_route_array_preview)
+        self._delete_shortcut = QShortcut(QKeySequence.Delete, self)
+        self._delete_shortcut.setContext(Qt.WindowShortcut)
+        self._delete_shortcut.activated.connect(
+            self.delete_selection_requested.emit
+        )
         for spinbox in (
             self._needle_1_dx_spin,
             self._needle_1_dy_spin,
@@ -682,6 +730,95 @@ class DesignNavigatorPanel(QWidget):
             self._updating_route_controls = False
         self._update_enabled_state()
         self._update_route_array_preview()
+
+    def set_selectable_entities(self, entities: object) -> None:
+        if isinstance(entities, (list, tuple)) and all(
+            isinstance(entity, SelectableDesignEntity) for entity in entities
+        ):
+            self._selectable_entities = tuple(entities)
+        else:
+            self._selectable_entities = ()
+        self.set_selection(
+            self._selection.prune(entity.id for entity in self._selectable_entities)
+        )
+
+    def set_selection(self, selection: SelectionModel) -> None:
+        valid_ids = {entity.id for entity in self._selectable_entities}
+        self._selection = selection.prune(valid_ids)
+        selected_count = len(self._selection.ids)
+        self._selection_count_label.setText(
+            "Nothing selected."
+            if selected_count == 0
+            else f"Selected: {selected_count}"
+        )
+        route_rows = sorted(
+            entity.route_index
+            for entity in self._selectable_entities
+            if entity.id in self._selection.ids
+            and entity.owner is EntityOwner.ROUTE
+            and entity.route_index is not None
+        )
+        self._updating_route_controls = True
+        try:
+            self._route_table.blockSignals(True)
+            self._route_table.clearSelection()
+            selection_model = self._route_table.selectionModel()
+            if selection_model is not None:
+                for row in route_rows:
+                    if 0 <= row < self._route_table.rowCount():
+                        selection_model.select(
+                            self._route_table.model().index(row, 0),
+                            QItemSelectionModel.Select | QItemSelectionModel.Rows,
+                        )
+        finally:
+            self._route_table.blockSignals(False)
+            self._updating_route_controls = False
+        self._selected_route_point_index = route_rows[0] if route_rows else -1
+        self._update_enabled_state()
+        self._update_route_array_preview()
+
+    def set_markup_visible(self, visible: bool) -> None:
+        self._markup_visible = bool(visible)
+        self._markup_visibility_button.blockSignals(True)
+        self._markup_visibility_button.setChecked(self._markup_visible)
+        self._markup_visibility_button.blockSignals(False)
+        if not self._markup_visible:
+            self._selectable_entities = tuple(
+                entity
+                for entity in self._selectable_entities
+                if entity.owner is not EntityOwner.MARKUP
+            )
+            self.set_selection(
+                self._selection.prune(
+                    entity.id for entity in self._selectable_entities
+                )
+            )
+        self._update_enabled_state()
+        self._update_route_array_preview()
+
+    def set_markup_state(self, *, visible: bool, guide_count: int) -> None:
+        self._markup_guide_count = max(0, int(guide_count))
+        self.set_markup_visible(visible)
+
+    def set_guide_undo_available(self, available: bool) -> None:
+        self._guide_undo_available = bool(available)
+        self._update_enabled_state()
+
+    def _on_markup_visibility_toggled(self, visible: bool) -> None:
+        self._markup_visible = bool(visible)
+        if not self._markup_visible:
+            self._selectable_entities = tuple(
+                entity
+                for entity in self._selectable_entities
+                if entity.owner is not EntityOwner.MARKUP
+            )
+            self.set_selection(
+                self._selection.prune(
+                    entity.id for entity in self._selectable_entities
+                )
+            )
+        self.markup_visibility_changed.emit(self._markup_visible)
+        self._update_enabled_state()
 
     def _route_measurement_control_state(self) -> RouteRunControlState:
         state = getattr(self, "_route_run_control_state", None)
@@ -869,6 +1006,9 @@ class DesignNavigatorPanel(QWidget):
             "segment_center": "Center",
             "segment": "Line",
             "vertex": "Corner",
+            "guide_end": "Guide End",
+            "guide_center": "Guide Center",
+            "guide_intersection": "Guide Intersection",
         }.get(snap_result.mode, "Line")
         self._snap_hint_label.setText(
             f"Hover snap: {label} at X={snap_result.point[0]:.3f}, "
@@ -947,9 +1087,12 @@ class DesignNavigatorPanel(QWidget):
         state: DesignNavigatorEnablement,
     ) -> None:
         self._select_tool_button.setEnabled(state.can_edit_design)
+        self._point_tool_button.setEnabled(state.can_edit_design)
+        self._guide_tool_button.setEnabled(state.can_edit_design)
         self._ruler_tool_button.setEnabled(state.can_edit_design)
         self._array_tool_button.setEnabled(state.can_edit_design)
         self._rotate_tool_button.setEnabled(state.can_use_rotate_tool)
+        self._markup_visibility_button.setEnabled(state.has_document)
 
     def _apply_route_edit_enabled_state(
         self,
@@ -966,6 +1109,15 @@ class DesignNavigatorPanel(QWidget):
         self._route_add_current_button.setEnabled(state.can_add_current_route_point)
         self._route_remove_button.setEnabled(state.can_remove_route_point)
         self._route_clear_button.setEnabled(state.can_clear_route)
+        can_mutate_selection = state.can_use_tool_options and bool(self._selection.ids)
+        self._selection_delete_button.setEnabled(can_mutate_selection)
+        self._guide_undo_button.setEnabled(
+            state.can_use_tool_options and self._guide_undo_available
+        )
+        self._guide_clear_button.setEnabled(
+            state.can_use_tool_options
+            and self._markup_guide_count > 0
+        )
 
     def _apply_route_run_enabled_state(
         self,
@@ -992,8 +1144,6 @@ class DesignNavigatorPanel(QWidget):
         for widget in (
             self._ruler_clear_button,
             self._ruler_cancel_button,
-            self._route_array_origin_x_spin,
-            self._route_array_origin_y_spin,
             self._route_array_dir1_step_x_spin,
             self._route_array_dir1_step_y_spin,
             self._route_array_dir1_count_spin,
@@ -1001,19 +1151,13 @@ class DesignNavigatorPanel(QWidget):
             self._route_array_dir2_step_y_spin,
             self._route_array_dir2_count_spin,
             self._route_array_serpentine_checkbox,
-            self._route_array_replace_checkbox,
-            self._route_array_pick_origin_button,
             self._route_array_pick_dir1_button,
-            self._route_array_pick_extent1_button,
             self._route_array_pick_dir2_button,
-            self._route_array_pick_extent2_button,
-            self._route_array_create_button,
             self._route_array_cancel_button,
         ):
             widget.setEnabled(state.can_use_tool_options)
-        has_selection_array = len(self._selected_route_row_indices()) >= 2
-        self._route_array_replace_checkbox.setEnabled(
-            state.can_use_tool_options and not has_selection_array
+        self._route_array_create_button.setEnabled(
+            state.can_use_tool_options and bool(self._selection.ids)
         )
 
     def _make_route_offset_spinbox(self, parent: QWidget) -> QDoubleSpinBox:
@@ -1106,6 +1250,23 @@ class DesignNavigatorPanel(QWidget):
             )
             painter.setBrush(QBrush(QColor("#eceff1")))
             painter.drawPolygon(polygon)
+        elif name == "point":
+            painter.setPen(QPen(accent, 2.2))
+            painter.drawLine(QPointF(14, 5), QPointF(14, 23))
+            painter.drawLine(QPointF(5, 14), QPointF(23, 14))
+            painter.setBrush(QBrush(soft))
+            painter.drawEllipse(QPointF(14, 14), 3.2, 3.2)
+        elif name == "guide":
+            painter.setPen(QPen(accent, 2.2, Qt.DashLine))
+            painter.drawLine(QPointF(5, 22), QPointF(23, 6))
+            painter.setBrush(QBrush(soft))
+            painter.drawEllipse(QPointF(5, 22), 2.5, 2.5)
+            painter.drawEllipse(QPointF(23, 6), 2.5, 2.5)
+        elif name == "eye":
+            painter.setPen(QPen(accent, 2.0))
+            painter.drawEllipse(4, 8, 20, 12)
+            painter.setBrush(QBrush(soft))
+            painter.drawEllipse(QPointF(14, 14), 3.5, 3.5)
         elif name == "ruler":
             painter.setPen(QPen(accent, 3.0))
             painter.drawLine(QPointF(5, 21), QPointF(23, 7))
@@ -1196,11 +1357,13 @@ class DesignNavigatorPanel(QWidget):
         self._update_route_array_preview()
 
     def _set_design_tool(self, tool: str) -> None:
-        if tool not in {"select", "ruler", "array"}:
+        if tool not in {"select", "point", "guide", "ruler", "array"}:
             tool = "select"
         self._active_design_tool = tool
         button_by_tool = {
             "select": self._select_tool_button,
+            "point": self._point_tool_button,
+            "guide": self._guide_tool_button,
             "ruler": self._ruler_tool_button,
             "array": self._array_tool_button,
         }
@@ -1208,16 +1371,36 @@ class DesignNavigatorPanel(QWidget):
             button.blockSignals(True)
             button.setChecked(name == tool)
             button.blockSignals(False)
-        stack_index_by_tool = {"select": 0, "ruler": 1, "array": 2}
+        stack_index_by_tool = {
+            "select": 0,
+            "point": 1,
+            "guide": 2,
+            "ruler": 3,
+            "array": 4,
+        }
         self._tool_stack.setCurrentIndex(stack_index_by_tool[tool])
         self._clear_route_pick_mode("")
-        self._tool_group.setVisible(tool == "array")
+        self._tool_group.setVisible(True)
+        emitted_tool = "measure" if tool == "ruler" else tool
+        self.active_design_tool_changed.emit(emitted_tool)
         if tool == "select":
             self.route_preview_changed.emit(None)
+            self.mixed_array_preview_changed.emit([], [])
             self.tool_measure_preview_changed.emit(None)
             self._tool_status_label.setText("")
+        elif tool == "point":
+            self.route_preview_changed.emit(None)
+            self.mixed_array_preview_changed.emit([], [])
+            self.tool_measure_preview_changed.emit(None)
+            self._tool_status_label.setText("")
+        elif tool == "guide":
+            self.route_preview_changed.emit(None)
+            self.mixed_array_preview_changed.emit([], [])
+            self.tool_measure_preview_changed.emit(None)
+            self._tool_status_label.setText("Click two points.")
         elif tool == "ruler":
             self.route_preview_changed.emit(None)
+            self.mixed_array_preview_changed.emit([], [])
             self._ruler_anchor = None
             self._ruler_end = None
             self._update_ruler_labels()
@@ -1226,7 +1409,7 @@ class DesignNavigatorPanel(QWidget):
             self.route_pick_mode_changed.emit("ruler")
         else:
             self.tool_measure_preview_changed.emit(None)
-            self._tool_status_label.setText("Adjust array parameters or pick geometry.")
+            self._tool_status_label.setText("Adjust array directions and counts.")
             self._update_route_array_preview()
 
     def cancel_active_tool(self) -> None:
@@ -1237,13 +1420,12 @@ class DesignNavigatorPanel(QWidget):
         if self._active_design_tool == "array":
             self._cancel_route_array()
             return
+        if self._active_design_tool == "guide":
+            self._tool_status_label.setText("Click two points.")
+            return
         self._clear_route_pick_mode("")
         self.tool_measure_preview_changed.emit(None)
         self.route_preview_changed.emit(None)
-
-    def _set_route_array_origin(self, point: Point2D) -> None:
-        self._route_array_origin_x_spin.setValue(float(point[0]))
-        self._route_array_origin_y_spin.setValue(float(point[1]))
 
     def _clear_ruler(self) -> None:
         self._ruler_anchor = None
@@ -1327,10 +1509,7 @@ class DesignNavigatorPanel(QWidget):
             self._route_pick_mode = "ruler"
             self.route_pick_mode_changed.emit("ruler")
             return
-        if mode == "array_origin":
-            self._set_route_array_origin(point)
-            status = f"Array origin set to {self._format_point(point)}."
-        elif mode == "array_dir1":
+        if mode == "array_dir1":
             anchor = self._route_vector_anchor_or_none(mode, point, "Direction 1")
             if anchor is None:
                 return
@@ -1339,20 +1518,6 @@ class DesignNavigatorPanel(QWidget):
             self._route_array_dir1_step_x_spin.setValue(length)
             self._route_array_dir1_step_y_spin.setValue(angle)
             status = f"Direction 1 set to length={length:.3f}, angle={angle:.3f} deg."
-        elif mode == "array_extent1":
-            count = self._count_from_endpoint(
-                (
-                    self._route_array_origin_x_spin.value(),
-                    self._route_array_origin_y_spin.value(),
-                ),
-                (
-                    self._route_array_dir1_step_x_spin.value(),
-                    self._route_array_dir1_step_y_spin.value(),
-                ),
-                point,
-            )
-            self._route_array_dir1_count_spin.setValue(count)
-            status = f"Direction 1 count set to {count}."
         elif mode == "array_dir2":
             anchor = self._route_vector_anchor_or_none(mode, point, "Direction 2")
             if anchor is None:
@@ -1362,20 +1527,6 @@ class DesignNavigatorPanel(QWidget):
             self._route_array_dir2_step_x_spin.setValue(length)
             self._route_array_dir2_step_y_spin.setValue(angle)
             status = f"Direction 2 set to length={length:.3f}, angle={angle:.3f} deg."
-        elif mode == "array_extent2":
-            count = self._count_from_endpoint(
-                (
-                    self._route_array_origin_x_spin.value(),
-                    self._route_array_origin_y_spin.value(),
-                ),
-                (
-                    self._route_array_dir2_step_x_spin.value(),
-                    self._route_array_dir2_step_y_spin.value(),
-                ),
-                point,
-            )
-            self._route_array_dir2_count_spin.setValue(count)
-            status = f"Direction 2 count set to {count}."
         else:
             status = "Unknown route pick mode."
         self._clear_route_pick_mode(status)
@@ -1399,25 +1550,22 @@ class DesignNavigatorPanel(QWidget):
         return self._route_pick_anchor_point
 
     def _emit_route_array_requested(self) -> None:
-        dir1 = self._route_array_dir1_step()
-        dir2 = self._route_array_dir2_step()
-        self.route_array_requested.emit(
-            self._route_array_origin_x_spin.value(),
-            self._route_array_origin_y_spin.value(),
-            dir1[0],
-            dir1[1],
-            self._route_array_dir1_count_spin.value(),
-            dir2[0],
-            dir2[1],
-            self._route_array_dir2_count_spin.value(),
-            self._route_array_serpentine_checkbox.isChecked(),
-            self._route_array_replace_checkbox.isChecked(),
-            self._selected_route_row_indices(),
+        if not self._selection.ids:
+            return
+        request = MixedArrayRequest(
+            direction_1=self._route_array_dir1_step(),
+            count_1=self._route_array_dir1_count_spin.value(),
+            direction_2=self._route_array_dir2_step(),
+            count_2=self._route_array_dir2_count_spin.value(),
+            serpentine=self._route_array_serpentine_checkbox.isChecked(),
+            source_ids=self._selection.ids,
         )
+        self.mixed_array_requested.emit(request)
         self._set_design_tool("select")
 
     def _cancel_route_array(self) -> None:
         self.route_preview_changed.emit(None)
+        self.mixed_array_preview_changed.emit([], [])
         self._set_design_tool("select")
 
     def _update_tool_hover_preview(self, snap_result: SnapResult | None) -> None:
@@ -1433,9 +1581,7 @@ class DesignNavigatorPanel(QWidget):
             return
         if self._active_design_tool != "array":
             return
-        if self._route_pick_mode == "array_origin":
-            self._update_route_array_preview(origin_override=point)
-        elif self._route_pick_mode == "array_dir1" and self._route_pick_anchor_point is not None:
+        if self._route_pick_mode == "array_dir1" and self._route_pick_anchor_point is not None:
             step = (
                 point[0] - self._route_pick_anchor_point[0],
                 point[1] - self._route_pick_anchor_point[1],
@@ -1449,94 +1595,44 @@ class DesignNavigatorPanel(QWidget):
             )
             self.tool_measure_preview_changed.emit([self._route_pick_anchor_point, point])
             self._update_route_array_preview(dir2_override=step)
-        elif self._route_pick_mode == "array_extent1":
-            count = self._count_from_endpoint(
-                self._route_array_origin(),
-                self._route_array_dir1_step(),
-                point,
-            )
-            self._update_route_array_preview(count1_override=count)
-        elif self._route_pick_mode == "array_extent2":
-            count = self._count_from_endpoint(
-                self._route_array_origin(),
-                self._route_array_dir2_step(),
-                point,
-            )
-            self._update_route_array_preview(count2_override=count)
 
     def _update_route_array_preview(
         self,
         *_unused: object,
-        origin_override: Point2D | None = None,
         dir1_override: Point2D | None = None,
-        count1_override: int | None = None,
         dir2_override: Point2D | None = None,
-        count2_override: int | None = None,
     ) -> None:
-        if self._document is None or self._active_design_tool != "array":
+        if (
+            self._document is None
+            or self._active_design_tool != "array"
+            or not self._selection.ids
+        ):
             self.route_preview_changed.emit(None)
+            self.mixed_array_preview_changed.emit([], [])
             return
-        origin = origin_override or self._route_array_origin()
         dir1 = dir1_override or self._route_array_dir1_step()
         dir2 = dir2_override or self._route_array_dir2_step()
-        count1 = int(count1_override or self._route_array_dir1_count_spin.value())
-        count2 = int(count2_override or self._route_array_dir2_count_spin.value())
-        selected_rows = self._selected_route_row_indices()
-        if self._route is not None and len(selected_rows) >= 2:
-            source_points = [
-                self._route.points[row].camera_center
-                for row in selected_rows
-                if 0 <= row < len(self._route.points)
-            ]
-            points = self._build_array_preview_points_for_sources(
-                source_points,
-                dir1,
-                count1,
-                dir2,
-                count2,
-            )
-        else:
-            points = self._build_array_preview_points(origin, dir1, count1, dir2, count2)
-        self.route_preview_changed.emit((points, self._current_route_offset_vectors()))
-
-    def _build_array_preview_points(
-        self,
-        origin: Point2D,
-        dir1: Point2D,
-        count1: int,
-        dir2: Point2D,
-        count2: int,
-    ) -> list[Point2D]:
-        return array_preview_points(
-            origin,
-            dir1,
-            count1,
-            dir2,
-            count2,
+        request = MixedArrayRequest(
+            direction_1=dir1,
+            count_1=self._route_array_dir1_count_spin.value(),
+            direction_2=dir2,
+            count_2=self._route_array_dir2_count_spin.value(),
             serpentine=self._route_array_serpentine_checkbox.isChecked(),
+            source_ids=self._selection.ids,
         )
-
-    def _build_array_preview_points_for_sources(
-        self,
-        sources: list[Point2D],
-        dir1: Point2D,
-        count1: int,
-        dir2: Point2D,
-        count2: int,
-    ) -> list[Point2D]:
-        cells = self._build_array_preview_points((0.0, 0.0), dir1, count1, dir2, count2)
-        points: list[Point2D] = []
-        for cell in cells:
-            if abs(cell[0]) <= 1e-12 and abs(cell[1]) <= 1e-12:
-                continue
-            for source in sources:
-                points.append((source[0] + cell[0], source[1] + cell[1]))
-        return points
-
-    def _route_array_origin(self) -> Point2D:
-        return (
-            self._route_array_origin_x_spin.value(),
-            self._route_array_origin_y_spin.value(),
+        plan = plan_mixed_array(
+            self._selectable_entities,
+            self._selection.ids,
+            request,
+            route=self._route,
+            edit_safe=not self._route_measurement_running,
+        )
+        if not plan.accepted:
+            self.mixed_array_preview_changed.emit([], [])
+            return
+        self.mixed_array_preview_changed.emit(
+            [point.camera_center for point in plan.route_copies],
+            [guide.geometry() for guide in plan.guide_copies],
         )
 
     def _route_array_dir1_step(self) -> Point2D:
@@ -1569,14 +1665,6 @@ class DesignNavigatorPanel(QWidget):
     @staticmethod
     def _vector_length_angle(vector: Point2D) -> tuple[float, float]:
         return vector_length_angle(vector)
-
-    @staticmethod
-    def _count_from_endpoint(
-        start: Point2D,
-        step: Point2D,
-        end: Point2D,
-    ) -> int:
-        return count_from_endpoint(start, step, end)
 
     @staticmethod
     def _route_pick_label_text(mode: str) -> str:
@@ -1659,15 +1747,24 @@ class DesignNavigatorPanel(QWidget):
         )
 
     def _on_route_selection_changed(self) -> None:
+        if self._updating_route_controls:
+            return
         selected_rows = self._selected_route_row_indices()
         if not selected_rows:
             self._selected_route_point_index = -1
             self.route_selected.emit(-1)
+            self.selection_requested.emit(set(), "replace")
             self._update_enabled_state()
             return
         row = selected_rows[0]
         self._selected_route_point_index = row
         self.route_selected.emit(row)
+        route_ids = {
+            route_entity_id(self._route.points[index].id)
+            for index in selected_rows
+            if self._route is not None and 0 <= index < len(self._route.points)
+        }
+        self.selection_requested.emit(route_ids, "replace")
         self._update_enabled_state()
         self._update_route_array_preview()
 
@@ -1742,6 +1839,14 @@ class DesignLayoutWindow(QWidget):
     calibration_point_selected = Signal(int, float, float)
     move_requested = Signal(float, float)
     route_point_requested = Signal(float, float)
+    point_requested = Signal(float, float)
+    guide_requested = Signal(object, object)
+    selection_changed = Signal(object)
+    delete_selection_requested = Signal()
+    guide_undo_requested = Signal()
+    guide_clear_requested = Signal()
+    markup_visibility_changed = Signal(bool)
+    mixed_array_requested = Signal(object)
     hover_snap_changed = Signal(object)
     visibility_changed = Signal(bool)
 
@@ -1749,6 +1854,11 @@ class DesignLayoutWindow(QWidget):
         _ = parent
         super().__init__(None)
         self._document: DesignDocument | None = None
+        self._probe_route: MeasurementRoute | None = None
+        self._markup: MarkupDocument | None = None
+        self._selection = SelectionModel()
+        self._selection_initialized = False
+        self._selectable_entities: tuple[SelectableDesignEntity, ...] = ()
         self.setWindowTitle("Design Window")
         self.setWindowFlag(Qt.Window, True)
         self.resize(1480, 920)
@@ -1777,6 +1887,11 @@ class DesignLayoutWindow(QWidget):
         )
         self._main_view.move_requested.connect(self.move_requested.emit)
         self._main_view.route_point_requested.connect(self.route_point_requested.emit)
+        self._main_view.point_requested.connect(self.point_requested.emit)
+        self._main_view.guide_requested.connect(self.guide_requested.emit)
+        self._main_view.entity_selection_requested.connect(
+            self._apply_selection_request
+        )
         self._main_view.route_pick_requested.connect(
             self.navigator_panel.apply_route_pick
         )
@@ -1793,9 +1908,34 @@ class DesignLayoutWindow(QWidget):
         self.navigator_panel.tool_measurements_changed.connect(
             self._main_view.set_tool_measure_segments
         )
+        self.navigator_panel.active_design_tool_changed.connect(
+            self._main_view.set_active_design_tool
+        )
+        self.navigator_panel.selection_requested.connect(
+            self._apply_selection_request
+        )
+        self.navigator_panel.delete_selection_requested.connect(
+            self.delete_selection_requested.emit
+        )
+        self.navigator_panel.guide_undo_requested.connect(
+            self.guide_undo_requested.emit
+        )
+        self.navigator_panel.guide_clear_requested.connect(
+            self.guide_clear_requested.emit
+        )
+        self.navigator_panel.markup_visibility_changed.connect(
+            self.markup_visibility_changed.emit
+        )
+        self.navigator_panel.mixed_array_requested.connect(
+            self.mixed_array_requested.emit
+        )
+        self.navigator_panel.mixed_array_preview_changed.connect(
+            self._main_view.set_mixed_array_preview
+        )
         self._escape_shortcut = QShortcut(QKeySequence("Esc"), self)
         self._escape_shortcut.setContext(Qt.WindowShortcut)
-        self._escape_shortcut.activated.connect(self.navigator_panel.cancel_active_tool)
+        self._escape_shortcut.activated.connect(self._cancel_active_interaction)
+        self._main_view.set_active_design_tool("select")
 
         content_layout = QHBoxLayout()
         content_layout.setContentsMargins(0, 0, 0, 0)
@@ -1810,6 +1950,56 @@ class DesignLayoutWindow(QWidget):
         self._document = document
         self._main_view.set_document(document)
         self.navigator_panel.set_document(document)
+
+    def set_markup(self, markup: MarkupDocument | None) -> None:
+        self._markup = markup
+        self._main_view.set_markup(markup)
+        self.navigator_panel.set_markup_state(
+            visible=bool(markup is not None and markup.visible),
+            guide_count=len(markup.guides) if markup is not None else 0,
+        )
+        self._refresh_selectable_entities()
+
+    def set_selection(self, selection: SelectionModel) -> None:
+        self._selection_initialized = True
+        self._selection = selection.prune(
+            entity.id for entity in self._selectable_entities
+        )
+        self._main_view.set_selection(self._selection)
+        self.navigator_panel.set_selection(self._selection)
+
+    @property
+    def selection(self) -> SelectionModel:
+        return self._selection
+
+    def set_guide_undo_available(self, available: bool) -> None:
+        self.navigator_panel.set_guide_undo_available(available)
+
+    def _refresh_selectable_entities(self) -> None:
+        self._selectable_entities = project_entities(
+            self._probe_route,
+            self._markup,
+        )
+        self._main_view.set_selectable_entities(self._selectable_entities)
+        self.navigator_panel.set_selectable_entities(self._selectable_entities)
+        self._selection = self._selection.prune(
+            entity.id for entity in self._selectable_entities
+        )
+        self._main_view.set_selection(self._selection)
+        self.navigator_panel.set_selection(self._selection)
+
+    def _apply_selection_request(self, entity_ids: object, mode: str) -> None:
+        ids = (
+            {str(entity_id) for entity_id in entity_ids}
+            if isinstance(entity_ids, (set, frozenset, list, tuple))
+            else set()
+        )
+        self.set_selection(self._selection.apply(ids, str(mode)))
+        self.selection_changed.emit(self._selection)
+
+    def _cancel_active_interaction(self) -> None:
+        self._main_view.cancel_active_interaction()
+        self.navigator_panel.cancel_active_tool()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         self._main_view.set_document(None)
@@ -1830,6 +2020,8 @@ class DesignLayoutWindow(QWidget):
         *,
         selected_route_point_index: int,
     ) -> None:
+        initialize_selection = not self._selection_initialized
+        self._probe_route = route
         self._main_view.set_probe_route(
             route,
             selected_route_point_index=selected_route_point_index,
@@ -1838,6 +2030,19 @@ class DesignLayoutWindow(QWidget):
             route,
             selected_route_point_index=selected_route_point_index,
         )
+        self._refresh_selectable_entities()
+        if (
+            initialize_selection
+            and route is not None
+            and 0 <= selected_route_point_index < len(route.points)
+        ):
+            self.set_selection(
+                SelectionModel(
+                    frozenset(
+                        {route_entity_id(route.points[selected_route_point_index].id)}
+                    )
+                )
+            )
 
     def set_registration_marks(
         self,
