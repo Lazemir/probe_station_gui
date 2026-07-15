@@ -73,7 +73,11 @@ class KLayoutRasterItem(QGraphicsObject):
         if frame is None or not isinstance(frame.image, QImage) or frame.image.isNull():
             return
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
+        painter.save()
+        painter.translate(0.0, self._bounds.top() + self._bounds.bottom())
+        painter.scale(1.0, -1.0)
         painter.drawImage(self._bounds, frame.image)
+        painter.restore()
 
 
 class KLayoutRasterController(QObject):

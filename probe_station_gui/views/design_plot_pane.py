@@ -1439,6 +1439,8 @@ class _DesignPlotPane(QWidget):
         return max(x_units, y_units)
 
     def _set_hover_snap(self, snap_result: SnapResult | None) -> None:
+        if snap_result is None:
+            self._latest_hover_request_id = 0
         self._hover_snap = snap_result
         self._redraw_hover()
         self.hover_snap_changed.emit(snap_result)

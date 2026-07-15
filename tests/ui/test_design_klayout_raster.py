@@ -1,19 +1,28 @@
 from __future__ import annotations
 
+from collections import Counter
 import os
 from pathlib import Path
+import time
 
+import klayout.db as db
+import pyqtgraph as pg
 import pytest
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import QObject, QRectF, Signal
-from PySide6.QtGui import QImage
+from PySide6.QtCore import QObject, QPointF, QRectF, Signal
+from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication, QGraphicsRectItem
 
-from probe_station_gui.design.klayout_types import RenderFrame
+from probe_station_gui.design.klayout_types import (
+    KLayoutConfig,
+    RenderFrame,
+    RenderRequest,
+)
+from probe_station_gui.design.klayout_workers import KLayoutRenderWorker
 from probe_station_gui.design.model import DesignDocument
 from probe_station_gui.views.design_klayout_raster import (
     ACTIVE_SCHEDULE_MS,
@@ -121,6 +130,56 @@ def _controller(
     return controller, item
 
 
+def _process_until(
+    app: QApplication,
+    predicate,
+    *,
+    timeout_s: float = 5.0,
+) -> None:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if predicate():
+            return
+        time.sleep(0.005)
+    raise AssertionError("timed out waiting for queued Qt delivery")
+
+
+def _write_top_asymmetric_design(path: Path) -> None:
+    layout = db.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(1, 0)).insert(db.Box(40_000, 75_000, 60_000, 95_000))
+    layout.write(str(path))
+
+
+def _rgb(value: int) -> tuple[int, int, int]:
+    color = QColor.fromRgba(value)
+    return (color.red(), color.green(), color.blue())
+
+
+def _matching_pixel_centroid(
+    image: QImage,
+    colors: set[tuple[int, int, int]],
+    bounds: QRectF,
+) -> tuple[float, float]:
+    left = max(0, int(bounds.left()))
+    top = max(0, int(bounds.top()))
+    right = min(image.width(), int(bounds.right()) + 1)
+    bottom = min(image.height(), int(bounds.bottom()) + 1)
+    points = [
+        (x_value, y_value)
+        for y_value in range(top, bottom)
+        for x_value in range(left, right)
+        if _rgb(image.pixel(x_value, y_value)) in colors
+    ]
+    assert points
+    return (
+        sum(point[0] for point in points) / len(points),
+        sum(point[1] for point in points) / len(points),
+    )
+
+
 def test_viewport_scheduler_uses_reviewed_timing_and_margin_policy() -> None:
     assert ACTIVE_SCHEDULE_MS == 16
     assert SETTLE_SCHEDULE_MS == 120
@@ -139,6 +198,107 @@ def test_raster_item_keeps_exact_world_box_below_overlays(qt_app: QApplication) 
     assert item.boundingRect() == QRectF(-5.0, 3.0, 20.0, 10.0)
     assert item.zValue() < overlay.zValue()
     assert item.frame is frame
+
+
+def test_real_klayout_raster_world_top_aligns_real_plot_overlay(
+    qt_app: QApplication,
+    tmp_path: Path,
+) -> None:
+    design_path = tmp_path / "top-asymmetric.gds"
+    _write_top_asymmetric_design(design_path)
+    config = KLayoutConfig(
+        path=design_path,
+        top_cell_name="TOP",
+        visible_layers=frozenset({(1, 0)}),
+        source_bounds=(0.0, 0.0, 100.0, 100.0),
+        display_bounds=(0.0, 0.0, 100.0, 100.0),
+        rotation_quarter_turns=0,
+        generation=1,
+    )
+    request = RenderRequest(
+        request_id=1,
+        config=config,
+        world_box=config.display_bounds,
+        pixel_width=320,
+        pixel_height=320,
+        viewport_generation=1,
+        density=3.2,
+        purpose="exact",
+    )
+    worker = KLayoutRenderWorker()
+    frames: list[RenderFrame] = []
+    failures: list[str] = []
+    worker.frame_ready.connect(frames.append)
+    worker.failed.connect(failures.append)
+    worker.submit(request)
+    _process_until(qt_app, lambda: bool(frames or failures))
+    worker.stop()
+
+    assert failures == []
+    frame = frames[0]
+    colors = Counter(
+        _rgb(frame.image.pixel(x_value, y_value))
+        for y_value in range(frame.image.height())
+        for x_value in range(frame.image.width())
+    )
+    background = colors.most_common(1)[0][0]
+    ink_colors = {
+        color
+        for color, count in colors.items()
+        if color != background and count > 4 and max(color) - min(color) > 32
+    }
+    assert ink_colors
+    source_ink_y = _matching_pixel_centroid(
+        frame.image,
+        ink_colors,
+        QRectF(0.0, 0.0, frame.image.width(), frame.image.height()),
+    )[1]
+    assert source_ink_y < frame.image.height() * 0.35
+
+    plot = pg.PlotWidget()
+    plot.resize(420, 420)
+    plot.setBackground("black")
+    plot.setMenuEnabled(False)
+    plot.hideButtons()
+    plot.plotItem.hideAxis("bottom")
+    plot.plotItem.hideAxis("left")
+    view_box = plot.getViewBox()
+    view_box.setAspectLocked(True)
+    view_box.setRange(xRange=(0.0, 100.0), yRange=(0.0, 100.0), padding=0.0)
+    raster = KLayoutRasterItem()
+    raster.set_frame(frame)
+    plot.addItem(raster)
+    marker = pg.ScatterPlotItem(
+        [50.0],
+        [85.0],
+        pen=pg.mkPen("#ff00ff", width=3),
+        brush=None,
+        size=15,
+        symbol="+",
+    )
+    plot.addItem(marker)
+    plot.show()
+    _process_until(qt_app, lambda: plot.isVisible())
+    qt_app.processEvents()
+
+    captured = plot.grab().toImage().convertToFormat(QImage.Format_ARGB32)
+    scene_bounds = view_box.sceneBoundingRect()
+    raster_centroid = _matching_pixel_centroid(captured, ink_colors, scene_bounds)
+    marker_centroid = _matching_pixel_centroid(
+        captured,
+        {(255, 0, 255)},
+        scene_bounds,
+    )
+    expected_marker = view_box.mapViewToScene(QPointF(50.0, 85.0))
+
+    assert marker_centroid == pytest.approx(
+        (expected_marker.x(), expected_marker.y()),
+        abs=4.0,
+    )
+    assert raster_centroid[1] == pytest.approx(marker_centroid[1], abs=45.0)
+    assert raster_centroid[1] < scene_bounds.center().y()
+    plot.close()
+    plot.deleteLater()
 
 
 def test_exact_request_uses_physical_pixels_and_caps_largest_dimension(

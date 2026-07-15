@@ -143,3 +143,65 @@ Commit subject: `feat: render design canvas with KLayout`
   may finish an already-running backend operation after it has been detached,
   while Task 3's stopping/publication guards suppress late GUI delivery.
   Explicit unload and window close still perform bounded joins as required.
+
+## Review fixes: raster orientation and stale hover
+
+Follow-up review identified two production defects after commit `78e49fb`.
+
+### RED evidence
+
+The fixes were preceded by three focused regressions:
+
+```powershell
+$env:QT_QPA_PLATFORM='offscreen'
+C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/ui/test_design_klayout_raster.py::test_real_klayout_raster_world_top_aligns_real_plot_overlay tests/ui/test_design_plot_klayout.py::test_snap_off_invalidates_inflight_hover_response tests/ui/test_design_plot_klayout.py::test_cursor_leave_invalidates_inflight_hover_response -q
+```
+
+Result before production changes: `3 failed`.
+
+- The asymmetric real KLayout frame placed high-world-Y geometry at source
+  image centroid Y about 47 px. Its real pyqtgraph overlay marker painted at
+  widget Y about 63.5 px, while the raster geometry painted at about 356.4 px.
+  This proved that the raster item vertically mirrored the worker image.
+- Both stale-hover tests showed that a response submitted before Snap Off or
+  cursor leave restored a non-`None` hover result after the overlay had been
+  cleared.
+
+### Root causes and fixes
+
+- `QImage` rows are top-down while the pyqtgraph world coordinate system is
+  Y-up. Directly drawing into the positive-height world rectangle mapped the
+  image's top row to `world_box.bottom`. `KLayoutRasterItem.paint` now performs
+  one painter-local Y reflection around `world_box.bottom + world_box.top`.
+  The worker image, frame box, and bounding rectangle are unchanged, avoiding
+  a double flip.
+- Hover response acceptance was keyed by `_latest_hover_request_id`, but clear
+  paths retained the prior id. `_set_hover_snap(None)` now invalidates that id,
+  covering Snap Off, out-of-bounds/no-position cursor state, missing document,
+  and missing worker/config. Document changes and shutdown retain their
+  explicit invalidation too.
+
+### GREEN evidence
+
+- The three new regressions: `3 passed in 2.14s`.
+- Task 4 UI plus existing navigator/main regression command:
+
+  ```powershell
+  C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/ui/test_design_klayout_raster.py tests/ui/test_design_plot_klayout.py tests/ui/test_design_navigator_panel.py tests/app/test_main_design_navigation.py -q
+  ```
+
+  Result: `34 passed in 3.48s`.
+
+- `git diff --check`, focused `compileall`, and Ruff all exited 0; Ruff reported
+  `All checks passed!`.
+- Fresh full suite:
+
+  ```powershell
+  C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests -q
+  ```
+
+  Result: `1420 passed, 10 subtests passed in 22.30s`.
+
+No hardware path or `main.py` process was started. The orientation regression
+uses a generated asymmetric GDS, the real `KLayoutRenderWorker`, and a real
+offscreen `pyqtgraph.PlotWidget` with a world-coordinate overlay marker.

@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 pytest.importorskip("pyqtgraph")
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QPointF, Signal
 from PySide6.QtWidgets import QApplication
 
 from probe_station_gui.design.klayout_types import KLayoutConfig, SnapResponse
@@ -191,6 +191,57 @@ def test_hover_is_replaceable_and_click_waits_for_matching_current_response(
 
     assert len(worker.hover_requests) == 2
     assert moves == [(50.0, 60.0)]
+
+
+def _hover_response(request) -> SnapResponse:
+    return SnapResponse(
+        request_id=request.request_id,
+        config_generation=request.config.generation,
+        raw_point=request.point,
+        result=SnapResult((10.0, 20.0), "vertex", 0.1),
+        elapsed_ms=1.0,
+        shapes_inspected=1,
+        purpose="hover",
+    )
+
+
+def test_snap_off_invalidates_inflight_hover_response(
+    pane, tmp_path: Path
+) -> None:
+    pane.set_document(_document(tmp_path / "layout.gds"))
+    worker = pane._snap_worker
+    changes = []
+    pane.hover_snap_changed.connect(changes.append)
+    pane._submit_file_backed_hover((1.0, 2.0))
+    request = worker.hover_requests[-1]
+
+    pane.set_snap_enabled(False)
+    changes.clear()
+    worker.snap_ready.emit(_hover_response(request))
+
+    assert pane._hover_snap is None
+    assert changes == []
+    assert len(pane._hover_item.getData()[0]) == 0
+
+
+def test_cursor_leave_invalidates_inflight_hover_response(
+    pane, tmp_path: Path
+) -> None:
+    pane.set_document(_document(tmp_path / "layout.gds"))
+    worker = pane._snap_worker
+    changes = []
+    pane.hover_snap_changed.connect(changes.append)
+    pane._submit_file_backed_hover((1.0, 2.0))
+    request = worker.hover_requests[-1]
+
+    pane._pending_hover_scene_pos = QPointF(-10_000.0, -10_000.0)
+    pane._flush_hover_snap()
+    changes.clear()
+    worker.snap_ready.emit(_hover_response(request))
+
+    assert pane._hover_snap is None
+    assert changes == []
+    assert len(pane._hover_item.getData()[0]) == 0
 
 
 @pytest.mark.parametrize(
