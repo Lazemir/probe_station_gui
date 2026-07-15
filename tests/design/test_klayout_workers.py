@@ -188,6 +188,71 @@ class _SnapHarness:
         return Backend()
 
 
+def _lifecycle_state(
+    worker: KLayoutRenderWorker | KLayoutSnapWorker,
+) -> tuple[object, ...]:
+    common = (
+        worker._stopping,
+        worker._stop_requested.is_set(),
+        worker._thread,
+        worker._latest_config,
+    )
+    if isinstance(worker, KLayoutRenderWorker):
+        return (*common, worker._pending)
+    return (*common, worker._hover, tuple(worker._clicks))
+
+
+@pytest.mark.parametrize(
+    ("worker_kind", "method_name"),
+    [
+        ("render", "submit"),
+        ("render", "stop"),
+        ("snap", "submit_hover"),
+        ("snap", "submit_click"),
+        ("snap", "stop"),
+    ],
+)
+def test_public_lifecycle_methods_reject_foreign_threads_without_mutation(
+    worker_kind: str,
+    method_name: str,
+) -> None:
+    worker: KLayoutRenderWorker | KLayoutSnapWorker
+    if worker_kind == "render":
+        worker = KLayoutRenderWorker(backend_factory=_RenderHarness().factory)
+    else:
+        worker = KLayoutSnapWorker(backend_factory=_SnapHarness().factory)
+    before = _lifecycle_state(worker)
+    errors: list[BaseException] = []
+
+    def invoke() -> None:
+        try:
+            if method_name == "submit":
+                assert isinstance(worker, KLayoutRenderWorker)
+                worker.submit(_render_request(1))
+            elif method_name == "submit_hover":
+                assert isinstance(worker, KLayoutSnapWorker)
+                worker.submit_hover(_snap_request(1))
+            elif method_name == "submit_click":
+                assert isinstance(worker, KLayoutSnapWorker)
+                worker.submit_click(_snap_request(1, purpose="click"))
+            else:
+                worker.stop(timeout_s=0.0)
+        except BaseException as exc:
+            errors.append(exc)
+
+    caller = threading.Thread(target=invoke)
+    caller.start()
+    caller.join(1.0)
+    after = _lifecycle_state(worker)
+    worker.stop(timeout_s=1.0)
+
+    assert caller.is_alive() is False
+    assert len(errors) == 1
+    assert isinstance(errors[0], RuntimeError)
+    assert str(errors[0]) == "KLayout worker methods must be called from the creator thread."
+    assert after == before
+
+
 def test_render_keeps_only_newest_pending_request(qt_app: QApplication) -> None:
     harness = _RenderHarness(block_ids={1})
     worker = KLayoutRenderWorker(backend_factory=harness.factory)

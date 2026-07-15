@@ -47,6 +47,7 @@ class _SnapBackend(Protocol):
 RenderBackendFactory = Callable[[], _RenderBackend]
 SnapBackendFactory = Callable[[], _SnapBackend]
 _STOP_WORKER = object()
+_CREATOR_THREAD_ERROR = "KLayout worker methods must be called from the creator thread."
 
 
 @dataclass(frozen=True)
@@ -57,7 +58,7 @@ class _Publication:
 
 
 class KLayoutRenderWorker(QObject):
-    """Render on one lazily-created daemon thread with a newest-only slot."""
+    """Render on one daemon thread; lifecycle calls belong to the creator thread."""
 
     loaded = Signal(object)
     frame_ready = Signal(object)
@@ -71,6 +72,7 @@ class KLayoutRenderWorker(QObject):
         backend_factory: RenderBackendFactory | None = None,
     ) -> None:
         super().__init__(parent)
+        self._creator_thread_id = threading.get_ident()
         self._backend_factory = backend_factory or _KLayoutRenderBackend
         self._condition = threading.Condition(threading.Lock())
         self._stop_requested = threading.Event()
@@ -84,6 +86,8 @@ class KLayoutRenderWorker(QObject):
         )
 
     def submit(self, request: RenderRequest) -> None:
+        """Queue the newest render request from the worker's creator thread."""
+        self._require_creator_thread()
         with self._condition:
             if self._stopping or self._stop_requested.is_set():
                 return
@@ -99,6 +103,8 @@ class KLayoutRenderWorker(QObject):
             self._condition.notify()
 
     def stop(self, timeout_s: float = 1.0) -> None:
+        """Stop accepting work from the creator thread and join up to the deadline."""
+        self._require_creator_thread()
         deadline = time.monotonic() + max(0.0, float(timeout_s))
         with self._condition:
             self._stop_requested.set()
@@ -169,6 +175,10 @@ class KLayoutRenderWorker(QObject):
             self._pending = None
             return request
 
+    def _require_creator_thread(self) -> None:
+        if threading.get_ident() != self._creator_thread_id:
+            raise RuntimeError(_CREATOR_THREAD_ERROR)
+
     def _post_publication(
         self,
         kind: str,
@@ -197,7 +207,7 @@ class KLayoutRenderWorker(QObject):
 
 
 class KLayoutSnapWorker(QObject):
-    """Query a separate layout with click FIFO priority over newest hover."""
+    """Snap on one daemon thread; lifecycle calls belong to the creator thread."""
 
     loaded = Signal(object)
     snap_ready = Signal(object)
@@ -211,6 +221,7 @@ class KLayoutSnapWorker(QObject):
         backend_factory: SnapBackendFactory | None = None,
     ) -> None:
         super().__init__(parent)
+        self._creator_thread_id = threading.get_ident()
         self._backend_factory = backend_factory or _KLayoutSnapBackend
         self._condition = threading.Condition(threading.Lock())
         self._stop_requested = threading.Event()
@@ -225,12 +236,18 @@ class KLayoutSnapWorker(QObject):
         )
 
     def submit_hover(self, request: SnapRequest) -> None:
+        """Queue the newest hover request from the worker's creator thread."""
+        self._require_creator_thread()
         self._submit(request, click=False)
 
     def submit_click(self, request: SnapRequest) -> None:
+        """Queue a FIFO-priority click request from the worker's creator thread."""
+        self._require_creator_thread()
         self._submit(request, click=True)
 
     def stop(self, timeout_s: float = 1.0) -> None:
+        """Stop accepting work from the creator thread and join up to the deadline."""
+        self._require_creator_thread()
         deadline = time.monotonic() + max(0.0, float(timeout_s))
         with self._condition:
             self._stop_requested.set()
@@ -326,6 +343,10 @@ class KLayoutSnapWorker(QObject):
                 self._hover = None
                 if request is not None and request.config == self._latest_config:
                     return request
+
+    def _require_creator_thread(self) -> None:
+        if threading.get_ident() != self._creator_thread_id:
+            raise RuntimeError(_CREATOR_THREAD_ERROR)
 
     def _post_publication(
         self,
