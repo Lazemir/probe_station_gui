@@ -18,6 +18,29 @@ The active refactoring roadmap is `.superpowers/sdd/refactor-plan.md`; it tracks
 
 ## Language
 
+## Microscope Distortion Calibration
+
+The project-specific lens distortion calibration protocol is seam-debug based. Do not treat it as a generic grid-pitch calibration, and do not assume the physical grid pitch is known unless the whole 50 um grid calibration target fits in the current objective FOV.
+
+Use the bright test structure as a reference object and move it through the camera field: center/control, left/right edge positions, top/bottom edge positions, and the four corner positions. Build the resulting seam mosaics from stage coordinates only, without feature-alignment shifts, and judge/optimize the distortion model by whether the same physical structure has matching contours on the vertical, horizontal, and corner seams. Stage coordinates are the first reference for stitching; if contours do not meet, fix geometry/distortion rather than hiding it with per-tile shifts.
+
+The repeatable capture is the `stitch_debug` scan pattern around the current stage position. It records 9 frames labeled `control`, `vertical_left`, `vertical_right`, `horizontal_top`, `horizontal_bottom`, and the four `corner_*` tiles. The normal scan code then writes raw tiles, sidecars, `microscope-scan-manifest.json`, and three diagnostic mosaics: `vertical_seam`, `horizontal_seam`, and `corner_seam`. Camera lock and flat-field/reference-flat should be enabled for live calibration captures unless deliberately testing illumination.
+
+The regression metric used for X5 was computed offline from these seam-debug artifacts:
+- Rebuild tile placements from the manifest and the persisted `PixelToStageMatrix`; do not run overlap registration or feature matching.
+- Normalize photometry in the overlap only, then measure local windows along each physical seam with phase correlation.
+- Keep windows with enough bright feature pixels and good correlation response; summarize residual norm as RMS, median, p90, max, and total px.
+- Fit an incremental Brown-Conrady stage geometry model (`center_px`, `k1`, `k2`, `p1`, `p2`, affine `pixels_to_mm`) against the seam residual field, then validate on a second independent seam-debug capture. Penalized/free optical-center fits were checked for X5 and did not improve over the frame center, so keep `(960, 600)` as the optical center unless new data clearly proves otherwise.
+- Accept a candidate only when it improves full-resolution seam metrics and the seam contours look better on vertical, horizontal, and corner mosaics. Prefer the cross-scan portable candidate over the single-scan best if they differ.
+
+The current X5 production payload is a manually selected seam-fit Brown model: `model_type=stage_geometry`, `center_px=(960,600)`, `k1=-0.0014808576600282065`, `k2=0.0022887010231724975`, `p1=-1.2684949874243132e-05`, `p2=8.4505485043518877e-05`, with the X5 affine pixel matrix unchanged. The X5 overlap sweep then selected `0.25` as the practical large-area default: `0.30` measured slightly better RMS, but `0.25` was the better time/quality tradeoff.
+
+The current X20 payload was calibrated on 2026-07-16 with the same seam-debug method, not the 5x5 grid workflow. Fit scan: `.scratch/x20-seam-debug-20260716-0105`; validation scan: `.scratch/x20-seam-debug-20260716-validate-0125`; report/contact sheet: `.scratch/distortion-alpha-ab/x20-seam-debug-20260716-crossval`. The selected Brown model keeps the X20 affine matrix unchanged and uses `center_px=(960,600)`, `k1=-0.05598720106581039`, `k2=0.04317294938913951`, `p1=0.0006840800681355104`, `p2=0.0007191198756683749`. Independent validation residual changed from RMS `19.481 px`, median `11.183 px`, p90 `29.210 px` to RMS `4.107 px`, median `3.161 px`, p90 `6.423 px`, max `7.295 px` at overlap `0.25`.
+
+X50 is a separate case: the 50 um grid mostly fits at high magnification, and the current X50 payload is the older point-grid/homography-style calibration with `grid_spacing_um=50`, residual mean `0.2248 px`, max `1.1027 px`, and calibrated pixel size about `0.11674 um/px`. Do not use the X50 grid-fit workflow as the default for X5/X20 seam calibration.
+
+For small FOV objectives such as X20, the whole surrounding bright test pattern may fill or exceed the frame. That is not a reason to switch to a "structure fully inside every frame" 5x5 grid capture. Use the seam-debug capture path and the central structure/seam agreement instead. The missing production step is to promote the scratch seam-regression scripts into a supported calibration command that takes a `stitch_debug` manifest and writes a candidate `stage_geometry` payload for the active objective.
+
 **Probe Station**:
 A microscope station with a FluidNC-controlled stage, camera feedback, and electrical probes used to position needles on chip targets.
 _Avoid_: CNC, microscope app
