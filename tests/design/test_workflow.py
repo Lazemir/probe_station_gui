@@ -1,6 +1,4 @@
 import tempfile
-import sys
-import types
 import unittest
 from pathlib import Path
 
@@ -61,16 +59,7 @@ class DesignRegistrationTest(unittest.TestCase):
 
 
 class DesignDocumentTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self._original_gdstk = sys.modules.get("gdstk")
-
-    def tearDown(self) -> None:
-        if self._original_gdstk is None:
-            sys.modules.pop("gdstk", None)
-        else:
-            sys.modules["gdstk"] = self._original_gdstk
-
-    def test_load_document_and_switch_layers(self) -> None:
+    def test_build_in_memory_document_and_switch_layers(self) -> None:
         cell_main = _FakeCell(
             "TOP",
             {
@@ -85,11 +74,12 @@ class DesignDocumentTest(unittest.TestCase):
             },
         )
         fake_library = _FakeLibrary([cell_main, cell_alt])
-        gdstk_stub = types.ModuleType("gdstk")
-        gdstk_stub.read_gds = lambda _path: fake_library
-        sys.modules["gdstk"] = gdstk_stub
 
-        document = DesignDocument.load(REPO_ROOT / "tests" / "fixtures" / "synthetic.gds")
+        document = DesignDocument._from_components(
+            path=REPO_ROOT / "tests" / "fixtures" / "synthetic.gds",
+            library=fake_library,
+            top_cell_name="TOP",
+        )
 
         self.assertEqual(document.top_cell_name, "TOP")
         self.assertEqual(document.layer_keys(), ((1, 0), (2, 0)))
@@ -103,7 +93,7 @@ class DesignDocumentTest(unittest.TestCase):
         self.assertEqual(alt_document.top_cell_name, "ALT")
         self.assertEqual(alt_document.layer_keys(), ((3, 1),))
 
-    def test_load_document_falls_back_to_first_cell_with_geometry(self) -> None:
+    def test_in_memory_document_uses_requested_cell_with_geometry(self) -> None:
         cell_empty = _FakeCell("EMPTY_TOP", {})
         cell_main = _FakeCell(
             "MAIN",
@@ -112,11 +102,12 @@ class DesignDocumentTest(unittest.TestCase):
             },
         )
         fake_library = _FakeLibrary([cell_empty, cell_main])
-        gdstk_stub = types.ModuleType("gdstk")
-        gdstk_stub.read_gds = lambda _path: fake_library
-        sys.modules["gdstk"] = gdstk_stub
 
-        document = DesignDocument.load(REPO_ROOT / "tests" / "fixtures" / "synthetic.gds")
+        document = DesignDocument._from_components(
+            path=REPO_ROOT / "tests" / "fixtures" / "synthetic.gds",
+            library=fake_library,
+            top_cell_name="MAIN",
+        )
 
         self.assertEqual(document.top_cell_name, "MAIN")
         self.assertEqual(document.layer_keys(), ((1, 0),))

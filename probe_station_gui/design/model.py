@@ -6,7 +6,8 @@ import importlib
 import math
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, ClassVar, Iterable, Optional
+from types import MappingProxyType
+from typing import Any, ClassVar, Iterable, Mapping, Optional
 
 
 class _LazyModule:
@@ -273,12 +274,32 @@ class DesignDocument:
     snap_long_segment_indices: tuple[int, ...] = field(default_factory=tuple, repr=False)
     snap_geometry_built: bool = field(default=False, repr=False)
     rotation_quarter_turns: int = 0
+    file_backed: bool = False
+    available_layers: frozenset[LayerKey] = field(default_factory=frozenset)
+    cell_bounds: Mapping[str, tuple[float, float, float, float]] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self,
             "rotation_quarter_turns",
             int(self.rotation_quarter_turns) % 4,
+        )
+        object.__setattr__(
+            self,
+            "available_layers",
+            frozenset(self.available_layers or self.polygons_by_layer),
+        )
+        object.__setattr__(
+            self,
+            "cell_bounds",
+            MappingProxyType(
+                {
+                    str(name): tuple(float(value) for value in bounds)
+                    for name, bounds in self.cell_bounds.items()
+                }
+            ),
         )
         if not self.plot_paths_by_layer and self.polygons_by_layer:
             object.__setattr__(
@@ -294,35 +315,73 @@ class DesignDocument:
 
     @classmethod
     def load(cls, path: str | Path) -> "DesignDocument":
-        """Read a GDS/OASIS file using gdstk."""
+        """Read lightweight metadata from a GDS/OASIS file using KLayout."""
 
-        gdstk = cls._import_gdstk()
         resolved = Path(path).expanduser().resolve()
         try:
-            library = gdstk.read_gds(str(resolved))
-        except Exception as exc:  # pragma: no cover - library specific
+            import klayout.db as db
+        except ImportError as exc:
+            raise DesignModelError(
+                "KLayout is not installed. Install it to enable GDS design navigation."
+            ) from exc
+
+        layout = db.Layout()
+        try:
+            layout.read(str(resolved))
+        except Exception as exc:  # pragma: no cover - KLayout specific
             raise DesignModelError(f"Failed to load design '{resolved}': {exc}") from exc
 
-        cells = tuple(getattr(library, "cells", ()))
+        cells = tuple(layout.each_cell())
         if not cells:
             raise DesignModelError(f"Design '{resolved}' does not contain any cells.")
-        try:
-            top_level = tuple(library.top_level())
-        except Exception:  # pragma: no cover - library specific
-            top_level = ()
+        top_level = tuple(layout.top_cells())
         top_cell = top_level[0] if top_level else cells[0]
-        cell_names = tuple(str(getattr(cell, "name", "")) for cell in cells if getattr(cell, "name", ""))
+        cell_names = tuple(
+            sorted(str(cell.name) for cell in cells if str(cell.name))
+        )
         if not cell_names:
             raise DesignModelError(f"Design '{resolved}' does not expose named cells.")
-        top_cell_name = str(getattr(top_cell, "name", cell_names[0]))
-        if not cls._extract_polygons(top_cell):
-            geometry_cell = cls._select_geometry_cell(top_level or cells, cells)
-            if geometry_cell is not None:
-                top_cell_name = str(getattr(geometry_cell, "name", top_cell_name))
-        return cls._from_components(
+        cell_bounds = {
+            str(cell.name): cls._klayout_bounds(cell.bbox(), layout.dbu)
+            for cell in cells
+            if str(cell.name) and not cell.bbox().empty()
+        }
+        top_cell_name = str(top_cell.name or cell_names[0])
+        if top_cell_name not in cell_bounds:
+            geometry_cell_name = next(
+                (
+                    str(cell.name)
+                    for group in (top_level or cells, cells)
+                    for cell in group
+                    if str(cell.name) in cell_bounds
+                ),
+                None,
+            )
+            if geometry_cell_name is not None:
+                top_cell_name = geometry_cell_name
+        if top_cell_name not in cell_bounds:
+            raise DesignModelError(f"Top cell '{top_cell_name}' has no polygon geometry.")
+
+        available_layers = frozenset(
+            (int(info.layer), int(info.datatype)) for info in layout.layer_infos()
+        )
+        bounds = cell_bounds[top_cell_name]
+        user_unit = float(layout.dbu) * 1e-6
+        del cells, top_level, top_cell, layout
+        return cls(
             path=resolved,
-            library=library,
+            library=None,
+            top_cell=None,
             top_cell_name=top_cell_name,
+            cell_names=cell_names,
+            dbu=1e-6,
+            user_unit=user_unit,
+            bounds=bounds,
+            polygons_by_layer={},
+            visible_layers=available_layers,
+            file_backed=True,
+            available_layers=available_layers,
+            cell_bounds=cell_bounds,
         )
 
     @classmethod
@@ -382,6 +441,23 @@ class DesignDocument:
     def with_top_cell(self, top_cell_name: str) -> "DesignDocument":
         """Return a copy using a different top cell from the same library."""
 
+        if self.file_backed:
+            if top_cell_name not in self.cell_names:
+                raise DesignModelError(
+                    f"Cell '{top_cell_name}' was not found in '{self.path.name}'."
+                )
+            if top_cell_name not in self.cell_bounds:
+                raise DesignModelError(
+                    f"Top cell '{top_cell_name}' has no polygon geometry."
+                )
+            return replace(
+                self,
+                top_cell_name=top_cell_name,
+                bounds=self._rotate_bounds(
+                    self.cell_bounds[top_cell_name],
+                    self.rotation_quarter_turns,
+                ),
+            )
         return self._from_components(
             path=self.path,
             library=self.library,
@@ -393,6 +469,13 @@ class DesignDocument:
     def with_visible_layers(self, layers: Iterable[LayerKey]) -> "DesignDocument":
         """Return a copy with a different visible layer subset."""
 
+        if self.file_backed:
+            effective_layers = frozenset(
+                layer for layer in layers if layer in self.available_layers
+            )
+            if not effective_layers:
+                effective_layers = self.available_layers
+            return replace(self, visible_layers=effective_layers)
         return self._from_components(
             path=self.path,
             library=self.library,
@@ -409,6 +492,16 @@ class DesignDocument:
         delta = int(quarter_turn_delta) % 4
         if delta == 0:
             return self
+        if self.file_backed:
+            turns = (self.rotation_quarter_turns + delta) % 4
+            return replace(
+                self,
+                bounds=self._rotate_bounds(
+                    self.cell_bounds[self.top_cell_name],
+                    turns,
+                ),
+                rotation_quarter_turns=turns,
+            )
         polygons_by_layer = self._rotate_polygons_by_layer(
             self.polygons_by_layer,
             self.bounds,
@@ -460,6 +553,8 @@ class DesignDocument:
     def layer_keys(self) -> tuple[LayerKey, ...]:
         """Return layer keys in display order."""
 
+        if self.file_backed:
+            return tuple(sorted(self.available_layers))
         return tuple(sorted(self.polygons_by_layer.keys()))
 
     def visible_polygons(self) -> dict[LayerKey, tuple[np.ndarray, ...]]:
@@ -836,6 +931,38 @@ class DesignDocument:
         if not mins_x:
             raise DesignModelError("Unable to determine document bounds.")
         return (min(mins_x), min(mins_y), max(maxs_x), max(maxs_y))
+
+    @staticmethod
+    def _klayout_bounds(
+        box: Any,
+        dbu: float,
+    ) -> tuple[float, float, float, float]:
+        design_box = box.to_dtype(float(dbu))
+        return (
+            float(design_box.left),
+            float(design_box.bottom),
+            float(design_box.right),
+            float(design_box.top),
+        )
+
+    @staticmethod
+    def _rotate_bounds(
+        bounds: tuple[float, float, float, float],
+        quarter_turns: int,
+    ) -> tuple[float, float, float, float]:
+        left, bottom, right, top = bounds
+        if int(quarter_turns) % 2 == 0:
+            return (left, bottom, right, top)
+        center_x = (left + right) * 0.5
+        center_y = (bottom + top) * 0.5
+        half_width = (top - bottom) * 0.5
+        half_height = (right - left) * 0.5
+        return (
+            center_x - half_width,
+            center_y - half_height,
+            center_x + half_width,
+            center_y + half_height,
+        )
 
     @staticmethod
     def _rotate_polygons_by_layer(
