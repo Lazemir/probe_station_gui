@@ -5,16 +5,20 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 from probe_station_gui.design.model import (
     DesignDocument,
-    DesignModelError,
     MeasurementTarget,
     Point2D,
 )
 from probe_station_gui.design.session import DesignSession
-from probe_station_gui.route.model import MeasurementRoute, RoutePoint
+from probe_station_gui.design.selection_model import (
+    MixedArrayPlan,
+    MixedDeletePlan,
+    MixedEditPlan,
+)
+from probe_station_gui.route.model import MeasurementRoute, RouteModelError, RoutePoint
 
 
 DEFAULT_STAGE_AXIS_NAMES = ("X", "Y", "Z", "A", "B", "C")
@@ -568,6 +572,80 @@ def add_route_array_points(
         selected_route_point_index=session.selected_route_point_index,
         added_points=tuple(added),
         last_selected_design_point=last_selected,
+    )
+
+
+def apply_route_entity_changes(
+    session: DesignSession,
+    plan: MixedEditPlan,
+) -> RouteEditPlan:
+    """Apply the route half of one prevalidated mixed design edit."""
+
+    if not plan.accepted:
+        return RouteEditPlan(False, status_message=plan.status_message)
+    if isinstance(plan, MixedDeletePlan):
+        remove_ids = plan.route_remove_ids
+        append_points: tuple[RoutePoint, ...] = ()
+    elif isinstance(plan, MixedArrayPlan):
+        remove_ids = frozenset()
+        append_points = plan.route_copies
+    else:  # pragma: no cover - closed union defensive guard
+        return RouteEditPlan(False, status_message="Unknown mixed design edit.")
+    route = session.route
+    route_change_requested = bool(
+        plan.required_route_ids or remove_ids or append_points
+    )
+    if route is None:
+        if route_change_requested:
+            return RouteEditPlan(False, status_message="Selected route points are stale.")
+        return RouteEditPlan(True, status_message=plan.status_message)
+    if not route_change_requested:
+        current = session.current_route_point()
+        return RouteEditPlan(
+            True,
+            status_message=plan.status_message,
+            route=route,
+            selected_route_point_index=session.selected_route_point_index,
+            last_selected_design_point=(
+                current.camera_center if current is not None else None
+            ),
+        )
+    selected_id = None
+    if 0 <= session.selected_route_point_index < len(route.points):
+        selected_id = route.points[session.selected_route_point_index].id
+    removed_points = tuple(point for point in route.points if point.id in remove_ids)
+    try:
+        route.apply_point_changes(
+            required_ids=plan.required_route_ids,
+            remove_ids=remove_ids,
+            append_points=append_points,
+        )
+    except RouteModelError as exc:
+        return RouteEditPlan(False, status_message=str(exc))
+    if not route.points:
+        session.selected_route_point_index = -1
+    elif selected_id is not None and any(
+        point.id == selected_id for point in route.points
+    ):
+        session.selected_route_point_index = next(
+            index for index, point in enumerate(route.points) if point.id == selected_id
+        )
+    else:
+        session.selected_route_point_index = min(
+            max(session.selected_route_point_index, 0),
+            len(route.points) - 1,
+        )
+    current = session.current_route_point()
+    return RouteEditPlan(
+        True,
+        status_message=plan.status_message,
+        route=route,
+        selected_route_point_index=session.selected_route_point_index,
+        added_points=append_points,
+        removed_point=removed_points[0] if removed_points else None,
+        last_selected_design_point=(
+            current.camera_center if current is not None else None
+        ),
     )
 
 
