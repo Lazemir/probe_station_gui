@@ -46,9 +46,10 @@ not basic document persistence or route logic.
 - Do not change camera, serial, motion, autofocus, contact, or route-control
   semantics.
 - Do not redesign route, registration, or measurement tools.
-- Do not rewrite the full `DesignDocument` persistence/domain API in this
-  iteration. It remains the compatibility and session-state adapter; KLayout
-  becomes authoritative for displayed pixels and interactive geometry queries.
+- Do not rewrite the public `DesignDocument` persistence/domain API. Replace
+  its file-backed GDS implementation with lightweight KLayout metadata so the
+  existing session, route, registration, bounds, layer, top-cell, and rotation
+  contracts remain available without flattening hierarchy into polygon arrays.
 - Do not retain the throwaway prototype in the production branch after its
   validated logic has been absorbed.
 
@@ -108,12 +109,27 @@ layout or queue.
 ### File-backed domain compatibility
 
 `DesignDocument` continues to carry path, selected top cell, visible layers,
-rotation, bounds, units, and route/session compatibility data. Its existing GDS
-load remains in the current background load flow for this iteration. The design
-plot no longer iterates its polygon/path caches and no longer builds its snap
-arrays. This sharply limits the production change while removing the two
-user-visible bottlenecks. Replacing the remaining compatibility loader with
-KLayout can be evaluated separately after this renderer is proven in daily use.
+rotation, bounds, units, and route/session compatibility data. Its file-backed
+loader uses a temporary `klayout.db.Layout` in the existing background load
+thread and retains only immutable metadata. It does not keep KLayout objects,
+flattened polygons, plot paths, or global snap arrays. Top-cell bounds are
+captured during that load so layer toggles and quarter-turn rotation remain
+metadata-only operations in the GUI thread.
+
+The legacy in-memory polygon construction path remains available for focused
+unit tests and non-file fixtures, but a real GDS/OASIS document never enters it.
+This correction is required by the 2026-07-15 runtime trace: the previous
+`gdstk.get_polygons(apply_repetitions=True)` compatibility load took 4.4 seconds
+in isolation and still starved the already-shown GUI.
+
+### Minimap
+
+The microscope minimap requests a low-resolution full-cell frame from its own
+coalescing KLayout render worker. It never iterates `DesignDocument` polygons.
+The last valid minimap image remains visible while a replacement is pending;
+resize and document changes retain only the newest request. Route, mark, FOV,
+and current-position overlays remain native `QPainter` overlays in the GUI
+thread.
 
 ## Coordinate and Rotation Rules
 
@@ -216,8 +232,8 @@ from an old document, layer set, top cell, or rotation from executing an action.
 
 ## Lifecycle and Failure Handling
 
-- Construct workers lazily when a file-backed document is assigned to the
-  design plot, not during `main.py` startup.
+- Construct render/snap workers lazily when a file-backed document is assigned
+  to the design plot or minimap, not while the main window is being built.
 - Stop and detach workers when the design window closes or its document source
   changes. A bounded join is allowed only during explicit shutdown, never on
   pan, zoom, layer change, or normal document update.
@@ -244,12 +260,16 @@ The production files and responsibilities are:
   conversion and legacy-compatible local snap selection.
 - `probe_station_gui/design/klayout_workers.py`: single-owner render and snap
   threads, coalescing, generation handling, and lazy KLayout imports.
+- `probe_station_gui/design/model.py`: lightweight KLayout metadata load for
+  real files while retaining the public document/session contract.
 - `probe_station_gui/views/design_klayout_raster.py`: the pyqtgraph-compatible
   QImage raster item and render scheduler.
 - `probe_station_gui/views/design_plot_pane.py`: wiring to the existing scene,
   asynchronous click continuation, and overlay updates.
 - `probe_station_gui/views/design_navigator_panel.py`: only the small snap hint
   copy update required for midpoint mode.
+- `probe_station_gui/views/microscope_view.py`: coalesced low-resolution
+  KLayout minimap frames plus the existing native overlays.
 - `probe_station_gui/prototypes/`: removed from this production branch after
   the validated code is rewritten into the bounded production modules.
 
@@ -317,5 +337,6 @@ The production files and responsibilities are:
   highlighting match the behavior defined above.
 - Existing route, registration, minimap, layer, top-cell, rotation, navigation,
   Pause/Resume/Interrupt, and API route-control regression tests remain passing.
-- Normal application startup does not import or instantiate KLayout rendering
-  objects before a design is opened.
+- Main-window construction does not import or instantiate KLayout. Restoring or
+  opening a design imports KLayout only inside background metadata/render/snap
+  workers and never flattens its hierarchy in the GUI process path.
