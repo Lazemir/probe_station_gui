@@ -7,9 +7,11 @@ import math
 import threading
 from time import perf_counter, monotonic
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPointF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
+
+from probe_station_gui.design.markup import MarkupDocument
 
 from probe_station_gui.design.navigation_geometry import (
     first_segment_length,
@@ -32,6 +34,19 @@ from probe_station_gui.design.klayout_types import (
     SnapResponse,
 )
 from probe_station_gui.design.klayout_workers import KLayoutSnapWorker
+from probe_station_gui.design.selection_geometry import (
+    GuideSnapCandidate,
+    SegmentGeometry,
+    SelectionRect,
+    guide_snap_candidates,
+)
+from probe_station_gui.design.selection_model import (
+    EntityOwner,
+    SelectableDesignEntity,
+    SelectionModel,
+    entities_in_rect,
+    route_entity_id,
+)
 from probe_station_gui.route.model import MeasurementRoute
 from probe_station_gui.views.design_klayout_raster import (
     KLayoutRasterController,
@@ -52,6 +67,9 @@ class _DesignPlotPane(QWidget):
     calibration_point_selected = Signal(int, float, float)
     move_requested = Signal(float, float)
     route_point_requested = Signal(float, float)
+    point_requested = Signal(float, float)
+    guide_requested = Signal(object, object)
+    entity_selection_requested = Signal(object, str)
     route_pick_requested = Signal(str, float, float)
     hover_snap_changed = Signal(object)
     snap_geometry_ready = Signal(int, object, object, object)
@@ -76,6 +94,21 @@ class _DesignPlotPane(QWidget):
         self._tool_measure_label_items: list[object] = []
         self._tool_sketch_segments: list[tuple[Point2D, Point2D]] = []
         self._tool_sketch_points: list[Point2D] = []
+        self._markup: MarkupDocument | None = None
+        self._markup_snap_candidates: tuple[GuideSnapCandidate, ...] = ()
+        self._selectable_entities: tuple[SelectableDesignEntity, ...] = ()
+        self._selection = SelectionModel()
+        self._selection_managed = False
+        self._active_design_tool = "legacy"
+        self._guide_anchor: Point2D | None = None
+        self._mixed_preview_points: list[Point2D] = []
+        self._mixed_preview_segments: list[SegmentGeometry] = []
+        self._selection_rect_mode: str | None = None
+        self._select_press_scene_pos: QPointF | None = None
+        self._select_press_design_point: Point2D | None = None
+        self._select_press_entity_id: str | None = None
+        self._select_dragging = False
+        self._select_modifiers = Qt.NoModifier
         self._source_design_marks: list[Point2D | None] = [None, None]
         self._current_design_position: Point2D | None = None
         self._fov_design_size: Point2D | None = None
@@ -93,6 +126,7 @@ class _DesignPlotPane(QWidget):
         self._snap_request_id = 0
         self._latest_hover_request_id = 0
         self._pending_clicks: dict[int, PendingClick] = {}
+        self._pending_hover_markup: dict[int, SnapResult | None] = {}
         self._snap_worker: KLayoutSnapWorker | None = None
         self._snap_worker_source_key = None
         self._retired_snap_workers: set[object] = set()
@@ -251,6 +285,29 @@ class _DesignPlotPane(QWidget):
             size=8,
             symbol="+",
         )
+        self._tool_sketch_intersection_item = pg.ScatterPlotItem(
+            pen=pg.mkPen("#ffee58", width=1.4),
+            brush=pg.mkBrush(255, 238, 88, 100),
+            size=9,
+            symbol="x",
+        )
+        self._markup_selected_item = self._plot.plot(
+            [],
+            [],
+            pen=pg.mkPen("#ff7043", width=3.0, style=Qt.DashLine),
+        )
+        self._mixed_preview_segment_item = self._plot.plot(
+            [],
+            [],
+            pen=pg.mkPen("#ffca28", width=2.0, style=Qt.DashLine),
+        )
+        self._mixed_preview_point_item = pg.ScatterPlotItem(
+            pen=pg.mkPen("#ffca28", width=1.5),
+            brush=pg.mkBrush(255, 202, 40, 100),
+            size=9,
+            symbol="o",
+        )
+        self._selection_rect_item = self._plot.plot([], [])
         self._axis_triad_x_item = self._plot.plot(
             [], [], pen=pg.mkPen("#ef5350", width=2.2)
         )
@@ -325,6 +382,8 @@ class _DesignPlotPane(QWidget):
         self._plot.addItem(self._tool_measure_point_item)
         self._plot.addItem(self._tool_sketch_point_item)
         self._plot.addItem(self._tool_sketch_midpoint_item)
+        self._plot.addItem(self._tool_sketch_intersection_item)
+        self._plot.addItem(self._mixed_preview_point_item)
         self._plot.addItem(self._axis_triad_x_label)
         self._plot.addItem(self._axis_triad_y_label)
         self._plot.addItem(self._axis_triad_z_label)
@@ -336,6 +395,7 @@ class _DesignPlotPane(QWidget):
         self._plot.addItem(self._check_mark_item)
         self._plot.scene().sigMouseClicked.connect(self._on_mouse_clicked)
         self._plot.scene().sigMouseMoved.connect(self._on_mouse_moved)
+        self._plot.scene().installEventFilter(self)
         view_box.sigRangeChanged.connect(lambda *_unused: self._on_view_range_changed())
         layout.addWidget(self._status_label, 1)
         layout.addWidget(self._plot, 1)
@@ -395,6 +455,7 @@ class _DesignPlotPane(QWidget):
             self._snap_generation += 1
             self._latest_hover_request_id = 0
             self._pending_clicks.clear()
+            self._pending_hover_markup.clear()
             self._set_hover_snap(None)
             self._detach_file_backed_document(timeout_s=0.0)
             self.set_status_message("No design loaded.")
@@ -403,6 +464,7 @@ class _DesignPlotPane(QWidget):
             self._snap_generation += 1
             self._latest_hover_request_id = 0
             self._pending_clicks.clear()
+            self._pending_hover_markup.clear()
             self._set_hover_snap(None)
             self.set_status_message("")
             if document.file_backed:
@@ -440,6 +502,7 @@ class _DesignPlotPane(QWidget):
         self._klayout_config = None
         self._latest_hover_request_id = 0
         self._pending_clicks.clear()
+        self._pending_hover_markup.clear()
         self._stop_snap_worker(timeout_s=timeout_s)
         if self._raster_controller is not None:
             self._raster_controller.set_document(None)
@@ -507,6 +570,7 @@ class _DesignPlotPane(QWidget):
             if failure.request_id != self._latest_hover_request_id:
                 return
             self._latest_hover_request_id = 0
+            self._pending_hover_markup.pop(failure.request_id, None)
             self._set_hover_snap(None)
             return
         if failure.purpose != "click":
@@ -646,6 +710,154 @@ class _DesignPlotPane(QWidget):
         self._tool_sketch_segments = parsed
         self._redraw_overlays()
 
+    @property
+    def active_design_tool(self) -> str:
+        return self._active_design_tool
+
+    def set_active_design_tool(self, tool: str) -> None:
+        normalized = str(tool).strip().lower()
+        if normalized not in {"select", "point", "guide", "measure", "array", "legacy"}:
+            raise ValueError(f"Unknown design tool {tool!r}.")
+        if normalized != "guide":
+            self._guide_anchor = None
+            self._tool_sketch_points = []
+        self._active_design_tool = normalized
+        self._clear_selection_interaction()
+        if self._plot is not None:
+            cursor = (
+                Qt.CrossCursor
+                if normalized in {"point", "guide", "measure", "array"}
+                else Qt.ArrowCursor
+            )
+            self._plot.setCursor(cursor)
+        self._redraw_overlays()
+
+    def set_markup(self, markup: MarkupDocument | None) -> None:
+        self._markup = markup
+        if markup is None or not markup.visible:
+            self._tool_sketch_segments = []
+            self._markup_snap_candidates = ()
+            self._selectable_entities = tuple(
+                entity
+                for entity in self._selectable_entities
+                if entity.owner is not EntityOwner.MARKUP
+            )
+            self._selection = self._selection.prune(
+                entity.id for entity in self._selectable_entities
+            )
+        else:
+            geometries = tuple(guide.geometry() for guide in markup.guides)
+            self._tool_sketch_segments = [
+                (geometry.start, geometry.end) for geometry in geometries
+            ]
+            self._markup_snap_candidates = guide_snap_candidates(geometries)
+        self._redraw_overlays()
+
+    def set_selectable_entities(
+        self,
+        entities: object,
+    ) -> None:
+        if isinstance(entities, (list, tuple)) and all(
+            isinstance(entity, SelectableDesignEntity) for entity in entities
+        ):
+            self._selectable_entities = tuple(entities)
+        else:
+            self._selectable_entities = ()
+        valid_ids = {entity.id for entity in self._selectable_entities}
+        self._selection = self._selection.prune(valid_ids)
+        self._redraw_overlays()
+
+    def set_selection(self, selection: SelectionModel) -> None:
+        valid_ids = {entity.id for entity in self._selectable_entities}
+        self._selection = selection.prune(valid_ids)
+        self._selection_managed = True
+        self._redraw_overlays()
+
+    def set_mixed_array_preview(
+        self,
+        points: object,
+        segments: object,
+    ) -> None:
+        self._mixed_preview_points = [
+            (float(point[0]), float(point[1]))
+            for point in points
+            if isinstance(point, (list, tuple)) and len(point) == 2
+        ] if isinstance(points, (list, tuple)) else []
+        self._mixed_preview_segments = [
+            segment for segment in segments if isinstance(segment, SegmentGeometry)
+        ] if isinstance(segments, (list, tuple)) else []
+        self._redraw_mixed_preview()
+
+    def cancel_active_interaction(self) -> None:
+        self._guide_anchor = None
+        self._tool_sketch_points = []
+        self._clear_selection_interaction()
+        self._redraw_overlays()
+
+    def _best_markup_snap(self, raw_point: Point2D) -> SnapResult | None:
+        if not self._snap_enabled or not self._markup_snap_candidates:
+            return None
+        threshold = self._snap_distance_threshold()
+        if threshold is None:
+            return None
+        best: tuple[float, GuideSnapCandidate] | None = None
+        for candidate in self._markup_snap_candidates:
+            distance = math.hypot(
+                candidate.point[0] - raw_point[0],
+                candidate.point[1] - raw_point[1],
+            )
+            if distance > threshold:
+                continue
+            if best is None or distance < best[0]:
+                best = (distance, candidate)
+        if best is None:
+            return None
+        distance, candidate = best
+        return SnapResult(
+            point=candidate.point,
+            mode=candidate.mode,
+            distance=distance,
+            segment_start=candidate.segment_start,
+            segment_end=candidate.segment_end,
+        )
+
+    def _selection_entity_ids(
+        self,
+        start: Point2D,
+        end: Point2D,
+    ) -> set[str]:
+        crossing = end[0] < start[0]
+        return entities_in_rect(
+            self._selectable_entities,
+            SelectionRect.from_drag(start, end),
+            crossing=crossing,
+        )
+
+    def _update_selection_rectangle(
+        self,
+        start: Point2D,
+        end: Point2D,
+    ) -> None:
+        crossing = end[0] < start[0]
+        self._selection_rect_mode = "cross" if crossing else "contain"
+        color = "#4caf50" if crossing else "#2196f3"
+        style = Qt.DashLine if crossing else Qt.SolidLine
+        self._selection_rect_item.setPen(pg.mkPen(color, width=1.5, style=style))
+        rect = SelectionRect.from_drag(start, end)
+        self._selection_rect_item.setData(
+            [rect.left, rect.right, rect.right, rect.left, rect.left],
+            [rect.bottom, rect.bottom, rect.top, rect.top, rect.bottom],
+        )
+
+    def _clear_selection_interaction(self) -> None:
+        self._select_press_scene_pos = None
+        self._select_press_design_point = None
+        self._select_press_entity_id = None
+        self._select_dragging = False
+        self._selection_rect_mode = None
+        if self._plot is not None and hasattr(self, "_selection_rect_item"):
+            self._selection_rect_item.setData([], [])
+
     def set_source_design_marks(self, points: list[Point2D | None]) -> None:
         self._source_design_marks = list(points[:2])
         while len(self._source_design_marks) < 2:
@@ -697,6 +909,7 @@ class _DesignPlotPane(QWidget):
 
         self._snap_enabled = bool(enabled)
         if not self._snap_enabled:
+            self._pending_hover_markup.clear()
             self._set_hover_snap(None)
 
     def focus_bounds(self) -> None:
@@ -803,6 +1016,7 @@ class _DesignPlotPane(QWidget):
         self._redraw_probe_route()
         self._redraw_route_preview()
         self._redraw_tool_sketch()
+        self._redraw_mixed_preview()
         self._redraw_tool_measure()
         self._redraw_axis_triad()
 
@@ -899,14 +1113,21 @@ class _DesignPlotPane(QWidget):
         )
         self._redraw_probe_route_numbers()
 
-        if 0 <= self._selected_route_point_index < len(self._probe_route.points):
+        selected_points = [
+            point
+            for point in self._probe_route.points
+            if point.enabled and route_entity_id(point.id) in self._selection.ids
+        ]
+        if not self._selection_managed and 0 <= self._selected_route_point_index < len(
+            self._probe_route.points
+        ):
             selected = self._probe_route.points[self._selected_route_point_index]
-            self._probe_route_selected_item.setData(
-                [selected.camera_center[0]],
-                [selected.camera_center[1]],
-            )
-        else:
-            self._probe_route_selected_item.setData([], [])
+            if selected.enabled:
+                selected_points = [selected]
+        self._probe_route_selected_item.setData(
+            [point.camera_center[0] for point in selected_points],
+            [point.camera_center[1] for point in selected_points],
+        )
 
         draw_details = len(points) <= self.PROBE_ROUTE_DETAIL_POINT_LIMIT
         needle_1_x: list[float] = []
@@ -989,6 +1210,8 @@ class _DesignPlotPane(QWidget):
             self._tool_sketch_item.setData([], [])
             self._tool_sketch_point_item.setData([], [])
             self._tool_sketch_midpoint_item.setData([], [])
+            self._tool_sketch_intersection_item.setData([], [])
+            self._markup_selected_item.setData([], [])
             return
 
         line_x: list[float] = []
@@ -1017,6 +1240,42 @@ class _DesignPlotPane(QWidget):
             [point[0] for point in midpoint_points],
             [point[1] for point in midpoint_points],
         )
+        intersections = [
+            candidate.point
+            for candidate in self._markup_snap_candidates
+            if candidate.mode == "guide_intersection"
+        ]
+        self._tool_sketch_intersection_item.setData(
+            [point[0] for point in intersections],
+            [point[1] for point in intersections],
+        )
+        selected_segments = [
+            entity.geometry
+            for entity in self._selectable_entities
+            if entity.id in self._selection.ids
+            and entity.owner is EntityOwner.MARKUP
+            and isinstance(entity.geometry, SegmentGeometry)
+        ]
+        selected_x: list[float] = []
+        selected_y: list[float] = []
+        for segment in selected_segments:
+            selected_x.extend([segment.start[0], segment.end[0], float("nan")])
+            selected_y.extend([segment.start[1], segment.end[1], float("nan")])
+        self._markup_selected_item.setData(selected_x, selected_y)
+
+    def _redraw_mixed_preview(self) -> None:
+        if self._plot is None:
+            return
+        self._mixed_preview_point_item.setData(
+            [point[0] for point in self._mixed_preview_points],
+            [point[1] for point in self._mixed_preview_points],
+        )
+        line_x: list[float] = []
+        line_y: list[float] = []
+        for segment in self._mixed_preview_segments:
+            line_x.extend([segment.start[0], segment.end[0], float("nan")])
+            line_y.extend([segment.start[1], segment.end[1], float("nan")])
+        self._mixed_preview_segment_item.setData(line_x, line_y)
 
     def _redraw_tool_measure(self) -> None:
         if self._plot is None:
@@ -1213,18 +1472,95 @@ class _DesignPlotPane(QWidget):
             self._plot.addItem(item)
             self._probe_route_number_items.append(item)
 
+    def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
+        if (
+            self._plot is None
+            or watched is not self._plot.scene()
+            or self._active_design_tool != "select"
+            or self._document is None
+        ):
+            return super().eventFilter(watched, event)
+        event_type = event.type()
+        if event_type == QEvent.GraphicsSceneMousePress:
+            if event.button() != Qt.LeftButton:
+                return super().eventFilter(watched, event)
+            position = event.scenePos()
+            if not self._plot.sceneBoundingRect().contains(position):
+                return super().eventFilter(watched, event)
+            view_point = self._plot.getViewBox().mapSceneToView(position)
+            design_point = (float(view_point.x()), float(view_point.y()))
+            hit = self._hit_entity(design_point)
+            self._select_press_scene_pos = QPointF(position)
+            self._select_press_design_point = design_point
+            self._select_press_entity_id = hit.id if hit is not None else None
+            self._select_modifiers = event.modifiers()
+            self._select_dragging = False
+            event.accept()
+            return True
+        if event_type == QEvent.GraphicsSceneMouseMove:
+            if self._select_press_scene_pos is None:
+                return super().eventFilter(watched, event)
+            if self._select_press_entity_id is not None:
+                event.accept()
+                return True
+            position = event.scenePos()
+            distance = (
+                position - self._select_press_scene_pos
+            ).manhattanLength()
+            if distance >= QApplication.startDragDistance():
+                self._select_dragging = True
+            if self._select_dragging and self._select_press_design_point is not None:
+                view_point = self._plot.getViewBox().mapSceneToView(position)
+                current = (float(view_point.x()), float(view_point.y()))
+                self._update_selection_rectangle(
+                    self._select_press_design_point,
+                    current,
+                )
+            event.accept()
+            return True
+        if event_type == QEvent.GraphicsSceneMouseRelease:
+            if event.button() != Qt.LeftButton or self._select_press_scene_pos is None:
+                return super().eventFilter(watched, event)
+            position = event.scenePos()
+            view_point = self._plot.getViewBox().mapSceneToView(position)
+            current = (float(view_point.x()), float(view_point.y()))
+            if self._select_dragging and self._select_press_design_point is not None:
+                matched = self._selection_entity_ids(
+                    self._select_press_design_point,
+                    current,
+                )
+            elif self._select_press_entity_id is not None:
+                matched = {self._select_press_entity_id}
+            else:
+                matched = set()
+            mode = self._selection_update_mode(self._select_modifiers)
+            self._clear_selection_interaction()
+            self.entity_selection_requested.emit(matched, mode)
+            event.accept()
+            return True
+        return super().eventFilter(watched, event)
+
     def _on_mouse_clicked(self, event) -> None:  # pragma: no cover - UI interaction
         if self._plot is None or self._document is None:
             return
         is_left_click = event.button() == Qt.LeftButton
         is_double_click = self._is_double_click_event(event)
+        active_tool = getattr(self, "_active_design_tool", "legacy")
         route_pick = self._route_pick_mode is not None and is_left_click
+        guide_click = (
+            not route_pick
+            and active_tool == "guide"
+            and self._route_edit_enabled
+            and is_left_click
+        )
         route_click = (
             not route_pick
             and self._route_edit_enabled
             and is_left_click
+            and active_tool in {"legacy", "point"}
         )
-        if route_pick or route_click:
+        select_click = active_tool == "select" and is_left_click
+        if route_pick or route_click or guide_click or select_click:
             slot = None
         elif self._navigation_enabled and is_left_click:
             if not is_double_click:
@@ -1239,8 +1575,16 @@ class _DesignPlotPane(QWidget):
         if route_pick:
             action = "route_pick"
             payload: tuple[object, ...] = (str(self._route_pick_mode),)
+        elif guide_click:
+            action = "guide_point"
+            payload = ()
         elif route_click:
-            action = "route_point"
+            action = (
+                "point" if active_tool == "point" else "route_point"
+            )
+            payload = ()
+        elif select_click:
+            action = "select"
             payload = ()
         elif slot is None:
             action = "move"
@@ -1253,6 +1597,9 @@ class _DesignPlotPane(QWidget):
             return
         view_point = self._plot.getViewBox().mapSceneToView(position)
         raw_point = (float(view_point.x()), float(view_point.y()))
+        if action == "select":
+            self._emit_click_selection(raw_point, event.modifiers())
+            return
         if bool(getattr(self._document, "file_backed", False)):
             self._submit_file_backed_click(action, raw_point, payload)
             return
@@ -1277,11 +1624,8 @@ class _DesignPlotPane(QWidget):
                 snap_result.point[1],
             )
             return
-        if route_click:
-            self.route_point_requested.emit(
-                snap_result.point[0],
-                snap_result.point[1],
-            )
+        if guide_click or route_click:
+            self._execute_click_action(action, payload, snap_result)
             return
         if slot is None:
             self.move_requested.emit(
@@ -1320,6 +1664,7 @@ class _DesignPlotPane(QWidget):
             action=str(action),
             raw_point=raw_point,
             payload=tuple(payload),
+            markup_result=self._best_markup_snap(raw_point),
         )
         worker.submit_click(
             SnapRequest(
@@ -1342,10 +1687,65 @@ class _DesignPlotPane(QWidget):
             self.route_pick_requested.emit(str(payload[0]), x_value, y_value)
         elif action == "route_point":
             self.route_point_requested.emit(x_value, y_value)
+        elif action == "point":
+            self.point_requested.emit(x_value, y_value)
+        elif action == "guide_point":
+            self._accept_guide_point((x_value, y_value))
         elif action == "move":
             self.move_requested.emit(x_value, y_value)
         elif action == "calibration" and payload:
             self.calibration_point_selected.emit(int(payload[0]), x_value, y_value)
+
+    def _accept_guide_point(self, point: Point2D) -> None:
+        if not self._route_edit_enabled or self._active_design_tool != "guide":
+            return
+        if self._guide_anchor is None:
+            self._guide_anchor = point
+            self._tool_sketch_points = [point]
+            self._redraw_overlays()
+            return
+        start = self._guide_anchor
+        self._guide_anchor = None
+        self._tool_sketch_points = []
+        if start != point:
+            self.guide_requested.emit(start, point)
+        self._redraw_overlays()
+
+    def _emit_click_selection(
+        self,
+        point: Point2D,
+        modifiers: Qt.KeyboardModifiers,
+    ) -> None:
+        entity = self._hit_entity(point)
+        matched = {entity.id} if entity is not None else set()
+        self.entity_selection_requested.emit(
+            matched,
+            self._selection_update_mode(modifiers),
+        )
+
+    def _hit_entity(self, point: Point2D) -> SelectableDesignEntity | None:
+        tolerance = self._snap_distance_threshold()
+        if tolerance is None:
+            return None
+        hits = [
+            entity
+            for entity in self._selectable_entities
+            if entity.hit_test(point, tolerance=tolerance)
+        ]
+        if not hits:
+            return None
+        return min(
+            hits,
+            key=lambda entity: 0 if entity.owner is EntityOwner.ROUTE else 1,
+        )
+
+    @staticmethod
+    def _selection_update_mode(modifiers: Qt.KeyboardModifiers) -> str:
+        if modifiers & Qt.ControlModifier:
+            return "invert"
+        if modifiers & Qt.ShiftModifier:
+            return "add"
+        return "replace"
 
     @staticmethod
     def _is_double_click_event(event) -> bool:
@@ -1394,6 +1794,9 @@ class _DesignPlotPane(QWidget):
             return
         self._snap_request_id += 1
         self._latest_hover_request_id = self._snap_request_id
+        self._pending_hover_markup = {
+            self._snap_request_id: self._best_markup_snap(raw_point)
+        }
         worker.submit_hover(
             SnapRequest(
                 request_id=self._snap_request_id,
@@ -1411,10 +1814,16 @@ class _DesignPlotPane(QWidget):
         if response.purpose == "hover":
             if response.request_id != self._latest_hover_request_id:
                 return
-            self._set_hover_snap(response.result)
-            self._log_hover_snap(
+            markup_result = self._pending_hover_markup.pop(response.request_id, None)
+            result = self._nearest_screen_result(
                 response.raw_point,
                 response.result,
+                markup_result,
+            )
+            self._set_hover_snap(result)
+            self._log_hover_snap(
+                response.raw_point,
+                result,
                 response.elapsed_ms,
             )
             return
@@ -1423,38 +1832,70 @@ class _DesignPlotPane(QWidget):
         pending = self._pending_clicks.pop(response.request_id, None)
         if pending is None or pending.config_generation != config.generation:
             return
-        self._set_hover_snap(response.result)
+        result = self._nearest_screen_result(
+            pending.raw_point,
+            response.result,
+            pending.markup_result,
+        )
+        self._set_hover_snap(result)
         logger.debug(
             "DESIGN SNAP click raw=(%.3f, %.3f) snapped=(%.3f, %.3f) mode=%s dist=%.4f elapsed_ms=%.2f",
             pending.raw_point[0],
             pending.raw_point[1],
-            response.result.point[0],
-            response.result.point[1],
-            response.result.mode,
-            response.result.distance,
+            result.point[0],
+            result.point[1],
+            result.mode,
+            result.distance,
             response.elapsed_ms,
         )
-        self._execute_click_action(pending.action, pending.payload, response.result)
+        self._execute_click_action(pending.action, pending.payload, result)
+
+    def _nearest_screen_result(
+        self,
+        raw_point: Point2D,
+        *results: SnapResult | None,
+    ) -> SnapResult:
+        available = [result for result in results if result is not None]
+        snapped = [result for result in available if result.mode != "free"]
+        candidates = snapped or available
+        if not candidates:
+            return SnapResult(point=raw_point, mode="free", distance=0.0)
+        return min(
+            candidates,
+            key=lambda result: self._screen_distance(raw_point, result.point),
+        )
+
+    def _screen_distance(self, first: Point2D, second: Point2D) -> float:
+        if self._plot is not None:
+            view_box = self._plot.getViewBox()
+            try:
+                first_scene = view_box.mapViewToScene(QPointF(*first))
+                second_scene = view_box.mapViewToScene(QPointF(*second))
+                return math.hypot(
+                    second_scene.x() - first_scene.x(),
+                    second_scene.y() - first_scene.y(),
+                )
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                pass
+        return math.hypot(second[0] - first[0], second[1] - first[1])
 
     def _resolve_snap_result(self, raw_point: Point2D) -> SnapResult:
-        if self._document is None:
-            return SnapResult(point=raw_point, mode="free", distance=0.0)
-        if not self._snap_enabled:
-            return SnapResult(point=raw_point, mode="free", distance=0.0)
-        if self._document.file_backed:
-            return SnapResult(point=raw_point, mode="free", distance=0.0)
-        if not self._document.has_snap_geometry():
-            return SnapResult(point=raw_point, mode="free", distance=0.0)
+        free_result = SnapResult(point=raw_point, mode="free", distance=0.0)
+        if self._document is None or not self._snap_enabled:
+            return free_result
+        markup_result = self._best_markup_snap(raw_point)
+        if self._document.file_backed or not self._document.has_snap_geometry():
+            return self._nearest_screen_result(raw_point, free_result, markup_result)
         snap_threshold = self._snap_distance_threshold()
         if snap_threshold is None:
-            return SnapResult(point=raw_point, mode="free", distance=0.0)
+            return self._nearest_screen_result(raw_point, free_result, markup_result)
         snap_result = self._document.snap_point_info(
             raw_point,
             max_distance=snap_threshold,
         )
         if snap_result.distance > snap_threshold:
-            return SnapResult(point=raw_point, mode="free", distance=0.0)
-        return snap_result
+            snap_result = free_result
+        return self._nearest_screen_result(raw_point, snap_result, markup_result)
 
     def _route_geometry_pixel_size(self) -> float | None:
         if self._plot is None or not self._plot.isVisible():
@@ -1506,6 +1947,12 @@ class _DesignPlotPane(QWidget):
         if snap_result is None:
             self._latest_hover_request_id = 0
         self._hover_snap = snap_result
+        if self._active_design_tool == "guide" and self._guide_anchor is not None:
+            if snap_result is None:
+                self._tool_sketch_points = [self._guide_anchor]
+            else:
+                self._tool_sketch_points = [self._guide_anchor, snap_result.point]
+            self._redraw_tool_sketch()
         self._redraw_hover()
         self.hover_snap_changed.emit(snap_result)
 
@@ -1518,7 +1965,12 @@ class _DesignPlotPane(QWidget):
         point = self._hover_snap.point
         self._hover_item.setData([point[0]], [point[1]])
         if (
-            self._hover_snap.mode in {"segment", "segment_center"}
+            self._hover_snap.mode in {
+                "segment",
+                "segment_center",
+                "guide_end",
+                "guide_center",
+            }
             and self._hover_snap.segment_start is not None
             and self._hover_snap.segment_end is not None
         ):
@@ -1569,6 +2021,7 @@ class _DesignPlotPane(QWidget):
             return
         self._shutdown = True
         self._pending_clicks.clear()
+        self._pending_hover_markup.clear()
         self._latest_hover_request_id = 0
         if hasattr(self, "_hover_timer"):
             self._hover_timer.stop()

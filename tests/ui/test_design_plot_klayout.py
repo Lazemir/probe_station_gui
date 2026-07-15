@@ -22,6 +22,7 @@ from probe_station_gui.design.klayout_types import (
     SnapFailure,
     SnapResponse,
 )
+from probe_station_gui.design.markup import MarkupDocument
 from probe_station_gui.design.model import DesignDocument, SnapResult
 from probe_station_gui.views import design_plot_pane as plot_module
 from probe_station_gui.views.design_navigator_panel import (
@@ -225,6 +226,98 @@ def test_hover_is_replaceable_and_click_waits_for_matching_current_response(
 
     assert len(worker.hover_requests) == 2
     assert moves == [(50.0, 60.0)]
+
+
+def test_file_backed_click_uses_nearer_correlated_markup_candidate(
+    pane,
+    tmp_path: Path,
+) -> None:
+    design_path = tmp_path / "markup-snap.gds"
+    design_path.write_bytes(b"gds")
+    pane.set_document(_document(design_path))
+    pane._snap_distance_threshold = lambda: 100.0
+    markup = MarkupDocument.empty(design_path).append_guide(
+        (1.0, 1.0),
+        (3.0, 1.0),
+        guide_id="guide",
+    )
+    pane.set_markup(markup)
+    points = []
+    pane.point_requested.connect(lambda x, y: points.append((x, y)))
+
+    pane._submit_file_backed_click("point", (1.1, 1.0))
+    request = pane._snap_worker.click_requests[-1]
+    pending = pane._pending_clicks[request.request_id]
+    assert pending.markup_result is not None
+    pane._snap_worker.snap_ready.emit(
+        SnapResponse(
+            request_id=request.request_id,
+            config_generation=request.config.generation,
+            raw_point=request.point,
+            result=SnapResult((20.0, 20.0), "vertex", 0.1),
+            elapsed_ms=1.0,
+            shapes_inspected=1,
+            purpose="click",
+        )
+    )
+
+    assert points == [(1.0, 1.0)]
+
+
+def test_failed_file_backed_click_does_not_execute_correlated_markup_candidate(
+    pane,
+    tmp_path: Path,
+) -> None:
+    design_path = tmp_path / "markup-failure.gds"
+    design_path.write_bytes(b"gds")
+    pane.set_document(_document(design_path))
+    pane._snap_distance_threshold = lambda: 100.0
+    pane.set_markup(
+        MarkupDocument.empty(design_path).append_guide(
+            (1.0, 1.0),
+            (3.0, 1.0),
+            guide_id="guide",
+        )
+    )
+    points = []
+    pane.point_requested.connect(lambda x, y: points.append((x, y)))
+    pane._submit_file_backed_click("point", (1.1, 1.0))
+    request = pane._snap_worker.click_requests[-1]
+
+    pane._snap_worker.failed.emit(
+        SnapFailure(
+            request.request_id,
+            request.config.generation,
+            "click",
+            "failed",
+        )
+    )
+
+    assert points == []
+
+
+def test_markup_edits_do_not_reconfigure_file_backed_workers(
+    pane,
+    tmp_path: Path,
+) -> None:
+    design_path = tmp_path / "markup-worker-stability.gds"
+    design_path.write_bytes(b"gds")
+    pane.set_document(_document(design_path))
+    snap_worker = pane._snap_worker
+    raster_controller = pane._raster_controller
+    configured_documents = list(raster_controller.documents)
+
+    pane.set_markup(
+        MarkupDocument.empty(design_path).append_guide(
+            (0.0, 0.0),
+            (2.0, 2.0),
+            guide_id="guide",
+        )
+    )
+
+    assert pane._snap_worker is snap_worker
+    assert pane._raster_controller is raster_controller
+    assert raster_controller.documents == configured_documents
 
 
 def test_matching_hover_failure_only_clears_matching_hover(pane, tmp_path: Path) -> None:
