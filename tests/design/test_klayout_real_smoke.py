@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable
+import os
 from pathlib import Path
 import threading
 import time
@@ -82,6 +83,7 @@ def _config(
     turns: int = 0,
     layers: set[tuple[int, int]] | None = None,
     generation: int | None = None,
+    source_load_id: str | None = None,
 ) -> KLayoutConfig:
     source_bounds = (0.0, 0.0, 22.0, 12.0)
     display_bounds = source_bounds if turns % 2 == 0 else (5.0, -5.0, 17.0, 17.0)
@@ -93,6 +95,33 @@ def _config(
         display_bounds=display_bounds,
         rotation_quarter_turns=turns,
         generation=turns + 1 if generation is None else generation,
+        source_load_id=source_load_id,
+    )
+
+
+def _write_reload_design(path: Path, *, box_left_um: float) -> None:
+    layout = db.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    left = round(box_left_um * 1000.0)
+    top.shapes(layout.layer(1, 0)).insert(
+        db.Box(left, 40_000, left + 10_000, 50_000)
+    )
+    top.shapes(layout.layer(9, 0)).insert(db.Box(0, 0, 1_000, 1_000))
+    top.shapes(layout.layer(9, 0)).insert(db.Box(99_000, 99_000, 100_000, 100_000))
+    layout.write(str(path))
+
+
+def _reload_config(path: Path, *, generation: int, source_load_id: str) -> KLayoutConfig:
+    return KLayoutConfig(
+        path=path,
+        top_cell_name="TOP",
+        visible_layers=frozenset({(1, 0)}),
+        source_bounds=(0.0, 0.0, 100.0, 100.0),
+        display_bounds=(0.0, 0.0, 100.0, 100.0),
+        rotation_quarter_turns=0,
+        generation=generation,
+        source_load_id=source_load_id,
     )
 
 
@@ -258,6 +287,77 @@ def test_real_snap_worker_ignores_text_origins(
 
     assert responses[0].result.mode == "free"
     assert responses[0].result.point == pytest.approx((15.0, 8.0))
+
+
+def test_real_workers_reload_render_snap_and_minimap_content_replaced_at_same_path(
+    tmp_path: Path,
+    qt_app: QApplication,
+) -> None:
+    design_path = tmp_path / "reload.gds"
+    replacement_path = tmp_path / "replacement.gds"
+    _write_reload_design(design_path, box_left_um=10.0)
+    first_config = _reload_config(
+        design_path,
+        generation=1,
+        source_load_id="first-load",
+    )
+    render_worker = KLayoutRenderWorker()
+    snap_worker = KLayoutSnapWorker()
+    frames: list[RenderFrame] = []
+    responses: list[SnapResponse] = []
+    failures: list[object] = []
+    render_worker.frame_ready.connect(frames.append)
+    render_worker.failed.connect(failures.append)
+    snap_worker.snap_ready.connect(responses.append)
+    snap_worker.failed.connect(failures.append)
+
+    render_worker.submit(
+        RenderRequest(
+            1,
+            first_config,
+            first_config.display_bounds,
+            240,
+            240,
+            1,
+            2.4,
+            "minimap",
+        )
+    )
+    snap_worker.submit_click(
+        SnapRequest(1, first_config, (10.0, 40.0), 0.25, "click")
+    )
+    _process_until(qt_app, lambda: len(frames) == 1 and len(responses) == 1)
+
+    _write_reload_design(replacement_path, box_left_um=70.0)
+    os.replace(replacement_path, design_path)
+    second_config = _reload_config(
+        design_path,
+        generation=2,
+        source_load_id="second-load",
+    )
+    render_worker.submit(
+        RenderRequest(
+            2,
+            second_config,
+            second_config.display_bounds,
+            240,
+            240,
+            2,
+            2.4,
+            "minimap",
+        )
+    )
+    snap_worker.submit_click(
+        SnapRequest(2, second_config, (70.0, 40.0), 0.25, "click")
+    )
+    _process_until(qt_app, lambda: len(frames) == 2 and len(responses) == 2)
+    render_worker.stop()
+    snap_worker.stop()
+
+    assert failures == []
+    assert frames[0].image != frames[1].image
+    assert responses[0].result.point == pytest.approx((10.0, 40.0))
+    assert responses[1].result.point == pytest.approx((70.0, 40.0))
 
 
 @pytest.mark.parametrize(

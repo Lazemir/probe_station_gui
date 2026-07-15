@@ -26,6 +26,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from probe_station_gui.design.klayout_types import (
     KLayoutConfig,
+    RenderFailure,
     RenderFrame,
     RenderRequest,
 )
@@ -115,13 +116,18 @@ class MicroscopeView(QWidget):
         self._minimap_render_generation = 0
         self._minimap_render_worker_factory = minimap_render_worker_factory
         self._minimap_render_worker: KLayoutRenderWorker | None = None
-        self._minimap_render_worker_path: Path | None = None
+        self._minimap_render_worker_source_key: tuple[Path, str | None] | None = None
+        self._retired_minimap_workers: set[object] = set()
+        self._minimap_retirement_callbacks: dict[object, object] = {}
         self._minimap_klayout_config: KLayoutConfig | None = None
         self._minimap_klayout_signature: tuple[object, ...] | None = None
         self._minimap_klayout_generation = 0
         self._minimap_request_id = 0
         self._minimap_viewport_generation = 0
         self._minimap_latest_request_id: int | None = None
+        self._minimap_latest_request: RenderRequest | None = None
+        self._minimap_retry_count = 0
+        self._minimap_failed_key: tuple[object, ...] | None = None
         self._minimap_desired_key: tuple[object, ...] | None = None
         self._minimap_pending_render: (
             tuple[QSize, tuple[object, ...]] | None
@@ -194,7 +200,7 @@ class MicroscopeView(QWidget):
             self._configure_minimap_document(document)
             self._probe_route_snapshot_token = None
         previous_state = (
-            self._design_document,
+            id(self._design_document),
             tuple(target.id for target in self._design_targets),
             self._selected_target_id,
             self._probe_route_snapshot,
@@ -218,7 +224,7 @@ class MicroscopeView(QWidget):
         self._source_design_marks = list(source_design_marks)
         self._check_design_marks = list(check_design_marks)
         current_state = (
-            self._design_document,
+            id(self._design_document),
             tuple(target.id for target in self._design_targets),
             self._selected_target_id,
             current_route_snapshot,
@@ -258,6 +264,7 @@ class MicroscopeView(QWidget):
         display_bounds = tuple(document.bounds)
         signature = (
             resolved_path,
+            document.source_load_id,
             document.top_cell_name,
             frozenset(document.visible_layers),
             source_bounds,
@@ -266,7 +273,8 @@ class MicroscopeView(QWidget):
         )
         if (
             self._minimap_render_worker is not None
-            and self._minimap_render_worker_path != resolved_path
+            and self._minimap_render_worker_source_key
+            != (resolved_path, document.source_load_id)
         ):
             self._stop_minimap_render_worker(timeout_s=0.0)
         if (
@@ -285,6 +293,7 @@ class MicroscopeView(QWidget):
             display_bounds=display_bounds,
             rotation_quarter_turns=document.rotation_quarter_turns,
             generation=self._minimap_klayout_generation,
+            source_load_id=document.source_load_id,
         )
         self._invalidate_minimap_background()
 
@@ -295,6 +304,9 @@ class MicroscopeView(QWidget):
         self._minimap_desired_key = None
         self._minimap_render_key = None
         self._minimap_latest_request_id = None
+        self._minimap_latest_request = None
+        self._minimap_retry_count = 0
+        self._minimap_failed_key = None
         self._minimap_cache_key = None
         self._minimap_background = None
         self._minimap_background_config_generation = None
@@ -302,7 +314,7 @@ class MicroscopeView(QWidget):
     def _stop_minimap_render_worker(self, *, timeout_s: float) -> None:
         worker = self._minimap_render_worker
         self._minimap_render_worker = None
-        self._minimap_render_worker_path = None
+        self._minimap_render_worker_source_key = None
         if worker is None:
             return
         try:
@@ -313,7 +325,33 @@ class MicroscopeView(QWidget):
             worker.failed.disconnect(self._on_klayout_minimap_failed)
         except (RuntimeError, TypeError):
             pass
+        finished = getattr(worker, "finished", None)
+        if finished is None:
+            worker.stop(timeout_s=timeout_s)
+            worker.deleteLater()
+            return
+        def callback(worker: object = worker) -> None:
+            self._finalize_retired_minimap_worker(worker)
+
+        self._retired_minimap_workers.add(worker)
+        self._minimap_retirement_callbacks[worker] = callback
+        finished.connect(callback)
         worker.stop(timeout_s=timeout_s)
+        if bool(getattr(worker, "is_finished", False)):
+            self._finalize_retired_minimap_worker(worker)
+
+    def _finalize_retired_minimap_worker(self, worker: object) -> None:
+        if worker not in self._retired_minimap_workers:
+            return
+        callback = self._minimap_retirement_callbacks.pop(worker, None)
+        finished = getattr(worker, "finished", None)
+        if callback is not None and finished is not None:
+            try:
+                finished.disconnect(callback)
+            except (RuntimeError, TypeError):
+                pass
+        self._retired_minimap_workers.discard(worker)
+        worker.deleteLater()
 
     def shutdown(self) -> None:
         """Detach the minimap worker on its creator thread without waiting."""
@@ -1256,6 +1294,8 @@ class MicroscopeView(QWidget):
             pixel_height,
         )
         self._minimap_desired_key = cache_key
+        if self._minimap_failed_key is not None and self._minimap_failed_key != cache_key:
+            self._minimap_failed_key = None
         if (
             self._minimap_cache_key == cache_key
             and self._minimap_background is not None
@@ -1263,6 +1303,15 @@ class MicroscopeView(QWidget):
             self._minimap_pending_render = None
             self._minimap_render_timer.stop()
             return self._minimap_background
+        if self._minimap_failed_key == cache_key:
+            self._minimap_pending_render = None
+            self._minimap_render_timer.stop()
+            if (
+                self._minimap_background is not None
+                and self._minimap_background_config_generation == config.generation
+            ):
+                return self._minimap_background
+            return None
         if self._minimap_render_key == cache_key:
             self._minimap_pending_render = None
             self._minimap_render_timer.stop()
@@ -1310,15 +1359,25 @@ class MicroscopeView(QWidget):
             return
 
         worker = self._minimap_render_worker
-        if worker is None or self._minimap_render_worker_path != config.path:
+        source_key = (config.path, config.source_load_id)
+        if worker is None or self._minimap_render_worker_source_key != source_key:
             if worker is not None:
                 self._stop_minimap_render_worker(timeout_s=0.0)
             worker = self._minimap_render_worker_factory()
             self._minimap_render_worker = worker
-            self._minimap_render_worker_path = config.path
+            self._minimap_render_worker_source_key = source_key
             worker.frame_ready.connect(self._on_klayout_minimap_frame)
             worker.failed.connect(self._on_klayout_minimap_failed)
+        self._submit_klayout_minimap_request(worker, config, cache_key, retry_count=0)
 
+    def _submit_klayout_minimap_request(
+        self,
+        worker: KLayoutRenderWorker,
+        config: KLayoutConfig,
+        cache_key: tuple[object, ...],
+        *,
+        retry_count: int,
+    ) -> None:
         pixel_width = int(cache_key[4])
         pixel_height = int(cache_key[5])
         left, bottom, right, top = config.display_bounds
@@ -1338,6 +1397,8 @@ class MicroscopeView(QWidget):
             purpose="minimap",
         )
         self._minimap_latest_request_id = request.request_id
+        self._minimap_latest_request = request
+        self._minimap_retry_count = int(retry_count)
         self._minimap_render_key = cache_key
         logger.debug(
             "KLayout minimap render scheduled request=%d size=%dx%d document=%s",
@@ -1368,9 +1429,11 @@ class MicroscopeView(QWidget):
         ):
             return
         self._minimap_render_key = None
+        self._minimap_latest_request = None
         self._minimap_cache_key = cache_key
         self._minimap_background_config_generation = config.generation
         self._minimap_background = QPixmap.fromImage(frame.image)
+        self._minimap_failed_key = None
         logger.debug(
             "KLayout minimap render accepted request=%d elapsed_ms=%.2f",
             frame.request_id,
@@ -1378,10 +1441,36 @@ class MicroscopeView(QWidget):
         )
         self.update()
 
-    def _on_klayout_minimap_failed(self, message: str) -> None:
+    def _on_klayout_minimap_failed(self, failure: object) -> None:
+        config = self._minimap_klayout_config
+        request = self._minimap_latest_request
+        cache_key = self._minimap_render_key
+        if (
+            config is None
+            or request is None
+            or cache_key is None
+            or not isinstance(failure, RenderFailure)
+            or failure.request_id != request.request_id
+            or failure.config_generation != config.generation
+            or failure.viewport_generation != request.viewport_generation
+            or failure.purpose != "minimap"
+            or self._minimap_desired_key != cache_key
+        ):
+            return
         self._minimap_render_key = None
         self._minimap_latest_request_id = None
-        logger.error("KLayout minimap render failed: %s", message)
+        self._minimap_latest_request = None
+        logger.error("KLayout minimap render failed: %s", failure.message)
+        worker = self._minimap_render_worker
+        if worker is None or self._minimap_retry_count >= 1:
+            self._minimap_failed_key = cache_key
+            return
+        self._submit_klayout_minimap_request(
+            worker,
+            config,
+            cache_key,
+            retry_count=self._minimap_retry_count + 1,
+        )
 
     def _minimap_static_overlay_for_size(self, size: QSize) -> QPixmap | None:
         if self._design_document is None:

@@ -8,10 +8,12 @@ import pytest
 from probe_station_gui.design.klayout_types import (
     KLayoutConfig,
     PendingClick,
+    RenderFailure,
     RenderFrame,
     RenderRequest,
     SnapRequest,
     SnapResponse,
+    SnapFailure,
 )
 from probe_station_gui.design.model import SnapResult
 
@@ -25,6 +27,7 @@ def _config(*, rotation_quarter_turns: int = 0) -> KLayoutConfig:
         display_bounds=(-5.0, 5.0, 15.0, 15.0),
         rotation_quarter_turns=rotation_quarter_turns,
         generation=7,
+        source_load_id="load-7",
     )
 
 
@@ -122,3 +125,26 @@ def test_snap_and_pending_click_contracts_preserve_correlation_and_payload() -> 
         response.result = SnapResult(request.point, "free", 0.0)  # type: ignore[misc]
     with pytest.raises(FrozenInstanceError):
         pending.action = "route"  # type: ignore[misc]
+
+
+def test_request_failures_are_frozen_and_fully_correlated() -> None:
+    render = RenderFailure(11, 7, 13, "exact", "render failed")
+    snap = SnapFailure(17, 7, "click", "snap failed")
+
+    assert (
+        render.request_id,
+        render.config_generation,
+        render.viewport_generation,
+        render.purpose,
+        render.message,
+    ) == (11, 7, 13, "exact", "render failed")
+    assert (
+        snap.request_id,
+        snap.config_generation,
+        snap.purpose,
+        snap.message,
+    ) == (17, 7, "click", "snap failed")
+    with pytest.raises(FrozenInstanceError):
+        render.message = "changed"  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        snap.message = "changed"  # type: ignore[misc]

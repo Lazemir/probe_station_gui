@@ -12,10 +12,12 @@ import pytest
 
 from probe_station_gui.design.klayout_types import (
     KLayoutConfig,
+    RenderFailure,
     RenderFrame,
     RenderRequest,
     SnapRequest,
     SnapResponse,
+    SnapFailure,
 )
 from probe_station_gui.design.klayout_workers import (
     KLayoutRenderWorker,
@@ -624,19 +626,21 @@ def test_failed_signal_is_emitted_unlocked_and_worker_stops_after_backend_error(
             pass
 
     worker = KLayoutRenderWorker(backend_factory=FailingBackend)
-    failures: list[str] = []
+    failures: list[RenderFailure] = []
 
-    def collect_failure(message: str) -> None:
+    def collect_failure(failure: RenderFailure) -> None:
         assert worker._condition.acquire(blocking=False)
         worker._condition.release()
-        failures.append(message)
+        failures.append(failure)
 
     worker.failed.connect(collect_failure, Qt.ConnectionType.DirectConnection)
     worker.submit(_render_request(1))
     _process_until(qt_app, lambda: bool(failures))
     worker.stop()
 
-    assert failures == ["RuntimeError: render exploded"]
+    assert len(failures) == 1
+    assert failures[0].request_id == 1
+    assert failures[0].message == "RuntimeError: render exploded"
 
 
 def test_stop_before_submit_does_not_create_a_thread_and_future_submit_is_ignored() -> None:
@@ -648,3 +652,87 @@ def test_stop_before_submit_does_not_create_a_thread_and_future_submit_is_ignore
     time.sleep(0.02)
 
     assert harness.factory_threads == []
+
+
+@pytest.mark.parametrize("kind", ["render", "snap"])
+def test_request_failure_keeps_request_correlation(
+    qt_app: QApplication,
+    kind: str,
+) -> None:
+    if kind == "render":
+        class Backend:
+            def ensure_config(self, _config: KLayoutConfig) -> None:
+                pass
+
+            def render(self, _request: RenderRequest) -> RenderFrame:
+                raise RuntimeError("render exploded")
+
+            def close(self) -> None:
+                pass
+
+        worker = KLayoutRenderWorker(backend_factory=Backend)
+        failures: list[RenderFailure] = []
+        worker.failed.connect(failures.append)
+        request = _render_request(31)
+        worker.submit(request)
+    else:
+        class Backend:
+            def ensure_config(self, _config: KLayoutConfig) -> None:
+                pass
+
+            def snap(self, _request: SnapRequest) -> SnapResponse:
+                raise RuntimeError("snap exploded")
+
+            def close(self) -> None:
+                pass
+
+        worker = KLayoutSnapWorker(backend_factory=Backend)
+        failures: list[SnapFailure] = []
+        request = _snap_request(32, purpose="click")
+        worker.failed.connect(failures.append)
+        worker.submit_click(request)
+
+    _process_until(qt_app, lambda: bool(failures))
+    worker.stop()
+
+    failure = failures[0]
+    assert failure.request_id == request.request_id
+    assert failure.config_generation == request.config.generation
+    assert failure.purpose == request.purpose
+    assert failure.message.endswith("exploded")
+    if kind == "render":
+        assert failure.viewport_generation == request.viewport_generation
+
+
+@pytest.mark.parametrize("kind", ["render", "snap"])
+def test_finished_is_delivered_on_creator_thread_after_bounded_stop(
+    qt_app: QApplication,
+    kind: str,
+) -> None:
+    creator_thread = threading.get_ident()
+    harness = (
+        _RenderHarness(block_ids={41})
+        if kind == "render"
+        else _SnapHarness(block_ids={41})
+    )
+    worker = (
+        KLayoutRenderWorker(backend_factory=harness.factory)
+        if kind == "render"
+        else KLayoutSnapWorker(backend_factory=harness.factory)
+    )
+    finished_threads: list[int] = []
+    worker.finished.connect(lambda: finished_threads.append(threading.get_ident()))
+    if kind == "render":
+        worker.submit(_render_request(41))
+    else:
+        worker.submit_hover(_snap_request(41))
+    assert harness.entered.wait(1.0)
+
+    started = time.monotonic()
+    worker.stop(0.0)
+    assert time.monotonic() - started < 0.1
+    assert finished_threads == []
+    harness.release.set()
+    _process_until(qt_app, lambda: bool(finished_threads))
+
+    assert finished_threads == [creator_thread]

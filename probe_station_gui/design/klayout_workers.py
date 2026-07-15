@@ -17,10 +17,12 @@ from .klayout_geometry import Segment2D, select_snap
 from .klayout_types import (
     KLayoutConfig,
     Point2D,
+    RenderFailure,
     RenderFrame,
     RenderRequest,
     SnapRequest,
     SnapResponse,
+    SnapFailure,
     forward_rotate_point,
     inverse_rotate_box,
     inverse_rotate_point,
@@ -62,8 +64,11 @@ class KLayoutRenderWorker(QObject):
 
     loaded = Signal(object)
     frame_ready = Signal(object)
-    failed = Signal(str)
+    failed = Signal(object)
+    lifecycle_failed = Signal(str)
+    finished = Signal()
     _publication_posted = Signal(object)
+    _finished_posted = Signal()
 
     def __init__(
         self,
@@ -80,8 +85,14 @@ class KLayoutRenderWorker(QObject):
         self._latest_config: KLayoutConfig | None = None
         self._stopping = False
         self._thread: threading.Thread | None = None
+        self._finished_publication_posted = False
+        self._thread_finished_event = threading.Event()
         self._publication_posted.connect(
             self._deliver_publication,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._finished_posted.connect(
+            self._deliver_finished,
             Qt.ConnectionType.QueuedConnection,
         )
 
@@ -112,6 +123,9 @@ class KLayoutRenderWorker(QObject):
             self._pending = None
             thread = self._thread
             self._condition.notify_all()
+            post_finished = thread is None
+        if post_finished:
+            self._post_finished()
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=max(0.0, deadline - time.monotonic()))
 
@@ -137,7 +151,13 @@ class KLayoutRenderWorker(QObject):
                 except Exception as exc:
                     self._post_publication(
                         "failed",
-                        f"{type(exc).__name__}: {exc}",
+                        RenderFailure(
+                            request_id=request.request_id,
+                            config_generation=request.config.generation,
+                            viewport_generation=request.viewport_generation,
+                            purpose=request.purpose,
+                            message=f"{type(exc).__name__}: {exc}",
+                        ),
                         request.config,
                     )
                     continue
@@ -148,7 +168,7 @@ class KLayoutRenderWorker(QObject):
                 )
         except Exception as exc:
             self._post_publication(
-                "failed",
+                "lifecycle_failed",
                 f"{type(exc).__name__}: {exc}",
             )
         finally:
@@ -157,9 +177,10 @@ class KLayoutRenderWorker(QObject):
                     backend.close()
                 except Exception as exc:
                     self._post_publication(
-                        "failed",
+                        "lifecycle_failed",
                         f"{type(exc).__name__}: {exc}",
                     )
+            self._post_finished()
 
     def _take_pending(self) -> RenderRequest | object:
         with self._condition:
@@ -193,6 +214,18 @@ class KLayoutRenderWorker(QObject):
             )
         )
 
+    def _post_finished(self) -> None:
+        with self._condition:
+            if self._finished_publication_posted:
+                return
+            self._finished_publication_posted = True
+            self._thread_finished_event.set()
+        self._finished_posted.emit()
+
+    @property
+    def is_finished(self) -> bool:
+        return self._thread_finished_event.is_set()
+
     @Slot(object)
     def _deliver_publication(self, publication: _Publication) -> None:
         with self._condition:
@@ -205,14 +238,21 @@ class KLayoutRenderWorker(QObject):
                 return
         getattr(self, publication.kind).emit(publication.value)
 
+    @Slot()
+    def _deliver_finished(self) -> None:
+        self.finished.emit()
+
 
 class KLayoutSnapWorker(QObject):
     """Snap on one daemon thread; lifecycle calls belong to the creator thread."""
 
     loaded = Signal(object)
     snap_ready = Signal(object)
-    failed = Signal(str)
+    failed = Signal(object)
+    lifecycle_failed = Signal(str)
+    finished = Signal()
     _publication_posted = Signal(object)
+    _finished_posted = Signal()
 
     def __init__(
         self,
@@ -230,8 +270,14 @@ class KLayoutSnapWorker(QObject):
         self._latest_config: KLayoutConfig | None = None
         self._stopping = False
         self._thread: threading.Thread | None = None
+        self._finished_publication_posted = False
+        self._thread_finished_event = threading.Event()
         self._publication_posted.connect(
             self._deliver_publication,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._finished_posted.connect(
+            self._deliver_finished,
             Qt.ConnectionType.QueuedConnection,
         )
 
@@ -256,6 +302,9 @@ class KLayoutSnapWorker(QObject):
             self._clicks.clear()
             thread = self._thread
             self._condition.notify_all()
+            post_finished = thread is None
+        if post_finished:
+            self._post_finished()
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=max(0.0, deadline - time.monotonic()))
 
@@ -299,7 +348,12 @@ class KLayoutSnapWorker(QObject):
                 except Exception as exc:
                     self._post_publication(
                         "failed",
-                        f"{type(exc).__name__}: {exc}",
+                        SnapFailure(
+                            request_id=request.request_id,
+                            config_generation=request.config.generation,
+                            purpose=request.purpose,
+                            message=f"{type(exc).__name__}: {exc}",
+                        ),
                         request.config,
                     )
                     continue
@@ -310,7 +364,7 @@ class KLayoutSnapWorker(QObject):
                 )
         except Exception as exc:
             self._post_publication(
-                "failed",
+                "lifecycle_failed",
                 f"{type(exc).__name__}: {exc}",
             )
         finally:
@@ -319,9 +373,10 @@ class KLayoutSnapWorker(QObject):
                     backend.close()
                 except Exception as exc:
                     self._post_publication(
-                        "failed",
+                        "lifecycle_failed",
                         f"{type(exc).__name__}: {exc}",
                     )
+            self._post_finished()
 
     def _take_next(self) -> SnapRequest | object:
         with self._condition:
@@ -362,6 +417,18 @@ class KLayoutSnapWorker(QObject):
             )
         )
 
+    def _post_finished(self) -> None:
+        with self._condition:
+            if self._finished_publication_posted:
+                return
+            self._finished_publication_posted = True
+            self._thread_finished_event.set()
+        self._finished_posted.emit()
+
+    @property
+    def is_finished(self) -> bool:
+        return self._thread_finished_event.is_set()
+
     @Slot(object)
     def _deliver_publication(self, publication: _Publication) -> None:
         with self._condition:
@@ -374,6 +441,10 @@ class KLayoutSnapWorker(QObject):
                 return
         getattr(self, publication.kind).emit(publication.value)
 
+    @Slot()
+    def _deliver_finished(self) -> None:
+        self.finished.emit()
+
 
 class _KLayoutRenderBackend:
     """Own the Qt-less KLayout view used by one render worker thread."""
@@ -384,9 +455,10 @@ class _KLayoutRenderBackend:
         self._cellview: Any = None
         self._cellview_index: int | None = None
         self._path: Path | None = None
+        self._source_load_id: str | None = None
 
     def ensure_config(self, config: KLayoutConfig) -> None:
-        if self._path != config.path:
+        if self._path != config.path or self._source_load_id != config.source_load_id:
             self.close()
             import klayout.db as db
             import klayout.lay as lay
@@ -396,6 +468,7 @@ class _KLayoutRenderBackend:
             self._cellview_index = self._view.load_layout(str(config.path), False)
             self._cellview = self._view.cellview(self._cellview_index)
             self._path = config.path
+            self._source_load_id = config.source_load_id
 
         layout = self._cellview.layout()
         cell = layout.cell(config.top_cell_name)
@@ -451,6 +524,7 @@ class _KLayoutRenderBackend:
         self._view = None
         self._cellview_index = None
         self._path = None
+        self._source_load_id = None
         self._db = None
         del cellview
         if view is not None:
@@ -481,9 +555,10 @@ class _KLayoutSnapBackend:
         self._top_cell: Any = None
         self._layer_indexes: dict[tuple[int, int], int] = {}
         self._path: Path | None = None
+        self._source_load_id: str | None = None
 
     def ensure_config(self, config: KLayoutConfig) -> None:
-        if self._path != config.path:
+        if self._path != config.path or self._source_load_id != config.source_load_id:
             self.close()
             import klayout.db as db
 
@@ -496,6 +571,7 @@ class _KLayoutSnapBackend:
                 for info in layout.layer_infos()
             }
             self._path = config.path
+            self._source_load_id = config.source_load_id
 
         top_cell = self._layout.cell(config.top_cell_name)
         if top_cell is None:
@@ -564,6 +640,7 @@ class _KLayoutSnapBackend:
         self._layout = None
         self._layer_indexes = {}
         self._path = None
+        self._source_load_id = None
         self._db = None
         del top_cell
         del layout

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import os
 from pathlib import Path
+import threading
 import time
 
 import klayout.db as db
@@ -15,7 +17,7 @@ from PySide6.QtCore import QObject, QRect, QSize, Signal
 from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import QApplication
 
-from probe_station_gui.design.klayout_types import RenderFrame
+from probe_station_gui.design.klayout_types import RenderFailure, RenderFrame
 from probe_station_gui.design.model import DesignDocument
 from probe_station_gui.views.microscope_view import MicroscopeView
 
@@ -28,7 +30,8 @@ def qt_app() -> QApplication:
 class _RenderWorker(QObject):
     loaded = Signal(object)
     frame_ready = Signal(object)
-    failed = Signal(str)
+    failed = Signal(object)
+    finished = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -149,6 +152,19 @@ def _write_tall_design(path: Path) -> None:
     layout.dbu = 0.001
     top = layout.create_cell("TOP")
     top.shapes(layout.layer(1, 0)).insert(db.Box(0, 0, 50_000, 115_000))
+    layout.write(str(path))
+
+
+def _write_reload_design(path: Path, *, box_left_um: float) -> None:
+    layout = db.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    left = round(box_left_um * 1000.0)
+    top.shapes(layout.layer(1, 0)).insert(
+        db.Box(left, 40_000, left + 10_000, 50_000)
+    )
+    top.shapes(layout.layer(9, 0)).insert(db.Box(0, 0, 1_000, 1_000))
+    top.shapes(layout.layer(9, 0)).insert(db.Box(99_000, 99_000, 100_000, 100_000))
     layout.write(str(path))
 
 
@@ -294,6 +310,40 @@ def test_real_tall_klayout_raster_aligns_overlay_and_click_aspect_fit(
     view.close()
 
 
+def test_real_minimap_reloads_replaced_file_at_same_path(
+    qt_app: QApplication,
+    tmp_path: Path,
+) -> None:
+    design_path = tmp_path / "reload.gds"
+    replacement_path = tmp_path / "replacement.gds"
+    _write_reload_design(design_path, box_left_um=10.0)
+    first = DesignDocument.load(design_path).with_visible_layers({(1, 0)})
+    view = MicroscopeView()
+    _set_document(view, first)
+    view._design_background_for_size(QSize(180, 160))
+    _process_until(qt_app, lambda: view._minimap_background is not None)
+    first_image = view._minimap_background.toImage().copy()
+
+    _write_reload_design(replacement_path, box_left_um=70.0)
+    os.replace(replacement_path, design_path)
+    second = DesignDocument.load(design_path).with_visible_layers({(1, 0)})
+    _set_document(view, second)
+    view._design_background_for_size(QSize(180, 160))
+    _process_until(
+        qt_app,
+        lambda: (
+            view._minimap_background is not None
+            and view._minimap_background_config_generation
+            == view._minimap_klayout_config.generation
+        ),
+    )
+    second_image = view._minimap_background.toImage()
+
+    assert first.source_load_id != second.source_load_id
+    assert first_image != second_image
+    view.close()
+
+
 def test_resize_coalesces_to_one_newest_minimap_request(
     qt_app: QApplication,
     tmp_path: Path,
@@ -395,6 +445,30 @@ def test_layer_and_rotation_changes_reuse_path_but_invalidate_frame(
     view.close()
 
 
+def test_same_path_new_source_retires_minimap_worker(
+    qt_app: QApplication,
+    tmp_path: Path,
+) -> None:
+    view, workers = _view_with_workers()
+    first = replace(_document(tmp_path / "same.gds"), source_load_id="load-a")
+    _set_document(view, first)
+    view._design_background_for_size(QSize(100, 80))
+    _drain_events(qt_app)
+    assert len(workers) == 1
+
+    _set_document(view, first.with_visible_layers({(2, 0)}))
+    view._design_background_for_size(QSize(100, 80))
+    _drain_events(qt_app)
+    assert len(workers) == 1
+
+    _set_document(view, replace(first, source_load_id="load-b"))
+    assert workers[0].stop_calls == [0.0]
+    assert workers[0] in view._retired_minimap_workers
+    view._design_background_for_size(QSize(100, 80))
+    _drain_events(qt_app)
+    assert len(workers) == 2
+
+
 def test_path_switch_detaches_and_removal_or_close_stops_bounded(
     qt_app: QApplication,
     tmp_path: Path,
@@ -454,7 +528,7 @@ def test_removal_and_close_do_not_wait_for_running_worker(
     assert workers[0].stop_calls == [0.0]
 
 
-def test_render_failure_allows_same_size_retry(
+def test_render_failure_retries_once_and_stale_failure_preserves_newer_state(
     qt_app: QApplication,
     tmp_path: Path,
 ) -> None:
@@ -464,13 +538,102 @@ def test_render_failure_allows_same_size_retry(
     _drain_events(qt_app)
     assert len(workers[0].requests) == 1
 
-    workers[0].failed.emit("render failed")
-    view._design_background_for_size(QSize(100, 80))
+    first = workers[0].requests[0]
+    workers[0].failed.emit(
+        RenderFailure(
+            first.request_id + 100,
+            first.config.generation,
+            first.viewport_generation,
+            "minimap",
+            "stale",
+        )
+    )
+    assert len(workers[0].requests) == 1
+    workers[0].failed.emit(
+        RenderFailure(
+            first.request_id,
+            first.config.generation,
+            first.viewport_generation,
+            "minimap",
+            "render failed",
+        )
+    )
     _drain_events(qt_app)
 
     assert len(workers[0].requests) == 2
     assert workers[0].requests[1].request_id > workers[0].requests[0].request_id
+    retry = workers[0].requests[1]
+    workers[0].failed.emit(
+        RenderFailure(
+            retry.request_id,
+            retry.config.generation,
+            retry.viewport_generation,
+            "minimap",
+            "still failed",
+        )
+    )
+    _drain_events(qt_app)
+    assert len(workers[0].requests) == 2
+    assert view._design_background_for_size(QSize(100, 80)) is None
+    _drain_events(qt_app)
+    assert len(workers[0].requests) == 2
     view.close()
+
+
+def test_failure_for_size_superseded_before_delivery_does_not_retry(
+    qt_app: QApplication,
+    tmp_path: Path,
+) -> None:
+    view, workers = _view_with_workers()
+    _set_document(view, _document(tmp_path / "superseded.gds"))
+    view._design_background_for_size(QSize(100, 80))
+    _drain_events(qt_app)
+    first = workers[0].requests[-1]
+    view._design_background_for_size(QSize(140, 100))
+
+    workers[0].failed.emit(
+        RenderFailure(
+            first.request_id,
+            first.config.generation,
+            first.viewport_generation,
+            "minimap",
+            "superseded",
+        )
+    )
+    _drain_events(qt_app)
+
+    assert len(workers[0].requests) == 2
+    assert workers[0].requests[-1].pixel_width != first.pixel_width
+    view.close()
+
+
+def test_retired_minimap_worker_finalizes_on_creator_thread(
+    qt_app: QApplication,
+    tmp_path: Path,
+) -> None:
+    creator_thread = threading.get_ident()
+    view, workers = _view_with_workers()
+    first = replace(_document(tmp_path / "first.gds"), source_load_id="first")
+    _set_document(view, first)
+    view._design_background_for_size(QSize(100, 80))
+    _drain_events(qt_app)
+    worker = workers[0]
+    delete_threads: list[int] = []
+    worker.deleteLater = lambda: delete_threads.append(threading.get_ident())
+
+    started = time.monotonic()
+    _set_document(
+        view,
+        replace(_document(tmp_path / "second.gds"), source_load_id="second"),
+    )
+    assert time.monotonic() - started < 0.1
+    assert worker in view._retired_minimap_workers
+
+    worker.finished.emit()
+    qt_app.processEvents()
+
+    assert worker not in view._retired_minimap_workers
+    assert delete_threads == [creator_thread]
 
 
 def test_legacy_in_memory_minimap_keeps_polygon_renderer(tmp_path: Path) -> None:

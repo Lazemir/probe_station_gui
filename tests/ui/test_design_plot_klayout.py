@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import os
 from pathlib import Path
+import threading
+import time
 
 import pytest
 
@@ -13,7 +16,12 @@ pytest.importorskip("pyqtgraph")
 from PySide6.QtCore import QObject, QPointF, Signal
 from PySide6.QtWidgets import QApplication
 
-from probe_station_gui.design.klayout_types import KLayoutConfig, SnapResponse
+from probe_station_gui.design.klayout_types import (
+    KLayoutConfig,
+    RenderFailure,
+    SnapFailure,
+    SnapResponse,
+)
 from probe_station_gui.design.model import DesignDocument, SnapResult
 from probe_station_gui.views import design_plot_pane as plot_module
 from probe_station_gui.views.design_navigator_panel import (
@@ -28,7 +36,8 @@ def qt_app() -> QApplication:
 
 
 class _RasterController(QObject):
-    failed = Signal(str)
+    failed = Signal(object)
+    succeeded = Signal()
 
     def __init__(self, *_args, **_kwargs) -> None:
         super().__init__()
@@ -55,6 +64,7 @@ class _RasterController(QObject):
             display_bounds=document.bounds,
             rotation_quarter_turns=document.rotation_quarter_turns,
             generation=self.generation,
+            source_load_id=document.source_load_id,
         )
 
     def shutdown(self) -> None:
@@ -66,7 +76,8 @@ class _RasterController(QObject):
 class _SnapWorker(QObject):
     loaded = Signal(object)
     snap_ready = Signal(object)
-    failed = Signal(str)
+    failed = Signal(object)
+    finished = Signal()
 
     instances = []
 
@@ -151,6 +162,23 @@ def test_file_configuration_changes_reuse_snap_worker_and_generation(
     assert pane._snap_worker is not worker
 
 
+def test_same_path_new_source_retires_snap_worker_while_same_source_reuses(
+    pane,
+    tmp_path: Path,
+) -> None:
+    first = replace(_document(tmp_path / "same.gds"), source_load_id="load-a")
+    pane.set_document(first)
+    worker = pane._snap_worker
+    pane.set_document(first.with_visible_layers({(2, 0)}))
+    assert pane._snap_worker is worker
+
+    pane.set_document(replace(first, source_load_id="load-b"))
+
+    assert pane._snap_worker is not worker
+    assert worker.stop_calls == [0.0]
+    assert worker in pane._retired_snap_workers
+
+
 def test_hover_is_replaceable_and_click_waits_for_matching_current_response(
     pane, tmp_path: Path
 ) -> None:
@@ -191,6 +219,79 @@ def test_hover_is_replaceable_and_click_waits_for_matching_current_response(
 
     assert len(worker.hover_requests) == 2
     assert moves == [(50.0, 60.0)]
+
+
+def test_matching_hover_failure_only_clears_matching_hover(pane, tmp_path: Path) -> None:
+    pane.set_document(_document(tmp_path / "hover-failure.gds"))
+    pane._submit_file_backed_hover((1.0, 2.0))
+    first = pane._snap_worker.hover_requests[-1]
+    pane._submit_file_backed_hover((3.0, 4.0))
+    second = pane._snap_worker.hover_requests[-1]
+    pane._set_hover_snap(SnapResult((9.0, 9.0), "vertex", 0.1))
+
+    pane._snap_worker.failed.emit(
+        SnapFailure(first.request_id, first.config.generation, "hover", "stale")
+    )
+    assert pane._hover_snap is not None
+    pane._snap_worker.failed.emit(
+        SnapFailure(second.request_id, second.config.generation, "hover", "current")
+    )
+    assert pane._hover_snap is None
+
+
+@pytest.mark.parametrize(
+    ("action", "payload", "signal_name"),
+    [
+        ("route_pick", ("array_origin",), "route_pick_requested"),
+        ("route_point", (), "route_point_requested"),
+        ("move", (), "move_requested"),
+        ("calibration", (0,), "calibration_point_selected"),
+    ],
+)
+def test_click_snap_failure_removes_only_matching_action_without_raw_fallback(
+    pane,
+    tmp_path: Path,
+    action: str,
+    payload: tuple[object, ...],
+    signal_name: str,
+) -> None:
+    pane.set_document(_document(tmp_path / f"{action}.gds"))
+    emitted: list[tuple[object, ...]] = []
+    getattr(pane, signal_name).connect(lambda *args: emitted.append(args))
+    pane._submit_file_backed_click(action, (7.0, 8.0), payload)
+    matching = pane._snap_worker.click_requests[-1]
+    pane._submit_file_backed_click("move", (70.0, 80.0))
+    other = pane._snap_worker.click_requests[-1]
+
+    pane._snap_worker.failed.emit(
+        SnapFailure(
+            matching.request_id,
+            matching.config.generation,
+            "click",
+            "query failed",
+        )
+    )
+
+    assert emitted == []
+    assert matching.request_id not in pane._pending_clicks
+    assert other.request_id in pane._pending_clicks
+    assert pane._status_label.text() == "Snap failed. Try again."
+
+
+def test_render_failure_state_clears_after_accepted_frame_signal(
+    pane,
+    tmp_path: Path,
+) -> None:
+    pane.set_document(_document(tmp_path / "render-status.gds"))
+    config = pane._klayout_config
+    pane._raster_controller.failed.emit(
+        RenderFailure(1, config.generation, 1, "exact", "failed")
+    )
+    assert pane._status_label.text() == "Design rendering failed."
+
+    pane._raster_controller.succeeded.emit()
+
+    assert pane._plot.isHidden() is False
 
 
 def _hover_response(request) -> SnapResponse:
@@ -311,6 +412,33 @@ def test_unload_and_close_stop_workers(pane, tmp_path: Path) -> None:
 
     pane.shutdown()
     assert raster_controller.shutdown_calls == 1
+
+
+def test_retired_snap_worker_finalizes_on_creator_thread(
+    pane,
+    qt_app: QApplication,
+    tmp_path: Path,
+) -> None:
+    creator_thread = threading.get_ident()
+    pane.set_document(
+        replace(_document(tmp_path / "retire-a.gds"), source_load_id="a")
+    )
+    worker = pane._snap_worker
+    delete_threads: list[int] = []
+    worker.deleteLater = lambda: delete_threads.append(threading.get_ident())
+
+    started = time.monotonic()
+    pane.set_document(
+        replace(_document(tmp_path / "retire-b.gds"), source_load_id="b")
+    )
+    assert time.monotonic() - started < 0.1
+    assert worker in pane._retired_snap_workers
+
+    worker.finished.emit()
+    qt_app.processEvents()
+
+    assert worker not in pane._retired_snap_workers
+    assert delete_threads == [creator_thread]
 
 
 def test_design_window_close_detaches_workers_and_reopen_restores_document(

@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import klayout.db as db
@@ -44,6 +45,24 @@ def test_load_keeps_only_klayout_document_metadata(tmp_path: Path) -> None:
     assert document.snap_vertices.size == 0
     assert document.snap_segment_starts.size == 0
     assert document.snap_segment_ends.size == 0
+
+
+def test_fresh_load_has_new_source_identity_preserved_by_document_changes(
+    tmp_path: Path,
+) -> None:
+    design_path = tmp_path / "identity.gds"
+    _write_design(design_path)
+
+    first = DesignDocument.load(design_path)
+    second = DesignDocument.load(design_path)
+
+    assert first.source_load_id
+    assert second.source_load_id
+    assert first.source_load_id != second.source_load_id
+    assert replace(first, visible_layers=frozenset({(2, 3)})).source_load_id == first.source_load_id
+    assert first.with_visible_layers({(2, 3)}).source_load_id == first.source_load_id
+    assert first.with_top_cell("TOP").source_load_id == first.source_load_id
+    assert first.with_rotation_delta(1).source_load_id == first.source_load_id
 
 
 def test_file_backed_layer_and_cell_changes_do_not_materialize_polygons(

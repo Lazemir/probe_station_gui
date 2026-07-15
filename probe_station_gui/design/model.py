@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import math
+import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
@@ -279,6 +280,7 @@ class DesignDocument:
     cell_bounds: Mapping[str, tuple[float, float, float, float]] = field(
         default_factory=lambda: MappingProxyType({})
     )
+    source_load_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -382,6 +384,7 @@ class DesignDocument:
             file_backed=True,
             available_layers=available_layers,
             cell_bounds=cell_bounds,
+            source_load_id=uuid.uuid4().hex,
         )
 
     @classmethod

@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QGraphicsObject
 from probe_station_gui.design.klayout_types import (
     Box2D,
     KLayoutConfig,
+    RenderFailure,
     RenderFrame,
     RenderRequest,
 )
@@ -83,7 +84,8 @@ class KLayoutRasterItem(QGraphicsObject):
 class KLayoutRasterController(QObject):
     """Schedule newest-only viewport frames for one file-backed document."""
 
-    failed = Signal(str)
+    failed = Signal(object)
+    succeeded = Signal()
 
     def __init__(
         self,
@@ -100,7 +102,9 @@ class KLayoutRasterController(QObject):
         self._render_worker_factory = render_worker_factory
         self._device_pixel_ratio = device_pixel_ratio or (lambda: 1.0)
         self._worker: KLayoutRenderWorker | None = None
-        self._worker_path: Path | None = None
+        self._worker_source_key: tuple[Path, str | None] | None = None
+        self._retired_workers: set[QObject] = set()
+        self._retirement_callbacks: dict[QObject, Callable[[], None]] = {}
         self._config: KLayoutConfig | None = None
         self._config_generation = 0
         self._request_id = 0
@@ -108,6 +112,8 @@ class KLayoutRasterController(QObject):
         self._last_range_box: Box2D | None = self._current_viewport()
         self._pending_zoom = False
         self._shutdown = False
+        self._latest_request: RenderRequest | None = None
+        self._latest_retry_count = 0
 
         self._active_timer = QTimer(self)
         self._active_timer.setSingleShot(True)
@@ -147,12 +153,13 @@ class KLayoutRasterController(QObject):
             raise ValueError("KLayout raster rendering requires a file-backed document")
 
         resolved_path = Path(document.path).expanduser().resolve()
-        if self._worker is None or self._worker_path != resolved_path:
+        source_key = (resolved_path, document.source_load_id)
+        if self._worker is None or self._worker_source_key != source_key:
             self._stop_worker(timeout_s=0.0)
             self._worker = self._render_worker_factory()
-            self._worker_path = resolved_path
+            self._worker_source_key = source_key
             self._worker.frame_ready.connect(self._on_frame_ready)
-            self._worker.failed.connect(self.failed.emit)
+            self._worker.failed.connect(self._on_render_failed)
             self._raster_item.clear()
 
         self._config_generation += 1
@@ -164,6 +171,7 @@ class KLayoutRasterController(QObject):
             display_bounds=tuple(document.bounds),
             rotation_quarter_turns=document.rotation_quarter_turns,
             generation=self._config_generation,
+            source_load_id=document.source_load_id,
         )
         self._viewport_generation += 1
         self._last_range_box = self._current_viewport()
@@ -214,7 +222,7 @@ class KLayoutRasterController(QObject):
     def _stop_worker(self, *, timeout_s: float) -> None:
         worker = self._worker
         self._worker = None
-        self._worker_path = None
+        self._worker_source_key = None
         if worker is None:
             return
         try:
@@ -222,10 +230,36 @@ class KLayoutRasterController(QObject):
         except (RuntimeError, TypeError):
             pass
         try:
-            worker.failed.disconnect(self.failed.emit)
+            worker.failed.disconnect(self._on_render_failed)
         except (RuntimeError, TypeError):
             pass
+        finished = getattr(worker, "finished", None)
+        if finished is None:
+            worker.stop(timeout_s=timeout_s)
+            worker.deleteLater()
+            return
+        def callback(worker: QObject = worker) -> None:
+            self._finalize_retired_worker(worker)
+
+        self._retired_workers.add(worker)
+        self._retirement_callbacks[worker] = callback
+        finished.connect(callback)
         worker.stop(timeout_s=timeout_s)
+        if bool(getattr(worker, "is_finished", False)):
+            self._finalize_retired_worker(worker)
+
+    def _finalize_retired_worker(self, worker: QObject) -> None:
+        if worker not in self._retired_workers:
+            return
+        callback = self._retirement_callbacks.pop(worker, None)
+        finished = getattr(worker, "finished", None)
+        if callback is not None and finished is not None:
+            try:
+                finished.disconnect(callback)
+            except (RuntimeError, TypeError):
+                pass
+        self._retired_workers.discard(worker)
+        worker.deleteLater()
 
     def _on_range_changed(self, *_unused: object) -> None:
         if self._config is None or self._shutdown:
@@ -253,7 +287,13 @@ class KLayoutRasterController(QObject):
             self.request_exact()
         self._pending_zoom = False
 
-    def _submit(self, world_box: Box2D, *, purpose: str) -> None:
+    def _submit(
+        self,
+        world_box: Box2D,
+        *,
+        purpose: str,
+        retry_count: int = 0,
+    ) -> None:
         config = self._config
         worker = self._worker
         viewport = self._current_viewport()
@@ -264,18 +304,19 @@ class KLayoutRasterController(QObject):
         world_height = max(_MIN_WORLD_SPAN, float(world_box[3]) - float(world_box[1]))
         density = min(pixel_width / world_width, pixel_height / world_height)
         self._request_id += 1
-        worker.submit(
-            RenderRequest(
-                request_id=self._request_id,
-                config=config,
-                world_box=world_box,
-                pixel_width=pixel_width,
-                pixel_height=pixel_height,
-                viewport_generation=self._viewport_generation,
-                density=float(density),
-                purpose=purpose,
-            )
+        request = RenderRequest(
+            request_id=self._request_id,
+            config=config,
+            world_box=world_box,
+            pixel_width=pixel_width,
+            pixel_height=pixel_height,
+            viewport_generation=self._viewport_generation,
+            density=float(density),
+            purpose=purpose,
         )
+        self._latest_request = request
+        self._latest_retry_count = int(retry_count)
+        worker.submit(request)
 
     def _pixel_dimensions(self, viewport: Box2D, world_box: Box2D) -> tuple[int, int]:
         scene_rect = self._view_box.sceneBoundingRect()
@@ -337,6 +378,29 @@ class KLayoutRasterController(QObject):
             ):
                 return
         self._raster_item.set_frame(frame)
+        self.succeeded.emit()
+
+    def _on_render_failed(self, failure: object) -> None:
+        request = self._latest_request
+        config = self._config
+        if (
+            request is None
+            or config is None
+            or not isinstance(failure, RenderFailure)
+            or failure.request_id != request.request_id
+            or failure.config_generation != config.generation
+            or failure.viewport_generation != request.viewport_generation
+            or failure.purpose != request.purpose
+        ):
+            return
+        self.failed.emit(failure)
+        if self._latest_retry_count >= 1:
+            return
+        self._submit(
+            request.world_box,
+            purpose=request.purpose,
+            retry_count=self._latest_retry_count + 1,
+        )
 
 
 def _expanded_box(box: Box2D, fraction: float) -> Box2D:

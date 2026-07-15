@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import replace
 import os
 from pathlib import Path
+import threading
 import time
 
 import klayout.db as db
@@ -19,6 +21,7 @@ from PySide6.QtWidgets import QApplication, QGraphicsRectItem
 
 from probe_station_gui.design.klayout_types import (
     KLayoutConfig,
+    RenderFailure,
     RenderFrame,
     RenderRequest,
 )
@@ -62,7 +65,8 @@ class _ViewBox(QObject):
 class _RenderWorker(QObject):
     loaded = Signal(object)
     frame_ready = Signal(object)
-    failed = Signal(str)
+    failed = Signal(object)
+    finished = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -435,3 +439,132 @@ def test_same_path_reuses_worker_path_change_detaches_and_unload_joins_bounded(
     controller.set_document(None)
     assert workers[1].stop_calls == [0.5]
     assert controller.config is None
+
+
+def test_same_path_new_source_retires_worker_but_document_changes_reuse_it(
+    qt_app: QApplication,
+    tmp_path: Path,
+) -> None:
+    view_box = _ViewBox()
+    workers: list[_RenderWorker] = []
+
+    def factory() -> _RenderWorker:
+        worker = _RenderWorker()
+        workers.append(worker)
+        return worker
+
+    controller = KLayoutRasterController(
+        view_box,
+        KLayoutRasterItem(),
+        render_worker_factory=factory,
+    )
+    first = replace(_document(tmp_path / "same.gds"), source_load_id="load-a")
+    controller.set_document(first)
+    controller.set_document(first.with_visible_layers({(2, 0)}))
+    assert len(workers) == 1
+
+    controller.set_document(replace(first, source_load_id="load-b"))
+
+    assert len(workers) == 2
+    assert workers[0].stop_calls == [0.0]
+    assert controller.config.source_load_id == "load-b"
+
+
+def test_current_render_failure_retries_once_stale_failure_is_ignored_and_success_recovers(
+    qt_app: QApplication,
+    tmp_path: Path,
+) -> None:
+    view_box = _ViewBox()
+    worker = _RenderWorker()
+    controller, item = _controller(view_box, worker)
+    failures: list[RenderFailure] = []
+    successes: list[None] = []
+    controller.failed.connect(failures.append)
+    controller.succeeded.connect(lambda: successes.append(None))
+    controller.set_document(_document(tmp_path / "failure.gds"))
+    first = worker.requests[-1]
+
+    stale = RenderFailure(
+        first.request_id + 1,
+        first.config.generation,
+        first.viewport_generation,
+        first.purpose,
+        "stale",
+    )
+    worker.failed.emit(stale)
+    assert len(worker.requests) == 1
+    assert failures == []
+
+    worker.failed.emit(
+        RenderFailure(
+            first.request_id,
+            first.config.generation,
+            first.viewport_generation,
+            first.purpose,
+            "transient",
+        )
+    )
+    assert len(worker.requests) == 2
+    retry = worker.requests[-1]
+    assert failures[-1].message == "transient"
+
+    worker.failed.emit(
+        RenderFailure(
+            retry.request_id,
+            retry.config.generation,
+            retry.viewport_generation,
+            retry.purpose,
+            "still broken",
+        )
+    )
+    assert len(worker.requests) == 2
+    worker.frame_ready.emit(_frame(retry))
+    assert item.frame is not None
+    assert successes == [None]
+
+
+def test_running_worker_is_retained_until_creator_thread_finish(
+    qt_app: QApplication,
+    tmp_path: Path,
+) -> None:
+    creator_thread = threading.get_ident()
+
+    class RetirableWorker(_RenderWorker):
+        def __init__(self) -> None:
+            super().__init__()
+            self.delete_threads: list[int] = []
+
+        def deleteLater(self) -> None:  # noqa: N802 - Qt API
+            self.delete_threads.append(threading.get_ident())
+            super().deleteLater()
+
+    workers: list[RetirableWorker] = []
+
+    def factory() -> RetirableWorker:
+        worker = RetirableWorker()
+        workers.append(worker)
+        return worker
+
+    controller = KLayoutRasterController(
+        _ViewBox(),
+        KLayoutRasterItem(),
+        render_worker_factory=factory,
+    )
+    controller.set_document(
+        replace(_document(tmp_path / "first.gds"), source_load_id="first")
+    )
+    first = workers[0]
+
+    started = time.monotonic()
+    controller.set_document(
+        replace(_document(tmp_path / "second.gds"), source_load_id="second")
+    )
+    assert time.monotonic() - started < 0.1
+    assert first in controller._retired_workers
+    assert first.delete_threads == []
+
+    first.finished.emit()
+    qt_app.processEvents()
+
+    assert first not in controller._retired_workers
+    assert first.delete_threads == [creator_thread]

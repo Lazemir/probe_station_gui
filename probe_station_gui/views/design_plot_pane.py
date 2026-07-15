@@ -26,6 +26,8 @@ from probe_station_gui.design.model import (
 from probe_station_gui.design.klayout_types import (
     KLayoutConfig,
     PendingClick,
+    RenderFailure,
+    SnapFailure,
     SnapRequest,
     SnapResponse,
 )
@@ -92,11 +94,15 @@ class _DesignPlotPane(QWidget):
         self._latest_hover_request_id = 0
         self._pending_clicks: dict[int, PendingClick] = {}
         self._snap_worker: KLayoutSnapWorker | None = None
-        self._snap_worker_path = None
+        self._snap_worker_source_key = None
+        self._retired_snap_workers: set[object] = set()
+        self._snap_retirement_callbacks: dict[object, object] = {}
         self._klayout_config: KLayoutConfig | None = None
         self._raster_item: KLayoutRasterItem | None = None
         self._raster_controller: KLayoutRasterController | None = None
         self._shutdown = False
+        self._render_error_visible = False
+        self._snap_failure_visible = False
         self._plot = None
         self._status_label: QLabel | None = None
         self._route_geometry_redraw_timer: QTimer | None = None
@@ -141,6 +147,7 @@ class _DesignPlotPane(QWidget):
             parent=self,
         )
         self._raster_controller.failed.connect(self._on_klayout_render_failed)
+        self._raster_controller.succeeded.connect(self._on_klayout_render_succeeded)
 
         self._route_item = self._plot.plot([], [], pen=pg.mkPen("#4dd0e1", width=2))
         self._probe_route_item = self._plot.plot(
@@ -416,14 +423,18 @@ class _DesignPlotPane(QWidget):
         self._klayout_config = config
         if config is None:
             return
-        if self._snap_worker is not None and self._snap_worker_path == config.path:
+        source_key = (config.path, config.source_load_id)
+        if (
+            self._snap_worker is not None
+            and self._snap_worker_source_key == source_key
+        ):
             return
         self._stop_snap_worker(timeout_s=0.0)
         worker = KLayoutSnapWorker()
         worker.snap_ready.connect(self._on_file_backed_snap_ready)
         worker.failed.connect(self._on_klayout_snap_failed)
         self._snap_worker = worker
-        self._snap_worker_path = config.path
+        self._snap_worker_source_key = source_key
 
     def _detach_file_backed_document(self, *, timeout_s: float) -> None:
         self._klayout_config = None
@@ -436,7 +447,7 @@ class _DesignPlotPane(QWidget):
     def _stop_snap_worker(self, *, timeout_s: float) -> None:
         worker = self._snap_worker
         self._snap_worker = None
-        self._snap_worker_path = None
+        self._snap_worker_source_key = None
         if worker is None:
             return
         try:
@@ -447,14 +458,73 @@ class _DesignPlotPane(QWidget):
             worker.failed.disconnect(self._on_klayout_snap_failed)
         except (RuntimeError, TypeError):
             pass
-        worker.stop(timeout_s=timeout_s)
+        finished = getattr(worker, "finished", None)
+        if finished is None:
+            worker.stop(timeout_s=timeout_s)
+            worker.deleteLater()
+            return
+        def callback(worker: object = worker) -> None:
+            self._finalize_retired_snap_worker(worker)
 
-    def _on_klayout_render_failed(self, message: str) -> None:
-        logger.warning("KLayout design render failed: %s", message)
+        self._retired_snap_workers.add(worker)
+        self._snap_retirement_callbacks[worker] = callback
+        finished.connect(callback)
+        worker.stop(timeout_s=timeout_s)
+        if bool(getattr(worker, "is_finished", False)):
+            self._finalize_retired_snap_worker(worker)
+
+    def _finalize_retired_snap_worker(self, worker: object) -> None:
+        if worker not in self._retired_snap_workers:
+            return
+        callback = self._snap_retirement_callbacks.pop(worker, None)
+        finished = getattr(worker, "finished", None)
+        if callback is not None and finished is not None:
+            try:
+                finished.disconnect(callback)
+            except (RuntimeError, TypeError):
+                pass
+        self._retired_snap_workers.discard(worker)
+        worker.deleteLater()
+
+    def _on_klayout_render_failed(self, failure: RenderFailure) -> None:
+        logger.warning("KLayout design render failed: %s", failure.message)
+        self._render_error_visible = True
         self.set_status_message("Design rendering failed.")
 
-    def _on_klayout_snap_failed(self, message: str) -> None:
-        logger.warning("KLayout design snap failed: %s", message)
+    def _on_klayout_render_succeeded(self) -> None:
+        if not self._render_error_visible:
+            return
+        self._render_error_visible = False
+        if not self._snap_failure_visible:
+            self.set_status_message("")
+
+    def _on_klayout_snap_failed(self, failure: SnapFailure) -> None:
+        config = self._klayout_config
+        if config is None or failure.config_generation != config.generation:
+            return
+        logger.warning("KLayout design snap failed: %s", failure.message)
+        if failure.purpose == "hover":
+            if failure.request_id != self._latest_hover_request_id:
+                return
+            self._latest_hover_request_id = 0
+            self._set_hover_snap(None)
+            return
+        if failure.purpose != "click":
+            return
+        pending = self._pending_clicks.get(failure.request_id)
+        if pending is None or pending.config_generation != config.generation:
+            return
+        self._pending_clicks.pop(failure.request_id, None)
+        self._snap_failure_visible = True
+        self.set_status_message("Snap failed. Try again.")
+        QTimer.singleShot(1500, self._clear_snap_failure_status)
+
+    def _clear_snap_failure_status(self) -> None:
+        if not self._snap_failure_visible:
+            return
+        self._snap_failure_visible = False
+        if not self._render_error_visible:
+            self.set_status_message("")
 
     def set_status_message(self, message: str) -> None:
         if self._status_label is None or self._plot is None:

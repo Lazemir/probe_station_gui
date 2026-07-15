@@ -38,10 +38,14 @@ Core Python packages:
 - `opencv-python`
 - `rotpy`
 - `scipy`
-- `gdstk`
+- `klayout==0.30.9`
 - `pyqtgraph`
 - `fastapi`
 - `uvicorn`
+
+KLayout is licensed under GPL-3.0-or-later. Any distribution of this application
+together with KLayout must comply with the GPL-3.0-or-later distribution terms,
+including the applicable source-code and license-notice obligations.
 
 Optional packages for LCR support:
 - `pyvisa`

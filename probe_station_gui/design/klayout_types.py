@@ -23,6 +23,7 @@ class KLayoutConfig:
     display_bounds: Box2D
     rotation_quarter_turns: int
     generation: int
+    source_load_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -63,6 +64,17 @@ class RenderFrame:
 
 
 @dataclass(frozen=True)
+class RenderFailure:
+    """A render exception correlated to the request that caused it."""
+
+    request_id: int
+    config_generation: int
+    viewport_generation: int
+    purpose: str
+    message: str
+
+
+@dataclass(frozen=True)
 class SnapRequest:
     """One local geometry query around a raw design-space point."""
 
@@ -84,6 +96,16 @@ class SnapResponse:
     elapsed_ms: float
     shapes_inspected: int
     purpose: str = "hover"
+
+
+@dataclass(frozen=True)
+class SnapFailure:
+    """A snap exception correlated to the request that caused it."""
+
+    request_id: int
+    config_generation: int
+    purpose: str
+    message: str
 
 
 @dataclass(frozen=True)
@@ -152,9 +174,11 @@ __all__ = [
     "PendingClick",
     "Point2D",
     "RenderFrame",
+    "RenderFailure",
     "RenderRequest",
     "SnapRequest",
     "SnapResponse",
+    "SnapFailure",
     "forward_rotate_point",
     "inverse_rotate_box",
     "inverse_rotate_point",
