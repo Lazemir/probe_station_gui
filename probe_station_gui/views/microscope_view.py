@@ -243,7 +243,7 @@ class MicroscopeView(QWidget):
             self._minimap_klayout_config = None
             self._minimap_klayout_signature = None
             self._invalidate_minimap_background()
-            self._stop_minimap_render_worker(timeout_s=0.5)
+            self._stop_minimap_render_worker(timeout_s=0.0)
             return
         if not document.file_backed:
             self._minimap_klayout_generation += 1
@@ -316,7 +316,7 @@ class MicroscopeView(QWidget):
         worker.stop(timeout_s=timeout_s)
 
     def shutdown(self) -> None:
-        """Stop the minimap worker with a bounded creator-thread join."""
+        """Detach the minimap worker on its creator thread without waiting."""
 
         if self._minimap_renderer_shutdown:
             return
@@ -325,7 +325,7 @@ class MicroscopeView(QWidget):
         self._minimap_klayout_config = None
         self._minimap_klayout_signature = None
         self._invalidate_minimap_background()
-        self._stop_minimap_render_worker(timeout_s=0.5)
+        self._stop_minimap_render_worker(timeout_s=0.0)
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         self.shutdown()
@@ -1192,7 +1192,18 @@ class MicroscopeView(QWidget):
 
         background = self._design_background_for_size(content_rect.size())
         if background is not None:
-            painter.drawPixmap(content_rect, background, background.rect())
+            if self._design_document.file_backed:
+                background_rect = self._minimap_design_rect_for_bounds(
+                    content_rect,
+                    self._design_document.bounds,
+                )
+                painter.drawPixmap(
+                    background_rect,
+                    background,
+                    QRectF(background.rect()),
+                )
+            else:
+                painter.drawPixmap(content_rect.topLeft(), background)
 
         static_overlay = self._minimap_static_overlay_for_size(content_rect.size())
         if static_overlay is not None:
@@ -1228,7 +1239,14 @@ class MicroscopeView(QWidget):
         logical_height = int(size.height())
         if logical_width <= 0 or logical_height <= 0:
             return None
-        pixel_width, pixel_height = self._minimap_physical_size(size)
+        fitted_rect = self._minimap_design_rect_for_bounds(
+            QRect(QPoint(0, 0), size),
+            config.display_bounds,
+        )
+        pixel_width, pixel_height = self._minimap_physical_size(
+            fitted_rect.width(),
+            fitted_rect.height(),
+        )
         cache_key = (
             "klayout",
             config.generation,
@@ -1258,7 +1276,11 @@ class MicroscopeView(QWidget):
             return self._minimap_background
         return None
 
-    def _minimap_physical_size(self, size: QSize) -> tuple[int, int]:
+    def _minimap_physical_size(
+        self,
+        logical_width: float,
+        logical_height: float,
+    ) -> tuple[int, int]:
         try:
             device_scale = float(self.devicePixelRatioF())
         except Exception:
@@ -1266,8 +1288,8 @@ class MicroscopeView(QWidget):
         if not math.isfinite(device_scale) or device_scale <= 0.0:
             device_scale = 1.0
         return (
-            max(1, round(int(size.width()) * device_scale)),
-            max(1, round(int(size.height()) * device_scale)),
+            max(1, round(float(logical_width) * device_scale)),
+            max(1, round(float(logical_height) * device_scale)),
         )
 
     def _flush_klayout_minimap_render(self) -> None:
@@ -1357,6 +1379,8 @@ class MicroscopeView(QWidget):
         self.update()
 
     def _on_klayout_minimap_failed(self, message: str) -> None:
+        self._minimap_render_key = None
+        self._minimap_latest_request_id = None
         logger.error("MINIMAP KLAYOUT failed: %s", message)
 
     def _minimap_static_overlay_for_size(self, size: QSize) -> QPixmap | None:
@@ -1793,29 +1817,41 @@ class MicroscopeView(QWidget):
         left, bottom, right, top = bounds
         width = max(right - left, 1e-9)
         height = max(top - bottom, 1e-9)
-        pad = 6.0
-        usable_width = max(rect.width() - 2.0 * pad, 1.0)
-        usable_height = max(rect.height() - 2.0 * pad, 1.0)
-        scale = min(usable_width / width, usable_height / height)
-        offset_x = rect.left() + (rect.width() - width * scale) * 0.5
-        offset_y = rect.top() + (rect.height() - height * scale) * 0.5
-        x_pos = offset_x + (point[0] - left) * scale
-        y_pos = offset_y + (top - point[1]) * scale
+        fitted = MicroscopeView._minimap_design_rect_for_bounds(rect, bounds)
+        x_pos = fitted.left() + (point[0] - left) * fitted.width() / width
+        y_pos = fitted.top() + (top - point[1]) * fitted.height() / height
         return QPointF(float(x_pos), float(y_pos))
+
+    @staticmethod
+    def _minimap_design_rect_for_bounds(
+        rect: QRect,
+        bounds: tuple[float, float, float, float],
+    ) -> QRectF:
+        left, bottom, right, top = bounds
+        width = max(float(right) - float(left), 1e-9)
+        height = max(float(top) - float(bottom), 1e-9)
+        pad = 6.0
+        usable_width = max(float(rect.width()) - 2.0 * pad, 1.0)
+        usable_height = max(float(rect.height()) - 2.0 * pad, 1.0)
+        scale = min(usable_width / width, usable_height / height)
+        return QRectF(
+            float(rect.left()) + (float(rect.width()) - width * scale) * 0.5,
+            float(rect.top()) + (float(rect.height()) - height * scale) * 0.5,
+            width * scale,
+            height * scale,
+        )
 
     def _map_rect_point_to_design(self, point: QPoint | QPointF, rect: QRect) -> tuple[float, float]:
         assert self._design_document is not None
         left, bottom, right, top = self._design_document.bounds
         width = max(right - left, 1e-9)
         height = max(top - bottom, 1e-9)
-        pad = 6.0
-        usable_width = max(rect.width() - 2.0 * pad, 1.0)
-        usable_height = max(rect.height() - 2.0 * pad, 1.0)
-        scale = min(usable_width / width, usable_height / height)
-        offset_x = rect.left() + (rect.width() - width * scale) * 0.5
-        offset_y = rect.top() + (rect.height() - height * scale) * 0.5
-        x_value = left + (float(point.x()) - offset_x) / scale
-        y_value = top - (float(point.y()) - offset_y) / scale
+        fitted = self._minimap_design_rect_for_bounds(
+            rect,
+            self._design_document.bounds,
+        )
+        x_value = left + (float(point.x()) - fitted.left()) * width / fitted.width()
+        y_value = top - (float(point.y()) - fitted.top()) * height / fitted.height()
         x_value = min(max(x_value, left), right)
         y_value = min(max(y_value, bottom), top)
         return (float(x_value), float(y_value))

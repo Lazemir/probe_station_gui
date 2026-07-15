@@ -4,14 +4,15 @@ import os
 from pathlib import Path
 import time
 
+import klayout.db as db
 import numpy as np
 import pytest
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QObject, QSize, Signal
-from PySide6.QtGui import QColor, QImage
+from PySide6.QtCore import QObject, QRect, QSize, Signal
+from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import QApplication
 
 from probe_station_gui.design.klayout_types import RenderFrame
@@ -39,6 +40,12 @@ class _RenderWorker(QObject):
 
     def stop(self, timeout_s: float = 1.0) -> None:
         self.stop_calls.append(timeout_s)
+
+
+class _BlockingStopRenderWorker(_RenderWorker):
+    def stop(self, timeout_s: float = 1.0) -> None:
+        super().stop(timeout_s)
+        time.sleep(max(0.0, float(timeout_s)))
 
 
 def _document(
@@ -103,11 +110,13 @@ def _set_document(view: MicroscopeView, document: DesignDocument | None) -> None
     )
 
 
-def _view_with_workers() -> tuple[MicroscopeView, list[_RenderWorker]]:
+def _view_with_workers(
+    worker_type: type[_RenderWorker] = _RenderWorker,
+) -> tuple[MicroscopeView, list[_RenderWorker]]:
     workers: list[_RenderWorker] = []
 
     def factory() -> _RenderWorker:
-        worker = _RenderWorker()
+        worker = worker_type()
         workers.append(worker)
         return worker
 
@@ -118,6 +127,29 @@ def _view_with_workers() -> tuple[MicroscopeView, list[_RenderWorker]]:
 def _drain_events(app: QApplication) -> None:
     for _ in range(4):
         app.processEvents()
+
+
+def _process_until(
+    app: QApplication,
+    predicate,
+    *,
+    timeout_s: float = 5.0,
+) -> None:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if predicate():
+            return
+        time.sleep(0.005)
+    raise AssertionError("timed out waiting for queued Qt delivery")
+
+
+def _write_tall_design(path: Path) -> None:
+    layout = db.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(1, 0)).insert(db.Box(0, 0, 50_000, 115_000))
+    layout.write(str(path))
 
 
 def _frame(
@@ -175,15 +207,90 @@ def test_file_backed_minimap_uses_full_bounds_physical_klayout_request(
     assert visible_calls == []
     assert len(workers) == 1
     request = workers[0].requests[-1]
+    fitted = view._minimap_design_rect_for_bounds(
+        QRect(0, 0, 120, 80),
+        document.bounds,
+    )
     assert request.purpose == "minimap"
     assert request.world_box == document.bounds
-    assert (request.pixel_width, request.pixel_height) == (240, 160)
+    assert (request.pixel_width, request.pixel_height) == (
+        round(fitted.width() * 2.0),
+        round(fitted.height() * 2.0),
+    )
     assert request.config.path == document.path.resolve()
     assert request.config.top_cell_name == "TOP"
     assert request.config.visible_layers == document.visible_layers
     assert request.config.source_bounds == document.cell_bounds["TOP"]
     assert request.config.display_bounds == document.bounds
     assert request.config.rotation_quarter_turns == 0
+    view.close()
+
+
+def test_real_tall_klayout_raster_aligns_overlay_and_click_aspect_fit(
+    qt_app: QApplication,
+    tmp_path: Path,
+) -> None:
+    design_path = tmp_path / "tall.gds"
+    _write_tall_design(design_path)
+    document = DesignDocument.load(design_path)
+    view = MicroscopeView()
+    _set_document(view, document)
+    content_size = QSize(224, 206)
+
+    assert view._design_background_for_size(content_size) is None
+    _process_until(qt_app, lambda: view._minimap_background is not None)
+    background = view._minimap_background
+    assert background is not None
+    source = background.toImage()
+    ink_color = source.pixelColor(source.width() // 2, source.height() // 2)
+
+    canvas = QImage(1000, 1000, QImage.Format_ARGB32)
+    canvas.fill(QColor("#000000"))
+    painter = QPainter(canvas)
+    display_rect = QRect(0, 0, 1000, 1000)
+    view._draw_design_minimap(painter, display_rect)
+    painter.end()
+    assert view._minimap_rect is not None
+    content_rect = QRect(
+        view._minimap_rect.left() + 8,
+        view._minimap_rect.top() + 26,
+        view._minimap_rect.width() - 16,
+        view._minimap_rect.height() - 34,
+    )
+    matching = [
+        (x_value, y_value)
+        for y_value in range(content_rect.top(), content_rect.bottom() + 1)
+        for x_value in range(content_rect.left(), content_rect.right() + 1)
+        if canvas.pixelColor(x_value, y_value) == ink_color
+    ]
+    assert matching
+    ink_left = min(point[0] for point in matching)
+    ink_right = max(point[0] for point in matching)
+    ink_top = min(point[1] for point in matching)
+    ink_bottom = max(point[1] for point in matching)
+    left, bottom, right, top = document.bounds
+    mapped_top_left = view._map_design_point_to_rect((left, top), content_rect)
+    mapped_bottom_right = view._map_design_point_to_rect(
+        (right, bottom),
+        content_rect,
+    )
+
+    assert ink_left == pytest.approx(mapped_top_left.x(), abs=3.0)
+    assert ink_top == pytest.approx(mapped_top_left.y(), abs=3.0)
+    assert ink_right == pytest.approx(mapped_bottom_right.x(), abs=3.0)
+    assert ink_bottom == pytest.approx(mapped_bottom_right.y(), abs=3.0)
+    assert (ink_right - ink_left) / (ink_bottom - ink_top) == pytest.approx(
+        (right - left) / (top - bottom),
+        rel=0.08,
+    )
+    assert ink_top - content_rect.top() == pytest.approx(6.0, abs=3.0)
+    mapped_center = view._map_design_point_to_rect(
+        ((left + right) * 0.5, (bottom + top) * 0.5),
+        content_rect,
+    )
+    assert view._map_rect_point_to_design(mapped_center, content_rect) == pytest.approx(
+        ((left + right) * 0.5, (bottom + top) * 0.5),
+    )
     view.close()
 
 
@@ -204,7 +311,7 @@ def test_resize_coalesces_to_one_newest_minimap_request(
     assert len(workers) == 1
     assert len(workers[0].requests) == 1
     request = workers[0].requests[0]
-    assert (request.pixel_width, request.pixel_height) == (140, 100)
+    assert (request.pixel_width, request.pixel_height) == (128, 64)
     assert request.purpose == "minimap"
     view.close()
 
@@ -314,7 +421,7 @@ def test_path_switch_detaches_and_removal_or_close_stops_bounded(
     started = time.monotonic()
     _set_document(view, None)
     assert time.monotonic() - started < 0.2
-    assert workers[1].stop_calls == [0.5]
+    assert workers[1].stop_calls == [0.0]
 
     _set_document(view, _document(tmp_path / "third.gds"))
     view._design_background_for_size(QSize(100, 80))
@@ -322,7 +429,48 @@ def test_path_switch_detaches_and_removal_or_close_stops_bounded(
     started = time.monotonic()
     view.close()
     assert time.monotonic() - started < 0.2
-    assert workers[2].stop_calls == [0.5]
+    assert workers[2].stop_calls == [0.0]
+
+
+@pytest.mark.parametrize("action", ["remove", "close"])
+def test_removal_and_close_do_not_wait_for_running_worker(
+    qt_app: QApplication,
+    tmp_path: Path,
+    action: str,
+) -> None:
+    view, workers = _view_with_workers(_BlockingStopRenderWorker)
+    _set_document(view, _document(tmp_path / f"{action}.gds"))
+    view._design_background_for_size(QSize(100, 80))
+    _drain_events(qt_app)
+
+    started = time.monotonic()
+    if action == "remove":
+        _set_document(view, None)
+    else:
+        view.close()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.1
+    assert workers[0].stop_calls == [0.0]
+
+
+def test_render_failure_allows_same_size_retry(
+    qt_app: QApplication,
+    tmp_path: Path,
+) -> None:
+    view, workers = _view_with_workers()
+    _set_document(view, _document(tmp_path / "retry.gds"))
+    view._design_background_for_size(QSize(100, 80))
+    _drain_events(qt_app)
+    assert len(workers[0].requests) == 1
+
+    workers[0].failed.emit("render failed")
+    view._design_background_for_size(QSize(100, 80))
+    _drain_events(qt_app)
+
+    assert len(workers[0].requests) == 2
+    assert workers[0].requests[1].request_id > workers[0].requests[0].request_id
+    view.close()
 
 
 def test_legacy_in_memory_minimap_keeps_polygon_renderer(tmp_path: Path) -> None:
