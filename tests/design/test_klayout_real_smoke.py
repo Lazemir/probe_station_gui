@@ -20,6 +20,7 @@ from probe_station_gui.design.klayout_types import (
 from probe_station_gui.design.klayout_workers import (
     KLayoutRenderWorker,
     KLayoutSnapWorker,
+    _shape_contours,
 )
 
 
@@ -32,20 +33,41 @@ def _write_hierarchical_design(path: Path) -> None:
     child.shapes(layout.layer(2, 0)).insert(db.Box(0, 0, 2_000, 2_000))
     top.insert(db.CellInstArray(child.cell_index(), db.Trans(20_000, 10_000)))
     top.shapes(layout.layer(3, 0)).insert(db.Text("label", db.Trans(15_000, 8_000)))
+    top.shapes(layout.layer(4, 0)).insert(
+        db.Polygon(
+            [
+                db.Point(12_000, 0),
+                db.Point(16_000, 0),
+                db.Point(14_000, 3_000),
+            ]
+        )
+    )
+    top.shapes(layout.layer(5, 0)).insert(
+        db.Path(
+            [db.Point(12_000, 5_000), db.Point(16_000, 5_000)],
+            1_000,
+        )
+    )
     layout.write(str(path))
 
 
-def _config(path: Path, *, turns: int = 0, layers: set[tuple[int, int]] | None = None) -> KLayoutConfig:
+def _config(
+    path: Path,
+    *,
+    turns: int = 0,
+    layers: set[tuple[int, int]] | None = None,
+    generation: int | None = None,
+) -> KLayoutConfig:
     source_bounds = (0.0, 0.0, 22.0, 12.0)
     display_bounds = source_bounds if turns % 2 == 0 else (5.0, -5.0, 17.0, 17.0)
     return KLayoutConfig(
         path=path,
         top_cell_name="TOP",
-        visible_layers=frozenset(layers or {(1, 0), (2, 0)}),
+        visible_layers=frozenset({(1, 0), (2, 0)} if layers is None else layers),
         source_bounds=source_bounds,
         display_bounds=display_bounds,
         rotation_quarter_turns=turns,
-        generation=turns + 1,
+        generation=turns + 1 if generation is None else generation,
     )
 
 
@@ -79,10 +101,29 @@ def test_real_render_worker_produces_detached_nonempty_hierarchical_frame(
 
     worker.submit(request)
     assert ready.wait(5.0)
+    ready.clear()
+    top_only_config = _config(
+        design_path,
+        turns=1,
+        layers={(1, 0)},
+        generation=3,
+    )
+    worker.submit(
+        RenderRequest(
+            request_id=2,
+            config=top_only_config,
+            world_box=top_only_config.display_bounds,
+            pixel_width=320,
+            pixel_height=240,
+            viewport_generation=8,
+            density=10.0,
+        )
+    )
+    assert ready.wait(5.0)
     worker.stop()
 
     assert failures == []
-    assert len(frames) == 1
+    assert len(frames) == 2
     frame = frames[0]
     assert frame.request_id == request.request_id
     assert frame.world_box == request.world_box
@@ -114,6 +155,12 @@ def test_real_render_worker_produces_detached_nonempty_hierarchical_frame(
         for y in range(half_height, frame.image.height())
     )
     assert bottom_right_ink > top_left_ink * 5
+    child_instance_pixels = sum(
+        frame.image.pixel(x, y) != frames[1].image.pixel(x, y)
+        for x in range(frame.image.width())
+        for y in range(frame.image.height())
+    )
+    assert child_instance_pixels > 80
 
 
 def test_real_snap_worker_queries_hierarchical_geometry_and_rotates_results(
@@ -181,3 +228,68 @@ def test_real_snap_worker_ignores_text_origins(tmp_path: Path) -> None:
 
     assert responses[0].result.mode == "free"
     assert responses[0].result.point == pytest.approx((15.0, 8.0))
+
+
+@pytest.mark.parametrize(
+    ("layer", "point"),
+    [
+        ((4, 0), (12.0, 0.0)),
+        ((5, 0), (12.0, 4.5)),
+    ],
+    ids=["polygon", "path"],
+)
+def test_real_snap_worker_handles_polygon_and_path(
+    tmp_path: Path,
+    layer: tuple[int, int],
+    point: tuple[float, float],
+) -> None:
+    design_path = tmp_path / "shape-types.gds"
+    _write_hierarchical_design(design_path)
+    config = _config(design_path, layers={layer})
+    worker = KLayoutSnapWorker()
+    ready = threading.Event()
+    responses: list[SnapResponse] = []
+    failures: list[str] = []
+    worker.snap_ready.connect(
+        lambda response: (responses.append(response), ready.set()),
+        Qt.ConnectionType.DirectConnection,
+    )
+    worker.failed.connect(
+        lambda message: (failures.append(message), ready.set()),
+        Qt.ConnectionType.DirectConnection,
+    )
+
+    worker.submit_hover(
+        SnapRequest(
+            request_id=13,
+            config=config,
+            point=point,
+            radius=0.2,
+        )
+    )
+    assert ready.wait(5.0)
+    worker.stop()
+
+    assert failures == []
+    assert len(responses) == 1
+    assert responses[0].result.mode == "vertex"
+    assert responses[0].result.point == pytest.approx(point)
+    assert responses[0].shapes_inspected == 1
+
+
+def test_shape_contours_handles_real_klayout_edge() -> None:
+    layout = db.Layout()
+    layout.dbu = 0.001
+    cell = layout.create_cell("TOP")
+    shape = cell.shapes(layout.layer(6, 0)).insert(
+        db.Edge(1_000, 2_000, 4_000, 6_000)
+    )
+
+    contours = list(_shape_contours(shape, db.DTrans(), db))
+
+    assert len(contours) == 1
+    points, closed = contours[0]
+    assert closed is False
+    assert [(point.x, point.y) for point in points] == pytest.approx(
+        [(1.0, 2.0), (4.0, 6.0)]
+    )

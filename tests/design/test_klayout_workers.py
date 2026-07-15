@@ -4,7 +4,7 @@ from dataclasses import replace
 from pathlib import Path
 import threading
 import time
-from typing import Callable
+from typing import Any, Callable
 
 from PySide6.QtCore import Qt
 
@@ -95,6 +95,47 @@ def _wait_until(predicate: Callable[[], bool], timeout_s: float = 2.0) -> None:
             return
         time.sleep(0.005)
     raise AssertionError("timed out waiting for worker state")
+
+
+def _pause_after_eligible(worker: object) -> tuple[threading.Event, threading.Event]:
+    checked = threading.Event()
+    release = threading.Event()
+    original = getattr(worker, "_may_emit")
+
+    def paused(config: KLayoutConfig | None = None) -> bool:
+        allowed = original(config)
+        if allowed:
+            checked.set()
+            release.wait(2.0)
+        return allowed
+
+    setattr(worker, "_may_emit", paused)
+    return checked, release
+
+
+class _ObservedRLock:
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._observed_thread_id: int | None = None
+        self.observed_acquire = threading.Event()
+
+    def observe_current_thread(self) -> None:
+        self._observed_thread_id = threading.get_ident()
+
+    def acquire(self, blocking: bool = True, timeout: float = -1.0) -> bool:
+        if threading.get_ident() == self._observed_thread_id:
+            self.observed_acquire.set()
+        return self._lock.acquire(blocking, timeout)
+
+    def release(self) -> None:
+        self._lock.release()
+
+    def __enter__(self) -> _ObservedRLock:
+        self.acquire()
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.release()
 
 
 class _RenderHarness:
@@ -195,6 +236,34 @@ def test_snap_keeps_newest_hover_but_prioritizes_fifo_clicks() -> None:
 
     assert [request_id for request_id, _thread_id in harness.snap_calls] == [1, 4, 5, 3]
     assert [response.request_id for response in responses] == [1, 4, 5, 3]
+
+
+def test_stale_hover_after_prioritized_click_does_not_exit_snap_thread() -> None:
+    harness = _SnapHarness()
+    factory_entered = threading.Event()
+    release_factory = threading.Event()
+
+    def blocked_factory() -> Any:
+        factory_entered.set()
+        release_factory.wait(1.0)
+        return harness.factory()
+
+    worker = KLayoutSnapWorker(backend_factory=blocked_factory)
+    responses: list[SnapResponse] = []
+    worker.snap_ready.connect(responses.append, Qt.ConnectionType.DirectConnection)
+    config_a = _config(generation=1)
+    config_b = replace(config_a, visible_layers=frozenset({(2, 0)}), generation=2)
+
+    worker.submit_hover(_snap_request(1, config=config_a))
+    assert factory_entered.wait(1.0)
+    worker.submit_click(_snap_request(2, purpose="click", config=config_b))
+    release_factory.set()
+    _wait_until(lambda: [response.request_id for response in responses] == [2])
+    worker.submit_hover(_snap_request(3, config=config_b))
+    _wait_until(lambda: [response.request_id for response in responses] == [2, 3])
+    worker.stop()
+
+    assert [request_id for request_id, _thread_id in harness.snap_calls] == [2, 3]
 
 
 def test_workers_lazily_create_independent_single_owner_daemon_threads() -> None:
@@ -304,6 +373,211 @@ def test_stop_is_bounded_and_suppresses_late_success_or_failure() -> None:
 
     assert elapsed < 0.2
     assert frames == []
+    assert failures == []
+
+
+def test_stop_after_loaded_eligibility_is_bounded_and_suppresses_loaded() -> None:
+    harness = _RenderHarness()
+    worker = KLayoutRenderWorker(backend_factory=harness.factory)
+    loaded: list[KLayoutConfig] = []
+    worker.loaded.connect(loaded.append, Qt.ConnectionType.DirectConnection)
+    checked, release_check = _pause_after_eligible(worker)
+
+    worker.submit(_render_request(1))
+    assert checked.wait(1.0)
+    started = time.monotonic()
+    worker.stop(timeout_s=0.02)
+    elapsed = time.monotonic() - started
+    release_check.set()
+    _wait_until(lambda: bool(harness.close_threads))
+
+    assert elapsed < 0.2
+    assert loaded == []
+
+
+def test_stop_after_frame_eligibility_is_bounded_and_suppresses_frame() -> None:
+    harness = _RenderHarness()
+    worker = KLayoutRenderWorker(backend_factory=harness.factory)
+    frames: list[RenderFrame] = []
+    worker.frame_ready.connect(frames.append, Qt.ConnectionType.DirectConnection)
+    worker.submit(_render_request(1))
+    _wait_until(lambda: [frame.request_id for frame in frames] == [1])
+    checked, release_check = _pause_after_eligible(worker)
+
+    worker.submit(_render_request(2))
+    assert checked.wait(1.0)
+    started = time.monotonic()
+    worker.stop(timeout_s=0.02)
+    elapsed = time.monotonic() - started
+    release_check.set()
+    _wait_until(lambda: bool(harness.close_threads))
+
+    assert elapsed < 0.2
+    assert [frame.request_id for frame in frames] == [1]
+
+
+def test_stop_intent_is_published_before_waiting_for_emission_gate() -> None:
+    harness = _RenderHarness()
+    worker = KLayoutRenderWorker(backend_factory=harness.factory)
+    frames: list[RenderFrame] = []
+    worker.frame_ready.connect(frames.append, Qt.ConnectionType.DirectConnection)
+    worker.submit(_render_request(1))
+    _wait_until(lambda: [frame.request_id for frame in frames] == [1])
+    gate = _ObservedRLock()
+    worker._emission_gate = gate
+    checked, release_check = _pause_after_eligible(worker)
+    worker.submit(_render_request(2))
+    assert checked.wait(1.0)
+    stop_finished = threading.Event()
+
+    def stop_worker() -> None:
+        gate.observe_current_thread()
+        worker.stop(timeout_s=1.0)
+        stop_finished.set()
+
+    stop_thread = threading.Thread(target=stop_worker)
+    stop_thread.start()
+    assert gate.observed_acquire.wait(1.0)
+    intent_was_published = worker._stop_requested.is_set()
+    release_check.set()
+    assert stop_finished.wait(1.0)
+    stop_thread.join(1.0)
+
+    assert intent_was_published is True
+    assert [frame.request_id for frame in frames] == [1]
+
+
+def test_new_config_cannot_interleave_between_frame_eligibility_and_emit() -> None:
+    harness = _RenderHarness(block_ids={2})
+    worker = KLayoutRenderWorker(backend_factory=harness.factory)
+    frames: list[RenderFrame] = []
+    worker.frame_ready.connect(frames.append, Qt.ConnectionType.DirectConnection)
+    config_a = _config(generation=1)
+    config_b = replace(config_a, visible_layers=frozenset({(2, 0)}), generation=2)
+    worker.submit(_render_request(1, config_a))
+    _wait_until(lambda: [frame.request_id for frame in frames] == [1])
+    gate = _ObservedRLock()
+    worker._emission_gate = gate
+    checked, release_check = _pause_after_eligible(worker)
+    worker.submit(_render_request(2, config_a))
+    assert harness.entered.wait(1.0)
+    harness.release.set()
+    assert checked.wait(1.0)
+    submit_started = threading.Event()
+    submit_finished = threading.Event()
+
+    def submit_new_config() -> None:
+        gate.observe_current_thread()
+        submit_started.set()
+        worker.submit(_render_request(3, config_b))
+        submit_finished.set()
+
+    submit_thread = threading.Thread(target=submit_new_config)
+    submit_thread.start()
+    assert submit_started.wait(1.0)
+    assert gate.observed_acquire.wait(1.0)
+    assert submit_finished.is_set() is False
+    release_check.set()
+    assert submit_finished.wait(1.0)
+    _wait_until(lambda: any(frame.request_id == 3 for frame in frames))
+    submit_thread.join(1.0)
+    worker.stop()
+
+    assert [frame.request_id for frame in frames] == [1, 2, 3]
+
+
+def test_stop_after_snap_eligibility_is_bounded_and_suppresses_snap() -> None:
+    harness = _SnapHarness()
+    worker = KLayoutSnapWorker(backend_factory=harness.factory)
+    responses: list[SnapResponse] = []
+    worker.snap_ready.connect(responses.append, Qt.ConnectionType.DirectConnection)
+    worker.submit_hover(_snap_request(1))
+    _wait_until(lambda: [response.request_id for response in responses] == [1])
+    checked, release_check = _pause_after_eligible(worker)
+
+    worker.submit_hover(_snap_request(2))
+    assert checked.wait(1.0)
+    started = time.monotonic()
+    worker.stop(timeout_s=0.02)
+    elapsed = time.monotonic() - started
+    release_check.set()
+    _wait_until(lambda: bool(harness.close_threads))
+
+    assert elapsed < 0.2
+    assert [response.request_id for response in responses] == [1]
+
+
+def test_new_config_cannot_interleave_between_snap_eligibility_and_emit() -> None:
+    harness = _SnapHarness(block_ids={2})
+    worker = KLayoutSnapWorker(backend_factory=harness.factory)
+    responses: list[SnapResponse] = []
+    worker.snap_ready.connect(responses.append, Qt.ConnectionType.DirectConnection)
+    config_a = _config(generation=1)
+    config_b = replace(config_a, visible_layers=frozenset({(2, 0)}), generation=2)
+    worker.submit_hover(_snap_request(1, config=config_a))
+    _wait_until(lambda: [response.request_id for response in responses] == [1])
+    gate = _ObservedRLock()
+    worker._emission_gate = gate
+    checked, release_check = _pause_after_eligible(worker)
+    worker.submit_hover(_snap_request(2, config=config_a))
+    assert harness.entered.wait(1.0)
+    harness.release.set()
+    assert checked.wait(1.0)
+    submit_started = threading.Event()
+    submit_finished = threading.Event()
+
+    def submit_new_config() -> None:
+        gate.observe_current_thread()
+        submit_started.set()
+        worker.submit_hover(_snap_request(3, config=config_b))
+        submit_finished.set()
+
+    submit_thread = threading.Thread(target=submit_new_config)
+    submit_thread.start()
+    assert submit_started.wait(1.0)
+    assert gate.observed_acquire.wait(1.0)
+    assert submit_finished.is_set() is False
+    release_check.set()
+    assert submit_finished.wait(1.0)
+    _wait_until(lambda: any(response.request_id == 3 for response in responses))
+    submit_thread.join(1.0)
+    worker.stop()
+
+    assert [response.request_id for response in responses] == [1, 2, 3]
+
+
+def test_stop_interleaving_after_failure_eligibility_suppresses_failure_signal() -> None:
+    entered = threading.Event()
+    release_backend = threading.Event()
+
+    class FailingBackend:
+        def ensure_config(self, _config: KLayoutConfig) -> None:
+            pass
+
+        def render(self, _request: RenderRequest) -> RenderFrame:
+            entered.set()
+            release_backend.wait(1.0)
+            raise RuntimeError("late failure")
+
+        def close(self) -> None:
+            pass
+
+    worker = KLayoutRenderWorker(backend_factory=FailingBackend)
+    failures: list[str] = []
+    worker.failed.connect(failures.append, Qt.ConnectionType.DirectConnection)
+    worker.submit(_render_request(1))
+    assert entered.wait(1.0)
+    checked, release_check = _pause_after_eligible(worker)
+
+    release_backend.set()
+    assert checked.wait(1.0)
+    started = time.monotonic()
+    worker.stop(timeout_s=0.02)
+    elapsed = time.monotonic() - started
+    release_check.set()
+    _wait_until(lambda: worker._thread is not None and not worker._thread.is_alive())
+
+    assert elapsed < 0.2
     assert failures == []
 
 
