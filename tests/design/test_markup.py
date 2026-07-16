@@ -8,11 +8,13 @@ import pytest
 from probe_station_gui.design.markup import (
     MARKUP_SCHEMA_VERSION,
     GuideSegment,
+    MarkupLoadChoice,
     MarkupDecodeError,
     MarkupDocument,
     SourceFingerprint,
     fingerprint_source,
     normalize_source_path,
+    resolve_loaded_markup,
 )
 
 
@@ -160,3 +162,41 @@ def test_degenerate_or_nonfinite_guides_are_rejected(
 def test_fingerprint_rejects_negative_values() -> None:
     with pytest.raises(MarkupDecodeError):
         SourceFingerprint.from_dict({"size": -1, "mtime_ns": 2})
+
+
+def test_matching_loaded_markup_is_accepted_without_a_choice(tmp_path: Path) -> None:
+    source = _source(tmp_path)
+    saved = MarkupDocument.empty(source).append_guide(
+        (0.0, 0.0),
+        (1.0, 0.0),
+        guide_id="kept",
+    )
+
+    decision = resolve_loaded_markup(saved, source)
+
+    assert decision.accepted
+    assert not decision.needs_choice
+    assert decision.document == saved
+
+
+def test_changed_source_requires_explicit_markup_choice(tmp_path: Path) -> None:
+    source = _source(tmp_path, b"old")
+    saved = MarkupDocument.empty(source).append_guide(
+        (0.0, 0.0),
+        (1.0, 0.0),
+        guide_id="old-guide",
+    )
+    source.write_bytes(b"changed-layout")
+
+    unresolved = resolve_loaded_markup(saved, source)
+    kept = resolve_loaded_markup(saved, source, MarkupLoadChoice.KEEP)
+    emptied = resolve_loaded_markup(saved, source, MarkupLoadChoice.START_EMPTY)
+    cancelled = resolve_loaded_markup(saved, source, MarkupLoadChoice.CANCEL)
+
+    assert unresolved.needs_choice and not unresolved.accepted
+    assert kept.accepted and kept.publish and kept.document is not None
+    assert kept.document.guides == saved.guides
+    assert kept.document.matches_source(source)
+    assert emptied.accepted and emptied.delete_stored
+    assert emptied.document == MarkupDocument.empty(source)
+    assert not cancelled.accepted and cancelled.cancel_load

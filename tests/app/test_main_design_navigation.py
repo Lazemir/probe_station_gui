@@ -5,6 +5,7 @@ import types
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -15,7 +16,16 @@ restore_real_imports_for_main(clear_probe_station_gui=True)
 
 import main as main_module
 from main import Main
+from probe_station_gui.design.markup import MarkupDocument, MarkupLoadChoice
+from probe_station_gui.design.markup_store import StoreLoadResult
+from probe_station_gui.design.selection_model import (
+    MixedArrayRequest,
+    SelectionModel,
+    markup_entity_id,
+    route_entity_id,
+)
 from probe_station_gui.design.session import DesignSession
+from probe_station_gui.route.model import MeasurementRoute
 
 DesignDocument = main_module.DesignDocument
 
@@ -81,6 +91,7 @@ class _FakeLibrary:
 
 
 def _make_document(tmp_path: Path) -> DesignDocument:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     design_path = tmp_path / "loaded.gds"
     design_path.write_bytes(b"loaded-design")
     return DesignDocument._from_components(
@@ -101,6 +112,15 @@ def _make_window() -> tuple[Main, _FakeStageController, list[str]]:
     window._design_load_generation = 1
     window._design_load_restore_states = {}
     window._design_load_show_window = {}
+    window._design_load_previous_sessions = {}
+    window._design_load_previous_markup = {}
+    window._design_markup = None
+    window._design_markup_direct_guide_ids = []
+    window._design_markup_store = None
+    window._design_markup_request_id = 0
+    window._design_markup_load_request_id = None
+    window._design_markup_load_contexts = {}
+    window._design_markup_pending_visibility = None
     window._pending_alignment_preparation = None
     window._last_selected_design_point = None
     window._design_snap_enabled = False
@@ -117,6 +137,7 @@ def _make_window() -> tuple[Main, _FakeStageController, list[str]]:
     window._refresh_design_panel = lambda: statuses.append("refresh_panel")
     window._refresh_design_position = lambda: statuses.append("refresh_position")
     window._restore_route_measurement_state_after_design_load = lambda: statuses.append("restore_route")
+    window._begin_design_markup_load = lambda *_args, **_kwargs: statuses.append("load_markup")
     window._raw_stage_xy_from_design_xy = lambda _design_xy: (1.5, -2.0)
     window._clear_planned_move_prediction = lambda **_kwargs: statuses.append("clear_prediction")
     return window, stage_controller, statuses
@@ -185,9 +206,218 @@ def test_on_design_document_loaded_success_refreshes_persists_and_restores_route
     assert "refresh_position" in statuses
     assert "persisted" in statuses
     assert "restore_route" in statuses
+    assert "load_markup" in statuses
     assert any("Loaded design 'loaded.gds' (TOP)." == item for item in statuses)
     assert panel.directories == [tmp_path]
     assert window.settings_manager.last_design_directory == tmp_path
+
+
+def _make_mixed_edit_window(tmp_path: Path) -> tuple[Main, list[str]]:
+    window, _stage, statuses = _make_window()
+    document = _make_document(tmp_path)
+    window._design_session.load_document(document)
+    route = MeasurementRoute.default_for_document(document)
+    route_point = route.add_point((2.0, 3.0))
+    window._design_session.route = route
+    markup = MarkupDocument.empty(document.path).append_guide(
+        (0.0, 0.0),
+        (1.0, 0.0),
+        guide_id="guide-1",
+    )
+    window._design_markup = markup
+    window._design_markup_direct_guide_ids = ["guide-1"]
+    window._route_measurement_thread = None
+    selection = SelectionModel(
+        frozenset(
+            {
+                route_entity_id(route_point.id),
+                markup_entity_id("guide-1"),
+            }
+        )
+    )
+    window.design_layout_window = types.SimpleNamespace(
+        selection=selection,
+        set_selection=lambda value: statuses.append(f"selection:{len(value.ids)}"),
+        set_markup=lambda value: statuses.append(f"markup:{len(value.guides)}"),
+        set_guide_undo_available=lambda value: statuses.append(f"undo:{value}"),
+        set_route_edit_enabled=lambda value: statuses.append(f"edit:{value}"),
+    )
+    window._publish_design_markup = lambda: statuses.append("publish_markup")
+    return window, statuses
+
+
+def test_mixed_delete_commits_route_and_markup_together(tmp_path: Path) -> None:
+    window, statuses = _make_mixed_edit_window(tmp_path)
+
+    Main._delete_design_selection(window)
+
+    assert window._design_session.route is not None
+    assert window._design_session.route.points == []
+    assert window._design_markup is not None
+    assert window._design_markup.guides == ()
+    assert "publish_markup" in statuses
+    assert "selection:0" in statuses
+
+
+def test_route_running_blocks_even_markup_only_delete(tmp_path: Path) -> None:
+    window, statuses = _make_mixed_edit_window(tmp_path)
+    window.design_layout_window.selection = SelectionModel(
+        frozenset({markup_entity_id("guide-1")})
+    )
+    window._route_measurement_thread = types.SimpleNamespace(is_alive=lambda: True)
+
+    Main._delete_design_selection(window)
+
+    assert window._design_markup is not None
+    assert [guide.id for guide in window._design_markup.guides] == ["guide-1"]
+    assert window._design_session.route is not None
+    assert len(window._design_session.route.points) == 1
+    assert "publish_markup" not in statuses
+    assert "Design editing is locked." in statuses
+
+
+def test_mixed_array_keeps_sources_and_copies_both_entity_types(tmp_path: Path) -> None:
+    window, statuses = _make_mixed_edit_window(tmp_path)
+    original_selection = window.design_layout_window.selection
+    request = MixedArrayRequest(
+        direction_1=(10.0, 0.0),
+        count_1=2,
+        direction_2=(0.0, 5.0),
+        count_2=1,
+        source_ids=original_selection.ids,
+    )
+
+    Main._apply_mixed_design_array(window, request)
+
+    assert window._design_session.route is not None
+    assert [point.camera_center for point in window._design_session.route.points] == [
+        (2.0, 3.0),
+        (12.0, 3.0),
+    ]
+    assert window._design_markup is not None
+    assert [(guide.start, guide.end) for guide in window._design_markup.guides] == [
+        ((0.0, 0.0), (1.0, 0.0)),
+        ((10.0, 0.0), (11.0, 0.0)),
+    ]
+    assert "publish_markup" in statuses
+    assert f"selection:{len(original_selection.ids)}" in statuses
+
+
+@pytest.mark.parametrize(
+    ("choice", "expected_guides", "expected_event"),
+    [
+        (MarkupLoadChoice.KEEP, 1, "publish_markup"),
+        (MarkupLoadChoice.START_EMPTY, 0, "delete_markup"),
+    ],
+)
+def test_changed_markup_choice_rebinds_or_discards_saved_guides(
+    monkeypatch,
+    tmp_path: Path,
+    choice: MarkupLoadChoice,
+    expected_guides: int,
+    expected_event: str,
+) -> None:
+    window, _stage, statuses = _make_window()
+    document = _make_document(tmp_path)
+    saved = MarkupDocument.empty(document.path).append_guide(
+        (0.0, 0.0),
+        (1.0, 0.0),
+        guide_id="saved-guide",
+    )
+    document.path.write_bytes(b"changed-after-markup")
+    window._design_session.load_document(document)
+    window._design_markup = MarkupDocument.empty(document.path)
+    window._design_markup_load_request_id = 7
+    window._design_markup_load_contexts[7] = (DesignSession(), None)
+    window._prompt_changed_markup_choice = lambda _path: choice
+    window._publish_design_markup = lambda: statuses.append("publish_markup")
+    window._delete_persisted_design_markup = (
+        lambda _path: statuses.append("delete_markup")
+    )
+    monkeypatch.setattr(
+        main_module.connection_flow,
+        "persist_controller_state_if_available",
+        lambda _owner: statuses.append("persisted"),
+    )
+
+    Main._on_design_markup_loaded(
+        window,
+        StoreLoadResult(7, saved.source_path, saved),
+    )
+
+    assert window._design_markup is not None
+    assert len(window._design_markup.guides) == expected_guides
+    assert window._design_markup.matches_source(document.path)
+    assert expected_event in statuses
+
+
+def test_changed_markup_cancel_restores_preload_design(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    window, _stage, statuses = _make_window()
+    previous_document = _make_document(tmp_path / "previous")
+    previous_session = DesignSession()
+    previous_session.load_document(previous_document)
+    previous_markup = MarkupDocument.empty(previous_document.path).append_guide(
+        (0.0, 0.0),
+        (1.0, 0.0),
+        guide_id="previous-guide",
+    )
+    new_document = _make_document(tmp_path / "new")
+    saved = MarkupDocument.empty(new_document.path).append_guide(
+        (2.0, 0.0),
+        (3.0, 0.0),
+        guide_id="new-guide",
+    )
+    new_document.path.write_bytes(b"changed")
+    window._design_session.load_document(new_document)
+    window._design_markup = MarkupDocument.empty(new_document.path)
+    window._design_markup_load_request_id = 9
+    window._design_markup_load_contexts[9] = (
+        previous_session,
+        previous_markup,
+    )
+    window._prompt_changed_markup_choice = (
+        lambda _path: MarkupLoadChoice.CANCEL
+    )
+    monkeypatch.setattr(
+        main_module.connection_flow,
+        "persist_controller_state_if_available",
+        lambda _owner: statuses.append("persisted"),
+    )
+
+    Main._on_design_markup_loaded(
+        window,
+        StoreLoadResult(9, saved.source_path, saved),
+    )
+
+    assert window._design_session is previous_session
+    assert window._design_markup is previous_markup
+    assert "Design load canceled." in statuses
+    assert "persisted" in statuses
+
+
+def test_explicit_unload_deletes_markup_sidecar(tmp_path: Path) -> None:
+    window, _stage, statuses = _make_window()
+    document = _make_document(tmp_path)
+    window._design_session.load_document(document)
+    window._design_markup = MarkupDocument.empty(document.path).append_guide(
+        (0.0, 0.0),
+        (1.0, 0.0),
+    )
+    window._delete_persisted_design_markup = (
+        lambda path: statuses.append(f"delete:{Path(path).name}")
+    )
+    window._update_design_position = lambda value: statuses.append(
+        f"position:{value}"
+    )
+
+    Main._unload_design_document(window)
+
+    assert window._design_session.document is None
+    assert window._design_markup is None
+    assert "delete:loaded.gds" in statuses
 
 
 def test_move_to_design_coordinate_seeds_prediction_and_requests_move_after_acceptance() -> None:

@@ -6,6 +6,7 @@ import math
 import os
 import uuid
 from dataclasses import dataclass, replace
+from enum import Enum
 from pathlib import Path
 from typing import ClassVar, Collection, Mapping
 
@@ -18,6 +19,26 @@ MARKUP_SCHEMA_VERSION = 1
 
 class MarkupDecodeError(ValueError):
     """Raised when a persisted markup document is not trustworthy."""
+
+
+class MarkupLoadChoice(str, Enum):
+    """Explicit response when a saved markup fingerprint is stale."""
+
+    KEEP = "keep"
+    START_EMPTY = "start_empty"
+    CANCEL = "cancel"
+
+
+@dataclass(frozen=True)
+class MarkupLoadDecision:
+    """Pure result used by the GUI after a background sidecar load."""
+
+    accepted: bool
+    document: MarkupDocument | None = None
+    needs_choice: bool = False
+    publish: bool = False
+    delete_stored: bool = False
+    cancel_load: bool = False
 
 
 @dataclass(frozen=True)
@@ -222,6 +243,43 @@ def fingerprint_source(source_path: str | os.PathLike[str]) -> SourceFingerprint
     return SourceFingerprint(size=int(stat.st_size), mtime_ns=int(stat.st_mtime_ns))
 
 
+def resolve_loaded_markup(
+    saved: MarkupDocument | None,
+    source_path: str | os.PathLike[str],
+    choice: MarkupLoadChoice | None = None,
+) -> MarkupLoadDecision:
+    """Resolve missing, current, or stale persisted markup without UI work."""
+
+    current = MarkupDocument.empty(source_path)
+    if saved is None:
+        return MarkupLoadDecision(True, document=current)
+    if saved.source_path != current.source_path:
+        raise ValueError("Markup belongs to a different source design.")
+    if saved.source_fingerprint == current.source_fingerprint:
+        return MarkupLoadDecision(True, document=saved)
+    if choice is None:
+        return MarkupLoadDecision(False, needs_choice=True)
+    try:
+        choice = MarkupLoadChoice(getattr(choice, "value", choice))
+    except ValueError as exc:
+        raise ValueError(f"Unknown markup load choice {choice!r}.") from exc
+    if choice is MarkupLoadChoice.KEEP:
+        return MarkupLoadDecision(
+            True,
+            document=saved.with_source_fingerprint(current.source_fingerprint),
+            publish=True,
+        )
+    if choice is MarkupLoadChoice.START_EMPTY:
+        return MarkupLoadDecision(
+            True,
+            document=current,
+            delete_stored=True,
+        )
+    if choice is MarkupLoadChoice.CANCEL:
+        return MarkupLoadDecision(False, cancel_load=True)
+    raise ValueError(f"Unknown markup load choice {choice!r}.")
+
+
 def _mapping(value: object, label: str) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise MarkupDecodeError(f"{label} must be an object.")
@@ -286,7 +344,10 @@ __all__ = [
     "MARKUP_SCHEMA_VERSION",
     "MarkupDecodeError",
     "MarkupDocument",
+    "MarkupLoadChoice",
+    "MarkupLoadDecision",
     "SourceFingerprint",
     "fingerprint_source",
     "normalize_source_path",
+    "resolve_loaded_markup",
 ]
