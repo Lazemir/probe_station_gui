@@ -18,6 +18,10 @@ import numpy as np
 
 from probe_station_client import ProbeStationClient
 from probe_station_gui.camera.api_control import OPERATOR_CAMERA_NODE_NAMES
+from probe_station_gui.camera.auto_exposure import (
+    highlight_level as _highlight_level,
+    next_exposure_us,
+)
 
 
 @dataclass(frozen=True)
@@ -51,28 +55,6 @@ class CameraStateSnapshot:
     balance_ratios: dict[str, object]
     balance_selector_entries: tuple[str, ...]
     original_balance_selector: str
-
-
-def next_exposure_us(
-    current_us: float,
-    measured_level: float,
-    limits: tuple[float, float],
-    config: ExposureDiagnosticConfig,
-) -> float:
-    """Return one bounded multiplicative exposure update."""
-
-    current = float(current_us)
-    measured = float(measured_level)
-    minimum, maximum = (float(limits[0]), float(limits[1]))
-    if not all(math.isfinite(value) for value in (current, measured, minimum, maximum)):
-        raise ValueError("Exposure update values must be finite.")
-    if measured <= 0.0 or minimum <= 0.0 or maximum < minimum:
-        raise ValueError("Exposure update values are outside valid bounds.")
-    ratio = float(config.target_level) / measured
-    if measured >= float(config.saturation_level):
-        ratio = min(ratio, float(config.clipping_reduction_ratio))
-    ratio = min(float(config.max_step_ratio), max(float(config.min_step_ratio), ratio))
-    return min(maximum, max(minimum, current * ratio))
 
 
 def frame_metrics(
@@ -579,15 +561,6 @@ def _decode_png(data: bytes) -> np.ndarray:
     if bgr is None:
         raise RuntimeError("Camera frame is not a decodable PNG.")
     return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-
-
-def _highlight_level(frame: np.ndarray, config: ExposureDiagnosticConfig) -> float:
-    return float(
-        np.percentile(
-            np.max(np.asarray(frame), axis=2),
-            float(config.target_percentile),
-        )
-    )
 
 
 def _native_trace_converged(
