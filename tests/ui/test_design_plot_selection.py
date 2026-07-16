@@ -387,3 +387,68 @@ def test_plot_uses_canonical_ruler_tool_token(pane: _DesignPlotPane) -> None:
     assert pane.active_design_tool == "ruler"
     with pytest.raises(ValueError, match="Unknown design tool"):
         pane.set_active_design_tool("measure")
+
+
+def test_layout_window_escape_cancels_transient_tool_state_and_selects(
+    qt_app: QApplication,
+) -> None:
+    window = DesignLayoutWindow()
+    window.navigator_panel._document = object()
+    window.navigator_panel._set_design_tool("guide")
+    window._main_view._guide_anchor = (1.0, 2.0)
+    window._main_view._tool_sketch_points = [(1.0, 2.0)]
+    window._main_view._tool_sketch_segments = [((0.0, 0.0), (3.0, 0.0))]
+    window.navigator_panel._ruler_segments = [((0.0, 0.0), (2.0, 0.0))]
+
+    window._cancel_active_interaction()
+
+    assert window._main_view._guide_anchor is None
+    assert window._main_view._tool_sketch_points == []
+    assert window._main_view._tool_sketch_segments == [
+        ((0.0, 0.0), (3.0, 0.0))
+    ]
+    assert window.navigator_panel._ruler_segments == [
+        ((0.0, 0.0), (2.0, 0.0))
+    ]
+    assert window._main_view.active_design_tool == "select"
+    assert window.navigator_panel._active_design_tool == "select"
+    window.close()
+    window.deleteLater()
+
+
+def test_layout_window_forwards_modifier_snapshots_to_ruler(
+    qt_app: QApplication,
+) -> None:
+    window = DesignLayoutWindow()
+    window.navigator_panel._document = object()
+    window.navigator_panel._set_design_tool("ruler")
+
+    window._main_view.route_pick_requested.emit(
+        "ruler",
+        1.0,
+        2.0,
+        False,
+        False,
+    )
+    window._main_view.tool_hover_snap_changed.emit(
+        SnapResult((6.0, 4.0), "vertex", 0.1),
+        True,
+        False,
+    )
+
+    assert window._main_view._tool_measure_points == [
+        (1.0, 2.0),
+        (6.0, 2.0),
+    ]
+    window._main_view.route_pick_requested.emit(
+        "ruler",
+        6.0,
+        4.0,
+        True,
+        False,
+    )
+    assert window.navigator_panel._ruler_segments == [
+        ((1.0, 2.0), (6.0, 2.0))
+    ]
+    window.close()
+    window.deleteLater()

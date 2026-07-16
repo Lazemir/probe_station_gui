@@ -12,6 +12,7 @@ pytest.importorskip("PySide6")
 from PySide6.QtCore import QItemSelectionModel, Qt
 from PySide6.QtWidgets import QApplication
 
+from probe_station_gui.design.model import SnapResult
 from probe_station_gui.design.selection_geometry import PointGeometry, SegmentGeometry
 from probe_station_gui.design.selection_model import (
     EntityOwner,
@@ -176,6 +177,94 @@ def test_design_ruler_uses_canonical_label_and_token(
     assert panel._ruler_tool_button.text() == "Ruler"
     assert tools[-1] == "ruler"
     assert panel._route_run_button.text() == "Measure"
+    panel.deleteLater()
+
+
+def test_ruler_preview_and_commit_share_shift_constraint(
+    qt_app: QApplication,
+) -> None:
+    panel = DesignNavigatorPanel()
+    panel._document = object()
+    panel._set_design_tool("ruler")
+    previews: list[object] = []
+    completed: list[object] = []
+    panel.tool_measure_preview_changed.connect(previews.append)
+    panel.tool_measurements_changed.connect(completed.append)
+
+    panel.apply_route_pick("ruler", 1.0, 2.0, False, False)
+    panel.set_tool_hover_snap(
+        SnapResult((6.0, 4.0), "vertex", 0.1),
+        True,
+        False,
+    )
+
+    assert previews[-1] == [(1.0, 2.0), (6.0, 2.0)]
+    panel.apply_route_pick("ruler", 6.0, 4.0, True, False)
+    assert completed[-1] == [((1.0, 2.0), (6.0, 2.0))]
+    panel.deleteLater()
+
+
+def test_array_directions_use_ctrl_diagonal_for_commit_and_preview(
+    qt_app: QApplication,
+) -> None:
+    panel = DesignNavigatorPanel()
+    panel._document = object()
+    previews: list[object] = []
+    panel.tool_measure_preview_changed.connect(previews.append)
+
+    panel._start_route_pick_mode("array_dir1")
+    panel.apply_route_pick("array_dir1", 0.0, 0.0, False, False)
+    panel.apply_route_pick("array_dir1", 4.0, 3.0, False, True)
+
+    assert panel._route_array_dir1_step_x_spin.value() == pytest.approx(
+        3.5 * 2**0.5,
+        abs=0.001,
+    )
+    assert panel._route_array_dir1_step_y_spin.value() == pytest.approx(45.0)
+
+    panel._start_route_pick_mode("array_dir2")
+    panel.apply_route_pick("array_dir2", 0.0, 0.0, False, False)
+    panel.set_tool_hover_snap(
+        SnapResult((4.0, -3.0), "vertex", 0.1),
+        False,
+        True,
+    )
+
+    assert previews[-1] == [(0.0, 0.0), (3.5, -3.5)]
+    panel.deleteLater()
+
+
+def test_escape_exits_ruler_but_preserves_completed_segments(
+    qt_app: QApplication,
+) -> None:
+    panel = DesignNavigatorPanel()
+    panel._document = object()
+    panel._set_design_tool("ruler")
+    panel.apply_route_pick("ruler", 0.0, 0.0)
+    panel.apply_route_pick("ruler", 2.0, 0.0)
+    panel.apply_route_pick("ruler", 5.0, 5.0)
+
+    panel.cancel_active_tool()
+
+    assert panel._active_design_tool == "select"
+    assert panel._ruler_anchor is None
+    assert panel._ruler_segments == [((0.0, 0.0), (2.0, 0.0))]
+    panel.deleteLater()
+
+
+@pytest.mark.parametrize("tool", ["point", "guide", "array"])
+def test_escape_returns_drawing_tools_to_select(
+    qt_app: QApplication,
+    tool: str,
+) -> None:
+    panel = DesignNavigatorPanel()
+    panel._document = object()
+    panel._set_design_tool(tool)
+
+    panel.cancel_active_tool()
+
+    assert panel._active_design_tool == "select"
+    assert panel._select_tool_button.isChecked()
     panel.deleteLater()
 
 

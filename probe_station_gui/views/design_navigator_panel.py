@@ -62,6 +62,7 @@ from probe_station_gui.design.model import (
     SnapResult,
 )
 from probe_station_gui.design.markup import MarkupDocument
+from probe_station_gui.design.selection_geometry import constrain_vector_endpoint
 from probe_station_gui.design.selection_model import (
     EntityOwner,
     MixedArrayRequest,
@@ -999,7 +1000,6 @@ class DesignNavigatorPanel(QWidget):
         self._design_dialog_directory = str(Path(directory))
 
     def set_hover_snap(self, snap_result: SnapResult | None) -> None:
-        self._update_tool_hover_preview(snap_result)
         if not self._snap_enabled:
             self._snap_hint_label.setText("Snap off: clicks use the exact cursor position.")
             return
@@ -1020,6 +1020,18 @@ class DesignNavigatorPanel(QWidget):
         self._snap_hint_label.setText(
             f"Hover snap: {label} at X={snap_result.point[0]:.3f}, "
             f"Y={snap_result.point[1]:.3f} | distance {snap_result.distance:.4f}"
+        )
+
+    def set_tool_hover_snap(
+        self,
+        snap_result: SnapResult | None,
+        shift: bool,
+        control: bool,
+    ) -> None:
+        self._update_tool_hover_preview(
+            snap_result,
+            shift=bool(shift),
+            control=bool(control),
         )
 
     def _update_mark_labels(self) -> None:
@@ -1424,19 +1436,15 @@ class DesignNavigatorPanel(QWidget):
             self._update_route_array_preview()
 
     def cancel_active_tool(self) -> None:
+        if self._active_design_tool == "select":
+            self._clear_route_pick_mode("")
+            return
         if self._active_design_tool == "ruler":
-            self._clear_ruler()
-            self._set_design_tool("select")
-            return
-        if self._active_design_tool == "array":
-            self._cancel_route_array()
-            return
-        if self._active_design_tool == "guide":
-            self._tool_status_label.setText("Click two points.")
-            return
-        self._clear_route_pick_mode("")
-        self.tool_measure_preview_changed.emit(None)
-        self.route_preview_changed.emit(None)
+            self._ruler_anchor = None
+            self._ruler_end = None
+            self._update_ruler_labels()
+            self.tool_measure_preview_changed.emit(None)
+        self._set_design_tool("select")
 
     def _clear_ruler(self) -> None:
         self._ruler_anchor = None
@@ -1501,6 +1509,8 @@ class DesignNavigatorPanel(QWidget):
         mode: str,
         x_value: float,
         y_value: float,
+        shift: bool = False,
+        control: bool = False,
     ) -> None:
         point = (float(x_value), float(y_value))
         status = ""
@@ -1510,6 +1520,12 @@ class DesignNavigatorPanel(QWidget):
                 self._ruler_end = None
                 self.tool_measure_preview_changed.emit([point])
             else:
+                point = constrain_vector_endpoint(
+                    self._ruler_anchor,
+                    point,
+                    shift=bool(shift),
+                    control=bool(control),
+                )
                 self._ruler_end = point
                 self._ruler_segments.append((self._ruler_anchor, point))
                 self.tool_measurements_changed.emit(list(self._ruler_segments))
@@ -1524,6 +1540,12 @@ class DesignNavigatorPanel(QWidget):
             anchor = self._route_vector_anchor_or_none(mode, point, "Direction 1")
             if anchor is None:
                 return
+            point = constrain_vector_endpoint(
+                anchor,
+                point,
+                shift=bool(shift),
+                control=bool(control),
+            )
             step = (point[0] - anchor[0], point[1] - anchor[1])
             length, angle = self._vector_length_angle(step)
             self._route_array_dir1_step_x_spin.setValue(length)
@@ -1533,6 +1555,12 @@ class DesignNavigatorPanel(QWidget):
             anchor = self._route_vector_anchor_or_none(mode, point, "Direction 2")
             if anchor is None:
                 return
+            point = constrain_vector_endpoint(
+                anchor,
+                point,
+                shift=bool(shift),
+                control=bool(control),
+            )
             step = (point[0] - anchor[0], point[1] - anchor[1])
             length, angle = self._vector_length_angle(step)
             self._route_array_dir2_step_x_spin.setValue(length)
@@ -1557,7 +1585,6 @@ class DesignNavigatorPanel(QWidget):
                 f"{label} vector starts at {self._format_point(point)}; click endpoint."
             )
             return None
-        self.tool_measure_preview_changed.emit([self._route_pick_anchor_point, point])
         return self._route_pick_anchor_point
 
     def _emit_route_array_requested(self) -> None:
@@ -1579,12 +1606,24 @@ class DesignNavigatorPanel(QWidget):
         self.mixed_array_preview_changed.emit([], [])
         self._set_design_tool("select")
 
-    def _update_tool_hover_preview(self, snap_result: SnapResult | None) -> None:
+    def _update_tool_hover_preview(
+        self,
+        snap_result: SnapResult | None,
+        *,
+        shift: bool = False,
+        control: bool = False,
+    ) -> None:
         if snap_result is None:
             return
         point = snap_result.point
         if self._active_design_tool == "ruler":
             if self._ruler_anchor is not None and self._ruler_end is None:
+                point = constrain_vector_endpoint(
+                    self._ruler_anchor,
+                    point,
+                    shift=bool(shift),
+                    control=bool(control),
+                )
                 self.tool_measure_preview_changed.emit([self._ruler_anchor, point])
                 self._ruler_end = point
                 self._update_ruler_labels()
@@ -1593,6 +1632,12 @@ class DesignNavigatorPanel(QWidget):
         if self._active_design_tool != "array":
             return
         if self._route_pick_mode == "array_dir1" and self._route_pick_anchor_point is not None:
+            point = constrain_vector_endpoint(
+                self._route_pick_anchor_point,
+                point,
+                shift=bool(shift),
+                control=bool(control),
+            )
             step = (
                 point[0] - self._route_pick_anchor_point[0],
                 point[1] - self._route_pick_anchor_point[1],
@@ -1600,6 +1645,12 @@ class DesignNavigatorPanel(QWidget):
             self.tool_measure_preview_changed.emit([self._route_pick_anchor_point, point])
             self._update_route_array_preview(dir1_override=step)
         elif self._route_pick_mode == "array_dir2" and self._route_pick_anchor_point is not None:
+            point = constrain_vector_endpoint(
+                self._route_pick_anchor_point,
+                point,
+                shift=bool(shift),
+                control=bool(control),
+            )
             step = (
                 point[0] - self._route_pick_anchor_point[0],
                 point[1] - self._route_pick_anchor_point[1],
@@ -1916,6 +1967,9 @@ class DesignLayoutWindow(QWidget):
         )
         self._main_view.route_pick_requested.connect(
             self.navigator_panel.apply_route_pick
+        )
+        self._main_view.tool_hover_snap_changed.connect(
+            self.navigator_panel.set_tool_hover_snap
         )
         self._main_view.hover_snap_changed.connect(self.hover_snap_changed.emit)
         self.navigator_panel.route_pick_mode_changed.connect(
