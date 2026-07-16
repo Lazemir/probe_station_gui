@@ -333,6 +333,24 @@ def _apply_fixed_white_balance(camera: object, snapshot: CameraStateSnapshot) ->
     )
 
 
+def _set_manual_exposure(
+    camera: object,
+    *,
+    gain_db: float,
+    exposure_us: float | None = None,
+) -> Mapping[str, Any]:
+    camera.update_settings(
+        [
+            ("ExposureAuto", "Off"),
+            ("GainAuto", "Off"),
+        ]
+    )
+    settings: list[tuple[str, object]] = [("Gain", gain_db)]
+    if exposure_us is not None:
+        settings.append(("ExposureTime", exposure_us))
+    return camera.update_settings(settings)
+
+
 def _run_all_modes(
     camera: object,
     snapshot: CameraStateSnapshot,
@@ -367,13 +385,7 @@ def _run_native_mode(
     output_dir: Path,
 ) -> dict[str, Any]:
     del snapshot
-    camera.update_settings(
-        [
-            ("ExposureAuto", "Off"),
-            ("GainAuto", "Off"),
-            ("Gain", config.fixed_gain_db),
-        ]
-    )
+    _set_manual_exposure(camera, gain_db=config.fixed_gain_db)
     if mode == "native_full":
         settings = [
             ("GainAuto", "Continuous"),
@@ -442,13 +454,10 @@ def _run_custom_mode(
         limits[1],
         max(limits[0], _finite_float(exposure_node.get("value"), limits[0])),
     )
-    response = camera.update_settings(
-        [
-            ("ExposureAuto", "Off"),
-            ("GainAuto", "Off"),
-            ("Gain", config.fixed_gain_db),
-            ("ExposureTime", exposure),
-        ]
+    response = _set_manual_exposure(
+        camera,
+        gain_db=config.fixed_gain_db,
+        exposure_us=exposure,
     )
     counter = int(response.get("frame_counter_at_completion", 0))
     started = time.monotonic()
@@ -508,13 +517,7 @@ def _apply_mode(
     report: Mapping[str, Any],
 ) -> None:
     _apply_fixed_white_balance(camera, snapshot)
-    camera.update_settings(
-        [
-            ("ExposureAuto", "Off"),
-            ("GainAuto", "Off"),
-            ("Gain", config.fixed_gain_db),
-        ]
-    )
+    _set_manual_exposure(camera, gain_db=config.fixed_gain_db)
     if mode == "native_full":
         settings = [
             ("GainAuto", "Continuous"),

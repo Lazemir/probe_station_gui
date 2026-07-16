@@ -116,7 +116,7 @@ def test_run_restores_original_settings_and_balance_ratios_after_failure() -> No
 
 
 def test_full_diagnostic_uses_valid_batches_and_writes_all_mode_frames() -> None:
-    camera = SyntheticCameraClient()
+    camera = StrictSyntheticCameraClient()
     with tempfile.TemporaryDirectory() as tmpdir:
         report = run_exposure_diagnostic(
             camera,
@@ -235,3 +235,14 @@ class SyntheticCameraClient(FakeCameraClient):
             width=60,
             height=40,
         )
+
+
+class StrictSyntheticCameraClient(SyntheticCameraClient):
+    def update_settings(self, settings):
+        ordered = list(settings)
+        names = {name for name, _value in ordered}
+        if self.state["GainAuto"] != "Off" and "Gain" in names:
+            raise RuntimeError("Gain is read-only while GainAuto is enabled")
+        if self.state["ExposureAuto"] != "Off" and "ExposureTime" in names:
+            raise RuntimeError("ExposureTime is read-only while ExposureAuto is enabled")
+        return super().update_settings(ordered)

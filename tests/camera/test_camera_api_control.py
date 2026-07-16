@@ -3,8 +3,9 @@ from __future__ import annotations
 import threading
 import time
 
-from PySide6.QtCore import QByteArray, QCoreApplication, QObject, QThread, Signal, Slot
+from PySide6.QtCore import QByteArray, QObject, QThread, Signal, Slot
 from PySide6.QtGui import QColor, QImage
+from PySide6.QtWidgets import QApplication
 
 from probe_station_gui.camera.api_control import (
     CameraApiBroker,
@@ -174,7 +175,7 @@ def test_png_encoding_returns_image_metadata_and_decodable_bytes() -> None:
 
 
 def test_qt_signal_completion_runs_outside_blocked_sender_thread() -> None:
-    app = QCoreApplication.instance() or QCoreApplication([])
+    app = QApplication.instance() or QApplication([])
     submitted: list[tuple[str, list[str]]] = []
     broker = CameraApiBroker(
         snapshot_submit=lambda request_id, names: submitted.append((request_id, names)),
