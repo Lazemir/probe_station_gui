@@ -43,12 +43,14 @@ def _point(
     point_id: str,
     center: tuple[float, float],
     *,
+    enabled: bool = True,
     metadata: dict[str, object] | None = None,
 ) -> RoutePoint:
     return RoutePoint(
         id=point_id,
         label=point_id.upper(),
         camera_center=center,
+        enabled=enabled,
         metadata=dict(metadata or {}),
     )
 
@@ -148,7 +150,12 @@ def test_mixed_delete_rejects_unsafe_or_stale_selection(tmp_path: Path) -> None:
 def test_mixed_array_excludes_zero_cell_and_preserves_relative_geometry(
     tmp_path: Path,
 ) -> None:
-    source = _point("p001", (4.0, 5.0), metadata={"structure": 7})
+    source = _point(
+        "p001",
+        (4.0, 5.0),
+        enabled=False,
+        metadata={"structure": 7},
+    )
     route = _route(source)
     markup = _markup(tmp_path)
     entities = project_entities(route, markup)
@@ -185,6 +192,7 @@ def test_mixed_array_excludes_zero_cell_and_preserves_relative_geometry(
         (12.0, 20.0),
     ]
     assert [point.label for point in plan.route_copies] == ["P002", "P003", "P004"]
+    assert all(not point.enabled for point in plan.route_copies)
     assert all(point.metadata["structure"] == 7 for point in plan.route_copies)
     assert all(
         point.metadata["array_source_point_id"] == "p001"

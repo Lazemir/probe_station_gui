@@ -5899,7 +5899,7 @@ class Main(QMainWindow):
     def _stop_design_markup_store(self) -> None:
         store = getattr(self, "_design_markup_store", None)
         if store is not None:
-            store.stop(timeout_s=1.0)
+            store.stop(timeout_s=0.0)
 
     def _show_navigation_status(self, plan: object) -> None:
         message = getattr(plan, "status_message", None)

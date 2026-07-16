@@ -124,6 +124,8 @@ class MarkupStoreWorker(QObject):
         self._active = False
         self._stopping = False
         self._thread: threading.Thread | None = None
+        self._drop_publications = threading.Event()
+        self._drain_thread: threading.Thread | None = None
         self._publication_posted.connect(
             self._deliver_publication,
             Qt.ConnectionType.QueuedConnection,
@@ -137,6 +139,12 @@ class MarkupStoreWorker(QObject):
     def is_idle(self) -> bool:
         with self._condition:
             return not self._active and not self._pending_by_source
+
+    @property
+    def drain_thread(self) -> threading.Thread | None:
+        """Non-daemon shutdown waiter, present only after a detached stop."""
+
+        return self._drain_thread
 
     def load(self, request_id: int, source_path: str | os.PathLike[str]) -> None:
         self._submit(
@@ -170,16 +178,34 @@ class MarkupStoreWorker(QObject):
         """Drain the latest queued operation per source, then stop within a bound."""
 
         self._require_creator_thread()
-        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        timeout = max(0.0, float(timeout_s))
+        deadline = time.monotonic() + timeout
         with self._condition:
             self._stopping = True
+            if timeout == 0.0:
+                self._drop_publications.set()
             thread = self._thread
             self._condition.notify_all()
             post_finished = thread is None
-        if post_finished:
+        if post_finished and not self._drop_publications.is_set():
             self._finished_posted.emit()
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=max(0.0, deadline - time.monotonic()))
+            if thread.is_alive():
+                self._drop_publications.set()
+                self._start_drain_thread(thread)
+
+    def _start_drain_thread(self, worker_thread: threading.Thread) -> None:
+        drain = self._drain_thread
+        if drain is not None and drain.is_alive():
+            return
+        drain = threading.Thread(
+            target=worker_thread.join,
+            name="design-markup-store-drain",
+            daemon=False,
+        )
+        self._drain_thread = drain
+        drain.start()
 
     def _submit(self, operation: _StoreOperation) -> None:
         self._require_creator_thread()
@@ -220,7 +246,8 @@ class MarkupStoreWorker(QObject):
                         self._active = False
                         self._condition.notify_all()
         finally:
-            self._finished_posted.emit()
+            if not self._drop_publications.is_set():
+                self._finished_posted.emit()
 
     def _take_pending(self) -> _StoreOperation | None:
         with self._condition:
@@ -276,6 +303,8 @@ class MarkupStoreWorker(QObject):
         raise ValueError(f"Unknown markup store operation {operation.operation!r}.")
 
     def _post_publication(self, kind: str, value: object) -> None:
+        if self._drop_publications.is_set():
+            return
         self._publication_posted.emit(_Publication(kind, value))
 
     @Slot(object)

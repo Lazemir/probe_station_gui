@@ -147,6 +147,30 @@ def test_pending_saves_for_one_source_coalesce_to_newest_snapshot(
     worker.stop()
 
 
+def test_zero_timeout_stop_returns_immediately_but_keeps_a_nondaemon_drain(
+    tmp_path: Path,
+) -> None:
+    document = _document(tmp_path)
+    backend = _BlockingBackend(tmp_path / "markup")
+    worker = MarkupStoreWorker(backend_factory=lambda: backend)
+    worker.publish(1, document)
+    assert backend.started.wait(timeout=1.0)
+
+    started_at = time.perf_counter()
+    worker.stop(timeout_s=0.0)
+    elapsed = time.perf_counter() - started_at
+
+    assert elapsed < 0.1
+    drain = worker.drain_thread
+    assert drain is not None and drain.is_alive()
+    assert not drain.daemon
+
+    backend.release.set()
+    drain.join(timeout=1.0)
+    assert not drain.is_alive()
+    assert backend.saved_documents == [document]
+
+
 def test_corrupt_json_reports_load_failure_without_document(
     tmp_path: Path,
     qt_app: QApplication,

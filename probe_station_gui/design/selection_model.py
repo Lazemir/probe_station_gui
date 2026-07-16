@@ -337,6 +337,7 @@ def _copy_route_point(
         id=point_id,
         label=f"P{len(existing) + 1:03d}",
         camera_center=(source.camera_center[0] + dx, source.camera_center[1] + dy),
+        enabled=source.enabled,
         metadata=metadata,
     )
 
