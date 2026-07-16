@@ -88,6 +88,14 @@ class CameraLockSettings:
 
 
 @dataclass(frozen=True)
+class AutoExposureScanOptions:
+    enabled: bool = True
+
+    def to_metadata(self) -> dict[str, object]:
+        return {"enabled": bool(self.enabled)}
+
+
+@dataclass(frozen=True)
 class StitchDebugMosaicGroup:
     name: str
     tiles: tuple[MicroscopeScanTile, ...]
@@ -509,6 +517,22 @@ def camera_lock_settings_from_payload(
     return CameraLockSettings(enabled=enabled, settings=settings)
 
 
+def auto_exposure_options_from_payload(
+    payload: Mapping[str, object],
+    *,
+    default_enabled: bool = True,
+) -> AutoExposureScanOptions:
+    value = payload.get("auto_exposure", default_enabled)
+    if isinstance(value, Mapping):
+        unknown = sorted(set(value) - {"enabled"})
+        if unknown:
+            raise ValueError(f"Unknown auto_exposure setting: {unknown[0]}.")
+        enabled = _bool_from_payload(value.get("enabled", default_enabled))
+    else:
+        enabled = _bool_from_payload(value)
+    return AutoExposureScanOptions(enabled=enabled)
+
+
 def starting_status(plan: MicroscopeScanPlan) -> str:
     return f"Microscope scan starting: {len(plan.tiles)} tiles."
 
@@ -802,6 +826,8 @@ def _bool_from_payload(value: object) -> bool:
 
 
 __all__ = [
+    "AutoExposureScanOptions",
+    "auto_exposure_options_from_payload",
     "CameraLockSettings",
     "FlatFieldScanOptions",
     "MicroscopeScanStartDecision",

@@ -126,29 +126,29 @@ Commit: `feat: apply flat field to live microscope view`
 - `MicroscopeScanConfiguration.auto_exposure: bool` defaults to `True`.
 - `Main._run_camera_auto_exposure() -> dict[str, Any]` adapts broker settings and raw `QImage` frames to the shared controller.
 
-- [ ] **Step 1: Write failing scan-option tests**
+- [x] **Step 1: Write failing scan-option tests**
 
 Assert missing API payload defaults to enabled, `auto_exposure=false` disables it, object form accepts `enabled`, and scan metadata serializes the applied result.
 
-- [ ] **Step 2: Write failing scan-order tests**
+- [x] **Step 2: Write failing scan-order tests**
 
 Use a minimal `Main` and ordered event list. Assert `auto_exposure` occurs before `begin_external_task`, `raise`, and all moves. Assert rejected auto-exposure produces no stage events and emits a failed scan result. Assert disabled auto-exposure starts with the existing camera lock.
 
-- [ ] **Step 3: Run tests and verify RED**
+- [x] **Step 3: Run tests and verify RED**
 
 Run: `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/camera/test_microscope_scan.py tests/app/test_main_microscope_scan.py -q`
 
 Expected: failures for missing options and pre-scan call.
 
-- [ ] **Step 4: Implement GUI and API scan configuration**
+- [x] **Step 4: Implement GUI and API scan configuration**
 
 Add an `Auto exposure` checkbox to the scan dialog, checked by default, and include the boolean in `MicroscopeScanConfiguration`. Parse the same option in `_api_microscope_area_scan` and attach it to the worker configuration.
 
-- [ ] **Step 5: Run the controller before motion**
+- [x] **Step 5: Run the controller before motion**
 
 In `_run_microscope_scan`, invoke the direct controller before `stage_controller.begin_external_task`. On rejection raise a scan failure before stage ownership or movement. On success add `auto_exposure` result metadata to `corrections`; then apply the existing camera lock and continue unchanged.
 
-- [ ] **Step 6: Run focused tests and commit**
+- [x] **Step 6: Run focused tests and commit**
 
 Run: `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/camera/test_microscope_scan.py tests/app/test_main_microscope_scan.py tests/ui -q`
 

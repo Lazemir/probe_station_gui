@@ -18,7 +18,7 @@ from importlib import resources
 from pathlib import Path
 import sys
 from types import SimpleNamespace
-from typing import Any, Sequence, TYPE_CHECKING
+from typing import Any, Mapping, Sequence, TYPE_CHECKING
 
 _STARTUP_T0 = time.perf_counter()
 _STARTUP_LAST_ELAPSED_MS = 0.0
@@ -141,6 +141,11 @@ from probe_station_gui.api.keys import API_KEY_FILENAME, ApiKeyStore
 from probe_station_gui.camera.api_control import (
     CameraApiBroker,
     encode_camera_frame_png,
+)
+from probe_station_gui.camera.auto_exposure import (
+    AutoExposureConfig,
+    AutoExposureFrame,
+    CameraAutoExposureController,
 )
 from probe_station_gui.camera.live_correction import (
     LatestFrameProcessor,
@@ -792,6 +797,11 @@ class Main(QMainWindow):
             batch_submit=self._submit_camera_settings_batch,
             frame_counter=self._latest_raw_camera_counter,
         )
+        self._camera_auto_exposure_controller = CameraAutoExposureController(
+            settings_read=self._camera_api_broker.read_settings,
+            settings_write=self._write_camera_auto_exposure_settings,
+            frame_read=self._read_camera_auto_exposure_frame,
+        )
         self.grabber.camera_settings_snapshot_ready.connect(
             self._camera_api_broker.complete
         )
@@ -1038,6 +1048,48 @@ class Main(QMainWindow):
             request_id=request_id,
             map_key="camera",
         )
+
+    def _write_camera_auto_exposure_settings(
+        self,
+        settings: list[tuple[str, object]],
+    ) -> dict[str, Any]:
+        return self._camera_api_broker.write_settings(
+            [
+                {"name": name, "value": value}
+                for name, value in settings
+            ]
+        )
+
+    def _read_camera_auto_exposure_frame(
+        self,
+        after_counter: int,
+        timeout_s: float,
+    ) -> AutoExposureFrame:
+        import numpy as np
+
+        frame, counter = self._wait_for_raw_camera_frame(
+            after_counter=int(after_counter),
+            timeout_s=float(timeout_s),
+        )
+        if frame is None:
+            raise RuntimeError("Fresh raw camera frame is unavailable.")
+        image = frame.convertToFormat(QImage.Format_RGB888)
+        width = int(image.width())
+        height = int(image.height())
+        stride = int(image.bytesPerLine())
+        rows = np.frombuffer(
+            image.bits(),
+            dtype=np.uint8,
+            count=height * stride,
+        ).reshape((height, stride))
+        rgb = np.ascontiguousarray(rows[:, : width * 3].reshape((height, width, 3)))
+        return AutoExposureFrame(rgb=rgb, counter=int(counter))
+
+    def _run_camera_auto_exposure(
+        self,
+        config: AutoExposureConfig | None = None,
+    ) -> dict[str, Any]:
+        return self._camera_auto_exposure_controller.run(config)
 
     def _api_camera_frame(
         self,
@@ -3004,6 +3056,12 @@ class Main(QMainWindow):
                 payload,
                 default_enabled=True,
             )
+            auto_exposure_options = (
+                microscope_scan.auto_exposure_options_from_payload(
+                    payload,
+                    default_enabled=True,
+                )
+            )
             camera_lock_settings = microscope_scan.camera_lock_settings_from_payload(
                 payload,
                 default_enabled=True,
@@ -3074,6 +3132,7 @@ class Main(QMainWindow):
             structure_size_mm=structure_size_mm,
             placement_fraction=placement_fraction,
             flat_field_options=flat_field_options,
+            auto_exposure_options=auto_exposure_options,
             camera_lock_settings=camera_lock_settings,
         )
         self._microscope_scan_stop_requested.clear()
@@ -8576,9 +8635,17 @@ class Main(QMainWindow):
             "camera_lock_settings",
             microscope_scan.CameraLockSettings(enabled=False),
         )
+        auto_exposure_options = getattr(
+            configuration,
+            "auto_exposure_options",
+            microscope_scan.AutoExposureScanOptions(
+                enabled=bool(getattr(configuration, "auto_exposure", True))
+            ),
+        )
         corrections = self._microscope_scan_corrections_metadata(
             flat_field_options=flat_field_options,
             camera_lock_settings=camera_lock_settings,
+            auto_exposure_options=auto_exposure_options,
         )
         scan_pattern = str(getattr(configuration, "scan_pattern", "grid") or "grid")
         refine_scale_from_overlaps = bool(
@@ -8591,9 +8658,27 @@ class Main(QMainWindow):
             }
         captured_frames: list[_MicroscopeScanCapturedFrame] = []
         camera_restore_key: str | None = None
+        stage_task_started = False
         try:
             output_dir.mkdir(parents=True, exist_ok=True)
+            if bool(getattr(auto_exposure_options, "enabled", True)):
+                self.microscope_scan_status.emit(
+                    "Microscope scan: adjusting exposure."
+                )
+                auto_exposure_result = self._run_camera_auto_exposure()
+                if not bool(auto_exposure_result.get("accepted", False)):
+                    raise RuntimeError(
+                        str(
+                            auto_exposure_result.get("message")
+                            or "Camera auto exposure failed."
+                        )
+                    )
+                corrections["auto_exposure"] = {
+                    "enabled": True,
+                    **auto_exposure_result,
+                }
             self.stage_controller.begin_external_task("microscope design scan")
+            stage_task_started = True
             camera_restore_key = self._apply_microscope_scan_camera_lock(
                 camera_lock_settings
             )
@@ -8754,7 +8839,8 @@ class Main(QMainWindow):
                             "Microscope scan complete, but camera settings restore "
                             f"failed: {restore_error}"
                         )
-            self.stage_controller.finish_external_task()
+            if stage_task_started:
+                self.stage_controller.finish_external_task()
             self.microscope_scan_finished.emit(success, message)
 
     def _move_to_microscope_scan_tile(
@@ -8869,6 +8955,8 @@ class Main(QMainWindow):
         *,
         flat_field_options: object,
         camera_lock_settings: object,
+        auto_exposure_options: object | None = None,
+        auto_exposure_result: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
         corrections: dict[str, object] = {}
         if hasattr(flat_field_options, "to_metadata"):
@@ -8879,6 +8967,11 @@ class Main(QMainWindow):
             lock_metadata = camera_lock_settings.to_metadata()
             if bool(lock_metadata.get("enabled")):
                 corrections["camera_lock"] = lock_metadata
+        if bool(getattr(auto_exposure_options, "enabled", False)):
+            corrections["auto_exposure"] = {
+                "enabled": True,
+                **dict(auto_exposure_result or {}),
+            }
         return corrections
 
     def _capture_microscope_scan_frame(self, *, raw: bool = False) -> QImage:

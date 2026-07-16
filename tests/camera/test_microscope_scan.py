@@ -374,6 +374,27 @@ def test_camera_lock_settings_default_to_fixed_auto_modes() -> None:
     )
 
 
+def test_auto_exposure_scan_options_default_enabled_and_accept_opt_out() -> None:
+    defaults = microscope_scan.auto_exposure_options_from_payload(
+        {},
+        default_enabled=True,
+    )
+    assert defaults.enabled is True
+    assert defaults.to_metadata() == {"enabled": True}
+
+    disabled = microscope_scan.auto_exposure_options_from_payload(
+        {"auto_exposure": False},
+        default_enabled=True,
+    )
+    assert disabled.enabled is False
+
+    configured = microscope_scan.auto_exposure_options_from_payload(
+        {"auto_exposure": {"enabled": True}},
+        default_enabled=False,
+    )
+    assert configured.enabled is True
+
+
 def test_tile_and_mosaic_save_plans_preserve_metadata_payloads() -> None:
     plan = _plan()
     tile_plan = microscope_scan.tile_image_save_plan(
