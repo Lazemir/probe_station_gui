@@ -363,6 +363,26 @@ def test_mixed_array_keeps_sources_and_copies_both_entity_types(tmp_path: Path) 
     assert f"selection:{len(original_selection.ids)}" in statuses
 
 
+def test_rotate_design_transforms_and_persists_route_and_markup_together(
+    tmp_path: Path,
+) -> None:
+    window, statuses = _make_mixed_edit_window(tmp_path)
+
+    Main._rotate_design_document(window, 1)
+
+    assert window._design_session.document is not None
+    assert window._design_session.document.rotation_quarter_turns == 1
+    assert window._design_session.route is not None
+    assert [point.camera_center for point in window._design_session.route.points] == [
+        (7.0, 2.0),
+    ]
+    assert window._design_markup is not None
+    assert [(guide.start, guide.end) for guide in window._design_markup.guides] == [
+        ((10.0, 0.0), (10.0, 1.0)),
+    ]
+    assert "publish_markup" in statuses
+
+
 @pytest.mark.parametrize(
     ("choice", "expected_guides", "expected_event"),
     [

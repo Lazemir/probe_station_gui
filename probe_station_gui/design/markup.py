@@ -8,7 +8,7 @@ import uuid
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
-from typing import ClassVar, Collection, Mapping
+from typing import Callable, ClassVar, Collection, Mapping
 
 from probe_station_gui.design.model import Point2D
 from probe_station_gui.design.selection_geometry import SegmentGeometry
@@ -220,6 +220,23 @@ class MarkupDocument:
         if fingerprint.size < 0 or fingerprint.mtime_ns < 0:
             raise ValueError("Source fingerprint values must be nonnegative.")
         return replace(self, source_fingerprint=fingerprint)
+
+    def transform_design_coordinates(
+        self,
+        point_transform: Callable[[Point2D], Point2D],
+    ) -> MarkupDocument:
+        """Move every guide into a transformed design coordinate system."""
+
+        transformed_guides: list[GuideSegment] = []
+        for guide in self.guides:
+            transformed = GuideSegment(
+                id=guide.id,
+                start=_point_for_edit(point_transform(guide.start), "guide.start"),
+                end=_point_for_edit(point_transform(guide.end), "guide.end"),
+            )
+            _validate_guide(transformed, ValueError)
+            transformed_guides.append(transformed)
+        return replace(self, guides=tuple(transformed_guides))
 
     def matches_source(self, source_path: str | os.PathLike[str]) -> bool:
         return (

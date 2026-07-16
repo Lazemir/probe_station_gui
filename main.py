@@ -6099,17 +6099,34 @@ class Main(QMainWindow):
         if route_measurement_thread is not None and route_measurement_thread.is_alive():
             self._show_status("Stop route measurement before rotating the design.", 5000)
             return
+        delta = int(quarter_turn_delta) % 4
+        if delta == 0:
+            delta = 1
+        markup = getattr(self, "_design_markup", None)
+        rotated_markup = (
+            markup.transform_design_coordinates(
+                lambda point: document.rotate_point(point, delta)
+            )
+            if markup is not None
+            else None
+        )
         try:
             plan = design_navigation.rotate_design_document(
-                self._design_session, 1, self._last_selected_design_point, can_rotate=True
+                self._design_session,
+                delta,
+                self._last_selected_design_point,
+                can_rotate=True,
             )
         except DesignModelError as exc:
             self._show_status(str(exc), 5000)
             return
+        self._design_markup = rotated_markup
         self._last_selected_design_point = plan.last_selected_design_point
         self._pending_alignment_preparation = None
         self._refresh_design_panel()
         self._refresh_design_position()
+        if rotated_markup != markup:
+            self._publish_design_markup()
         self._show_navigation_status(plan)
 
     def _create_measurement_route(self) -> None:
