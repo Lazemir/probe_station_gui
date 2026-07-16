@@ -396,6 +396,15 @@ class _MicroscopeScanCapturedFrame:
     actual_stage_position: tuple[float, ...] | None
 
 
+@dataclass(frozen=True)
+class _PendingDesignMarkupLoad:
+    generation: int
+    session: DesignSession
+    plan: design_navigation.DesignLoadResultPlan
+    show_window: bool
+    previous_markup: MarkupDocument | None
+
+
 def _application_icon() -> QIcon:
     icon_path = resources.files("probe_station_gui").joinpath(APP_ICON_RESOURCE)
     icon = QIcon(str(icon_path))
@@ -597,9 +606,10 @@ class Main(QMainWindow):
         self._design_markup_store: MarkupStoreWorker | None = None
         self._design_markup_request_id = 0
         self._design_markup_load_request_id: int | None = None
+        self._design_load_pending = False
         self._design_markup_load_contexts: dict[
             int,
-            tuple[DesignSession, MarkupDocument | None],
+            _PendingDesignMarkupLoad,
         ] = {}
         self._design_markup_pending_visibility: bool | None = None
         self._design_markup_direct_guide_ids: list[str] = []
@@ -5610,14 +5620,17 @@ class Main(QMainWindow):
     def _start_design_document_load(
         self, design_path: str, *, restore_state: dict[str, object] | None, show_window: bool
     ) -> None:
+        self._invalidate_pending_design_markup_load()
         self._design_load_generation += 1
         generation = self._design_load_generation
+        self._set_design_load_pending_ui(True)
         path_text = str(design_path)
         if restore_state is not None:
             self._design_load_restore_states[generation] = dict(restore_state)
         self._design_load_show_window[generation] = bool(show_window)
         if show_window:
             toggle_design_layout_window(self, True)
+            self._set_design_load_pending_ui(True)
         if self.design_layout_window is not None and show_window:
             self.design_layout_window.set_status_message("Loading design...")
         elif self.design_navigator_panel:
@@ -5638,28 +5651,32 @@ class Main(QMainWindow):
             return
         restore_state = self._design_load_restore_states.pop(generation, None)
         show_window = self._design_load_show_window.pop(generation, True)
-        previous_session = self._snapshot_design_session()
+        candidate_session = self._snapshot_design_session()
         previous_markup = getattr(self, "_design_markup", None)
         try:
             plan = design_navigation.design_document_loaded_plan(
-                self._design_session,
+                candidate_session,
                 document,
                 error,
                 restore_state,
             )
         except DesignModelError as exc:
+            self._set_design_load_pending_ui(False)
             self._show_status(str(exc), 6000)
             if restore_state is not None:
                 connection_flow.save_controller_state_without_design(self)
             return
         if not plan.accepted:
+            self._set_design_load_pending_ui(False)
             self._apply_design_load_failure_plan(plan, show_window)
             return
-        self._apply_design_load_success_plan(plan, show_window)
         if plan.document is not None:
             self._begin_design_markup_load(
                 plan.document,
-                previous_session=previous_session,
+                generation=generation,
+                candidate_session=candidate_session,
+                plan=plan,
+                show_window=show_window,
                 previous_markup=previous_markup,
             )
 
@@ -5729,12 +5746,12 @@ class Main(QMainWindow):
         self,
         document: DesignDocument,
         *,
-        previous_session: DesignSession,
+        generation: int,
+        candidate_session: DesignSession,
+        plan: design_navigation.DesignLoadResultPlan,
+        show_window: bool,
         previous_markup: MarkupDocument | None,
     ) -> None:
-        empty = MarkupDocument.empty(document.path)
-        self._design_markup = empty
-        self._design_markup_direct_guide_ids = []
         self._design_markup_pending_visibility = None
         request_id = self._next_design_markup_request_id()
         self._design_markup_load_request_id = request_id
@@ -5743,9 +5760,74 @@ class Main(QMainWindow):
             contexts = {}
             self._design_markup_load_contexts = contexts
         contexts.clear()
-        contexts[request_id] = (previous_session, previous_markup)
-        self._refresh_design_markup_ui()
+        contexts[request_id] = _PendingDesignMarkupLoad(
+            generation=generation,
+            session=candidate_session,
+            plan=plan,
+            show_window=show_window,
+            previous_markup=previous_markup,
+        )
+        self._set_design_load_pending_ui(True)
+        if show_window:
+            window = self.design_layout_window
+            if window is not None and hasattr(window, "set_document_preview"):
+                window.set_document_preview(document)
         self._ensure_design_markup_store().load(request_id, document.path)
+
+    def _commit_pending_design_load(
+        self,
+        context: _PendingDesignMarkupLoad,
+        markup: MarkupDocument,
+    ) -> None:
+        self._design_session = context.session
+        self._design_markup = markup
+        self._design_markup_direct_guide_ids = []
+        self._design_markup_pending_visibility = None
+        self._apply_design_load_success_plan(context.plan, context.show_window)
+        self._finish_design_markup_load_ui(
+            context.plan.document,
+            show_window=context.show_window,
+        )
+
+    def _set_design_load_pending_ui(self, pending: bool) -> None:
+        self._design_load_pending = bool(pending)
+        panel = self.design_navigator_panel
+        if panel is not None and hasattr(panel, "set_design_load_pending"):
+            panel.set_design_load_pending(pending)
+        window = self.design_layout_window
+        if window is not None and hasattr(window, "set_design_load_pending"):
+            window.set_design_load_pending(pending)
+        if window is not None and hasattr(window, "set_route_edit_enabled"):
+            window.set_route_edit_enabled(
+                False if pending else self._design_edit_safe()
+            )
+
+    def _finish_design_markup_load_ui(
+        self,
+        document: DesignDocument | None,
+        *,
+        show_window: bool,
+    ) -> None:
+        window = self.design_layout_window
+        if (
+            show_window
+            and window is not None
+            and hasattr(window, "finish_document_preview")
+        ):
+            window.finish_document_preview(document)
+        self._set_design_load_pending_ui(False)
+
+    def _invalidate_pending_design_markup_load(self) -> None:
+        active_request = getattr(self, "_design_markup_load_request_id", None)
+        contexts = getattr(self, "_design_markup_load_contexts", {})
+        context = contexts.get(active_request) if active_request is not None else None
+        self._design_markup_load_request_id = None
+        contexts.clear()
+        self._design_markup_pending_visibility = None
+        self._finish_design_markup_load_ui(
+            self._design_session.document,
+            show_window=bool(context is not None and context.show_window),
+        )
 
     def _on_design_markup_loaded(self, result: object) -> None:
         if not all(
@@ -5758,33 +5840,49 @@ class Main(QMainWindow):
         context = contexts.pop(result.request_id, None)
         if result.request_id != active_request or context is None:
             return
-        document = self._design_session.document
+        if context.generation != self._design_load_generation:
+            self._design_markup_load_request_id = None
+            return
+        document = context.plan.document
         if document is None:
+            self._design_markup_load_request_id = None
             return
         try:
             decision = resolve_loaded_markup(result.document, document.path)
         except (OSError, ValueError) as exc:
             self._design_markup_load_request_id = None
+            empty = MarkupDocument.empty(document.path)
+            pending_visibility = getattr(
+                self,
+                "_design_markup_pending_visibility",
+                None,
+            )
+            if pending_visibility is not None:
+                empty = empty.with_visibility(pending_visibility)
+            self._commit_pending_design_load(context, empty)
             self._show_status(f"Markup could not be loaded: {exc}", 6000)
-            self._refresh_design_panel()
             return
         if decision.needs_choice:
             choice = self._prompt_changed_markup_choice(document.path)
             decision = resolve_loaded_markup(result.document, document.path, choice)
         self._design_markup_load_request_id = None
         if decision.cancel_load:
-            previous_session, previous_markup = context
-            self._design_session = previous_session
-            self._design_markup = previous_markup
-            self._design_markup_direct_guide_ids = []
+            pending_visibility = getattr(
+                self,
+                "_design_markup_pending_visibility",
+                None,
+            )
             self._design_markup_pending_visibility = None
-            self._refresh_design_panel()
-            self._refresh_design_position()
-            connection_flow.persist_controller_state_if_available(self)
+            if pending_visibility is not None:
+                self._design_markup = context.previous_markup
+                self._refresh_design_markup_ui()
+            self._finish_design_markup_load_ui(
+                self._design_session.document,
+                show_window=context.show_window,
+            )
             self._show_status("Design load canceled.", 4000)
             return
         if not decision.accepted or decision.document is None:
-            self._refresh_design_panel()
             return
         loaded_markup = decision.document
         pending_visibility = getattr(
@@ -5794,14 +5892,11 @@ class Main(QMainWindow):
         )
         if pending_visibility is not None:
             loaded_markup = loaded_markup.with_visibility(pending_visibility)
-        self._design_markup_pending_visibility = None
-        self._design_markup = loaded_markup
-        self._design_markup_direct_guide_ids = []
-        self._refresh_design_markup_ui()
-        if decision.publish or pending_visibility is not None:
-            self._publish_design_markup()
-        elif decision.delete_stored:
+        self._commit_pending_design_load(context, loaded_markup)
+        if decision.delete_stored:
             self._delete_persisted_design_markup(decision.document.source_path)
+        elif decision.publish or pending_visibility is not None:
+            self._publish_design_markup()
 
     def _prompt_changed_markup_choice(self, source_path: Path) -> MarkupLoadChoice:
         message_box = QMessageBox(self)
@@ -5844,11 +5939,26 @@ class Main(QMainWindow):
             and failure.request_id == getattr(self, "_design_markup_load_request_id", None)
         ):
             self._design_markup_load_request_id = None
-            getattr(self, "_design_markup_load_contexts", {}).pop(
+            context = getattr(self, "_design_markup_load_contexts", {}).pop(
                 failure.request_id,
                 None,
             )
-            self._refresh_design_panel()
+            if (
+                context is not None
+                and context.generation == self._design_load_generation
+                and context.plan.document is not None
+            ):
+                empty = MarkupDocument.empty(context.plan.document.path)
+                pending_visibility = getattr(
+                    self,
+                    "_design_markup_pending_visibility",
+                    None,
+                )
+                if pending_visibility is not None:
+                    empty = empty.with_visibility(pending_visibility)
+                self._commit_pending_design_load(context, empty)
+            else:
+                self._set_design_load_pending_ui(False)
             self._show_status("Markup could not be loaded.", 6000)
             logger.warning("Markup load failed: %s", failure.message)
             return
@@ -5887,10 +5997,7 @@ class Main(QMainWindow):
             return
         request_id = self._next_design_markup_request_id()
         store = self._ensure_design_markup_store()
-        if markup.guides:
-            store.publish(request_id, markup)
-        else:
-            store.delete(request_id, markup.source_path)
+        store.publish(request_id, markup)
 
     def _delete_persisted_design_markup(self, source_path: str | Path) -> None:
         request_id = self._next_design_markup_request_id()
@@ -5919,6 +6026,8 @@ class Main(QMainWindow):
         return True
 
     def _unload_design_document(self) -> None:
+        if not self._design_mutation_ready():
+            return
         self._design_load_generation += 1
         loaded_document = self._design_session.document
         plan = design_navigation.unload_design_document(self._design_session)
@@ -5939,6 +6048,8 @@ class Main(QMainWindow):
         self._show_navigation_status(plan)
 
     def _set_design_top_cell(self, top_cell_name: str) -> None:
+        if not self._design_mutation_ready():
+            return
         try:
             plan = design_navigation.set_design_top_cell(self._design_session, top_cell_name)
         except DesignModelError as exc:
@@ -5951,6 +6062,8 @@ class Main(QMainWindow):
         self._show_navigation_status(plan)
 
     def _set_design_layer_visibility(self, layer: int, datatype: int, visible: bool) -> None:
+        if not self._design_mutation_ready():
+            return
         try:
             plan = design_navigation.set_design_layer_visibility(
                 self._design_session, layer, datatype, visible
@@ -5963,6 +6076,8 @@ class Main(QMainWindow):
         self._refresh_design_panel()
 
     def _rotate_design_document(self, quarter_turn_delta: int) -> None:
+        if not self._design_mutation_ready():
+            return
         document = self._design_session.document
         if document is None:
             self._show_status("Load a design before rotating it.", 4000)
@@ -5998,6 +6113,8 @@ class Main(QMainWindow):
         self._show_navigation_status(plan)
 
     def _create_measurement_route(self) -> None:
+        if not self._design_mutation_ready():
+            return
         try:
             plan = design_navigation.create_measurement_route(self._design_session)
         except DesignModelError as exc:
@@ -6008,6 +6125,8 @@ class Main(QMainWindow):
         self._show_navigation_status(plan)
 
     def _load_measurement_route(self, route_path: str) -> None:
+        if not self._design_mutation_ready():
+            return
         try:
             plan = design_navigation.load_measurement_route(self._design_session, route_path)
         except DesignModelError as exc:
@@ -6018,6 +6137,8 @@ class Main(QMainWindow):
         self._restore_route_measurement_state_after_design_load()
 
     def _save_measurement_route(self) -> None:
+        if not self._design_mutation_ready():
+            return
         try:
             plan = design_navigation.save_measurement_route(self._design_session)
         except DesignModelError as exc:
@@ -6026,6 +6147,8 @@ class Main(QMainWindow):
         self._apply_route_edit_plan(plan, update_selection=False)
 
     def _save_measurement_route_as(self, route_path: str) -> None:
+        if not self._design_mutation_ready():
+            return
         try:
             plan = design_navigation.save_measurement_route(self._design_session, route_path)
         except DesignModelError as exc:
@@ -6047,8 +6170,16 @@ class Main(QMainWindow):
     def _design_edit_safe(self) -> bool:
         if self._design_session.document is None:
             return False
+        if bool(getattr(self, "_design_load_pending", False)):
+            return False
         route_thread = getattr(self, "_route_measurement_thread", None)
         return not bool(route_thread is not None and route_thread.is_alive())
+
+    def _design_mutation_ready(self) -> bool:
+        if not bool(getattr(self, "_design_load_pending", False)):
+            return True
+        self._show_status("Design is loading.", 3000)
+        return False
 
     def _markup_mutation_ready(self) -> bool:
         if not self._design_edit_safe():
@@ -6120,7 +6251,7 @@ class Main(QMainWindow):
         )
         self._design_markup_direct_guide_ids = []
         self._refresh_design_markup_ui()
-        self._publish_design_markup()
+        self._delete_persisted_design_markup(markup.source_path)
         self._show_status("Markup cleared.", 3000)
 
     def _delete_design_selection(self) -> None:
@@ -6222,6 +6353,9 @@ class Main(QMainWindow):
         count_x: int, step_y_dx: float, step_y_dy: float, count_y: int,
         serpentine: bool, replace_existing: bool, selected_indices: object = None,
     ) -> None:
+        if not self._design_edit_safe():
+            self._show_status("Design editing is locked.", 4000)
+            return
         try:
             plan = design_navigation.add_route_array_points(
                 self._design_session, origin_x, origin_y, step_x_dx, step_x_dy,
@@ -6234,10 +6368,14 @@ class Main(QMainWindow):
         self._apply_route_edit_plan(plan)
 
     def _remove_selected_route_point(self) -> None:
+        if not self._design_mutation_ready():
+            return
         plan = design_navigation.remove_selected_route_point(self._design_session)
         self._apply_route_edit_plan(plan)
 
     def _clear_measurement_route_points(self) -> None:
+        if not self._design_mutation_ready():
+            return
         plan = design_navigation.clear_measurement_route_points(self._design_session)
         self._apply_route_edit_plan(plan, empty_selection=True)
 
@@ -7570,6 +7708,8 @@ class Main(QMainWindow):
             logger.exception("Failed to persist route measurement session metadata.")
 
     def _select_route_point(self, index: int) -> None:
+        if not self._design_mutation_ready():
+            return
         plan = design_navigation.select_route_point(self._design_session, index)
         self._last_selected_design_point = plan.last_selected_design_point
         self._refresh_design_panel()
@@ -7581,6 +7721,8 @@ class Main(QMainWindow):
         needle_2_dx: float,
         needle_2_dy: float,
     ) -> None:
+        if not self._design_mutation_ready():
+            return
         route = self._design_session.route
         if route is None:
             return
@@ -7597,6 +7739,8 @@ class Main(QMainWindow):
             self.design_layout_window.set_route_edit_enabled(enabled)
 
     def _add_design_source_mark(self, x_value: float, y_value: float) -> None:
+        if not self._design_mutation_ready():
+            return
         self._design_session.add_source_design_mark((x_value, y_value))
         self._refresh_design_panel()
         self._show_status(
@@ -7605,6 +7749,8 @@ class Main(QMainWindow):
         )
 
     def _add_design_check_mark(self, x_value: float, y_value: float) -> None:
+        if not self._design_mutation_ready():
+            return
         self._design_session.add_check_design_mark((x_value, y_value))
         self._refresh_design_panel()
         self._show_status(

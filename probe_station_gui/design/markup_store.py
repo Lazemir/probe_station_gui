@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 import hashlib
@@ -120,7 +121,7 @@ class MarkupStoreWorker(QObject):
         self._creator_thread_id = threading.get_ident()
         self._backend_factory = backend_factory or FilesystemMarkupStoreBackend
         self._condition = threading.Condition(threading.Lock())
-        self._pending_by_source: dict[str, _StoreOperation] = {}
+        self._pending_by_source: dict[str, deque[_StoreOperation]] = {}
         self._active = False
         self._stopping = False
         self._thread: threading.Thread | None = None
@@ -212,7 +213,18 @@ class MarkupStoreWorker(QObject):
         with self._condition:
             if self._stopping:
                 return
-            self._pending_by_source[operation.source_path] = operation
+            pending = self._pending_by_source.setdefault(
+                operation.source_path,
+                deque(),
+            )
+            if (
+                operation.operation == "save"
+                and pending
+                and pending[-1].operation == "save"
+            ):
+                pending[-1] = operation
+            else:
+                pending.append(operation)
             if self._thread is None:
                 self._thread = threading.Thread(
                     target=self._run,
@@ -256,7 +268,10 @@ class MarkupStoreWorker(QObject):
                     return None
                 self._condition.wait()
             source_path = next(iter(self._pending_by_source))
-            operation = self._pending_by_source.pop(source_path)
+            pending = self._pending_by_source[source_path]
+            operation = pending.popleft()
+            if not pending:
+                del self._pending_by_source[source_path]
             self._active = True
             return operation
 

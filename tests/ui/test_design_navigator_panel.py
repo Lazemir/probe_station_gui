@@ -9,7 +9,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import QItemSelectionModel
+from PySide6.QtCore import QItemSelectionModel, Qt
 from PySide6.QtWidgets import QApplication
 
 from probe_station_gui.design.selection_geometry import PointGeometry, SegmentGeometry
@@ -105,6 +105,35 @@ def test_design_navigator_enables_idle_route_controls_with_route_selection(
     assert not panel._route_stop_button.isEnabled()
     assert not panel._route_save_shift_button.isEnabled()
     assert not panel._route_jump_selected_button.isEnabled()
+
+    panel.deleteLater()
+
+
+def test_design_navigator_locks_old_design_controls_while_new_design_loads(
+    qt_app: QApplication,
+) -> None:
+    panel = DesignNavigatorPanel()
+    panel._document = object()
+    panel.set_route(_route(point_count=2), selected_route_point_index=0)
+    panel.set_current_position((1.0, 2.0), (3.0, 4.0))
+
+    panel.set_design_load_pending(True)
+
+    assert not panel._unload_design_button.isEnabled()
+    assert not panel._top_cell_combo.isEnabled()
+    assert not panel._layer_list.isEnabled()
+    assert not panel._snap_checkbox.isEnabled()
+    assert not panel._route_new_button.isEnabled()
+    assert not panel._route_open_button.isEnabled()
+    assert not panel._route_save_as_button.isEnabled()
+    assert not panel._route_table.isEnabled()
+    assert not panel._route_add_current_button.isEnabled()
+    assert not panel._route_remove_button.isEnabled()
+    assert not panel._route_clear_button.isEnabled()
+    assert not panel._route_run_button.isEnabled()
+    assert not panel._route_move_selected_button.isEnabled()
+    assert not panel._markup_visibility_button.isEnabled()
+    assert not panel._delete_shortcut.isEnabled()
 
     panel.deleteLater()
 
@@ -258,6 +287,72 @@ def test_route_table_selection_and_shared_selection_are_bidirectional(
     )
 
     assert requests[-1] == ({route_entity_id("p002")}, "replace")
+    panel.deleteLater()
+
+
+def test_route_table_shift_add_and_ctrl_invert_preserve_guide_selection(
+    qt_app: QApplication,
+) -> None:
+    panel = DesignNavigatorPanel()
+    route = _route(point_count=2)
+    panel._document = object()
+    panel.set_route(route, selected_route_point_index=0)
+    entities = [
+        SelectableDesignEntity(
+            route_entity_id(point.id),
+            EntityOwner.ROUTE,
+            point.id,
+            PointGeometry(point.camera_center),
+            route_index=index,
+        )
+        for index, point in enumerate(route.points)
+    ]
+    guide_id = markup_entity_id("guide")
+    entities.append(
+        SelectableDesignEntity(
+            guide_id,
+            EntityOwner.MARKUP,
+            "guide",
+            SegmentGeometry((0.0, 0.0), (1.0, 0.0)),
+        )
+    )
+    panel.set_selectable_entities(entities)
+    panel.set_selection(
+        SelectionModel(frozenset({guide_id, route_entity_id("p001")}))
+    )
+    requests: list[tuple[set[str], str]] = []
+    panel.selection_requested.connect(
+        lambda ids, mode: requests.append((set(ids), mode))
+    )
+    selection_model = panel._route_table.selectionModel()
+
+    panel._route_selection_modifiers = lambda: Qt.ShiftModifier
+    selection_model.select(
+        panel._route_table.model().index(1, 0),
+        QItemSelectionModel.Select | QItemSelectionModel.Rows,
+    )
+    assert requests[-1] == (
+        {route_entity_id("p001"), route_entity_id("p002")},
+        "add",
+    )
+
+    panel.set_selection(
+        SelectionModel(
+            frozenset(
+                {
+                    guide_id,
+                    route_entity_id("p001"),
+                    route_entity_id("p002"),
+                }
+            )
+        )
+    )
+    panel._route_selection_modifiers = lambda: Qt.ControlModifier
+    selection_model.select(
+        panel._route_table.model().index(0, 0),
+        QItemSelectionModel.Deselect | QItemSelectionModel.Rows,
+    )
+    assert requests[-1] == ({route_entity_id("p001")}, "invert")
     panel.deleteLater()
 
 

@@ -18,18 +18,36 @@ class DesignNavigatorEnablement:
     route_running: bool
     design_registration_active: bool
     route_control: RouteRunControlPresentation
+    design_load_pending: bool = False
 
     @property
     def can_edit_design(self) -> bool:
-        return self.has_document and not self.route_running
+        return (
+            self.has_document
+            and not self.route_running
+            and not self.design_load_pending
+        )
+
+    @property
+    def can_use_document_controls(self) -> bool:
+        return self.has_document and not self.design_load_pending
 
     @property
     def can_save_route(self) -> bool:
-        return self.has_route and self.route_saved and not self.route_running
+        return (
+            self.has_route
+            and self.route_saved
+            and not self.route_running
+            and not self.design_load_pending
+        )
 
     @property
     def can_save_route_as(self) -> bool:
-        return self.has_route and not self.route_running
+        return (
+            self.has_route
+            and not self.route_running
+            and not self.design_load_pending
+        )
 
     @property
     def can_use_rotate_tool(self) -> bool:
@@ -37,7 +55,11 @@ class DesignNavigatorEnablement:
 
     @property
     def can_edit_route_offsets(self) -> bool:
-        return self.has_route and not self.route_running
+        return (
+            self.has_route
+            and not self.route_running
+            and not self.design_load_pending
+        )
 
     @property
     def can_add_current_route_point(self) -> bool:
@@ -45,15 +67,31 @@ class DesignNavigatorEnablement:
             self.has_route
             and self.has_current_design_position
             and not self.route_running
+            and not self.design_load_pending
         )
 
     @property
     def can_remove_route_point(self) -> bool:
-        return self.has_route_selection and not self.route_running
+        return (
+            self.has_route_selection
+            and not self.route_running
+            and not self.design_load_pending
+        )
 
     @property
     def can_clear_route(self) -> bool:
-        return self.has_route and self.route_has_points and not self.route_running
+        return (
+            self.has_route
+            and self.route_has_points
+            and not self.route_running
+            and not self.design_load_pending
+        )
+
+    @property
+    def can_run_selected(self) -> bool:
+        return self.has_route_selection and (
+            self.route_running or not self.design_load_pending
+        )
 
     @property
     def can_confirm_waiting(self) -> bool:
@@ -66,7 +104,7 @@ class DesignNavigatorEnablement:
     @property
     def can_move_selected(self) -> bool:
         return self.has_route_selection and (
-            not self.route_running
+            (not self.route_running and not self.design_load_pending)
             or self.can_confirm_waiting
         )
 
@@ -76,7 +114,11 @@ class DesignNavigatorEnablement:
 
     @property
     def can_use_tool_options(self) -> bool:
-        return self.has_document and not self.route_running
+        return (
+            self.has_document
+            and not self.route_running
+            and not self.design_load_pending
+        )
 
 
 __all__ = ["DesignNavigatorEnablement"]

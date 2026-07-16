@@ -19,6 +19,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QButtonGroup,
     QCheckBox,
     QFileDialog,
@@ -155,6 +156,7 @@ class DesignNavigatorPanel(QWidget):
         self._markup_visible = True
         self._markup_guide_count = 0
         self._guide_undo_available = False
+        self._design_load_pending = False
         self._route_pick_mode: str | None = None
         self._route_pick_anchor_mode: str | None = None
         self._route_pick_anchor_point: Point2D | None = None
@@ -645,6 +647,11 @@ class DesignNavigatorPanel(QWidget):
         self._update_mark_labels()
         self._update_enabled_state()
 
+    def set_design_load_pending(self, pending: bool) -> None:
+        self._design_load_pending = bool(pending)
+        self._delete_shortcut.setEnabled(not self._design_load_pending)
+        self._update_enabled_state()
+
     def set_targets(
         self,
         targets: list[MeasurementTarget],
@@ -1055,16 +1062,17 @@ class DesignNavigatorPanel(QWidget):
             route_running=self._route_measurement_running,
             design_registration_active=self._design_registration_active,
             route_control=self._route_measurement_control_state().presentation(),
+            design_load_pending=self._design_load_pending,
         )
 
     def _apply_document_enabled_state(
         self,
         state: DesignNavigatorEnablement,
     ) -> None:
-        self._unload_design_button.setEnabled(state.has_document)
-        self._top_cell_combo.setEnabled(state.has_document)
-        self._layer_list.setEnabled(state.has_document)
-        self._snap_checkbox.setEnabled(state.has_document)
+        self._unload_design_button.setEnabled(state.can_use_document_controls)
+        self._top_cell_combo.setEnabled(state.can_use_document_controls)
+        self._layer_list.setEnabled(state.can_use_document_controls)
+        self._snap_checkbox.setEnabled(state.can_use_document_controls)
         self._route_new_button.setEnabled(state.can_edit_design)
         self._route_open_button.setEnabled(state.can_edit_design)
         self._route_save_button.setEnabled(state.can_save_route)
@@ -1092,7 +1100,9 @@ class DesignNavigatorPanel(QWidget):
         self._ruler_tool_button.setEnabled(state.can_edit_design)
         self._array_tool_button.setEnabled(state.can_edit_design)
         self._rotate_tool_button.setEnabled(state.can_use_rotate_tool)
-        self._markup_visibility_button.setEnabled(state.has_document)
+        self._markup_visibility_button.setEnabled(
+            state.can_use_document_controls
+        )
 
     def _apply_route_edit_enabled_state(
         self,
@@ -1105,7 +1115,9 @@ class DesignNavigatorPanel(QWidget):
             self._needle_2_dy_spin,
         ):
             spinbox.setEnabled(state.can_edit_route_offsets)
-        self._route_table.setEnabled(state.has_route)
+        self._route_table.setEnabled(
+            state.has_route and not state.design_load_pending
+        )
         self._route_add_current_button.setEnabled(state.can_add_current_route_point)
         self._route_remove_button.setEnabled(state.can_remove_route_point)
         self._route_clear_button.setEnabled(state.can_clear_route)
@@ -1124,7 +1136,7 @@ class DesignNavigatorPanel(QWidget):
         state: DesignNavigatorEnablement,
     ) -> None:
         route_control = state.route_control
-        self._route_run_button.setEnabled(state.has_route_selection)
+        self._route_run_button.setEnabled(state.can_run_selected)
         self._route_stop_button.setEnabled(state.route_running)
         self._route_pause_button.setText(route_control.pause_text)
         self._route_pause_button.setEnabled(route_control.pause_enabled)
@@ -1750,13 +1762,7 @@ class DesignNavigatorPanel(QWidget):
         if self._updating_route_controls:
             return
         selected_rows = self._selected_route_row_indices()
-        if not selected_rows:
-            self._selected_route_point_index = -1
-            self.route_selected.emit(-1)
-            self.selection_requested.emit(set(), "replace")
-            self._update_enabled_state()
-            return
-        row = selected_rows[0]
+        row = selected_rows[0] if selected_rows else -1
         self._selected_route_point_index = row
         self.route_selected.emit(row)
         route_ids = {
@@ -1764,9 +1770,26 @@ class DesignNavigatorPanel(QWidget):
             for index in selected_rows
             if self._route is not None and 0 <= index < len(self._route.points)
         }
-        self.selection_requested.emit(route_ids, "replace")
+        modifiers = self._route_selection_modifiers()
+        if modifiers & Qt.ControlModifier:
+            existing_route_ids = {
+                entity_id
+                for entity_id in self._selection.ids
+                if entity_id.startswith("route:")
+            }
+            self.selection_requested.emit(
+                existing_route_ids ^ route_ids,
+                "invert",
+            )
+        elif modifiers & Qt.ShiftModifier:
+            self.selection_requested.emit(route_ids, "add")
+        else:
+            self.selection_requested.emit(route_ids, "replace")
         self._update_enabled_state()
         self._update_route_array_preview()
+
+    def _route_selection_modifiers(self) -> Qt.KeyboardModifiers:
+        return QApplication.keyboardModifiers()
 
     def _selected_route_row_indices(self) -> list[int]:
         selection_model = self._route_table.selectionModel()
@@ -1950,6 +1973,21 @@ class DesignLayoutWindow(QWidget):
         self._document = document
         self._main_view.set_document(document)
         self.navigator_panel.set_document(document)
+
+    def set_design_load_pending(self, pending: bool) -> None:
+        self.navigator_panel.set_design_load_pending(pending)
+        self._escape_shortcut.setEnabled(not bool(pending))
+
+    def set_document_preview(self, document: DesignDocument) -> None:
+        self._main_view.set_document_preview(document)
+        self.navigator_panel.set_status_message("Loading Markup...")
+
+    def finish_document_preview(
+        self,
+        document: DesignDocument | None,
+    ) -> None:
+        self._main_view.finish_document_preview(document)
+        self.navigator_panel.set_status_message("")
 
     def set_markup(self, markup: MarkupDocument | None) -> None:
         self._markup = markup

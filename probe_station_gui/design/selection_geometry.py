@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Iterable, TypeAlias
 
 from probe_station_gui.design.model import Point2D
@@ -282,22 +283,34 @@ def _cross(first: Point2D, second: Point2D) -> float:
 
 
 def _cross_epsilon(first: SegmentGeometry, second: SegmentGeometry) -> float:
-    scale = max(
-        1.0,
-        *(abs(value) for point in (first.start, first.end, second.start, second.end) for value in point),
+    first_length = math.hypot(
+        first.end[0] - first.start[0],
+        first.end[1] - first.start[1],
     )
-    return 1e-12 * scale * scale
+    second_length = math.hypot(
+        second.end[0] - second.start[0],
+        second.end[1] - second.start[1],
+    )
+    return 1e-12 * max(1.0, first_length * second_length)
 
 
 def _within_bounds(point: Point2D, segment: SegmentGeometry) -> bool:
-    epsilon = 1e-12 * max(
+    coordinates = (
+        float(point[0]),
+        float(point[1]),
+        float(segment.start[0]),
+        float(segment.start[1]),
+        float(segment.end[0]),
+        float(segment.end[1]),
+    )
+    span = max(
         1.0,
-        abs(point[0]),
-        abs(point[1]),
-        abs(segment.start[0]),
-        abs(segment.start[1]),
-        abs(segment.end[0]),
-        abs(segment.end[1]),
+        abs(segment.end[0] - segment.start[0]),
+        abs(segment.end[1] - segment.start[1]),
+    )
+    epsilon = max(
+        1e-12 * span,
+        *(4.0 * math.ulp(coordinate) for coordinate in coordinates),
     )
     return (
         min(segment.start[0], segment.end[0]) - epsilon

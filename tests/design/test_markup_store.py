@@ -171,6 +171,28 @@ def test_zero_timeout_stop_returns_immediately_but_keeps_a_nondaemon_drain(
     assert backend.saved_documents == [document]
 
 
+def test_delete_and_reload_remain_ordered_behind_an_active_save(
+    tmp_path: Path,
+    qt_app: QApplication,
+) -> None:
+    document = _document(tmp_path)
+    backend = _OrderingBackend()
+    worker = MarkupStoreWorker(backend_factory=lambda: backend)
+    loads: list[StoreLoadResult] = []
+    worker.loaded.connect(loads.append)
+
+    worker.publish(1, document)
+    assert backend.started.wait(timeout=1.0)
+    worker.delete(2, document.source_path)
+    worker.load(3, document.source_path)
+    backend.release.set()
+    _wait_until(qt_app, lambda: bool(loads))
+
+    assert backend.operations == ["save", "delete", "load"]
+    assert loads == [StoreLoadResult(3, document.source_path, None)]
+    worker.stop()
+
+
 def test_corrupt_json_reports_load_failure_without_document(
     tmp_path: Path,
     qt_app: QApplication,
@@ -247,3 +269,22 @@ class _BlockingBackend(_RecordingBackend):
         if len(self.saved_documents) == 1:
             self.started.set()
             assert self.release.wait(timeout=2.0)
+
+
+class _OrderingBackend:
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.operations: list[str] = []
+
+    def save(self, _document: MarkupDocument) -> None:
+        self.operations.append("save")
+        self.started.set()
+        assert self.release.wait(timeout=2.0)
+
+    def delete(self, _source_path: str) -> None:
+        self.operations.append("delete")
+
+    def load(self, _source_path: str) -> MarkupDocument | None:
+        self.operations.append("load")
+        return None

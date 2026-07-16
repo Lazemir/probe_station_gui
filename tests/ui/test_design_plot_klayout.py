@@ -151,6 +151,53 @@ def test_file_backed_document_never_calls_legacy_plot_or_global_snap(
     assert pane._layer_items == []
 
 
+def test_pending_document_preview_renders_without_destroying_tool_state(
+    pane,
+    tmp_path: Path,
+) -> None:
+    previous = _document(tmp_path / "previous.gds")
+    candidate = _document(tmp_path / "candidate.gds")
+    pane.set_document(previous)
+    pane.set_active_design_tool("guide")
+    pane._guide_anchor = (2.0, 3.0)
+    pane.set_tool_sketch_points([(2.0, 3.0)])
+    pane._plot.getViewBox().setRange(
+        xRange=(10.0, 20.0),
+        yRange=(5.0, 15.0),
+        padding=0.0,
+    )
+    previous_range = pane._plot.getViewBox().viewRange()
+    pane.set_status_message("Loading design...")
+    assert pane._plot.isHidden()
+
+    pane.set_document_preview(candidate)
+    pane._plot.getViewBox().setRange(
+        xRange=(30.0, 40.0),
+        yRange=(20.0, 30.0),
+        padding=0.0,
+    )
+
+    assert pane._document is candidate
+    assert pane._document_preview_active
+    assert not pane._plot.isHidden()
+    assert pane.active_design_tool == "guide"
+    assert pane._guide_anchor == (2.0, 3.0)
+    assert pane._tool_sketch_points == [(2.0, 3.0)]
+    assert not pane._tool_sketch_point_item.isVisible()
+
+    pane.finish_document_preview(previous)
+
+    assert pane._document is previous
+    assert not pane._document_preview_active
+    assert pane.active_design_tool == "guide"
+    assert pane._guide_anchor == (2.0, 3.0)
+    assert pane._tool_sketch_points == [(2.0, 3.0)]
+    assert pane._tool_sketch_point_item.isVisible()
+    restored_range = pane._plot.getViewBox().viewRange()
+    assert restored_range[0] == pytest.approx(previous_range[0])
+    assert restored_range[1] == pytest.approx(previous_range[1])
+
+
 def test_file_configuration_changes_reuse_snap_worker_and_generation(
     pane, tmp_path: Path
 ) -> None:
@@ -262,6 +309,48 @@ def test_file_backed_click_uses_nearer_correlated_markup_candidate(
     )
 
     assert points == [(1.0, 1.0)]
+
+
+@pytest.mark.parametrize("change", ["hide", "delete", "snap_off"])
+def test_pending_click_is_rejected_when_markup_or_snap_state_changes(
+    pane,
+    tmp_path: Path,
+    change: str,
+) -> None:
+    design_path = tmp_path / f"pending-{change}.gds"
+    design_path.write_bytes(b"gds")
+    pane.set_document(_document(design_path))
+    pane._snap_distance_threshold = lambda: 100.0
+    markup = MarkupDocument.empty(design_path).append_guide(
+        (1.0, 1.0),
+        (3.0, 1.0),
+        guide_id="guide",
+    )
+    pane.set_markup(markup)
+    points = []
+    pane.point_requested.connect(lambda x, y: points.append((x, y)))
+    pane._submit_file_backed_click("point", (1.1, 1.0))
+    request = pane._snap_worker.click_requests[-1]
+
+    if change == "hide":
+        pane.set_markup(markup.with_visibility(False))
+    elif change == "delete":
+        pane.set_markup(markup.remove_ids({"guide"}))
+    else:
+        pane.set_snap_enabled(False)
+    pane._snap_worker.snap_ready.emit(
+        SnapResponse(
+            request_id=request.request_id,
+            config_generation=request.config.generation,
+            raw_point=request.point,
+            result=SnapResult((20.0, 20.0), "vertex", 0.1),
+            elapsed_ms=1.0,
+            shapes_inspected=1,
+            purpose="click",
+        )
+    )
+
+    assert points == []
 
 
 def test_failed_file_backed_click_does_not_execute_correlated_markup_candidate(
@@ -600,4 +689,24 @@ def test_design_window_close_detaches_workers_and_reopen_restores_document(
     assert window._main_view._klayout_config is not None
     assert window._main_view._snap_worker is not first_snap_worker
     window._main_view.shutdown()
+    window.deleteLater()
+
+
+def test_design_window_disables_escape_during_pending_document_preview(
+    monkeypatch,
+    qt_app: QApplication,
+) -> None:
+    monkeypatch.setattr(plot_module, "KLayoutRasterController", _RasterController)
+    monkeypatch.setattr(plot_module, "KLayoutSnapWorker", _SnapWorker)
+    window = DesignLayoutWindow()
+
+    window.set_design_load_pending(True)
+
+    assert not window._escape_shortcut.isEnabled()
+    assert not window.navigator_panel._delete_shortcut.isEnabled()
+
+    window.set_design_load_pending(False)
+
+    assert window._escape_shortcut.isEnabled()
+    assert window.navigator_panel._delete_shortcut.isEnabled()
     window.deleteLater()

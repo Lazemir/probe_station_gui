@@ -8,6 +8,7 @@ from probe_station_gui.design.selection_geometry import (
     SelectionRect,
     guide_snap_candidates,
     segment_intersection,
+    segment_intersects_rect,
 )
 
 
@@ -84,6 +85,46 @@ def test_parallel_and_collinear_segments_have_no_unique_intersection() -> None:
 
     assert segment_intersection(horizontal, parallel) is None
     assert segment_intersection(horizontal, overlap) is None
+
+
+def test_intersection_and_cross_selection_are_translation_invariant() -> None:
+    horizontal = SegmentGeometry((0.0, 0.0), (1.0, 0.0))
+    vertical = SegmentGeometry((0.5, -0.5), (0.5, 0.5))
+    crossing = SegmentGeometry((-1.0, 0.5), (2.0, 0.5))
+    rect = SelectionRect(0.0, 1.0, 0.0, 1.0)
+    offset = 1_000_000.0
+    translated_rect = SelectionRect(
+        offset,
+        offset + 1.0,
+        offset,
+        offset + 1.0,
+    )
+
+    assert segment_intersection(horizontal, vertical) == pytest.approx((0.5, 0.0))
+    assert segment_intersection(
+        horizontal.translated(offset, offset),
+        vertical.translated(offset, offset),
+    ) == pytest.approx((offset + 0.5, offset))
+    assert crossing.crosses(rect)
+    assert crossing.translated(offset, offset).crosses(translated_rect)
+
+
+def test_translated_collinear_near_miss_does_not_become_an_intersection() -> None:
+    first = SegmentGeometry((0.0, 0.0), (1.0, 0.0))
+    near_miss = SelectionRect(1.01, 2.0, -0.5, 0.5)
+    offset = 1_000_000_000_000.0
+    translated_rect = SelectionRect(
+        offset + near_miss.left,
+        offset + near_miss.right,
+        offset + near_miss.bottom,
+        offset + near_miss.top,
+    )
+
+    assert not segment_intersects_rect(first, near_miss)
+    assert not segment_intersects_rect(
+        first.translated(offset, offset),
+        translated_rect,
+    )
 
 
 def test_guide_candidates_include_endpoints_midpoints_and_intersection() -> None:

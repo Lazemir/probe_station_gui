@@ -95,6 +95,7 @@ class _DesignPlotPane(QWidget):
         self._tool_sketch_segments: list[tuple[Point2D, Point2D]] = []
         self._tool_sketch_points: list[Point2D] = []
         self._markup: MarkupDocument | None = None
+        self._markup_generation = 0
         self._markup_snap_candidates: tuple[GuideSnapCandidate, ...] = ()
         self._selectable_entities: tuple[SelectableDesignEntity, ...] = ()
         self._selection = SelectionModel()
@@ -141,6 +142,13 @@ class _DesignPlotPane(QWidget):
         self._status_label: QLabel | None = None
         self._route_geometry_redraw_timer: QTimer | None = None
         self._route_geometry_deferred = False
+        self._document_preview_active = False
+        self._document_preview_previous_document: DesignDocument | None = None
+        self._document_preview_previous_view_range: tuple[
+            tuple[float, float],
+            tuple[float, float],
+        ] | None = None
+        self._preview_overlay_items: tuple[object, ...] = ()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -393,6 +401,13 @@ class _DesignPlotPane(QWidget):
         self._plot.addItem(self._source_mark_1_item)
         self._plot.addItem(self._source_mark_2_item)
         self._plot.addItem(self._check_mark_item)
+        self._preview_overlay_items = tuple(
+            item
+            for name, item in vars(self).items()
+            if name.endswith("_item")
+            and name != "_raster_item"
+            and hasattr(item, "setVisible")
+        )
         self._plot.scene().sigMouseClicked.connect(self._on_mouse_clicked)
         self._plot.scene().sigMouseMoved.connect(self._on_mouse_moved)
         self._plot.scene().installEventFilter(self)
@@ -710,6 +725,52 @@ class _DesignPlotPane(QWidget):
         self._tool_sketch_segments = parsed
         self._redraw_overlays()
 
+    def set_document_preview(self, document: DesignDocument) -> None:
+        if not self._document_preview_active:
+            self._document_preview_previous_document = self._document
+            if self._plot is not None:
+                view_range = self._plot.getViewBox().viewRange()
+                self._document_preview_previous_view_range = (
+                    (float(view_range[0][0]), float(view_range[0][1])),
+                    (float(view_range[1][0]), float(view_range[1][1])),
+                )
+        self._document_preview_active = True
+        self.set_document(document)
+        self._set_preview_overlay_visibility(False)
+        self.set_status_message("")
+
+    def finish_document_preview(
+        self,
+        document: DesignDocument | None,
+    ) -> None:
+        restore_view = (
+            document is self._document_preview_previous_document
+            and self._document_preview_previous_view_range is not None
+        )
+        previous_view_range = self._document_preview_previous_view_range
+        self._document_preview_active = False
+        self.set_document(document)
+        if restore_view and self._plot is not None and previous_view_range is not None:
+            self._plot.getViewBox().setRange(
+                xRange=previous_view_range[0],
+                yRange=previous_view_range[1],
+                padding=0.0,
+            )
+        self._document_preview_previous_document = None
+        self._document_preview_previous_view_range = None
+        self._set_preview_overlay_visibility(True)
+        self._redraw_overlays()
+        if document is not None:
+            self.set_status_message("")
+
+    def _set_preview_overlay_visibility(self, visible: bool) -> None:
+        for item in (
+            *self._preview_overlay_items,
+            *self._probe_route_number_items,
+            *self._tool_measure_label_items,
+        ):
+            item.setVisible(bool(visible))
+
     @property
     def active_design_tool(self) -> str:
         return self._active_design_tool
@@ -733,6 +794,9 @@ class _DesignPlotPane(QWidget):
         self._redraw_overlays()
 
     def set_markup(self, markup: MarkupDocument | None) -> None:
+        if markup != self._markup:
+            self._markup_generation += 1
+            self._pending_hover_markup.clear()
         self._markup = markup
         if markup is None or not markup.visible:
             self._tool_sketch_segments = []
@@ -907,7 +971,12 @@ class _DesignPlotPane(QWidget):
     def set_snap_enabled(self, enabled: bool) -> None:
         """Enable or disable geometry snapping for design clicks and hover."""
 
-        self._snap_enabled = bool(enabled)
+        normalized = bool(enabled)
+        if normalized != self._snap_enabled:
+            self._markup_generation += 1
+            self._pending_clicks.clear()
+            self._pending_hover_markup.clear()
+        self._snap_enabled = normalized
         if not self._snap_enabled:
             self._pending_hover_markup.clear()
             self._set_hover_snap(None)
@@ -1003,6 +1072,9 @@ class _DesignPlotPane(QWidget):
 
     def _redraw_overlays(self) -> None:
         if self._plot is None:
+            return
+        if self._document_preview_active:
+            self._set_preview_overlay_visibility(False)
             return
         if self._targets:
             x_values = [target.design_center[0] for target in self._targets]
@@ -1453,7 +1525,7 @@ class _DesignPlotPane(QWidget):
         if self._plot is None or pg is None:
             return
         self._clear_probe_route_numbers()
-        if self._probe_route is None:
+        if self._probe_route is None or self._document_preview_active:
             return
         enabled_points = [point for point in self._probe_route.points if point.enabled]
         draw_labels = len(enabled_points) <= self.PROBE_ROUTE_LABEL_POINT_LIMIT
@@ -1476,6 +1548,7 @@ class _DesignPlotPane(QWidget):
         if (
             self._plot is None
             or watched is not self._plot.scene()
+            or getattr(self, "_document_preview_active", False)
             or self._active_design_tool != "select"
             or self._document is None
         ):
@@ -1541,7 +1614,11 @@ class _DesignPlotPane(QWidget):
         return super().eventFilter(watched, event)
 
     def _on_mouse_clicked(self, event) -> None:  # pragma: no cover - UI interaction
-        if self._plot is None or self._document is None:
+        if (
+            self._plot is None
+            or self._document is None
+            or getattr(self, "_document_preview_active", False)
+        ):
             return
         is_left_click = event.button() == Qt.LeftButton
         is_double_click = self._is_double_click_event(event)
@@ -1665,6 +1742,7 @@ class _DesignPlotPane(QWidget):
             raw_point=raw_point,
             payload=tuple(payload),
             markup_result=self._best_markup_snap(raw_point),
+            markup_generation=self._markup_generation,
         )
         worker.submit_click(
             SnapRequest(
@@ -1763,7 +1841,11 @@ class _DesignPlotPane(QWidget):
             self._hover_timer.start()
 
     def _flush_hover_snap(self) -> None:  # pragma: no cover - UI interaction
-        if self._plot is None or self._document is None:
+        if (
+            self._plot is None
+            or self._document is None
+            or getattr(self, "_document_preview_active", False)
+        ):
             self._set_hover_snap(None)
             return
         position = self._pending_hover_scene_pos
@@ -1830,7 +1912,11 @@ class _DesignPlotPane(QWidget):
         if response.purpose != "click":
             return
         pending = self._pending_clicks.pop(response.request_id, None)
-        if pending is None or pending.config_generation != config.generation:
+        if (
+            pending is None
+            or pending.config_generation != config.generation
+            or pending.markup_generation != self._markup_generation
+        ):
             return
         result = self._nearest_screen_result(
             pending.raw_point,
