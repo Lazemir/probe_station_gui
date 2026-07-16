@@ -212,3 +212,136 @@ def test_public_temporary_camera_settings_request_queues_ordered_command() -> No
             raise AssertionError("unexpected camera command")
     finally:
         close_grabber(grabber)
+
+
+def test_snapshot_request_preserves_request_id() -> None:
+    grabber = make_grabber([FakeNode("Gain", "float", 0.0)])
+    try:
+        grabber.request_camera_settings_snapshot(
+            "camera",
+            ["Gain"],
+            request_id="snapshot-1",
+        )
+
+        command = grabber._camera_commands.get_nowait()
+        assert command.action == "snapshot"
+        assert command.payload["request_id"] == "snapshot-1"
+        result = grabber._camera_settings_snapshot(command.payload)
+        assert result["request_id"] == "snapshot-1"
+    finally:
+        close_grabber(grabber)
+
+
+def test_public_batch_request_queues_ordered_settings() -> None:
+    grabber = make_grabber(
+        [
+            FakeNode("ExposureAuto", "enum", "Continuous", entries=("Off", "Continuous")),
+            FakeNode("ExposureTime", "float", 3076.14),
+        ]
+    )
+    try:
+        grabber.request_camera_settings_batch(
+            [("ExposureAuto", "Off"), ("ExposureTime", 1800.0)],
+            request_id="batch-1",
+        )
+
+        command = grabber._camera_commands.get_nowait()
+        assert command.action == "batch_set"
+        assert command.payload["request_id"] == "batch-1"
+        assert command.payload["settings"] == [
+            {"node_name": "ExposureAuto", "value": "Off"},
+            {"node_name": "ExposureTime", "value": 1800.0},
+        ]
+    finally:
+        close_grabber(grabber)
+
+
+def test_batch_validates_every_node_before_first_write() -> None:
+    exposure_auto = FakeNode(
+        "ExposureAuto",
+        "enum",
+        "Continuous",
+        entries=("Off", "Continuous"),
+    )
+    exposure_time = FakeNode(
+        "ExposureTime",
+        "float",
+        3076.14,
+        writable=False,
+    )
+    grabber = make_grabber([exposure_auto, exposure_time])
+    try:
+        result = grabber._apply_camera_settings_batch(
+            {
+                "request_id": "batch-2",
+                "settings": [
+                    {"node_name": "ExposureAuto", "value": "Off"},
+                    {"node_name": "ExposureTime", "value": 1800.0},
+                ],
+            }
+        )
+
+        assert result["ok"] is False
+        assert result["request_id"] == "batch-2"
+        assert exposure_auto.set_values == []
+        assert exposure_auto.value == "Continuous"
+    finally:
+        close_grabber(grabber)
+
+
+def test_batch_rolls_back_changed_nodes_in_reverse_order() -> None:
+    gain = FakeNode("Gain", "float", 0.0)
+    exposure_auto = FakeNode(
+        "ExposureAuto",
+        "enum",
+        "Continuous",
+        entries=("Off", "Continuous"),
+    )
+    exposure_mode = FakeNode(
+        "ExposureMode",
+        "enum",
+        "Timed",
+        entries=("Timed",),
+    )
+    grabber = make_grabber([gain, exposure_auto, exposure_mode])
+    try:
+        result = grabber._apply_camera_settings_batch(
+            {
+                "request_id": "batch-3",
+                "settings": [
+                    {"node_name": "Gain", "value": 2.0},
+                    {"node_name": "ExposureAuto", "value": "Off"},
+                    {"node_name": "ExposureMode", "value": "Invalid"},
+                ],
+            }
+        )
+
+        assert result["ok"] is False
+        assert gain.value == 0.0
+        assert exposure_auto.value == "Continuous"
+        assert exposure_auto.set_values == ["Off", "Continuous"]
+        assert gain.set_values == [2.0, 0.0]
+        assert result["rollback_errors"] == []
+    finally:
+        close_grabber(grabber)
+
+
+def test_batch_rejects_duplicate_nodes_without_writing() -> None:
+    gain = FakeNode("Gain", "float", 0.0)
+    grabber = make_grabber([gain])
+    try:
+        result = grabber._apply_camera_settings_batch(
+            {
+                "request_id": "batch-4",
+                "settings": [
+                    {"node_name": "Gain", "value": 1.0},
+                    {"node_name": "Gain", "value": 2.0},
+                ],
+            }
+        )
+
+        assert result["ok"] is False
+        assert "Duplicate" in result["message"]
+        assert gain.set_values == []
+    finally:
+        close_grabber(grabber)

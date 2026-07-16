@@ -58,6 +58,7 @@ class Grabber(QObject):
     error: Signal = Signal(str)
     camera_settings_snapshot_ready: Signal = Signal(object)
     camera_setting_changed: Signal = Signal(object)
+    camera_settings_batch_changed: Signal = Signal(object)
     camera_settings_override_changed: Signal = Signal(object)
 
     def __init__(self) -> None:
@@ -79,6 +80,8 @@ class Grabber(QObject):
         self,
         map_key: str | None = None,
         node_names: list[str] | None = None,
+        *,
+        request_id: str | None = None,
     ) -> None:
         """Request a GenICam node snapshot from the live camera."""
 
@@ -88,10 +91,13 @@ class Grabber(QObject):
                     "ok": False,
                     "message": "Camera is not ready.",
                     "maps": [],
+                    "request_id": request_id,
                 }
             )
             return
         payload: dict[str, Any] = {}
+        if request_id:
+            payload["request_id"] = str(request_id)
         if map_key and node_names:
             payload["map_key"] = str(map_key)
             payload["node_names"] = [str(name) for name in node_names if str(name)]
@@ -102,6 +108,8 @@ class Grabber(QObject):
         map_key: str,
         node_name: str,
         value: object,
+        *,
+        request_id: str | None = None,
     ) -> None:
         """Request a writable GenICam node update on the camera thread."""
 
@@ -112,6 +120,7 @@ class Grabber(QObject):
                     "message": "Camera is not ready.",
                     "map_key": map_key,
                     "node_name": node_name,
+                    "request_id": request_id,
                 }
             )
             return
@@ -122,6 +131,56 @@ class Grabber(QObject):
                     "map_key": str(map_key),
                     "node_name": str(node_name),
                     "value": value,
+                    "request_id": request_id,
+                },
+            )
+        )
+
+    def request_camera_settings_batch(
+        self,
+        settings: Mapping[str, object] | Iterable[tuple[str, object]],
+        *,
+        request_id: str,
+        map_key: str = "camera",
+    ) -> None:
+        """Request an ordered, atomic GenICam settings update."""
+
+        try:
+            setting_items = self._camera_setting_items(settings)
+        except Exception as exc:
+            self.camera_settings_batch_changed.emit(
+                {
+                    "ok": False,
+                    "message": f"Camera settings batch invalid: {exc}",
+                    "request_id": str(request_id),
+                }
+            )
+            return
+        if not setting_items:
+            self.camera_settings_batch_changed.emit(
+                {
+                    "ok": False,
+                    "message": "No camera settings provided.",
+                    "request_id": str(request_id),
+                }
+            )
+            return
+        if self._camera is None:
+            self.camera_settings_batch_changed.emit(
+                {
+                    "ok": False,
+                    "message": "Camera is not ready.",
+                    "request_id": str(request_id),
+                }
+            )
+            return
+        self._camera_commands.put(
+            _CameraCommand(
+                "batch_set",
+                {
+                    "map_key": str(map_key),
+                    "request_id": str(request_id),
+                    "settings": setting_items,
                 },
             )
         )
@@ -374,6 +433,13 @@ class Grabber(QObject):
                     command.payload,
                     self.camera_setting_changed,
                 )
+            elif command.action == "batch_set":
+                self._submit_camera_task(
+                    "settings batch",
+                    self._apply_camera_settings_batch,
+                    command.payload,
+                    self.camera_settings_batch_changed,
+                )
             elif command.action == "execute":
                 self._submit_camera_task(
                     "command execute",
@@ -411,10 +477,19 @@ class Grabber(QObject):
                 dict(payload),
             )
         except RuntimeError as exc:
-            signal.emit({"ok": False, "message": f"Camera {task_name} failed: {exc}"})
+            result = {"ok": False, "message": f"Camera {task_name} failed: {exc}"}
+            request_id = payload.get("request_id")
+            if request_id is not None:
+                result["request_id"] = request_id
+            signal.emit(result)
             return
         future.add_done_callback(
-            lambda done: self._emit_camera_task_result(task_name, done, signal)
+            lambda done: self._emit_camera_task_result(
+                task_name,
+                done,
+                signal,
+                payload,
+            )
         )
 
     def _run_camera_task(
@@ -437,6 +512,7 @@ class Grabber(QObject):
         task_name: str,
         future: concurrent.futures.Future[dict[str, Any]],
         signal: Signal,
+        payload: dict[str, Any],
     ) -> None:
         try:
             result = future.result()
@@ -445,6 +521,9 @@ class Grabber(QObject):
                 "ok": False,
                 "message": f"Camera {task_name} failed: {exc}",
             }
+        request_id = payload.get("request_id")
+        if request_id is not None:
+            result.setdefault("request_id", request_id)
         signal.emit(result)
 
     def _camera_settings_snapshot(
@@ -455,12 +534,16 @@ class Grabber(QObject):
         if cam is None:
             return {"ok": False, "message": "Camera is not ready.", "maps": []}
         payload = payload or {}
+        request_id = payload.get("request_id")
         target_map_key = str(payload.get("map_key") or "")
         node_names = [
             str(name) for name in payload.get("node_names") or [] if str(name)
         ]
         if target_map_key and node_names:
-            return self._camera_settings_partial_snapshot(target_map_key, node_names)
+            result = self._camera_settings_partial_snapshot(target_map_key, node_names)
+            if request_id is not None:
+                result["request_id"] = request_id
+            return result
 
         maps: list[dict[str, Any]] = []
         total_nodes = 0
@@ -490,12 +573,15 @@ class Grabber(QObject):
                         "error": str(exc),
                     }
                 )
-        return {
+        result = {
             "ok": True,
             "message": f"Loaded {total_nodes} camera settings.",
             "maps": maps,
             "streaming": self._acquiring,
         }
+        if request_id is not None:
+            result["request_id"] = request_id
+        return result
 
     def _camera_settings_partial_snapshot(
         self,
@@ -707,6 +793,98 @@ class Grabber(QObject):
             "map_key": map_key,
             "node_name": node_name,
             "node": updated,
+        }
+
+    def _apply_camera_settings_batch(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        map_key = str(payload.get("map_key") or "camera")
+        request_id = str(payload.get("request_id") or "")
+        settings = [
+            item
+            for item in payload.get("settings") or []
+            if isinstance(item, dict) and str(item.get("node_name") or "")
+        ]
+        node_names = [str(item.get("node_name") or "") for item in settings]
+        if not settings:
+            return {
+                "ok": False,
+                "message": "No camera settings provided.",
+                "request_id": request_id,
+                "nodes": [],
+                "rollback_errors": [],
+            }
+        duplicate_names = sorted(
+            {name for name in node_names if node_names.count(name) > 1}
+        )
+        if duplicate_names:
+            return {
+                "ok": False,
+                "message": f"Duplicate camera settings: {', '.join(duplicate_names)}.",
+                "request_id": request_id,
+                "nodes": [],
+                "rollback_errors": [],
+            }
+
+        prepared: list[tuple[dict[str, Any], object, dict[str, Any]]] = []
+        try:
+            for item in settings:
+                node_name = str(item.get("node_name") or "")
+                node = self._node_by_name(map_key, node_name)
+                info = self._read_node_info(map_key, node)
+                if info is None or not info["available"]:
+                    raise RuntimeError(f"{node_name}: camera setting is unavailable.")
+                if not info["readable"]:
+                    raise RuntimeError(f"{node_name}: camera setting cannot be restored.")
+                if not info["writable"]:
+                    raise RuntimeError(f"{node_name}: camera setting is read-only.")
+                prepared.append((item, node, info))
+        except Exception as exc:  # pragma: no cover - hardware dependent
+            return {
+                "ok": False,
+                "message": f"Camera settings batch failed: {exc}",
+                "request_id": request_id,
+                "nodes": [],
+                "rollback_errors": [],
+            }
+
+        changed_settings: list[dict[str, Any]] = []
+        updated_nodes: list[dict[str, Any]] = []
+        try:
+            for item, node, info in prepared:
+                changed_settings.append(
+                    {
+                        "map_key": map_key,
+                        "node_name": str(item.get("node_name") or ""),
+                        "value": info.get("value"),
+                    }
+                )
+                self._set_node_value(node, str(info["type"]), item.get("value"))
+                updated_nodes.append(self._read_node_info(map_key, node) or info)
+        except Exception as exc:  # pragma: no cover - hardware dependent
+            _, rollback_errors = self._restore_camera_setting_values(
+                list(reversed(changed_settings))
+            )
+            message = f"Camera settings batch failed: {exc}"
+            if rollback_errors:
+                message = f"{message}; rollback errors: {'; '.join(rollback_errors)}"
+            return {
+                "ok": False,
+                "message": message,
+                "request_id": request_id,
+                "nodes": updated_nodes,
+                "rollback_errors": rollback_errors,
+                "streaming": self._acquiring,
+            }
+
+        return {
+            "ok": True,
+            "message": f"Applied {len(updated_nodes)} camera settings.",
+            "request_id": request_id,
+            "nodes": updated_nodes,
+            "rollback_errors": [],
+            "streaming": self._acquiring,
         }
 
     def _apply_temporary_camera_settings(
