@@ -143,9 +143,11 @@ from probe_station_gui.camera.api_control import (
     encode_camera_frame_png,
 )
 from probe_station_gui.camera.auto_exposure import (
+    AutoExposureBusyError,
     AutoExposureConfig,
     AutoExposureFrame,
     CameraAutoExposureController,
+    auto_exposure_config_from_mapping,
 )
 from probe_station_gui.camera.live_correction import (
     LatestFrameProcessor,
@@ -1014,6 +1016,7 @@ class Main(QMainWindow):
             camera_settings_read_callback=self._camera_api_broker.read_settings,
             camera_settings_write_callback=self._camera_api_broker.write_settings,
             camera_frame_callback=self._api_camera_frame,
+            camera_auto_exposure_callback=self._api_camera_auto_exposure,
             host=api_settings.host,
             port=api_settings.port,
         )
@@ -1126,6 +1129,35 @@ class Main(QMainWindow):
                 "space": space,
             }
         return encode_camera_frame_png(frame, counter=counter, space=space)
+
+    def _api_camera_auto_exposure(
+        self,
+        config: Mapping[str, object] | None,
+    ) -> dict[str, Any]:
+        if self._microscope_scan_running():
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": (
+                    "Camera auto exposure is unavailable during a microscope scan."
+                ),
+            }
+        try:
+            parsed = auto_exposure_config_from_mapping(config)
+        except ValueError as exc:
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": str(exc),
+            }
+        try:
+            return self._run_camera_auto_exposure(parsed)
+        except AutoExposureBusyError as exc:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": str(exc),
+            }
 
     def _configure_telegram_bot_from_settings(self) -> None:
         telegram_settings = self.settings_manager.telegram_configuration()

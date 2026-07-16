@@ -171,25 +171,25 @@ Commit: `feat: run auto exposure before microscope scans`
 - `POST /api/v1/camera/auto-exposure` requires `camera_write` and accepts `{}` or `{"config": {...}}`.
 - `ProbeStationCameraClient.auto_exposure(config=None, timeout_s=30.0) -> dict[str, Any]`.
 
-- [ ] **Step 1: Write failing server and client tests**
+- [x] **Step 1: Write failing server and client tests**
 
 Assert missing permission returns 403, missing callback returns 501, ordered callback result passes through, invalid non-object config returns 400, rejected results preserve 409, and the Python client sends POST with an extended request timeout.
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 Run: `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/api/test_server.py tests/api/test_client.py tests/app/test_main_camera_api.py -q`
 
 Expected: constructor/route/client method failures.
 
-- [ ] **Step 3: Implement endpoint and client**
+- [x] **Step 3: Implement endpoint and client**
 
 Add the dedicated callback and route beside camera settings routes. Authorize with `API_PERMISSION_CAMERA_WRITE`, validate config shape, call the callback synchronously in the FastAPI worker, and map rejected status through `_raise_for_rejected`. Add the client method without changing default timeout behavior for other requests.
 
-- [ ] **Step 4: Wire Main busy guards**
+- [x] **Step 4: Wire Main busy guards**
 
 Pass `self._api_camera_auto_exposure` into the server. Reject when a microscope scan is active; otherwise parse configuration and run the shared controller. A concurrent controller operation returns 409 without waiting.
 
-- [ ] **Step 5: Run focused tests and commit**
+- [x] **Step 5: Run focused tests and commit**
 
 Run: `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/api/test_server.py tests/api/test_client.py tests/app/test_main_camera_api.py -q`
 

@@ -64,6 +64,7 @@ class ApiServerHttpTest(unittest.TestCase):
         camera_settings_read_callback=None,
         camera_settings_write_callback=None,
         camera_frame_callback=None,
+        camera_auto_exposure_callback=None,
     ):
         from fastapi.testclient import TestClient
 
@@ -75,6 +76,7 @@ class ApiServerHttpTest(unittest.TestCase):
             camera_settings_read_callback=camera_settings_read_callback,
             camera_settings_write_callback=camera_settings_write_callback,
             camera_frame_callback=camera_frame_callback,
+            camera_auto_exposure_callback=camera_auto_exposure_callback,
         )
         app, _uvicorn = server._create_app()
         return TestClient(app)
@@ -262,6 +264,65 @@ class ApiServerHttpTest(unittest.TestCase):
         self.assertEqual(response.headers["X-Camera-Frame-Space"], "raw")
         self.assertEqual(response.headers["X-Camera-Frame-Width"], "640")
         self.assertEqual(response.headers["X-Camera-Frame-Height"], "480")
+
+    def test_camera_auto_exposure_endpoint_validates_and_passes_config(self) -> None:
+        calls = []
+        client = self._client(
+            camera_auto_exposure_callback=lambda config: (
+                calls.append(config)
+                or {
+                    "accepted": True,
+                    "converged": True,
+                    "final_exposure_us": 2400.0,
+                }
+            )
+        )
+
+        response = client.post(
+            "/api/v1/camera/auto-exposure",
+            json={"config": {"target_level": 230.0}},
+        )
+        invalid = client.post(
+            "/api/v1/camera/auto-exposure",
+            json={"config": "invalid"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(calls, [{"target_level": 230.0}])
+        self.assertEqual(response.json()["final_exposure_us"], 2400.0)
+        self.assertEqual(invalid.status_code, 400)
+
+    def test_camera_auto_exposure_endpoint_reports_unavailable_and_rejection(self) -> None:
+        unavailable = self._client().post(
+            "/api/v1/camera/auto-exposure",
+            json={},
+        )
+        rejected = self._client(
+            camera_auto_exposure_callback=lambda _config: {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Camera auto exposure is already running.",
+            }
+        ).post("/api/v1/camera/auto-exposure", json={})
+
+        self.assertEqual(unavailable.status_code, 501)
+        self.assertEqual(rejected.status_code, 409)
+
+    def test_camera_auto_exposure_requires_camera_write_permission(self) -> None:
+        client = self._client(
+            auth_callback=lambda _key, permission: {
+                "accepted": permission != API_PERMISSION_CAMERA_WRITE,
+                "status_code": 403,
+                "message": "camera write denied",
+            },
+            camera_auto_exposure_callback=lambda _config: {
+                "accepted": True,
+            },
+        )
+
+        response = client.post("/api/v1/camera/auto-exposure", json={})
+
+        self.assertEqual(response.status_code, 403)
 
     def test_camera_endpoints_require_separate_camera_permissions(self) -> None:
         auth_calls = []

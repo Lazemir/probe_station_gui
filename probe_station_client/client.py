@@ -123,6 +123,22 @@ class ProbeStationCameraClient:
             height=int(normalized_headers.get("x-camera-frame-height", "0")),
         )
 
+    def auto_exposure(
+        self,
+        config: Mapping[str, object] | None = None,
+        *,
+        timeout_s: float = 30.0,
+    ) -> dict[str, Any]:
+        payload: dict[str, object] = {}
+        if config is not None:
+            payload["config"] = dict(config)
+        return self._client._request(
+            "POST",
+            "/api/v1/camera/auto-exposure",
+            payload,
+            timeout_s=float(timeout_s),
+        )
+
 
 class ProbeStationMeterClient:
     """Measurement-instrument namespace for the probe station API client."""
@@ -1118,6 +1134,7 @@ class ProbeStationClient:
         payload: Mapping[str, Any] | None = None,
         *,
         auth: bool = True,
+        timeout_s: float | None = None,
     ) -> dict[str, Any]:
         body = None
         headers = {"Accept": "application/json"}
@@ -1131,7 +1148,7 @@ class ProbeStationClient:
             self._url_for(path),
             headers,
             body,
-            self.timeout_s,
+            self.timeout_s if timeout_s is None else float(timeout_s),
         )
         response = self._decode_response(response_body)
         if 200 <= status_code < 300:

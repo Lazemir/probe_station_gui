@@ -150,6 +150,10 @@ class ProbeStationApiServer:
             [str, int | None, float], dict[str, Any]
         ]
         | None = None,
+        camera_auto_exposure_callback: Callable[
+            [dict[str, Any] | None], dict[str, Any]
+        ]
+        | None = None,
         host: str | None = None,
         port: int | None = None,
     ) -> None:
@@ -162,6 +166,7 @@ class ProbeStationApiServer:
         self._camera_settings_read_callback = camera_settings_read_callback
         self._camera_settings_write_callback = camera_settings_write_callback
         self._camera_frame_callback = camera_frame_callback
+        self._camera_auto_exposure_callback = camera_auto_exposure_callback
         self._server: object | None = None
         self._thread: threading.Thread | None = None
 
@@ -635,6 +640,35 @@ class ProbeStationApiServer:
                     "X-Camera-Frame-Height": str(result.get("height", 0)),
                 },
             )
+
+        @app.post("/api/v1/camera/auto-exposure")
+        def camera_auto_exposure(
+            payload: dict[str, Any] = Body(...),
+            auth_headers: tuple[str | None, str | None] = Depends(api_auth_headers),
+        ) -> dict[str, Any]:
+            authorize_request(API_PERMISSION_CAMERA_WRITE, auth_headers)
+            unknown = sorted(set(payload) - {"config"})
+            if unknown:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"message": f"Unknown request setting: {unknown[0]}."},
+                )
+            raw_config = payload.get("config")
+            if raw_config is not None and not isinstance(raw_config, dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail={"message": "config must be an object."},
+                )
+            callback = self._camera_auto_exposure_callback
+            if callback is None:
+                raise HTTPException(
+                    status_code=501,
+                    detail={"message": "Camera auto exposure API is unavailable."},
+                )
+            config = None if raw_config is None else dict(raw_config)
+            result = callback(config)
+            _raise_for_rejected(result)
+            return result
 
         add_body_command_route(
             "/api/v1/stage/focus/local",

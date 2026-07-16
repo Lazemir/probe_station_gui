@@ -109,6 +109,32 @@ class ProbeStationClientTest(unittest.TestCase):
                 "/api/v1/camera/frame?space=raw&after_counter=17&timeout_ms=2500"
             )
         )
+
+    def test_camera_client_runs_auto_exposure_with_extended_timeout(self) -> None:
+        transport = _FakeTransport(
+            (200, {"accepted": True, "final_exposure_us": 2450.0})
+        )
+        client = ProbeStationClient(
+            api_key="secret",
+            timeout_s=3.0,
+            transport=transport,
+        )
+
+        result = client.camera.auto_exposure(
+            {"target_level": 230.0},
+            timeout_s=31.0,
+        )
+
+        self.assertEqual(result["final_exposure_us"], 2450.0)
+        self.assertEqual(transport.calls[0]["method"], "POST")
+        self.assertTrue(
+            transport.calls[0]["url"].endswith("/api/v1/camera/auto-exposure")
+        )
+        self.assertEqual(
+            json.loads(transport.calls[0]["body"].decode("utf-8")),
+            {"config": {"target_level": 230.0}},
+        )
+        self.assertEqual(transport.calls[0]["timeout_s"], 31.0)
     def test_stage_status_sends_bearer_token(self) -> None:
         transport = _FakeTransport((200, {"accepted": True, "state": "Idle"}))
         client = ProbeStationClient(
