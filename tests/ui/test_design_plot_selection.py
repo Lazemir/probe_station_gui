@@ -73,7 +73,7 @@ def _route() -> MeasurementRoute:
     )
 
 
-def test_markup_overlay_draws_guides_endpoints_midpoints_and_intersection(
+def test_markup_overlay_draws_only_guides_but_keeps_all_snap_candidates(
     pane: _DesignPlotPane,
     tmp_path: Path,
 ) -> None:
@@ -90,6 +90,18 @@ def test_markup_overlay_draws_guides_endpoints_midpoints_and_intersection(
         if candidate.mode == "guide_intersection"
     ]
     assert [candidate.point for candidate in intersection] == [(5.0, 5.0)]
+    assert {candidate.mode for candidate in pane._markup_snap_candidates} == {
+        "guide_end",
+        "guide_intersection",
+    }
+    for item in (
+        pane._tool_sketch_point_item,
+        pane._tool_sketch_midpoint_item,
+        pane._tool_sketch_intersection_item,
+    ):
+        x_data, y_data = item.getData()
+        assert len(x_data) == 0
+        assert len(y_data) == 0
 
 
 def test_hidden_markup_has_no_overlay_entity_or_snap_candidate(
@@ -313,3 +325,11 @@ def test_layout_window_toolbar_drives_canvas_tool(
 
     window.close()
     window.deleteLater()
+
+
+def test_plot_uses_canonical_ruler_tool_token(pane: _DesignPlotPane) -> None:
+    pane.set_active_design_tool("ruler")
+
+    assert pane.active_design_tool == "ruler"
+    with pytest.raises(ValueError, match="Unknown design tool"):
+        pane.set_active_design_tool("measure")

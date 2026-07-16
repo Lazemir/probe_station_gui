@@ -277,7 +277,7 @@ class DesignNavigatorPanel(QWidget):
         )
         self._ruler_tool_button = self._make_tool_button(
             self._tool_toolbar_widget,
-            "Measure",
+            "Ruler",
             self._make_tool_icon("ruler"),
         )
         self._array_tool_button = self._make_tool_button(
@@ -1393,8 +1393,7 @@ class DesignNavigatorPanel(QWidget):
         self._tool_stack.setCurrentIndex(stack_index_by_tool[tool])
         self._clear_route_pick_mode("")
         self._tool_group.setVisible(True)
-        emitted_tool = "measure" if tool == "ruler" else tool
-        self.active_design_tool_changed.emit(emitted_tool)
+        self.active_design_tool_changed.emit(tool)
         if tool == "select":
             self.route_preview_changed.emit(None)
             self.mixed_array_preview_changed.emit([], [])

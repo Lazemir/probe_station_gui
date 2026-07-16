@@ -777,7 +777,7 @@ class _DesignPlotPane(QWidget):
 
     def set_active_design_tool(self, tool: str) -> None:
         normalized = str(tool).strip().lower()
-        if normalized not in {"select", "point", "guide", "measure", "array", "legacy"}:
+        if normalized not in {"select", "point", "guide", "ruler", "array", "legacy"}:
             raise ValueError(f"Unknown design tool {tool!r}.")
         if normalized != "guide":
             self._guide_anchor = None
@@ -787,7 +787,7 @@ class _DesignPlotPane(QWidget):
         if self._plot is not None:
             cursor = (
                 Qt.CrossCursor
-                if normalized in {"point", "guide", "measure", "array"}
+                if normalized in {"point", "guide", "ruler", "array"}
                 else Qt.ArrowCursor
             )
             self._plot.setCursor(cursor)
@@ -1275,52 +1275,24 @@ class _DesignPlotPane(QWidget):
     def _redraw_tool_sketch(self) -> None:
         if self._plot is None:
             return
+        self._tool_sketch_point_item.setData([], [])
+        self._tool_sketch_midpoint_item.setData([], [])
+        self._tool_sketch_intersection_item.setData([], [])
         segments = list(self._tool_sketch_segments)
         if len(self._tool_sketch_points) == 2:
             segments.append((self._tool_sketch_points[0], self._tool_sketch_points[1]))
         if not segments and not self._tool_sketch_points:
             self._tool_sketch_item.setData([], [])
-            self._tool_sketch_point_item.setData([], [])
-            self._tool_sketch_midpoint_item.setData([], [])
-            self._tool_sketch_intersection_item.setData([], [])
             self._markup_selected_item.setData([], [])
             return
 
         line_x: list[float] = []
         line_y: list[float] = []
-        endpoint_points: list[Point2D] = []
-        midpoint_points: list[Point2D] = []
         for start, end in segments:
             line_x.extend([start[0], end[0], float("nan")])
             line_y.extend([start[1], end[1], float("nan")])
-            endpoint_points.extend([start, end])
-            midpoint_points.append(
-                (
-                    (float(start[0]) + float(end[0])) * 0.5,
-                    (float(start[1]) + float(end[1])) * 0.5,
-                )
-            )
-        if len(self._tool_sketch_points) == 1:
-            endpoint_points.append(self._tool_sketch_points[0])
 
         self._tool_sketch_item.setData(line_x, line_y)
-        self._tool_sketch_point_item.setData(
-            [point[0] for point in endpoint_points],
-            [point[1] for point in endpoint_points],
-        )
-        self._tool_sketch_midpoint_item.setData(
-            [point[0] for point in midpoint_points],
-            [point[1] for point in midpoint_points],
-        )
-        intersections = [
-            candidate.point
-            for candidate in self._markup_snap_candidates
-            if candidate.mode == "guide_intersection"
-        ]
-        self._tool_sketch_intersection_item.setData(
-            [point[0] for point in intersections],
-            [point[1] for point in intersections],
-        )
         selected_segments = [
             entity.geometry
             for entity in self._selectable_entities

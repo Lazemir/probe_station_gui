@@ -162,6 +162,23 @@ def test_design_tools_are_exclusive_and_markup_eye_is_independent(
     panel.deleteLater()
 
 
+def test_design_ruler_uses_canonical_label_and_token(
+    qt_app: QApplication,
+) -> None:
+    panel = DesignNavigatorPanel()
+    panel._document = object()
+    panel._update_enabled_state()
+    tools: list[str] = []
+    panel.active_design_tool_changed.connect(tools.append)
+
+    panel._ruler_tool_button.click()
+
+    assert panel._ruler_tool_button.text() == "Ruler"
+    assert tools[-1] == "ruler"
+    assert panel._route_run_button.text() == "Measure"
+    panel.deleteLater()
+
+
 def test_point_guide_and_mutations_disable_while_route_is_running(
     qt_app: QApplication,
 ) -> None:
