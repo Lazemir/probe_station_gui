@@ -251,6 +251,60 @@ def test_guide_click_click_commits_and_stays_active(
     assert pane.active_design_tool == "guide"
 
 
+def test_shift_constrains_guide_preview_and_commit_to_same_endpoint(
+    pane: _DesignPlotPane,
+) -> None:
+    emitted: list[tuple[tuple[float, float], tuple[float, float]]] = []
+    pane.guide_requested.connect(lambda start, end: emitted.append((start, end)))
+    pane.set_route_edit_enabled(True)
+    pane.set_active_design_tool("guide")
+    pane._execute_click_action(
+        "guide_point",
+        (),
+        SnapResult((1.0, 2.0), "free", 0.0),
+    )
+    result = SnapResult((6.0, 4.0), "vertex", 0.1)
+
+    pane._set_hover_snap(result, shift=True, control=False)
+
+    assert pane._tool_sketch_points == [(1.0, 2.0), (6.0, 2.0)]
+    pane._execute_click_action(
+        "guide_point",
+        (),
+        result,
+        shift=True,
+        control=False,
+    )
+    assert emitted == [((1.0, 2.0), (6.0, 2.0))]
+
+
+@pytest.mark.parametrize(
+    ("shift", "control", "raw", "expected"),
+    [
+        (False, True, (6.0, 6.0), (5.5, 6.5)),
+        (True, True, (6.0, 4.0), (6.0, 4.0)),
+    ],
+)
+def test_guide_uses_ctrl_diagonal_and_shift_ctrl_free(
+    pane: _DesignPlotPane,
+    shift: bool,
+    control: bool,
+    raw: tuple[float, float],
+    expected: tuple[float, float],
+) -> None:
+    pane.set_route_edit_enabled(True)
+    pane.set_active_design_tool("guide")
+    pane._accept_guide_point((1.0, 2.0))
+
+    pane._set_hover_snap(
+        SnapResult(raw, "vertex", 0.1),
+        shift=shift,
+        control=control,
+    )
+
+    assert pane._tool_sketch_points[-1] == pytest.approx(expected)
+
+
 def test_escape_cancels_only_unfinished_guide(pane: _DesignPlotPane) -> None:
     pane.set_route_edit_enabled(True)
     pane.set_active_design_tool("guide")

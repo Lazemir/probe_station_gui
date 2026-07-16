@@ -13,7 +13,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 pytest.importorskip("pyqtgraph")
 
-from PySide6.QtCore import QObject, QPointF, Signal
+from PySide6.QtCore import QObject, QPointF, Qt, Signal
 from PySide6.QtWidgets import QApplication
 
 from probe_station_gui.design.klayout_types import (
@@ -311,6 +311,100 @@ def test_file_backed_click_uses_nearer_correlated_markup_candidate(
     assert points == [(1.0, 1.0)]
 
 
+def test_file_backed_guide_click_keeps_originating_modifier_snapshot(
+    pane,
+    tmp_path: Path,
+) -> None:
+    pane.set_document(_document(tmp_path / "guide-constraint.gds"))
+    pane.set_route_edit_enabled(True)
+    pane.set_active_design_tool("guide")
+    pane._accept_guide_point((0.0, 0.0))
+    guides = []
+    pane.guide_requested.connect(lambda start, end: guides.append((start, end)))
+
+    pane._submit_file_backed_click(
+        "guide_point",
+        (4.0, 3.0),
+        modifiers=Qt.ControlModifier,
+    )
+    request = pane._snap_worker.click_requests[-1]
+    pending = pane._pending_clicks[request.request_id]
+
+    assert (pending.shift_constraint, pending.control_constraint) == (False, True)
+    pane._snap_worker.snap_ready.emit(
+        SnapResponse(
+            request_id=request.request_id,
+            config_generation=request.config.generation,
+            raw_point=request.point,
+            result=SnapResult((4.0, 3.0), "vertex", 0.1),
+            elapsed_ms=1.0,
+            shapes_inspected=1,
+            purpose="click",
+        )
+    )
+    assert len(guides) == 1
+    assert guides[0][0] == (0.0, 0.0)
+    assert guides[0][1] == pytest.approx((3.5, 3.5))
+
+
+def test_escape_discards_late_file_backed_tool_click(
+    pane,
+    tmp_path: Path,
+) -> None:
+    pane.set_document(_document(tmp_path / "cancelled-point.gds"))
+    pane.set_route_edit_enabled(True)
+    pane.set_active_design_tool("point")
+    points = []
+    pane.point_requested.connect(lambda x, y: points.append((x, y)))
+    pane._submit_file_backed_click("point", (4.0, 3.0))
+    request = pane._snap_worker.click_requests[-1]
+
+    pane.cancel_active_interaction()
+    pane._snap_worker.snap_ready.emit(
+        SnapResponse(
+            request_id=request.request_id,
+            config_generation=request.config.generation,
+            raw_point=request.point,
+            result=SnapResult((4.0, 3.0), "vertex", 0.1),
+            elapsed_ms=1.0,
+            shapes_inspected=1,
+            purpose="click",
+        )
+    )
+
+    assert points == []
+
+
+def test_file_backed_hover_keeps_modifiers_and_escape_discards_late_response(
+    pane,
+    tmp_path: Path,
+) -> None:
+    pane.set_document(_document(tmp_path / "hover-constraint.gds"))
+    events = []
+    pane.tool_hover_snap_changed.connect(
+        lambda result, shift, control: events.append((result, shift, control))
+    )
+    pane._submit_file_backed_hover(
+        (4.0, 3.0),
+        modifiers=Qt.ControlModifier,
+    )
+    request = pane._snap_worker.hover_requests[-1]
+    pane._snap_worker.snap_ready.emit(_hover_response(request))
+
+    assert events[-1][1:] == (False, True)
+
+    pane._submit_file_backed_hover(
+        (8.0, 7.0),
+        modifiers=Qt.ShiftModifier,
+    )
+    cancelled = pane._snap_worker.hover_requests[-1]
+    events.clear()
+    pane.cancel_active_interaction()
+    pane._snap_worker.snap_ready.emit(_hover_response(cancelled))
+
+    assert events == []
+
+
 @pytest.mark.parametrize("change", ["hide", "delete", "snap_off"])
 def test_pending_click_is_rejected_when_markup_or_snap_state_changes(
     pane,
@@ -536,7 +630,12 @@ def test_cursor_leave_invalidates_inflight_hover_response(
 @pytest.mark.parametrize(
     ("action", "payload", "signal_name", "expected"),
     [
-        ("route_pick", ("array_origin",), "route_pick_requested", ("array_origin", 7.0, 8.0)),
+        (
+            "route_pick",
+            ("array_origin",),
+            "route_pick_requested",
+            ("array_origin", 7.0, 8.0, False, False),
+        ),
         ("route_point", (), "route_point_requested", (7.0, 8.0)),
         ("move", (), "move_requested", (7.0, 8.0)),
         ("calibration", (0,), "calibration_point_selected", (0, 7.0, 8.0)),

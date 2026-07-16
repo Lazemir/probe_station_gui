@@ -119,6 +119,8 @@ class PendingClick:
     payload: tuple[object, ...] = ()
     markup_result: SnapResult | None = None
     markup_generation: int = 0
+    shift_constraint: bool = False
+    control_constraint: bool = False
 
 
 def forward_rotate_point(point: Point2D, config: KLayoutConfig) -> Point2D:
