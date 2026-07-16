@@ -6,6 +6,7 @@ from probe_station_gui.design.selection_geometry import (
     PointGeometry,
     SegmentGeometry,
     SelectionRect,
+    constrain_vector_endpoint,
     guide_snap_candidates,
     segment_intersection,
     segment_intersects_rect,
@@ -155,3 +156,39 @@ def test_coincident_candidates_are_deduplicated_by_point_and_precedence() -> Non
 
     assert len(at_touch) == 1
     assert at_touch[0].mode == "guide_intersection"
+
+
+@pytest.mark.parametrize(
+    ("proposed", "shift", "control", "expected"),
+    [
+        ((3.0, 2.0), False, False, (3.0, 2.0)),
+        ((3.0, 2.0), True, False, (3.0, 0.0)),
+        ((2.0, 3.0), True, False, (0.0, 3.0)),
+        ((4.0, 1.0), False, True, (4.0, 0.0)),
+        ((4.0, 3.0), False, True, (3.5, 3.5)),
+        ((4.0, -3.0), False, True, (3.5, -3.5)),
+        ((3.0, 2.0), True, True, (3.0, 2.0)),
+        ((0.0, 0.0), False, True, (0.0, 0.0)),
+    ],
+)
+def test_klayout_angle_constraint_mapping(
+    proposed: tuple[float, float],
+    shift: bool,
+    control: bool,
+    expected: tuple[float, float],
+) -> None:
+    assert constrain_vector_endpoint(
+        (0.0, 0.0),
+        proposed,
+        shift=shift,
+        control=control,
+    ) == pytest.approx(expected)
+
+
+def test_angle_constraint_is_relative_to_anchor_and_breaks_ties_stably() -> None:
+    assert constrain_vector_endpoint(
+        (10.0, -5.0),
+        (11.0, -4.0),
+        shift=True,
+        control=False,
+    ) == pytest.approx((11.0, -5.0))

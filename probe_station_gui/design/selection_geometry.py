@@ -101,6 +101,49 @@ class GuideSnapCandidate:
     segment_end: Point2D | None = None
 
 
+def constrain_vector_endpoint(
+    anchor: Point2D,
+    proposed: Point2D,
+    *,
+    shift: bool,
+    control: bool,
+) -> Point2D:
+    """Project an endpoint using KLayout's Shift/Ctrl angle constraints."""
+
+    origin = (float(anchor[0]), float(anchor[1]))
+    endpoint = (float(proposed[0]), float(proposed[1]))
+    if bool(shift) == bool(control):
+        return endpoint
+
+    dx = endpoint[0] - origin[0]
+    dy = endpoint[1] - origin[1]
+    candidates = [
+        (origin[0] + dx, origin[1]),
+        (origin[0], origin[1] + dy),
+    ]
+    if control:
+        positive_diagonal = (dx + dy) * 0.5
+        negative_diagonal = (dx - dy) * 0.5
+        candidates.extend(
+            [
+                (
+                    origin[0] + positive_diagonal,
+                    origin[1] + positive_diagonal,
+                ),
+                (
+                    origin[0] + negative_diagonal,
+                    origin[1] - negative_diagonal,
+                ),
+            ]
+        )
+    return min(
+        candidates,
+        key=lambda point: (
+            (point[0] - endpoint[0]) ** 2 + (point[1] - endpoint[1]) ** 2
+        ),
+    )
+
+
 def segment_intersects_rect(segment: SegmentGeometry, rect: SelectionRect) -> bool:
     """Return whether any point of a finite segment touches the rectangle."""
 
