@@ -8,7 +8,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from PySide6.QtCore import QBuffer, QIODevice
+from PySide6.QtCore import QBuffer, QIODevice, QObject, Slot
 from PySide6.QtGui import QImage
 
 
@@ -35,7 +35,7 @@ class _PendingCameraOperation:
     result: dict[str, Any] | None = None
 
 
-class CameraApiBroker:
+class CameraApiBroker(QObject):
     """Correlate synchronous API requests with asynchronous camera results."""
 
     def __init__(
@@ -46,6 +46,7 @@ class CameraApiBroker:
         frame_counter: FrameCounter,
         timeout_s: float = 5.0,
     ) -> None:
+        super().__init__()
         self._snapshot_submit = snapshot_submit
         self._batch_submit = batch_submit
         self._frame_counter = frame_counter
@@ -106,6 +107,7 @@ class CameraApiBroker:
             ]
         return result
 
+    @Slot(object)
     def complete(self, result: object) -> None:
         if not isinstance(result, Mapping):
             return

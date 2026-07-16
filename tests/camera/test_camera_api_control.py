@@ -3,13 +3,28 @@ from __future__ import annotations
 import threading
 import time
 
-from PySide6.QtCore import QByteArray
+from PySide6.QtCore import QByteArray, QCoreApplication, QObject, QThread, Signal, Slot
 from PySide6.QtGui import QColor, QImage
 
 from probe_station_gui.camera.api_control import (
     CameraApiBroker,
     encode_camera_frame_png,
 )
+
+
+class _SignalSender(QObject):
+    completed = Signal(object)
+
+
+class _BlockingWorker(QObject):
+    def __init__(self, stop: threading.Event) -> None:
+        super().__init__()
+        self._stop = stop
+
+    @Slot()
+    def run(self) -> None:
+        while not self._stop.is_set():
+            time.sleep(0.005)
 
 
 def _wait_for_count(items: list[object], count: int) -> None:
@@ -156,3 +171,48 @@ def test_png_encoding_returns_image_metadata_and_decodable_bytes() -> None:
     decoded = QImage.fromData(QByteArray(result["data"]), "PNG")
     assert not decoded.isNull()
     assert decoded.size() == image.size()
+
+
+def test_qt_signal_completion_runs_outside_blocked_sender_thread() -> None:
+    app = QCoreApplication.instance() or QCoreApplication([])
+    submitted: list[tuple[str, list[str]]] = []
+    broker = CameraApiBroker(
+        snapshot_submit=lambda request_id, names: submitted.append((request_id, names)),
+        batch_submit=lambda _request_id, _settings: None,
+        frame_counter=lambda: 31,
+        timeout_s=0.3,
+    )
+    sender = _SignalSender()
+    sender.completed.connect(broker.complete)
+    stop = threading.Event()
+    blocker = _BlockingWorker(stop)
+    camera_thread = QThread()
+    sender.moveToThread(camera_thread)
+    blocker.moveToThread(camera_thread)
+    camera_thread.started.connect(blocker.run)
+    camera_thread.start()
+    result_holder: dict[str, object] = {}
+    request_thread = threading.Thread(
+        target=lambda: result_holder.update(broker.read_settings(["Gain"]))
+    )
+    request_thread.start()
+    try:
+        _wait_for_count(submitted, 1)
+        sender.completed.emit(
+            {
+                "ok": True,
+                "request_id": submitted[0][0],
+                "maps": [{"key": "camera", "nodes": [{"name": "Gain"}]}],
+            }
+        )
+        deadline = time.monotonic() + 0.25
+        while request_thread.is_alive() and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.005)
+        request_thread.join(0.1)
+        assert result_holder["accepted"] is True
+        assert result_holder["frame_counter_at_completion"] == 31
+    finally:
+        stop.set()
+        camera_thread.quit()
+        camera_thread.wait(1000)
