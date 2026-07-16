@@ -10,9 +10,11 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeySequence
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDockWidget, QMainWindow
 
 from probe_station_gui.views import main_window_menus
+from probe_station_gui.views.design_navigator_panel import DesignLayoutWindow
 from probe_station_gui.views.main_window_menus import setup_main_window_menus
 
 
@@ -178,7 +180,7 @@ def test_setup_main_window_menus_preserves_labels_and_shortcuts(
     assert window._alignment_capture_action.shortcut() == QKeySequence("Space")
     assert window._alignment_capture_action.shortcutContext() == Qt.ApplicationShortcut
     assert window._alignment_exit_action.shortcut() == QKeySequence(Qt.Key_Escape)
-    assert window._alignment_exit_action.shortcutContext() == Qt.ApplicationShortcut
+    assert window._alignment_exit_action.shortcutContext() == Qt.WindowShortcut
 
     window._design_layout_window_action.trigger()
     window._contact_calibration_window_action.trigger()
@@ -193,3 +195,52 @@ def test_setup_main_window_menus_preserves_labels_and_shortcuts(
     assert ("lens_distortion", None) in window.calls
 
     window.close()
+
+
+def test_main_window_escape_does_not_block_active_design_tool_cancel(
+    qt_app: QApplication,
+) -> None:
+    main_window = _MenuOwner()
+    setup_main_window_menus(main_window)
+    main_window.show()
+
+    design_window = DesignLayoutWindow()
+    design_window.navigator_panel._document = object()
+    design_window.navigator_panel._set_design_tool("guide")
+    design_window._main_view._accept_guide_point((1.0, 2.0))
+    design_window.show()
+    design_window.activateWindow()
+    design_window._main_view._plot.setFocus()
+    qt_app.processEvents()
+
+    QTest.keyClick(design_window._main_view._plot, Qt.Key_Escape)
+    qt_app.processEvents()
+
+    assert design_window._main_view._guide_anchor is None
+    assert design_window._main_view.active_design_tool == "select"
+    assert design_window.navigator_panel._active_design_tool == "select"
+    assert ("cancel_pick", None) not in main_window.calls
+    assert ("measure_exit", None) not in main_window.calls
+
+    design_window.close()
+    design_window.deleteLater()
+    main_window.close()
+    main_window.deleteLater()
+
+
+def test_escape_still_exits_modes_in_main_window(qt_app: QApplication) -> None:
+    window = _MenuOwner()
+    setup_main_window_menus(window)
+    window.show()
+    window.activateWindow()
+    window.setFocus()
+    qt_app.processEvents()
+
+    QTest.keyClick(window, Qt.Key_Escape)
+    qt_app.processEvents()
+
+    assert ("cancel_pick", None) in window.calls
+    assert ("measure_exit", None) in window.calls
+
+    window.close()
+    window.deleteLater()

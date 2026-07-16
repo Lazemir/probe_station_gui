@@ -20,4 +20,5 @@ def restore_real_imports_for_main(*, clear_probe_station_gui: bool = False) -> N
     if clear_probe_station_gui or (
         package is not None and not hasattr(package, "__path__")
     ):
+        _delete_loaded_modules("main")
         _delete_loaded_modules("probe_station_gui")

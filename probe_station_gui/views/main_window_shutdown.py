@@ -37,6 +37,7 @@ class MainWindowShutdownOwner(Protocol):
 
     def _stop_telegram_bot_service(self) -> None: ...
     def _save_pending_linear_feedrate_default(self) -> None: ...
+    def _stop_design_markup_store(self) -> None: ...
     def _route_runtime_presenter(self) -> Any: ...
 
 
@@ -83,6 +84,7 @@ def _stop_services_and_timers(owner: MainWindowShutdownOwner) -> None:
     if owner._linear_feedrate_save_timer.isActive():
         owner._linear_feedrate_save_timer.stop()
     owner._save_pending_linear_feedrate_default()
+    owner._stop_design_markup_store()
 
 
 def _stop_route_worker(owner: MainWindowShutdownOwner) -> None:

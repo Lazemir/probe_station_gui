@@ -65,6 +65,12 @@ class MainWindowAuxiliaryOwner(Protocol):
     def _set_route_needle_offsets(self, *args: Any) -> None: ...
     def _set_route_edit_enabled(self, *args: Any) -> None: ...
     def _add_route_array_points(self, *args: Any) -> None: ...
+    def _add_design_guide(self, *args: Any) -> None: ...
+    def _delete_design_selection(self, *args: Any) -> None: ...
+    def _undo_last_design_guide(self, *args: Any) -> None: ...
+    def _clear_design_guides(self, *args: Any) -> None: ...
+    def _set_design_markup_visibility(self, *args: Any) -> None: ...
+    def _apply_mixed_design_array(self, *args: Any) -> None: ...
     def _open_route_measurement_dialog(self, *args: Any) -> None: ...
     def _start_route_measurement(self, *args: Any) -> None: ...
     def _request_stop_route_measurement(self, *args: Any) -> None: ...
@@ -358,9 +364,6 @@ def _connect_route_file_and_edit_signals(owner: MainWindowAuxiliaryOwner) -> Non
     owner.design_navigator_panel.route_edit_enabled_changed.connect(
         owner._set_route_edit_enabled
     )
-    owner.design_navigator_panel.route_array_requested.connect(
-        owner._add_route_array_points
-    )
 
 
 def _connect_route_measurement_signals(owner: MainWindowAuxiliaryOwner) -> None:
@@ -424,6 +427,27 @@ def _connect_design_layout_window_signals(
     )
     owner.design_layout_window.route_point_requested.connect(
         owner._add_design_route_point
+    )
+    owner.design_layout_window.point_requested.connect(
+        owner._add_design_route_point
+    )
+    owner.design_layout_window.guide_requested.connect(
+        owner._add_design_guide
+    )
+    owner.design_layout_window.delete_selection_requested.connect(
+        owner._delete_design_selection
+    )
+    owner.design_layout_window.guide_undo_requested.connect(
+        owner._undo_last_design_guide
+    )
+    owner.design_layout_window.guide_clear_requested.connect(
+        owner._clear_design_guides
+    )
+    owner.design_layout_window.markup_visibility_changed.connect(
+        owner._set_design_markup_visibility
+    )
+    owner.design_layout_window.mixed_array_requested.connect(
+        owner._apply_mixed_design_array
     )
     owner.design_layout_window.hover_snap_changed.connect(
         owner.design_navigator_panel.set_hover_snap

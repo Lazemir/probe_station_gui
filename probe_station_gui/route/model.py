@@ -440,6 +440,28 @@ class MeasurementRoute:
         self.updated_at_utc = _utc_timestamp()
         return point
 
+    def apply_point_changes(
+        self,
+        *,
+        required_ids: set[str] | frozenset[str],
+        remove_ids: set[str] | frozenset[str] = frozenset(),
+        append_points: tuple[RoutePoint, ...] = (),
+    ) -> None:
+        """Validate and apply one point-list mutation without partial changes."""
+
+        current_ids = {point.id for point in self.points}
+        required = frozenset(required_ids)
+        removed = frozenset(remove_ids)
+        if not required <= current_ids or not removed <= current_ids:
+            raise RouteModelError("Selected route points are stale.")
+        retained = [point for point in self.points if point.id not in removed]
+        result = [*retained, *append_points]
+        result_ids = [point.id for point in result]
+        if len(result_ids) != len(set(result_ids)):
+            raise RouteModelError("Route point IDs must remain unique.")
+        self.points[:] = result
+        self.updated_at_utc = _utc_timestamp()
+
     def clear_points(self) -> None:
         if not self.points:
             return

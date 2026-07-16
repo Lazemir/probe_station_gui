@@ -410,6 +410,13 @@ class _FakeDesignLayoutWindow:
         self.calibration_point_selected = _Signal()
         self.move_requested = _Signal()
         self.route_point_requested = _Signal()
+        self.point_requested = _Signal()
+        self.guide_requested = _Signal()
+        self.delete_selection_requested = _Signal()
+        self.guide_undo_requested = _Signal()
+        self.guide_clear_requested = _Signal()
+        self.markup_visibility_changed = _Signal()
+        self.mixed_array_requested = _Signal()
         self.hover_snap_changed = _Signal()
         self.visibility_changed = _Signal()
         self.show_count = 0
@@ -449,6 +456,12 @@ class _DesignOwner:
         "_set_route_needle_offsets",
         "_set_route_edit_enabled",
         "_add_route_array_points",
+        "_add_design_guide",
+        "_delete_design_selection",
+        "_undo_last_design_guide",
+        "_clear_design_guides",
+        "_set_design_markup_visibility",
+        "_apply_mixed_design_array",
         "_open_route_measurement_dialog",
         "_start_route_measurement",
         "_request_stop_route_measurement",
@@ -526,6 +539,13 @@ def test_create_design_layout_window_wires_route_controls_and_reuses_class(
     panel.route_measurement_move_requested.emit("point-7")
     panel.route_measurement_measure_requested.emit(7)
     window.move_requested.emit(1.25, -3.5)
+    window.point_requested.emit(4.0, 5.0)
+    window.guide_requested.emit((0.0, 0.0), (1.0, 1.0))
+    window.delete_selection_requested.emit()
+    window.guide_undo_requested.emit()
+    window.guide_clear_requested.emit()
+    window.markup_visibility_changed.emit(False)
+    window.mixed_array_requested.emit("array")
     window.hover_snap_changed.emit("snap")
 
     assert ("_request_pause_route_measurement", ()) in owner.calls
@@ -542,4 +562,11 @@ def test_create_design_layout_window_wires_route_controls_and_reuses_class(
         (owner._route_measurement_dialog.configuration,),
     ) in owner.calls
     assert ("move_to_design_window_point", (1.25, -3.5)) in owner.calls
+    assert ("_add_design_route_point", (4.0, 5.0)) in owner.calls
+    assert ("_add_design_guide", ((0.0, 0.0), (1.0, 1.0))) in owner.calls
+    assert ("_delete_design_selection", ()) in owner.calls
+    assert ("_undo_last_design_guide", ()) in owner.calls
+    assert ("_clear_design_guides", ()) in owner.calls
+    assert ("_set_design_markup_visibility", (False,)) in owner.calls
+    assert ("_apply_mixed_design_array", ("array",)) in owner.calls
     assert panel.hover_snap_values == ["snap"]

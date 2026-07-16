@@ -105,6 +105,7 @@ def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
         _save_pending_linear_feedrate_default=lambda: events.append(
             ("save_feedrate",)
         ),
+        _stop_design_markup_store=lambda: events.append(("markup_store_stop",)),
         _route_measurement_dialog=SimpleNamespace(
             close=lambda: events.append(("route_close",))
         ),
@@ -132,6 +133,7 @@ def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
         ("blink_timer_stop",),
         ("feedrate_timer_stop",),
         ("save_feedrate",),
+        ("markup_store_stop",),
         ("route_runner_stop",),
         ("route_thread", "join", 2.0),
         ("scan_stop_requested",),

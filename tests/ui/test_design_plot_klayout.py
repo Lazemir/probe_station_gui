@@ -13,7 +13,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 pytest.importorskip("pyqtgraph")
 
-from PySide6.QtCore import QObject, QPointF, Signal
+from PySide6.QtCore import QObject, QPointF, Qt, Signal
 from PySide6.QtWidgets import QApplication
 
 from probe_station_gui.design.klayout_types import (
@@ -22,6 +22,7 @@ from probe_station_gui.design.klayout_types import (
     SnapFailure,
     SnapResponse,
 )
+from probe_station_gui.design.markup import MarkupDocument
 from probe_station_gui.design.model import DesignDocument, SnapResult
 from probe_station_gui.views import design_plot_pane as plot_module
 from probe_station_gui.views.design_navigator_panel import (
@@ -150,6 +151,53 @@ def test_file_backed_document_never_calls_legacy_plot_or_global_snap(
     assert pane._layer_items == []
 
 
+def test_pending_document_preview_renders_without_destroying_tool_state(
+    pane,
+    tmp_path: Path,
+) -> None:
+    previous = _document(tmp_path / "previous.gds")
+    candidate = _document(tmp_path / "candidate.gds")
+    pane.set_document(previous)
+    pane.set_active_design_tool("guide")
+    pane._guide_anchor = (2.0, 3.0)
+    pane.set_tool_sketch_points([(2.0, 3.0)])
+    pane._plot.getViewBox().setRange(
+        xRange=(10.0, 20.0),
+        yRange=(5.0, 15.0),
+        padding=0.0,
+    )
+    previous_range = pane._plot.getViewBox().viewRange()
+    pane.set_status_message("Loading design...")
+    assert pane._plot.isHidden()
+
+    pane.set_document_preview(candidate)
+    pane._plot.getViewBox().setRange(
+        xRange=(30.0, 40.0),
+        yRange=(20.0, 30.0),
+        padding=0.0,
+    )
+
+    assert pane._document is candidate
+    assert pane._document_preview_active
+    assert not pane._plot.isHidden()
+    assert pane.active_design_tool == "guide"
+    assert pane._guide_anchor == (2.0, 3.0)
+    assert pane._tool_sketch_points == [(2.0, 3.0)]
+    assert not pane._tool_sketch_point_item.isVisible()
+
+    pane.finish_document_preview(previous)
+
+    assert pane._document is previous
+    assert not pane._document_preview_active
+    assert pane.active_design_tool == "guide"
+    assert pane._guide_anchor == (2.0, 3.0)
+    assert pane._tool_sketch_points == [(2.0, 3.0)]
+    assert pane._tool_sketch_point_item.isVisible()
+    restored_range = pane._plot.getViewBox().viewRange()
+    assert restored_range[0] == pytest.approx(previous_range[0])
+    assert restored_range[1] == pytest.approx(previous_range[1])
+
+
 def test_file_configuration_changes_reuse_snap_worker_and_generation(
     pane, tmp_path: Path
 ) -> None:
@@ -225,6 +273,234 @@ def test_hover_is_replaceable_and_click_waits_for_matching_current_response(
 
     assert len(worker.hover_requests) == 2
     assert moves == [(50.0, 60.0)]
+
+
+def test_file_backed_click_uses_nearer_correlated_markup_candidate(
+    pane,
+    tmp_path: Path,
+) -> None:
+    design_path = tmp_path / "markup-snap.gds"
+    design_path.write_bytes(b"gds")
+    pane.set_document(_document(design_path))
+    pane._snap_distance_threshold = lambda: 100.0
+    markup = MarkupDocument.empty(design_path).append_guide(
+        (1.0, 1.0),
+        (3.0, 1.0),
+        guide_id="guide",
+    )
+    pane.set_markup(markup)
+    points = []
+    pane.point_requested.connect(lambda x, y: points.append((x, y)))
+
+    pane._submit_file_backed_click("point", (1.1, 1.0))
+    request = pane._snap_worker.click_requests[-1]
+    pending = pane._pending_clicks[request.request_id]
+    assert pending.markup_result is not None
+    pane._snap_worker.snap_ready.emit(
+        SnapResponse(
+            request_id=request.request_id,
+            config_generation=request.config.generation,
+            raw_point=request.point,
+            result=SnapResult((20.0, 20.0), "vertex", 0.1),
+            elapsed_ms=1.0,
+            shapes_inspected=1,
+            purpose="click",
+        )
+    )
+
+    assert points == [(1.0, 1.0)]
+
+
+def test_file_backed_guide_click_keeps_originating_modifier_snapshot(
+    pane,
+    tmp_path: Path,
+) -> None:
+    pane.set_document(_document(tmp_path / "guide-constraint.gds"))
+    pane.set_route_edit_enabled(True)
+    pane.set_active_design_tool("guide")
+    pane._accept_guide_point((0.0, 0.0))
+    guides = []
+    pane.guide_requested.connect(lambda start, end: guides.append((start, end)))
+
+    pane._submit_file_backed_click(
+        "guide_point",
+        (4.0, 3.0),
+        modifiers=Qt.ControlModifier,
+    )
+    request = pane._snap_worker.click_requests[-1]
+    pending = pane._pending_clicks[request.request_id]
+
+    assert (pending.shift_constraint, pending.control_constraint) == (False, True)
+    pane._snap_worker.snap_ready.emit(
+        SnapResponse(
+            request_id=request.request_id,
+            config_generation=request.config.generation,
+            raw_point=request.point,
+            result=SnapResult((4.0, 3.0), "vertex", 0.1),
+            elapsed_ms=1.0,
+            shapes_inspected=1,
+            purpose="click",
+        )
+    )
+    assert len(guides) == 1
+    assert guides[0][0] == (0.0, 0.0)
+    assert guides[0][1] == pytest.approx((3.5, 3.5))
+
+
+def test_escape_discards_late_file_backed_tool_click(
+    pane,
+    tmp_path: Path,
+) -> None:
+    pane.set_document(_document(tmp_path / "cancelled-point.gds"))
+    pane.set_route_edit_enabled(True)
+    pane.set_active_design_tool("point")
+    points = []
+    pane.point_requested.connect(lambda x, y: points.append((x, y)))
+    pane._submit_file_backed_click("point", (4.0, 3.0))
+    request = pane._snap_worker.click_requests[-1]
+
+    pane.cancel_active_interaction()
+    pane._snap_worker.snap_ready.emit(
+        SnapResponse(
+            request_id=request.request_id,
+            config_generation=request.config.generation,
+            raw_point=request.point,
+            result=SnapResult((4.0, 3.0), "vertex", 0.1),
+            elapsed_ms=1.0,
+            shapes_inspected=1,
+            purpose="click",
+        )
+    )
+
+    assert points == []
+
+
+def test_file_backed_hover_keeps_modifiers_and_escape_discards_late_response(
+    pane,
+    tmp_path: Path,
+) -> None:
+    pane.set_document(_document(tmp_path / "hover-constraint.gds"))
+    events = []
+    pane.tool_hover_snap_changed.connect(
+        lambda result, shift, control: events.append((result, shift, control))
+    )
+    pane._submit_file_backed_hover(
+        (4.0, 3.0),
+        modifiers=Qt.ControlModifier,
+    )
+    request = pane._snap_worker.hover_requests[-1]
+    pane._snap_worker.snap_ready.emit(_hover_response(request))
+
+    assert events[-1][1:] == (False, True)
+
+    pane._submit_file_backed_hover(
+        (8.0, 7.0),
+        modifiers=Qt.ShiftModifier,
+    )
+    cancelled = pane._snap_worker.hover_requests[-1]
+    events.clear()
+    pane.cancel_active_interaction()
+    pane._snap_worker.snap_ready.emit(_hover_response(cancelled))
+
+    assert events == []
+
+
+@pytest.mark.parametrize("change", ["hide", "delete", "snap_off"])
+def test_pending_click_is_rejected_when_markup_or_snap_state_changes(
+    pane,
+    tmp_path: Path,
+    change: str,
+) -> None:
+    design_path = tmp_path / f"pending-{change}.gds"
+    design_path.write_bytes(b"gds")
+    pane.set_document(_document(design_path))
+    pane._snap_distance_threshold = lambda: 100.0
+    markup = MarkupDocument.empty(design_path).append_guide(
+        (1.0, 1.0),
+        (3.0, 1.0),
+        guide_id="guide",
+    )
+    pane.set_markup(markup)
+    points = []
+    pane.point_requested.connect(lambda x, y: points.append((x, y)))
+    pane._submit_file_backed_click("point", (1.1, 1.0))
+    request = pane._snap_worker.click_requests[-1]
+
+    if change == "hide":
+        pane.set_markup(markup.with_visibility(False))
+    elif change == "delete":
+        pane.set_markup(markup.remove_ids({"guide"}))
+    else:
+        pane.set_snap_enabled(False)
+    pane._snap_worker.snap_ready.emit(
+        SnapResponse(
+            request_id=request.request_id,
+            config_generation=request.config.generation,
+            raw_point=request.point,
+            result=SnapResult((20.0, 20.0), "vertex", 0.1),
+            elapsed_ms=1.0,
+            shapes_inspected=1,
+            purpose="click",
+        )
+    )
+
+    assert points == []
+
+
+def test_failed_file_backed_click_does_not_execute_correlated_markup_candidate(
+    pane,
+    tmp_path: Path,
+) -> None:
+    design_path = tmp_path / "markup-failure.gds"
+    design_path.write_bytes(b"gds")
+    pane.set_document(_document(design_path))
+    pane._snap_distance_threshold = lambda: 100.0
+    pane.set_markup(
+        MarkupDocument.empty(design_path).append_guide(
+            (1.0, 1.0),
+            (3.0, 1.0),
+            guide_id="guide",
+        )
+    )
+    points = []
+    pane.point_requested.connect(lambda x, y: points.append((x, y)))
+    pane._submit_file_backed_click("point", (1.1, 1.0))
+    request = pane._snap_worker.click_requests[-1]
+
+    pane._snap_worker.failed.emit(
+        SnapFailure(
+            request.request_id,
+            request.config.generation,
+            "click",
+            "failed",
+        )
+    )
+
+    assert points == []
+
+
+def test_markup_edits_do_not_reconfigure_file_backed_workers(
+    pane,
+    tmp_path: Path,
+) -> None:
+    design_path = tmp_path / "markup-worker-stability.gds"
+    design_path.write_bytes(b"gds")
+    pane.set_document(_document(design_path))
+    snap_worker = pane._snap_worker
+    raster_controller = pane._raster_controller
+    configured_documents = list(raster_controller.documents)
+
+    pane.set_markup(
+        MarkupDocument.empty(design_path).append_guide(
+            (0.0, 0.0),
+            (2.0, 2.0),
+            guide_id="guide",
+        )
+    )
+
+    assert pane._snap_worker is snap_worker
+    assert pane._raster_controller is raster_controller
+    assert raster_controller.documents == configured_documents
 
 
 def test_matching_hover_failure_only_clears_matching_hover(pane, tmp_path: Path) -> None:
@@ -354,7 +630,12 @@ def test_cursor_leave_invalidates_inflight_hover_response(
 @pytest.mark.parametrize(
     ("action", "payload", "signal_name", "expected"),
     [
-        ("route_pick", ("array_origin",), "route_pick_requested", ("array_origin", 7.0, 8.0)),
+        (
+            "route_pick",
+            ("array_origin",),
+            "route_pick_requested",
+            ("array_origin", 7.0, 8.0, False, False),
+        ),
         ("route_point", (), "route_point_requested", (7.0, 8.0)),
         ("move", (), "move_requested", (7.0, 8.0)),
         ("calibration", (0,), "calibration_point_selected", (0, 7.0, 8.0)),
@@ -507,4 +788,24 @@ def test_design_window_close_detaches_workers_and_reopen_restores_document(
     assert window._main_view._klayout_config is not None
     assert window._main_view._snap_worker is not first_snap_worker
     window._main_view.shutdown()
+    window.deleteLater()
+
+
+def test_design_window_disables_escape_during_pending_document_preview(
+    monkeypatch,
+    qt_app: QApplication,
+) -> None:
+    monkeypatch.setattr(plot_module, "KLayoutRasterController", _RasterController)
+    monkeypatch.setattr(plot_module, "KLayoutSnapWorker", _SnapWorker)
+    window = DesignLayoutWindow()
+
+    window.set_design_load_pending(True)
+
+    assert not window._escape_shortcut.isEnabled()
+    assert not window.navigator_panel._delete_shortcut.isEnabled()
+
+    window.set_design_load_pending(False)
+
+    assert window._escape_shortcut.isEnabled()
+    assert window.navigator_panel._delete_shortcut.isEnabled()
     window.deleteLater()
