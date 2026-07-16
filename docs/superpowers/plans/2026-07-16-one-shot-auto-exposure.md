@@ -235,34 +235,34 @@ Commit: `fix: suppress transient camera buffer timeouts`
 - Modify only files owned by Tasks 1-5 if verification finds a defect.
 - Generate ignored reports under `.scratch/`.
 
-- [ ] **Step 1: Run static sanity checks**
+- [x] **Step 1: Run static sanity checks**
 
 Run: `git diff --check`
 
 Expected: no whitespace errors.
 
-- [ ] **Step 2: Run the complete automated suite**
+- [x] **Step 2: Run the complete automated suite**
 
 Run: `$env:QT_QPA_PLATFORM='offscreen'; C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests -q`
 
 Expected: all tests pass without a native Qt application lifecycle failure.
 
-- [ ] **Step 3: Restart the GUI normally**
+- [x] **Step 3: Restart the GUI normally**
 
 Restart from `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe main.py`; verify camera streaming and API health before calling the new endpoint.
 
-- [ ] **Step 4: Invoke real one-shot exposure through the API**
+- [x] **Step 4: Invoke real one-shot exposure through the API**
 
 Call `ProbeStationClient.camera.auto_exposure()` using the existing Codex operator key. Verify the response converges, leaves `ExposureAuto=Off`, `GainAuto=Off`, `Gain=0`, and returns a fresh-frame watermark.
 
-- [ ] **Step 5: Verify scan integration without unnecessary motion**
+- [x] **Step 5: Verify scan integration without unnecessary motion**
 
 Use a one-tile area scan centered at the current point. Confirm auto-exposure status precedes camera lock and stage task status, the manifest contains the auto-exposure result, and the camera retains the final exposure after scan completion.
 
-- [ ] **Step 6: Verify timeout logging behavior**
+- [x] **Step 6: Verify timeout logging behavior**
 
 Inspect both runtime logs. Confirm isolated `-1011` no longer produces `ERROR` or Telegram-alert dispatch while unrelated camera errors remain eligible for the existing path.
 
-- [ ] **Step 7: Commit verification fixes**
+- [x] **Step 7: Commit verification fixes**
 
 If hardware verification requires changes, repeat the relevant RED/GREEN test and commit as `fix: harden automatic camera exposure`.
