@@ -1089,7 +1089,7 @@ class Main(QMainWindow):
             dtype=np.uint8,
             count=height * stride,
         ).reshape((height, stride))
-        rgb = np.ascontiguousarray(rows[:, : width * 3].reshape((height, width, 3)))
+        rgb = rows[:, : width * 3].reshape((height, width, 3)).copy(order="C")
         return AutoExposureFrame(rgb=rgb, counter=int(counter))
 
     def _run_camera_auto_exposure(

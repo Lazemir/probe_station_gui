@@ -315,6 +315,7 @@ def test_camera_auto_exposure_frame_reader_uses_fresh_raw_frame() -> None:
     assert calls == [{"after_counter": 17, "timeout_s": 1.25}]
     assert frame.counter == 18
     assert frame.rgb.shape == (6, 8, 3)
+    assert frame.rgb.flags.owndata is True
     assert frame.rgb[0, 0].tolist() == [12, 34, 56]
 
 
