@@ -142,6 +142,12 @@ from probe_station_gui.camera.api_control import (
     CameraApiBroker,
     encode_camera_frame_png,
 )
+from probe_station_gui.camera.live_correction import (
+    LatestFrameProcessor,
+    LiveCameraCorrectionPipeline,
+    LiveCameraCorrectionRequest,
+    LiveCameraCorrectionResult,
+)
 from probe_station_gui.api.command_dispatch import (
     ApiBridgeRequestHandlers,
     ApiCommandDispatchHandlers,
@@ -691,6 +697,20 @@ class Main(QMainWindow):
         self._latest_raw_camera_frame_counter = 0
         self._latest_camera_frame_condition = threading.Condition()
         self._latest_camera_frame_for_notifications: QImage | None = None
+        self._live_camera_correction_pipeline = LiveCameraCorrectionPipeline(
+            self.settings_manager.config_dir()
+        )
+        self._live_camera_frame_processor = LatestFrameProcessor(
+            self._live_camera_correction_pipeline.process
+        )
+        self._live_camera_frame_processor.frame_ready.connect(
+            self._on_live_camera_frame_processed,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._live_camera_frame_processor.error.connect(
+            self._on_live_camera_frame_processing_error,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self._distortion_correction_cache_signature: tuple[str, str] | None = None
         self._distortion_correction_cache_model: DistortionCorrection | None = None
         self._stage_unhomed_display_origins: dict[str, float] = {}
@@ -3469,6 +3489,30 @@ class Main(QMainWindow):
         )
 
     def _on_camera_frame(self, qimg: QImage) -> None:
+        with self._latest_camera_frame_condition:
+            self._latest_raw_camera_frame = qimg.copy()
+            self._latest_raw_camera_frame_counter = (
+                int(getattr(self, "_latest_raw_camera_frame_counter", 0)) + 1
+            )
+            sequence = int(self._latest_raw_camera_frame_counter)
+            self._latest_camera_frame_condition.notify_all()
+        objective = self.settings_manager.active_objective_configuration()
+        request = LiveCameraCorrectionRequest(
+            sequence=sequence,
+            frame=qimg.copy(),
+            objective_name=str(getattr(objective, "name", "") or ""),
+            distortion_configured=bool(
+                getattr(objective, "distortion_correction_configured", False)
+            ),
+            distortion_payload=getattr(objective, "distortion_correction", {}),
+        )
+        if not self._live_camera_frame_processor.submit(request):
+            logger.debug("Live camera frame ignored during processor shutdown.")
+
+    def _on_live_camera_frame_processed(
+        self,
+        result: LiveCameraCorrectionResult,
+    ) -> None:
         now = time.monotonic()
         if self._last_camera_frame_ui_timestamp is not None:
             frame_gap = now - self._last_camera_frame_ui_timestamp
@@ -3478,20 +3522,19 @@ class Main(QMainWindow):
                     frame_gap,
                 )
         self._last_camera_frame_ui_timestamp = now
-        frame = self._correct_camera_frame_for_active_objective(qimg)
+        frame = result.frame
         with self._latest_camera_frame_condition:
-            self._latest_raw_camera_frame = qimg.copy()
-            self._latest_raw_camera_frame_counter = (
-                int(getattr(self, "_latest_raw_camera_frame_counter", 0)) + 1
-            )
+            if int(result.sequence) <= int(self._latest_camera_frame_counter):
+                return
             self._latest_camera_frame = frame.copy()
-            self._latest_camera_frame_counter = (
-                int(getattr(self, "_latest_camera_frame_counter", 0)) + 1
-            )
+            self._latest_camera_frame_counter = int(result.sequence)
             self._latest_camera_frame_condition.notify_all()
         self._latest_camera_frame_for_notifications = frame
         self.stage_controller.on_frame_ready(frame)
         self.view.set_frame(frame)
+
+    def _on_live_camera_frame_processing_error(self, message: str) -> None:
+        logger.warning("Live camera frame correction failed: %s", message)
 
     def _correct_camera_frame_for_active_objective(self, qimg: QImage) -> QImage:
         objective = self.settings_manager.active_objective_configuration()
@@ -8525,6 +8568,9 @@ class Main(QMainWindow):
             "flat_field_options",
             microscope_scan.FlatFieldScanOptions(enabled=False),
         )
+        scan_flat_field_enabled = bool(
+            getattr(flat_field_options, "enabled", False)
+        )
         camera_lock_settings = getattr(
             configuration,
             "camera_lock_settings",
@@ -8575,7 +8621,9 @@ class Main(QMainWindow):
                 captured_frames.append(
                     _MicroscopeScanCapturedFrame(
                         tile=tile,
-                        frame=self._capture_microscope_scan_frame(),
+                        frame=self._capture_microscope_scan_frame(
+                            raw=scan_flat_field_enabled
+                        ),
                         captured_at=utc_timestamp(),
                         actual_stage_position=self._microscope_scan_actual_position(),
                     )
@@ -8588,11 +8636,14 @@ class Main(QMainWindow):
                 captured_tiles: list[tuple[MicroscopeScanTile, QImage]] = []
                 tile_results: list[MicroscopeCaptureResult] = []
                 for captured in captured_frames:
-                    corrected_frame = self._flat_field_microscope_scan_frame(
-                        captured.frame,
-                        flat_field_options,
-                        flat_field_profile=flat_field_profile,
-                    )
+                    if scan_flat_field_enabled:
+                        corrected_frame = self._correct_microscope_scan_frame(
+                            captured.frame,
+                            flat_field_options,
+                            flat_field_profile=flat_field_profile,
+                        )
+                    else:
+                        corrected_frame = captured.frame
                     result = self._save_microscope_scan_tile(
                         captured.tile,
                         plan,
@@ -8830,15 +8881,34 @@ class Main(QMainWindow):
                 corrections["camera_lock"] = lock_metadata
         return corrections
 
-    def _capture_microscope_scan_frame(self) -> QImage:
-        before_counter = self._latest_camera_counter()
-        frame, _counter = self._wait_for_camera_frame(
+    def _capture_microscope_scan_frame(self, *, raw: bool = False) -> QImage:
+        if raw:
+            before_counter = self._latest_raw_camera_counter()
+            wait_for_frame = self._wait_for_raw_camera_frame
+        else:
+            before_counter = self._latest_camera_counter()
+            wait_for_frame = self._wait_for_camera_frame
+        frame, _counter = wait_for_frame(
             after_counter=before_counter,
             timeout_s=2.0,
         )
         if frame is None:
             raise RuntimeError("Camera frame is unavailable.")
         return frame
+
+    def _correct_microscope_scan_frame(
+        self,
+        frame: QImage,
+        flat_field_options: object,
+        *,
+        flat_field_profile: object | None,
+    ) -> QImage:
+        flat_corrected = self._flat_field_microscope_scan_frame(
+            frame,
+            flat_field_options,
+            flat_field_profile=flat_field_profile,
+        )
+        return self._correct_camera_frame_for_active_objective(flat_corrected)
 
     def _save_microscope_scan_tile(
         self,

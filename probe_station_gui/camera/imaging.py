@@ -172,6 +172,15 @@ class FlatFieldProfile:
 
 
 @dataclass(frozen=True)
+class CompiledFlatFieldCorrection:
+    """Precomputed per-pixel RGB gain for repeated flat-field correction."""
+
+    image_size_px: tuple[int, int]
+    source: str
+    gain_rgb: Any = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True)
 class MicroscopeScanTile:
     """One stage position in a design scan plan."""
 
@@ -369,6 +378,56 @@ def apply_flat_field_correction(frame: QImage, profile: FlatFieldProfile) -> QIm
     rgb = _qimage_to_rgb_array(frame)
     corrected = _apply_flat_field_array(rgb, profile)
     return _rgb_array_to_qimage(corrected)
+
+
+def compile_flat_field_correction(
+    profile: FlatFieldProfile,
+) -> CompiledFlatFieldCorrection:
+    """Precompute the gain map used to correct every frame of a live stream."""
+
+    import numpy as np
+
+    illumination = profile.illumination_rgb.astype(np.float32, copy=False)
+    expected_shape = (
+        int(profile.image_size_px[1]),
+        int(profile.image_size_px[0]),
+        3,
+    )
+    if tuple(illumination.shape) != expected_shape:
+        raise ValueError("Flat-field illumination data does not match profile size.")
+    mean = np.asarray(profile.mean_rgb, dtype=np.float32).reshape((1, 1, 3))
+    denominator_floor = np.maximum(mean / float(profile.max_gain), 1.0)
+    denominator = np.maximum(illumination, denominator_floor)
+    gain = np.ascontiguousarray(mean / denominator, dtype=np.float32)
+    return CompiledFlatFieldCorrection(
+        image_size_px=tuple(profile.image_size_px),
+        source=str(profile.source),
+        gain_rgb=gain,
+    )
+
+
+def apply_compiled_flat_field_correction(
+    frame: QImage,
+    correction: CompiledFlatFieldCorrection,
+) -> QImage:
+    """Apply a cached flat-field gain map to one frame."""
+
+    import numpy as np
+
+    if frame.isNull():
+        raise ValueError("Cannot flat-field an empty frame.")
+    frame_size = (int(frame.width()), int(frame.height()))
+    if frame_size != tuple(correction.image_size_px):
+        raise ValueError(
+            "Flat-field correction frame size "
+            f"{correction.image_size_px[0]}x{correction.image_size_px[1]} "
+            f"does not match frame size {frame_size[0]}x{frame_size[1]}."
+        )
+    rgb = _qimage_to_rgb_array(frame).astype(np.float32, copy=False)
+    corrected = rgb * correction.gain_rgb
+    return _rgb_array_to_qimage(
+        np.clip(corrected, 0.0, 255.0).astype(np.uint8)
+    )
 
 
 def apply_self_flat_field_correction(
@@ -1720,17 +1779,20 @@ def _timestamp_for_filename(captured_at: str) -> str:
 
 
 __all__ = [
+    "CompiledFlatFieldCorrection",
     "FlatFieldProfile",
     "MicroscopeCaptureResult",
     "MicroscopeImageMetadata",
     "MicroscopeScaleCalibration",
     "MicroscopeScanPlan",
     "MicroscopeScanTile",
+    "apply_compiled_flat_field_correction",
     "apply_flat_field_correction",
     "apply_self_flat_field_correction",
     "build_flat_field_profile",
     "build_median_flat_field_profile",
     "build_design_scan_plan",
+    "compile_flat_field_correction",
     "objective_scale_calibration",
     "refine_scan_scale_from_tile_overlaps",
     "render_microscope_overlay",

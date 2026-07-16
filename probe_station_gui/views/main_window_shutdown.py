@@ -33,6 +33,7 @@ class MainWindowShutdownOwner(Protocol):
     _route_measurement_thread: Any
     _microscope_scan_thread: Any
     _microscope_scan_stop_requested: Any
+    _live_camera_frame_processor: Any
     _route_measurement_dialog: Any
 
     def _stop_telegram_bot_service(self) -> None: ...
@@ -109,6 +110,7 @@ def _stop_microscope_scan(owner: MainWindowShutdownOwner) -> None:
 
 def _close_serial_and_panels(owner: MainWindowShutdownOwner) -> None:
     stop_jog_before_serial_close(owner, "application shutdown")
+    owner._live_camera_frame_processor.shutdown(timeout_s=2.0)
     owner.grabber.stop()
     owner.thread.quit()
     owner.thread.wait()

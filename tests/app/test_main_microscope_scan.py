@@ -155,6 +155,61 @@ def test_microscope_scan_reference_flat_field_loads_reference_image(tmp_path) ->
     assert profile.image_size_px == (8, 6)
 
 
+def test_microscope_scan_capture_uses_raw_space_for_scan_flat_field() -> None:
+    window = Main.__new__(Main)
+    raw = QImage(8, 6, QImage.Format_RGB32)
+    raw.fill(QColor("red"))
+    events: list[tuple[str, object]] = []
+    window._latest_raw_camera_counter = lambda: 12
+    window._wait_for_raw_camera_frame = (
+        lambda **kwargs: events.append(("raw", kwargs)) or (raw, 13)
+    )
+    window._latest_camera_counter = lambda: pytest.fail("corrected counter used")
+    window._wait_for_camera_frame = lambda **_kwargs: pytest.fail(
+        "corrected frame used"
+    )
+
+    captured = Main._capture_microscope_scan_frame(window, raw=True)
+
+    assert captured.pixelColor(0, 0) == QColor("red")
+    assert events == [("raw", {"after_counter": 12, "timeout_s": 2.0})]
+
+
+def test_microscope_scan_applies_flat_field_before_lens_correction() -> None:
+    window = Main.__new__(Main)
+    events: list[str] = []
+    source = QImage(8, 6, QImage.Format_RGB32)
+    source.setText("space", "raw")
+
+    def apply_flat(frame, _options, *, flat_field_profile):
+        assert frame.text("space") == "raw"
+        assert flat_field_profile == "profile"
+        events.append("flat")
+        result = frame.copy()
+        result.setText("space", "flat")
+        return result
+
+    def apply_lens(frame):
+        assert frame.text("space") == "flat"
+        events.append("lens")
+        result = frame.copy()
+        result.setText("space", "corrected")
+        return result
+
+    window._flat_field_microscope_scan_frame = apply_flat
+    window._correct_camera_frame_for_active_objective = apply_lens
+
+    corrected = Main._correct_microscope_scan_frame(
+        window,
+        source,
+        object(),
+        flat_field_profile="profile",
+    )
+
+    assert corrected.text("space") == "corrected"
+    assert events == ["flat", "lens"]
+
+
 def test_api_microscope_area_scan_builds_stitch_debug_plan(monkeypatch) -> None:
     created_threads: list[_FakeScanThread] = []
     monkeypatch.setattr(

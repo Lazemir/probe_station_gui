@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Run application-controlled one-shot exposure before every microscope scan, expose it through the operator camera API, and suppress isolated recoverable Spinnaker `NEW_BUFFER_DATA` timeouts.
+**Goal:** Run application-controlled one-shot exposure before every microscope scan, apply calibrated flat-field correction to live GUI frames, expose exposure through the operator camera API, and suppress isolated recoverable Spinnaker `NEW_BUFFER_DATA` timeouts.
 
 **Architecture:** A transport-independent controller owns camera state transitions, convergence, rollback, and serialization. `Main` adapts the existing camera broker and raw-frame condition to that controller for both scan workers and the external API. Acquisition timeout classification remains inside `Grabber`, where the actual Spinnaker exception and frame recovery are visible.
 
@@ -34,7 +34,7 @@
 - Consumes callbacks: `settings_read(names)`, `settings_write(ordered_settings)`, and `frame_read(after_counter, timeout_s)`.
 - Produces shared `next_exposure_us(...)` and `highlight_level(...)` used by the diagnostic.
 
-- [ ] **Step 1: Write failing controller tests**
+- [x] **Step 1: Write failing controller tests**
 
 Cover bounded convergence, fresh-frame watermarks, ordered manual-mode transition, success leaving the result active, failure rollback, and non-blocking busy rejection. The success assertion must include:
 
@@ -48,21 +48,21 @@ assert camera.state["Gain"] == "0.0"
 assert result["brightness_trace"][-2:] == pytest.approx([235.0, 235.0])
 ```
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 Run: `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/camera/test_auto_exposure.py -q`
 
 Expected: import failure because `probe_station_gui.camera.auto_exposure` does not exist.
 
-- [ ] **Step 3: Implement the minimal controller**
+- [x] **Step 3: Implement the minimal controller**
 
 Add immutable config/frame dataclasses, validate all numeric config fields, acquire a non-blocking operation lock, snapshot the five operator nodes, disable automatic modes in one batch, write gain/exposure in a second batch, consume only fresh raw frames, and restore the snapshot on every unsuccessful exit. Return a JSON-safe result containing configuration, final settings, frame counter, iteration count, and brightness trace.
 
-- [ ] **Step 4: Share controller math with the diagnostic**
+- [x] **Step 4: Share controller math with the diagnostic**
 
 Import `AutoExposureConfig`, `next_exposure_us`, and `highlight_level` into `exposure_diagnostic.py`. Keep `ExposureDiagnosticConfig` as a compatible extension for diagnostic-only SNR fields so existing CLI/report behavior remains stable.
 
-- [ ] **Step 5: Run focused tests and commit**
+- [x] **Step 5: Run focused tests and commit**
 
 Run: `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/camera/test_auto_exposure.py tests/camera/test_exposure_diagnostic.py -q`
 
@@ -70,7 +70,48 @@ Expected: PASS.
 
 Commit: `feat: add reusable camera auto exposure`
 
-### Task 2: Scan Configuration And Direct Integration
+### Task 2: Live Flat-Field Camera Pipeline
+
+**Files:**
+- Modify: `probe_station_gui/camera/imaging.py`
+- Create: `probe_station_gui/camera/live_correction.py`
+- Modify: `main.py`
+- Modify: `probe_station_gui/views/main_window_shutdown.py`
+- Modify: `tests/camera/test_imaging.py`
+- Create: `tests/camera/test_live_correction.py`
+- Modify: `tests/app/test_main_camera_distortion.py`
+- Modify: `tests/ui/test_main_window_shutdown.py`
+
+**Interfaces:**
+- Produces a compiled flat-field gain map which does not recompute illumination ratios per frame.
+- Produces a cached active-objective correction pipeline with raw, flat-field, lens-distortion ordering.
+- Produces a latest-frame background processor which replaces stale pending work and supports bounded shutdown.
+
+- [x] **Step 1: Write failing compiled-profile and pipeline tests**
+
+Assert a profile compiles to the same corrected pixels as the existing path, `current.json` is loaded for the active objective, repeated frames reuse the cache, missing profile passes through, and flat-field runs before distortion.
+
+- [x] **Step 2: Write failing background and Main integration tests**
+
+Assert submission never blocks, a busy processor replaces its pending frame with the newest one, raw counters notify before processing completes, corrected frames reach GUI/stage/API state, and shutdown stops the worker.
+
+- [x] **Step 3: Run tests and verify RED**
+
+Run: `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/camera/test_imaging.py tests/camera/test_live_correction.py tests/app/test_main_camera_distortion.py tests/ui/test_main_window_shutdown.py -q`
+
+Expected: failures for missing compiled correction and live processor integration.
+
+- [x] **Step 4: Implement the live correction path**
+
+Load `<config_dir>/calibrations/flat-field/<objective>/current.json`, compile and cache the gain map, and process raw frames in a dedicated latest-frame worker. Deliver only processed frames to corrected API state, stage, notifications, and GUI. Missing profiles pass through; invalid profiles log once per signature.
+
+- [x] **Step 5: Run focused tests and commit**
+
+Run the Task 2 test command again and expect PASS.
+
+Commit: `feat: apply flat field to live microscope view`
+
+### Task 3: Scan Configuration And Direct Integration
 
 **Files:**
 - Modify: `probe_station_gui/camera/microscope_scan.py`
@@ -115,7 +156,7 @@ Expected: PASS.
 
 Commit: `feat: run auto exposure before microscope scans`
 
-### Task 3: Operator Camera API And Client
+### Task 4: Operator Camera API And Client
 
 **Files:**
 - Modify: `probe_station_gui/api/server.py`
@@ -156,7 +197,7 @@ Expected: PASS.
 
 Commit: `feat: expose camera auto exposure API`
 
-### Task 4: Recoverable Spinnaker Timeout Classification
+### Task 5: Recoverable Spinnaker Timeout Classification
 
 **Files:**
 - Modify: `probe_station_gui/camera/worker.py`
@@ -188,10 +229,10 @@ Expected: PASS.
 
 Commit: `fix: suppress transient camera buffer timeouts`
 
-### Task 5: Regression And Hardware Verification
+### Task 6: Regression And Hardware Verification
 
 **Files:**
-- Modify only files owned by Tasks 1-4 if verification finds a defect.
+- Modify only files owned by Tasks 1-5 if verification finds a defect.
 - Generate ignored reports under `.scratch/`.
 
 - [ ] **Step 1: Run static sanity checks**

@@ -78,6 +78,9 @@ def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
             set=lambda: events.append(("scan_stop_requested",))
         ),
         grabber=SimpleNamespace(stop=lambda: events.append(("grabber_stop",))),
+        _live_camera_frame_processor=SimpleNamespace(
+            shutdown=lambda **kwargs: events.append(("frame_processor_shutdown", kwargs))
+        ),
         thread=SimpleNamespace(
             quit=lambda: events.append(("camera_thread_quit",)),
             wait=lambda: events.append(("camera_thread_wait",)),
@@ -140,6 +143,7 @@ def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
         ("scan_thread", "join", 2.0),
         ("stop_jog", "application shutdown", True),
         ("force_jog_stop", {"timeout": 0.8}),
+        ("frame_processor_shutdown", {"timeout_s": 2.0}),
         ("grabber_stop",),
         ("camera_thread_quit",),
         ("camera_thread_wait",),

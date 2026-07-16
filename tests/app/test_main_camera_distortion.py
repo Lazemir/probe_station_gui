@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from types import SimpleNamespace
 
 from PySide6.QtGui import QColor, QImage
 
@@ -10,6 +11,7 @@ from tests.app.import_reset import restore_real_imports_for_main
 restore_real_imports_for_main()
 
 from main import Main
+from probe_station_gui.camera.live_correction import LiveCameraCorrectionResult
 
 
 class FakeView:
@@ -28,6 +30,15 @@ class FakeStageController:
         self.frames.append(frame.copy())
 
 
+class FakeFrameProcessor:
+    def __init__(self) -> None:
+        self.requests: list[object] = []
+
+    def submit(self, request: object) -> bool:
+        self.requests.append(request)
+        return True
+
+
 def test_camera_frame_pipeline_sends_corrected_frame_to_view_and_stage() -> None:
     window = Main.__new__(Main)
     window._last_camera_frame_ui_timestamp = None
@@ -38,12 +49,31 @@ def test_camera_frame_pipeline_sends_corrected_frame_to_view_and_stage() -> None
     window._latest_camera_frame_for_notifications = None
     window.view = FakeView()
     window.stage_controller = FakeStageController()
-    window._correct_camera_frame_for_active_objective = lambda frame: _tagged_copy(
-        frame,
-        "corrected",
+    window.settings_manager = SimpleNamespace(
+        active_objective_configuration=lambda: SimpleNamespace(
+            name="X20",
+            distortion_correction_configured=True,
+            distortion_correction={"model_version": 1},
+        )
     )
+    window._live_camera_frame_processor = FakeFrameProcessor()
 
     Main._on_camera_frame(window, _source_image("raw"))
+
+    assert window._latest_raw_camera_frame is not None
+    assert window._latest_raw_camera_frame.text("tag") == "raw"
+    assert window._latest_raw_camera_frame_counter == 1
+    assert window._latest_camera_frame is None
+    assert window.view.frames == []
+
+    request = window._live_camera_frame_processor.requests[-1]
+    Main._on_live_camera_frame_processed(
+        window,
+        LiveCameraCorrectionResult(
+            sequence=request.sequence,
+            frame=_tagged_copy(request.frame, "corrected"),
+        ),
+    )
 
     assert window._latest_camera_frame is not None
     assert window._latest_camera_frame.text("tag") == "corrected"
