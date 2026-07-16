@@ -1,6 +1,8 @@
 import unittest
 
 from probe_station_gui.api.keys import (
+    API_PERMISSION_CAMERA_READ,
+    API_PERMISSION_CAMERA_WRITE,
     API_PERMISSION_ROUTE_MEASURE,
     API_PERMISSION_STAGE_READ,
     API_PERMISSION_STAGE_WRITE,
@@ -59,6 +61,9 @@ class ApiServerHttpTest(unittest.TestCase):
         status_callback=None,
         command_callback=None,
         auth_callback=None,
+        camera_settings_read_callback=None,
+        camera_settings_write_callback=None,
+        camera_frame_callback=None,
     ):
         from fastapi.testclient import TestClient
 
@@ -67,6 +72,9 @@ class ApiServerHttpTest(unittest.TestCase):
             status_callback=status_callback or (lambda: {"accepted": True, "state": "Idle"}),
             command_callback=command_callback,
             auth_callback=auth_callback,
+            camera_settings_read_callback=camera_settings_read_callback,
+            camera_settings_write_callback=camera_settings_write_callback,
+            camera_frame_callback=camera_frame_callback,
         )
         app, _uvicorn = server._create_app()
         return TestClient(app)
@@ -178,6 +186,128 @@ class ApiServerHttpTest(unittest.TestCase):
             ],
         )
         self.assertEqual(response.json()["output_dir"], "C:/scan")
+
+    def test_camera_settings_endpoints_preserve_names_and_ordered_writes(self) -> None:
+        reads = []
+        writes = []
+        client = self._client(
+            camera_settings_read_callback=lambda names: (
+                reads.append(names)
+                or {"accepted": True, "camera_ready": True, "nodes": []}
+            ),
+            camera_settings_write_callback=lambda settings: (
+                writes.append(settings)
+                or {
+                    "accepted": True,
+                    "nodes": settings,
+                    "frame_counter_at_completion": 9,
+                }
+            ),
+        )
+
+        read_response = client.get(
+            "/api/v1/camera/settings",
+            params=[("name", "ExposureTime"), ("name", "Gain")],
+        )
+        write_response = client.patch(
+            "/api/v1/camera/settings",
+            json={
+                "settings": [
+                    {"name": "ExposureAuto", "value": "Off"},
+                    {"name": "ExposureTime", "value": 1800.0},
+                ]
+            },
+        )
+
+        self.assertEqual(read_response.status_code, 200)
+        self.assertEqual(reads, [["ExposureTime", "Gain"]])
+        self.assertEqual(write_response.status_code, 200)
+        self.assertEqual(
+            writes,
+            [
+                [
+                    {"name": "ExposureAuto", "value": "Off"},
+                    {"name": "ExposureTime", "value": 1800.0},
+                ]
+            ],
+        )
+        self.assertEqual(write_response.json()["frame_counter_at_completion"], 9)
+
+    def test_camera_frame_endpoint_returns_png_metadata_headers(self) -> None:
+        calls = []
+        client = self._client(
+            camera_frame_callback=lambda space, after_counter, timeout_s: (
+                calls.append((space, after_counter, timeout_s))
+                or {
+                    "accepted": True,
+                    "data": b"png-data",
+                    "content_type": "image/png",
+                    "counter": 21,
+                    "space": space,
+                    "width": 640,
+                    "height": 480,
+                }
+            )
+        )
+
+        response = client.get(
+            "/api/v1/camera/frame",
+            params={"space": "raw", "after_counter": 20, "timeout_ms": 1500},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"png-data")
+        self.assertEqual(calls, [("raw", 20, 1.5)])
+        self.assertEqual(response.headers["X-Camera-Frame-Counter"], "21")
+        self.assertEqual(response.headers["X-Camera-Frame-Space"], "raw")
+        self.assertEqual(response.headers["X-Camera-Frame-Width"], "640")
+        self.assertEqual(response.headers["X-Camera-Frame-Height"], "480")
+
+    def test_camera_endpoints_require_separate_camera_permissions(self) -> None:
+        auth_calls = []
+
+        def auth_callback(api_key, permission):
+            auth_calls.append((api_key, permission))
+            if permission == API_PERMISSION_CAMERA_WRITE:
+                return {
+                    "accepted": False,
+                    "status_code": 403,
+                    "message": "camera write denied",
+                }
+            return {"accepted": True}
+
+        client = self._client(
+            auth_callback=auth_callback,
+            camera_settings_read_callback=lambda names: {
+                "accepted": True,
+                "nodes": [],
+            },
+            camera_settings_write_callback=lambda settings: {
+                "accepted": True,
+                "nodes": [],
+            },
+            camera_frame_callback=lambda space, after_counter, timeout_s: {
+                "accepted": True,
+                "data": b"png",
+                "counter": 1,
+                "space": space,
+                "width": 1,
+                "height": 1,
+            },
+        )
+
+        read = client.get("/api/v1/camera/settings")
+        frame = client.get("/api/v1/camera/frame")
+        write = client.patch(
+            "/api/v1/camera/settings",
+            json={"settings": [{"name": "Gain", "value": 0.0}]},
+        )
+
+        self.assertEqual(read.status_code, 200)
+        self.assertEqual(frame.status_code, 200)
+        self.assertEqual(write.status_code, 403)
+        self.assertIn((None, API_PERMISSION_CAMERA_READ), auth_calls)
+        self.assertIn((None, API_PERMISSION_CAMERA_WRITE), auth_calls)
 
     def test_click_to_move_calibration_endpoint_delegates_to_command_callback(self) -> None:
         calls = []

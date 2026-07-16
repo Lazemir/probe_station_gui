@@ -232,6 +232,24 @@ def test_snapshot_request_preserves_request_id() -> None:
         close_grabber(grabber)
 
 
+def test_partial_snapshot_keeps_unavailable_requested_node_visible() -> None:
+    grabber = make_grabber([FakeNode("Gain", "float", 0.0)])
+    try:
+        result = grabber._camera_settings_partial_snapshot(
+            "camera",
+            ["Gain", "ExposureTime"],
+        )
+
+        nodes = result["maps"][0]["nodes"]
+        assert [node["name"] for node in nodes] == ["Gain", "ExposureTime"]
+        assert nodes[1]["available"] is False
+        assert nodes[1]["readable"] is False
+        assert nodes[1]["writable"] is False
+        assert "ExposureTime" in nodes[1]["error"]
+    finally:
+        close_grabber(grabber)
+
+
 def test_public_batch_request_queues_ordered_settings() -> None:
     grabber = make_grabber(
         [

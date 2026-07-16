@@ -597,7 +597,22 @@ class Grabber(QObject):
                 if info is not None:
                     nodes.append(info)
             except Exception as exc:  # pragma: no cover - hardware dependent
-                errors.append(f"{node_name}: {exc}")
+                error = f"{node_name}: {exc}"
+                errors.append(error)
+                nodes.append(
+                    {
+                        "map_key": map_key,
+                        "name": node_name,
+                        "display_name": node_name,
+                        "type": "",
+                        "value": "",
+                        "available": False,
+                        "readable": False,
+                        "writable": False,
+                        "entries": [],
+                        "error": error,
+                    }
+                )
 
         return {
             "ok": True,

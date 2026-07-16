@@ -138,6 +138,10 @@ from probe_station_gui.shared.diagnostics import configure_crash_diagnostics
 from probe_station_gui.api.request_bridge import ApiRequestBridge
 from probe_station_gui.api.server import ProbeStationApiServer
 from probe_station_gui.api.keys import API_KEY_FILENAME, ApiKeyStore
+from probe_station_gui.camera.api_control import (
+    CameraApiBroker,
+    encode_camera_frame_png,
+)
 from probe_station_gui.api.command_dispatch import (
     ApiBridgeRequestHandlers,
     ApiCommandDispatchHandlers,
@@ -763,6 +767,17 @@ class Main(QMainWindow):
             Qt.ConnectionType.QueuedConnection,
         )
         self.grabber = Grabber()
+        self._camera_api_broker = CameraApiBroker(
+            snapshot_submit=self._submit_camera_settings_snapshot,
+            batch_submit=self._submit_camera_settings_batch,
+            frame_counter=self._latest_raw_camera_counter,
+        )
+        self.grabber.camera_settings_snapshot_ready.connect(
+            self._camera_api_broker.complete
+        )
+        self.grabber.camera_settings_batch_changed.connect(
+            self._camera_api_broker.complete
+        )
         self.thread = QThread()
         self.grabber.moveToThread(self.thread)
         self.thread.started.connect(self.grabber.start)
@@ -966,6 +981,9 @@ class Main(QMainWindow):
             status_callback=self._submit_api_status_request,
             command_callback=self._submit_api_command_request_from_api_thread,
             auth_callback=self._authorize_api_request,
+            camera_settings_read_callback=self._camera_api_broker.read_settings,
+            camera_settings_write_callback=self._camera_api_broker.write_settings,
+            camera_frame_callback=self._api_camera_frame,
             host=api_settings.host,
             port=api_settings.port,
         )
@@ -978,6 +996,64 @@ class Main(QMainWindow):
         permission: str,
     ) -> dict[str, Any]:
         return self._api_key_store.authorize(api_key, permission)
+
+    def _submit_camera_settings_snapshot(
+        self,
+        request_id: str,
+        names: list[str],
+    ) -> None:
+        self.grabber.request_camera_settings_snapshot(
+            "camera",
+            names,
+            request_id=request_id,
+        )
+
+    def _submit_camera_settings_batch(
+        self,
+        request_id: str,
+        settings: list[tuple[str, object]],
+    ) -> None:
+        self.grabber.request_camera_settings_batch(
+            settings,
+            request_id=request_id,
+            map_key="camera",
+        )
+
+    def _api_camera_frame(
+        self,
+        space: str,
+        after_counter: int | None,
+        timeout_s: float,
+    ) -> dict[str, Any]:
+        if space == "raw":
+            frame, counter = self._wait_for_raw_camera_frame(
+                after_counter=after_counter,
+                timeout_s=timeout_s,
+            )
+        elif space == "corrected":
+            frame, counter = self._wait_for_camera_frame(
+                after_counter=after_counter,
+                timeout_s=timeout_s,
+            )
+        else:
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": f"Unsupported camera frame space: {space!r}.",
+            }
+        if frame is None:
+            return {
+                "accepted": False,
+                "status_code": 504 if after_counter is not None else 503,
+                "message": (
+                    "No newer camera frame arrived before timeout."
+                    if after_counter is not None
+                    else "Camera frame is not available."
+                ),
+                "counter": int(counter),
+                "space": space,
+            }
+        return encode_camera_frame_png(frame, counter=counter, space=space)
 
     def _configure_telegram_bot_from_settings(self) -> None:
         telegram_settings = self.settings_manager.telegram_configuration()

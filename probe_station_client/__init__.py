@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from .client import (
     AuthenticationError,
+    CameraFrame,
     PermissionDeniedError,
     ProbeStationApiError,
     ProbeStationClient,
+    ProbeStationCameraClient,
     ProbeStationClientError,
     ProbeStationConnectionError,
     ProbeStationMeterClient,
@@ -31,6 +33,7 @@ from .visa import RemoteVisaInstrument, RemoteVisaResourceManager
 
 __all__ = [
     "AuthenticationError",
+    "CameraFrame",
     "CredentialError",
     "CredentialNotFoundError",
     "CredentialStore",
@@ -38,6 +41,7 @@ __all__ = [
     "PermissionDeniedError",
     "ProbeStationApiError",
     "ProbeStationClient",
+    "ProbeStationCameraClient",
     "ProbeStationClientError",
     "ProbeStationConnectionError",
     "ProbeStationInstrument",
