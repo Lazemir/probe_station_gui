@@ -204,7 +204,7 @@ def _add_alignment_shortcuts(owner: MainWindowMenuOwner) -> None:
 
     owner._alignment_exit_action = QAction("Cancel Alignment Pick", owner)
     owner._alignment_exit_action.setShortcut(QKeySequence(Qt.Key_Escape))
-    owner._alignment_exit_action.setShortcutContext(Qt.ApplicationShortcut)
+    owner._alignment_exit_action.setShortcutContext(Qt.WindowShortcut)
     owner._alignment_exit_action.triggered.connect(owner._cancel_manual_alignment_pick)
     owner._alignment_exit_action.triggered.connect(owner._on_measure_mode_exited)
     owner.addAction(owner._alignment_exit_action)
