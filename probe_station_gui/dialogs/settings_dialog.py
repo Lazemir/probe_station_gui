@@ -34,6 +34,8 @@ from PySide6.QtWidgets import (
 )
 
 from probe_station_gui.api.keys import (
+    API_PERMISSION_CAMERA_READ,
+    API_PERMISSION_CAMERA_WRITE,
     API_PERMISSION_ROUTE_MEASURE,
     API_PERMISSION_ROUTE_READ,
     API_PERMISSION_STAGE_READ,
@@ -143,6 +145,8 @@ class ApiSettingsWidget(QWidget):
         4: API_PERMISSION_STAGE_WRITE,
         5: API_PERMISSION_ROUTE_READ,
         6: API_PERMISSION_ROUTE_MEASURE,
+        7: API_PERMISSION_CAMERA_READ,
+        8: API_PERMISSION_CAMERA_WRITE,
     }
     ITEM_KIND_ROLE = Qt.UserRole
     RECORD_ID_ROLE = Qt.UserRole + 1
@@ -182,7 +186,7 @@ class ApiSettingsWidget(QWidget):
         keys_group = QGroupBox("API keys", self)
         keys_layout = QVBoxLayout(keys_group)
         self._keys_tree = QTreeWidget(keys_group)
-        self._keys_tree.setColumnCount(9)
+        self._keys_tree.setColumnCount(11)
         self._keys_tree.setHeaderLabels(
             [
                 "User / key",
@@ -192,6 +196,8 @@ class ApiSettingsWidget(QWidget):
                 "Stage write",
                 "Route read",
                 "Route measure",
+                "Camera read",
+                "Camera write",
                 "Created",
                 "Last used",
             ]
@@ -305,6 +311,8 @@ class ApiSettingsWidget(QWidget):
             [
                 record.key_name or record.key_prefix,
                 masked_api_key(record.key_prefix, record.key_suffix),
+                "",
+                "",
                 "",
                 "",
                 "",

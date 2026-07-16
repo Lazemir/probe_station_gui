@@ -4,9 +4,12 @@ import unittest
 from pathlib import Path
 
 from probe_station_gui.api.keys import (
+    API_PERMISSION_CAMERA_READ,
+    API_PERMISSION_CAMERA_WRITE,
     API_PERMISSION_ROUTE_MEASURE,
     API_PERMISSION_STAGE_READ,
     API_PERMISSION_STAGE_WRITE,
+    ApiKeyRecord,
     ApiKeyStore,
     default_api_user_name,
     masked_api_key,
@@ -14,6 +17,45 @@ from probe_station_gui.api.keys import (
 
 
 class ApiKeyStoreTest(unittest.TestCase):
+    def test_new_key_defaults_to_camera_read_without_camera_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = ApiKeyStore(Path(tmpdir) / "api-keys.json")
+
+            _api_key, record = store.create_key(user_name="operator")
+
+            self.assertTrue(record.permissions[API_PERMISSION_CAMERA_READ])
+            self.assertFalse(record.permissions[API_PERMISSION_CAMERA_WRITE])
+
+    def test_legacy_key_inherits_camera_permissions_from_stage_permissions(self) -> None:
+        record = ApiKeyRecord.from_dict(
+            {
+                "id": "legacy",
+                "permissions": {
+                    API_PERMISSION_STAGE_READ: True,
+                    API_PERMISSION_STAGE_WRITE: False,
+                },
+            }
+        )
+
+        self.assertTrue(record.permissions[API_PERMISSION_CAMERA_READ])
+        self.assertFalse(record.permissions[API_PERMISSION_CAMERA_WRITE])
+
+    def test_explicit_camera_permissions_override_legacy_migration(self) -> None:
+        record = ApiKeyRecord.from_dict(
+            {
+                "id": "explicit",
+                "permissions": {
+                    API_PERMISSION_STAGE_READ: True,
+                    API_PERMISSION_STAGE_WRITE: False,
+                    API_PERMISSION_CAMERA_READ: False,
+                    API_PERMISSION_CAMERA_WRITE: True,
+                },
+            }
+        )
+
+        self.assertFalse(record.permissions[API_PERMISSION_CAMERA_READ])
+        self.assertTrue(record.permissions[API_PERMISSION_CAMERA_WRITE])
+
     def test_create_stores_hash_and_authorizes_permission(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "api-keys.json"
