@@ -207,21 +207,21 @@ Commit: `feat: expose camera auto exposure API`
 - Produces: `Grabber.NEW_BUFFER_TIMEOUT_CODE = -1011` and `Grabber.NEW_BUFFER_TIMEOUT_ALERT_COUNT = 5`.
 - Produces private `_handle_acquisition_exception(exc) -> bool` and recovery state consumed by `_emit_frame`.
 
-- [ ] **Step 1: Write failing timeout tests**
+- [x] **Step 1: Write failing timeout tests**
 
 Use a fake exception with `spin_error_code=-1011`. Assert one matching timeout emits no `error`, five consecutive matches emit exactly one error, a valid-frame recovery resets escalation, the recovered frame suppresses the expected gap warning, and mismatched code/message emits immediately.
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 Run: `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/camera/test_camera_worker.py -q`
 
 Expected: missing classifier/state failures.
 
-- [ ] **Step 3: Implement classification and escalation**
+- [x] **Step 3: Implement classification and escalation**
 
 Route acquisition exceptions through the classifier. Ignore isolated matching timeouts, escalate once at the named threshold, and reset on a valid image. Suppress only the first frame-gap warning caused by a non-escalated timeout. Preserve current handling for all unrelated exceptions.
 
-- [ ] **Step 4: Run focused tests and commit**
+- [x] **Step 4: Run focused tests and commit**
 
 Run: `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/camera/test_camera_worker.py -q`
 

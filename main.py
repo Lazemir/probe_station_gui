@@ -698,6 +698,7 @@ class Main(QMainWindow):
         self._design_snap_enabled = True
         self._last_reported_b_position: float | None = None
         self._last_camera_frame_ui_timestamp: float | None = None
+        self._suppress_next_camera_ui_gap = False
         self._latest_camera_frame: QImage | None = None
         self._latest_camera_frame_counter = 0
         self._latest_raw_camera_frame: QImage | None = None
@@ -823,6 +824,9 @@ class Main(QMainWindow):
             lambda: toggle_design_layout_window(self, True)
         )
         self.grabber.frame_ready.connect(self._on_camera_frame)
+        self.grabber.frame_gap_suppressed.connect(
+            self._on_camera_frame_gap_suppressed
+        )
         self.grabber.error.connect(self.on_error)
         self.design_layout_module_ready.connect(self._on_design_layout_module_ready)
         self.design_document_loaded.connect(self._on_design_document_loaded)
@@ -3596,6 +3600,9 @@ class Main(QMainWindow):
                 getattr(objective, "distortion_correction_configured", False)
             ),
             distortion_payload=getattr(objective, "distortion_correction", {}),
+            suppress_gap_warning=bool(
+                getattr(self, "_suppress_next_camera_ui_gap", False)
+            ),
         )
         if not self._live_camera_frame_processor.submit(request):
             logger.debug("Live camera frame ignored during processor shutdown.")
@@ -3605,9 +3612,13 @@ class Main(QMainWindow):
         result: LiveCameraCorrectionResult,
     ) -> None:
         now = time.monotonic()
+        suppress_gap_warning = bool(result.suppress_gap_warning)
         if self._last_camera_frame_ui_timestamp is not None:
             frame_gap = now - self._last_camera_frame_ui_timestamp
-            if frame_gap > self.CAMERA_UI_FRAME_GAP_WARNING_S:
+            if (
+                frame_gap > self.CAMERA_UI_FRAME_GAP_WARNING_S
+                and not suppress_gap_warning
+            ):
                 logger.warning(
                     "Camera UI frame gap %.3fs before display update",
                     frame_gap,
@@ -3620,12 +3631,17 @@ class Main(QMainWindow):
             self._latest_camera_frame = frame.copy()
             self._latest_camera_frame_counter = int(result.sequence)
             self._latest_camera_frame_condition.notify_all()
+        if suppress_gap_warning:
+            self._suppress_next_camera_ui_gap = False
         self._latest_camera_frame_for_notifications = frame
         self.stage_controller.on_frame_ready(frame)
         self.view.set_frame(frame)
 
     def _on_live_camera_frame_processing_error(self, message: str) -> None:
         logger.warning("Live camera frame correction failed: %s", message)
+
+    def _on_camera_frame_gap_suppressed(self) -> None:
+        self._suppress_next_camera_ui_gap = True
 
     def _correct_camera_frame_for_active_objective(self, qimg: QImage) -> QImage:
         objective = self.settings_manager.active_objective_configuration()

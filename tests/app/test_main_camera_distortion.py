@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import threading
+import logging
+import time
 from types import SimpleNamespace
 
 from PySide6.QtGui import QColor, QImage
@@ -80,6 +82,34 @@ def test_camera_frame_pipeline_sends_corrected_frame_to_view_and_stage() -> None
     assert window._latest_camera_frame_for_notifications.text("tag") == "corrected"
     assert window.view.frames[-1].text("tag") == "corrected"
     assert window.stage_controller.frames[-1].text("tag") == "corrected"
+
+
+def test_recovered_transient_timeout_suppresses_one_ui_gap_warning(caplog) -> None:
+    window = Main.__new__(Main)
+    window._last_camera_frame_ui_timestamp = time.monotonic() - 1.0
+    window.CAMERA_UI_FRAME_GAP_WARNING_S = 0.25
+    window._latest_camera_frame_condition = threading.Condition()
+    window._latest_camera_frame = None
+    window._latest_camera_frame_counter = 0
+    window._latest_raw_camera_frame = None
+    window._latest_raw_camera_frame_counter = 0
+    window._latest_camera_frame_for_notifications = None
+    window._suppress_next_camera_ui_gap = True
+    window.view = FakeView()
+    window.stage_controller = FakeStageController()
+
+    with caplog.at_level(logging.WARNING):
+        Main._on_live_camera_frame_processed(
+            window,
+            LiveCameraCorrectionResult(
+                sequence=1,
+                frame=_source_image("corrected"),
+                suppress_gap_warning=True,
+            ),
+        )
+
+    assert "Camera UI frame gap" not in caplog.text
+    assert window._suppress_next_camera_ui_gap is False
 
 
 def _source_image(tag: str) -> QImage:

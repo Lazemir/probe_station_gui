@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import queue
+import logging
+import time
 
 from probe_station_gui.camera.worker import Grabber
 
@@ -363,3 +365,106 @@ def test_batch_rejects_duplicate_nodes_without_writing() -> None:
         assert gain.set_values == []
     finally:
         close_grabber(grabber)
+
+
+class FakeSpinError(RuntimeError):
+    def __init__(self, message: str, code: int) -> None:
+        super().__init__(message)
+        self.spin_error_code = code
+
+
+class FakeRgbImage:
+    def get_pix_fmt(self) -> str:
+        return "RGB8"
+
+    def get_height(self) -> int:
+        return 1
+
+    def get_width(self) -> int:
+        return 1
+
+    def get_stride(self) -> int:
+        return 3
+
+    def get_image_data(self) -> bytes:
+        return bytes((10, 20, 30))
+
+
+def _new_buffer_timeout() -> FakeSpinError:
+    return FakeSpinError(
+        "Spinnaker: Failed waiting for EventData on NEW_BUFFER_DATA event. [-1011]",
+        -1011,
+    )
+
+
+def test_isolated_new_buffer_timeout_emits_no_camera_error() -> None:
+    grabber = Grabber()
+    errors: list[str] = []
+    grabber.error.connect(errors.append)
+    try:
+        emitted = grabber._handle_acquisition_exception(_new_buffer_timeout())
+    finally:
+        close_grabber(grabber)
+
+    assert emitted is False
+    assert errors == []
+
+
+def test_repeated_new_buffer_timeouts_escalate_once() -> None:
+    grabber = Grabber()
+    errors: list[str] = []
+    grabber.error.connect(errors.append)
+    try:
+        emitted = [
+            grabber._handle_acquisition_exception(_new_buffer_timeout())
+            for _ in range(Grabber.NEW_BUFFER_TIMEOUT_ALERT_COUNT + 2)
+        ]
+    finally:
+        close_grabber(grabber)
+
+    assert emitted.count(True) == 1
+    assert len(errors) == 1
+    assert "NEW_BUFFER_DATA" in errors[0]
+
+
+def test_valid_frame_resets_timeout_escalation_and_suppresses_recovery_gap(
+    caplog,
+) -> None:
+    grabber = Grabber()
+    errors: list[str] = []
+    suppressed_gaps: list[bool] = []
+    grabber.error.connect(errors.append)
+    grabber.frame_gap_suppressed.connect(lambda: suppressed_gaps.append(True))
+    grabber._last_frame_timestamp = time.monotonic() - 1.0
+    try:
+        for _ in range(Grabber.NEW_BUFFER_TIMEOUT_ALERT_COUNT - 1):
+            grabber._handle_acquisition_exception(_new_buffer_timeout())
+        with caplog.at_level(logging.WARNING):
+            grabber._emit_frame(FakeRgbImage())
+        for _ in range(Grabber.NEW_BUFFER_TIMEOUT_ALERT_COUNT - 1):
+            grabber._handle_acquisition_exception(_new_buffer_timeout())
+    finally:
+        close_grabber(grabber)
+
+    assert errors == []
+    assert suppressed_gaps == [True]
+    assert "Camera frame gap" not in caplog.text
+
+
+def test_unrelated_acquisition_exception_emits_immediately() -> None:
+    grabber = Grabber()
+    errors: list[str] = []
+    grabber.error.connect(errors.append)
+    try:
+        wrong_code = grabber._handle_acquisition_exception(
+            FakeSpinError("NEW_BUFFER_DATA", -1001)
+        )
+        wrong_message = grabber._handle_acquisition_exception(
+            FakeSpinError("different timeout", -1011)
+        )
+    finally:
+        close_grabber(grabber)
+
+    assert wrong_code is True
+    assert wrong_message is True
+    assert errors == ["NEW_BUFFER_DATA", "different timeout"]

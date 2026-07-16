@@ -36,12 +36,14 @@ class LiveCameraCorrectionRequest:
     objective_name: str
     distortion_configured: bool
     distortion_payload: object
+    suppress_gap_warning: bool = False
 
 
 @dataclass(frozen=True)
 class LiveCameraCorrectionResult:
     sequence: int
     frame: QImage
+    suppress_gap_warning: bool = False
 
 
 class LiveCameraCorrectionPipeline:
@@ -105,6 +107,7 @@ class LiveCameraCorrectionPipeline:
         return LiveCameraCorrectionResult(
             sequence=int(request.sequence),
             frame=frame,
+            suppress_gap_warning=bool(request.suppress_gap_warning),
         )
 
     def _compiled_flat_field_for_objective(

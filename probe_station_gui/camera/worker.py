@@ -53,8 +53,11 @@ class Grabber(QObject):
     FRAME_LOG_INTERVAL_S = 5.0
     FRAME_TIMEOUT_S = 0.5
     SETTINGS_TASK_WARNING_S = 0.25
+    NEW_BUFFER_TIMEOUT_CODE = -1011
+    NEW_BUFFER_TIMEOUT_ALERT_COUNT = 5
 
     frame_ready: Signal = Signal(QImage)
+    frame_gap_suppressed: Signal = Signal()
     error: Signal = Signal(str)
     camera_settings_snapshot_ready: Signal = Signal(object)
     camera_setting_changed: Signal = Signal(object)
@@ -69,6 +72,9 @@ class Grabber(QObject):
         self._frame_index = 0
         self._last_frame_timestamp: float | None = None
         self._last_frame_log_timestamp = 0.0
+        self._new_buffer_timeout_count = 0
+        self._new_buffer_timeout_alerted = False
+        self._suppress_next_frame_gap = False
         self._camera_commands: queue.Queue[_CameraCommand] = queue.Queue()
         self._temporary_camera_settings: dict[str, list[dict[str, Any]]] = {}
         self._camera_settings_executor = concurrent.futures.ThreadPoolExecutor(
@@ -283,6 +289,7 @@ class Grabber(QObject):
         self._running = True
         self._last_frame_timestamp = None
         self._last_frame_log_timestamp = 0.0
+        self._reset_acquisition_timeout_state()
         CameraList, SpinSystem, import_error = _load_camera_backend()
         if CameraList is None or SpinSystem is None:
             message = "Camera backend unavailable"
@@ -316,7 +323,7 @@ class Grabber(QObject):
                 try:
                     icam = cam.get_next_image(timeout=self.FRAME_TIMEOUT_S)
                 except Exception as exc:  # pragma: no cover - hardware dependent
-                    self.error.emit(str(exc))
+                    self._handle_acquisition_exception(exc)
                     time.sleep(0.1)
                     continue
                 if icam is None:  # pragma: no cover - hardware dependent
@@ -355,6 +362,8 @@ class Grabber(QObject):
             self.error.emit(f"frame conversion: {exc!r}")
             return
 
+        suppress_frame_gap = bool(self._suppress_next_frame_gap)
+        self._reset_acquisition_timeout_state()
         self._frame_index += 1
         now = time.monotonic()
         frame_interval = (
@@ -363,7 +372,11 @@ class Grabber(QObject):
             else None
         )
         self._last_frame_timestamp = now
-        if frame_interval is not None and frame_interval > self.FRAME_GAP_WARNING_S:
+        if (
+            frame_interval is not None
+            and frame_interval > self.FRAME_GAP_WARNING_S
+            and not suppress_frame_gap
+        ):
             logger.warning(
                 "Camera frame gap %.3fs before index=%s size=%sx%s",
                 frame_interval,
@@ -381,7 +394,45 @@ class Grabber(QObject):
                 f"{frame_interval:.3f}s" if frame_interval is not None else "first",
             )
             self._last_frame_log_timestamp = now
+        if suppress_frame_gap:
+            self.frame_gap_suppressed.emit()
         self.frame_ready.emit(qimg.copy())
+
+    def _handle_acquisition_exception(self, exc: Exception) -> bool:
+        """Classify one acquisition failure and emit only actionable errors."""
+
+        message = str(exc) or type(exc).__name__
+        if not self._is_new_buffer_timeout(exc, message):
+            self._reset_acquisition_timeout_state()
+            self.error.emit(message)
+            return True
+
+        self._new_buffer_timeout_count += 1
+        if self._new_buffer_timeout_count < self.NEW_BUFFER_TIMEOUT_ALERT_COUNT:
+            self._suppress_next_frame_gap = True
+            return False
+
+        self._suppress_next_frame_gap = False
+        if not self._new_buffer_timeout_alerted:
+            self._new_buffer_timeout_alerted = True
+            self.error.emit(message)
+            return True
+        return False
+
+    def _is_new_buffer_timeout(self, exc: Exception, message: str) -> bool:
+        try:
+            code = int(getattr(exc, "spin_error_code"))
+        except (AttributeError, TypeError, ValueError):
+            return False
+        return (
+            code == self.NEW_BUFFER_TIMEOUT_CODE
+            and "NEW_BUFFER_DATA" in str(message).upper()
+        )
+
+    def _reset_acquisition_timeout_state(self) -> None:
+        self._new_buffer_timeout_count = 0
+        self._new_buffer_timeout_alerted = False
+        self._suppress_next_frame_gap = False
 
     def _set_rgb8_pixel_format(self, cam: object) -> None:
         try:
