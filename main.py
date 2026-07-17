@@ -862,6 +862,12 @@ class Main(QMainWindow):
                 position,
             )
         )
+        self.stage_controller.coordinate_confidence_changed.connect(
+            lambda updates: stage_position_panel_adapter.update_coordinate_confidence(
+                self,
+                updates,
+            )
+        )
         self.stage_controller.needle_height_changed.connect(self._on_needle_height_changed)
         self.stage_controller.axis_max_feedrates_changed.connect(
             lambda rates: connection_flow.on_axis_max_feedrates_changed(self, rates)

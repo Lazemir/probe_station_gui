@@ -167,18 +167,18 @@ C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/
 - Test: `tests/stage/test_position_presenter.py`
 - Test: `tests/ui/test_stage_position_panel.py`
 
-- [ ] Add failing presenter tests for stripe visibility and color: green exact, red approximate, hidden for disabled profile, unavailable coordinate, or active limit. Verify purple edited-target fill and the stripe coexist.
-- [ ] Extend the presentation model with an optional confidence role; do not overload the existing homed/unhomed/limit/edited fill role.
-- [ ] Implement a 4 px bottom stripe inside each coordinate field and update it only when its axis presentation changes.
-- [ ] Add a compact legend under the coordinate grid covering existing fill semantics and both confidence stripes. Add a tooltip explaining exact versus approximate coordinates.
-- [ ] Connect controller confidence signals event-wise; do not add polling or full widget rebuilds.
+- [x] Add failing presenter tests for stripe visibility and color: green exact, red approximate, hidden for disabled profile, unavailable coordinate, or active limit. Verify purple edited-target fill and the stripe coexist.
+- [x] Extend the presentation model with an optional confidence role; do not overload the existing homed/unhomed/limit/edited fill role.
+- [x] Implement a 4 px bottom stripe inside each coordinate field and update it only when its axis presentation changes.
+- [x] Add a compact legend under the coordinate grid covering existing fill semantics and both confidence stripes. Add a tooltip explaining exact versus approximate coordinates.
+- [x] Connect controller confidence signals event-wise; do not add polling or full widget rebuilds.
 - [ ] Run:
 
 ```powershell
 C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/stage/test_position_presenter.py tests/ui/test_stage_position_panel.py -q
 ```
 
-- [ ] Commit: `feat: display coordinate confidence`
+- [x] Commit: `feat: display coordinate confidence`
 
 ## Task 6: Fit and persist arbitrary multi-point registrations
 

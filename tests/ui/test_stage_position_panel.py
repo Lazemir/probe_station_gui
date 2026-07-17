@@ -254,6 +254,83 @@ def test_pending_target_style_overrides_base_style(
     panel.deleteLater()
 
 
+def test_confidence_stripe_coexists_with_edited_target_fill(
+    qt_app: QApplication,
+) -> None:
+    panel = StagePositionPanel(("X", "Y", "Z"))
+    panel.apply_display_plan(
+        _display_plan(
+            AxisFieldPresentation(
+                "X", 1.0, 1.0, 1.0, "#1565c0", "#f5f5f5", "X axis", "exact"
+            ),
+            AxisFieldPresentation(
+                "Y",
+                2.0,
+                2.0,
+                2.0,
+                "#1565c0",
+                "#f5f5f5",
+                "Y axis",
+                "approximate",
+            ),
+            AxisFieldPresentation(
+                "Z", 3.0, 3.0, 3.0, "#c62828", "#ffffff", "Z axis", None
+            ),
+        )
+    )
+    panel.set_pending_target("X", 4.0, 4.25)
+
+    x_style = panel.axis_fields["X"].styleSheet()
+    y_style = panel.axis_fields["Y"].styleSheet()
+    z_style = panel.axis_fields["Z"].styleSheet()
+    assert "background-color: #d7b8ff" in x_style
+    assert "border-bottom: 4px solid #2e7d32" in x_style
+    assert "border-bottom: 4px solid #d32f2f" in y_style
+    assert "border-bottom: 4px solid" not in z_style
+
+    panel.deleteLater()
+
+
+def test_confidence_update_restyles_only_the_changed_axis(
+    qt_app: QApplication,
+) -> None:
+    panel = StagePositionPanel(("X", "Y"))
+    panel.apply_display_plan(
+        _display_plan(
+            AxisFieldPresentation(
+                "X", 1.0, 1.0, 1.0, "#1565c0", "#f5f5f5", "X axis", "approximate"
+            ),
+            AxisFieldPresentation(
+                "Y", 2.0, 2.0, 2.0, "#1565c0", "#f5f5f5", "Y axis", "exact"
+            ),
+        )
+    )
+    original_y_style = panel.axis_fields["Y"].styleSheet()
+
+    panel.update_confidence_roles({"X": "exact"})
+
+    assert "border-bottom: 4px solid #2e7d32" in panel.axis_fields["X"].styleSheet()
+    assert panel.axis_fields["Y"].styleSheet() == original_y_style
+    panel.deleteLater()
+
+
+def test_position_legend_covers_fill_and_confidence_semantics(
+    qt_app: QApplication,
+) -> None:
+    panel = StagePositionPanel(("X",))
+
+    legend = panel.legend_label
+    assert "Homed" in legend.text()
+    assert "Unhomed" in legend.text()
+    assert "Limit" in legend.text()
+    assert "Edited" in legend.text()
+    assert "Exact" in legend.text()
+    assert "Approximate" in legend.text()
+    assert "backlash" in legend.toolTip().lower()
+
+    panel.deleteLater()
+
+
 def test_motion_blink_dimming_maps_known_base_colors(
     qt_app: QApplication,
 ) -> None:

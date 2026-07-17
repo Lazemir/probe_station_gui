@@ -50,17 +50,31 @@ class StageControllerPrecisionMotionMixin:
         self._precision_approach_settings = settings.clone()
         current = self._precision_fingerprints()
         self._precision_profile_fingerprints = current
-        changed_axes = {
+        profile_changed_axes = {
             axis
             for axis in PRECISION_APPROACH_AXES
             if previous.get(axis) != current.get(axis)
-            and self._precision_approach_settings.profiles[axis].enabled
         }
-        if changed_axes:
+        enabled_changed_axes = {
+            axis
+            for axis in profile_changed_axes
+            if self._precision_approach_settings.profiles[axis].enabled
+        }
+        if enabled_changed_axes:
             self._invalidate_coordinate_confidence(
-                changed_axes,
+                enabled_changed_axes,
                 reason="Precision approach configuration changed.",
             )
+        disabled_changed_axes = profile_changed_axes - enabled_changed_axes
+        if disabled_changed_axes:
+            self._emit_coordinate_confidence_changed(disabled_changed_axes)
+
+    def precision_approach_enabled_axes(self) -> frozenset[str]:
+        return frozenset(
+            axis
+            for axis, profile in self._precision_approach_settings.profiles.items()
+            if profile.enabled
+        )
 
     def coordinate_confidence(self) -> dict[str, AxisCoordinateConfidence]:
         return dict(self._coordinate_confidence)

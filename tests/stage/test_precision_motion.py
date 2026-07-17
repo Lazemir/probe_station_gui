@@ -184,6 +184,25 @@ def test_disabled_profiles_keep_existing_single_segment_path() -> None:
     controller.shutdown()
 
 
+def test_disabling_profile_emits_event_and_removes_axis_from_enabled_set() -> None:
+    controller = StageController()
+    events: list[dict[str, object]] = []
+    controller.coordinate_confidence_changed = SimpleNamespace(
+        emit=lambda update: events.append(dict(update))
+    )
+    controller.apply_precision_approach_configuration(
+        _settings(Z=PrecisionApproachProfile(True, 0.03, 1))
+    )
+    events.clear()
+
+    controller.apply_precision_approach_configuration(_settings())
+
+    assert controller.precision_approach_enabled_axes() == frozenset()
+    assert len(events) == 1
+    assert set(events[0]) == {"Z"}
+    controller.shutdown()
+
+
 def test_cached_exact_confidence_restores_only_matching_live_axes() -> None:
     profiles = _settings(
         X=PrecisionApproachProfile(True, 0.1, 1),

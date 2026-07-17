@@ -1,4 +1,5 @@
 import math
+from types import SimpleNamespace
 
 from probe_station_gui.stage.position_presenter import (
     BAxisRegistrationPlan,
@@ -77,6 +78,51 @@ def test_valid_display_plan_uses_homed_unhomed_and_limit_styles() -> None:
     )
     assert plan.missing_axes == ("A", "B")
     assert plan.fields_available is True
+
+
+def test_display_plan_assigns_confidence_roles_only_to_enabled_available_axes() -> None:
+    plan = stage_position_display_plan(
+        (1.0, 2.0, 3.0, 4.0),
+        axis_names=("X", "Y", "Z", "A"),
+        homed_axes={"X", "Y", "Z", "A"},
+        limit_axes={"A"},
+        pending_targets={"X": (8.0, 8.0)},
+        display_axis_value=_display_axis_value,
+        feedrate_mm_min=120.0,
+        precision_enabled_axes={"X", "Y", "A"},
+        coordinate_confidence={
+            "X": SimpleNamespace(exact=True),
+            "Y": SimpleNamespace(exact=False),
+            "Z": SimpleNamespace(exact=True),
+            "A": SimpleNamespace(exact=True),
+        },
+    )
+
+    updates = {item.axis: item for item in plan.axis_updates}
+    assert updates["X"].confidence_role == "exact"
+    assert updates["Y"].confidence_role == "approximate"
+    assert updates["Z"].confidence_role is None
+    assert updates["A"].confidence_role is None
+
+
+def test_display_plan_hides_confidence_when_coordinate_is_unavailable() -> None:
+    plan = stage_position_display_plan(
+        (1.0, "bad"),
+        axis_names=("X", "Y"),
+        homed_axes={"X", "Y"},
+        limit_axes=set(),
+        pending_targets={},
+        display_axis_value=_display_axis_value,
+        feedrate_mm_min=120.0,
+        precision_enabled_axes={"X", "Y"},
+        coordinate_confidence={
+            "X": SimpleNamespace(exact=True),
+            "Y": SimpleNamespace(exact=False),
+        },
+    )
+
+    assert plan.axis_updates[0].confidence_role == "exact"
+    assert plan.missing_axes == ("Y",)
 
 
 def test_pending_target_visible_value_overrides_live_display_value() -> None:
