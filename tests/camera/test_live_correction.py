@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QCoreApplication
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 from PySide6.QtGui import QColor, QImage
+from PySide6.QtWidgets import QApplication
 
 from probe_station_gui.camera.live_correction import (
     LatestFrameProcessor,
@@ -187,7 +190,7 @@ def test_latest_frame_processor_replaces_stale_pending_request() -> None:
     processor.frame_ready.connect(
         lambda value: (results.append(value), all_results.set() if len(results) == 2 else None)
     )
-    app = QCoreApplication.instance() or QCoreApplication([])
+    app = QApplication.instance() or QApplication([])
     try:
         assert processor.submit(1) is True
         assert processing_started.wait(2.0)

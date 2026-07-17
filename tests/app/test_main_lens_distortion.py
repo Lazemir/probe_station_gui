@@ -274,8 +274,8 @@ def test_run_lens_distortion_calibration_captures_offset_grid(
 
     assert stage.events[:5] == [
         ("load_flat", "X20"),
-        ("auto_exposure",),
         ("begin", "lens distortion calibration"),
+        ("auto_exposure",),
         ("camera_lock", True),
         ("needles", "raise", 71.0),
     ]
@@ -329,6 +329,46 @@ def test_lens_distortion_calibration_requires_flat_field_before_motion() -> None
     assert stage.events == []
     assert finished[0][0] is False
     assert "flat-field" in finished[0][1].lower()
+
+
+def test_lens_distortion_auto_exposure_failure_releases_stage_without_move() -> None:
+    stage = _FakeStage()
+    finished: list[tuple[bool, str, object]] = []
+    window = Main.__new__(Main)
+    window.stage_controller = stage
+    window._active_objective_metadata = lambda: ("X20", 20.0)
+    window._active_microscope_scale = lambda: SimpleNamespace(
+        pixel_size_x_mm=0.001,
+        pixel_size_y_mm=0.001,
+    )
+    window._flat_field_calibration_store = SimpleNamespace(
+        load=lambda objective: (
+            stage.events.append(("load_flat", objective))
+            or SimpleNamespace(profile="flat-profile")
+        )
+    )
+    window._run_camera_auto_exposure = lambda: {
+        "accepted": False,
+        "message": "Exposure did not converge.",
+    }
+    window._emit_lens_distortion_finished = (
+        lambda success, message, payload: finished.append((success, message, payload))
+    )
+
+    Main._run_lens_distortion_calibration(window, (10.0, 20.0), 120.0, 70.0)
+
+    assert stage.events == [
+        ("load_flat", "X20"),
+        ("begin", "lens distortion calibration"),
+        ("finish",),
+    ]
+    assert finished == [
+        (
+            False,
+            "Lens distortion calibration failed: Exposure did not converge.",
+            None,
+        )
+    ]
 
 
 def test_fit_lens_distortion_payload_prefers_stage_geometry(monkeypatch) -> None:

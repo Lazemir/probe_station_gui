@@ -29,6 +29,14 @@ class _Signal:
             callback()
 
 
+class _RecordingSignal:
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, ...]] = []
+
+    def emit(self, *args: object) -> None:
+        self.calls.append(tuple(args))
+
+
 class _FakeWizard:
     def __init__(self, _parent=None) -> None:
         self.start_flat_field_requested = _Signal()
@@ -359,6 +367,41 @@ def test_stale_calibration_events_do_not_affect_newer_active_context(
     assert wizard.results == []
     assert getattr(window, context_attribute) is active
     assert getattr(window, thread_attribute) is thread_b
+
+
+@pytest.mark.parametrize(
+    ("reporter", "progress_signal_name"),
+    (
+        (
+            Main._report_flat_field_calibration_progress,
+            "flat_field_calibration_progress",
+        ),
+        (
+            Main._report_lens_distortion_calibration_progress,
+            "lens_distortion_calibration_progress",
+        ),
+    ),
+)
+def test_calibration_worker_progress_uses_queued_status_signal(
+    reporter,
+    progress_signal_name,
+) -> None:
+    context = main_module._OpticalCalibrationRunContext(
+        operation_id="worker-progress",
+        wizard_run_id=8,
+        objective_name="X20",
+    )
+    status_signal = _RecordingSignal()
+    progress_signal = _RecordingSignal()
+    owner = SimpleNamespace(
+        status_message_requested=status_signal,
+        **{progress_signal_name: progress_signal},
+    )
+
+    reporter(owner, "capture 2/9", context)
+
+    assert status_signal.calls == [("capture 2/9", 0)]
+    assert progress_signal.calls == [(context, "capture 2/9")]
 
 
 def test_lens_dialog_calibrate_opens_lens_only_wizard(monkeypatch) -> None:

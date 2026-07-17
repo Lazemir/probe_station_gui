@@ -4680,7 +4680,10 @@ class Main(QMainWindow):
         message: str,
         context: _OpticalCalibrationRunContext | None = None,
     ) -> None:
-        self._show_status(message)
+        try:
+            self.status_message_requested.emit(message, 0)
+        except RuntimeError:
+            pass
         try:
             self.flat_field_calibration_progress.emit(context, message)
         except RuntimeError:
@@ -4697,6 +4700,7 @@ class Main(QMainWindow):
         success = False
         message = "Flat-field calibration stopped."
         stage_reserved = False
+        stage_position_changed = False
         camera_restore_key: str | None = None
         feedrate = (
             self._coordinate_feedrate_for_axes(("X", "Y"))
@@ -4712,6 +4716,8 @@ class Main(QMainWindow):
             objective_name, magnification, scale = (
                 self._optical_calibration_objective_metadata(context)
             )
+            self.stage_controller.begin_external_task("flat-field calibration")
+            stage_reserved = True
             self._report_flat_field_calibration_progress(
                 "Flat-field calibration: adjusting exposure.", context
             )
@@ -4736,8 +4742,6 @@ class Main(QMainWindow):
             frame_size = self._lens_distortion_frame_size(initial_frame)
             capture_offsets = self._flat_field_capture_offsets_mm(frame_size, scale)
 
-            self.stage_controller.begin_external_task("flat-field calibration")
-            stage_reserved = True
             camera_restore_key = self._apply_microscope_scan_camera_lock(
                 microscope_scan.CameraLockSettings(
                     enabled=True,
@@ -4758,6 +4762,7 @@ class Main(QMainWindow):
                 self._report_flat_field_calibration_progress(
                     f"Flat-field calibration: capture {index}/{total}.", context
                 )
+                stage_position_changed = True
                 self.stage_controller.run_external_move_to_xy(
                     start_xy[0] + dx_mm,
                     start_xy[1] + dy_mm,
@@ -4808,19 +4813,20 @@ class Main(QMainWindow):
             message = f"Flat-field calibration failed: {exc}"
         finally:
             if stage_reserved:
-                try:
-                    self._report_flat_field_calibration_progress(
-                        "Flat-field calibration: returning to start.", context
-                    )
-                    self.stage_controller.run_external_move_to_xy(
-                        start_xy[0],
-                        start_xy[1],
-                        feedrate=feedrate,
-                    )
-                except Exception as exc:
-                    logger.exception("Flat-field calibration restore failed")
-                    success = False
-                    message = f"Flat-field calibration restore failed: {exc}"
+                if stage_position_changed:
+                    try:
+                        self._report_flat_field_calibration_progress(
+                            "Flat-field calibration: returning to start.", context
+                        )
+                        self.stage_controller.run_external_move_to_xy(
+                            start_xy[0],
+                            start_xy[1],
+                            feedrate=feedrate,
+                        )
+                    except Exception as exc:
+                        logger.exception("Flat-field calibration restore failed")
+                        success = False
+                        message = f"Flat-field calibration restore failed: {exc}"
                 if camera_restore_key is not None:
                     restore_error = self._restore_microscope_scan_camera_lock(
                         camera_restore_key
@@ -5018,7 +5024,10 @@ class Main(QMainWindow):
         message: str,
         context: _OpticalCalibrationRunContext | None = None,
     ) -> None:
-        self._show_status(message)
+        try:
+            self.status_message_requested.emit(message, 0)
+        except RuntimeError:
+            pass
         try:
             self.lens_distortion_calibration_progress.emit(context, message)
         except RuntimeError:
@@ -5035,6 +5044,7 @@ class Main(QMainWindow):
         success = False
         message = "Lens distortion calibration stopped."
         reserved = False
+        stage_position_changed = False
         camera_restore_key: str | None = None
         feedrate = (
             self._coordinate_feedrate_for_axes(("X", "Y"))
@@ -5056,6 +5066,8 @@ class Main(QMainWindow):
                 raise RuntimeError(
                     f"Flat-field profile for {objective_name} is unavailable: {exc}"
                 ) from exc
+            self.stage_controller.begin_external_task("lens distortion calibration")
+            reserved = True
             self._report_lens_distortion_calibration_progress(
                 "Lens distortion calibration: adjusting exposure.", context
             )
@@ -5068,8 +5080,6 @@ class Main(QMainWindow):
                     )
                 )
 
-            self.stage_controller.begin_external_task("lens distortion calibration")
-            reserved = True
             camera_restore_key = self._apply_microscope_scan_camera_lock(
                 microscope_scan.CameraLockSettings(
                     enabled=True,
@@ -5105,6 +5115,7 @@ class Main(QMainWindow):
                 self._report_lens_distortion_calibration_progress(
                     f"Lens distortion calibration: capture {index}/{total}.", context
                 )
+                stage_position_changed = True
                 self.stage_controller.run_external_move_to_xy(
                     start_xy[0] + dx_mm,
                     start_xy[1] + dy_mm,
@@ -5139,19 +5150,20 @@ class Main(QMainWindow):
             message = f"Lens distortion calibration failed: {exc}"
         finally:
             if reserved:
-                try:
-                    self._report_lens_distortion_calibration_progress(
-                        "Lens distortion calibration: returning to start.", context
-                    )
-                    self.stage_controller.run_external_move_to_xy(
-                        start_xy[0],
-                        start_xy[1],
-                        feedrate=feedrate,
-                    )
-                except Exception as exc:
-                    logger.exception("Lens distortion calibration restore failed")
-                    success = False
-                    message = f"Lens distortion calibration restore failed: {exc}"
+                if stage_position_changed:
+                    try:
+                        self._report_lens_distortion_calibration_progress(
+                            "Lens distortion calibration: returning to start.", context
+                        )
+                        self.stage_controller.run_external_move_to_xy(
+                            start_xy[0],
+                            start_xy[1],
+                            feedrate=feedrate,
+                        )
+                    except Exception as exc:
+                        logger.exception("Lens distortion calibration restore failed")
+                        success = False
+                        message = f"Lens distortion calibration restore failed: {exc}"
                 if camera_restore_key is not None:
                     restore_error = self._restore_microscope_scan_camera_lock(
                         camera_restore_key

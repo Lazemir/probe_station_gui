@@ -114,8 +114,8 @@ def test_flat_field_runner_captures_raw_grid_and_restores_stage(monkeypatch) -> 
 
     Main._run_flat_field_calibration(window, (10.0, 20.0), 120.0, 70.0)
 
-    assert events.index(("auto_exposure",)) < events.index(
-        ("begin", "flat-field calibration")
+    assert events.index(("begin", "flat-field calibration")) < events.index(
+        ("auto_exposure",)
     )
     assert events.index(("camera_lock", True, (
         ("ExposureAuto", "Off"),
@@ -166,5 +166,9 @@ def test_flat_field_runner_does_not_move_when_auto_exposure_fails() -> None:
 
     Main._run_flat_field_calibration(window, (10.0, 20.0), 120.0, 70.0)
 
-    assert not any(event[0] in {"begin", "move"} for event in events)
+    assert not any(event[0] == "move" for event in events)
+    assert events == [
+        ("begin", "flat-field calibration"),
+        ("finish",),
+    ]
     assert finished == [(False, "Flat-field calibration failed: Exposure did not converge.", None)]

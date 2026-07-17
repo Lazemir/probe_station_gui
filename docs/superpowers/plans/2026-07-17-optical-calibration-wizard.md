@@ -165,9 +165,10 @@ def test_flat_field_runner_captures_shifted_three_by_three_and_restores_stage(mo
     assert len(installed_frames) == 9
 ```
 
-Assert one-shot auto-exposure occurs before `begin_external_task`, every frame
-comes from `_wait_for_raw_camera_frame`, and the store receives the active
-objective plus capture metadata.
+Assert the stage is reserved before one-shot auto-exposure, every frame comes
+from `_wait_for_raw_camera_frame`, and the store receives the active objective
+plus capture metadata. A failed exposure must release the reservation without
+issuing an XY move.
 
 - [ ] **Step 2: Run the runner test and verify the method is absent**
 
