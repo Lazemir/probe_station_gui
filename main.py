@@ -155,6 +155,7 @@ from probe_station_gui.camera.live_correction import (
     LiveCameraCorrectionRequest,
     LiveCameraCorrectionResult,
 )
+from probe_station_gui.camera.flat_field_calibration import FlatFieldCalibrationStore
 from probe_station_gui.api.command_dispatch import (
     ApiBridgeRequestHandlers,
     ApiCommandDispatchHandlers,
@@ -478,6 +479,7 @@ class Main(QMainWindow):
     telegram_bot_request_received: Signal = Signal(object)
     microscope_scan_status: Signal = Signal(str)
     microscope_scan_finished: Signal = Signal(bool, str)
+    flat_field_calibration_finished: Signal = Signal(bool, str, object)
     lens_distortion_calibration_finished: Signal = Signal(bool, str, object)
     contact_seek_status: Signal = Signal(str)
     contact_seek_calibration_found: Signal = Signal(float, str)
@@ -566,6 +568,10 @@ class Main(QMainWindow):
     LENS_DISTORTION_MAX_RESIDUAL_MAX_PX = 12.0
     LENS_DISTORTION_CAPTURE_SETTLE_S = 0.12
     LENS_DISTORTION_CAMERA_TIMEOUT_S = 2.0
+    FLAT_FIELD_CAPTURE_GRID_SIZE = 3
+    FLAT_FIELD_CAPTURE_OVERLAP_FRACTION = 0.8
+    FLAT_FIELD_CAPTURE_SETTLE_S = 0.12
+    FLAT_FIELD_CAMERA_TIMEOUT_S = 2.0
 
     def __init__(self) -> None:
         _startup_trace("Main.__init__ entered")
@@ -708,6 +714,9 @@ class Main(QMainWindow):
         self._live_camera_correction_pipeline = LiveCameraCorrectionPipeline(
             self.settings_manager.config_dir()
         )
+        self._flat_field_calibration_store = FlatFieldCalibrationStore(
+            self.settings_manager.config_dir()
+        )
         self._live_camera_frame_processor = LatestFrameProcessor(
             self._live_camera_correction_pipeline.process
         )
@@ -767,6 +776,7 @@ class Main(QMainWindow):
         self._api_route_offset_xy: tuple[float, float] = (0.0, 0.0)
         self._microscope_scan_thread: threading.Thread | None = None
         self._microscope_scan_stop_requested = threading.Event()
+        self._flat_field_calibration_thread: threading.Thread | None = None
         self._lens_distortion_thread: threading.Thread | None = None
         self._sample_handling_thread: threading.Thread | None = None
         self._last_sample_focus_z_by_objective: dict[str, float] = {}
@@ -847,6 +857,9 @@ class Main(QMainWindow):
         )
         self.microscope_scan_status.connect(self._on_microscope_scan_status)
         self.microscope_scan_finished.connect(self._on_microscope_scan_finished)
+        self.flat_field_calibration_finished.connect(
+            self._on_flat_field_calibration_finished
+        )
         self.lens_distortion_calibration_finished.connect(
             self._on_lens_distortion_calibration_finished
         )
@@ -4447,6 +4460,242 @@ class Main(QMainWindow):
     def _refresh_objective_calibration_ui(self) -> None:
         self._refresh_click_calibration_ui()
         self._refresh_lens_distortion_ui()
+
+    def _start_flat_field_calibration(self) -> None:
+        if self._flat_field_calibration_running():
+            self._show_status("Flat-field calibration is already running.", 4000)
+            return
+        if not self._stage_serial_ready():
+            self._show_status("Connect the stage controller before calibration.", 5000)
+            return
+        if self.stage_controller.is_busy():
+            self._show_status("Stage is busy; flat-field calibration not started.", 5000)
+            return
+        try:
+            position = self.stage_controller.current_stage_position()
+        except StageControllerError as exc:
+            self._show_status(str(exc), 5000)
+            return
+        if len(position) < 2:
+            self._show_status("Unable to read X/Y stage position.", 5000)
+            return
+
+        start_xy = (float(position[0]), float(position[1]))
+        thread = threading.Thread(
+            target=self._run_flat_field_calibration,
+            args=(
+                start_xy,
+                self._coordinate_feedrate_for_axes(("X", "Y")),
+                self._current_needle_feedrate(),
+            ),
+            name="FlatFieldCalibration",
+            daemon=True,
+        )
+        self._flat_field_calibration_thread = thread
+        self._show_status("Flat-field calibration started.", 4000)
+        thread.start()
+
+    def _flat_field_calibration_running(self) -> bool:
+        thread = getattr(self, "_flat_field_calibration_thread", None)
+        return thread is not None and thread.is_alive()
+
+    def _run_flat_field_calibration(
+        self,
+        start_xy: tuple[float, float],
+        linear_feedrate: float | None = None,
+        needle_feedrate: float | None = None,
+    ) -> None:
+        payload: dict[str, object] | None = None
+        success = False
+        message = "Flat-field calibration stopped."
+        stage_reserved = False
+        camera_restore_key: str | None = None
+        feedrate = (
+            self._coordinate_feedrate_for_axes(("X", "Y"))
+            if linear_feedrate is None
+            else float(linear_feedrate)
+        )
+        needle_feedrate_value = (
+            self._current_needle_feedrate()
+            if needle_feedrate is None
+            else float(needle_feedrate)
+        )
+        try:
+            self._show_status("Flat-field calibration: adjusting exposure.")
+            auto_exposure = self._run_camera_auto_exposure()
+            if not bool(auto_exposure.get("accepted", False)):
+                raise RuntimeError(
+                    str(
+                        auto_exposure.get("message")
+                        or "Camera auto exposure failed."
+                    )
+                )
+
+            scale = self._active_microscope_scale()
+            if scale is None:
+                raise RuntimeError(
+                    "Flat-field calibration requires click-to-move calibration."
+                )
+            objective_name, magnification = self._active_objective_metadata()
+            if not objective_name:
+                raise RuntimeError("No active objective selected.")
+            initial_frame, _counter = self._wait_for_raw_camera_frame(
+                timeout_s=self.FLAT_FIELD_CAMERA_TIMEOUT_S,
+            )
+            if initial_frame is None:
+                raise RuntimeError("Camera frame timeout.")
+            frame_size = self._lens_distortion_frame_size(initial_frame)
+            capture_offsets = self._flat_field_capture_offsets_mm(frame_size, scale)
+
+            self.stage_controller.begin_external_task("flat-field calibration")
+            stage_reserved = True
+            camera_restore_key = self._apply_microscope_scan_camera_lock(
+                microscope_scan.CameraLockSettings(
+                    enabled=True,
+                    settings=microscope_scan.DEFAULT_CAMERA_LOCK_SETTINGS,
+                )
+            )
+            self._show_status("Flat-field calibration: raising needles.")
+            self.stage_controller.run_external_needles_action(
+                "raise",
+                needle_feedrate_value,
+            )
+
+            frames: list[QImage] = []
+            total = len(capture_offsets)
+            for index, (dx_mm, dy_mm) in enumerate(capture_offsets, start=1):
+                self._show_status(
+                    f"Flat-field calibration: capture {index}/{total}."
+                )
+                self.stage_controller.run_external_move_to_xy(
+                    start_xy[0] + dx_mm,
+                    start_xy[1] + dy_mm,
+                    feedrate=feedrate,
+                )
+                time.sleep(self.FLAT_FIELD_CAPTURE_SETTLE_S)
+                before_counter = self._latest_raw_camera_counter()
+                frame, _counter = self._wait_for_raw_camera_frame(
+                    after_counter=before_counter,
+                    timeout_s=self.FLAT_FIELD_CAMERA_TIMEOUT_S,
+                )
+                if frame is None:
+                    raise RuntimeError("Camera frame timeout.")
+                if self._lens_distortion_frame_size(frame) != frame_size:
+                    raise RuntimeError("Camera frame size changed during calibration.")
+                frames.append(frame)
+
+            stored = self._flat_field_calibration_store.install(
+                objective_name,
+                frames,
+                blur_radius_px=microscope_scan.DEFAULT_FLAT_FIELD_BLUR_RADIUS_PX,
+                max_gain=microscope_scan.DEFAULT_FLAT_FIELD_MAX_GAIN,
+                metadata={
+                    "calibrated_at": utc_timestamp(),
+                    "magnification": magnification,
+                    "capture_grid": [
+                        self.FLAT_FIELD_CAPTURE_GRID_SIZE,
+                        self.FLAT_FIELD_CAPTURE_GRID_SIZE,
+                    ],
+                    "overlap_fraction": self.FLAT_FIELD_CAPTURE_OVERLAP_FRACTION,
+                    "start_stage_xy_mm": [float(value) for value in start_xy],
+                    "capture_offsets_mm": [
+                        [float(dx_mm), float(dy_mm)]
+                        for dx_mm, dy_mm in capture_offsets
+                    ],
+                    "auto_exposure": dict(auto_exposure),
+                },
+            )
+            payload = {
+                "objective": objective_name,
+                "current_manifest": str(stored.current_manifest),
+                "reference_image": str(getattr(stored, "reference_image", "")),
+            }
+            success = True
+            message = "Flat-field calibration saved."
+        except Exception as exc:
+            logger.exception("Flat-field calibration failed")
+            message = f"Flat-field calibration failed: {exc}"
+        finally:
+            if stage_reserved:
+                try:
+                    self._show_status("Flat-field calibration: returning to start.")
+                    self.stage_controller.run_external_move_to_xy(
+                        start_xy[0],
+                        start_xy[1],
+                        feedrate=feedrate,
+                    )
+                except Exception as exc:
+                    logger.exception("Flat-field calibration restore failed")
+                    success = False
+                    message = f"Flat-field calibration restore failed: {exc}"
+                if camera_restore_key is not None:
+                    restore_error = self._restore_microscope_scan_camera_lock(
+                        camera_restore_key
+                    )
+                    if restore_error:
+                        success = False
+                        message = (
+                            "Flat-field camera settings restore failed: "
+                            f"{restore_error}"
+                        )
+                self.stage_controller.finish_external_task()
+            self._emit_flat_field_calibration_finished(success, message, payload)
+
+    @classmethod
+    def _flat_field_capture_offsets_mm(
+        cls,
+        frame_size: tuple[int, int],
+        scale: object,
+    ) -> tuple[tuple[float, float], ...]:
+        width_px, height_px = frame_size
+        try:
+            fov_x_mm = abs(float(width_px) * float(scale.pixel_size_x_mm))
+            fov_y_mm = abs(float(height_px) * float(scale.pixel_size_y_mm))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "Flat-field calibration requires click-to-move calibration."
+            ) from exc
+        step_fraction = 1.0 - float(cls.FLAT_FIELD_CAPTURE_OVERLAP_FRACTION)
+        step_x = fov_x_mm * step_fraction
+        step_y = fov_y_mm * step_fraction
+        if not (
+            math.isfinite(step_x)
+            and math.isfinite(step_y)
+            and step_x > 0.0
+            and step_y > 0.0
+        ):
+            raise RuntimeError("Flat-field capture spacing is invalid.")
+
+        x_offsets = (-step_x, 0.0, step_x)
+        y_offsets = (-step_y, 0.0, step_y)
+        offsets: list[tuple[float, float]] = [(0.0, 0.0)]
+        for row_index, y_offset in enumerate(y_offsets):
+            row_x_offsets = x_offsets if row_index % 2 == 0 else reversed(x_offsets)
+            for x_offset in row_x_offsets:
+                if abs(x_offset) <= 1e-15 and abs(y_offset) <= 1e-15:
+                    continue
+                offsets.append((float(x_offset), float(y_offset)))
+        return tuple(offsets)
+
+    def _emit_flat_field_calibration_finished(
+        self,
+        success: bool,
+        message: str,
+        payload: dict[str, object] | None,
+    ) -> None:
+        self.flat_field_calibration_finished.emit(success, message, payload)
+
+    def _on_flat_field_calibration_finished(
+        self,
+        success: bool,
+        message: str,
+        _payload: object,
+    ) -> None:
+        thread = getattr(self, "_flat_field_calibration_thread", None)
+        if thread is not None and not thread.is_alive():
+            thread.join(timeout=0.1)
+        self._flat_field_calibration_thread = None
+        self._show_status(message, 10000 if success else 8000)
 
     def _start_lens_distortion_calibration(self) -> None:
         if self._lens_distortion_calibration_running():
