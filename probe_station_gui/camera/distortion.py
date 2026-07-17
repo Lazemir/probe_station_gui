@@ -815,8 +815,8 @@ def detect_bright_feature_bounds(frame: object) -> BrightFeatureBounds | None:
     link_kernel = cv2.getStructuringElement(
         cv2.MORPH_RECT,
         (
-            _odd_kernel_size(max(9, width // 80), limit=max(3, width - 1)),
-            _odd_kernel_size(max(9, height // 80), limit=max(3, height - 1)),
+            _odd_kernel_size(max(9, width // 160), limit=max(3, width - 1)),
+            _odd_kernel_size(max(9, height // 160), limit=max(3, height - 1)),
         ),
     )
     linked = cv2.dilate(mask.astype(np.uint8), link_kernel, iterations=1)
