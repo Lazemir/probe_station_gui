@@ -3,9 +3,11 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from PySide6.QtGui import QImage
 
 import main as main_module
 from main import Main
+from probe_station_gui.camera import geometry_mask
 from probe_station_gui.settings.manager import Settings
 from probe_station_gui.settings.objective_config import (
     ObjectiveCalibrationSettings,
@@ -86,6 +88,27 @@ class _FakeFrame:
 
     def height(self) -> int:
         return 1200
+
+
+def _lens_output(
+    payload: dict[str, object],
+    *,
+    before_preview: QImage | None = None,
+    after_preview: QImage | None = None,
+) -> main_module._LensDistortionCalibrationOutput:
+    return main_module._LensDistortionCalibrationOutput(
+        payload=payload,
+        before_preview=(
+            before_preview
+            if before_preview is not None
+            else QImage(4, 3, QImage.Format_Grayscale8)
+        ),
+        after_preview=(
+            after_preview
+            if after_preview is not None
+            else QImage(4, 3, QImage.Format_Grayscale8)
+        ),
+    )
 
 
 def test_lens_distortion_capture_offsets_cover_center_edges_and_corners() -> None:
@@ -197,24 +220,18 @@ def test_run_lens_distortion_calibration_captures_offset_grid(
     )
     raw_frames = [_FakeFrame() for _ in range(len(expected_offsets) + 1)]
     captured_offsets: list[tuple[float, float]] = []
-    corrected_frames: list[object] = []
-
-    class _CorrectedFrame(_FakeFrame):
-        def __init__(self, raw: object) -> None:
-            self.raw = raw
+    segmented_frames: list[object] = []
+    masks: list[object] = []
+    observations = (object(), object())
+    before_preview = QImage(8, 6, QImage.Format_Grayscale8)
+    after_preview = QImage(8, 6, QImage.Format_Grayscale8)
 
     def wait_for_frame(*, after_counter=None, timeout_s=2.0):
         assert after_counter in (None, 0)
         return raw_frames.pop(0), 1
 
     class _Fit:
-        def __init__(self, grid_frames) -> None:
-            self.grid_frames = grid_frames
-
         def to_payload(self) -> dict[str, object]:
-            captured_offsets.extend(
-                frame.stage_offset_mm for frame in self.grid_frames
-            )
             return {
                 "model_version": 1,
                 "model_type": "stage_geometry",
@@ -225,24 +242,55 @@ def test_run_lens_distortion_calibration_captures_offset_grid(
                 "residual_max_px": 1.0,
             }
 
-    def fit_geometry(
+    def segment(frame):
+        segmented_frames.append(frame)
+        mask = SimpleNamespace(frame_size=(1920, 1200), mask=object())
+        masks.append(mask)
+        return mask
+
+    def build_observations(
         grid_frames,
+        geometry_masks,
         *,
         frame_size,
-        pixels_to_mm=None,
-        cluster_tolerance_px=None,
+        image_pixels_to_mm,
+        match_gate_px,
     ):
+        captured_offsets.extend(frame.stage_offset_mm for frame in grid_frames)
+        assert tuple(geometry_masks) == tuple(masks)
         assert frame_size == (1920, 1200)
-        assert pixels_to_mm == ((0.1, -0.0), (0.0, -0.1))
-        assert cluster_tolerance_px == 12.0
-        return _Fit(grid_frames)
+        assert image_pixels_to_mm == ((0.1, -0.0), (0.0, -0.1))
+        assert match_gate_px == 12.0
+        return observations
+
+    def fit_geometry(
+        fit_observations,
+        *,
+        frame_size,
+        initial_pixels_to_mm,
+    ):
+        assert tuple(fit_observations) == observations
+        assert frame_size == (1920, 1200)
+        assert initial_pixels_to_mm == ((0.1, -0.0), (0.0, -0.1))
+        return _Fit()
+
+    def build_previews(raw_grid_frames, geometry_masks, initial_matrix, payload):
+        assert tuple(raw_grid_frames[i].frame for i in range(9)) == tuple(
+            segmented_frames
+        )
+        assert tuple(geometry_masks) == tuple(masks)
+        assert initial_matrix == ((0.1, 0.0), (0.0, 0.1))
+        assert payload["calibrated_pixels_to_mm"] == [
+            [0.1, -0.0],
+            [0.0, -0.1],
+        ]
+        return before_preview, after_preview
 
     window.stage_controller = stage
     window._active_objective_metadata = lambda: ("X20", 20.0)
     window._flat_field_calibration_store = SimpleNamespace(
-        load=lambda objective: (
-            stage.events.append(("load_flat", objective))
-            or SimpleNamespace(profile="flat-profile")
+        load=lambda _objective: (_ for _ in ()).throw(
+            AssertionError("lens calibration loaded flat-field data")
         )
     )
     window._run_camera_auto_exposure = lambda: (
@@ -264,25 +312,35 @@ def test_run_lens_distortion_calibration_captures_offset_grid(
     window._emit_lens_distortion_finished = (
         lambda success, message, payload: finished.append((success, message, payload))
     )
-    def apply_flat(frame, profile):
-        assert profile == "flat-profile"
-        corrected = _CorrectedFrame(frame)
-        corrected_frames.append(corrected)
-        return corrected
-
-    def detect_corrected(frame):
-        assert isinstance(frame, _FakeFrame)
-        return SimpleNamespace(left=500.0, top=300.0, right=1420.0, bottom=900.0)
-
-    monkeypatch.setattr(main_module, "apply_flat_field_correction", apply_flat)
-    monkeypatch.setattr(main_module, "detect_bright_feature_bounds", detect_corrected)
-    monkeypatch.setattr(main_module, "fit_stage_geometry_from_grid_frames", fit_geometry)
+    monkeypatch.setattr(
+        main_module,
+        "apply_flat_field_correction",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("lens calibration applied flat-field correction")
+        ),
+    )
+    monkeypatch.setattr(geometry_mask, "segment_metal_geometry", segment)
+    monkeypatch.setattr(
+        geometry_mask,
+        "build_geometry_feature_observations",
+        build_observations,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "fit_stage_geometry_from_observations",
+        fit_geometry,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        geometry_mask,
+        "build_geometry_alignment_previews",
+        build_previews,
+    )
     monkeypatch.setattr(main_module.time, "sleep", lambda _seconds: None)
 
     Main._run_lens_distortion_calibration(window, (10.0, 20.0))
 
-    assert stage.events[:5] == [
-        ("load_flat", "X20"),
+    assert stage.events[:4] == [
         ("begin", "lens distortion calibration"),
         ("auto_exposure",),
         ("camera_lock", True),
@@ -297,12 +355,19 @@ def test_run_lens_distortion_calibration_captures_offset_grid(
         ("camera_restore", "lens-lock"),
         ("finish",),
     ]
-    assert captured_offsets == list(expected_offsets) * 2
-    assert len(corrected_frames) == len(expected_offsets)
+    assert captured_offsets == list(expected_offsets)
+    assert len(segmented_frames) == len(expected_offsets) == 9
     assert finished[0][0] is True
-    assert "raw 0.50/1.00 px" in finished[0][1]
-    assert "flat field 0.50/1.00 px" in finished[0][1]
-    assert finished[0][2]["calibration_input"] == "raw"
+    assert "raw geometry" in finished[0][1].lower()
+    assert "0.50 px mean" in finished[0][1]
+    assert "1.00 px max" in finished[0][1]
+    assert "candidate" not in finished[0][1].lower()
+    output = finished[0][2]
+    assert isinstance(output, main_module._LensDistortionCalibrationOutput)
+    assert output.before_preview is before_preview
+    assert output.after_preview is after_preview
+    assert "calibration_input" not in output.payload
+    assert "calibration_candidates" not in output.payload
 
 
 def test_lens_distortion_calibration_does_not_require_flat_field_before_motion() -> None:
@@ -326,10 +391,7 @@ def test_lens_distortion_calibration_does_not_require_flat_field_before_motion()
 
     Main._run_lens_distortion_calibration(window, (10.0, 20.0))
 
-    assert stage.events == [
-        ("begin", "lens distortion calibration"),
-        ("finish",),
-    ]
+    assert stage.events == [("begin", "lens distortion calibration"), ("finish",)]
     assert finished[0][0] is False
     assert "flat-field" not in finished[0][1].lower()
 
@@ -345,9 +407,8 @@ def test_lens_distortion_auto_exposure_failure_releases_stage_without_move() -> 
         pixel_size_y_mm=0.001,
     )
     window._flat_field_calibration_store = SimpleNamespace(
-        load=lambda objective: (
-            stage.events.append(("load_flat", objective))
-            or SimpleNamespace(profile="flat-profile")
+        load=lambda _objective: (_ for _ in ()).throw(
+            AssertionError("lens calibration loaded flat-field data")
         )
     )
     window._run_camera_auto_exposure = lambda: {
@@ -360,11 +421,7 @@ def test_lens_distortion_auto_exposure_failure_releases_stage_without_move() -> 
 
     Main._run_lens_distortion_calibration(window, (10.0, 20.0), 120.0, 70.0)
 
-    assert stage.events == [
-        ("load_flat", "X20"),
-        ("begin", "lens distortion calibration"),
-        ("finish",),
-    ]
+    assert stage.events == [("begin", "lens distortion calibration"), ("finish",)]
     assert finished == [
         (
             False,
@@ -374,7 +431,9 @@ def test_lens_distortion_auto_exposure_failure_releases_stage_without_move() -> 
     ]
 
 
-def test_fit_lens_distortion_payload_uses_image_coordinate_matrix(monkeypatch) -> None:
+def test_fit_lens_distortion_output_uses_raw_masks_and_image_coordinate_matrix(
+    monkeypatch,
+) -> None:
     frames = [
         main_module.GridCalibrationFrame(_FakeFrame(), (0.0, 0.0)),
         main_module.GridCalibrationFrame(_FakeFrame(), (0.1, 0.0)),
@@ -382,6 +441,10 @@ def test_fit_lens_distortion_payload_uses_image_coordinate_matrix(monkeypatch) -
     scale = SimpleNamespace(
         pixels_to_mm=((-0.001, 0.0002), (0.0003, -0.0011)),
     )
+    masks = (SimpleNamespace(mask="mask-0"), SimpleNamespace(mask="mask-1"))
+    observations = (object(), object())
+    before_preview = QImage(5, 4, QImage.Format_Grayscale8)
+    after_preview = QImage(5, 4, QImage.Format_Grayscale8)
     calls: list[tuple[object, ...]] = []
 
     class _Fit:
@@ -394,230 +457,171 @@ def test_fit_lens_distortion_payload_uses_image_coordinate_matrix(monkeypatch) -
                     [-0.0009, -0.0004],
                     [0.0002, 0.0012],
                 ],
+                "residual_mean_px": 0.5,
+                "residual_max_px": 1.0,
             }
 
-    def fit_geometry(
+    def segment(frame):
+        index = len([call for call in calls if call[0] == "segment"])
+        calls.append(("segment", frame))
+        return masks[index]
+
+    def build_observations(
         grid_frames,
+        geometry_masks,
         *,
         frame_size,
-        pixels_to_mm,
-        cluster_tolerance_px,
+        image_pixels_to_mm,
+        match_gate_px,
     ):
         calls.append(
             (
-                "geometry",
+                "observations",
                 tuple(grid_frames),
+                tuple(geometry_masks),
                 frame_size,
-                pixels_to_mm,
-                cluster_tolerance_px,
+                image_pixels_to_mm,
+                match_gate_px,
             )
+        )
+        return observations
+
+    def fit_geometry(
+        fit_observations,
+        *,
+        frame_size,
+        initial_pixels_to_mm,
+    ):
+        calls.append(
+            ("fit", tuple(fit_observations), frame_size, initial_pixels_to_mm)
         )
         return _Fit()
 
-    monkeypatch.setattr(main_module, "fit_stage_geometry_from_grid_frames", fit_geometry)
+    def build_previews(raw_frames, geometry_masks, initial_matrix, payload):
+        calls.append(
+            (
+                "previews",
+                tuple(raw_frames),
+                tuple(geometry_masks),
+                initial_matrix,
+                payload,
+            )
+        )
+        return before_preview, after_preview
 
-    payload = Main._fit_lens_distortion_payload(
+    monkeypatch.setattr(geometry_mask, "segment_metal_geometry", segment)
+    monkeypatch.setattr(
+        geometry_mask,
+        "build_geometry_feature_observations",
+        build_observations,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "fit_stage_geometry_from_observations",
+        fit_geometry,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        geometry_mask,
+        "build_geometry_alignment_previews",
+        build_previews,
+    )
+
+    output = Main._fit_lens_distortion_output(
         frames,
         frame_size=(1920, 1200),
         scale=scale,
     )
 
-    assert payload == {
+    assert output.payload == {
         "model_version": 1,
         "model_type": "stage_geometry",
         "pixels_to_mm": [[-0.0009, 0.0004], [0.0002, -0.0012]],
         "calibrated_pixels_to_mm": [[-0.0009, 0.0004], [0.0002, -0.0012]],
+        "residual_mean_px": 0.5,
+        "residual_max_px": 1.0,
     }
-    assert calls == [
+    assert output.before_preview is before_preview
+    assert output.after_preview is after_preview
+    assert calls[:4] == [
+        ("segment", frames[0].frame),
+        ("segment", frames[1].frame),
         (
-            "geometry",
+            "observations",
             tuple(frames),
+            masks,
             (1920, 1200),
             ((-0.001, -0.0002), (0.0003, 0.0011)),
             12.0,
-        )
+        ),
+        (
+            "fit",
+            observations,
+            (1920, 1200),
+            ((-0.001, -0.0002), (0.0003, 0.0011)),
+        ),
     ]
-
-
-def test_lens_distortion_fit_selection_uses_best_valid_candidate() -> None:
-    raw = {
-        "model_type": "stage_geometry",
-        "residual_mean_px": 1.7,
-        "residual_max_px": 4.2,
-    }
-    flat = {
-        "model_type": "stage_geometry",
-        "residual_mean_px": 1.4,
-        "residual_max_px": 5.6,
-    }
-
-    selected = Main._select_lens_distortion_fit_candidate(
-        {"raw": raw, "flat_field": flat}
+    preview_call = calls[4]
+    assert preview_call[:4] == (
+        "previews",
+        tuple(frames),
+        masks,
+        ((-0.001, 0.0002), (0.0003, -0.0011)),
     )
-
-    assert selected["calibration_input"] == "flat_field"
-    assert selected["calibration_candidates"] == {
-        "raw": {"residual_mean_px": 1.7, "residual_max_px": 4.2},
-        "flat_field": {"residual_mean_px": 1.4, "residual_max_px": 5.6},
-    }
+    assert preview_call[4] is output.payload
 
 
-def test_lens_distortion_fit_selection_rejects_invalid_candidates() -> None:
-    raw = {
-        "model_type": "stage_geometry",
-        "residual_mean_px": 4.5,
-        "residual_max_px": 19.7,
-    }
-    flat = {
-        "model_type": "stage_geometry",
-        "residual_mean_px": 3.2,
-        "residual_max_px": 10.0,
-    }
-
-    with pytest.raises(RuntimeError, match="raw.*4.50.*flat field.*3.20"):
-        Main._select_lens_distortion_fit_candidate(
-            {"raw": raw, "flat_field": flat}
-        )
-
-
-def test_lens_distortion_fit_selection_reports_rejected_candidate_metrics() -> None:
-    raw = {
-        "model_type": "stage_geometry",
-        "residual_mean_px": 4.5,
-        "residual_max_px": 19.7,
-    }
-    flat = {
-        "model_type": "stage_geometry",
-        "residual_mean_px": 1.4,
-        "residual_max_px": 5.6,
-    }
-
-    selected = Main._select_lens_distortion_fit_candidate(
-        {"raw": raw, "flat_field": flat}
-    )
-
-    assert selected["calibration_input"] == "flat_field"
-    assert selected["calibration_candidates"]["raw"] == {
-        "residual_mean_px": 4.5,
-        "residual_max_px": 19.7,
-    }
-
-
-def test_lens_distortion_candidates_compare_same_raw_frames(monkeypatch) -> None:
-    raw_frames = [
-        main_module.GridCalibrationFrame(_FakeFrame(), (0.0, 0.0)),
-        main_module.GridCalibrationFrame(_FakeFrame(), (0.1, 0.0)),
-    ]
-    corrected: list[object] = []
-    calls: list[tuple[object, ...]] = []
-
-    class _CorrectedFrame(_FakeFrame):
-        pass
-
-    def apply_flat(frame, profile):
-        assert profile == "flat-profile"
-        result = _CorrectedFrame()
-        corrected.append(result)
-        return result
-
-    def fit_payload(frames, *, frame_size, scale, validate=True):
-        calls.append(tuple(frame.frame for frame in frames))
-        assert frame_size == (1920, 1200)
-        assert scale == "scale"
-        assert validate is False
-        is_flat = isinstance(frames[0].frame, _CorrectedFrame)
-        return {
-            "model_type": "stage_geometry",
-            "residual_mean_px": 1.2 if is_flat else 1.8,
-            "residual_max_px": 4.0 if is_flat else 5.0,
-        }
-
-    monkeypatch.setattr(main_module, "apply_flat_field_correction", apply_flat)
-    monkeypatch.setattr(Main, "_fit_lens_distortion_payload", staticmethod(fit_payload))
-
-    selected = Main._fit_lens_distortion_candidates(
-        raw_frames,
-        frame_size=(1920, 1200),
-        scale="scale",
-        flat_field_profile="flat-profile",
-    )
-
-    assert len(calls) == 2
-    assert calls[0] == tuple(frame.frame for frame in raw_frames)
-    assert calls[1] == tuple(corrected)
-    assert selected["calibration_input"] == "flat_field"
-
-
-def test_lens_distortion_candidates_use_raw_when_flat_field_is_unavailable(
+def test_fit_lens_distortion_output_fails_when_preview_generation_fails(
     monkeypatch,
 ) -> None:
-    raw_frames = [
+    frames = [
         main_module.GridCalibrationFrame(_FakeFrame(), (0.0, 0.0)),
         main_module.GridCalibrationFrame(_FakeFrame(), (0.1, 0.0)),
     ]
-    calls: list[tuple[object, ...]] = []
+    scale = SimpleNamespace(pixels_to_mm=((-0.001, 0.0), (0.0, -0.001)))
 
-    def fit_payload(frames, *, frame_size, scale, validate=True):
-        calls.append(tuple(frame.frame for frame in frames))
-        assert validate is False
-        return {
-            "model_type": "stage_geometry",
-            "residual_mean_px": 1.8,
-            "residual_max_px": 5.0,
-        }
+    class _Fit:
+        def to_payload(self) -> dict[str, object]:
+            return {
+                "model_type": "stage_geometry",
+                "pixels_to_mm": [[-0.001, 0.0], [0.0, 0.001]],
+                "residual_mean_px": 0.5,
+                "residual_max_px": 1.0,
+            }
 
-    monkeypatch.setattr(Main, "_fit_lens_distortion_payload", staticmethod(fit_payload))
-
-    selected = Main._fit_lens_distortion_candidates(
-        raw_frames,
-        frame_size=(1920, 1200),
-        scale="scale",
-        flat_field_profile=None,
+    monkeypatch.setattr(
+        geometry_mask,
+        "segment_metal_geometry",
+        lambda _frame: object(),
     )
-
-    assert calls == [tuple(frame.frame for frame in raw_frames)]
-    assert selected["calibration_input"] == "raw"
-
-
-def test_lens_distortion_candidates_keep_raw_when_flat_correction_fails(
-    monkeypatch,
-) -> None:
-    raw_frames = [
-        main_module.GridCalibrationFrame(_FakeFrame(), (0.0, 0.0)),
-        main_module.GridCalibrationFrame(_FakeFrame(), (0.1, 0.0)),
-    ]
-
-    def fit_payload(frames, *, frame_size, scale, validate=True):
-        assert validate is False
-        return {
-            "model_type": "stage_geometry",
-            "residual_mean_px": 1.8,
-            "residual_max_px": 5.0,
-        }
-
-    monkeypatch.setattr(Main, "_fit_lens_distortion_payload", staticmethod(fit_payload))
+    monkeypatch.setattr(
+        geometry_mask,
+        "build_geometry_feature_observations",
+        lambda *_args, **_kwargs: (object(), object()),
+    )
     monkeypatch.setattr(
         main_module,
-        "apply_flat_field_correction",
-        lambda _frame, _profile: (_ for _ in ()).throw(
-            ValueError("profile size mismatch")
+        "fit_stage_geometry_from_observations",
+        lambda *_args, **_kwargs: _Fit(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        geometry_mask,
+        "build_geometry_alignment_previews",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ValueError("preview canvas is empty")
         ),
     )
 
-    selected = Main._fit_lens_distortion_candidates(
-        raw_frames,
-        frame_size=(1920, 1200),
-        scale="scale",
-        flat_field_profile="stale-profile",
-    )
-
-    assert selected["calibration_input"] == "raw"
-    assert selected["calibration_candidate_failures"] == [
-        "flat field: profile size mismatch"
-    ]
+    with pytest.raises(ValueError, match="preview canvas is empty"):
+        Main._fit_lens_distortion_output(
+            frames,
+            frame_size=(1920, 1200),
+            scale=scale,
+        )
 
 
-def test_fit_lens_distortion_payload_raises_when_stage_geometry_errors(
+def test_fit_lens_distortion_output_raises_when_stage_geometry_errors(
     monkeypatch,
 ) -> None:
     frames = [
@@ -631,17 +635,30 @@ def test_fit_lens_distortion_payload_raises_when_stage_geometry_errors(
     def fit_geometry(*_args, **_kwargs):
         raise RuntimeError("scipy unavailable")
 
-    monkeypatch.setattr(main_module, "fit_stage_geometry_from_grid_frames", fit_geometry)
+    monkeypatch.setattr(
+        geometry_mask, "segment_metal_geometry", lambda _frame: object()
+    )
+    monkeypatch.setattr(
+        geometry_mask,
+        "build_geometry_feature_observations",
+        lambda *_args, **_kwargs: (object(), object()),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "fit_stage_geometry_from_observations",
+        fit_geometry,
+        raising=False,
+    )
 
     with pytest.raises(RuntimeError, match="scipy unavailable"):
-        Main._fit_lens_distortion_payload(
+        Main._fit_lens_distortion_output(
             frames,
             frame_size=(1920, 1200),
             scale=scale,
         )
 
 
-def test_fit_lens_distortion_payload_rejects_high_residual(monkeypatch) -> None:
+def test_fit_lens_distortion_output_rejects_high_residual(monkeypatch) -> None:
     frames = [
         main_module.GridCalibrationFrame(_FakeFrame(), (0.0, 0.0)),
         main_module.GridCalibrationFrame(_FakeFrame(), (0.1, 0.0)),
@@ -662,24 +679,221 @@ def test_fit_lens_distortion_payload_rejects_high_residual(monkeypatch) -> None:
     def fit_geometry(*_args, **_kwargs):
         return _Fit()
 
-    monkeypatch.setattr(main_module, "fit_stage_geometry_from_grid_frames", fit_geometry)
+    monkeypatch.setattr(
+        geometry_mask, "segment_metal_geometry", lambda _frame: object()
+    )
+    monkeypatch.setattr(
+        geometry_mask,
+        "build_geometry_feature_observations",
+        lambda *_args, **_kwargs: (object(), object()),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "fit_stage_geometry_from_observations",
+        fit_geometry,
+        raising=False,
+    )
 
     with pytest.raises(RuntimeError, match="residual is too high"):
-        Main._fit_lens_distortion_payload(
+        Main._fit_lens_distortion_output(
             frames,
             frame_size=(1920, 1200),
             scale=scale,
         )
 
 
-def test_fit_lens_distortion_payload_requires_click_calibration() -> None:
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {
+            "residual_mean_px": 0.5,
+            "residual_max_px": 1.0,
+        },
+        {
+            "model_type": "unsupported",
+            "residual_mean_px": 0.5,
+            "residual_max_px": 1.0,
+        },
+    ),
+    ids=("missing-model-type", "unsupported-model-type"),
+)
+def test_fit_lens_distortion_output_rejects_unsupported_model_type_before_preview(
+    monkeypatch,
+    payload,
+) -> None:
+    frames = [
+        main_module.GridCalibrationFrame(_FakeFrame(), (0.0, 0.0)),
+        main_module.GridCalibrationFrame(_FakeFrame(), (0.1, 0.0)),
+    ]
+    scale = SimpleNamespace(
+        pixels_to_mm=((-0.001, 0.0), (0.0, -0.001)),
+    )
+    preview_calls: list[object] = []
+
+    class _Fit:
+        def to_payload(self) -> dict[str, object]:
+            return dict(payload)
+
+    monkeypatch.setattr(
+        geometry_mask, "segment_metal_geometry", lambda _frame: object()
+    )
+    monkeypatch.setattr(
+        geometry_mask,
+        "build_geometry_feature_observations",
+        lambda *_args, **_kwargs: (object(), object()),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "fit_stage_geometry_from_observations",
+        lambda *_args, **_kwargs: _Fit(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        geometry_mask,
+        "build_geometry_alignment_previews",
+        lambda *_args, **_kwargs: (
+            preview_calls.append(True)
+            or (
+                QImage(2, 2, QImage.Format_Grayscale8),
+                QImage(2, 2, QImage.Format_Grayscale8),
+            )
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="model_type"):
+        Main._fit_lens_distortion_output(
+            frames,
+            frame_size=(1920, 1200),
+            scale=scale,
+        )
+
+    assert preview_calls == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {
+            "model_type": "stage_geometry",
+            "residual_max_px": 1.0,
+        },
+        {
+            "model_type": "stage_geometry",
+            "residual_mean_px": 0.5,
+        },
+        {
+            "model_type": "stage_geometry",
+            "residual_mean_px": "not-a-number",
+            "residual_max_px": 1.0,
+        },
+        {
+            "model_type": "stage_geometry",
+            "residual_mean_px": 0.5,
+            "residual_max_px": "not-a-number",
+        },
+        {
+            "model_type": "stage_geometry",
+            "residual_mean_px": float("nan"),
+            "residual_max_px": 1.0,
+        },
+        {
+            "model_type": "stage_geometry",
+            "residual_mean_px": 0.5,
+            "residual_max_px": float("inf"),
+        },
+    ),
+    ids=(
+        "missing-mean",
+        "missing-max",
+        "non-numeric-mean",
+        "non-numeric-max",
+        "nonfinite-mean",
+        "nonfinite-max",
+    ),
+)
+def test_fit_lens_distortion_output_rejects_invalid_residual_metrics_before_preview(
+    monkeypatch,
+    payload,
+) -> None:
+    frames = [
+        main_module.GridCalibrationFrame(_FakeFrame(), (0.0, 0.0)),
+        main_module.GridCalibrationFrame(_FakeFrame(), (0.1, 0.0)),
+    ]
+    scale = SimpleNamespace(
+        pixels_to_mm=((-0.001, 0.0), (0.0, -0.001)),
+    )
+    preview_calls: list[object] = []
+
+    class _Fit:
+        def to_payload(self) -> dict[str, object]:
+            return dict(payload)
+
+    monkeypatch.setattr(
+        geometry_mask, "segment_metal_geometry", lambda _frame: object()
+    )
+    monkeypatch.setattr(
+        geometry_mask,
+        "build_geometry_feature_observations",
+        lambda *_args, **_kwargs: (object(), object()),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "fit_stage_geometry_from_observations",
+        lambda *_args, **_kwargs: _Fit(),
+        raising=False,
+    )
+
+    def build_previews(*_args, **_kwargs):
+        preview_calls.append(True)
+        return QImage(2, 2, QImage.Format_Grayscale8), QImage(
+            2, 2, QImage.Format_Grayscale8
+        )
+
+    monkeypatch.setattr(
+        geometry_mask,
+        "build_geometry_alignment_previews",
+        build_previews,
+    )
+
+    with pytest.raises(RuntimeError, match="residual"):
+        Main._fit_lens_distortion_output(
+            frames,
+            frame_size=(1920, 1200),
+            scale=scale,
+        )
+
+    assert preview_calls == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"model_type": "stage_geometry", "residual_max_px": 1.0},
+        {
+            "model_type": "stage_geometry",
+            "residual_mean_px": "not-a-number",
+            "residual_max_px": 1.0,
+        },
+        {
+            "model_type": "stage_geometry",
+            "residual_mean_px": 0.5,
+            "residual_max_px": float("nan"),
+        },
+    ),
+)
+def test_lens_distortion_success_message_rejects_invalid_metrics(payload) -> None:
+    with pytest.raises(RuntimeError, match="residual"):
+        Main._lens_distortion_fit_success_message(payload)
+
+
+def test_fit_lens_distortion_output_requires_click_calibration() -> None:
     frames = [
         main_module.GridCalibrationFrame(_FakeFrame(), (0.0, 0.0)),
     ]
     scale = SimpleNamespace()
 
     with pytest.raises(RuntimeError, match="requires click-to-move calibration"):
-        Main._fit_lens_distortion_payload(
+        Main._fit_lens_distortion_output(
             frames,
             frame_size=(1920, 1200),
             scale=scale,
@@ -712,9 +926,17 @@ def test_lens_distortion_finished_resets_click_calibration_without_stage_matrix(
     window._show_status = (
         lambda message, timeout_ms=0: statuses.append((str(message), int(timeout_ms)))
     )
-    payload = {"model_version": 1, "frame_size": [640, 480], "residual_mean_px": 0.2}
+    payload = {
+        "model_version": 1,
+        "model_type": "stage_geometry",
+        "frame_size": [640, 480],
+        "residual_mean_px": 0.2,
+        "residual_max_px": 0.4,
+    }
 
-    Main._on_lens_distortion_calibration_finished(window, True, "done", payload)
+    Main._on_lens_distortion_calibration_finished(
+        window, True, "done", _lens_output(payload)
+    )
 
     profile = manager.settings.objectives.objectives["X50"]
     assert profile.distortion_correction_configured is True
@@ -757,11 +979,16 @@ def test_lens_distortion_finished_applies_stage_calibrated_grid_matrix() -> None
     matrix = [[-0.000117, 0.0], [0.0, -0.000117]]
     payload = {
         "model_version": 1,
+        "model_type": "stage_geometry",
         "frame_size": [640, 480],
         "calibrated_pixels_to_mm": matrix,
+        "residual_mean_px": 0.2,
+        "residual_max_px": 0.4,
     }
 
-    Main._on_lens_distortion_calibration_finished(window, True, "done", payload)
+    Main._on_lens_distortion_calibration_finished(
+        window, True, "done", _lens_output(payload)
+    )
 
     profile = manager.settings.objectives.objectives["X50"]
     assert profile.distortion_correction_configured is True
@@ -796,30 +1023,46 @@ def test_lens_distortion_completion_saves_to_captured_objective_after_active_swi
     )
     captured_context = main_module._OpticalCalibrationRunContext(
         operation_id="lens-x20",
-        wizard_run_id=None,
+        wizard_run_id=27,
         objective_name="X20",
     )
     matrix = [[-0.000117, 0.0], [0.0, -0.000117]]
     payload = {
         "model_version": 1,
+        "model_type": "stage_geometry",
         "frame_size": [640, 480],
         "calibrated_pixels_to_mm": matrix,
+        "residual_mean_px": 0.2,
+        "residual_max_px": 0.4,
     }
     window.settings_manager = manager
     window._lens_distortion_thread = _DeadThread()
     window._lens_distortion_context = captured_context
     window._lens_distortion_dialog = None
-    window._optical_calibration_wizard = None
+    wizard_calls: list[tuple[object, ...]] = []
+    window._optical_calibration_wizard = SimpleNamespace(
+        set_lens_distortion_result=lambda success, message, **kwargs: wizard_calls.append(
+            (success, message, kwargs)
+        )
+    )
     window._apply_objective_settings = lambda: None
     window._refresh_objective_calibration_ui = lambda: None
     window._show_status = lambda *_args: None
+
+    before_preview = QImage(7, 5, QImage.Format_Grayscale8)
+    after_preview = QImage(7, 5, QImage.Format_Grayscale8)
+    output = _lens_output(
+        payload,
+        before_preview=before_preview,
+        after_preview=after_preview,
+    )
 
     Main._on_lens_distortion_calibration_finished(
         window,
         captured_context,
         True,
         "done",
-        payload,
+        output,
     )
 
     x20 = manager.settings.objectives.objectives["X20"]
@@ -832,6 +1075,178 @@ def test_lens_distortion_completion_saves_to_captured_objective_after_active_swi
     assert x5.distortion_correction_configured is True
     assert x5.pixels_to_mm == x5_matrix
     assert x5.xy_calibration_configured is True
+    assert wizard_calls == [
+        (
+            True,
+            "done",
+            {
+                "run_id": 27,
+                "before_preview": before_preview,
+                "after_preview": after_preview,
+            },
+        )
+    ]
+
+
+def test_stale_lens_distortion_completion_saves_and_displays_nothing() -> None:
+    window = Main.__new__(Main)
+    stale_context = main_module._OpticalCalibrationRunContext(
+        operation_id="stale-lens",
+        wizard_run_id=31,
+        objective_name="X20",
+    )
+    current_context = main_module._OpticalCalibrationRunContext(
+        operation_id="current-lens",
+        wizard_run_id=32,
+        objective_name="X50",
+    )
+    saved: list[object] = []
+    displayed: list[object] = []
+    statuses: list[object] = []
+    window._lens_distortion_context = current_context
+    window._lens_distortion_thread = _DeadThread()
+    window._lens_distortion_dialog = None
+    window._optical_calibration_wizard = SimpleNamespace(
+        set_lens_distortion_result=lambda *args, **kwargs: displayed.append(
+            (args, kwargs)
+        )
+    )
+    window._save_objective_distortion = lambda *args: saved.append(args)
+    window._show_status = lambda *args: statuses.append(args)
+
+    Main._on_lens_distortion_calibration_finished(
+        window,
+        stale_context,
+        True,
+        "stale done",
+        _lens_output({"model_version": 1}),
+    )
+
+    assert saved == []
+    assert displayed == []
+    assert statuses == []
+    assert window._lens_distortion_context is current_context
+
+
+@pytest.mark.parametrize(
+    "output",
+    (
+        _lens_output(
+            {
+                "model_type": "stage_geometry",
+                "residual_mean_px": 0.5,
+            }
+        ),
+        {
+            "model_type": "stage_geometry",
+            "residual_mean_px": 0.5,
+            "residual_max_px": 1.0,
+        },
+        main_module._LensDistortionCalibrationOutput(
+            payload={
+                "model_type": "stage_geometry",
+                "residual_mean_px": 0.5,
+                "residual_max_px": 1.0,
+            },
+            before_preview=None,
+            after_preview=QImage(4, 3, QImage.Format_Grayscale8),
+        ),
+    ),
+    ids=("malformed-payload", "bare-dict", "malformed-previews"),
+)
+def test_malformed_lens_distortion_completion_is_rejected_without_save_or_previews(
+    output,
+) -> None:
+    window = Main.__new__(Main)
+    context = main_module._OpticalCalibrationRunContext(
+        operation_id="malformed-lens",
+        wizard_run_id=44,
+        objective_name="X20",
+    )
+    saved: list[object] = []
+    wizard_calls: list[tuple[object, ...]] = []
+    statuses: list[tuple[object, ...]] = []
+    window._lens_distortion_context = context
+    window._lens_distortion_thread = _DeadThread()
+    window._lens_distortion_dialog = None
+    window._optical_calibration_wizard = SimpleNamespace(
+        set_lens_distortion_result=lambda *args, **kwargs: wizard_calls.append(
+            (args, kwargs)
+        )
+    )
+    window._save_objective_distortion = lambda *args: saved.append(args)
+    window._show_status = lambda *args: statuses.append(args)
+
+    Main._on_lens_distortion_calibration_finished(
+        window,
+        context,
+        True,
+        "done",
+        output,
+    )
+
+    assert saved == []
+    assert len(wizard_calls) == 1
+    wizard_args, wizard_kwargs = wizard_calls[0]
+    assert wizard_args[0] is False
+    assert wizard_kwargs == {"run_id": 44}
+    assert statuses[0][1] == 8000
+    assert statuses[0][0] == wizard_args[1]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {
+            "residual_mean_px": 0.5,
+            "residual_max_px": 1.0,
+        },
+        {
+            "model_type": "unsupported",
+            "residual_mean_px": 0.5,
+            "residual_max_px": 1.0,
+        },
+    ),
+    ids=("missing-model-type", "unsupported-model-type"),
+)
+def test_successful_lens_distortion_completion_rejects_unsupported_model_payload(
+    payload,
+) -> None:
+    window = Main.__new__(Main)
+    context = main_module._OpticalCalibrationRunContext(
+        operation_id="unsupported-model-lens",
+        wizard_run_id=45,
+        objective_name="X20",
+    )
+    saved: list[object] = []
+    wizard_calls: list[tuple[object, ...]] = []
+    statuses: list[tuple[object, ...]] = []
+    window._lens_distortion_context = context
+    window._lens_distortion_thread = _DeadThread()
+    window._lens_distortion_dialog = None
+    window._optical_calibration_wizard = SimpleNamespace(
+        set_lens_distortion_result=lambda *args, **kwargs: wizard_calls.append(
+            (args, kwargs)
+        )
+    )
+    window._save_objective_distortion = lambda *args: saved.append(args)
+    window._show_status = lambda *args: statuses.append(args)
+
+    Main._on_lens_distortion_calibration_finished(
+        window,
+        context,
+        True,
+        "done",
+        _lens_output(payload),
+    )
+
+    assert saved == []
+    assert len(wizard_calls) == 1
+    wizard_args, wizard_kwargs = wizard_calls[0]
+    assert wizard_args[0] is False
+    assert wizard_kwargs == {"run_id": 45}
+    assert statuses[0][1] == 8000
+    assert statuses[0][0] == wizard_args[1]
 
 
 def test_click_calibration_update_keeps_stage_calibrated_distortion_matrix() -> None:
