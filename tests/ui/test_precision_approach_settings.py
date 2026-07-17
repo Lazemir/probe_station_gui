@@ -11,6 +11,7 @@ pytest.importorskip("PySide6")
 from PySide6.QtWidgets import QApplication
 
 from probe_station_gui.dialogs.settings.axis_settings import AxisSettingsWidget
+from probe_station_gui.dialogs.settings_dialog import SettingsDialog
 from probe_station_gui.settings.manager import Settings
 from probe_station_gui.settings.precision_approach import PrecisionApproachProfile
 
@@ -107,3 +108,50 @@ def test_axis_calibration_controls_preserve_read_only_metadata() -> None:
     assert settings.axis_z_calibration.coefficients_mm == original_z.coefficients_mm
 
     widget.deleteLater()
+
+
+@pytest.mark.parametrize(
+    "initial_tab",
+    ["Axes", "Axis Calibration", "Precision approach"],
+)
+def test_settings_dialog_uses_one_axes_tab_and_legacy_aliases(
+    initial_tab: str,
+) -> None:
+    _qt_app()
+    dialog = SettingsDialog(Settings(), initial_tab=initial_tab)
+
+    labels = [dialog._tabs.tabText(index) for index in range(dialog._tabs.count())]
+    assert "Coordinates" in labels
+    assert "Axes" in labels
+    assert "Axis Calibration" not in labels
+    assert "Precision approach" not in labels
+    assert dialog._tabs.currentWidget() is dialog._axes_tab
+
+    dialog.reject()
+
+
+def test_settings_dialog_collects_axis_settings_without_replacing_metadata() -> None:
+    _qt_app()
+    settings = Settings()
+    settings.axis_a_calibration.configured = True
+    original_a = settings.axis_a_calibration.clone()
+    dialog = SettingsDialog(settings)
+    x_row = dialog._axes_tab._rows["X"]
+
+    x_row.enabled_checkbox.setChecked(True)
+    x_row.backlash_spin.setValue(0.125)
+    x_row.direction_combo.setCurrentIndex(x_row.direction_combo.findData(-1))
+    dialog._axes_tab._calibration_checkboxes["A"].setChecked(False)
+    dialog._collect_settings()
+
+    result = dialog.result_settings()
+    assert result.precision_approach.profiles["X"] == PrecisionApproachProfile(
+        enabled=True,
+        backlash=0.125,
+        final_direction=-1,
+    )
+    assert result.axis_a_calibration.configured is False
+    assert result.axis_a_calibration.amplitude_mm == original_a.amplitude_mm
+    assert result.axis_a_calibration.source == original_a.source
+
+    dialog.reject()
