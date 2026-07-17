@@ -81,6 +81,7 @@ class StageControllerPrecisionMotionMixin:
         feedrate: float | None,
         allow_unhomed: bool,
         wait_for_completion: bool = True,
+        ignore_needle_safety: bool = False,
     ) -> None:
         ordered_targets = {
             axis: float(targets[axis])
@@ -96,7 +97,8 @@ class StageControllerPrecisionMotionMixin:
         }
         if not enabled_axes:
             self._check_cancelled()
-            self._move_safety_check()
+            if not ignore_needle_safety:
+                self._move_safety_check()
             self._send_absolute_axis_targets_move(
                 ordered_targets,
                 ignore_needle_safety=True,
@@ -151,7 +153,8 @@ class StageControllerPrecisionMotionMixin:
         try:
             for segment in segments:
                 self._check_cancelled()
-                self._move_safety_check()
+                if not ignore_needle_safety:
+                    self._move_safety_check()
                 sent_segment = True
                 self._send_absolute_axis_targets_move(
                     segment,

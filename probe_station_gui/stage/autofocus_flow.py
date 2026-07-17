@@ -141,11 +141,7 @@ class StageControllerAutofocusMixin:
             max_z=context.max_z,
             step_mm=fine_step,
         )
-        self._approach_z_from_below_locked(
-            best.best_z,
-            min_z=context.min_z,
-            fine_step_mm=fine_step,
-        )
+        self._move_to_autofocus_final_z_locked(best.best_z)
         message = (
             f"Autofocus {objective_name} complete. "
             f"Best score {best.best_score:.2f} at Z={best.best_z:.4f} mm "
@@ -177,11 +173,7 @@ class StageControllerAutofocusMixin:
                 max_z=context.upper_z,
                 step_mm=context.fine_step_mm,
             )
-            self._approach_z_from_below_locked(
-                best.best_z,
-                min_z=context.min_z,
-                fine_step_mm=context.fine_step_mm,
-            )
+            self._move_to_autofocus_final_z_locked(best.best_z)
         except StageControllerError as exc:
             if str(exc) != "Operation cancelled.":
                 raise
@@ -232,22 +224,7 @@ class StageControllerAutofocusMixin:
                     "Could not confirm idle before restoring autofocus start Z.",
                     exc_info=True,
                 )
-            status = self._query_current_status_with_required_coordinates(
-                axes=("Z",),
-            )
-            position = self._position_for_configured_mode(status)
-            if status is None or position is None or len(position) < 3:
-                raise StageControllerError(
-                    "Unable to read Z position after autofocus cancel."
-                )
-            current_z = float(position[2])
-            delta_z = float(context.start_z) - current_z
-            if abs(delta_z) >= 1e-5:
-                self._send_relative_move(
-                    MoveVector(z=delta_z),
-                    allow_relative=True,
-                    as_jog=True,
-                )
+            self._move_to_autofocus_final_z_locked(context.start_z)
         finally:
             if was_cancelled:
                 self._cancel_event.set()
@@ -595,9 +572,10 @@ class StageControllerAutofocusMixin:
             if fine_step_mm is None
             else float(fine_step_mm)
         )
-        backlash = min(
-            max(abs(fine_step) * 4.0, 0.002),
-            self.AUTOFOCUS_BACKLASH_MM,
+        profile = self._precision_approach_settings.profiles["Z"]
+        backlash = max(
+            0.002,
+            profile.backlash if profile.enabled and profile.backlash > 0.0 else abs(fine_step),
         )
         approach_z = max(float(min_z), target - backlash)
         if abs(approach_z - current_z) >= 1e-5:
@@ -613,6 +591,13 @@ class StageControllerAutofocusMixin:
                 allow_relative=True,
                 as_jog=True,
             )
+
+    def _move_to_autofocus_final_z_locked(self, target_z: float) -> None:
+        self._execute_precision_axis_targets_locked(
+            {"Z": float(target_z)},
+            feedrate=None,
+            allow_unhomed=False,
+        )
 
     def _frame_samples(
         self,

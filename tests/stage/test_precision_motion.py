@@ -330,3 +330,31 @@ def test_requested_controller_reset_invalidates_all_enabled_axes() -> None:
     assert not controller.coordinate_confidence()["X"].exact
     assert not controller.coordinate_confidence()["Z"].exact
     controller.shutdown()
+
+
+def test_b_rotation_resolves_relative_angle_to_precision_absolute_target() -> None:
+    controller = StageController()
+    controller._serial = _FakeSerial()
+    controller._query_current_status_with_required_coordinates = (
+        lambda **_kwargs: SimpleNamespace(values={"B": 5.0})
+    )
+    controller._axis_value_for_configured_mode = (
+        lambda status, axis: status.values.get(axis)
+    )
+    moves: list[tuple[dict[str, float], dict[str, object]]] = []
+    controller._execute_precision_axis_targets_locked = (
+        lambda targets, **kwargs: moves.append((dict(targets), dict(kwargs)))
+    )
+    controller.movement_started = SimpleNamespace(emit=lambda: None)
+    controller.movement_finished = SimpleNamespace(emit=lambda *_args: None)
+    controller.status_message = SimpleNamespace(emit=lambda _message: None)
+
+    controller._run_rotate_b(2.5)
+
+    assert moves == [
+        (
+            {"B": 7.5},
+            {"feedrate": None, "allow_unhomed": True},
+        )
+    ]
+    controller.shutdown()

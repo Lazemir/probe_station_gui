@@ -144,10 +144,10 @@ C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/
 - Test: `tests/api/test_server.py`
 - Test: `tests/app/test_main_route_control.py`
 
-- [ ] Add failing tests that GUI G90/G91, local API G90/G91, click-to-move, route XY travel, autofocus final restoration, exact needle targets, and B rotation all reach the shared planner; assert jog, homing, and autofocus sampling bypass it.
-- [ ] Resolve click-to-move pixel displacement to a complete absolute target before planning, retaining the direct in-process controller call.
-- [ ] Replace `AUTOFOCUS_BACKLASH_MM` and `_approach_z_from_below_locked` planning with the Z precision profile. Autofocus sampling keeps raw moves; final restore uses the shared approach and returns to the starting or another known-safe Z when interrupted.
-- [ ] Make route travel use the shared absolute target executor without changing the public API route-control state machine.
+- [x] Add failing tests that GUI G90/G91, local API G90/G91, click-to-move, route XY travel, autofocus final restoration, exact needle targets, and B rotation all reach the shared planner; assert jog, homing, and autofocus sampling bypass it.
+- [x] Resolve click-to-move pixel displacement to a complete absolute target before planning, retaining the direct in-process controller call.
+- [x] Replace `AUTOFOCUS_BACKLASH_MM` and `_approach_z_from_below_locked` planning with the Z precision profile. Autofocus sampling keeps raw moves; final restore uses the shared approach and returns to the starting or another known-safe Z when interrupted.
+- [x] Make route travel use the shared absolute target executor without changing the public API route-control state machine.
 - [ ] Add regression tests for Pause/Resume/Interrupt, especially interruption after the preparation segment: no final movement and no lower/contact-check/external-measurement step may run afterward.
 - [ ] Run:
 
@@ -155,7 +155,7 @@ C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/
 C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/stage/test_controller_click_move.py tests/stage/test_controller_autofocus.py tests/app/test_main_stage_coordinate_controls.py tests/stage/test_api_moves.py tests/api/test_server.py tests/app/test_main_route_control.py -q
 ```
 
-- [ ] Commit: `feat: apply precision approach to target moves`
+- [x] Commit: `feat: apply precision approach to target moves`
 
 ## Task 5: Show coordinate confidence stripes and legend
 

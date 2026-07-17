@@ -273,11 +273,17 @@ class StageControllerMotionCommandsMixin:
                 if abs(delta_deg) < 1e-3:
                     self.movement_finished.emit(True, "Chip is already aligned.")
                     return
+                status = self._query_current_status_with_required_coordinates(
+                    axes=("B",),
+                )
+                current_b = self._axis_value_for_configured_mode(status, "B")
+                if current_b is None:
+                    raise StageControllerError("Unable to read B axis position.")
                 self.status_message.emit(f"Chip alignment: rotating B by {delta_deg:+.3f} deg.")
-                self._send_relative_move(
-                    MoveVector(b=delta_deg),
-                    allow_relative=True,
-                    as_jog=True,
+                self._execute_precision_axis_targets_locked(
+                    {"B": float(current_b) + float(delta_deg)},
+                    feedrate=None,
+                    allow_unhomed=True,
                 )
             self.movement_finished.emit(
                 True,

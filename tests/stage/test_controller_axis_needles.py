@@ -5,6 +5,11 @@ from pathlib import Path
 
 import numpy as np
 
+from probe_station_gui.settings.precision_approach import (
+    PrecisionApproachProfile,
+    PrecisionApproachSettings,
+)
+
 try:
     from .controller_test_support import (
         AxisACalibrationSettings,
@@ -1180,6 +1185,54 @@ class StageControllerPriorityNeedlesActionTest(unittest.TestCase):
             list(controller._oscillation_needles_actions), [("lower", None, None)]
         )
         self.assertIn("queued during oscillation", messages[-1])
+
+class StageControllerPrecisionNeedleTargetTest(unittest.TestCase):
+    def test_final_profile_segment_uses_shared_precision_executor(self) -> None:
+        controller = StageController()
+        profiles = PrecisionApproachSettings()
+        profiles.profiles["A"] = PrecisionApproachProfile(True, 0.1, -1)
+        controller.apply_precision_approach_configuration(profiles)
+        controller._axis_a_configured_coordinate_for_lowering = (
+            lambda lowering, _status=None: float(lowering)
+        )
+        controller._needle_motion_profile_segments = (
+            lambda *_args, **_kwargs: [(1.0, 5.0, False)]
+        )
+        controller._update_needles_from_a_position = lambda _position: None
+        moves = []
+        controller._execute_precision_axis_targets_locked = (
+            lambda targets, **kwargs: moves.append((dict(targets), dict(kwargs)))
+        )
+        controller._send_absolute_axis_move = (
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("final needle target bypassed precision executor")
+            )
+        )
+
+        moved = controller._send_needle_motion_profile_locked(
+            action="lower",
+            current_a=0.0,
+            target_lowering=1.0,
+            feedrate=5.0,
+            status=None,
+        )
+
+        self.assertTrue(moved)
+        self.assertEqual(
+            moves,
+            [
+                (
+                    {"A": 1.0},
+                    {
+                        "feedrate": 5.0,
+                        "allow_unhomed": False,
+                        "ignore_needle_safety": True,
+                    },
+                )
+            ],
+        )
+        controller.shutdown()
+
 
 if __name__ == "__main__":
     unittest.main()

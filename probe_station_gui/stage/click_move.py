@@ -18,7 +18,6 @@ from probe_station_gui.stage.autofocus_math import (
 )
 from probe_station_gui.stage.errors import StageControllerError
 from probe_station_gui.stage.motion_command_planning import (
-    absolute_axis_target_limit_error,
     clamped_motion_feedrate,
 )
 from probe_station_gui.stage.types import MoveVector
@@ -248,17 +247,6 @@ class StageControllerClickMoveMixin:
             targets = {"X": target_position[0], "Y": target_position[1]}
             if self._status_matches_axis_targets(status, targets, tolerance=1e-5):
                 return "Target already at requested X/Y."
-            self._ensure_axis_limits(required_axes=("X", "Y"))
-            for axis, target in targets.items():
-                limits = self._axis_limits_for_configured_mode(axis, status)
-                if limits and self._axis_software_limit_ready(status, axis):
-                    error = absolute_axis_target_limit_error(axis, target, limits)
-                    if error is not None:
-                        raise StageControllerError(error)
-            current_values = {
-                "X": float(current_position[0]),
-                "Y": float(current_position[1]),
-            }
             effective_feedrate = clamped_motion_feedrate(
                 feedrate,
                 default_feedrate=self.DEFAULT_FEEDRATE,
@@ -267,23 +255,16 @@ class StageControllerClickMoveMixin:
             self.status_message.emit(
                 f"Moving to X={target_x_mm:.3f} mm, Y={target_y_mm:.3f} mm"
             )
-            self._write_current_command_and_wait(
-                self._absolute_axis_targets_jog_command(targets, effective_feedrate)
-            )
             self.absolute_xy_move_started.emit(
                 float(target_x_mm),
                 float(target_y_mm),
                 float(effective_feedrate),
             )
-            move_distance = self._absolute_move_distance_for_timeout(
+            self._execute_precision_axis_targets_locked(
                 targets,
-                current_values,
+                feedrate=feedrate,
+                allow_unhomed=False,
             )
-            self._wait_for_idle_at_targets(
-                targets,
-                timeout=self._idle_timeout_for_distance(move_distance, effective_feedrate),
-            )
-            self._query_current_status()
             return f"Arrived at X={target_x_mm:.3f} mm, Y={target_y_mm:.3f} mm."
 
     def _move_to_xyz_locked(
@@ -337,19 +318,27 @@ class StageControllerClickMoveMixin:
                 self.status_message.emit(
                     f"Moving to {label} X={target_x_mm:.3f} mm, Y={target_y_mm:.3f} mm"
                 )
-                self._send_absolute_axis_targets_move(xy_targets, as_jog=True)
+                self._execute_precision_axis_targets_locked(
+                    xy_targets,
+                    feedrate=None,
+                    allow_unhomed=False,
+                )
                 current_x = float(target_position[0])
                 current_y = float(target_position[1])
                 moved = True
 
             delta_z = float(target_position[2]) - current_z
-            if abs(delta_z) >= 1e-5:
+            z_precision_enabled = self._precision_approach_settings.profiles[
+                "Z"
+            ].enabled
+            if abs(delta_z) >= 1e-5 or z_precision_enabled:
                 self.status_message.emit(
                     f"Moving Z to {label} focus height {target_z_mm:.3f} mm"
                 )
-                self._send_absolute_axis_targets_move(
+                self._execute_precision_axis_targets_locked(
                     {"Z": float(target_position[2])},
-                    as_jog=True,
+                    feedrate=None,
+                    allow_unhomed=False,
                 )
                 moved = True
 
@@ -395,10 +384,20 @@ class StageControllerClickMoveMixin:
             self.status_message.emit(
                 f"Jogging stage dX={move.x:.3f} mm dY={move.y:.3f} mm"
             )
-            self._send_relative_move(
-                move,
-                as_jog=True,
-                motion_started_callback=self._emit_click_move_started,
+            status = self._query_current_status_with_required_coordinates(
+                axes=("X", "Y"),
+            )
+            position = getattr(status, "display_position", None)
+            if not isinstance(position, (list, tuple)) or len(position) < 2:
+                raise StageControllerError("Unable to read stage position for click move.")
+            self._emit_click_move_started(move, self.DEFAULT_FEEDRATE)
+            self._execute_precision_axis_targets_locked(
+                {
+                    "X": float(position[0]) + move.x,
+                    "Y": float(position[1]) + move.y,
+                },
+                feedrate=None,
+                allow_unhomed=False,
             )
             return before_counter
 
@@ -866,10 +865,11 @@ class StageControllerClickMoveMixin:
         self.status_message.emit(
             f"Jogging stage dX={move.x:.3f} mm dY={move.y:.3f} mm"
         )
-        self._send_relative_move(
-            move,
-            as_jog=True,
-            motion_started_callback=self._emit_click_move_started,
+        self._emit_click_move_started(move, self.DEFAULT_FEEDRATE)
+        self._execute_precision_axis_targets_locked(
+            {"X": target_x, "Y": target_y},
+            feedrate=None,
+            allow_unhomed=False,
         )
         return (True, before_counter)
 

@@ -159,7 +159,7 @@ class StageControllerNeedleActionsMixin:
         if not segments:
             self._update_needles_from_a_position(target_a)
             return False
-        for segment_lowering, segment_feedrate, slow_zone in segments:
+        for segment_index, (segment_lowering, segment_feedrate, slow_zone) in enumerate(segments):
             self._check_cancelled()
             segment_target_a = self._axis_a_configured_coordinate_for_lowering(
                 segment_lowering,
@@ -167,29 +167,49 @@ class StageControllerNeedleActionsMixin:
             )
             if abs(segment_target_a - current_a) < 1e-6:
                 continue
+            use_precision_approach = (
+                segment_index == len(segments) - 1
+                and self._precision_approach_settings.profiles["A"].enabled
+            )
             if slow_zone:
                 programmed_feedrate = self._begin_needles_feedrate_control(
                     action,
                     segment_feedrate,
                 )
                 try:
+                    if use_precision_approach:
+                        self._execute_precision_axis_targets_locked(
+                            {"A": segment_target_a},
+                            feedrate=programmed_feedrate,
+                            allow_unhomed=False,
+                            ignore_needle_safety=True,
+                        )
+                    else:
+                        self._send_absolute_axis_move(
+                            "A",
+                            segment_target_a,
+                            ignore_needle_safety=True,
+                            feedrate=programmed_feedrate,
+                            as_jog=True,
+                        )
+                finally:
+                    self._end_needles_feedrate_control()
+            else:
+                if use_precision_approach:
+                    self._execute_precision_axis_targets_locked(
+                        {"A": segment_target_a},
+                        feedrate=segment_feedrate,
+                        allow_unhomed=False,
+                        ignore_needle_safety=True,
+                    )
+                else:
                     self._send_absolute_axis_move(
                         "A",
                         segment_target_a,
                         ignore_needle_safety=True,
-                        feedrate=programmed_feedrate,
+                        feedrate=segment_feedrate,
                         as_jog=True,
                     )
-                finally:
-                    self._end_needles_feedrate_control()
-            else:
-                self._send_absolute_axis_move(
-                    "A",
-                    segment_target_a,
-                    ignore_needle_safety=True,
-                    feedrate=segment_feedrate,
-                    as_jog=True,
-                )
             current_a = segment_target_a
         self._update_needles_from_a_position(target_a)
         return True
