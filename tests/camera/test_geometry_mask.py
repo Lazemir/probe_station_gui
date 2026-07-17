@@ -837,6 +837,38 @@ def test_geometry_alignment_previews_use_an_exact_common_crop() -> None:
     assert np.array_equal(_preview_qimage_array(before), _preview_qimage_array(after))
 
 
+def test_geometry_alignment_previews_build_fitted_maps_once(monkeypatch) -> None:
+    frame_size = (80, 60)
+    matrix = np.array(((-0.001, 0.0), (0.0, -0.001)))
+    frames = tuple(
+        GridCalibrationFrame(frame=None, stage_offset_mm=(0.0, 0.0))
+        for _ in range(3)
+    )
+    masks = tuple(np.ones((60, 80), dtype=bool) for _ in frames)
+    payload = _preview_payload(
+        frame_size=frame_size,
+        pixels_to_mm=matrix,
+        center_px=(40.0, 30.0),
+        k1=0.01,
+    )
+    apply_calls: list[object] = []
+    apply_correction = geometry_mask.apply_distortion_correction
+
+    def count_apply(frame, correction):
+        apply_calls.append(correction)
+        return apply_correction(frame, correction)
+
+    monkeypatch.setattr(
+        geometry_mask,
+        "apply_distortion_correction",
+        count_apply,
+    )
+
+    build_geometry_alignment_previews(frames, masks, matrix, payload)
+
+    assert len(apply_calls) == 1
+
+
 @pytest.mark.parametrize(
     ("frames", "masks", "matrix", "payload", "message"),
     [

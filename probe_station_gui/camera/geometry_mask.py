@@ -356,15 +356,28 @@ def _apply_fitted_geometry_to_preview_mask(
     mask: np.ndarray,
     correction: StageGeometryCorrection,
 ) -> np.ndarray:
-    rgb = np.repeat((mask.astype(np.uint8) * 255)[:, :, None], 3, axis=2)
-    height, width = mask.shape
-    source = QImage(rgb.data, width, height, int(rgb.strides[0]), QImage.Format_RGB888).copy()
-    try:
-        # The public helper validates and builds the fitted inverse maps.  Use
-        # those maps below with nearest-neighbour sampling to preserve masks.
-        apply_distortion_correction(source, correction)
-    except Exception as exc:
-        raise GeometryAlignmentPreviewError("Unable to apply the fitted geometry correction.") from exc
+    if correction.map_x is None or correction.map_y is None:
+        if all(
+            abs(float(value)) <= 1e-15
+            for value in (correction.k1, correction.k2, correction.p1, correction.p2)
+        ):
+            return mask.copy()
+        rgb = np.repeat((mask.astype(np.uint8) * 255)[:, :, None], 3, axis=2)
+        height, width = mask.shape
+        source = QImage(
+            rgb.data,
+            width,
+            height,
+            int(rgb.strides[0]),
+            QImage.Format_RGB888,
+        ).copy()
+        try:
+            # The public helper validates and builds the fitted inverse maps.
+            apply_distortion_correction(source, correction)
+        except Exception as exc:
+            raise GeometryAlignmentPreviewError(
+                "Unable to apply the fitted geometry correction."
+            ) from exc
     if correction.map_x is None or correction.map_y is None:
         return mask.copy()
     try:

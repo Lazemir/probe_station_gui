@@ -346,9 +346,9 @@ from probe_station_gui.camera.imaging import (
 from probe_station_gui.camera.distortion import (
     DistortionCorrection,
     GridCalibrationFrame,
+    StageGeometryCorrection,
     apply_distortion_correction,
     correction_from_payload,
-    detect_bright_feature_bounds,
     fit_stage_geometry_from_observations,
 )
 from probe_station_gui.camera import microscope_scan
@@ -585,14 +585,11 @@ class Main(QMainWindow):
     SAMPLE_LOAD_Y_MM = sample_handling.SAMPLE_LOAD_Y_MM
     SAMPLE_UNLOAD_X_MM = sample_handling.SAMPLE_UNLOAD_X_MM
     SAMPLE_UNLOAD_Y_MM = sample_handling.SAMPLE_UNLOAD_Y_MM
-    LENS_DISTORTION_GRID_STEP_MM = 0.05
-    LENS_DISTORTION_GRID_CELL_COUNT = 4
     LENS_DISTORTION_CAPTURE_GRID_SIZE = 3
     LENS_DISTORTION_FOV_FRACTION = 0.35
-    LENS_DISTORTION_EDGE_MARGIN_FRACTION = 0.85
-    LENS_DISTORTION_FEATURE_EDGE_MARGIN_FRACTION = 0.02
-    LENS_DISTORTION_MIN_CAPTURE_SHIFT_PX = 24.0
     LENS_DISTORTION_CLUSTER_TOLERANCE_PX = 12.0
+    LENS_DISTORTION_MIN_FEATURE_COUNT = 4
+    LENS_DISTORTION_MIN_OBSERVATION_COUNT = 12
     LENS_DISTORTION_MAX_RESIDUAL_MEAN_PX = 3.0
     LENS_DISTORTION_MAX_RESIDUAL_MAX_PX = 12.0
     LENS_DISTORTION_CAPTURE_SETTLE_S = 0.12
@@ -5138,6 +5135,15 @@ class Main(QMainWindow):
                     raise RuntimeError("Camera frame size changed during calibration.")
                 frames.append(GridCalibrationFrame(frame, (dx_mm, dy_mm)))
 
+            self._report_lens_distortion_calibration_progress(
+                "Lens distortion calibration: returning to start.", context
+            )
+            self.stage_controller.run_external_move_to_xy(
+                start_xy[0],
+                start_xy[1],
+                feedrate=feedrate,
+            )
+            stage_position_changed = False
             output = self._fit_lens_distortion_output(
                 frames,
                 frame_size=frame_size,
@@ -5322,6 +5328,73 @@ class Main(QMainWindow):
                 "Lens distortion calibration residual is too high "
                 f"({residual_mean_px:.2f} px mean, {residual_max_px:.2f} px max)."
             )
+        required_fields = (
+            "model_version",
+            "frame_size",
+            "pixels_to_mm",
+            "calibrated_pixels_to_mm",
+            "center_px",
+            "k1",
+            "k2",
+            "p1",
+            "p2",
+            "feature_count",
+            "observation_count",
+            "optimizer_success",
+        )
+        missing_fields = [
+            field for field in required_fields if field not in payload
+        ]
+        if missing_fields:
+            raise RuntimeError(
+                "Lens distortion calibration payload is incomplete: "
+                + ", ".join(missing_fields)
+                + "."
+            )
+        if (
+            isinstance(payload.get("model_version"), bool)
+            or payload.get("model_version") != 1
+        ):
+            raise RuntimeError("Lens distortion calibration model_version is invalid.")
+        pixels_to_mm = parse_pixels_to_mm_matrix(payload.get("pixels_to_mm"))
+        calibrated_pixels_to_mm = parse_pixels_to_mm_matrix(
+            payload.get("calibrated_pixels_to_mm")
+        )
+        if not pixels_to_mm or not calibrated_pixels_to_mm:
+            raise RuntimeError(
+                "Lens distortion calibration pixel matrices are invalid."
+            )
+        for field, minimum in (
+            ("feature_count", Main.LENS_DISTORTION_MIN_FEATURE_COUNT),
+            ("observation_count", Main.LENS_DISTORTION_MIN_OBSERVATION_COUNT),
+        ):
+            value = payload.get(field)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < minimum
+            ):
+                raise RuntimeError(
+                    f"Lens distortion calibration {field} is insufficient."
+                )
+        if payload.get("optimizer_success") is not True:
+            raise RuntimeError("Lens distortion calibration optimizer did not converge.")
+        try:
+            correction = correction_from_payload(payload)
+        except Exception as exc:
+            raise RuntimeError(
+                "Lens distortion calibration payload cannot be applied."
+            ) from exc
+        if not isinstance(correction, StageGeometryCorrection):
+            raise RuntimeError(
+                "Lens distortion calibration payload is not stage geometry."
+            )
+        try:
+            json.dumps(payload, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "Lens distortion calibration payload is not serializable."
+            ) from exc
 
     @staticmethod
     def _lens_distortion_frame_size(frame: object) -> tuple[int, int]:
@@ -5342,92 +5415,28 @@ class Main(QMainWindow):
         *,
         initial_frame: object | None = None,
     ) -> tuple[tuple[float, float], ...]:
-        if initial_frame is not None:
-            return cls._lens_distortion_capture_offsets_from_feature_bounds(
-                frame_size,
-                scale,
-                initial_frame,
-            )
-        extent_x, extent_y = cls._lens_distortion_capture_step_mm(frame_size, scale)
-        x_offsets = cls._lens_distortion_axis_offsets_mm(extent_x)
-        y_offsets = cls._lens_distortion_axis_offsets_mm(extent_y)
-        offsets: list[tuple[float, float]] = [(0.0, 0.0)]
-        for row_index, y_offset in enumerate(y_offsets):
-            row_x_offsets = x_offsets if row_index % 2 == 0 else tuple(reversed(x_offsets))
-            for x_offset in row_x_offsets:
-                if abs(x_offset) <= 1e-12 and abs(y_offset) <= 1e-12:
-                    continue
-                offsets.append((float(x_offset), float(y_offset)))
-        return tuple(offsets)
-
-    @classmethod
-    def _lens_distortion_capture_offsets_from_feature_bounds(
-        cls,
-        frame_size: tuple[int, int],
-        scale: object,
-        initial_frame: object,
-    ) -> tuple[tuple[float, float], ...]:
+        del initial_frame
         width_px, height_px = frame_size
-        bounds = detect_bright_feature_bounds(initial_frame)
-        if bounds is None:
-            raise RuntimeError("Lens distortion calibration structure was not detected.")
-        left = float(bounds.left)
-        top = float(bounds.top)
-        right = float(bounds.right)
-        bottom = float(bounds.bottom)
-        if (
-            not math.isfinite(left)
-            or not math.isfinite(top)
-            or not math.isfinite(right)
-            or not math.isfinite(bottom)
-            or left < 0.0
-            or top < 0.0
-            or right > float(width_px)
-            or bottom > float(height_px)
-            or right <= left
-            or bottom <= top
-        ):
-            raise RuntimeError("Lens distortion calibration structure bounds are invalid.")
-        edge_margin_px = max(
-            8.0,
-            min(float(width_px), float(height_px))
-            * float(cls.LENS_DISTORTION_FEATURE_EDGE_MARGIN_FRACTION),
-        )
-        safe_x_px = min(
-            left - edge_margin_px,
-            float(width_px) - right - edge_margin_px,
-        )
-        safe_y_px = min(
-            top - edge_margin_px,
-            float(height_px) - bottom - edge_margin_px,
-        )
-        max_shift_x_px = min(
-            safe_x_px * float(cls.LENS_DISTORTION_EDGE_MARGIN_FRACTION),
-            float(width_px) * float(cls.LENS_DISTORTION_FOV_FRACTION),
-        )
-        max_shift_y_px = min(
-            safe_y_px * float(cls.LENS_DISTORTION_EDGE_MARGIN_FRACTION),
-            float(height_px) * float(cls.LENS_DISTORTION_FOV_FRACTION),
-        )
-        min_shift = float(cls.LENS_DISTORTION_MIN_CAPTURE_SHIFT_PX)
-        if max_shift_x_px < min_shift or max_shift_y_px < min_shift:
-            raise RuntimeError(
-                "Lens distortion calibration structure is too close to the frame edge."
-            )
-        x_shifts = cls._lens_distortion_axis_offsets_mm(max_shift_x_px)
-        y_shifts = cls._lens_distortion_axis_offsets_mm(max_shift_y_px)
+        if width_px <= 0 or height_px <= 0:
+            raise RuntimeError("Camera frame size is unavailable.")
+        extent_x_px = float(width_px) * float(cls.LENS_DISTORTION_FOV_FRACTION)
+        extent_y_px = float(height_px) * float(cls.LENS_DISTORTION_FOV_FRACTION)
+        x_offsets_px = cls._lens_distortion_axis_offsets(extent_x_px)
+        y_offsets_px = cls._lens_distortion_axis_offsets(extent_y_px)
         offsets: list[tuple[float, float]] = [(0.0, 0.0)]
-        for row_index, y_shift_px in enumerate(y_shifts):
-            row_x_shifts = (
-                x_shifts if row_index % 2 == 0 else tuple(reversed(x_shifts))
+        for row_index, y_offset_px in enumerate(y_offsets_px):
+            row_x_offsets_px = (
+                x_offsets_px
+                if row_index % 2 == 0
+                else tuple(reversed(x_offsets_px))
             )
-            for x_shift_px in row_x_shifts:
-                if abs(x_shift_px) <= 1e-12 and abs(y_shift_px) <= 1e-12:
+            for x_offset_px in row_x_offsets_px:
+                if abs(x_offset_px) <= 1e-12 and abs(y_offset_px) <= 1e-12:
                     continue
                 dx_mm, dy_mm = cls._lens_distortion_pixel_shift_to_stage_offset_mm(
                     scale,
-                    x_shift_px,
-                    y_shift_px,
+                    x_offset_px,
+                    y_offset_px,
                 )
                 offsets.append((float(dx_mm), float(dy_mm)))
         return tuple(offsets)
@@ -5461,11 +5470,11 @@ class Main(QMainWindow):
         return (pixel_delta[0] * pixel_size_x_mm, -pixel_delta[1] * pixel_size_y_mm)
 
     @classmethod
-    def _lens_distortion_axis_offsets_mm(cls, extent_mm: float) -> tuple[float, ...]:
+    def _lens_distortion_axis_offsets(cls, extent_value: float) -> tuple[float, ...]:
         count = max(3, int(cls.LENS_DISTORTION_CAPTURE_GRID_SIZE))
         if count % 2 == 0:
             count += 1
-        extent = abs(float(extent_mm))
+        extent = abs(float(extent_value))
         if not math.isfinite(extent) or extent <= 0.0:
             return (0.0,)
         midpoint = count // 2
@@ -5473,43 +5482,6 @@ class Main(QMainWindow):
             return (0.0,)
         step = extent / float(midpoint)
         return tuple((index - midpoint) * step for index in range(count))
-
-    @classmethod
-    def _lens_distortion_capture_step_mm(
-        cls,
-        frame_size: tuple[int, int],
-        scale: object,
-    ) -> tuple[float, float]:
-        width_px, height_px = frame_size
-        try:
-            fov_x_mm = abs(float(width_px) * float(scale.pixel_size_x_mm))
-            fov_y_mm = abs(float(height_px) * float(scale.pixel_size_y_mm))
-        except (AttributeError, TypeError, ValueError):
-            return (cls.LENS_DISTORTION_GRID_STEP_MM, cls.LENS_DISTORTION_GRID_STEP_MM)
-        return (
-            cls._lens_distortion_axis_step_mm(fov_x_mm),
-            cls._lens_distortion_axis_step_mm(fov_y_mm),
-        )
-
-    @classmethod
-    def _lens_distortion_axis_step_mm(cls, fov_mm: float) -> float:
-        base = float(cls.LENS_DISTORTION_GRID_STEP_MM)
-        try:
-            fov = float(fov_mm)
-        except (TypeError, ValueError):
-            return base
-        if not math.isfinite(fov) or fov <= 0.0:
-            return base
-        grid_span = base * float(cls.LENS_DISTORTION_GRID_CELL_COUNT)
-        max_center_offset = (fov - grid_span) * 0.5
-        safe_edge_step = max_center_offset * float(cls.LENS_DISTORTION_EDGE_MARGIN_FRACTION)
-        if safe_edge_step <= 0.0:
-            return 0.0
-        fov_step = fov * float(cls.LENS_DISTORTION_FOV_FRACTION)
-        candidate = min(fov_step, safe_edge_step)
-        if safe_edge_step >= base:
-            candidate = max(base, candidate)
-        return min(candidate, safe_edge_step)
 
     def _on_lens_distortion_calibration_finished(self, *args: object) -> None:
         if len(args) == 3:

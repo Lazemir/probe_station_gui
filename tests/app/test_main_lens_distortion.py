@@ -120,6 +120,28 @@ def _lens_output(
     )
 
 
+def _stage_geometry_payload(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "model_version": 1,
+        "model_type": "stage_geometry",
+        "frame_size": [1920, 1200],
+        "pixels_to_mm": [[-0.001, 0.0], [0.0, -0.001]],
+        "calibrated_pixels_to_mm": [[-0.001, 0.0], [0.0, -0.001]],
+        "center_px": [960.0, 600.0],
+        "k1": 0.01,
+        "k2": -0.002,
+        "p1": 0.0005,
+        "p2": -0.0003,
+        "residual_mean_px": 0.5,
+        "residual_max_px": 1.0,
+        "feature_count": 8,
+        "observation_count": 24,
+        "optimizer_success": True,
+    }
+    payload.update(overrides)
+    return payload
+
+
 def test_lens_distortion_capture_offsets_cover_center_edges_and_corners() -> None:
     scale = SimpleNamespace(
         pixel_size_x_mm=0.001174,
@@ -132,59 +154,34 @@ def test_lens_distortion_capture_offsets_cover_center_edges_and_corners() -> Non
     assert offsets[0] == (0.0, 0.0)
     assert len({round(x, 9) for x, _y in offsets}) == 3
     assert len({round(y, 9) for _x, y in offsets}) == 3
-    max_x = max(abs(x) for x, _y in offsets)
-    max_y = max(abs(y) for _x, y in offsets)
-    assert max_x <= (1920 * scale.pixel_size_x_mm - Main.LENS_DISTORTION_GRID_STEP_MM * Main.LENS_DISTORTION_GRID_CELL_COUNT) * 0.5
-    assert max_y <= (1200 * scale.pixel_size_y_mm - Main.LENS_DISTORTION_GRID_STEP_MM * Main.LENS_DISTORTION_GRID_CELL_COUNT) * 0.5
-
-
-def test_lens_distortion_capture_offsets_clamp_to_safe_edge_margin() -> None:
-    grid_span = Main.LENS_DISTORTION_GRID_STEP_MM * Main.LENS_DISTORTION_GRID_CELL_COUNT
-    fov_mm = grid_span + Main.LENS_DISTORTION_GRID_STEP_MM * 0.5
-    scale = SimpleNamespace(
-        pixel_size_x_mm=fov_mm / 1000.0,
-        pixel_size_y_mm=fov_mm / 1000.0,
+    assert max(abs(x) for x, _y in offsets) == pytest.approx(
+        1920 * scale.pixel_size_x_mm * Main.LENS_DISTORTION_FOV_FRACTION
+    )
+    assert max(abs(y) for _x, y in offsets) == pytest.approx(
+        1200 * scale.pixel_size_y_mm * Main.LENS_DISTORTION_FOV_FRACTION
     )
 
-    offsets = Main._lens_distortion_capture_offsets_mm((1000, 1000), scale)
 
-    max_offset = max(abs(value) for offset in offsets for value in offset)
-    safe_edge = (fov_mm - grid_span) * 0.5 * Main.LENS_DISTORTION_EDGE_MARGIN_FRACTION
-    assert max_offset <= safe_edge
-
-
-def test_lens_distortion_capture_offsets_use_detected_feature_bounds(monkeypatch) -> None:
+def test_lens_distortion_capture_offsets_follow_affine_click_calibration() -> None:
     scale = SimpleNamespace(
-        pixels_to_mm=((-0.001, 0.0), (0.0, -0.001)),
+        pixels_to_mm=((-0.001, 0.0002), (0.0003, -0.0011)),
         pixel_size_x_mm=0.001,
         pixel_size_y_mm=0.001,
     )
-    frame = _FakeFrame()
-    monkeypatch.setattr(
-        main_module,
-        "detect_bright_feature_bounds",
-        lambda _frame: SimpleNamespace(left=250.0, top=150.0, right=750.0, bottom=650.0),
-    )
 
-    offsets = Main._lens_distortion_capture_offsets_mm(
-        (1000, 800),
+    offsets = Main._lens_distortion_capture_offsets_mm((1000, 800), scale)
+
+    x_px = 1000 * Main.LENS_DISTORTION_FOV_FRACTION
+    y_px = 800 * Main.LENS_DISTORTION_FOV_FRACTION
+    expected_corner = Main._lens_distortion_pixel_shift_to_stage_offset_mm(
         scale,
-        initial_frame=frame,
+        -x_px,
+        -y_px,
     )
-
-    edge_margin = max(
-        8.0,
-        800 * Main.LENS_DISTORTION_FEATURE_EDGE_MARGIN_FRACTION,
-    )
-    expected_x_px = (250.0 - edge_margin) * Main.LENS_DISTORTION_EDGE_MARGIN_FRACTION
-    expected_y_px = (150.0 - edge_margin) * Main.LENS_DISTORTION_EDGE_MARGIN_FRACTION
-    assert len(offsets) == 9
-    assert offsets[0] == (0.0, 0.0)
-    assert max(abs(x) for x, _y in offsets) == pytest.approx(expected_x_px * 0.001)
-    assert max(abs(y) for _x, y in offsets) == pytest.approx(expected_y_px * 0.001)
+    assert expected_corner in offsets
 
 
-def test_lens_distortion_capture_offsets_fail_when_feature_too_close_to_edge(
+def test_lens_distortion_capture_offsets_allow_structure_at_frame_edge(
     monkeypatch,
 ) -> None:
     scale = SimpleNamespace(
@@ -195,15 +192,22 @@ def test_lens_distortion_capture_offsets_fail_when_feature_too_close_to_edge(
     monkeypatch.setattr(
         main_module,
         "detect_bright_feature_bounds",
-        lambda _frame: SimpleNamespace(left=8.0, top=150.0, right=900.0, bottom=650.0),
+        lambda _frame: (_ for _ in ()).throw(
+            AssertionError("capture offsets inspected structure bounds")
+        ),
+        raising=False,
     )
 
-    with pytest.raises(RuntimeError, match="too close"):
-        Main._lens_distortion_capture_offsets_mm(
-            (1000, 800),
-            scale,
-            initial_frame=_FakeFrame(),
-        )
+    offsets = Main._lens_distortion_capture_offsets_mm(
+        (1000, 800),
+        scale,
+        initial_frame=_FakeFrame(),
+    )
+
+    assert len(offsets) == 9
+    assert offsets[0] == (0.0, 0.0)
+    assert max(abs(x) for x, _y in offsets) == pytest.approx(350 * 0.001)
+    assert max(abs(y) for _x, y in offsets) == pytest.approx(280 * 0.001)
 
 
 def test_run_lens_distortion_calibration_captures_offset_grid(
@@ -213,14 +217,9 @@ def test_run_lens_distortion_calibration_captures_offset_grid(
     stage = _FakeStage()
     finished: list[tuple[bool, str, object]] = []
     scale = SimpleNamespace(
-        pixels_to_mm=((0.1, 0.0), (0.0, 0.1)),
+        pixels_to_mm=((-0.001, 0.0), (0.0, -0.001)),
         pixel_size_x_mm=0.001,
         pixel_size_y_mm=0.001,
-    )
-    monkeypatch.setattr(
-        main_module,
-        "detect_bright_feature_bounds",
-        lambda _frame: SimpleNamespace(left=500.0, top=300.0, right=1420.0, bottom=900.0),
     )
     expected_offsets = Main._lens_distortion_capture_offsets_mm(
         (1920, 1200),
@@ -241,17 +240,13 @@ def test_run_lens_distortion_calibration_captures_offset_grid(
 
     class _Fit:
         def to_payload(self) -> dict[str, object]:
-            return {
-                "model_version": 1,
-                "model_type": "stage_geometry",
-                "frame_size": [1920, 1200],
-                "pixels_to_mm": [[0.1, 0.0], [0.0, 0.1]],
-                "calibrated_pixels_to_mm": [[0.1, 0.0], [0.0, 0.1]],
-                "residual_mean_px": 0.5,
-                "residual_max_px": 1.0,
-            }
+            return _stage_geometry_payload(
+                pixels_to_mm=[[-0.001, -0.0], [0.0, 0.001]],
+                calibrated_pixels_to_mm=[[-0.001, -0.0], [0.0, 0.001]],
+            )
 
     def segment(frame):
+        stage.events.append(("segment", frame))
         segmented_frames.append(frame)
         mask = SimpleNamespace(frame_size=(1920, 1200), mask=object())
         masks.append(mask)
@@ -268,7 +263,7 @@ def test_run_lens_distortion_calibration_captures_offset_grid(
         captured_offsets.extend(frame.stage_offset_mm for frame in grid_frames)
         assert tuple(geometry_masks) == tuple(masks)
         assert frame_size == (1920, 1200)
-        assert image_pixels_to_mm == ((0.1, -0.0), (0.0, -0.1))
+        assert image_pixels_to_mm == ((-0.001, -0.0), (0.0, 0.001))
         assert match_gate_px == 12.0
         return observations
 
@@ -280,7 +275,7 @@ def test_run_lens_distortion_calibration_captures_offset_grid(
     ):
         assert tuple(fit_observations) == observations
         assert frame_size == (1920, 1200)
-        assert initial_pixels_to_mm == ((0.1, -0.0), (0.0, -0.1))
+        assert initial_pixels_to_mm == ((-0.001, -0.0), (0.0, 0.001))
         return _Fit()
 
     def build_previews(raw_grid_frames, geometry_masks, initial_matrix, payload):
@@ -288,10 +283,10 @@ def test_run_lens_distortion_calibration_captures_offset_grid(
             segmented_frames
         )
         assert tuple(geometry_masks) == tuple(masks)
-        assert initial_matrix == ((0.1, 0.0), (0.0, 0.1))
+        assert initial_matrix == ((-0.001, 0.0), (0.0, -0.001))
         assert payload["calibrated_pixels_to_mm"] == [
-            [0.1, -0.0],
-            [0.0, -0.1],
+            [-0.001, 0.0],
+            [0.0, -0.001],
         ]
         return before_preview, after_preview
 
@@ -359,8 +354,15 @@ def test_run_lens_distortion_calibration_captures_offset_grid(
     assert capture_moves[0] == ("move", 10.0, 20.0, 123.0)
     last_dx, last_dy = expected_offsets[-1]
     assert capture_moves[-1] == ("move", 10.0 + last_dx, 20.0 + last_dy, 123.0)
-    assert stage.events[-3:] == [
-        ("move", 10.0, 20.0, 123.0),
+    restore_event = ("move", 10.0, 20.0, 123.0)
+    restore_index = max(
+        index for index, event in enumerate(stage.events) if event == restore_event
+    )
+    first_segment_index = next(
+        index for index, event in enumerate(stage.events) if event[0] == "segment"
+    )
+    assert restore_index < first_segment_index
+    assert stage.events[-2:] == [
         ("camera_restore", "lens-lock"),
         ("finish",),
     ]
@@ -458,17 +460,13 @@ def test_fit_lens_distortion_output_uses_raw_masks_and_image_coordinate_matrix(
 
     class _Fit:
         def to_payload(self) -> dict[str, object]:
-            return {
-                "model_version": 1,
-                "model_type": "stage_geometry",
-                "pixels_to_mm": [[-0.0009, -0.0004], [0.0002, 0.0012]],
-                "calibrated_pixels_to_mm": [
+            return _stage_geometry_payload(
+                pixels_to_mm=[[-0.0009, -0.0004], [0.0002, 0.0012]],
+                calibrated_pixels_to_mm=[
                     [-0.0009, -0.0004],
                     [0.0002, 0.0012],
                 ],
-                "residual_mean_px": 0.5,
-                "residual_max_px": 1.0,
-            }
+            )
 
     def segment(frame):
         index = len([call for call in calls if call[0] == "segment"])
@@ -542,14 +540,17 @@ def test_fit_lens_distortion_output_uses_raw_masks_and_image_coordinate_matrix(
         scale=scale,
     )
 
-    assert output.payload == {
-        "model_version": 1,
-        "model_type": "stage_geometry",
-        "pixels_to_mm": [[-0.0009, 0.0004], [0.0002, -0.0012]],
-        "calibrated_pixels_to_mm": [[-0.0009, 0.0004], [0.0002, -0.0012]],
-        "residual_mean_px": 0.5,
-        "residual_max_px": 1.0,
-    }
+    assert output.payload["model_type"] == "stage_geometry"
+    assert output.payload["pixels_to_mm"] == [
+        [-0.0009, 0.0004],
+        [0.0002, -0.0012],
+    ]
+    assert output.payload["calibrated_pixels_to_mm"] == [
+        [-0.0009, 0.0004],
+        [0.0002, -0.0012],
+    ]
+    assert output.payload["feature_count"] == 8
+    assert output.payload["observation_count"] == 24
     assert output.before_preview is before_preview
     assert output.after_preview is after_preview
     assert calls[:4] == [
@@ -591,12 +592,10 @@ def test_fit_lens_distortion_output_fails_when_preview_generation_fails(
 
     class _Fit:
         def to_payload(self) -> dict[str, object]:
-            return {
-                "model_type": "stage_geometry",
-                "pixels_to_mm": [[-0.001, 0.0], [0.0, 0.001]],
-                "residual_mean_px": 0.5,
-                "residual_max_px": 1.0,
-            }
+            return _stage_geometry_payload(
+                pixels_to_mm=[[-0.001, 0.0], [0.0, 0.001]],
+                calibrated_pixels_to_mm=[[-0.001, 0.0], [0.0, 0.001]],
+            )
 
     monkeypatch.setattr(
         geometry_mask,
@@ -909,7 +908,7 @@ def test_fit_lens_distortion_output_requires_click_calibration() -> None:
         )
 
 
-def test_lens_distortion_finished_resets_click_calibration_without_stage_matrix() -> None:
+def test_lens_distortion_finished_rejects_structurally_incomplete_payload() -> None:
     window = Main.__new__(Main)
     manager = _FakeSettingsManager()
     manager.settings.objectives = ObjectivesSettings(
@@ -948,15 +947,17 @@ def test_lens_distortion_finished_resets_click_calibration_without_stage_matrix(
     )
 
     profile = manager.settings.objectives.objectives["X50"]
-    assert profile.distortion_correction_configured is True
-    assert profile.distortion_correction == payload
-    assert profile.xy_calibration_configured is False
-    assert profile.pixels_to_mm == []
-    assert manager.saved_count == 1
-    assert apply_calls == ["apply"]
-    assert refresh_calls == ["refresh"]
+    assert profile.distortion_correction_configured is False
+    assert profile.distortion_correction == {}
+    assert profile.xy_calibration_configured is True
+    assert profile.pixels_to_mm == [[1.0, 0.0], [0.0, 1.0]]
+    assert manager.saved_count == 0
+    assert apply_calls == []
+    assert refresh_calls == []
     assert dialog.running == [False]
-    assert statuses == [("done Recalibrate click-to-move.", 10000)]
+    assert len(statuses) == 1
+    assert statuses[0][0].startswith("Lens distortion calibration save failed:")
+    assert statuses[0][1] == 8000
 
 
 def test_lens_distortion_finished_applies_stage_calibrated_grid_matrix() -> None:
@@ -986,14 +987,14 @@ def test_lens_distortion_finished_applies_stage_calibrated_grid_matrix() -> None
         lambda message, timeout_ms=0: statuses.append((str(message), int(timeout_ms)))
     )
     matrix = [[-0.000117, 0.0], [0.0, -0.000117]]
-    payload = {
-        "model_version": 1,
-        "model_type": "stage_geometry",
-        "frame_size": [640, 480],
-        "calibrated_pixels_to_mm": matrix,
-        "residual_mean_px": 0.2,
-        "residual_max_px": 0.4,
-    }
+    payload = _stage_geometry_payload(
+        frame_size=[640, 480],
+        pixels_to_mm=matrix,
+        calibrated_pixels_to_mm=matrix,
+        center_px=[320.0, 240.0],
+        residual_mean_px=0.2,
+        residual_max_px=0.4,
+    )
 
     Main._on_lens_distortion_calibration_finished(
         window, True, "done", _lens_output(payload)
@@ -1036,14 +1037,14 @@ def test_lens_distortion_completion_saves_to_captured_objective_after_active_swi
         objective_name="X20",
     )
     matrix = [[-0.000117, 0.0], [0.0, -0.000117]]
-    payload = {
-        "model_version": 1,
-        "model_type": "stage_geometry",
-        "frame_size": [640, 480],
-        "calibrated_pixels_to_mm": matrix,
-        "residual_mean_px": 0.2,
-        "residual_max_px": 0.4,
-    }
+    payload = _stage_geometry_payload(
+        frame_size=[640, 480],
+        pixels_to_mm=matrix,
+        calibrated_pixels_to_mm=matrix,
+        center_px=[320.0, 240.0],
+        residual_mean_px=0.2,
+        residual_max_px=0.4,
+    )
     window.settings_manager = manager
     window._lens_distortion_thread = _DeadThread()
     window._lens_distortion_context = captured_context

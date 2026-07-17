@@ -353,6 +353,22 @@ def test_stage_geometry_payload_applies_to_qimage() -> None:
     assert fit.to_payload()["model_type"] == "stage_geometry"
 
 
+def test_stage_geometry_fit_rejects_sparse_underdetermined_tracks() -> None:
+    observations = [
+        StageFeatureObservation(0, "a", (0.0, 0.0), (20.0, 20.0)),
+        StageFeatureObservation(1, "a", (0.010, 0.0), (10.0, 20.0)),
+        StageFeatureObservation(0, "b", (0.0, 0.0), (60.0, 40.0)),
+        StageFeatureObservation(1, "b", (0.010, 0.0), (50.0, 40.0)),
+    ]
+
+    with pytest.raises(ValueError, match="insufficient geometry coverage"):
+        fit_stage_geometry_from_observations(
+            observations,
+            frame_size=(80, 60),
+            initial_pixels_to_mm=((-0.001, 0.0), (0.0, -0.001)),
+        )
+
+
 def test_stage_geometry_payload_rejects_invalid_pixels_matrix() -> None:
     payload = {
         "model_version": 1,
@@ -366,7 +382,8 @@ def test_stage_geometry_payload_rejects_invalid_pixels_matrix() -> None:
         correction_from_payload(payload)
 
 
-def test_stage_geometry_fit_from_grid_frames_does_not_need_grid_spacing() -> None:
+def test_affine_stage_geometry_fit_from_grid_frames_does_not_need_grid_spacing(
+) -> None:
     frames = [
         GridCalibrationFrame(
             frame=_synthetic_grid_image(
@@ -398,6 +415,7 @@ def test_stage_geometry_fit_from_grid_frames_does_not_need_grid_spacing() -> Non
         frames,
         frame_size=(360, 260),
         pixels_to_mm=((-0.0010, 0.0), (0.0, -0.0010)),
+        optimize_distortion=False,
         max_nfev=200,
     )
 
