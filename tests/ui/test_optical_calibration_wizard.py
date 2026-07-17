@@ -31,6 +31,7 @@ def test_full_mode_runs_flat_field_then_lens_distortion(
     qt_app: QApplication,
 ) -> None:
     wizard = OpticalCalibrationWizard()
+    assert wizard.wizardStyle() == QWizard.ModernStyle
     wizard.set_mode(OpticalCalibrationMode.FULL)
     flat_spy = QSignalSpy(wizard.start_flat_field_requested)
     lens_spy = QSignalSpy(wizard.start_lens_distortion_requested)

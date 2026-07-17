@@ -168,6 +168,7 @@ class OpticalCalibrationWizard(QWizard):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Optical Calibration")
+        self.setWizardStyle(QWizard.ModernStyle)
         self.setOption(QWizard.NoBackButtonOnStartPage, True)
         self.setOption(QWizard.NoBackButtonOnLastPage, True)
         self.setModal(False)
