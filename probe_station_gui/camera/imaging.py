@@ -339,27 +339,24 @@ def build_median_flat_field_profile(
 ) -> FlatFieldProfile:
     """Build a flat-field profile from the median of several shifted frames."""
 
+    return build_flat_field_profile(
+        median_flat_field_reference(frames),
+        blur_radius_px=blur_radius_px,
+        max_gain=max_gain,
+        source=source or "scan_median",
+    )
+
+
+def median_flat_field_reference(frames: Sequence[QImage]) -> QImage:
+    """Return the per-pixel RGB median of equally sized flat-field frames."""
+
     if not frames:
-        raise ValueError("Cannot build a median flat-field profile without frames.")
+        raise ValueError("Cannot build a median flat-field reference without frames.")
     first = frames[0]
     if first.isNull():
-        raise ValueError("Cannot build a flat-field profile from an empty frame.")
+        raise ValueError("Cannot build a median flat-field reference from an empty frame.")
     frame_size = (int(first.width()), int(first.height()))
-    radius = _flat_field_radius(blur_radius_px)
-    gain_limit = _positive_float(max_gain, "max_gain")
-    median_rgb = _median_rgb_array(frames, frame_size)
-    illumination = _flat_field_illumination(median_rgb, radius)
-    mean_rgb = tuple(
-        float(max(1.0, illumination[:, :, channel].mean())) for channel in range(3)
-    )
-    return FlatFieldProfile(
-        image_size_px=frame_size,
-        source=str(source or "scan_median"),
-        blur_radius_px=radius,
-        max_gain=gain_limit,
-        mean_rgb=mean_rgb,
-        illumination_rgb=illumination,
-    )
+    return _rgb_array_to_qimage(_median_rgb_array(frames, frame_size))
 
 
 def apply_flat_field_correction(frame: QImage, profile: FlatFieldProfile) -> QImage:
@@ -1793,6 +1790,7 @@ __all__ = [
     "build_median_flat_field_profile",
     "build_design_scan_plan",
     "compile_flat_field_correction",
+    "median_flat_field_reference",
     "objective_scale_calibration",
     "refine_scan_scale_from_tile_overlaps",
     "render_microscope_overlay",

@@ -21,17 +21,21 @@ def test_pipeline_loads_active_objective_flat_field_and_reuses_cache(
 ) -> None:
     reference_path = _write_reference(tmp_path, "X20")
     _write_current_profile(tmp_path, "X20", reference_path)
-    build_calls: list[str] = []
+    compile_calls: list[str] = []
 
     from probe_station_gui.camera import live_correction
 
-    real_build = live_correction.build_flat_field_profile
+    real_compile = live_correction.compile_flat_field_correction
 
-    def counted_build(*args, **kwargs):
-        build_calls.append(str(kwargs.get("source")))
-        return real_build(*args, **kwargs)
+    def counted_compile(profile):
+        compile_calls.append(profile.source)
+        return real_compile(profile)
 
-    monkeypatch.setattr(live_correction, "build_flat_field_profile", counted_build)
+    monkeypatch.setattr(
+        live_correction,
+        "compile_flat_field_correction",
+        counted_compile,
+    )
     pipeline = LiveCameraCorrectionPipeline(tmp_path, profile_refresh_s=60.0)
     request = LiveCameraCorrectionRequest(
         sequence=1,
@@ -46,6 +50,42 @@ def test_pipeline_loads_active_objective_flat_field_and_reuses_cache(
 
     assert first.frame.pixelColor(1, 3) != request.frame.pixelColor(1, 3)
     assert second.frame.pixelColor(1, 3) == first.frame.pixelColor(1, 3)
+    assert len(compile_calls) == 1
+
+
+def test_pipeline_does_not_rebuild_unchanged_flat_field_profile(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    reference_path = _write_reference(tmp_path, "X20")
+    _write_current_profile(tmp_path, "X20", reference_path)
+    build_calls: list[str] = []
+
+    from probe_station_gui.camera import flat_field_calibration
+
+    real_build = flat_field_calibration.build_flat_field_profile
+
+    def counted_build(*args, **kwargs):
+        build_calls.append(str(kwargs.get("source")))
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(
+        flat_field_calibration,
+        "build_flat_field_profile",
+        counted_build,
+    )
+    pipeline = LiveCameraCorrectionPipeline(tmp_path, profile_refresh_s=0.0)
+    request = LiveCameraCorrectionRequest(
+        sequence=1,
+        frame=_frame(80),
+        objective_name="X20",
+        distortion_configured=False,
+        distortion_payload={},
+    )
+
+    pipeline.process(request)
+    pipeline.process(request)
+
     assert len(build_calls) == 1
 
 

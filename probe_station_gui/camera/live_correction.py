@@ -6,10 +6,9 @@ import json
 import logging
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QImage
@@ -18,10 +17,10 @@ from probe_station_gui.camera.distortion import (
     apply_distortion_correction,
     correction_from_payload,
 )
+from probe_station_gui.camera.flat_field_calibration import FlatFieldCalibrationStore
 from probe_station_gui.camera.imaging import (
     CompiledFlatFieldCorrection,
     apply_compiled_flat_field_correction,
-    build_flat_field_profile,
     compile_flat_field_correction,
 )
 
@@ -59,6 +58,7 @@ class LiveCameraCorrectionPipeline:
         distortion_apply: Callable[[QImage, object], QImage] | None = None,
     ) -> None:
         self._config_dir = Path(config_dir)
+        self._flat_field_store = FlatFieldCalibrationStore(self._config_dir)
         self._profile_refresh_s = max(0.0, float(profile_refresh_s))
         self._flat_field_apply = (
             flat_field_apply or apply_compiled_flat_field_correction
@@ -138,45 +138,19 @@ class LiveCameraCorrectionPipeline:
             *manifest_file_signature,
         )
         try:
-            payload = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
-            if not isinstance(payload, Mapping):
-                raise ValueError("flat-field current.json must contain an object")
-            declared_objective = str(payload.get("objective") or objective).strip()
-            if declared_objective.casefold() != objective.casefold():
-                raise ValueError(
-                    "flat-field objective does not match the active objective"
-                )
-            reference_path = _reference_path(payload, manifest_path.parent)
-            reference_signature = _file_signature(reference_path)
-            blur_radius_px = int(payload.get("blur_radius_px", 401))
-            max_gain = float(payload.get("max_gain", 4.0))
+            stored = self._flat_field_store.load(objective)
+            reference_signature = _file_signature(stored.reference_image)
             signature = (
                 *error_signature,
-                str(reference_path),
+                str(stored.reference_image),
                 *reference_signature,
-                blur_radius_px,
-                max_gain,
+                stored.profile.blur_radius_px,
+                stored.profile.max_gain,
             )
             if signature == self._flat_signature:
                 return self._flat_correction
 
-            reference = QImage(str(reference_path))
-            if reference.isNull():
-                raise ValueError(f"unable to load flat-field reference {reference_path}")
-            declared_size = payload.get("frame_size_px")
-            if declared_size is not None:
-                size = tuple(int(value) for value in declared_size)
-                if size != (reference.width(), reference.height()):
-                    raise ValueError(
-                        "flat-field reference size does not match current.json"
-                    )
-            profile = build_flat_field_profile(
-                reference,
-                blur_radius_px=blur_radius_px,
-                max_gain=max_gain,
-                source=f"{objective} live flat-field",
-            )
-            self._flat_correction = compile_flat_field_correction(profile)
+            self._flat_correction = compile_flat_field_correction(stored.profile)
             self._flat_signature = signature
             self._flat_warning_signature = None
             return self._flat_correction
@@ -186,18 +160,10 @@ class LiveCameraCorrectionPipeline:
             return None
 
     def _flat_field_manifest_path(self, objective_name: str) -> Path | None:
-        if not objective_name:
+        try:
+            return self._flat_field_store.current_manifest_path(objective_name)
+        except ValueError:
             return None
-        name_path = Path(objective_name)
-        if name_path.name != objective_name or name_path.is_absolute():
-            return None
-        return (
-            self._config_dir
-            / "calibrations"
-            / "flat-field"
-            / objective_name
-            / "current.json"
-        )
 
     def _distortion_for_objective(
         self,
@@ -306,16 +272,6 @@ class LatestFrameProcessor(QObject):
                 self.error.emit(str(exc) or type(exc).__name__)
             else:
                 self.frame_ready.emit(result)
-
-
-def _reference_path(payload: Mapping[str, Any], base_dir: Path) -> Path:
-    value = str(payload.get("reference_image") or "").strip()
-    if not value:
-        raise ValueError("flat-field reference_image is missing")
-    path = Path(value).expanduser()
-    if not path.is_absolute():
-        path = base_dir / path
-    return path
 
 
 def _file_signature(path: Path) -> tuple[int, int]:
