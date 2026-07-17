@@ -191,9 +191,9 @@ C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/
 - Test: `tests/design/test_workflow.py`
 - Test: `tests/design/test_navigation_adapter.py`
 
-- [ ] Add failing numerical tests for an all-point least-squares 2D similarity transform with two, three, and noisy point pairs. Verify proper rotation only, uniform scale, translation, RMS residual, maximum source residual, and no hidden pass/fail residual threshold.
-- [ ] Add rejection tests for fewer than two pairs, length mismatch, non-finite coordinates, and coincident/degenerate source geometry. Reflection-shaped input must still return the best proper-rotation fit and its visible residuals.
-- [ ] Replace first-two-point fitting with centered SVD/Procrustes fitting and expose residual statistics on `DesignRegistration`.
+- [x] Add failing numerical tests for an all-point least-squares 2D similarity transform with two, three, and noisy point pairs. Verify proper rotation only, uniform scale, translation, RMS residual, maximum source residual, and no hidden pass/fail residual threshold.
+- [x] Add rejection tests for fewer than two pairs, length mismatch, non-finite coordinates, and coincident/degenerate source geometry. Reflection-shaped input must still return the best proper-rotation fit and its visible residuals.
+- [x] Replace first-two-point fitting with centered SVD/Procrustes fitting and expose residual statistics on `DesignRegistration`.
 
 ```python
 source_centered = source - source.mean(axis=0)
@@ -203,15 +203,16 @@ rotation = u @ np.diag([1.0, np.linalg.det(u @ vt)]) @ vt
 scale = np.sum(singular * np.array([1.0, np.linalg.det(u @ vt)])) / np.sum(source_centered**2)
 ```
 
-- [ ] Convert session source/stage marks and `AlignmentPreparation` to variable-length immutable tuples. Derive B correction from the fitted angular component, rotate every captured stage point around the existing `(0, 0)` B pivot after successful B motion, then rebuild the all-point registration.
-- [ ] Version the design state payload and migrate legacy version-1 two-slot mark lists. Preserve existing registration while a new draft is incomplete.
+- [x] Convert session source/stage marks and `AlignmentPreparation` to variable-length immutable tuples. Derive B correction from the fitted angular component, rotate every captured stage point around the existing `(0, 0)` B pivot after successful B motion, then rebuild the all-point registration.
+- [x] Version the design state payload and migrate legacy version-1 two-slot mark lists.
+- [ ] Preserve existing registration while a new draft is incomplete.
 - [ ] Run:
 
 ```powershell
 C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/design/test_registration.py tests/design/test_workflow.py tests/design/test_navigation_adapter.py -q
 ```
 
-- [ ] Commit: `feat: support multipoint design registration`
+- [x] Commit: `feat: support multipoint design registration`
 
 ## Task 7: Add the dedicated Align interaction and dynamic capture panel
 

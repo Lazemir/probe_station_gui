@@ -292,5 +292,5 @@ def test_panel_and_position_presentations_include_navigation_state(tmp_path: Pat
     assert position.current_design_position == (9.0, 10.0)
     assert position.fov_design_size == (11.0, 12.0)
     assert position.selected_design_point == (1.0, 2.0)
-    assert position.source_design_marks == [(0.0, 0.0)]
-    assert position.check_design_marks == [(5.0, 6.0)]
+    assert position.source_design_marks == ((0.0, 0.0),)
+    assert position.check_design_marks == ((5.0, 6.0),)

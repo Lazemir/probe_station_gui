@@ -342,6 +342,64 @@ class DesignSessionTest(unittest.TestCase):
         self.assertAlmostEqual(mapped[0], 10.5)
         self.assertAlmostEqual(mapped[1], -10.0)
 
+    def test_prepare_alignment_uses_all_pairs_and_rotates_every_stage_mark(self) -> None:
+        session = DesignSession()
+        session.document = self._make_document()
+        design_marks = ((0.0, 0.0), (1000.0, 0.0), (0.0, 2000.0))
+        stage_marks = ((10.0, 10.0), (10.0, 11.0), (8.0, 10.0))
+        session.source_design_marks = design_marks
+        session.source_stage_marks = stage_marks
+
+        preparation = session.prepare_source_alignment()
+
+        self.assertEqual(preparation.design_marks, design_marks)
+        self.assertEqual(preparation.stage_marks_before_rotation, stage_marks)
+        self.assertEqual(len(preparation.stage_marks_after_rotation), 3)
+        self.assertAlmostEqual(preparation.rotation_deg, -90.0)
+        self.assertAlmostEqual(preparation.rms_residual_mm, 0.0, places=12)
+        self.assertAlmostEqual(preparation.max_residual_mm, 0.0, places=12)
+
+        session.apply_prepared_alignment(preparation)
+
+        self.assertIsInstance(session.source_design_marks, tuple)
+        self.assertIsInstance(session.source_stage_marks, tuple)
+        assert session.registration is not None
+        self.assertEqual(session.registration.source_residual_summary.count, 3)
+        self.assertAlmostEqual(session.registration.rotation_deg, 0.0, places=9)
+
+    def test_persisted_state_v2_roundtrip_and_v1_slot_migration(self) -> None:
+        document = self._make_document()
+        session = DesignSession()
+        session.load_document(document)
+        session.source_design_marks = (
+            (0.0, 0.0),
+            (10.0, 0.0),
+            (0.0, 10.0),
+        )
+        session.source_stage_marks = (
+            (1.0, 2.0),
+            (21.0, 2.0),
+            (1.0, 22.0),
+        )
+        session._rebuild_registration()
+
+        state = session.export_persisted_state()
+        assert state is not None
+        self.assertEqual(state["version"], 2)
+        restored = DesignSession()
+        restored.restore_persisted_state(document, state)
+        self.assertEqual(restored.source_design_marks, session.source_design_marks)
+        self.assertEqual(restored.source_stage_marks, session.source_stage_marks)
+
+        legacy = dict(state)
+        legacy["version"] = 1
+        legacy["source_design_marks"] = [[0.0, 0.0], [10.0, 0.0]]
+        legacy["source_stage_marks"] = [[1.0, 2.0], [21.0, 2.0]]
+        migrated = DesignSession()
+        migrated.restore_persisted_state(document, legacy)
+        self.assertEqual(migrated.source_design_marks, ((0.0, 0.0), (10.0, 0.0)))
+        self.assertEqual(migrated.source_stage_marks, ((1.0, 2.0), (21.0, 2.0)))
+
     def test_rotate_document_transforms_design_state(self) -> None:
         document = DesignDocument(
             path=REPO_ROOT / "tests" / "fixtures" / "synthetic.gds",
