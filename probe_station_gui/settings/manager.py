@@ -68,6 +68,10 @@ from probe_station_gui.settings.oscillation_config import (
     OscillationSettingsDefaults,
     parse_oscillation_settings,
 )
+from probe_station_gui.settings.precision_approach import (
+    PrecisionApproachSettings,
+    parse_precision_approach_settings,
+)
 from probe_station_gui.settings.value_parsing import (
     coerce_bool,
     finite_float,
@@ -123,6 +127,9 @@ class Settings:
         default_factory=CoordinateSystemSettings
     )
     objectives: ObjectivesSettings = field(default_factory=ObjectivesSettings)
+    precision_approach: PrecisionApproachSettings = field(
+        default_factory=PrecisionApproachSettings
+    )
     design_last_directory: str = ""
 
     def clone(self) -> "Settings":
@@ -142,6 +149,7 @@ class Settings:
             axis_z_calibration=self.axis_z_calibration.clone(),
             coordinate_system=self.coordinate_system.clone(),
             objectives=self.objectives.clone(),
+            precision_approach=self.precision_approach.clone(),
             design_last_directory=self.design_last_directory,
         )
 
@@ -174,6 +182,7 @@ class Settings:
             "axis_z_calibration": self.axis_z_calibration.to_dict(),
             "coordinate_system": self.coordinate_system.to_dict(),
             "objectives": self.objectives.to_dict(),
+            "precision_approach": self.precision_approach.to_dict(),
             "design_last_directory": self.design_last_directory,
         }
 
@@ -617,6 +626,9 @@ class SettingsManager:
                 self._raw_section(raw, "coordinate_system")
             ),
             objectives=parse_objectives_settings(self._raw_section(raw, "objectives")),
+            precision_approach=parse_precision_approach_settings(
+                self._raw_section(raw, "precision_approach")
+            ),
             design_last_directory=self._design_last_directory_from_raw(raw),
         )
 
@@ -907,6 +919,9 @@ class SettingsManager:
             clone.axis_z_calibration.to_dict()
         )
         clone.objectives = parse_objectives_settings(clone.objectives.to_dict())
+        clone.precision_approach = parse_precision_approach_settings(
+            clone.precision_approach.to_dict()
+        )
         clone.design_last_directory = clone.design_last_directory.strip()
         return clone
 

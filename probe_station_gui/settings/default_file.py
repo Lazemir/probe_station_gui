@@ -19,6 +19,7 @@ from probe_station_gui.settings.objective_config import (
     normalize_objective_name,
 )
 from probe_station_gui.settings.oscillation_config import OscillationSettings
+from probe_station_gui.settings.precision_approach import PrecisionApproachSettings
 from probe_station_gui.settings.sections import (
     ApiSettings,
     ClickToMoveSettings,
@@ -67,6 +68,7 @@ def normalize_default_settings_data(
     _ensure_dict_section(data, "axis_a_calibration", AxisACalibrationSettings().to_dict())
     _ensure_dict_section(data, "axis_z_calibration", AxisZCalibrationSettings().to_dict())
     _ensure_dict_section(data, "coordinate_system", CoordinateSystemSettings().to_dict())
+    _ensure_precision_approach_section(data)
     _ensure_objectives_section(data)
     if not isinstance(data.get("design_last_directory"), str):
         data["design_last_directory"] = ""
@@ -90,6 +92,18 @@ def _ensure_dict_section(data: dict, key: str, defaults: dict) -> dict:
     for default_key, default_value in defaults.items():
         section.setdefault(default_key, default_value)
     return section
+
+
+def _ensure_precision_approach_section(data: dict) -> None:
+    defaults = PrecisionApproachSettings().to_dict()
+    section = _ensure_dict_section(data, "precision_approach", defaults)
+    for axis, profile_defaults in defaults.items():
+        profile = section.get(axis)
+        if not isinstance(profile, dict):
+            section[axis] = dict(profile_defaults)
+            continue
+        for key, value in profile_defaults.items():
+            profile.setdefault(key, value)
 
 
 def _ensure_telegram_section(data: dict) -> None:

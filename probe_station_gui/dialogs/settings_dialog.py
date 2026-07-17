@@ -60,6 +60,9 @@ from probe_station_gui.dialogs.settings.feedrates import (
 from probe_station_gui.dialogs.settings.jog import JogSettingsWidget
 from probe_station_gui.dialogs.settings.measurement import MeasurementSettingsWidget
 from probe_station_gui.dialogs.settings.objectives import ObjectivesSettingsWidget
+from probe_station_gui.dialogs.settings.precision_approach import (
+    PrecisionApproachSettingsWidget,
+)
 from probe_station_gui.shared.wheel_guard import (
     GuardedComboBox as QComboBox,
     GuardedDoubleSpinBox as QDoubleSpinBox,
@@ -1002,6 +1005,10 @@ class SettingsDialog(QDialog):
             self._settings.axis_z_calibration,
             self,
         )
+        self._precision_approach_tab = PrecisionApproachSettingsWidget(
+            self._settings.precision_approach,
+            self,
+        )
         if camera_settings_source is not None:
             self._camera_tab = CameraSettingsWidget(camera_settings_source, self)
         self._tabs.addTab(self._controls_tab, "Controls")
@@ -1013,6 +1020,7 @@ class SettingsDialog(QDialog):
         self._tabs.addTab(self._coordinate_system_tab, "Coordinates")
         self._tabs.addTab(self._objectives_tab, "Objectives")
         self._tabs.addTab(self._axis_calibration_tab, "Axis Calibration")
+        self._tabs.addTab(self._precision_approach_tab, "Precision approach")
         self._tabs.addTab(self._measurement_tab, "Measurement")
         self._tabs.addTab(self._needles_tab, "Needles")
         self._tabs.addTab(self._logging_tab, "Logging")
@@ -1066,6 +1074,7 @@ class SettingsDialog(QDialog):
         self._coordinate_system_tab.to_settings(self._settings)
         self._objectives_tab.to_settings(self._settings)
         self._axis_calibration_tab.to_settings(self._settings)
+        self._precision_approach_tab.to_settings(self._settings)
         self._measurement_tab.to_settings(self._settings)
         self._needles_tab.to_settings(self._settings)
         self._logging_tab.to_settings(self._settings.logging)

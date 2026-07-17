@@ -15,6 +15,9 @@ from probe_station_gui.dialogs.settings.feedrates import (
 from probe_station_gui.dialogs.settings.jog import JogSettingsWidget
 from probe_station_gui.dialogs.settings.measurement import MeasurementSettingsWidget
 from probe_station_gui.dialogs.settings.objectives import ObjectivesSettingsWidget
+from probe_station_gui.dialogs.settings.precision_approach import (
+    PrecisionApproachSettingsWidget,
+)
 
 __all__ = [
     "ControlsSettingsWidget",
@@ -26,4 +29,5 @@ __all__ = [
     "KeyCaptureDialog",
     "MeasurementSettingsWidget",
     "ObjectivesSettingsWidget",
+    "PrecisionApproachSettingsWidget",
 ]

@@ -37,9 +37,9 @@
 - Test: `tests/settings/test_default_file.py`
 - Create: `tests/ui/test_precision_approach_settings.py`
 
-- [ ] Add failing model/parser tests for a per-axis profile with `enabled`, non-negative `backlash`, and `final_direction` constrained to `+1` or `-1`; verify missing user settings merge defaults for all available axes.
-- [ ] Add failing default tests for A=`disabled, 0, -1`, Z=`enabled, 0.03 mm, +1`, and X/Y/B/C=`disabled, 0, +1`.
-- [ ] Implement immutable `PrecisionApproachProfile` and a `PrecisionApproachSettings` mapping with normalization and a deterministic fingerprint payload.
+- [x] Add failing model/parser tests for a per-axis profile with `enabled`, non-negative `backlash`, and `final_direction` constrained to `+1` or `-1`; verify missing user settings merge defaults for all available axes.
+- [x] Add failing default tests for A=`disabled, 0, -1`, Z=`enabled, 0.03 mm, +1`, and X/Y/B/C=`disabled, 0, +1`.
+- [x] Implement immutable `PrecisionApproachProfile` and a `PrecisionApproachSettings` mapping with normalization and a deterministic fingerprint payload.
 
 ```python
 @dataclass(frozen=True)
@@ -55,16 +55,16 @@ class PrecisionApproachProfile:
             raise ValueError("final_direction must be -1 or +1")
 ```
 
-- [ ] Wire the section into `Settings`, JSON parsing, normalized defaults, save/load, and the shipped default file without changing existing settings keys.
-- [ ] Add failing Qt tests for a “Precision approach” settings section with one row per axis: enabled checkbox, backlash spinbox using the axis display unit, final-side selector, and a concise approach preview.
-- [ ] Implement the editor and connect it to `SettingsDialog` apply/reset flows. Disable the remaining row controls when the profile is disabled while preserving their values.
-- [ ] Run:
+- [x] Wire the section into `Settings`, JSON parsing, normalized defaults, save/load, and the shipped default file without changing existing settings keys.
+- [x] Add failing Qt tests for a “Precision approach” settings section with one row per axis: enabled checkbox, backlash spinbox using the axis display unit, final-side selector, and a concise approach preview.
+- [x] Implement the editor and connect it to `SettingsDialog` apply/reset flows. Disable the remaining row controls when the profile is disabled while preserving their values.
+- [x] Run:
 
 ```powershell
 C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/settings/test_precision_approach.py tests/settings/test_section_parsing.py tests/settings/test_default_file.py tests/ui/test_precision_approach_settings.py -q
 ```
 
-- [ ] Commit: `feat: add precision approach settings`
+- [x] Commit: `feat: add precision approach settings`
 
 ## Task 2: Implement the pure approach planner and confidence state
 

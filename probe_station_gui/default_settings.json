@@ -204,6 +204,38 @@
     "startup_mode": "controller",
     "preferred_system": "G54"
   },
+  "precision_approach": {
+    "X": {
+      "enabled": false,
+      "backlash": 0.0,
+      "final_direction": 1
+    },
+    "Y": {
+      "enabled": false,
+      "backlash": 0.0,
+      "final_direction": 1
+    },
+    "Z": {
+      "enabled": true,
+      "backlash": 0.03,
+      "final_direction": 1
+    },
+    "A": {
+      "enabled": false,
+      "backlash": 0.0,
+      "final_direction": -1
+    },
+    "B": {
+      "enabled": false,
+      "backlash": 0.0,
+      "final_direction": 1
+    },
+    "C": {
+      "enabled": false,
+      "backlash": 0.0,
+      "final_direction": 1
+    }
+  },
   "objectives": {
     "active_name": "X5",
     "apply_offsets_on_change": true,
