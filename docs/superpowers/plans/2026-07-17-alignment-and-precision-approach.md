@@ -75,8 +75,8 @@ C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/
 - Create: `tests/stage/test_precision_approach.py`
 - Create: `tests/stage/test_coordinate_confidence.py`
 
-- [ ] Add table-driven failing tests for disabled/zero-backlash direct moves, already-loaded direct moves, approximate coordinates, insufficient same-direction travel, reversals, mixed-axis preparation, relative-target resolution, and an out-of-limit preparation that rejects the entire operation.
-- [ ] Implement pure plan value objects. Planning occurs in calibrated display coordinates; callers supply converted current/target values and validate the returned complete target maps before G-code conversion.
+- [x] Add table-driven failing tests for disabled/zero-backlash direct moves, already-loaded direct moves, approximate coordinates, insufficient same-direction travel, reversals, mixed-axis preparation, relative-target resolution, and an out-of-limit preparation that rejects the entire operation.
+- [x] Implement pure plan value objects. Planning occurs in calibrated display coordinates; callers supply converted current/target values and validate the returned complete target maps before G-code conversion.
 
 ```python
 @dataclass(frozen=True)
@@ -86,16 +86,16 @@ class PrecisionMovePlan:
     prepared_axes: frozenset[str]
 ```
 
-- [ ] For direction `+1`, prepare at `target - backlash`; for `-1`, prepare at `target + backlash`. A preparation map holds every non-prepared axis at the current coordinate, then the final map contains the complete requested target.
-- [ ] Add failing state-machine tests: exact after a completed final approach; exact survives same-direction motion; reversal immediately makes approximate; confirmed final-direction travel restores exact only after accumulated travel reaches backlash; homing/reset/failure/profile change makes approximate.
-- [ ] Implement `AxisCoordinateConfidence` with `exact`, loaded direction, last confirmed machine coordinate, and accumulated take-up travel. Keep transitions pure and event-driven.
-- [ ] Run:
+- [x] For direction `+1`, prepare at `target - backlash`; for `-1`, prepare at `target + backlash`. A preparation map holds every non-prepared axis at the current coordinate, then the final map contains the complete requested target.
+- [x] Add failing state-machine tests: exact after a completed final approach; exact survives same-direction motion; reversal immediately makes approximate; confirmed final-direction travel restores exact only after accumulated travel reaches backlash; homing/reset/failure/profile change makes approximate.
+- [x] Implement `AxisCoordinateConfidence` with `exact`, loaded direction, last confirmed machine coordinate, and accumulated take-up travel. Keep transitions pure and event-driven.
+- [x] Run:
 
 ```powershell
 C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/stage/test_precision_approach.py tests/stage/test_coordinate_confidence.py -q
 ```
 
-- [ ] Commit: `feat: add precision motion planner`
+- [x] Commit: `feat: add precision motion planner`
 
 ## Task 3: Execute precision plans in StageController and persist confidence
 
