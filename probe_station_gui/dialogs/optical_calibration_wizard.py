@@ -4,16 +4,19 @@ from __future__ import annotations
 
 from enum import Enum
 
-from PySide6.QtCore import QTimer, Signal
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QCloseEvent, QImage, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFormLayout,
+    QGridLayout,
     QLabel,
     QRadioButton,
+    QSizePolicy,
     QVBoxLayout,
     QWizard,
     QWizardPage,
+    QWidget,
 )
 
 
@@ -139,19 +142,104 @@ class _ResultPage(QWizardPage):
     def __init__(self, parent: QWizard | None = None) -> None:
         super().__init__(parent)
         self.setTitle("Calibration Complete")
-        layout = QFormLayout(self)
+        layout = QVBoxLayout(self)
+        results_layout = QFormLayout()
         self._flat_label = QLabel("Not run", self)
         self._lens_label = QLabel("Not run", self)
         self._flat_label.setWordWrap(True)
         self._lens_label.setWordWrap(True)
-        layout.addRow(QLabel("Flat field", self), self._flat_label)
-        layout.addRow(QLabel("Lens correction", self), self._lens_label)
+        results_layout.addRow(QLabel("Flat field", self), self._flat_label)
+        results_layout.addRow(QLabel("Lens correction", self), self._lens_label)
+        layout.addLayout(results_layout)
+
+        self._comparison_container = QWidget(self)
+        preview_layout = QGridLayout(self._comparison_container)
+        preview_layout.setColumnStretch(0, 1)
+        preview_layout.setColumnStretch(1, 1)
+        preview_layout.setRowStretch(1, 1)
+        before_heading = QLabel("Before", self)
+        after_heading = QLabel("After", self)
+        before_heading.setAlignment(Qt.AlignCenter)
+        after_heading.setAlignment(Qt.AlignCenter)
+        self._before_preview_label = self._create_preview_label()
+        self._after_preview_label = self._create_preview_label()
+        preview_layout.addWidget(before_heading, 0, 0)
+        preview_layout.addWidget(after_heading, 0, 1)
+        preview_layout.addWidget(self._before_preview_label, 1, 0)
+        preview_layout.addWidget(self._after_preview_label, 1, 1)
+        layout.addWidget(self._comparison_container, 1)
+        self._comparison_container.hide()
+
+        self._before_preview_source: QImage | None = None
+        self._after_preview_source: QImage | None = None
+
+    def _create_preview_label(self) -> QLabel:
+        label = QLabel(self)
+        label.setAlignment(Qt.AlignCenter)
+        label.setMinimumSize(280, 180)
+        label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        return label
 
     def set_flat_result(self, message: str) -> None:
         self._flat_label.setText(str(message or "Complete"))
 
-    def set_lens_result(self, message: str) -> None:
+    def set_lens_result(
+        self,
+        message: str,
+        *,
+        before_preview: QImage | None = None,
+        after_preview: QImage | None = None,
+    ) -> None:
         self._lens_label.setText(str(message or "Complete"))
+        if (
+            before_preview is None
+            or after_preview is None
+            or before_preview.isNull()
+            or after_preview.isNull()
+        ):
+            self.clear_lens_previews()
+            return
+        self._before_preview_source = before_preview.copy()
+        self._after_preview_source = after_preview.copy()
+        self._comparison_container.show()
+        self._refresh_preview_pixmaps()
+
+    def clear_lens_previews(self) -> None:
+        self._before_preview_source = None
+        self._after_preview_source = None
+        self._before_preview_label.clear()
+        self._after_preview_label.clear()
+        self._comparison_container.hide()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt virtual method
+        super().resizeEvent(event)
+        self._refresh_preview_pixmaps()
+
+    def _refresh_preview_pixmaps(self) -> None:
+        self._set_preview_pixmap(
+            self._before_preview_label,
+            self._before_preview_source,
+        )
+        self._set_preview_pixmap(
+            self._after_preview_label,
+            self._after_preview_source,
+        )
+
+    @staticmethod
+    def _set_preview_pixmap(label: QLabel, source: QImage | None) -> None:
+        if source is None or source.isNull():
+            label.clear()
+            return
+        bounds = label.contentsRect().size()
+        if bounds.isEmpty():
+            return
+        label.setPixmap(
+            QPixmap.fromImage(source).scaled(
+                bounds,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+        )
 
 
 class OpticalCalibrationWizard(QWizard):
@@ -172,7 +260,8 @@ class OpticalCalibrationWizard(QWizard):
         self.setOption(QWizard.NoBackButtonOnStartPage, True)
         self.setOption(QWizard.NoBackButtonOnLastPage, True)
         self.setModal(False)
-        self.resize(560, 300)
+        self.setMinimumSize(680, 460)
+        self.resize(820, 580)
 
         self._mode_page = _ModePage(self)
         self._flat_page = _FlatFieldPage(
@@ -214,6 +303,7 @@ class OpticalCalibrationWizard(QWizard):
         self._lens_page.set_status("Ready.")
         self._result_page.set_flat_result("Not run")
         self._result_page.set_lens_result("Not run")
+        self._result_page.clear_lens_previews()
         if mode is None:
             self.setStartId(self.MODE_PAGE_ID)
         else:
@@ -290,6 +380,8 @@ class OpticalCalibrationWizard(QWizard):
         message: str,
         *,
         run_id: int | None = None,
+        before_preview: QImage | None = None,
+        after_preview: QImage | None = None,
     ) -> None:
         accepted = self._set_capture_result(
             self.LENS_DISTORTION_PAGE_ID,
@@ -298,8 +390,16 @@ class OpticalCalibrationWizard(QWizard):
             message,
             run_id=run_id,
         )
-        if accepted and success:
-            self._result_page.set_lens_result(message)
+        if not accepted:
+            return
+        if success:
+            self._result_page.set_lens_result(
+                message,
+                before_preview=before_preview,
+                after_preview=after_preview,
+            )
+            return
+        self._result_page.clear_lens_previews()
 
     def validateCurrentPage(self) -> bool:  # noqa: N802 - Qt virtual method
         page_id = self.currentId()

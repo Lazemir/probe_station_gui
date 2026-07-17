@@ -8,6 +8,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
+from PySide6.QtGui import QColor, QImage
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication, QWizard
 
@@ -25,6 +26,49 @@ def qt_app() -> QApplication:
 def _show(wizard: OpticalCalibrationWizard, qt_app: QApplication) -> None:
     wizard.show()
     qt_app.processEvents()
+
+
+def _preview(color: QColor) -> QImage:
+    image = QImage(320, 180, QImage.Format_RGBA8888)
+    image.fill(color)
+    return image
+
+
+def _has_no_pixmap(label) -> bool:
+    pixmap = label.pixmap()
+    return pixmap is None or pixmap.isNull()
+
+
+def _start_lens_capture(
+    wizard: OpticalCalibrationWizard,
+    qt_app: QApplication,
+) -> int:
+    assert wizard.prepare(OpticalCalibrationMode.LENS_DISTORTION)
+    _show(wizard, qt_app)
+    assert wizard.currentId() == wizard.LENS_DISTORTION_PAGE_ID
+    wizard.next()
+    run_id = wizard.active_run_id()
+    assert run_id is not None
+    return run_id
+
+
+def _complete_lens_capture(
+    wizard: OpticalCalibrationWizard,
+    qt_app: QApplication,
+    *,
+    run_id: int,
+    before: QImage,
+    after: QImage,
+) -> None:
+    wizard.set_lens_distortion_result(
+        True,
+        "Lens correction saved.",
+        run_id=run_id,
+        before_preview=before,
+        after_preview=after,
+    )
+    qt_app.processEvents()
+    assert wizard.currentId() == wizard.RESULT_PAGE_ID
 
 
 def test_full_mode_runs_flat_field_then_lens_distortion(
@@ -248,4 +292,206 @@ def test_objective_and_progress_are_visible(qt_app: QApplication) -> None:
     assert "X20" in wizard.objective_text()
     assert "capture 4/9" in wizard.currentPage().status_text()
     wizard.set_flat_field_result(False, "stopped", run_id=wizard.active_run_id())
+    wizard.close()
+
+
+def test_lens_result_displays_copied_previews_in_equal_bounds(
+    qt_app: QApplication,
+) -> None:
+    wizard = OpticalCalibrationWizard()
+    before = _preview(QColor("red"))
+    after = _preview(QColor("green"))
+    run_id = _start_lens_capture(wizard, qt_app)
+
+    _complete_lens_capture(
+        wizard,
+        qt_app,
+        run_id=run_id,
+        before=before,
+        after=after,
+    )
+
+    result = wizard._result_page
+    assert result._comparison_container.isVisible()
+    before_pixmap = result._before_preview_label.pixmap()
+    after_pixmap = result._after_preview_label.pixmap()
+    assert before_pixmap is not None and not before_pixmap.isNull()
+    assert after_pixmap is not None and not after_pixmap.isNull()
+    assert result._before_preview_source is not before
+    assert result._after_preview_source is not after
+    assert result._before_preview_label.contentsRect().size() == (
+        result._after_preview_label.contentsRect().size()
+    )
+    assert before_pixmap.size() == after_pixmap.size()
+    assert before_pixmap.toImage().pixelColor(0, 0) == QColor("red")
+    assert after_pixmap.toImage().pixelColor(0, 0) == QColor("green")
+    wizard.close()
+
+
+def test_lens_preview_pixmaps_rescale_with_wizard_resize(
+    qt_app: QApplication,
+) -> None:
+    wizard = OpticalCalibrationWizard()
+    run_id = _start_lens_capture(wizard, qt_app)
+    _complete_lens_capture(
+        wizard,
+        qt_app,
+        run_id=run_id,
+        before=_preview(QColor("red")),
+        after=_preview(QColor("green")),
+    )
+    result = wizard._result_page
+    original_bounds = result._before_preview_label.contentsRect().size()
+
+    wizard.resize(1040, 720)
+    qt_app.processEvents()
+
+    before_pixmap = result._before_preview_label.pixmap()
+    after_pixmap = result._after_preview_label.pixmap()
+    assert result._before_preview_label.contentsRect().size() == (
+        result._after_preview_label.contentsRect().size()
+    )
+    assert result._before_preview_label.contentsRect().size().width() > (
+        original_bounds.width()
+    )
+    assert before_pixmap is not None and not before_pixmap.isNull()
+    assert after_pixmap is not None and not after_pixmap.isNull()
+    assert before_pixmap.width() <= result._before_preview_label.contentsRect().width()
+    assert before_pixmap.height() <= result._before_preview_label.contentsRect().height()
+    assert after_pixmap.width() <= result._after_preview_label.contentsRect().width()
+    assert after_pixmap.height() <= result._after_preview_label.contentsRect().height()
+    wizard.close()
+
+
+def test_prepare_clears_lens_previews(qt_app: QApplication) -> None:
+    wizard = OpticalCalibrationWizard()
+    run_id = _start_lens_capture(wizard, qt_app)
+    _complete_lens_capture(
+        wizard,
+        qt_app,
+        run_id=run_id,
+        before=_preview(QColor("red")),
+        after=_preview(QColor("green")),
+    )
+
+    assert wizard.prepare(OpticalCalibrationMode.LENS_DISTORTION)
+
+    result = wizard._result_page
+    assert result._comparison_container.isHidden()
+    assert result._before_preview_source is None
+    assert result._after_preview_source is None
+    assert _has_no_pixmap(result._before_preview_label)
+    assert _has_no_pixmap(result._after_preview_label)
+    wizard.close()
+
+
+def test_stale_lens_result_cannot_overwrite_current_previews(
+    qt_app: QApplication,
+) -> None:
+    wizard = OpticalCalibrationWizard()
+    first_run_id = _start_lens_capture(wizard, qt_app)
+    _complete_lens_capture(
+        wizard,
+        qt_app,
+        run_id=first_run_id,
+        before=_preview(QColor("red")),
+        after=_preview(QColor("green")),
+    )
+
+    wizard.back()
+    qt_app.processEvents()
+    assert wizard.currentId() == wizard.LENS_DISTORTION_PAGE_ID
+    wizard._completed_pages.discard(wizard.LENS_DISTORTION_PAGE_ID)
+    wizard.next()
+    current_run_id = wizard.active_run_id()
+    assert current_run_id is not None
+    assert current_run_id != first_run_id
+    assert wizard.is_running()
+
+    wizard.set_lens_distortion_result(
+        True,
+        "Stale result.",
+        run_id=first_run_id,
+        before_preview=_preview(QColor("red")),
+        after_preview=_preview(QColor("green")),
+    )
+
+    result = wizard._result_page
+    assert wizard.is_running()
+    assert wizard.active_run_id() == current_run_id
+    assert result._before_preview_label.pixmap().toImage().pixelColor(0, 0) == QColor(
+        "red"
+    )
+    assert result._after_preview_label.pixmap().toImage().pixelColor(0, 0) == QColor(
+        "green"
+    )
+    wizard.set_lens_distortion_result(False, "stopped", run_id=current_run_id)
+    wizard.close()
+
+
+def test_failed_lens_result_stays_on_capture_page_and_clears_previews(
+    qt_app: QApplication,
+) -> None:
+    wizard = OpticalCalibrationWizard()
+    run_id = _start_lens_capture(wizard, qt_app)
+
+    wizard.set_lens_distortion_result(
+        False,
+        "Calibration failed.",
+        run_id=run_id,
+        before_preview=_preview(QColor("red")),
+        after_preview=_preview(QColor("green")),
+    )
+    qt_app.processEvents()
+
+    result = wizard._result_page
+    assert wizard.currentId() == wizard.LENS_DISTORTION_PAGE_ID
+    assert result._before_preview_source is None
+    assert result._after_preview_source is None
+    assert _has_no_pixmap(result._after_preview_label)
+    wizard.close()
+
+
+def test_current_failed_lens_result_clears_and_hides_rendered_previews(
+    qt_app: QApplication,
+) -> None:
+    wizard = OpticalCalibrationWizard()
+    run_id = _start_lens_capture(wizard, qt_app)
+    result = wizard._result_page
+    result.set_lens_result(
+        "Previous calibration.",
+        before_preview=_preview(QColor("red")),
+        after_preview=_preview(QColor("green")),
+    )
+    qt_app.processEvents()
+    assert not result._comparison_container.isHidden()
+    assert not _has_no_pixmap(result._before_preview_label)
+    assert not _has_no_pixmap(result._after_preview_label)
+
+    wizard.set_lens_distortion_result(False, "Calibration failed.", run_id=run_id)
+    qt_app.processEvents()
+
+    assert result._comparison_container.isHidden()
+    assert result._before_preview_source is None
+    assert result._after_preview_source is None
+    assert _has_no_pixmap(result._before_preview_label)
+    assert _has_no_pixmap(result._after_preview_label)
+    wizard.close()
+
+
+def test_flat_field_result_hides_empty_lens_comparison(
+    qt_app: QApplication,
+) -> None:
+    wizard = OpticalCalibrationWizard()
+    wizard.set_mode(OpticalCalibrationMode.FLAT_FIELD)
+    _show(wizard, qt_app)
+    wizard.next()
+    wizard.next()
+    wizard.set_flat_field_result(True, "Flat field saved.", run_id=wizard.active_run_id())
+    qt_app.processEvents()
+
+    result = wizard._result_page
+    assert result._comparison_container.isHidden()
+    assert _has_no_pixmap(result._before_preview_label)
+    assert _has_no_pixmap(result._after_preview_label)
     wizard.close()
