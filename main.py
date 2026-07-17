@@ -579,6 +579,7 @@ class Main(QMainWindow):
     LENS_DISTORTION_EDGE_MARGIN_FRACTION = 0.85
     LENS_DISTORTION_FEATURE_EDGE_MARGIN_FRACTION = 0.02
     LENS_DISTORTION_MIN_CAPTURE_SHIFT_PX = 24.0
+    LENS_DISTORTION_CLUSTER_TOLERANCE_PX = 12.0
     LENS_DISTORTION_MAX_RESIDUAL_MEAN_PX = 3.0
     LENS_DISTORTION_MAX_RESIDUAL_MAX_PX = 12.0
     LENS_DISTORTION_CAPTURE_SETTLE_S = 0.12
@@ -5060,12 +5061,16 @@ class Main(QMainWindow):
             objective_name, _magnification, scale = (
                 self._optical_calibration_objective_metadata(context)
             )
+            flat_field_profile: object | None = None
             try:
                 flat_field = self._flat_field_calibration_store.load(objective_name)
-            except Exception as exc:
-                raise RuntimeError(
-                    f"Flat-field profile for {objective_name} is unavailable: {exc}"
-                ) from exc
+                flat_field_profile = flat_field.profile
+            except Exception:
+                logger.info(
+                    "Flat-field profile for %s is unavailable; fitting raw frames only.",
+                    objective_name,
+                    exc_info=True,
+                )
             self.stage_controller.begin_external_task("lens distortion calibration")
             reserved = True
             self._report_lens_distortion_calibration_progress(
@@ -5099,14 +5104,10 @@ class Main(QMainWindow):
             if initial_frame is None:
                 raise RuntimeError("Camera frame timeout.")
             frame_size = self._lens_distortion_frame_size(initial_frame)
-            corrected_initial_frame = apply_flat_field_correction(
-                initial_frame,
-                flat_field.profile,
-            )
             capture_offsets = self._lens_distortion_capture_offsets_mm(
                 frame_size,
                 scale,
-                initial_frame=corrected_initial_frame,
+                initial_frame=initial_frame,
             )
             frames: list[GridCalibrationFrame] = []
             total = len(capture_offsets)
@@ -5132,19 +5133,16 @@ class Main(QMainWindow):
                 current_frame_size = self._lens_distortion_frame_size(frame)
                 if current_frame_size != frame_size:
                     raise RuntimeError("Camera frame size changed during calibration.")
-                corrected_frame = apply_flat_field_correction(
-                    frame,
-                    flat_field.profile,
-                )
-                frames.append(GridCalibrationFrame(corrected_frame, (dx_mm, dy_mm)))
+                frames.append(GridCalibrationFrame(frame, (dx_mm, dy_mm)))
 
-            payload = self._fit_lens_distortion_payload(
+            payload = self._fit_lens_distortion_candidates(
                 frames,
                 frame_size=frame_size,
                 scale=scale,
+                flat_field_profile=flat_field_profile,
             )
             success = True
-            message = "Lens distortion calibration saved."
+            message = self._lens_distortion_fit_success_message(payload)
         except Exception as exc:
             logger.exception("Lens distortion calibration failed")
             message = f"Lens distortion calibration failed: {exc}"
@@ -5201,20 +5199,164 @@ class Main(QMainWindow):
         *,
         frame_size: tuple[int, int],
         scale: object,
+        validate: bool = True,
     ) -> dict[str, object]:
-        pixels_to_mm = getattr(scale, "pixels_to_mm", None)
-        if pixels_to_mm is None:
+        stored_pixels_to_mm = parse_pixels_to_mm_matrix(
+            getattr(scale, "pixels_to_mm", None)
+        )
+        if not stored_pixels_to_mm:
             raise RuntimeError(
                 "Lens distortion calibration requires click-to-move calibration."
             )
+        image_pixels_to_mm = Main._flip_pixel_matrix_y(stored_pixels_to_mm)
         fit = fit_stage_geometry_from_grid_frames(
             frames,
             frame_size=frame_size,
-            pixels_to_mm=pixels_to_mm,
+            pixels_to_mm=image_pixels_to_mm,
+            cluster_tolerance_px=float(
+                Main.LENS_DISTORTION_CLUSTER_TOLERANCE_PX
+            ),
         )
         payload = fit.to_payload()
-        Main._validate_lens_distortion_fit_payload(payload)
+        if isinstance(payload, dict):
+            for key in ("pixels_to_mm", "calibrated_pixels_to_mm"):
+                fitted_matrix = parse_pixels_to_mm_matrix(payload.get(key))
+                if fitted_matrix:
+                    payload[key] = [
+                        [float(value) for value in row]
+                        for row in Main._flip_pixel_matrix_y(fitted_matrix)
+                    ]
+        if validate:
+            Main._validate_lens_distortion_fit_payload(payload)
         return payload
+
+    @classmethod
+    def _fit_lens_distortion_candidates(
+        cls,
+        raw_frames: Sequence[GridCalibrationFrame],
+        *,
+        frame_size: tuple[int, int],
+        scale: object,
+        flat_field_profile: object | None,
+    ) -> dict[str, object]:
+        candidates: dict[str, dict[str, object]] = {}
+        failures: list[str] = []
+        try:
+            candidates["raw"] = cls._fit_lens_distortion_payload(
+                raw_frames,
+                frame_size=frame_size,
+                scale=scale,
+                validate=False,
+            )
+        except Exception as exc:
+            failures.append(f"raw: {exc}")
+
+        if flat_field_profile is not None:
+            try:
+                corrected_frames = [
+                    GridCalibrationFrame(
+                        apply_flat_field_correction(frame.frame, flat_field_profile),
+                        frame.stage_offset_mm,
+                    )
+                    for frame in raw_frames
+                ]
+                candidates["flat_field"] = cls._fit_lens_distortion_payload(
+                    corrected_frames,
+                    frame_size=frame_size,
+                    scale=scale,
+                    validate=False,
+                )
+            except Exception as exc:
+                failures.append(f"flat field: {exc}")
+
+        if not candidates:
+            raise RuntimeError("; ".join(failures) or "No fit candidates were produced.")
+        selected = cls._select_lens_distortion_fit_candidate(candidates)
+        if failures:
+            selected["calibration_candidate_failures"] = failures
+        return selected
+
+    @staticmethod
+    def _lens_distortion_fit_success_message(payload: dict[str, object]) -> str:
+        selected = str(payload.get("calibration_input") or "raw").replace("_", " ")
+        candidates = payload.get("calibration_candidates")
+        details: list[str] = []
+        if isinstance(candidates, dict):
+            for name in ("raw", "flat_field"):
+                metrics = candidates.get(name)
+                if not isinstance(metrics, dict):
+                    continue
+                try:
+                    mean_px = float(metrics.get("residual_mean_px"))
+                    max_px = float(metrics.get("residual_max_px"))
+                except (TypeError, ValueError):
+                    continue
+                label = name.replace("_", " ")
+                details.append(f"{label} {mean_px:.2f}/{max_px:.2f} px")
+        suffix = f"; {', '.join(details)}" if details else ""
+        return f"Lens distortion calibration saved ({selected}{suffix})."
+
+    @staticmethod
+    def _flip_pixel_matrix_y(
+        matrix: Sequence[Sequence[float]],
+    ) -> tuple[tuple[float, float], tuple[float, float]]:
+        """Convert between GUI Y-up and camera-image Y-down matrix conventions."""
+
+        return (
+            (float(matrix[0][0]), -float(matrix[0][1])),
+            (float(matrix[1][0]), -float(matrix[1][1])),
+        )
+
+    @classmethod
+    def _select_lens_distortion_fit_candidate(
+        cls,
+        candidates: dict[str, dict[str, object]],
+    ) -> dict[str, object]:
+        summaries: dict[str, dict[str, float]] = {}
+        valid: list[
+            tuple[float, float, float, int, str, dict[str, object]]
+        ] = []
+        failures: list[str] = []
+        labels = {"raw": "raw", "flat_field": "flat field"}
+        for name, candidate in candidates.items():
+            label = labels.get(name, str(name).replace("_", " "))
+            mean_px: float | None = None
+            max_px: float | None = None
+            try:
+                mean_px = float(candidate.get("residual_mean_px"))
+                max_px = float(candidate.get("residual_max_px"))
+                if not math.isfinite(mean_px) or not math.isfinite(max_px):
+                    raise RuntimeError("residual is not finite")
+                summaries[name] = {
+                    "residual_mean_px": mean_px,
+                    "residual_max_px": max_px,
+                }
+                cls._validate_lens_distortion_fit_payload(candidate)
+            except (RuntimeError, TypeError, ValueError) as exc:
+                if mean_px is not None and max_px is not None:
+                    detail = f"{mean_px:.2f}/{max_px:.2f} px"
+                else:
+                    detail = str(exc)
+                failures.append(f"{label}: {detail}")
+                continue
+            score = max(
+                mean_px / float(cls.LENS_DISTORTION_MAX_RESIDUAL_MEAN_PX),
+                max_px / float(cls.LENS_DISTORTION_MAX_RESIDUAL_MAX_PX),
+            )
+            preference = 0 if name == "raw" else 1
+            valid.append((score, mean_px, max_px, preference, name, candidate))
+        if not valid:
+            detail = "; ".join(failures) or "no fit candidates"
+            raise RuntimeError(
+                f"Lens distortion calibration residual is too high ({detail})."
+            )
+        _score, _mean, _maximum, _preference, selected_name, selected_payload = min(
+            valid
+        )
+        selected = dict(selected_payload)
+        selected["calibration_input"] = selected_name
+        selected["calibration_candidates"] = summaries
+        return selected
 
     @staticmethod
     def _validate_lens_distortion_fit_payload(payload: object) -> None:

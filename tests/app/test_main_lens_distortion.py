@@ -221,11 +221,20 @@ def test_run_lens_distortion_calibration_captures_offset_grid(
                 "frame_size": [1920, 1200],
                 "pixels_to_mm": [[0.1, 0.0], [0.0, 0.1]],
                 "calibrated_pixels_to_mm": [[0.1, 0.0], [0.0, 0.1]],
+                "residual_mean_px": 0.5,
+                "residual_max_px": 1.0,
             }
 
-    def fit_geometry(grid_frames, *, frame_size, pixels_to_mm=None):
+    def fit_geometry(
+        grid_frames,
+        *,
+        frame_size,
+        pixels_to_mm=None,
+        cluster_tolerance_px=None,
+    ):
         assert frame_size == (1920, 1200)
-        assert pixels_to_mm == ((0.1, 0.0), (0.0, 0.1))
+        assert pixels_to_mm == ((0.1, -0.0), (0.0, -0.1))
+        assert cluster_tolerance_px == 12.0
         return _Fit(grid_frames)
 
     window.stage_controller = stage
@@ -262,7 +271,7 @@ def test_run_lens_distortion_calibration_captures_offset_grid(
         return corrected
 
     def detect_corrected(frame):
-        assert isinstance(frame, _CorrectedFrame)
+        assert isinstance(frame, _FakeFrame)
         return SimpleNamespace(left=500.0, top=300.0, right=1420.0, bottom=900.0)
 
     monkeypatch.setattr(main_module, "apply_flat_field_correction", apply_flat)
@@ -288,24 +297,15 @@ def test_run_lens_distortion_calibration_captures_offset_grid(
         ("camera_restore", "lens-lock"),
         ("finish",),
     ]
-    assert captured_offsets == list(expected_offsets)
-    assert len(corrected_frames) == len(expected_offsets) + 1
-    assert finished == [
-        (
-            True,
-            "Lens distortion calibration saved.",
-            {
-                "model_version": 1,
-                "model_type": "stage_geometry",
-                "frame_size": [1920, 1200],
-                "pixels_to_mm": [[0.1, 0.0], [0.0, 0.1]],
-                "calibrated_pixels_to_mm": [[0.1, 0.0], [0.0, 0.1]],
-            },
-        )
-    ]
+    assert captured_offsets == list(expected_offsets) * 2
+    assert len(corrected_frames) == len(expected_offsets)
+    assert finished[0][0] is True
+    assert "raw 0.50/1.00 px" in finished[0][1]
+    assert "flat field 0.50/1.00 px" in finished[0][1]
+    assert finished[0][2]["calibration_input"] == "raw"
 
 
-def test_lens_distortion_calibration_requires_flat_field_before_motion() -> None:
+def test_lens_distortion_calibration_does_not_require_flat_field_before_motion() -> None:
     window = Main.__new__(Main)
     stage = _FakeStage()
     finished: list[tuple[bool, str, object]] = []
@@ -326,9 +326,12 @@ def test_lens_distortion_calibration_requires_flat_field_before_motion() -> None
 
     Main._run_lens_distortion_calibration(window, (10.0, 20.0))
 
-    assert stage.events == []
+    assert stage.events == [
+        ("begin", "lens distortion calibration"),
+        ("finish",),
+    ]
     assert finished[0][0] is False
-    assert "flat-field" in finished[0][1].lower()
+    assert "flat-field" not in finished[0][1].lower()
 
 
 def test_lens_distortion_auto_exposure_failure_releases_stage_without_move() -> None:
@@ -371,22 +374,44 @@ def test_lens_distortion_auto_exposure_failure_releases_stage_without_move() -> 
     ]
 
 
-def test_fit_lens_distortion_payload_prefers_stage_geometry(monkeypatch) -> None:
+def test_fit_lens_distortion_payload_uses_image_coordinate_matrix(monkeypatch) -> None:
     frames = [
         main_module.GridCalibrationFrame(_FakeFrame(), (0.0, 0.0)),
         main_module.GridCalibrationFrame(_FakeFrame(), (0.1, 0.0)),
     ]
     scale = SimpleNamespace(
-        pixels_to_mm=((-0.001, 0.0), (0.0, -0.001)),
+        pixels_to_mm=((-0.001, 0.0002), (0.0003, -0.0011)),
     )
     calls: list[tuple[object, ...]] = []
 
     class _Fit:
         def to_payload(self) -> dict[str, object]:
-            return {"model_version": 1, "model_type": "stage_geometry"}
+            return {
+                "model_version": 1,
+                "model_type": "stage_geometry",
+                "pixels_to_mm": [[-0.0009, -0.0004], [0.0002, 0.0012]],
+                "calibrated_pixels_to_mm": [
+                    [-0.0009, -0.0004],
+                    [0.0002, 0.0012],
+                ],
+            }
 
-    def fit_geometry(grid_frames, *, frame_size, pixels_to_mm):
-        calls.append(("geometry", tuple(grid_frames), frame_size, pixels_to_mm))
+    def fit_geometry(
+        grid_frames,
+        *,
+        frame_size,
+        pixels_to_mm,
+        cluster_tolerance_px,
+    ):
+        calls.append(
+            (
+                "geometry",
+                tuple(grid_frames),
+                frame_size,
+                pixels_to_mm,
+                cluster_tolerance_px,
+            )
+        )
         return _Fit()
 
     monkeypatch.setattr(main_module, "fit_stage_geometry_from_grid_frames", fit_geometry)
@@ -397,14 +422,198 @@ def test_fit_lens_distortion_payload_prefers_stage_geometry(monkeypatch) -> None
         scale=scale,
     )
 
-    assert payload == {"model_version": 1, "model_type": "stage_geometry"}
+    assert payload == {
+        "model_version": 1,
+        "model_type": "stage_geometry",
+        "pixels_to_mm": [[-0.0009, 0.0004], [0.0002, -0.0012]],
+        "calibrated_pixels_to_mm": [[-0.0009, 0.0004], [0.0002, -0.0012]],
+    }
     assert calls == [
         (
             "geometry",
             tuple(frames),
             (1920, 1200),
-            ((-0.001, 0.0), (0.0, -0.001)),
+            ((-0.001, -0.0002), (0.0003, 0.0011)),
+            12.0,
         )
+    ]
+
+
+def test_lens_distortion_fit_selection_uses_best_valid_candidate() -> None:
+    raw = {
+        "model_type": "stage_geometry",
+        "residual_mean_px": 1.7,
+        "residual_max_px": 4.2,
+    }
+    flat = {
+        "model_type": "stage_geometry",
+        "residual_mean_px": 1.4,
+        "residual_max_px": 5.6,
+    }
+
+    selected = Main._select_lens_distortion_fit_candidate(
+        {"raw": raw, "flat_field": flat}
+    )
+
+    assert selected["calibration_input"] == "flat_field"
+    assert selected["calibration_candidates"] == {
+        "raw": {"residual_mean_px": 1.7, "residual_max_px": 4.2},
+        "flat_field": {"residual_mean_px": 1.4, "residual_max_px": 5.6},
+    }
+
+
+def test_lens_distortion_fit_selection_rejects_invalid_candidates() -> None:
+    raw = {
+        "model_type": "stage_geometry",
+        "residual_mean_px": 4.5,
+        "residual_max_px": 19.7,
+    }
+    flat = {
+        "model_type": "stage_geometry",
+        "residual_mean_px": 3.2,
+        "residual_max_px": 10.0,
+    }
+
+    with pytest.raises(RuntimeError, match="raw.*4.50.*flat field.*3.20"):
+        Main._select_lens_distortion_fit_candidate(
+            {"raw": raw, "flat_field": flat}
+        )
+
+
+def test_lens_distortion_fit_selection_reports_rejected_candidate_metrics() -> None:
+    raw = {
+        "model_type": "stage_geometry",
+        "residual_mean_px": 4.5,
+        "residual_max_px": 19.7,
+    }
+    flat = {
+        "model_type": "stage_geometry",
+        "residual_mean_px": 1.4,
+        "residual_max_px": 5.6,
+    }
+
+    selected = Main._select_lens_distortion_fit_candidate(
+        {"raw": raw, "flat_field": flat}
+    )
+
+    assert selected["calibration_input"] == "flat_field"
+    assert selected["calibration_candidates"]["raw"] == {
+        "residual_mean_px": 4.5,
+        "residual_max_px": 19.7,
+    }
+
+
+def test_lens_distortion_candidates_compare_same_raw_frames(monkeypatch) -> None:
+    raw_frames = [
+        main_module.GridCalibrationFrame(_FakeFrame(), (0.0, 0.0)),
+        main_module.GridCalibrationFrame(_FakeFrame(), (0.1, 0.0)),
+    ]
+    corrected: list[object] = []
+    calls: list[tuple[object, ...]] = []
+
+    class _CorrectedFrame(_FakeFrame):
+        pass
+
+    def apply_flat(frame, profile):
+        assert profile == "flat-profile"
+        result = _CorrectedFrame()
+        corrected.append(result)
+        return result
+
+    def fit_payload(frames, *, frame_size, scale, validate=True):
+        calls.append(tuple(frame.frame for frame in frames))
+        assert frame_size == (1920, 1200)
+        assert scale == "scale"
+        assert validate is False
+        is_flat = isinstance(frames[0].frame, _CorrectedFrame)
+        return {
+            "model_type": "stage_geometry",
+            "residual_mean_px": 1.2 if is_flat else 1.8,
+            "residual_max_px": 4.0 if is_flat else 5.0,
+        }
+
+    monkeypatch.setattr(main_module, "apply_flat_field_correction", apply_flat)
+    monkeypatch.setattr(Main, "_fit_lens_distortion_payload", staticmethod(fit_payload))
+
+    selected = Main._fit_lens_distortion_candidates(
+        raw_frames,
+        frame_size=(1920, 1200),
+        scale="scale",
+        flat_field_profile="flat-profile",
+    )
+
+    assert len(calls) == 2
+    assert calls[0] == tuple(frame.frame for frame in raw_frames)
+    assert calls[1] == tuple(corrected)
+    assert selected["calibration_input"] == "flat_field"
+
+
+def test_lens_distortion_candidates_use_raw_when_flat_field_is_unavailable(
+    monkeypatch,
+) -> None:
+    raw_frames = [
+        main_module.GridCalibrationFrame(_FakeFrame(), (0.0, 0.0)),
+        main_module.GridCalibrationFrame(_FakeFrame(), (0.1, 0.0)),
+    ]
+    calls: list[tuple[object, ...]] = []
+
+    def fit_payload(frames, *, frame_size, scale, validate=True):
+        calls.append(tuple(frame.frame for frame in frames))
+        assert validate is False
+        return {
+            "model_type": "stage_geometry",
+            "residual_mean_px": 1.8,
+            "residual_max_px": 5.0,
+        }
+
+    monkeypatch.setattr(Main, "_fit_lens_distortion_payload", staticmethod(fit_payload))
+
+    selected = Main._fit_lens_distortion_candidates(
+        raw_frames,
+        frame_size=(1920, 1200),
+        scale="scale",
+        flat_field_profile=None,
+    )
+
+    assert calls == [tuple(frame.frame for frame in raw_frames)]
+    assert selected["calibration_input"] == "raw"
+
+
+def test_lens_distortion_candidates_keep_raw_when_flat_correction_fails(
+    monkeypatch,
+) -> None:
+    raw_frames = [
+        main_module.GridCalibrationFrame(_FakeFrame(), (0.0, 0.0)),
+        main_module.GridCalibrationFrame(_FakeFrame(), (0.1, 0.0)),
+    ]
+
+    def fit_payload(frames, *, frame_size, scale, validate=True):
+        assert validate is False
+        return {
+            "model_type": "stage_geometry",
+            "residual_mean_px": 1.8,
+            "residual_max_px": 5.0,
+        }
+
+    monkeypatch.setattr(Main, "_fit_lens_distortion_payload", staticmethod(fit_payload))
+    monkeypatch.setattr(
+        main_module,
+        "apply_flat_field_correction",
+        lambda _frame, _profile: (_ for _ in ()).throw(
+            ValueError("profile size mismatch")
+        ),
+    )
+
+    selected = Main._fit_lens_distortion_candidates(
+        raw_frames,
+        frame_size=(1920, 1200),
+        scale="scale",
+        flat_field_profile="stale-profile",
+    )
+
+    assert selected["calibration_input"] == "raw"
+    assert selected["calibration_candidate_failures"] == [
+        "flat field: profile size mismatch"
     ]
 
 
