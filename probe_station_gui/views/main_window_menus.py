@@ -32,6 +32,7 @@ class MainWindowMenuOwner(Protocol):
     _contact_calibration_window_action: Any
     _surface_map_window_action: Any
     _microscope_scan_action: Any
+    _optical_calibration_action: Any
     _click_calibration_action: Any
     _lens_distortion_calibration_action: Any
     _ruler_action: Any
@@ -43,6 +44,7 @@ class MainWindowMenuOwner(Protocol):
     def addAction(self, action: Any) -> None: ...  # noqa: N802 - Qt naming
     def _open_status_log(self) -> None: ...
     def _show_click_calibration_dialog(self) -> None: ...
+    def _show_optical_calibration_wizard(self) -> None: ...
     def _show_lens_distortion_dialog(self) -> None: ...
     def _on_measure_action_toggled(self, checked: bool) -> None: ...
     def _capture_manual_alignment_center_shortcut(self) -> None: ...
@@ -130,6 +132,12 @@ def _add_calibration_actions(owner: MainWindowMenuOwner, calibration_menu: Any) 
         lambda _checked=False: show_microscope_scan_dialog(owner)
     )
     calibration_menu.addAction(owner._microscope_scan_action)
+
+    owner._optical_calibration_action = QAction("Optical Calibration", owner)
+    owner._optical_calibration_action.triggered.connect(
+        owner._show_optical_calibration_wizard
+    )
+    calibration_menu.addAction(owner._optical_calibration_action)
 
     owner._click_calibration_action = QAction("Click-to-Move Calibration", owner)
     owner._click_calibration_action.triggered.connect(

@@ -88,7 +88,7 @@ class _FakeFrame:
         return 1200
 
 
-def test_lens_distortion_capture_offsets_cover_five_by_five_grid() -> None:
+def test_lens_distortion_capture_offsets_cover_center_edges_and_corners() -> None:
     scale = SimpleNamespace(
         pixel_size_x_mm=0.001174,
         pixel_size_y_mm=0.001169,
@@ -96,10 +96,10 @@ def test_lens_distortion_capture_offsets_cover_five_by_five_grid() -> None:
 
     offsets = Main._lens_distortion_capture_offsets_mm((1920, 1200), scale)
 
-    assert len(offsets) == 25
+    assert len(offsets) == 9
     assert offsets[0] == (0.0, 0.0)
-    assert len({round(x, 9) for x, _y in offsets}) == 5
-    assert len({round(y, 9) for _x, y in offsets}) == 5
+    assert len({round(x, 9) for x, _y in offsets}) == 3
+    assert len({round(y, 9) for _x, y in offsets}) == 3
     max_x = max(abs(x) for x, _y in offsets)
     max_y = max(abs(y) for _x, y in offsets)
     assert max_x <= (1920 * scale.pixel_size_x_mm - Main.LENS_DISTORTION_GRID_STEP_MM * Main.LENS_DISTORTION_GRID_CELL_COUNT) * 0.5
@@ -146,7 +146,7 @@ def test_lens_distortion_capture_offsets_use_detected_feature_bounds(monkeypatch
     )
     expected_x_px = (250.0 - edge_margin) * Main.LENS_DISTORTION_EDGE_MARGIN_FRACTION
     expected_y_px = (150.0 - edge_margin) * Main.LENS_DISTORTION_EDGE_MARGIN_FRACTION
-    assert len(offsets) == 25
+    assert len(offsets) == 9
     assert offsets[0] == (0.0, 0.0)
     assert max(abs(x) for x, _y in offsets) == pytest.approx(expected_x_px * 0.001)
     assert max(abs(y) for _x, y in offsets) == pytest.approx(expected_y_px * 0.001)
@@ -195,12 +195,17 @@ def test_run_lens_distortion_calibration_captures_offset_grid(
         scale,
         initial_frame=_FakeFrame(),
     )
-    frames = [_FakeFrame() for _ in range(len(expected_offsets) + 1)]
+    raw_frames = [_FakeFrame() for _ in range(len(expected_offsets) + 1)]
     captured_offsets: list[tuple[float, float]] = []
+    corrected_frames: list[object] = []
+
+    class _CorrectedFrame(_FakeFrame):
+        def __init__(self, raw: object) -> None:
+            self.raw = raw
 
     def wait_for_frame(*, after_counter=None, timeout_s=2.0):
         assert after_counter in (None, 0)
-        return frames.pop(0), 1
+        return raw_frames.pop(0), 1
 
     class _Fit:
         def __init__(self, grid_frames) -> None:
@@ -224,6 +229,23 @@ def test_run_lens_distortion_calibration_captures_offset_grid(
         return _Fit(grid_frames)
 
     window.stage_controller = stage
+    window._active_objective_metadata = lambda: ("X20", 20.0)
+    window._flat_field_calibration_store = SimpleNamespace(
+        load=lambda objective: (
+            stage.events.append(("load_flat", objective))
+            or SimpleNamespace(profile="flat-profile")
+        )
+    )
+    window._run_camera_auto_exposure = lambda: (
+        stage.events.append(("auto_exposure",))
+        or {"accepted": True, "converged": True}
+    )
+    window._apply_microscope_scan_camera_lock = lambda settings: (
+        stage.events.append(("camera_lock", settings.enabled)) or "lens-lock"
+    )
+    window._restore_microscope_scan_camera_lock = lambda key: (
+        stage.events.append(("camera_restore", key)) or ""
+    )
     window._current_needle_feedrate = lambda: 71.0
     window._coordinate_feedrate_for_axes = lambda axes: 123.0
     window._latest_raw_camera_counter = lambda: 0
@@ -233,19 +255,41 @@ def test_run_lens_distortion_calibration_captures_offset_grid(
     window._emit_lens_distortion_finished = (
         lambda success, message, payload: finished.append((success, message, payload))
     )
+    def apply_flat(frame, profile):
+        assert profile == "flat-profile"
+        corrected = _CorrectedFrame(frame)
+        corrected_frames.append(corrected)
+        return corrected
+
+    def detect_corrected(frame):
+        assert isinstance(frame, _CorrectedFrame)
+        return SimpleNamespace(left=500.0, top=300.0, right=1420.0, bottom=900.0)
+
+    monkeypatch.setattr(main_module, "apply_flat_field_correction", apply_flat)
+    monkeypatch.setattr(main_module, "detect_bright_feature_bounds", detect_corrected)
     monkeypatch.setattr(main_module, "fit_stage_geometry_from_grid_frames", fit_geometry)
     monkeypatch.setattr(main_module.time, "sleep", lambda _seconds: None)
 
     Main._run_lens_distortion_calibration(window, (10.0, 20.0))
 
-    assert stage.events[0] == ("begin", "lens distortion calibration")
-    assert stage.events[1] == ("needles", "raise", 71.0)
-    capture_moves = stage.events[2 : 2 + len(expected_offsets)]
+    assert stage.events[:5] == [
+        ("load_flat", "X20"),
+        ("auto_exposure",),
+        ("begin", "lens distortion calibration"),
+        ("camera_lock", True),
+        ("needles", "raise", 71.0),
+    ]
+    capture_moves = [event for event in stage.events if event[0] == "move"][:-1]
     assert capture_moves[0] == ("move", 10.0, 20.0, 123.0)
     last_dx, last_dy = expected_offsets[-1]
     assert capture_moves[-1] == ("move", 10.0 + last_dx, 20.0 + last_dy, 123.0)
-    assert stage.events[-2:] == [("move", 10.0, 20.0, 123.0), ("finish",)]
+    assert stage.events[-3:] == [
+        ("move", 10.0, 20.0, 123.0),
+        ("camera_restore", "lens-lock"),
+        ("finish",),
+    ]
     assert captured_offsets == list(expected_offsets)
+    assert len(corrected_frames) == len(expected_offsets) + 1
     assert finished == [
         (
             True,
@@ -259,6 +303,32 @@ def test_run_lens_distortion_calibration_captures_offset_grid(
             },
         )
     ]
+
+
+def test_lens_distortion_calibration_requires_flat_field_before_motion() -> None:
+    window = Main.__new__(Main)
+    stage = _FakeStage()
+    finished: list[tuple[bool, str, object]] = []
+    window.stage_controller = stage
+    window._active_microscope_scale = lambda: SimpleNamespace(
+        pixels_to_mm=((0.1, 0.0), (0.0, 0.1)),
+    )
+    window._active_objective_metadata = lambda: ("X20", 20.0)
+    window._flat_field_calibration_store = SimpleNamespace(
+        load=lambda _objective: (_ for _ in ()).throw(FileNotFoundError("missing"))
+    )
+    window._current_needle_feedrate = lambda: 71.0
+    window._coordinate_feedrate_for_axes = lambda _axes: 123.0
+    window._show_status = lambda *_args: None
+    window._emit_lens_distortion_finished = (
+        lambda success, message, payload: finished.append((success, message, payload))
+    )
+
+    Main._run_lens_distortion_calibration(window, (10.0, 20.0))
+
+    assert stage.events == []
+    assert finished[0][0] is False
+    assert "flat-field" in finished[0][1].lower()
 
 
 def test_fit_lens_distortion_payload_prefers_stage_geometry(monkeypatch) -> None:

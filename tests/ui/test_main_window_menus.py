@@ -43,6 +43,7 @@ class _MenuOwner(QMainWindow):
         self._contact_calibration_window_action = None
         self._surface_map_window_action = None
         self._microscope_scan_action = None
+        self._optical_calibration_action = None
         self._click_calibration_action = None
         self._lens_distortion_calibration_action = None
         self._ruler_action = None
@@ -82,6 +83,9 @@ class _MenuOwner(QMainWindow):
 
     def _show_click_calibration_dialog(self) -> None:
         self._record("click_calibration")
+
+    def _show_optical_calibration_wizard(self) -> None:
+        self._record("optical_calibration")
 
     def _show_lens_distortion_dialog(self) -> None:
         self._record("lens_distortion")
@@ -163,6 +167,7 @@ def test_setup_main_window_menus_preserves_labels_and_shortcuts(
         "Contact / Stone Calibration",
         "Surface Map",
         "Microscope Scan",
+        "Optical Calibration",
         "Click-to-Move Calibration",
         "Lens Distortion Calibration",
         "Alignment",
@@ -186,12 +191,14 @@ def test_setup_main_window_menus_preserves_labels_and_shortcuts(
     window._contact_calibration_window_action.trigger()
     window._surface_map_window_action.trigger()
     window._microscope_scan_action.trigger()
+    window._optical_calibration_action.trigger()
     window._lens_distortion_calibration_action.trigger()
 
     assert ("design", True) in window.calls
     assert ("contact", True) in window.calls
     assert ("surface", None) in window.calls
     assert ("microscope", None) in window.calls
+    assert ("optical_calibration", None) in window.calls
     assert ("lens_distortion", None) in window.calls
 
     window.close()

@@ -378,6 +378,10 @@ from probe_station_gui.views.contact_oscillation_window import (
 )
 from probe_station_gui.dialogs.click_calibration_dialog import ClickCalibrationDialog
 from probe_station_gui.dialogs.lens_distortion_dialog import LensDistortionDialog
+from probe_station_gui.dialogs.optical_calibration_wizard import (
+    OpticalCalibrationMode,
+    OpticalCalibrationWizard,
+)
 from probe_station_gui.views.dock_widgets import CollapsibleDockWidget
 from probe_station_gui.views.oscillation_panel import OscillationPanel
 from probe_station_gui.views.resistance_monitor_panel import ResistanceMonitorPanel
@@ -479,7 +483,9 @@ class Main(QMainWindow):
     telegram_bot_request_received: Signal = Signal(object)
     microscope_scan_status: Signal = Signal(str)
     microscope_scan_finished: Signal = Signal(bool, str)
+    flat_field_calibration_progress: Signal = Signal(str)
     flat_field_calibration_finished: Signal = Signal(bool, str, object)
+    lens_distortion_calibration_progress: Signal = Signal(str)
     lens_distortion_calibration_finished: Signal = Signal(bool, str, object)
     contact_seek_status: Signal = Signal(str)
     contact_seek_calibration_found: Signal = Signal(float, str)
@@ -559,7 +565,7 @@ class Main(QMainWindow):
     SAMPLE_UNLOAD_Y_MM = sample_handling.SAMPLE_UNLOAD_Y_MM
     LENS_DISTORTION_GRID_STEP_MM = 0.05
     LENS_DISTORTION_GRID_CELL_COUNT = 4
-    LENS_DISTORTION_CAPTURE_GRID_SIZE = 5
+    LENS_DISTORTION_CAPTURE_GRID_SIZE = 3
     LENS_DISTORTION_FOV_FRACTION = 0.35
     LENS_DISTORTION_EDGE_MARGIN_FRACTION = 0.85
     LENS_DISTORTION_FEATURE_EDGE_MARGIN_FRACTION = 0.02
@@ -649,8 +655,10 @@ class Main(QMainWindow):
         self._microscope_scan_action: QAction | None = None
         self._design_layout_window_action: QAction | None = None
         self._click_calibration_action: QAction | None = None
+        self._optical_calibration_action: QAction | None = None
         self._lens_distortion_calibration_action: QAction | None = None
         self._click_calibration_dialog: ClickCalibrationDialog | None = None
+        self._optical_calibration_wizard: OpticalCalibrationWizard | None = None
         self._lens_distortion_dialog: LensDistortionDialog | None = None
         self._sample_load_action: QAction | None = None
         self._sample_unload_action: QAction | None = None
@@ -777,7 +785,9 @@ class Main(QMainWindow):
         self._microscope_scan_thread: threading.Thread | None = None
         self._microscope_scan_stop_requested = threading.Event()
         self._flat_field_calibration_thread: threading.Thread | None = None
+        self._flat_field_wizard_run_id: int | None = None
         self._lens_distortion_thread: threading.Thread | None = None
+        self._lens_distortion_wizard_run_id: int | None = None
         self._sample_handling_thread: threading.Thread | None = None
         self._last_sample_focus_z_by_objective: dict[str, float] = {}
         self._route_telegram = RouteTelegramPhotoState()
@@ -857,8 +867,14 @@ class Main(QMainWindow):
         )
         self.microscope_scan_status.connect(self._on_microscope_scan_status)
         self.microscope_scan_finished.connect(self._on_microscope_scan_finished)
+        self.flat_field_calibration_progress.connect(
+            self._on_flat_field_calibration_progress
+        )
         self.flat_field_calibration_finished.connect(
             self._on_flat_field_calibration_finished
+        )
+        self.lens_distortion_calibration_progress.connect(
+            self._on_lens_distortion_calibration_progress
         )
         self.lens_distortion_calibration_finished.connect(
             self._on_lens_distortion_calibration_finished
@@ -4344,10 +4360,55 @@ class Main(QMainWindow):
         self._click_calibration_dialog.raise_()
         self._click_calibration_dialog.activateWindow()
 
+    def _show_optical_calibration_wizard(
+        self,
+        mode: OpticalCalibrationMode | None = None,
+    ) -> None:
+        if self._optical_calibration_wizard is None:
+            wizard = OpticalCalibrationWizard(self)
+            wizard.start_flat_field_requested.connect(
+                self._start_flat_field_calibration_from_wizard
+            )
+            wizard.start_lens_distortion_requested.connect(
+                self._start_lens_distortion_calibration_from_wizard
+            )
+            self._optical_calibration_wizard = wizard
+
+        objectives = self.settings_manager.objectives_configuration()
+        active_name = normalize_objective_name(objectives.active_name)
+        profile = objectives.objectives.get(active_name)
+        flat_field_configured = False
+        if active_name:
+            try:
+                flat_field_configured = (
+                    self._flat_field_calibration_store.current_manifest_path(
+                        active_name
+                    ).is_file()
+                )
+            except (OSError, ValueError):
+                flat_field_configured = False
+        self._optical_calibration_wizard.set_objective(
+            active_name,
+            flat_field_configured=flat_field_configured,
+            lens_configured=bool(
+                profile is not None
+                and profile.distortion_correction_configured
+            ),
+        )
+        if not self._optical_calibration_wizard.prepare(mode):
+            self._show_status("Optical calibration is already running.", 4000)
+        self._optical_calibration_wizard.show()
+        self._optical_calibration_wizard.raise_()
+        self._optical_calibration_wizard.activateWindow()
+
     def _show_lens_distortion_dialog(self) -> None:
         if self._lens_distortion_dialog is None:
             dialog = LensDistortionDialog(self)
-            dialog.calibrate_requested.connect(self._start_lens_distortion_calibration)
+            dialog.calibrate_requested.connect(
+                lambda: self._show_optical_calibration_wizard(
+                    OpticalCalibrationMode.LENS_DISTORTION
+                )
+            )
             dialog.reset_requested.connect(self._reset_lens_distortion_calibration)
             self._lens_distortion_dialog = dialog
         self._refresh_lens_distortion_ui()
@@ -4461,24 +4522,80 @@ class Main(QMainWindow):
         self._refresh_click_calibration_ui()
         self._refresh_lens_distortion_ui()
 
-    def _start_flat_field_calibration(self) -> None:
+    def _start_flat_field_calibration_from_wizard(self) -> None:
+        wizard = self._optical_calibration_wizard
+        if wizard is None:
+            return
+        run_id = wizard.active_run_id()
+        if not self._optical_calibration_objective_matches_wizard(wizard):
+            wizard.set_flat_field_result(
+                False,
+                "Active objective changed. Reopen optical calibration.",
+                run_id=run_id,
+            )
+            return
+        self._flat_field_wizard_run_id = run_id
+        if self._start_flat_field_calibration():
+            return
+        self._flat_field_wizard_run_id = None
+        wizard.set_flat_field_result(
+            False,
+            "Flat-field calibration did not start.",
+            run_id=run_id,
+        )
+
+    def _start_lens_distortion_calibration_from_wizard(self) -> None:
+        wizard = self._optical_calibration_wizard
+        if wizard is None:
+            return
+        run_id = wizard.active_run_id()
+        if not self._optical_calibration_objective_matches_wizard(wizard):
+            wizard.set_lens_distortion_result(
+                False,
+                "Active objective changed. Reopen optical calibration.",
+                run_id=run_id,
+            )
+            return
+        self._lens_distortion_wizard_run_id = run_id
+        if self._start_lens_distortion_calibration():
+            return
+        self._lens_distortion_wizard_run_id = None
+        wizard.set_lens_distortion_result(
+            False,
+            "Lens distortion calibration did not start.",
+            run_id=run_id,
+        )
+
+    def _optical_calibration_objective_matches_wizard(
+        self,
+        wizard: OpticalCalibrationWizard,
+    ) -> bool:
+        current_name, _magnification = self._active_objective_metadata()
+        return normalize_objective_name(current_name) == normalize_objective_name(
+            wizard.objective_text()
+        )
+
+    def _start_flat_field_calibration(self) -> bool:
         if self._flat_field_calibration_running():
             self._show_status("Flat-field calibration is already running.", 4000)
-            return
+            return False
+        if self._lens_distortion_calibration_running():
+            self._show_status("Lens distortion calibration is already running.", 4000)
+            return False
         if not self._stage_serial_ready():
             self._show_status("Connect the stage controller before calibration.", 5000)
-            return
+            return False
         if self.stage_controller.is_busy():
             self._show_status("Stage is busy; flat-field calibration not started.", 5000)
-            return
+            return False
         try:
             position = self.stage_controller.current_stage_position()
         except StageControllerError as exc:
             self._show_status(str(exc), 5000)
-            return
+            return False
         if len(position) < 2:
             self._show_status("Unable to read X/Y stage position.", 5000)
-            return
+            return False
 
         start_xy = (float(position[0]), float(position[1]))
         thread = threading.Thread(
@@ -4494,10 +4611,18 @@ class Main(QMainWindow):
         self._flat_field_calibration_thread = thread
         self._show_status("Flat-field calibration started.", 4000)
         thread.start()
+        return True
 
     def _flat_field_calibration_running(self) -> bool:
         thread = getattr(self, "_flat_field_calibration_thread", None)
         return thread is not None and thread.is_alive()
+
+    def _report_flat_field_calibration_progress(self, message: str) -> None:
+        self._show_status(message)
+        try:
+            self.flat_field_calibration_progress.emit(message)
+        except RuntimeError:
+            pass
 
     def _run_flat_field_calibration(
         self,
@@ -4521,7 +4646,9 @@ class Main(QMainWindow):
             else float(needle_feedrate)
         )
         try:
-            self._show_status("Flat-field calibration: adjusting exposure.")
+            self._report_flat_field_calibration_progress(
+                "Flat-field calibration: adjusting exposure."
+            )
             auto_exposure = self._run_camera_auto_exposure()
             if not bool(auto_exposure.get("accepted", False)):
                 raise RuntimeError(
@@ -4555,7 +4682,9 @@ class Main(QMainWindow):
                     settings=microscope_scan.DEFAULT_CAMERA_LOCK_SETTINGS,
                 )
             )
-            self._show_status("Flat-field calibration: raising needles.")
+            self._report_flat_field_calibration_progress(
+                "Flat-field calibration: raising needles."
+            )
             self.stage_controller.run_external_needles_action(
                 "raise",
                 needle_feedrate_value,
@@ -4564,7 +4693,7 @@ class Main(QMainWindow):
             frames: list[QImage] = []
             total = len(capture_offsets)
             for index, (dx_mm, dy_mm) in enumerate(capture_offsets, start=1):
-                self._show_status(
+                self._report_flat_field_calibration_progress(
                     f"Flat-field calibration: capture {index}/{total}."
                 )
                 self.stage_controller.run_external_move_to_xy(
@@ -4618,7 +4747,9 @@ class Main(QMainWindow):
         finally:
             if stage_reserved:
                 try:
-                    self._show_status("Flat-field calibration: returning to start.")
+                    self._report_flat_field_calibration_progress(
+                        "Flat-field calibration: returning to start."
+                    )
                     self.stage_controller.run_external_move_to_xy(
                         start_xy[0],
                         start_xy[1],
@@ -4685,6 +4816,12 @@ class Main(QMainWindow):
     ) -> None:
         self.flat_field_calibration_finished.emit(success, message, payload)
 
+    def _on_flat_field_calibration_progress(self, message: str) -> None:
+        wizard = getattr(self, "_optical_calibration_wizard", None)
+        run_id = getattr(self, "_flat_field_wizard_run_id", None)
+        if wizard is not None and run_id is not None:
+            wizard.set_progress(message, run_id=run_id)
+
     def _on_flat_field_calibration_finished(
         self,
         success: bool,
@@ -4695,26 +4832,38 @@ class Main(QMainWindow):
         if thread is not None and not thread.is_alive():
             thread.join(timeout=0.1)
         self._flat_field_calibration_thread = None
+        run_id = getattr(self, "_flat_field_wizard_run_id", None)
+        self._flat_field_wizard_run_id = None
+        wizard = getattr(self, "_optical_calibration_wizard", None)
+        if wizard is not None and run_id is not None:
+            wizard.set_flat_field_result(
+                success,
+                message,
+                run_id=run_id,
+            )
         self._show_status(message, 10000 if success else 8000)
 
-    def _start_lens_distortion_calibration(self) -> None:
+    def _start_lens_distortion_calibration(self) -> bool:
         if self._lens_distortion_calibration_running():
             self._show_status("Lens distortion calibration is already running.", 4000)
-            return
+            return False
+        if self._flat_field_calibration_running():
+            self._show_status("Flat-field calibration is already running.", 4000)
+            return False
         if not self._stage_serial_ready():
             self._show_status("Connect the stage controller before calibration.", 5000)
-            return
+            return False
         if self.stage_controller.is_busy():
             self._show_status("Stage is busy; lens distortion calibration not started.", 5000)
-            return
+            return False
         try:
             position = self.stage_controller.current_stage_position()
         except StageControllerError as exc:
             self._show_status(str(exc), 5000)
-            return
+            return False
         if len(position) < 2:
             self._show_status("Unable to read X/Y stage position.", 5000)
-            return
+            return False
 
         start_xy = (float(position[0]), float(position[1]))
         linear_feedrate = self._coordinate_feedrate_for_axes(("X", "Y"))
@@ -4732,6 +4881,7 @@ class Main(QMainWindow):
             )
         self._show_status("Lens distortion calibration started.", 4000)
         thread.start()
+        return True
 
     def _reset_lens_distortion_calibration(self) -> None:
         if self._lens_distortion_calibration_running():
@@ -4755,6 +4905,13 @@ class Main(QMainWindow):
         thread = getattr(self, "_lens_distortion_thread", None)
         return thread is not None and thread.is_alive()
 
+    def _report_lens_distortion_calibration_progress(self, message: str) -> None:
+        self._show_status(message)
+        try:
+            self.lens_distortion_calibration_progress.emit(message)
+        except RuntimeError:
+            pass
+
     def _run_lens_distortion_calibration(
         self,
         start_xy: tuple[float, float],
@@ -4765,6 +4922,7 @@ class Main(QMainWindow):
         success = False
         message = "Lens distortion calibration stopped."
         reserved = False
+        camera_restore_key: str | None = None
         feedrate = (
             self._coordinate_feedrate_for_axes(("X", "Y"))
             if linear_feedrate is None
@@ -4776,9 +4934,38 @@ class Main(QMainWindow):
             else float(needle_feedrate)
         )
         try:
+            objective_name, _magnification = self._active_objective_metadata()
+            if not objective_name:
+                raise RuntimeError("No active objective selected.")
+            try:
+                flat_field = self._flat_field_calibration_store.load(objective_name)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Flat-field profile for {objective_name} is unavailable: {exc}"
+                ) from exc
+            self._report_lens_distortion_calibration_progress(
+                "Lens distortion calibration: adjusting exposure."
+            )
+            auto_exposure = self._run_camera_auto_exposure()
+            if not bool(auto_exposure.get("accepted", False)):
+                raise RuntimeError(
+                    str(
+                        auto_exposure.get("message")
+                        or "Camera auto exposure failed."
+                    )
+                )
+
             self.stage_controller.begin_external_task("lens distortion calibration")
             reserved = True
-            self._show_status("Lens distortion calibration: raising needles.")
+            camera_restore_key = self._apply_microscope_scan_camera_lock(
+                microscope_scan.CameraLockSettings(
+                    enabled=True,
+                    settings=microscope_scan.DEFAULT_CAMERA_LOCK_SETTINGS,
+                )
+            )
+            self._report_lens_distortion_calibration_progress(
+                "Lens distortion calibration: raising needles."
+            )
             self.stage_controller.run_external_needles_action(
                 "raise",
                 needle_feedrate_value,
@@ -4790,16 +4977,20 @@ class Main(QMainWindow):
             if initial_frame is None:
                 raise RuntimeError("Camera frame timeout.")
             frame_size = self._lens_distortion_frame_size(initial_frame)
+            corrected_initial_frame = apply_flat_field_correction(
+                initial_frame,
+                flat_field.profile,
+            )
             capture_offsets = self._lens_distortion_capture_offsets_mm(
                 frame_size,
                 scale,
-                initial_frame=initial_frame,
+                initial_frame=corrected_initial_frame,
             )
             frames: list[GridCalibrationFrame] = []
             total = len(capture_offsets)
             for index, offset in enumerate(capture_offsets, start=1):
                 dx_mm, dy_mm = offset
-                self._show_status(
+                self._report_lens_distortion_calibration_progress(
                     f"Lens distortion calibration: capture {index}/{total}."
                 )
                 self.stage_controller.run_external_move_to_xy(
@@ -4818,7 +5009,11 @@ class Main(QMainWindow):
                 current_frame_size = self._lens_distortion_frame_size(frame)
                 if current_frame_size != frame_size:
                     raise RuntimeError("Camera frame size changed during calibration.")
-                frames.append(GridCalibrationFrame(frame, (dx_mm, dy_mm)))
+                corrected_frame = apply_flat_field_correction(
+                    frame,
+                    flat_field.profile,
+                )
+                frames.append(GridCalibrationFrame(corrected_frame, (dx_mm, dy_mm)))
 
             payload = self._fit_lens_distortion_payload(
                 frames,
@@ -4833,7 +5028,9 @@ class Main(QMainWindow):
         finally:
             if reserved:
                 try:
-                    self._show_status("Lens distortion calibration: returning to start.")
+                    self._report_lens_distortion_calibration_progress(
+                        "Lens distortion calibration: returning to start."
+                    )
                     self.stage_controller.run_external_move_to_xy(
                         start_xy[0],
                         start_xy[1],
@@ -4843,8 +5040,17 @@ class Main(QMainWindow):
                     logger.exception("Lens distortion calibration restore failed")
                     success = False
                     message = f"Lens distortion calibration restore failed: {exc}"
-                finally:
-                    self.stage_controller.finish_external_task()
+                if camera_restore_key is not None:
+                    restore_error = self._restore_microscope_scan_camera_lock(
+                        camera_restore_key
+                    )
+                    if restore_error:
+                        success = False
+                        message = (
+                            "Lens distortion camera settings restore failed: "
+                            f"{restore_error}"
+                        )
+                self.stage_controller.finish_external_task()
             self._emit_lens_distortion_finished(success, message, payload)
 
     def _emit_lens_distortion_finished(
@@ -5114,7 +5320,22 @@ class Main(QMainWindow):
         if self._lens_distortion_dialog is not None:
             self._lens_distortion_dialog.set_running(False)
             self._lens_distortion_dialog.set_status(message)
+        run_id = getattr(self, "_lens_distortion_wizard_run_id", None)
+        self._lens_distortion_wizard_run_id = None
+        wizard = getattr(self, "_optical_calibration_wizard", None)
+        if wizard is not None and run_id is not None:
+            wizard.set_lens_distortion_result(
+                success,
+                message,
+                run_id=run_id,
+            )
         self._show_status(message, 10000 if success else 8000)
+
+    def _on_lens_distortion_calibration_progress(self, message: str) -> None:
+        wizard = getattr(self, "_optical_calibration_wizard", None)
+        run_id = getattr(self, "_lens_distortion_wizard_run_id", None)
+        if wizard is not None and run_id is not None:
+            wizard.set_progress(message, run_id=run_id)
 
     def _save_active_objective_distortion(self, payload: object | None) -> None:
         settings = self.settings_manager.settings.clone()
