@@ -8,8 +8,9 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QDoubleValidator
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 
 from probe_station_gui.stage.position_presenter import (
     AxisFieldPresentation,
@@ -314,19 +315,34 @@ def test_confidence_update_restyles_only_the_changed_axis(
     panel.deleteLater()
 
 
-def test_position_legend_covers_fill_and_confidence_semantics(
+def test_position_legend_uses_aligned_semantic_groups(
     qt_app: QApplication,
 ) -> None:
     panel = StagePositionPanel(("X",))
 
-    legend = panel.legend_label
-    assert "Homed" in legend.text()
-    assert "Unhomed" in legend.text()
-    assert "Limit" in legend.text()
-    assert "Edited" in legend.text()
-    assert "Exact" in legend.text()
-    assert "Approximate" in legend.text()
-    assert "backlash" in legend.toolTip().lower()
+    assert tuple(panel._legend_titles) == ("Field state:", "Accuracy:")
+    assert tuple(item.label.text() for item in panel._legend_groups["Field state:"]) == (
+        "Homed",
+        "Unhomed",
+        "Limit",
+        "Edited",
+    )
+    assert tuple(item.label.text() for item in panel._legend_groups["Accuracy:"]) == (
+        "Exact",
+        "Approximate",
+    )
+    state_sizes = {item.swatch.size() for item in panel._legend_groups["Field state:"]}
+    accuracy_sizes = {
+        item.swatch.size() for item in panel._legend_groups["Accuracy:"]
+    }
+    assert len(state_sizes) == 1
+    assert len(accuracy_sizes) == 1
+    assert "backlash" in panel.legend_widget.toolTip().lower()
+    assert all(
+        label.textFormat() != Qt.RichText
+        and "font-size: 9px" not in label.styleSheet()
+        for label in panel.legend_widget.findChildren(QLabel)
+    )
 
     panel.deleteLater()
 

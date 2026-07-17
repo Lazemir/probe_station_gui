@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass
 
 from PySide6.QtCore import QLocale, Qt, Signal
 from PySide6.QtGui import QDoubleValidator, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QHBoxLayout,
+    QFrame,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -32,6 +34,12 @@ DIMMED_BACKGROUNDS = {
     "#c62828": "#e57373",
     "#d7b8ff": "#ead6ff",
 }
+
+
+@dataclass(frozen=True)
+class _LegendItem:
+    swatch: QFrame
+    label: QLabel
 
 
 def format_stage_axis_value(value: float) -> str:
@@ -145,23 +153,68 @@ class StagePositionPanel(QWidget):
         self._cancel_button.clicked.connect(self.cancel_requested.emit)
         layout.addWidget(self._cancel_button)
 
-        self._legend_label = QLabel(self)
-        self._legend_label.setTextFormat(Qt.RichText)
-        self._legend_label.setText(
-            '<span style="color:#1565c0">■</span> Homed&nbsp;&nbsp;'
-            '<span style="color:#f0b429">■</span> Unhomed&nbsp;&nbsp;'
-            '<span style="color:#c62828">■</span> Limit&nbsp;&nbsp;'
-            '<span style="color:#d7b8ff">■</span> Edited&nbsp;&nbsp;'
-            '<span style="color:#2e7d32">▂</span> Exact&nbsp;&nbsp;'
-            '<span style="color:#d32f2f">▂</span> Approximate'
-        )
-        self._legend_label.setToolTip(
+        self._legend_titles = ("Field state:", "Accuracy:")
+        self._legend_groups: dict[str, tuple[_LegendItem, ...]] = {}
+        self._legend_widget = QWidget(self)
+        self._legend_widget.setToolTip(
             "Green stripe: exact coordinate after the configured backlash approach. "
             "Red stripe: approximate coordinate until that approach is completed."
         )
-        self._legend_label.setStyleSheet("QLabel { font-size: 9px; color: #5f6368; }")
-        self._legend_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        outer_layout.addWidget(self._legend_label)
+        legend_layout = QHBoxLayout(self._legend_widget)
+        legend_layout.setContentsMargins(0, 0, 0, 0)
+        legend_layout.setSpacing(10)
+
+        for group_index, (title, entries) in enumerate(
+            (
+                (
+                    "Field state:",
+                    (
+                        ("Homed", "#1565c0", (10, 10)),
+                        ("Unhomed", "#f0b429", (10, 10)),
+                        ("Limit", "#c62828", (10, 10)),
+                        ("Edited", EDITED_BACKGROUND, (10, 10)),
+                    ),
+                ),
+                (
+                    "Accuracy:",
+                    (
+                        ("Exact", EXACT_STRIPE, (14, 4)),
+                        ("Approximate", APPROXIMATE_STRIPE, (14, 4)),
+                    ),
+                ),
+            )
+        ):
+            if group_index:
+                separator = QFrame(self._legend_widget)
+                separator.setFrameShape(QFrame.VLine)
+                separator.setFrameShadow(QFrame.Sunken)
+                legend_layout.addWidget(separator, alignment=Qt.AlignVCenter)
+
+            title_label = QLabel(title, self._legend_widget)
+            title_label.setAlignment(Qt.AlignVCenter)
+            legend_layout.addWidget(title_label, alignment=Qt.AlignVCenter)
+
+            group_items: list[_LegendItem] = []
+            for label_text, color, size in entries:
+                item_layout = QHBoxLayout()
+                item_layout.setContentsMargins(0, 0, 0, 0)
+                item_layout.setSpacing(4)
+                swatch = QFrame(self._legend_widget)
+                swatch.setFixedSize(*size)
+                swatch.setStyleSheet(
+                    f"QFrame {{ background-color: {color}; border: none; }}"
+                )
+                label = QLabel(label_text, self._legend_widget)
+                label.setStyleSheet("QLabel { color: #5f6368; }")
+                label.setAlignment(Qt.AlignVCenter)
+                item_layout.addWidget(swatch, alignment=Qt.AlignVCenter)
+                item_layout.addWidget(label, alignment=Qt.AlignVCenter)
+                legend_layout.addLayout(item_layout)
+                group_items.append(_LegendItem(swatch, label))
+            self._legend_groups[title] = tuple(group_items)
+
+        legend_layout.addStretch()
+        outer_layout.addWidget(self._legend_widget)
 
         self.set_fields_available(False)
 
@@ -186,8 +239,8 @@ class StagePositionPanel(QWidget):
         return self._cancel_button
 
     @property
-    def legend_label(self) -> QLabel:
-        return self._legend_label
+    def legend_widget(self) -> QWidget:
+        return self._legend_widget
 
     @property
     def pending_targets(self) -> dict[str, tuple[float, float]]:
