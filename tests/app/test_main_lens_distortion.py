@@ -526,6 +526,65 @@ def test_lens_distortion_finished_applies_stage_calibrated_grid_matrix() -> None
     assert statuses == [("done", 10000)]
 
 
+def test_lens_distortion_completion_saves_to_captured_objective_after_active_switch() -> None:
+    window = Main.__new__(Main)
+    manager = _FakeSettingsManager()
+    x5_payload = {"model_version": 1, "frame_size": [320, 240]}
+    x5_matrix = [[-0.0005, 0.0], [0.0, -0.0005]]
+    manager.settings.objectives = ObjectivesSettings(
+        active_name="X5",
+        objectives={
+            "X5": ObjectiveCalibrationSettings(
+                name="X5",
+                magnification=5.0,
+                pixels_to_mm=x5_matrix,
+                xy_calibration_configured=True,
+                distortion_correction=x5_payload,
+                distortion_correction_configured=True,
+            ),
+            "X20": ObjectiveCalibrationSettings(name="X20", magnification=20.0),
+        },
+    )
+    captured_context = main_module._OpticalCalibrationRunContext(
+        operation_id="lens-x20",
+        wizard_run_id=None,
+        objective_name="X20",
+    )
+    matrix = [[-0.000117, 0.0], [0.0, -0.000117]]
+    payload = {
+        "model_version": 1,
+        "frame_size": [640, 480],
+        "calibrated_pixels_to_mm": matrix,
+    }
+    window.settings_manager = manager
+    window._lens_distortion_thread = _DeadThread()
+    window._lens_distortion_context = captured_context
+    window._lens_distortion_dialog = None
+    window._optical_calibration_wizard = None
+    window._apply_objective_settings = lambda: None
+    window._refresh_objective_calibration_ui = lambda: None
+    window._show_status = lambda *_args: None
+
+    Main._on_lens_distortion_calibration_finished(
+        window,
+        captured_context,
+        True,
+        "done",
+        payload,
+    )
+
+    x20 = manager.settings.objectives.objectives["X20"]
+    x5 = manager.settings.objectives.objectives["X5"]
+    assert x20.distortion_correction == payload
+    assert x20.distortion_correction_configured is True
+    assert x20.pixels_to_mm == matrix
+    assert x20.xy_calibration_configured is True
+    assert x5.distortion_correction == x5_payload
+    assert x5.distortion_correction_configured is True
+    assert x5.pixels_to_mm == x5_matrix
+    assert x5.xy_calibration_configured is True
+
+
 def test_click_calibration_update_keeps_stage_calibrated_distortion_matrix() -> None:
     window = Main.__new__(Main)
     manager = _FakeSettingsManager()

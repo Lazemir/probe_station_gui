@@ -3,8 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 import main as main_module
 from main import Main
+from probe_station_gui.settings.manager import Settings
 from probe_station_gui.dialogs.optical_calibration_wizard import (
     OpticalCalibrationMode,
 )
@@ -88,6 +91,22 @@ class _FakeLensDialog:
         pass
 
 
+class _LiveThread:
+    def is_alive(self) -> bool:
+        return True
+
+
+class _ObjectiveSettingsManager:
+    def __init__(self) -> None:
+        self.settings = Settings()
+
+    def replace(self, settings: Settings) -> None:
+        self.settings = settings
+
+    def save(self) -> None:
+        raise AssertionError("Objective change must not be persisted while calibration runs.")
+
+
 def _objective_settings() -> ObjectivesSettings:
     return ObjectivesSettings(
         active_name="X20",
@@ -135,46 +154,53 @@ def test_show_optical_calibration_wizard_reports_active_objective(
 def test_wizard_routes_run_identity_through_progress_and_completion() -> None:
     window = Main.__new__(Main)
     wizard = _FakeWizard()
+    context = main_module._OpticalCalibrationRunContext(
+        operation_id="flat-17",
+        wizard_run_id=17,
+        objective_name="X20",
+    )
     window._optical_calibration_wizard = wizard
-    window._flat_field_wizard_run_id = None
     window._flat_field_calibration_thread = None
+    window._flat_field_calibration_context = context
     window._show_status = lambda *_args: None
-    window._active_objective_metadata = lambda: ("X20", 20.0)
-    window._start_flat_field_calibration = lambda: True
 
-    Main._start_flat_field_calibration_from_wizard(window)
-    assert window._flat_field_wizard_run_id == 17
-
-    Main._on_flat_field_calibration_progress(window, "Flat field: capture 3/9.")
-    Main._on_flat_field_calibration_finished(window, True, "saved", {})
+    Main._on_flat_field_calibration_progress(
+        window,
+        context,
+        "Flat field: capture 3/9.",
+    )
+    Main._on_flat_field_calibration_finished(window, context, True, "saved", {})
 
     assert wizard.progress == [("Flat field: capture 3/9.", 17)]
     assert wizard.results == [("flat", True, "saved", 17)]
-    assert window._flat_field_wizard_run_id is None
+    assert window._flat_field_calibration_context is None
 
 
 def test_failed_lens_wizard_stage_returns_matching_result() -> None:
     window = Main.__new__(Main)
     wizard = _FakeWizard()
     wizard.run_id = 23
+    context = main_module._OpticalCalibrationRunContext(
+        operation_id="lens-23",
+        wizard_run_id=23,
+        objective_name="X20",
+    )
     window._optical_calibration_wizard = wizard
-    window._lens_distortion_wizard_run_id = None
     window._lens_distortion_thread = None
+    window._lens_distortion_context = context
     window._lens_distortion_dialog = None
     window._show_status = lambda *_args: None
-    window._active_objective_metadata = lambda: ("X20", 20.0)
-    window._start_lens_distortion_calibration = lambda: True
 
-    Main._start_lens_distortion_calibration_from_wizard(window)
     Main._on_lens_distortion_calibration_finished(
         window,
+        context,
         False,
         "fit failed",
         None,
     )
 
     assert wizard.results == [("lens", False, "fit failed", 23)]
-    assert window._lens_distortion_wizard_run_id is None
+    assert window._lens_distortion_context is None
 
 
 def test_wizard_rejects_objective_change_before_start() -> None:
@@ -182,7 +208,6 @@ def test_wizard_rejects_objective_change_before_start() -> None:
     wizard = _FakeWizard()
     starts = []
     window._optical_calibration_wizard = wizard
-    window._flat_field_wizard_run_id = None
     window._active_objective_metadata = lambda: ("X5", 5.0)
     window._start_flat_field_calibration = lambda: starts.append(True) or True
 
@@ -197,6 +222,143 @@ def test_wizard_rejects_objective_change_before_start() -> None:
             17,
         )
     ]
+
+
+def test_objective_change_is_blocked_while_calibration_context_is_active() -> None:
+    window = Main.__new__(Main)
+    manager = _ObjectiveSettingsManager()
+    context = main_module._OpticalCalibrationRunContext(
+        operation_id="lens-pre-stage",
+        wizard_run_id=None,
+        objective_name="X20",
+    )
+    statuses: list[str] = []
+    restored: list[str] = []
+    manager.settings.objectives.active_name = "X20"
+    window.settings_manager = manager
+    window.stage_controller = SimpleNamespace(is_busy=lambda: False)
+    window._flat_field_calibration_thread = None
+    window._flat_field_calibration_context = None
+    window._lens_distortion_thread = None
+    window._lens_distortion_context = context
+    window._sync_objective_combo = lambda name: restored.append(name)
+    window._show_status = lambda message, _timeout=0: statuses.append(str(message))
+    window._refresh_objective_calibration_ui = lambda: None
+
+    Main._set_active_objective(window, "X5", apply_motion=True)
+
+    assert manager.settings.objectives.active_name == "X20"
+    assert restored == ["X20"]
+    assert statuses == ["Stage is busy; objective not changed."]
+
+
+def test_lens_start_captures_context_before_worker_thread_starts(monkeypatch) -> None:
+    window = Main.__new__(Main)
+    started_contexts = []
+
+    class _Thread:
+        def __init__(self, *, target, args, daemon) -> None:
+            self.target = target
+            self.args = args
+            self.daemon = daemon
+
+        def is_alive(self) -> bool:
+            return False
+
+        def start(self) -> None:
+            context = self.args[-1]
+            assert window._lens_distortion_context is context
+            started_contexts.append(context)
+
+    window.stage_controller = SimpleNamespace(
+        is_busy=lambda: False,
+        current_stage_position=lambda: (10.0, 20.0),
+    )
+    window._stage_serial_ready = lambda: True
+    window._flat_field_calibration_thread = None
+    window._flat_field_calibration_context = None
+    window._lens_distortion_thread = None
+    window._lens_distortion_context = None
+    window._active_objective_metadata = lambda: ("X20", 20.0)
+    window._coordinate_feedrate_for_axes = lambda _axes: 120.0
+    window._current_needle_feedrate = lambda: 70.0
+    window._lens_distortion_dialog = None
+    window._show_status = lambda *_args: None
+    monkeypatch.setattr(main_module.threading, "Thread", _Thread)
+
+    assert Main._start_lens_distortion_calibration(window, wizard_run_id=41) is True
+
+    assert len(started_contexts) == 1
+    assert started_contexts[0].wizard_run_id == 41
+    assert started_contexts[0].objective_name == "X20"
+
+
+@pytest.mark.parametrize(
+    (
+        "operation",
+        "progress_handler",
+        "completion_handler",
+        "context_attribute",
+        "thread_attribute",
+    ),
+    [
+        pytest.param(
+            "flat",
+            Main._on_flat_field_calibration_progress,
+            Main._on_flat_field_calibration_finished,
+            "_flat_field_calibration_context",
+            "_flat_field_calibration_thread",
+            id="flat-field",
+        ),
+        pytest.param(
+            "lens",
+            Main._on_lens_distortion_calibration_progress,
+            Main._on_lens_distortion_calibration_finished,
+            "_lens_distortion_context",
+            "_lens_distortion_thread",
+            id="lens-distortion",
+        ),
+    ],
+)
+def test_stale_calibration_events_do_not_affect_newer_active_context(
+    operation,
+    progress_handler,
+    completion_handler,
+    context_attribute,
+    thread_attribute,
+) -> None:
+    window = Main.__new__(Main)
+    wizard = _FakeWizard()
+    stale = main_module._OpticalCalibrationRunContext(
+        operation_id=f"{operation}-a",
+        wizard_run_id=31,
+        objective_name="X20",
+    )
+    active = main_module._OpticalCalibrationRunContext(
+        operation_id=f"{operation}-b",
+        wizard_run_id=32,
+        objective_name="X5",
+    )
+    thread_b = _LiveThread()
+    window._optical_calibration_wizard = wizard
+    setattr(window, context_attribute, active)
+    setattr(window, thread_attribute, thread_b)
+    window._lens_distortion_dialog = None
+    window._show_status = lambda *_args: None
+
+    progress_handler(window, stale, "A progress")
+    completion_handler(
+        window,
+        stale,
+        False,
+        "A failed",
+        None,
+    )
+
+    assert wizard.progress == []
+    assert wizard.results == []
+    assert getattr(window, context_attribute) is active
+    assert getattr(window, thread_attribute) is thread_b
 
 
 def test_lens_dialog_calibrate_opens_lens_only_wizard(monkeypatch) -> None:
