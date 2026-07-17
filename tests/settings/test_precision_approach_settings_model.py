@@ -7,6 +7,7 @@ from probe_station_gui.settings.precision_approach import (
     PrecisionApproachProfile,
     PrecisionApproachSettings,
     parse_precision_approach_settings,
+    precision_profile_is_effective,
 )
 from probe_station_gui.settings.manager import Settings, SettingsManager
 
@@ -39,6 +40,12 @@ def test_precision_approach_profile_rejects_invalid_backlash(backlash: float) ->
 def test_precision_approach_profile_rejects_invalid_final_direction() -> None:
     with pytest.raises(ValueError, match="final_direction"):
         PrecisionApproachProfile(final_direction=0)
+
+
+def test_precision_profile_is_effective_only_with_positive_backlash() -> None:
+    assert precision_profile_is_effective(PrecisionApproachProfile(True, 0.1, 1))
+    assert not precision_profile_is_effective(PrecisionApproachProfile(True, 0.0, 1))
+    assert not precision_profile_is_effective(PrecisionApproachProfile(False, 0.1, 1))
 
 
 def test_precision_approach_parser_merges_partial_and_invalid_values_with_defaults() -> None:

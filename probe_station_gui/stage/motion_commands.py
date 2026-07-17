@@ -579,6 +579,7 @@ class StageControllerMotionCommandsMixin:
         wait_for_completion: bool = True,
         allow_unhomed: bool = False,
         as_jog: bool = False,
+        motion_started_callback: Callable[[], None] | None = None,
     ) -> None:
         ordered_targets = ordered_absolute_axis_targets(
             targets,
@@ -624,6 +625,8 @@ class StageControllerMotionCommandsMixin:
                     effective_feedrate,
                 ),
             )
+            if motion_started_callback is not None:
+                motion_started_callback()
             if wait_for_completion:
                 move_distance = self._absolute_move_distance_for_timeout(
                     ordered_targets,
@@ -642,6 +645,8 @@ class StageControllerMotionCommandsMixin:
         self._write_current_command_and_wait(
             absolute_axis_g1_command(ordered_targets, effective_feedrate),
         )
+        if motion_started_callback is not None:
+            motion_started_callback()
         if wait_for_completion:
             move_distance = self._absolute_move_distance_for_timeout(
                 ordered_targets,

@@ -5,6 +5,9 @@ from __future__ import annotations
 import math
 import threading
 
+from probe_station_gui.settings.precision_approach import (
+    precision_profile_is_effective,
+)
 from probe_station_gui.stage.errors import StageControllerError
 from probe_station_gui.stage.feedrate_limits import axis_max_feedrate
 from probe_station_gui.stage.needle_motion_profile import (
@@ -169,7 +172,9 @@ class StageControllerNeedleActionsMixin:
                 continue
             use_precision_approach = (
                 segment_index == len(segments) - 1
-                and self._precision_approach_settings.profiles["A"].enabled
+                and precision_profile_is_effective(
+                    self._precision_approach_settings.profiles["A"]
+                )
             )
             if slow_zone:
                 programmed_feedrate = self._begin_needles_feedrate_control(

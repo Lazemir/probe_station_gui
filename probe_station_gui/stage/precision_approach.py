@@ -5,7 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
-from probe_station_gui.settings.precision_approach import PrecisionApproachProfile
+from probe_station_gui.settings.precision_approach import (
+    PrecisionApproachProfile,
+    precision_profile_is_effective,
+)
 from probe_station_gui.stage.coordinate_confidence import AxisCoordinateConfidence
 
 
@@ -80,7 +83,7 @@ class PrecisionApproachPlanner:
         profile: PrecisionApproachProfile,
         confidence: AxisCoordinateConfidence,
     ) -> bool:
-        if not profile.enabled or profile.backlash <= 0.0:
+        if not precision_profile_is_effective(profile):
             return False
         directed_travel = (target - current) * profile.final_direction
         if (

@@ -245,7 +245,10 @@ class StageControllerClickMoveMixin:
             )
             target_position = (float(target_x_mm), float(target_y_mm))
             targets = {"X": target_position[0], "Y": target_position[1]}
-            if self._status_matches_axis_targets(status, targets, tolerance=1e-5):
+            if (
+                self._status_matches_axis_targets(status, targets, tolerance=1e-5)
+                and not self._precision_targets_require_execution(targets)
+            ):
                 return "Target already at requested X/Y."
             effective_feedrate = clamped_motion_feedrate(
                 feedrate,
@@ -314,6 +317,7 @@ class StageControllerClickMoveMixin:
             if (
                 abs(float(target_position[0]) - current_x) >= 1e-5
                 or abs(float(target_position[1]) - current_y) >= 1e-5
+                or self._precision_targets_require_execution(xy_targets)
             ):
                 self.status_message.emit(
                     f"Moving to {label} X={target_x_mm:.3f} mm, Y={target_y_mm:.3f} mm"
@@ -328,15 +332,16 @@ class StageControllerClickMoveMixin:
                 moved = True
 
             delta_z = float(target_position[2]) - current_z
-            z_precision_enabled = self._precision_approach_settings.profiles[
-                "Z"
-            ].enabled
-            if abs(delta_z) >= 1e-5 or z_precision_enabled:
+            z_targets = {"Z": float(target_position[2])}
+            if (
+                abs(delta_z) >= 1e-5
+                or self._precision_targets_require_execution(z_targets)
+            ):
                 self.status_message.emit(
                     f"Moving Z to {label} focus height {target_z_mm:.3f} mm"
                 )
                 self._execute_precision_axis_targets_locked(
-                    {"Z": float(target_position[2])},
+                    z_targets,
                     feedrate=None,
                     allow_unhomed=False,
                 )

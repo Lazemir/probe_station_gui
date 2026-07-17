@@ -33,6 +33,12 @@ class PrecisionApproachProfile:
         }
 
 
+def precision_profile_is_effective(profile: PrecisionApproachProfile) -> bool:
+    """Return whether a profile can perform a non-zero backlash approach."""
+
+    return bool(profile.enabled and profile.backlash > 0.0)
+
+
 def default_precision_approach_profiles() -> dict[str, PrecisionApproachProfile]:
     profiles = {axis: PrecisionApproachProfile() for axis in PRECISION_APPROACH_AXES}
     profiles["Z"] = PrecisionApproachProfile(True, 0.03, 1)
@@ -119,4 +125,5 @@ __all__ = [
     "PrecisionApproachSettings",
     "default_precision_approach_profiles",
     "parse_precision_approach_settings",
+    "precision_profile_is_effective",
 ]

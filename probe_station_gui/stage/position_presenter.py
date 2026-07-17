@@ -424,6 +424,12 @@ def _axis_field_presentation(
         homed_axes=homed_axes,
         limit_axes=limit_axes,
     )
+    confidence_role = coordinate_confidence_role(
+        axis_name,
+        precision_enabled_axes=precision_enabled_axes,
+        limit_axes=limit_axes,
+        coordinate_confidence=coordinate_confidence,
+    )
     return AxisFieldPresentation(
         axis=axis_name,
         raw_value=raw_value,
@@ -435,13 +441,12 @@ def _axis_field_presentation(
         ),
         base_background=background,
         base_foreground=foreground,
-        tooltip=_axis_tooltip(axis_name, feedrate_mm_min),
-        confidence_role=coordinate_confidence_role(
+        tooltip=_axis_tooltip(
             axis_name,
-            precision_enabled_axes=precision_enabled_axes,
-            limit_axes=limit_axes,
-            coordinate_confidence=coordinate_confidence,
+            feedrate_mm_min,
+            confidence_role=confidence_role,
         ),
+        confidence_role=confidence_role,
     )
 
 
@@ -489,11 +494,27 @@ def _visible_axis_value(
     return float(pending_target[1])
 
 
-def _axis_tooltip(axis_name: str, feedrate_mm_min: float) -> str:
-    return (
+def _axis_tooltip(
+    axis_name: str,
+    feedrate_mm_min: float,
+    *,
+    confidence_role: str | None = None,
+) -> str:
+    tooltip = (
         f"{axis_name} coordinate. Enter targets and press Apply. "
         f"Move feedrate: {float(feedrate_mm_min):.1f} mm/min."
     )
+    accuracy_detail = {
+        "exact": (
+            " Accuracy: Exact; coordinate confirmed by the configured "
+            "backlash approach."
+        ),
+        "approximate": (
+            " Accuracy: Approximate; the configured backlash approach has not "
+            "completed."
+        ),
+    }.get(confidence_role, "")
+    return tooltip + accuracy_detail
 
 
 def _missing_axis_names(

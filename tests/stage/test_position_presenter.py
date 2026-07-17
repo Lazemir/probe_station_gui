@@ -103,6 +103,11 @@ def test_display_plan_assigns_confidence_roles_only_to_enabled_available_axes() 
     assert updates["Y"].confidence_role == "approximate"
     assert updates["Z"].confidence_role is None
     assert updates["A"].confidence_role is None
+    assert "Accuracy: Exact" in updates["X"].tooltip
+    assert "confirmed by the configured backlash approach" in updates["X"].tooltip
+    assert "Accuracy: Approximate" in updates["Y"].tooltip
+    assert "backlash approach has not completed" in updates["Y"].tooltip
+    assert "Accuracy:" not in updates["Z"].tooltip
 
 
 def test_display_plan_hides_confidence_when_coordinate_is_unavailable() -> None:

@@ -331,12 +331,25 @@ def test_position_legend_uses_aligned_semantic_groups(
         "Exact",
         "Approximate",
     )
-    state_sizes = {item.swatch.size() for item in panel._legend_groups["Field state:"]}
-    accuracy_sizes = {
-        item.swatch.size() for item in panel._legend_groups["Accuracy:"]
+    state_sizes = {
+        (item.swatch.width(), item.swatch.height())
+        for item in panel._legend_groups["Field state:"]
     }
-    assert len(state_sizes) == 1
-    assert len(accuracy_sizes) == 1
+    accuracy_sizes = {
+        (item.swatch.width(), item.swatch.height())
+        for item in panel._legend_groups["Accuracy:"]
+    }
+    assert state_sizes == {(10, 10)}
+    assert accuracy_sizes == {(14, 4)}
+    legend_layout = panel.legend_widget.layout()
+    assert legend_layout.spacing() == 10
+    item_layouts = tuple(
+        layout
+        for index in range(legend_layout.count())
+        if (layout := legend_layout.itemAt(index).layout()) is not None
+    )
+    assert len(item_layouts) == 6
+    assert {layout.spacing() for layout in item_layouts} == {4}
     assert "backlash" in panel.legend_widget.toolTip().lower()
     assert all(
         label.textFormat() != Qt.RichText

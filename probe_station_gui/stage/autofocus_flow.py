@@ -7,6 +7,9 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any
 
+from probe_station_gui.settings.precision_approach import (
+    precision_profile_is_effective,
+)
 from probe_station_gui.stage.autofocus_math import (
     autofocus_sweep_feedrate_mm_min,
     frame_rate_from_timestamps,
@@ -224,7 +227,25 @@ class StageControllerAutofocusMixin:
                     "Could not confirm idle before restoring autofocus start Z.",
                     exc_info=True,
                 )
-            self._move_to_autofocus_final_z_locked(context.start_z)
+            try:
+                self._move_to_autofocus_final_z_locked(context.start_z)
+            except StageControllerError:
+                logger.warning(
+                    "Precision autofocus restore failed; returning directly to "
+                    "the validated starting Z.",
+                    exc_info=True,
+                )
+                start_target = {"Z": float(context.start_z)}
+                self._validate_absolute_axis_targets_move(
+                    start_target,
+                    allow_unhomed=False,
+                )
+                self._send_absolute_axis_targets_move(
+                    start_target,
+                    feedrate=None,
+                    allow_unhomed=False,
+                    as_jog=True,
+                )
         finally:
             if was_cancelled:
                 self._cancel_event.set()
@@ -575,7 +596,11 @@ class StageControllerAutofocusMixin:
         profile = self._precision_approach_settings.profiles["Z"]
         backlash = max(
             0.002,
-            profile.backlash if profile.enabled and profile.backlash > 0.0 else abs(fine_step),
+            (
+                profile.backlash
+                if precision_profile_is_effective(profile)
+                else abs(fine_step)
+            ),
         )
         approach_z = max(float(min_z), target - backlash)
         if abs(approach_z - current_z) >= 1e-5:

@@ -5,13 +5,15 @@ from types import SimpleNamespace
 import numpy as np
 
 from probe_station_gui.settings.precision_approach import (
+    PrecisionApproachProfile,
     PrecisionApproachSettings,
 )
+from probe_station_gui.stage.coordinate_confidence import AxisCoordinateConfidence
 
 try:
-    from .controller_test_support import StageController
+    from .controller_test_support import StageController, _FakeSerial
 except ImportError:
-    from controller_test_support import StageController
+    from controller_test_support import StageController, _FakeSerial
 
 
 def test_click_move_resolves_pixel_delta_to_absolute_xy_target() -> None:
@@ -109,6 +111,41 @@ def test_move_to_xy_uses_shared_precision_executor() -> None:
     controller.shutdown()
 
 
+def test_external_route_move_at_target_executes_approximate_precision_axis() -> None:
+    controller = StageController()
+    controller._serial = _FakeSerial()
+    settings = PrecisionApproachSettings()
+    settings.profiles["X"] = PrecisionApproachProfile(True, 0.1, 1)
+    controller.apply_precision_approach_configuration(settings)
+    status = SimpleNamespace(
+        display_position=(1.0, 2.0, 0.0),
+        position=(1.0, 2.0, 0.0),
+        work_position=(1.0, 2.0, 0.0),
+        homed_axes={"X", "Y"},
+    )
+    controller._query_synced_status_for_absolute_motion = lambda **_kwargs: status
+    controller._require_homed_axes = lambda *_args, **_kwargs: None
+    controller._require_position_for_absolute_motion = (
+        lambda *_args, **_kwargs: status.display_position
+    )
+    controller._status_matches_axis_targets = lambda *_args, **_kwargs: True
+    moves: list[dict[str, float]] = []
+    controller._execute_precision_axis_targets_locked = (
+        lambda targets, **_kwargs: moves.append(dict(targets))
+    )
+    controller.absolute_xy_move_started = SimpleNamespace(emit=lambda *_args: None)
+    controller.movement_started = SimpleNamespace(emit=lambda: None)
+    controller.movement_finished = SimpleNamespace(emit=lambda *_args: None)
+    controller._move_safety_check = lambda: None
+    controller.status_message = SimpleNamespace(emit=lambda _message: None)
+
+    message = controller.run_external_move_to_xy(1.0, 2.0)
+
+    assert moves == [{"X": 1.0, "Y": 2.0}]
+    assert "Arrived" in message
+    controller.shutdown()
+
+
 def test_saved_xyz_uses_precision_for_xy_and_final_z_but_not_safe_transit() -> None:
     controller = StageController()
     status = SimpleNamespace(
@@ -183,4 +220,121 @@ def test_saved_xyz_without_separate_transit_still_finishes_z_precisely() -> None
 
     assert transit == [{"Z": 2.0}]
     assert precise == [{"X": 4.0, "Y": 5.0}, {"Z": 2.0}]
+    controller.shutdown()
+
+
+def test_saved_xyz_at_target_executes_approximate_xy_precision() -> None:
+    controller = StageController()
+    settings = PrecisionApproachSettings()
+    settings.profiles["X"] = PrecisionApproachProfile(True, 0.1, 1)
+    settings.profiles["Z"] = PrecisionApproachProfile()
+    controller.apply_precision_approach_configuration(settings)
+    status = SimpleNamespace(
+        display_position=(1.0, 2.0, 3.0),
+        position=(1.0, 2.0, 3.0),
+        work_position=(1.0, 2.0, 3.0),
+        homed_axes={"X", "Y", "Z"},
+    )
+    controller._query_synced_status_for_absolute_motion = lambda **_kwargs: status
+    controller._require_homed_axes = lambda *_args, **_kwargs: None
+    controller._require_position_for_absolute_motion = (
+        lambda *_args, **_kwargs: status.display_position
+    )
+    precise: list[dict[str, float]] = []
+    controller._execute_precision_axis_targets_locked = (
+        lambda targets, **_kwargs: precise.append(dict(targets))
+    )
+    controller._wait_for_idle = lambda *_args, **_kwargs: None
+    controller._query_current_status = lambda: None
+    controller.status_message = SimpleNamespace(emit=lambda _message: None)
+
+    controller._move_to_xyz_locked(
+        1.0,
+        2.0,
+        3.0,
+        transit_z_mm=None,
+        label="saved position",
+    )
+
+    assert precise == [{"X": 1.0, "Y": 2.0}]
+    controller.shutdown()
+
+
+def test_saved_xyz_zero_backlash_profile_preserves_at_target_noop() -> None:
+    controller = StageController()
+    settings = PrecisionApproachSettings()
+    settings.profiles["Z"] = PrecisionApproachProfile(True, 0.0, 1)
+    controller.apply_precision_approach_configuration(settings)
+    status = SimpleNamespace(
+        display_position=(1.0, 2.0, 3.0),
+        position=(1.0, 2.0, 3.0),
+        work_position=(1.0, 2.0, 3.0),
+        homed_axes={"X", "Y", "Z"},
+    )
+    controller._query_synced_status_for_absolute_motion = lambda **_kwargs: status
+    controller._require_homed_axes = lambda *_args, **_kwargs: None
+    controller._require_position_for_absolute_motion = (
+        lambda *_args, **_kwargs: status.display_position
+    )
+    precise: list[dict[str, float]] = []
+    controller._execute_precision_axis_targets_locked = (
+        lambda targets, **_kwargs: precise.append(dict(targets))
+    )
+    controller._wait_for_idle = lambda *_args, **_kwargs: None
+    controller._query_current_status = lambda: None
+    controller.status_message = SimpleNamespace(emit=lambda _message: None)
+
+    message = controller._move_to_xyz_locked(
+        1.0,
+        2.0,
+        3.0,
+        transit_z_mm=None,
+        label="saved position",
+    )
+
+    assert precise == []
+    assert "already reached" in message
+    controller.shutdown()
+
+
+def test_saved_xyz_exact_precision_z_preserves_at_target_noop() -> None:
+    controller = StageController()
+    settings = PrecisionApproachSettings()
+    settings.profiles["Z"] = PrecisionApproachProfile(True, 0.03, 1)
+    controller.apply_precision_approach_configuration(settings)
+    controller._coordinate_confidence["Z"] = (
+        AxisCoordinateConfidence().after_precision_final(
+            coordinate=3.0,
+            final_direction=1,
+        )
+    )
+    status = SimpleNamespace(
+        display_position=(1.0, 2.0, 3.0),
+        position=(1.0, 2.0, 3.0),
+        work_position=(1.0, 2.0, 3.0),
+        homed_axes={"X", "Y", "Z"},
+    )
+    controller._query_synced_status_for_absolute_motion = lambda **_kwargs: status
+    controller._require_homed_axes = lambda *_args, **_kwargs: None
+    controller._require_position_for_absolute_motion = (
+        lambda *_args, **_kwargs: status.display_position
+    )
+    precise: list[dict[str, float]] = []
+    controller._execute_precision_axis_targets_locked = (
+        lambda targets, **_kwargs: precise.append(dict(targets))
+    )
+    controller._wait_for_idle = lambda *_args, **_kwargs: None
+    controller._query_current_status = lambda: None
+    controller.status_message = SimpleNamespace(emit=lambda _message: None)
+
+    message = controller._move_to_xyz_locked(
+        1.0,
+        2.0,
+        3.0,
+        transit_z_mm=None,
+        label="saved position",
+    )
+
+    assert precise == []
+    assert "already reached" in message
     controller.shutdown()

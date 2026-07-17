@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -11,6 +12,7 @@ from probe_station_gui.settings.precision_approach import (
     PRECISION_APPROACH_AXES,
     PrecisionApproachProfile,
     PrecisionApproachSettings,
+    precision_profile_is_effective,
 )
 from probe_station_gui.stage.coordinate_confidence import AxisCoordinateConfidence
 from probe_station_gui.stage.errors import StageControllerError
@@ -19,6 +21,7 @@ from probe_station_gui.stage.precision_approach import PrecisionApproachPlanner
 
 COORDINATE_CONFIDENCE_STATE_VERSION = 1
 COORDINATE_CONFIDENCE_RESTORE_TOLERANCE = 7.5e-4
+CALIBRATED_TARGET_ROUND_TRIP_TOLERANCE = 1e-9
 
 
 class StageControllerPrecisionMotionMixin:
@@ -58,7 +61,9 @@ class StageControllerPrecisionMotionMixin:
         enabled_changed_axes = {
             axis
             for axis in profile_changed_axes
-            if self._precision_approach_settings.profiles[axis].enabled
+            if precision_profile_is_effective(
+                self._precision_approach_settings.profiles[axis]
+            )
         }
         if enabled_changed_axes:
             self._invalidate_coordinate_confidence(
@@ -73,11 +78,23 @@ class StageControllerPrecisionMotionMixin:
         return frozenset(
             axis
             for axis, profile in self._precision_approach_settings.profiles.items()
-            if profile.enabled
+            if precision_profile_is_effective(profile)
         )
 
     def coordinate_confidence(self) -> dict[str, AxisCoordinateConfidence]:
         return dict(self._coordinate_confidence)
+
+    def _precision_targets_require_execution(
+        self,
+        targets: Mapping[str, float],
+    ) -> bool:
+        return any(
+            precision_profile_is_effective(
+                self._precision_approach_settings.profiles[axis]
+            )
+            and not self._coordinate_confidence[axis].exact
+            for axis in targets
+        )
 
     def invalidate_coordinate_confidence(
         self,
@@ -108,14 +125,14 @@ class StageControllerPrecisionMotionMixin:
         enabled_axes = {
             axis
             for axis in ordered_targets
-            if self._precision_approach_settings.profiles[axis].enabled
+            if precision_profile_is_effective(
+                self._precision_approach_settings.profiles[axis]
+            )
         }
         if not enabled_axes:
             self._check_cancelled()
             if not ignore_needle_safety:
                 self._move_safety_check()
-            if before_first_segment is not None:
-                before_first_segment()
             self._send_absolute_axis_targets_move(
                 ordered_targets,
                 ignore_needle_safety=True,
@@ -123,6 +140,7 @@ class StageControllerPrecisionMotionMixin:
                 wait_for_completion=wait_for_completion,
                 allow_unhomed=allow_unhomed,
                 as_jog=True,
+                motion_started_callback=before_first_segment,
             )
             return
 
@@ -173,9 +191,6 @@ class StageControllerPrecisionMotionMixin:
                 self._check_cancelled()
                 if not ignore_needle_safety:
                     self._move_safety_check()
-                if first_segment and before_first_segment is not None:
-                    before_first_segment()
-                first_segment = False
                 sent_segment = True
                 self._send_absolute_axis_targets_move(
                     segment,
@@ -184,7 +199,11 @@ class StageControllerPrecisionMotionMixin:
                     wait_for_completion=True,
                     allow_unhomed=allow_unhomed,
                     as_jog=True,
+                    motion_started_callback=(
+                        before_first_segment if first_segment else None
+                    ),
                 )
+                first_segment = False
             final_status = self._query_current_status_with_required_coordinates(axes=axes)
             changed_axes: set[str] = set()
             for axis in enabled_axes:
@@ -217,10 +236,22 @@ class StageControllerPrecisionMotionMixin:
         self,
         display_targets: Mapping[str, float],
     ) -> dict[str, float]:
-        return {
-            axis: self.calibrated_axis_raw_value(axis, value)
-            for axis, value in display_targets.items()
-        }
+        raw_targets: dict[str, float] = {}
+        for axis, value in display_targets.items():
+            raw_value = self.calibrated_axis_raw_value(axis, value)
+            round_trip_value = self.calibrated_axis_display_value(axis, raw_value)
+            if not math.isclose(
+                round_trip_value,
+                float(value),
+                rel_tol=0.0,
+                abs_tol=CALIBRATED_TARGET_ROUND_TRIP_TOLERANCE,
+            ):
+                raise StageControllerError(
+                    f"{axis} precision target cannot be represented by the "
+                    "calibrated axis mapping."
+                )
+            raw_targets[axis] = raw_value
+        return raw_targets
 
     def _normalized_confidence_axes(self, axes: object | None) -> set[str]:
         if axes is None:
@@ -235,9 +266,11 @@ class StageControllerPrecisionMotionMixin:
             str(axis).strip().upper()
             for axis in candidates
             if str(axis).strip().upper() in self._coordinate_confidence
-            and self._precision_approach_settings.profiles[
-                str(axis).strip().upper()
-            ].enabled
+            and precision_profile_is_effective(
+                self._precision_approach_settings.profiles[
+                    str(axis).strip().upper()
+                ]
+            )
         }
 
     def _invalidate_coordinate_confidence(
@@ -293,7 +326,7 @@ class StageControllerPrecisionMotionMixin:
         machine_position = self._last_machine_position
         for axis in PRECISION_APPROACH_AXES:
             profile = self._precision_approach_settings.profiles[axis]
-            if not profile.enabled:
+            if not precision_profile_is_effective(profile):
                 continue
             index = self.AXIS_INDEX[axis]
             last_machine = (
@@ -334,7 +367,7 @@ class StageControllerPrecisionMotionMixin:
         changed_axes: set[str] = set()
         for axis in PRECISION_APPROACH_AXES:
             profile = self._precision_approach_settings.profiles[axis]
-            if not profile.enabled:
+            if not precision_profile_is_effective(profile):
                 continue
             changed_axes.add(axis)
             record = pending.get(axis)
@@ -360,7 +393,7 @@ class StageControllerPrecisionMotionMixin:
         changed_axes: set[str] = set()
         for axis in PRECISION_APPROACH_AXES:
             profile = self._precision_approach_settings.profiles[axis]
-            if not profile.enabled:
+            if not precision_profile_is_effective(profile):
                 continue
             index = self.AXIS_INDEX[axis]
             if index >= len(raw_position):
