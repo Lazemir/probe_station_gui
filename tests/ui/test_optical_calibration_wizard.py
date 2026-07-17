@@ -44,7 +44,11 @@ def test_full_mode_runs_flat_field_then_lens_distortion(
     assert wizard.currentId() == wizard.FLAT_FIELD_PAGE_ID
     assert wizard.is_running()
 
-    wizard.set_flat_field_result(True, "Flat field saved.")
+    wizard.set_flat_field_result(
+        True,
+        "Flat field saved.",
+        run_id=wizard.active_run_id(),
+    )
     qt_app.processEvents()
     assert wizard.currentId() == wizard.LENS_DISTORTION_PAGE_ID
     assert not wizard.is_running()
@@ -53,7 +57,11 @@ def test_full_mode_runs_flat_field_then_lens_distortion(
     assert lens_spy.count() == 1
     assert wizard.currentId() == wizard.LENS_DISTORTION_PAGE_ID
 
-    wizard.set_lens_distortion_result(True, "Lens correction saved.")
+    wizard.set_lens_distortion_result(
+        True,
+        "Lens correction saved.",
+        run_id=wizard.active_run_id(),
+    )
     qt_app.processEvents()
     assert wizard.currentId() == wizard.RESULT_PAGE_ID
     assert wizard.button(QWizard.FinishButton).isEnabled()
@@ -93,9 +101,13 @@ def test_individual_mode_skips_the_other_capture(
     assert spy.count() == 1
 
     if mode is OpticalCalibrationMode.FLAT_FIELD:
-        wizard.set_flat_field_result(True, "saved")
+        wizard.set_flat_field_result(True, "saved", run_id=wizard.active_run_id())
     else:
-        wizard.set_lens_distortion_result(True, "saved")
+        wizard.set_lens_distortion_result(
+            True,
+            "saved",
+            run_id=wizard.active_run_id(),
+        )
     qt_app.processEvents()
 
     assert wizard.currentId() == wizard.RESULT_PAGE_ID
@@ -110,7 +122,11 @@ def test_failed_capture_stays_on_page_and_can_retry(qt_app: QApplication) -> Non
     wizard.next()
 
     wizard.next()
-    wizard.set_flat_field_result(False, "Camera frame timeout.")
+    wizard.set_flat_field_result(
+        False,
+        "Camera frame timeout.",
+        run_id=wizard.active_run_id(),
+    )
     qt_app.processEvents()
 
     assert wizard.currentId() == wizard.FLAT_FIELD_PAGE_ID
@@ -119,7 +135,7 @@ def test_failed_capture_stays_on_page_and_can_retry(qt_app: QApplication) -> Non
 
     wizard.next()
     assert spy.count() == 2
-    wizard.set_flat_field_result(False, "stopped")
+    wizard.set_flat_field_result(False, "stopped", run_id=wizard.active_run_id())
     wizard.close()
 
 
@@ -134,7 +150,67 @@ def test_running_capture_rejects_close(qt_app: QApplication) -> None:
     qt_app.processEvents()
 
     assert wizard.isVisible()
-    wizard.set_flat_field_result(False, "stopped")
+    wizard.set_flat_field_result(False, "stopped", run_id=wizard.active_run_id())
+    wizard.close()
+
+
+def test_prepare_during_capture_preserves_running_close_guard(
+    qt_app: QApplication,
+) -> None:
+    wizard = OpticalCalibrationWizard()
+    wizard.set_mode(OpticalCalibrationMode.FLAT_FIELD)
+    _show(wizard, qt_app)
+    wizard.next()
+    wizard.next()
+    run_id = wizard.active_run_id()
+
+    assert wizard.prepare(OpticalCalibrationMode.LENS_DISTORTION) is False
+    assert wizard.is_running()
+    assert wizard.active_run_id() == run_id
+    assert wizard.currentId() == wizard.FLAT_FIELD_PAGE_ID
+
+    wizard.close()
+    qt_app.processEvents()
+    assert wizard.isVisible()
+    wizard.set_flat_field_result(False, "stopped", run_id=run_id)
+    wizard.close()
+
+
+def test_stale_or_duplicate_completion_does_not_unlock_capture(
+    qt_app: QApplication,
+) -> None:
+    wizard = OpticalCalibrationWizard()
+    wizard.set_mode(OpticalCalibrationMode.FULL)
+    _show(wizard, qt_app)
+    wizard.next()
+    wizard.next()
+    flat_run_id = wizard.active_run_id()
+    wizard.set_flat_field_result(True, "saved", run_id=flat_run_id)
+    qt_app.processEvents()
+    assert wizard.currentId() == wizard.LENS_DISTORTION_PAGE_ID
+
+    wizard.next()
+    lens_run_id = wizard.active_run_id()
+    wizard.set_flat_field_result(False, "stale", run_id=flat_run_id)
+    assert wizard.is_running()
+    assert wizard.active_run_id() == lens_run_id
+    assert wizard.currentId() == wizard.LENS_DISTORTION_PAGE_ID
+
+    wizard.set_lens_distortion_result(True, "saved", run_id=lens_run_id)
+    qt_app.processEvents()
+    assert wizard.currentId() == wizard.RESULT_PAGE_ID
+    wizard.set_lens_distortion_result(False, "duplicate", run_id=lens_run_id)
+    assert wizard.currentId() == wizard.RESULT_PAGE_ID
+    wizard.close()
+
+
+def test_prepare_full_starts_with_flat_field(qt_app: QApplication) -> None:
+    wizard = OpticalCalibrationWizard()
+
+    assert wizard.prepare(OpticalCalibrationMode.FULL) is True
+    _show(wizard, qt_app)
+
+    assert wizard.currentId() == wizard.FLAT_FIELD_PAGE_ID
     wizard.close()
 
 
@@ -150,5 +226,5 @@ def test_objective_and_progress_are_visible(qt_app: QApplication) -> None:
 
     assert "X20" in wizard.objective_text()
     assert "capture 4/9" in wizard.currentPage().status_text()
-    wizard.set_flat_field_result(False, "stopped")
+    wizard.set_flat_field_result(False, "stopped", run_id=wizard.active_run_id())
     wizard.close()

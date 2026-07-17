@@ -162,8 +162,8 @@ class OpticalCalibrationWizard(QWizard):
     LENS_DISTORTION_PAGE_ID = 2
     RESULT_PAGE_ID = 3
 
-    start_flat_field_requested = Signal()
-    start_lens_distortion_requested = Signal()
+    start_flat_field_requested = Signal(int)
+    start_lens_distortion_requested = Signal(int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -194,14 +194,20 @@ class OpticalCalibrationWizard(QWizard):
         self.setStartId(self.MODE_PAGE_ID)
 
         self._running = False
+        self._run_counter = 0
+        self._active_run_id: int | None = None
+        self._active_page_id: int | None = None
         self._completed_pages: set[int] = set()
         self.currentIdChanged.connect(self._update_button_text)
         self._update_button_text(self.currentId())
 
-    def prepare(self, mode: OpticalCalibrationMode | None = None) -> None:
+    def prepare(self, mode: OpticalCalibrationMode | None = None) -> bool:
         """Reset results and optionally open directly at one calibration stage."""
 
-        self._running = False
+        if self._running:
+            return False
+        self._active_run_id = None
+        self._active_page_id = None
         self._completed_pages.clear()
         self._flat_page.set_status("Ready.")
         self._lens_page.set_status("Ready.")
@@ -213,12 +219,13 @@ class OpticalCalibrationWizard(QWizard):
             selected = OpticalCalibrationMode(mode)
             self.set_mode(selected)
             self.setStartId(
-                self.FLAT_FIELD_PAGE_ID
-                if selected is OpticalCalibrationMode.FLAT_FIELD
-                else self.LENS_DISTORTION_PAGE_ID
+                self.LENS_DISTORTION_PAGE_ID
+                if selected is OpticalCalibrationMode.LENS_DISTORTION
+                else self.FLAT_FIELD_PAGE_ID
             )
         self.restart()
         self._set_navigation_enabled(True)
+        return True
 
     def mode(self) -> OpticalCalibrationMode:
         return self._mode_page.mode()
@@ -245,29 +252,46 @@ class OpticalCalibrationWizard(QWizard):
     def is_running(self) -> bool:
         return self._running
 
+    def active_run_id(self) -> int | None:
+        return self._active_run_id
+
     def set_progress(self, message: str) -> None:
         page = self.currentPage()
         if isinstance(page, _CapturePage):
             page.set_status(message)
 
-    def set_flat_field_result(self, success: bool, message: str) -> None:
-        self._set_capture_result(
+    def set_flat_field_result(
+        self,
+        success: bool,
+        message: str,
+        *,
+        run_id: int | None,
+    ) -> None:
+        accepted = self._set_capture_result(
             self.FLAT_FIELD_PAGE_ID,
             self._flat_page,
             success,
             message,
+            run_id=run_id,
         )
-        if success:
+        if accepted and success:
             self._result_page.set_flat_result(message)
 
-    def set_lens_distortion_result(self, success: bool, message: str) -> None:
-        self._set_capture_result(
+    def set_lens_distortion_result(
+        self,
+        success: bool,
+        message: str,
+        *,
+        run_id: int | None,
+    ) -> None:
+        accepted = self._set_capture_result(
             self.LENS_DISTORTION_PAGE_ID,
             self._lens_page,
             success,
             message,
+            run_id=run_id,
         )
-        if success:
+        if accepted and success:
             self._result_page.set_lens_result(message)
 
     def validateCurrentPage(self) -> bool:  # noqa: N802 - Qt virtual method
@@ -296,13 +320,17 @@ class OpticalCalibrationWizard(QWizard):
             return
         super().closeEvent(event)
 
-    def _start_capture(self, page: _CapturePage, signal: Signal) -> None:
+    def _start_capture(self, page: _CapturePage, signal: object) -> None:
         if self._running:
             return
         page.set_status("Starting.")
+        self._run_counter += 1
+        run_id = self._run_counter
         self._running = True
+        self._active_run_id = run_id
+        self._active_page_id = self.currentId()
         self._set_navigation_enabled(False)
-        signal.emit()
+        signal.emit(run_id)
 
     def _set_capture_result(
         self,
@@ -310,16 +338,34 @@ class OpticalCalibrationWizard(QWizard):
         page: _CapturePage,
         success: bool,
         message: str,
-    ) -> None:
+        *,
+        run_id: int | None,
+    ) -> bool:
+        if (
+            not self._running
+            or self._active_page_id != page_id
+            or self._active_run_id != run_id
+        ):
+            return False
         page.set_status(message)
         self._running = False
+        self._active_run_id = None
+        self._active_page_id = None
         self._set_navigation_enabled(True)
         if not success:
             self._completed_pages.discard(page_id)
-            return
+            return True
         self._completed_pages.add(page_id)
         if self.currentId() == page_id:
-            QTimer.singleShot(0, self.next)
+            QTimer.singleShot(
+                0,
+                lambda: self._advance_completed_page(page_id),
+            )
+        return True
+
+    def _advance_completed_page(self, page_id: int) -> None:
+        if self.currentId() == page_id and page_id in self._completed_pages:
+            self.next()
 
     def _set_navigation_enabled(self, enabled: bool) -> None:
         for button_id in (
