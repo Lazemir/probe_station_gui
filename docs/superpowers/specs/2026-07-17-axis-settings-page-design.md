@@ -95,3 +95,22 @@ Qt tests will verify:
 
 Existing parsing, persistence, and controller tests remain unchanged because the
 underlying configuration schema and behavior do not change.
+
+## Coordinate Legend Cleanup
+
+Replace the single rich-text legend under the stage coordinate fields with a
+real horizontal widget layout. The legend has two visibly separated semantic
+groups on one baseline:
+
+- `Field state:` followed by equal square swatches for `Homed`, `Unhomed`,
+  `Limit`, and `Edited`.
+- `Accuracy:` followed by equal horizontal stripe swatches for `Exact` and
+  `Approximate`.
+
+Use normal UI font sizing, fixed inter-item spacing, vertically centered labels
+and swatches, and a vertical separator between groups. The legend remains
+left-aligned with the stage-position panel. Existing colors and the backlash
+tooltip remain unchanged.
+
+Qt tests will verify the group titles and item order, equal swatch dimensions
+within each group, a shared vertical alignment, and the existing tooltip text.
