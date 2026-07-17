@@ -32,7 +32,7 @@
 - Modify: `probe_station_gui/settings/default_file.py`
 - Modify: `probe_station_gui/default_settings.json`
 - Modify: `probe_station_gui/dialogs/settings_dialog.py`
-- Create: `tests/settings/test_precision_approach.py`
+- Create: `tests/settings/test_precision_approach_settings_model.py`
 - Test: `tests/settings/test_section_parsing.py`
 - Test: `tests/settings/test_default_file.py`
 - Create: `tests/ui/test_precision_approach_settings.py`
@@ -61,7 +61,7 @@ class PrecisionApproachProfile:
 - [x] Run:
 
 ```powershell
-C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/settings/test_precision_approach.py tests/settings/test_section_parsing.py tests/settings/test_default_file.py tests/ui/test_precision_approach_settings.py -q
+C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/settings/test_precision_approach_settings_model.py tests/settings/test_section_parsing.py tests/settings/test_default_file.py tests/ui/test_precision_approach_settings.py -q
 ```
 
 - [x] Commit: `feat: add precision approach settings`
