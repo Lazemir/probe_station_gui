@@ -84,8 +84,8 @@ class _MenuOwner(QMainWindow):
     def _show_click_calibration_dialog(self) -> None:
         self._record("click_calibration")
 
-    def _show_optical_calibration_wizard(self) -> None:
-        self._record("optical_calibration")
+    def _show_optical_calibration_wizard(self, mode=None) -> None:
+        self._record("optical_calibration", mode)
 
     def _show_lens_distortion_dialog(self) -> None:
         self._record("lens_distortion")

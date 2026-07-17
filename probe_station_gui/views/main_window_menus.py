@@ -135,7 +135,7 @@ def _add_calibration_actions(owner: MainWindowMenuOwner, calibration_menu: Any) 
 
     owner._optical_calibration_action = QAction("Optical Calibration", owner)
     owner._optical_calibration_action.triggered.connect(
-        owner._show_optical_calibration_wizard
+        lambda _checked=False: owner._show_optical_calibration_wizard()
     )
     calibration_menu.addAction(owner._optical_calibration_action)
 
