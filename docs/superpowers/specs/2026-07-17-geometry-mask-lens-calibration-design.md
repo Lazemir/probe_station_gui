@@ -8,21 +8,21 @@ Calibrate objective-specific lens geometry from the nine-position stage scan wit
 
 - Lens-distortion calibration uses raw camera frames only.
 - Flat-field calibration remains available for live images and microscope scans, but is not loaded or applied by lens calibration.
-- The complete visible aluminum pattern participates in calibration, including the central grid and surrounding comb structures.
+- The complete visible metal pattern participates in calibration, including the central grid and surrounding comb structures.
 - The result page of the optical calibration wizard shows geometric alignment before and after the fitted correction.
 - This change does not alter normal mosaic photometry or flat-field application outside lens calibration.
 
 ## Segmentation
 
-Each raw frame is converted into a binary aluminum mask for geometric analysis. Segmentation operates on local color contrast rather than absolute RGB values:
+Each raw frame is converted into a binary metal mask for geometric analysis. Segmentation operates on local color contrast rather than absolute RGB values:
 
 1. Convert the frame to a perceptual luminance/chroma representation.
 2. Estimate the slowly varying local background inside the usable image area.
 3. Threshold the difference between each pixel and its local background with an adaptive threshold derived from that frame.
-4. Apply small morphology operations to remove isolated sensor noise and reconnect narrow aluminum lines without joining nearby independent structures.
+4. Apply small morphology operations to remove isolated sensor noise and reconnect narrow metal lines without joining nearby independent structures.
 5. Reject border artifacts and components below a minimum geometric support.
 
-The detector does not modify the source image and does not produce a corrected RGB frame. Different exposure or illumination may change the threshold value, but should not change the resulting aluminum contour.
+The detector does not modify the source image and does not produce a corrected RGB frame. Different exposure or illumination may change the threshold value, but should not change the resulting metal contour.
 
 ## Geometric Features
 
@@ -63,7 +63,7 @@ Both panels use the same mask data, crop, canvas size, and display scale.
 - `Before` places the nine masks in a common reference coordinate system using the pre-calibration click-to-move geometry and no new distortion correction.
 - `After` places them using the fitted affine geometry and distortion correction.
 - Overlaid mask occupancy is rendered in grayscale. Correctly aligned contours reinforce to white; misalignment remains visible as doubled gray contours. No colored seam guides are drawn.
-- The panels show the complete useful aluminum pattern, not only the central grid.
+- The panels show the complete useful metal pattern, not only the central grid.
 - Mean and maximum residuals are shown with the preview.
 
 The worker returns a result object containing the serializable correction payload and two `QImage` previews. The GUI creates `QPixmap` objects only on the GUI thread. Preview images are transient and are not written into objective settings.
@@ -72,7 +72,7 @@ The wizard result page expands to a side-by-side layout when preview images are 
 
 ## Error Handling
 
-- Insufficient aluminum pixels: fail with a segmentation-specific message.
+- Insufficient metal pixels: fail with a segmentation-specific message.
 - Too few repeated feature tracks: fail with a matching-specific message.
 - Ambiguous assignments outside the matching gate: reject those observations.
 - Residual over the configured limits: do not save the correction.

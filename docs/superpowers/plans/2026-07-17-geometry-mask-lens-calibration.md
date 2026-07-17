@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Fit lens geometry from illumination-invariant binary masks of all visible aluminum structures and show nine-frame geometric alignment before and after calibration in the optical wizard.
+**Goal:** Fit lens geometry from illumination-invariant binary masks of all visible metal structures and show nine-frame geometric alignment before and after calibration in the optical wizard.
 
 **Architecture:** Add a focused `geometry_mask` camera module that segments raw frames, extracts real corner/end-point features, builds unique stage-predicted tracks, and renders alignment previews. Reuse the existing robust stage-geometry optimizer in `distortion.py`; keep flat-field correction out of this data path. Deliver preview `QImage` objects beside the serializable correction payload and construct `QPixmap` objects only on the GUI thread.
 
@@ -30,7 +30,7 @@
 - Modify `tests/app/test_main_lens_distortion.py`: raw-only worker and result-bundle tests; remove raw-versus-flat selection expectations.
 - Modify `tests/ui/test_optical_calibration_wizard.py`: preview delivery, scaling, reset, and stale-run tests.
 
-### Task 1: Adaptive Aluminum Mask And Real Features
+### Task 1: Adaptive Metal Mask And Real Features
 
 **Files:**
 - Create: `probe_station_gui/camera/geometry_mask.py`
@@ -38,7 +38,7 @@
 
 **Interfaces:**
 - Produces: `GeometryMaskFrame(mask: np.ndarray, features: tuple[GeometryMaskFeature, ...], frame_size: tuple[int, int])`.
-- Produces: `segment_aluminum_geometry(frame: object) -> GeometryMaskFrame`.
+- Produces: `segment_metal_geometry(frame: object) -> GeometryMaskFrame`.
 - Produces: `GeometryMaskFeature(point_px, descriptor, response, component_id)` with actual mask corner/end-point coordinates.
 
 - [ ] **Step 1: Write failing segmentation tests**
@@ -47,9 +47,9 @@ Create synthetic RGB images containing a connected 4x4 grid and disconnected com
 
 ```python
 def test_segmentation_is_stable_under_illumination_and_color_changes():
-    reference, expected = synthetic_aluminum_pattern()
+    reference, expected = synthetic_metal_pattern()
     variants = illumination_variants(reference)
-    masks = [segment_aluminum_geometry(frame).mask for frame in variants]
+    masks = [segment_metal_geometry(frame).mask for frame in variants]
     assert all(mask_iou(mask, expected) > 0.90 for mask in masks)
 ```
 
@@ -74,12 +74,12 @@ class GeometryMaskFrame:
     features: tuple[GeometryMaskFeature, ...]
     frame_size: tuple[int, int]
 
-def segment_aluminum_geometry(frame: object) -> GeometryMaskFrame:
+def segment_metal_geometry(frame: object) -> GeometryMaskFrame:
     rgb = _rgb_array(frame)
-    mask = _adaptive_aluminum_mask(rgb)
+    mask = _adaptive_metal_mask(rgb)
     features = _actual_mask_features(mask)
     if len(features) < MIN_GEOMETRY_FEATURES:
-        raise ValueError("Insufficient aluminum geometry was detected.")
+        raise ValueError("Insufficient metal geometry was detected.")
     return GeometryMaskFrame(mask, features, (rgb.shape[1], rgb.shape[0]))
 ```
 
@@ -91,7 +91,7 @@ Assert extracted points lie on actual corners/endpoints in the expected mask nei
 
 ```powershell
 git add probe_station_gui/camera/geometry_mask.py tests/camera/test_geometry_mask.py
-git commit -m "feat: segment aluminum calibration geometry"
+git commit -m "feat: segment metal calibration geometry"
 ```
 
 ### Task 2: Unique Stage-Predicted Feature Tracking
