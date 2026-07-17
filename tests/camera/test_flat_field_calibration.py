@@ -85,6 +85,37 @@ def test_load_accepts_existing_current_manifest_shape(tmp_path: Path) -> None:
     assert stored.profile.max_gain == 5.0
 
 
+@pytest.mark.parametrize(
+    ("version", "include_version"),
+    [
+        pytest.param(None, False, id="missing"),
+        pytest.param(None, True, id="null"),
+        pytest.param(0, True, id="older"),
+        pytest.param(2, True, id="future"),
+        pytest.param("1", True, id="string"),
+        pytest.param(1.0, True, id="float"),
+        pytest.param(True, True, id="boolean"),
+    ],
+)
+def test_load_rejects_current_manifest_without_exact_schema_version(
+    tmp_path: Path,
+    flat_frames: list[QImage],
+    version: object,
+    include_version: bool,
+) -> None:
+    store = FlatFieldCalibrationStore(tmp_path)
+    current_path = store.install("X20", flat_frames).current_manifest
+    manifest = json.loads(current_path.read_text(encoding="utf-8"))
+    if include_version:
+        manifest["version"] = version
+    else:
+        manifest.pop("version")
+    current_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="version must be exactly 1"):
+        FlatFieldCalibrationStore(tmp_path).load("X20")
+
+
 def test_failed_install_keeps_previous_current_manifest(
     tmp_path: Path,
     flat_frames: list[QImage],
@@ -124,6 +155,47 @@ def test_profile_manifest_write_failure_keeps_previous_current_manifest(
         store.install("X20", flat_frames)
 
     assert first.current_manifest.read_bytes() == previous_current
+    assert FlatFieldCalibrationStore(tmp_path).load("X20").reference_image == first.reference_image
+
+
+def test_staged_current_manifest_write_failure_keeps_previous_current_manifest(
+    tmp_path: Path,
+    flat_frames: list[QImage],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = FlatFieldCalibrationStore(tmp_path)
+    first = store.install("X20", flat_frames)
+    previous_current = first.current_manifest.read_bytes()
+
+    from probe_station_gui.camera import flat_field_calibration
+
+    real_write_json = flat_field_calibration._write_json
+    temporary_paths: list[Path] = []
+    profile_manifest_paths: list[Path] = []
+
+    def fail_staged_current_pointer(path: Path, payload: object) -> None:
+        if path.name == "profile.json":
+            profile_manifest_paths.append(path)
+        if (
+            path.parent == first.current_manifest.parent
+            and path.name.startswith(".current.json.")
+            and path.name.endswith(".tmp")
+        ):
+            temporary_paths.append(path)
+            real_write_json(path, payload)
+            raise OSError("staged current pointer write failed")
+        real_write_json(path, payload)
+
+    monkeypatch.setattr(flat_field_calibration, "_write_json", fail_staged_current_pointer)
+
+    with pytest.raises(OSError, match="staged current pointer write failed"):
+        store.install("X20", flat_frames)
+
+    assert profile_manifest_paths
+    assert profile_manifest_paths[0].is_file()
+    assert first.current_manifest.read_bytes() == previous_current
+    assert temporary_paths
+    assert not temporary_paths[0].exists()
     assert FlatFieldCalibrationStore(tmp_path).load("X20").reference_image == first.reference_image
 
 

@@ -71,6 +71,11 @@ class FlatFieldCalibrationStore:
             raise ValueError("flat-field current.json is invalid") from exc
         if not isinstance(payload, Mapping):
             raise ValueError("flat-field current.json must contain an object")
+        version = payload.get("version")
+        if type(version) is not int or version != _MANIFEST_VERSION:
+            raise ValueError(
+                f"flat-field current.json version must be exactly {_MANIFEST_VERSION}"
+            )
 
         declared_objective = str(payload.get("objective") or objective).strip()
         if declared_objective.casefold() != objective.casefold():
