@@ -14,6 +14,7 @@ from probe_station_gui.camera.geometry_mask import (
     GeometryMaskComponent,
     GeometryMaskFeature,
     GeometryMaskFrame,
+    build_geometry_alignment_previews,
     segment_metal_geometry,
 )
 
@@ -563,3 +564,356 @@ def test_geometry_tracking_supplies_fit_with_recoverable_affine_and_distortion_d
     assert fit.model.p1 == pytest.approx(distortion["p1"], abs=0.0005)
     assert fit.model.p2 == pytest.approx(distortion["p2"], abs=0.0005)
     assert fit.center_px == pytest.approx(center_px, abs=2.0)
+
+
+def _preview_mask_pattern(frame_size: tuple[int, int]) -> np.ndarray:
+    """Return a central grid with visible left and right comb structures."""
+    width, height = frame_size
+    mask = np.zeros((height, width), dtype=np.uint8)
+    for x in (width // 2 - 16, width // 2, width // 2 + 16):
+        cv2.line(mask, (x, height // 2 - 20), (x, height // 2 + 20), 1, 3)
+    for y in (height // 2 - 20, height // 2, height // 2 + 20):
+        cv2.line(mask, (width // 2 - 16, y), (width // 2 + 16, y), 1, 3)
+    for spine_x, tooth_end_x in ((12, 34), (width - 13, width - 35)):
+        cv2.line(mask, (spine_x, 18), (spine_x, height - 19), 1, 3)
+        for y in (28, 44, 60, height - 61, height - 45, height - 29):
+            cv2.line(mask, (spine_x, y), (tooth_end_x, y), 1, 3)
+    return mask.astype(bool)
+
+
+def _inverse_preview_geometry_point(
+    corrected_px: np.ndarray,
+    *,
+    frame_size: tuple[int, int],
+    center_px: tuple[float, float],
+    k1: float,
+    k2: float,
+    p1: float,
+    p2: float,
+) -> np.ndarray:
+    from probe_station_gui.camera.distortion import _stage_geometry_correct_point
+
+    estimate = corrected_px.astype(float, copy=True)
+    for _ in range(30):
+        mapped = np.asarray(
+            _stage_geometry_correct_point(
+                (float(estimate[0]), float(estimate[1])),
+                frame_size=frame_size,
+                center_px=center_px,
+                k1=k1,
+                k2=k2,
+                p1=p1,
+                p2=p2,
+            ),
+            dtype=float,
+        )
+        estimate += corrected_px - mapped
+    return estimate
+
+
+def _distorted_preview_mask(
+    corrected_mask: np.ndarray,
+    *,
+    frame_size: tuple[int, int],
+    center_px: tuple[float, float],
+    k1: float,
+    k2: float,
+    p1: float,
+    p2: float,
+) -> np.ndarray:
+    observed = np.zeros_like(corrected_mask, dtype=bool)
+    ys, xs = np.nonzero(corrected_mask)
+    for x, y in zip(xs, ys):
+        raw = _inverse_preview_geometry_point(
+            np.asarray((x, y), dtype=float),
+            frame_size=frame_size,
+            center_px=center_px,
+            k1=k1,
+            k2=k2,
+            p1=p1,
+            p2=p2,
+        )
+        raw_x, raw_y = np.rint(raw).astype(int)
+        if 0 <= raw_x < frame_size[0] and 0 <= raw_y < frame_size[1]:
+            observed[raw_y, raw_x] = True
+    return observed
+
+
+def _translated_preview_mask(mask: np.ndarray, shift_px: np.ndarray) -> np.ndarray:
+    height, width = mask.shape
+    return cv2.warpAffine(
+        mask.astype(np.uint8),
+        np.asarray(((1.0, 0.0, shift_px[0]), (0.0, 1.0, shift_px[1]))),
+        (width, height),
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    ).astype(bool)
+
+
+def _preview_qimage_array(image: QImage) -> np.ndarray:
+    assert image.format() == QImage.Format_Grayscale8
+    rows = np.frombuffer(
+        image.constBits(),
+        dtype=np.uint8,
+        count=image.sizeInBytes(),
+    ).reshape((image.height(), image.bytesPerLine()))
+    return rows[:, : image.width()].copy()
+
+
+def _preview_spread_metric(image: QImage) -> float:
+    values = _preview_qimage_array(image)
+    return float(np.count_nonzero(values)) / float(values.sum())
+
+
+def _assert_preview_occupancy_levels(
+    image: QImage,
+    *,
+    frame_count: int,
+) -> np.ndarray:
+    values = _preview_qimage_array(image)
+    single_level = int(np.rint(255.0 * (1.0 - 0.58)))
+    reinforced_level = int(np.rint(255.0 * (1.0 - 0.58**frame_count)))
+    nonzero_levels = np.unique(values[values > 0])
+
+    assert np.any(values == 0)
+    assert single_level in nonzero_levels
+    assert reinforced_level in nonzero_levels
+    assert nonzero_levels.size >= 2
+    assert int(nonzero_levels.max()) < 255
+    return values
+
+
+def _preview_payload(
+    *,
+    frame_size: tuple[int, int],
+    pixels_to_mm: np.ndarray,
+    center_px: tuple[float, float],
+    k1: float = 0.0,
+    k2: float = 0.0,
+    p1: float = 0.0,
+    p2: float = 0.0,
+) -> dict[str, object]:
+    return {
+        "model_version": 1,
+        "model_type": "stage_geometry",
+        "frame_size": list(frame_size),
+        "pixels_to_mm": pixels_to_mm.tolist(),
+        "calibrated_pixels_to_mm": pixels_to_mm.tolist(),
+        "center_px": list(center_px),
+        "k1": k1,
+        "k2": k2,
+        "p1": p1,
+        "p2": p2,
+    }
+
+
+def test_geometry_alignment_previews_keep_combs_and_reduce_mask_spread() -> None:
+    frame_size = (160, 112)
+    center_px = (81.0, 53.0)
+    initial_gui_matrix = np.array(((-0.00122, 0.0), (0.0, -0.00093)))
+    fitted_gui_matrix = np.array(((-0.001, 0.00004), (0.00002, -0.001)))
+    fitted_image_matrix = fitted_gui_matrix @ np.diag((1.0, -1.0))
+    distortion = {"k1": 0.042, "k2": -0.009, "p1": 0.002, "p2": -0.0015}
+    stage_offsets = ((0.0, 0.0), (0.012, -0.008), (-0.010, 0.010))
+    base_mask = _preview_mask_pattern(frame_size)
+    masks = tuple(
+        _distorted_preview_mask(
+            _translated_preview_mask(
+                base_mask,
+                np.linalg.inv(fitted_image_matrix) @ np.asarray(offset),
+            ),
+            frame_size=frame_size,
+            center_px=center_px,
+            **distortion,
+        )
+        for offset in stage_offsets
+    )
+    frames = tuple(
+        GridCalibrationFrame(frame=None, stage_offset_mm=offset)
+        for offset in stage_offsets
+    )
+
+    before, after = build_geometry_alignment_previews(
+        frames,
+        masks,
+        initial_gui_matrix,
+        _preview_payload(
+            frame_size=frame_size,
+            pixels_to_mm=fitted_gui_matrix,
+            center_px=center_px,
+            **distortion,
+        ),
+    )
+
+    assert not before.isNull()
+    assert not after.isNull()
+    assert before.size() == after.size()
+    assert before.format() == QImage.Format_Grayscale8
+    assert after.format() == QImage.Format_Grayscale8
+    before_values = _assert_preview_occupancy_levels(before, frame_count=len(frames))
+    after_values = _assert_preview_occupancy_levels(after, frame_count=len(frames))
+
+    left_comb_region = after_values[8:102, 8:48]
+    right_comb_region = after_values[8:102, 118:158]
+    central_overlap_region = after_values[25:85, 55:110]
+    assert np.count_nonzero(left_comb_region) > 500
+    assert np.count_nonzero(right_comb_region) > 500
+    assert np.any(left_comb_region == 107)
+    assert np.any(right_comb_region == 107)
+    assert np.any(central_overlap_region == 205)
+
+    component_count, _labels, component_stats, _centroids = cv2.connectedComponentsWithStats(
+        (after_values > 0).astype(np.uint8),
+        connectivity=8,
+    )
+    components = [tuple(int(value) for value in row) for row in component_stats[1:]]
+    assert component_count - 1 == 3
+    assert any(
+        8 <= x <= 20 and 10 <= y <= 20 and 24 <= width <= 34 and height >= 70 and area > 500
+        for x, y, width, height, area in components
+    )
+    assert any(
+        120 <= x <= 132 and 10 <= y <= 20 and 24 <= width <= 34 and height >= 70 and area > 500
+        for x, y, width, height, area in components
+    )
+    assert _preview_spread_metric(after) < _preview_spread_metric(before)
+
+
+def test_geometry_alignment_previews_align_asymmetric_landmark_with_signed_axes() -> None:
+    frame_size = (96, 72)
+    gui_matrix = np.array(((-0.5, 0.0), (0.0, -0.25)))
+    image_matrix = gui_matrix @ np.diag((1.0, -1.0))
+    inverse_image_matrix = np.linalg.inv(image_matrix)
+    landmark_px = np.asarray((40.0, 30.0))
+    stage_offsets = ((0.0, 0.0), (0.5, -0.5), (-1.0, 0.75))
+    assert stage_offsets[1][0] > 0.0 and stage_offsets[1][1] < 0.0
+    assert stage_offsets[2][0] < 0.0 and stage_offsets[2][1] > 0.0
+    masks: list[np.ndarray] = []
+    for stage_offset in stage_offsets:
+        source_px = landmark_px + inverse_image_matrix @ np.asarray(stage_offset)
+        mask = np.zeros((frame_size[1], frame_size[0]), dtype=bool)
+        source_x, source_y = np.rint(source_px).astype(int)
+        mask[source_y, source_x] = True
+        masks.append(mask)
+
+    frames = tuple(
+        GridCalibrationFrame(frame=None, stage_offset_mm=offset)
+        for offset in stage_offsets
+    )
+    payload = _preview_payload(
+        frame_size=frame_size,
+        pixels_to_mm=gui_matrix,
+        center_px=(48.0, 36.0),
+    )
+
+    _before, after = build_geometry_alignment_previews(
+        frames,
+        tuple(masks),
+        gui_matrix,
+        payload,
+    )
+
+    after_values = _preview_qimage_array(after)
+    expected_output = (12, 12)
+    assert after_values[expected_output[1], expected_output[0]] == 205
+    assert np.count_nonzero(after_values) == 1
+
+
+def test_geometry_alignment_previews_use_an_exact_common_crop() -> None:
+    frame_size = (120, 84)
+    matrix = np.array(((-0.001, 0.0), (0.0, -0.001)))
+    mask = _preview_mask_pattern(frame_size)
+    frames = (GridCalibrationFrame(frame=None, stage_offset_mm=(0.0, 0.0)),)
+    payload = _preview_payload(
+        frame_size=frame_size,
+        pixels_to_mm=matrix,
+        center_px=(60.0, 42.0),
+    )
+
+    before, after = build_geometry_alignment_previews(frames, (mask,), matrix, payload)
+
+    assert before.size() == after.size()
+    assert np.array_equal(_preview_qimage_array(before), _preview_qimage_array(after))
+
+
+@pytest.mark.parametrize(
+    ("frames", "masks", "matrix", "payload", "message"),
+    [
+        (
+            (GridCalibrationFrame(frame=None, stage_offset_mm=(0.0, 0.0)),),
+            (),
+            ((-0.001, 0.0), (0.0, -0.001)),
+            _preview_payload(
+                frame_size=(80, 60),
+                pixels_to_mm=np.array(((-0.001, 0.0), (0.0, -0.001))),
+                center_px=(40.0, 30.0),
+            ),
+            "same length",
+        ),
+        (
+            (GridCalibrationFrame(frame=None, stage_offset_mm=(0.0, 0.0)),),
+            (np.zeros((60, 80), dtype=bool),),
+            ((-0.001, 0.0), (0.0, -0.001)),
+            _preview_payload(
+                frame_size=(80, 60),
+                pixels_to_mm=np.array(((-0.001, 0.0), (0.0, -0.001))),
+                center_px=(40.0, 30.0),
+            ),
+            "empty",
+        ),
+        (
+            (GridCalibrationFrame(frame=None, stage_offset_mm=(0.0, 0.0)),),
+            (np.ones((60, 80), dtype=bool),),
+            ((-0.001, 0.0), (0.0, -0.001)),
+            {"model_version": 1, "model_type": "stage_geometry", "frame_size": [80, 60], "pixels_to_mm": [[1.0, 2.0], [2.0, 4.0]]},
+            "fitted",
+        ),
+    ],
+)
+def test_geometry_alignment_previews_reject_invalid_inputs(
+    frames: tuple[GridCalibrationFrame, ...],
+    masks: tuple[np.ndarray, ...],
+    matrix: object,
+    payload: dict[str, object],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        build_geometry_alignment_previews(frames, masks, matrix, payload)
+
+
+def test_geometry_alignment_previews_reject_size_mismatch_and_correction_errors(monkeypatch) -> None:
+    frame_size = (80, 60)
+    matrix = np.array(((-0.001, 0.0), (0.0, -0.001)))
+    frames = (
+        GridCalibrationFrame(frame=None, stage_offset_mm=(0.0, 0.0)),
+        GridCalibrationFrame(frame=None, stage_offset_mm=(0.0, 0.0)),
+    )
+    payload = _preview_payload(
+        frame_size=frame_size,
+        pixels_to_mm=matrix,
+        center_px=(40.0, 30.0),
+        k1=0.01,
+    )
+
+    with pytest.raises(ValueError, match="same size"):
+        build_geometry_alignment_previews(
+            frames,
+            (np.ones((60, 80), dtype=bool), np.ones((59, 80), dtype=bool)),
+            matrix,
+            payload,
+        )
+
+    monkeypatch.setattr(
+        geometry_mask,
+        "apply_distortion_correction",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("map unavailable")),
+        raising=False,
+    )
+    with pytest.raises(ValueError, match="correction"):
+        build_geometry_alignment_previews(
+            frames[:1],
+            (np.ones((60, 80), dtype=bool),),
+            matrix,
+            payload,
+        )

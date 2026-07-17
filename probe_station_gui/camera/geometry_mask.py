@@ -11,7 +11,12 @@ from PySide6.QtGui import QImage
 from scipy.optimize import linear_sum_assignment
 from scipy.spatial import cKDTree
 
-from probe_station_gui.camera.distortion import StageFeatureObservation
+from probe_station_gui.camera.distortion import (
+    StageFeatureObservation,
+    StageGeometryCorrection,
+    apply_distortion_correction,
+    correction_from_payload,
+)
 
 
 MIN_GEOMETRY_FEATURES = 8
@@ -33,6 +38,13 @@ _DESCRIPTOR_COST_WEIGHT_PX = 2.0
 _MIN_COMPONENT_LENGTH_TOLERANCE_PX = 10.0
 _MAX_COMPONENT_LENGTH_RELATIVE_DELTA = 0.55
 _ASSIGNMENT_BLOCKED_COST = 1e9
+_PREVIEW_CROP_MARGIN_PX = 12
+_PREVIEW_OCCUPANCY_DECAY = 0.58
+_GUI_TO_IMAGE_PIXEL_AXES = np.diag((1.0, -1.0))
+
+
+class GeometryAlignmentPreviewError(ValueError):
+    """A preview could not be safely composed from the fitted geometry."""
 
 
 @dataclass(frozen=True)
@@ -203,6 +215,253 @@ def build_geometry_feature_observations(
                 )
             )
     return tuple(observations)
+
+
+def build_geometry_alignment_previews(
+    raw_frames: Sequence[object],
+    masks: Sequence[object],
+    initial_pixels_to_mm: Sequence[Sequence[float]],
+    fitted_payload: object,
+) -> tuple[QImage, QImage]:
+    """Render common-crop mask alignment previews before and after fitting.
+
+    Persisted objective matrices use the GUI's Y-up pixel convention.  The
+    compositor changes only the pixel basis locally, because masks and Qt image
+    coordinates are Y-down.
+    """
+    if len(raw_frames) != len(masks):
+        raise GeometryAlignmentPreviewError("raw_frames and masks must have the same length.")
+    if not raw_frames:
+        raise GeometryAlignmentPreviewError("At least one mask is required for an alignment preview.")
+
+    binary_masks, frame_size = _preview_binary_masks(masks)
+    initial_image_matrix = _image_matrix_from_persisted_gui(
+        initial_pixels_to_mm,
+        "initial_pixels_to_mm",
+    )
+    fitted_correction, fitted_image_matrix = _fitted_preview_correction(
+        fitted_payload,
+        frame_size,
+    )
+    stage_offsets = tuple(_stage_offset_mm(frame) for frame in raw_frames)
+
+    before_masks = tuple(mask.copy() for mask in binary_masks)
+    after_masks = tuple(
+        _apply_fitted_geometry_to_preview_mask(mask, fitted_correction)
+        for mask in binary_masks
+    )
+    before_placements = _preview_mask_placements(
+        before_masks,
+        stage_offsets,
+        initial_image_matrix,
+    )
+    after_placements = _preview_mask_placements(
+        after_masks,
+        stage_offsets,
+        fitted_image_matrix,
+    )
+    canvas_origin, canvas_size = _shared_preview_canvas_bounds(
+        (*before_placements, *after_placements),
+    )
+    before_canvas = _accumulate_preview_occupancy(
+        before_placements,
+        canvas_origin=canvas_origin,
+        canvas_size=canvas_size,
+    )
+    after_canvas = _accumulate_preview_occupancy(
+        after_placements,
+        canvas_origin=canvas_origin,
+        canvas_size=canvas_size,
+    )
+    return (_preview_occupancy_qimage(before_canvas), _preview_occupancy_qimage(after_canvas))
+
+
+def _preview_binary_masks(masks: Sequence[object]) -> tuple[tuple[np.ndarray, ...], tuple[int, int]]:
+    normalized: list[np.ndarray] = []
+    expected_size: tuple[int, int] | None = None
+    for item in masks:
+        source = item.mask if isinstance(item, GeometryMaskFrame) else item
+        array = np.asarray(source)
+        if array.ndim != 2 or not array.shape[0] or not array.shape[1]:
+            raise GeometryAlignmentPreviewError("Each preview mask must be a non-empty 2D binary mask.")
+        if not np.issubdtype(array.dtype, np.bool_) and not np.issubdtype(array.dtype, np.number):
+            raise GeometryAlignmentPreviewError("Each preview mask must be binary.")
+        if np.issubdtype(array.dtype, np.floating) and not np.isfinite(array).all():
+            raise GeometryAlignmentPreviewError("Each preview mask must contain finite values.")
+        mask = np.ascontiguousarray(array != 0)
+        frame_size = (int(mask.shape[1]), int(mask.shape[0]))
+        declared_size = getattr(item, "frame_size", frame_size)
+        if tuple(declared_size) != frame_size:
+            raise GeometryAlignmentPreviewError("Each geometry mask must match its declared frame size.")
+        if expected_size is None:
+            expected_size = frame_size
+        elif frame_size != expected_size:
+            raise GeometryAlignmentPreviewError("All preview masks must have the same size.")
+        normalized.append(mask)
+    if expected_size is None:
+        raise GeometryAlignmentPreviewError("At least one mask is required for an alignment preview.")
+    return (tuple(normalized), expected_size)
+
+
+def _image_matrix_from_persisted_gui(
+    matrix: Sequence[Sequence[float]],
+    label: str,
+) -> np.ndarray:
+    try:
+        gui_matrix = _valid_image_pixels_to_mm(matrix)
+    except ValueError as exc:
+        raise GeometryAlignmentPreviewError(f"{label} must be a finite non-singular 2x2 matrix.") from exc
+    return gui_matrix @ _GUI_TO_IMAGE_PIXEL_AXES
+
+
+def _fitted_preview_correction(
+    payload: object,
+    frame_size: tuple[int, int],
+) -> tuple[StageGeometryCorrection, np.ndarray]:
+    if not isinstance(payload, dict):
+        raise GeometryAlignmentPreviewError("fitted payload must be a stage-geometry object.")
+    if str(payload.get("model_type", "")).strip().lower() != "stage_geometry":
+        raise GeometryAlignmentPreviewError("fitted payload must use the stage_geometry model.")
+    try:
+        image_matrix = _image_matrix_from_persisted_gui(
+            payload.get("pixels_to_mm"),
+            "fitted payload pixels_to_mm",
+        )
+    except (TypeError, ValueError) as exc:
+        raise GeometryAlignmentPreviewError("fitted payload has an invalid pixels_to_mm matrix.") from exc
+    image_payload = dict(payload)
+    image_payload["pixels_to_mm"] = image_matrix.tolist()
+    if "calibrated_pixels_to_mm" in image_payload:
+        try:
+            image_payload["calibrated_pixels_to_mm"] = _image_matrix_from_persisted_gui(
+                image_payload["calibrated_pixels_to_mm"],
+                "fitted payload calibrated_pixels_to_mm",
+            ).tolist()
+        except (TypeError, ValueError) as exc:
+            raise GeometryAlignmentPreviewError(
+                "fitted payload has an invalid calibrated_pixels_to_mm matrix."
+            ) from exc
+    try:
+        correction = correction_from_payload(image_payload)
+    except Exception as exc:
+        raise GeometryAlignmentPreviewError("Unable to prepare the fitted geometry correction.") from exc
+    if not isinstance(correction, StageGeometryCorrection):
+        raise GeometryAlignmentPreviewError("fitted payload did not produce a stage-geometry correction.")
+    if correction.frame_size != frame_size:
+        raise GeometryAlignmentPreviewError("fitted correction frame size must match the preview masks.")
+    return correction, image_matrix
+
+
+def _apply_fitted_geometry_to_preview_mask(
+    mask: np.ndarray,
+    correction: StageGeometryCorrection,
+) -> np.ndarray:
+    rgb = np.repeat((mask.astype(np.uint8) * 255)[:, :, None], 3, axis=2)
+    height, width = mask.shape
+    source = QImage(rgb.data, width, height, int(rgb.strides[0]), QImage.Format_RGB888).copy()
+    try:
+        # The public helper validates and builds the fitted inverse maps.  Use
+        # those maps below with nearest-neighbour sampling to preserve masks.
+        apply_distortion_correction(source, correction)
+    except Exception as exc:
+        raise GeometryAlignmentPreviewError("Unable to apply the fitted geometry correction.") from exc
+    if correction.map_x is None or correction.map_y is None:
+        return mask.copy()
+    try:
+        corrected = cv2.remap(
+            mask.astype(np.uint8),
+            correction.map_x,
+            correction.map_y,
+            interpolation=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+    except cv2.error as exc:
+        raise GeometryAlignmentPreviewError("Unable to apply the fitted geometry correction map.") from exc
+    return corrected.astype(bool)
+
+
+def _preview_mask_placements(
+    masks: Sequence[np.ndarray],
+    stage_offsets: Sequence[tuple[float, float]],
+    image_matrix: np.ndarray,
+) -> tuple[tuple[np.ndarray, np.ndarray], ...]:
+    try:
+        stage_to_pixel = np.linalg.inv(image_matrix)
+    except np.linalg.LinAlgError as exc:
+        raise GeometryAlignmentPreviewError("Preview pixel matrix must be non-singular.") from exc
+    return tuple(
+        (mask, -(stage_to_pixel @ np.asarray(stage_offset, dtype=float)))
+        for mask, stage_offset in zip(masks, stage_offsets)
+    )
+
+
+def _shared_preview_canvas_bounds(
+    placements: Sequence[tuple[np.ndarray, np.ndarray]],
+) -> tuple[np.ndarray, tuple[int, int]]:
+    bounds: list[tuple[float, float, float, float]] = []
+    for mask, translation in placements:
+        ys, xs = np.nonzero(mask)
+        if not xs.size:
+            continue
+        bounds.append(
+            (
+                float(xs.min()) + float(translation[0]),
+                float(ys.min()) + float(translation[1]),
+                float(xs.max()) + float(translation[0]),
+                float(ys.max()) + float(translation[1]),
+            )
+        )
+    if not bounds:
+        raise GeometryAlignmentPreviewError("The alignment preview mask union is empty.")
+    left = int(np.floor(min(bound[0] for bound in bounds))) - _PREVIEW_CROP_MARGIN_PX
+    top = int(np.floor(min(bound[1] for bound in bounds))) - _PREVIEW_CROP_MARGIN_PX
+    right = int(np.ceil(max(bound[2] for bound in bounds))) + _PREVIEW_CROP_MARGIN_PX
+    bottom = int(np.ceil(max(bound[3] for bound in bounds))) + _PREVIEW_CROP_MARGIN_PX
+    return np.asarray((left, top), dtype=float), (right - left + 1, bottom - top + 1)
+
+
+def _accumulate_preview_occupancy(
+    placements: Sequence[tuple[np.ndarray, np.ndarray]],
+    *,
+    canvas_origin: np.ndarray,
+    canvas_size: tuple[int, int],
+) -> np.ndarray:
+    width, height = canvas_size
+    occupancy = np.zeros((height, width), dtype=np.float32)
+    for mask, translation in placements:
+        transform = np.asarray(
+            (
+                (1.0, 0.0, float(translation[0] - canvas_origin[0])),
+                (0.0, 1.0, float(translation[1] - canvas_origin[1])),
+            ),
+            dtype=np.float32,
+        )
+        occupancy += cv2.warpAffine(
+            mask.astype(np.float32),
+            transform,
+            canvas_size,
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+    return occupancy
+
+
+def _preview_occupancy_qimage(occupancy: np.ndarray) -> QImage:
+    values = np.zeros(occupancy.shape, dtype=np.uint8)
+    occupied = occupancy > 0.0
+    values[occupied] = np.rint(
+        255.0 * (1.0 - np.power(_PREVIEW_OCCUPANCY_DECAY, occupancy[occupied]))
+    ).astype(np.uint8)
+    height, width = values.shape
+    return QImage(
+        values.data,
+        width,
+        height,
+        int(values.strides[0]),
+        QImage.Format_Grayscale8,
+    ).copy()
 
 
 def _valid_geometry_frame_size(frame_size: object) -> tuple[int, int]:
