@@ -979,6 +979,11 @@ class SettingsManager:
 
         return self._settings.coordinate_system.clone()
 
+    def precision_approach_configuration(self) -> PrecisionApproachSettings:
+        """Return the current per-axis final approach profiles."""
+
+        return self._settings.precision_approach.clone()
+
     def objectives_configuration(self) -> ObjectivesSettings:
         """Return the current objective configuration clone."""
 

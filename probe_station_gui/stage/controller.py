@@ -51,6 +51,7 @@ from probe_station_gui.stage.jog_commands import (
 from probe_station_gui.stage.homing_startup import StageControllerHomingStartupMixin
 from probe_station_gui.stage.jog_queue import StageControllerJogQueueMixin
 from probe_station_gui.stage.motion_commands import StageControllerMotionCommandsMixin
+from probe_station_gui.stage.precision_motion import StageControllerPrecisionMotionMixin
 from probe_station_gui.stage.motion_timing import (
     absolute_move_distance_for_timeout as absolute_move_distance_for_timeout,
     idle_timeout_for_distance as idle_timeout_for_distance,
@@ -106,6 +107,7 @@ class StageController(
     StageControllerJogQueueMixin,
     StageControllerMotionCommandsMixin,
     StageControllerAxisCoordinatesMixin,
+    StageControllerPrecisionMotionMixin,
     StageControllerSafetyStateMixin,
     StageControllerClickMoveMixin,
     StageControllerAutofocusMixin,
@@ -137,6 +139,7 @@ class StageController(
     status_message: Signal = Signal(str)
     controller_reboot_detected: Signal = Signal()
     controller_reboot_ready: Signal = Signal()
+    coordinate_confidence_changed: Signal = Signal(object)
 
     CALIBRATION_PIXEL_TARGET = 120.0
     CALIBRATION_MIN_VERIFY_PIXELS = 15.0
@@ -299,6 +302,7 @@ class StageController(
         self._preferred_work_coordinate_system = self.DEFAULT_WORK_COORDINATE_SYSTEM
         self._active_work_coordinate_system: Optional[str] = None
         self._controller_coordinate_offsets: dict[str, tuple[float, ...]] = {}
+        self._initialize_precision_motion()
         self._async_write_queue: PriorityQueue[_QueuedSerialWrite] = PriorityQueue()
         self._async_write_clear_epoch = 0
         self._async_write_shutdown = threading.Event()
@@ -785,6 +789,9 @@ class StageController(
             self._oscillation_needles_actions.clear()
             self._active_needles_action = None
             self._active_needles_programmed_feedrate = None
+        self.invalidate_coordinate_confidence(
+            "Controller reset makes coordinates approximate."
+        )
         self.status_message.emit(reason)
         self.queue_soft_reset(source=source)
 
@@ -1024,6 +1031,7 @@ class StageController(
             self._controller_coordinate_offsets[status.coordinate_system] = tuple(
                 float(v) for v in status.work_offset
             )
+        self._update_coordinate_confidence_from_status(status)
 
     def _check_cancelled(self) -> None:
         if self._cancel_event.is_set():

@@ -3833,6 +3833,9 @@ class Main(QMainWindow):
         self.stage_controller.apply_axis_z_calibration(
             self.settings_manager.axis_z_calibration_configuration()
         )
+        self.stage_controller.apply_precision_approach_configuration(
+            self.settings_manager.precision_approach_configuration()
+        )
         needle_calibration_ui.apply_needle_calibration_runtime(self, needle_settings)
         coordinate_settings = self.settings_manager.coordinate_system_configuration()
         self.stage_controller.apply_coordinate_system_configuration(
@@ -5549,6 +5552,10 @@ class Main(QMainWindow):
         stripped = command.strip().upper()
         if not stripped:
             return
+        self.stage_controller.invalidate_needles_state()
+        self.stage_controller.invalidate_coordinate_confidence(
+            "Manual controller command."
+        )
         if re.match(r"^G5(?:4|5|6|7|8|9(?:\.[123])?)$", stripped):
             self.stage_controller.request_startup_sync(auto_home_a=False)
             self._schedule_cancel_state_refresh()

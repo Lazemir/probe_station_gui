@@ -235,13 +235,10 @@ class StageControllerMotionCommandsMixin:
                 f"{target_text} F{self._format_gcode_value(feedrate_text)}."
             )
             with self._serial_session() as serial_connection:
-                self._send_absolute_axis_targets_move(
+                self._execute_precision_axis_targets_locked(
                     ordered_targets,
-                    ignore_needle_safety=self._motion_safety_disabled,
                     feedrate=feedrate,
-                    wait_for_completion=True,
                     allow_unhomed=allow_unhomed,
-                    as_jog=True,
                 )
                 self._query_status(serial_connection)
             message = f"Coordinate move complete (G90 {target_text})."
@@ -321,14 +318,11 @@ class StageControllerMotionCommandsMixin:
                     f"{axis}{target_value:+.3f} "
                     f"F{self._format_gcode_value(feedrate_text)}."
                 )
-                self._send_absolute_axis_move(
-                    axis,
-                    target_value,
-                    ignore_needle_safety=self._motion_safety_disabled,
+                self._execute_precision_axis_targets_locked(
+                    {axis: target_value},
                     feedrate=feedrate,
-                    wait_for_completion=False,
                     allow_unhomed=allow_unhomed or mode == "G91",
-                    as_jog=True,
+                    wait_for_completion=False,
                 )
             self.movement_finished.emit(
                 True,
@@ -366,13 +360,10 @@ class StageControllerMotionCommandsMixin:
                     "Coordinate move (G90): "
                     f"{target_text} F{self._format_gcode_value(feedrate_text)}."
                 )
-                self._send_absolute_axis_targets_move(
+                self._execute_precision_axis_targets_locked(
                     ordered_targets,
-                    ignore_needle_safety=self._motion_safety_disabled,
                     feedrate=feedrate,
-                    wait_for_completion=True,
                     allow_unhomed=allow_unhomed,
-                    as_jog=True,
                 )
             self.movement_finished.emit(
                 True,
@@ -654,6 +645,40 @@ class StageControllerMotionCommandsMixin:
                     move_distance, effective_feedrate
                 ),
             )
+
+    def _validate_absolute_axis_targets_move(
+        self,
+        targets: dict[str, float],
+        *,
+        allow_unhomed: bool,
+        status: _Status | None = None,
+    ) -> None:
+        """Validate a target map without sending controller commands."""
+
+        ordered_targets = ordered_absolute_axis_targets(
+            targets,
+            axis_order=self.AXIS_INDEX,
+        )
+        if not ordered_targets or self._motion_safety_disabled:
+            return
+        self._ensure_axis_limits(required_axes=tuple(ordered_targets))
+        if status is None:
+            status = self._query_current_status_with_required_coordinates(
+                axes=tuple(ordered_targets),
+            )
+        if status is None:
+            raise StageControllerError("Unable to read position for absolute move.")
+        self._require_homed_axes(
+            status,
+            set(ordered_targets),
+            allow_relative=allow_unhomed,
+        )
+        for axis, value in ordered_targets.items():
+            limits = self._axis_limits_for_configured_mode(axis, status)
+            if limits and self._axis_software_limit_ready(status, axis):
+                error = absolute_axis_target_limit_error(axis, value, limits)
+                if error is not None:
+                    raise StageControllerError(error)
 
     def _send_absolute_axis_move(
         self,

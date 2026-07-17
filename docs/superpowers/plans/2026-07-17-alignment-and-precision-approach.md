@@ -105,25 +105,25 @@ C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/
 - Modify: `probe_station_gui/stage/controller.py`
 - Modify: `probe_station_gui/stage/motion_commands.py`
 - Modify: `probe_station_gui/stage/connection_state.py`
-- Modify: `probe_station_gui/views/main_window_connection_flow.py`
-- Modify: `probe_station_gui/settings_manager.py`
+- Modify: `main.py`
+- Modify: `probe_station_gui/settings/manager.py`
 - Create: `tests/stage/test_precision_motion.py`
 - Test: `tests/stage/test_controller_cache.py`
 - Test: `tests/stage/test_controller_status_session.py`
 
-- [ ] Add failing controller tests proving one accepted logical operation may send preparation and final absolute segments, reports busy/finished once, checks cancellation and safety between segments, and marks affected axes approximate after send failure or cancellation.
-- [ ] Add `PrecisionMotionMixin` that resolves relative requests to absolute display-space targets, obtains one plan, validates all segments before the first send, executes them in the existing background operation, and updates confidence only from confirmed status/motion outcomes.
-- [ ] Route `request_absolute_axis_targets_move`, `run_external_absolute_axis_targets_move`, and relative coordinate commands through the mixin. Add an explicit bypass used only by jog, homing, autofocus search/oscillation, and planner-internal segment sending.
-- [ ] Add failing persistence tests for versioned confidence records in `controller-state.json`: exact restoration requires the same volatile controller session marker, a fresh matching position within the named tolerance, and the same profile/calibration fingerprint. Verify one-axis position mismatch invalidates only that axis and marker mismatch invalidates all enabled axes.
-- [ ] Extend the existing controller-state export/restore schema without adding a second state file. Never serialize an in-flight prediction as exact.
-- [ ] Invalidate confidence on reset/session change, homing, manual-command notification, profile/calibration changes, live position mismatch, and failed/partial motion. Keep signal emission outside locks.
-- [ ] Run:
+- [x] Add failing controller tests proving one accepted logical operation may send preparation and final absolute segments, reports busy/finished once, checks cancellation and safety between segments, and marks affected axes approximate after send failure or cancellation.
+- [x] Add `PrecisionMotionMixin` that resolves relative requests to absolute display-space targets, obtains one plan, validates all segments before the first send, executes them in the existing background operation, and updates confidence only from confirmed status/motion outcomes.
+- [x] Route `request_absolute_axis_targets_move`, `run_external_absolute_axis_targets_move`, and relative coordinate commands through the mixin. Add an explicit bypass used only by jog, homing, autofocus search/oscillation, and planner-internal segment sending.
+- [x] Add failing persistence tests for versioned confidence records in `controller-state.json`: exact restoration requires the same volatile controller session marker, a fresh matching position within the named tolerance, and the same profile/calibration fingerprint. Verify one-axis position mismatch invalidates only that axis and marker mismatch invalidates all enabled axes.
+- [x] Extend the existing controller-state export/restore schema without adding a second state file. Never serialize an in-flight prediction as exact.
+- [x] Invalidate confidence on reset/session change, homing, manual-command notification, profile/calibration changes, live position mismatch, and failed/partial motion. Keep signal emission outside locks.
+- [x] Run:
 
 ```powershell
 C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/stage/test_precision_motion.py tests/stage/test_controller_cache.py tests/stage/test_controller_status_session.py tests/stage/test_motion_command_planning.py -q
 ```
 
-- [ ] Commit: `feat: persist precise coordinate confidence`
+- [x] Commit: `feat: persist precise coordinate confidence`
 
 ## Task 4: Integrate target workflows and remove the autofocus special case
 

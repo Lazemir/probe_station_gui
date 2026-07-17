@@ -8,7 +8,7 @@ from probe_station_gui.settings.precision_approach import (
     PrecisionApproachSettings,
     parse_precision_approach_settings,
 )
-from probe_station_gui.settings.manager import Settings
+from probe_station_gui.settings.manager import Settings, SettingsManager
 
 
 def test_precision_approach_defaults_cover_every_stage_axis() -> None:
@@ -106,3 +106,15 @@ def test_application_settings_clone_and_serialize_precision_profiles() -> None:
         "backlash": 0.75,
         "final_direction": -1,
     }
+
+
+def test_settings_manager_returns_independent_precision_approach_configuration() -> None:
+    manager = SettingsManager.__new__(SettingsManager)
+    manager._settings = Settings()
+
+    configuration = manager.precision_approach_configuration()
+    configuration.profiles["Z"] = PrecisionApproachProfile(False, 9.0, -1)
+
+    assert manager.settings.precision_approach.profiles["Z"] == (
+        PrecisionApproachProfile(True, 0.03, 1)
+    )

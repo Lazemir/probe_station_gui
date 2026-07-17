@@ -27,6 +27,24 @@ from probe_station_gui.views import (
 
 
 class MainStageCoordinateControlsTest(unittest.TestCase):
+    def test_manual_terminal_command_invalidates_needles_and_coordinate_confidence(
+        self,
+    ) -> None:
+        events = []
+        window = Main.__new__(Main)
+        window.stage_controller = types.SimpleNamespace(
+            invalidate_needles_state=lambda reason="": events.append(
+                ("needles", reason)
+            ),
+            invalidate_coordinate_confidence=lambda reason="": events.append(
+                ("coordinates", reason)
+            ),
+        )
+
+        Main._on_manual_terminal_command(window, "G1 X1")
+
+        self.assertEqual([event[0] for event in events], ["needles", "coordinates"])
+
     def test_stage_position_display_updates_caches_while_panel_applies_ui_state(
         self,
     ) -> None:

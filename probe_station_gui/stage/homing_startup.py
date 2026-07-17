@@ -62,6 +62,10 @@ class StageControllerHomingStartupMixin:
         try:
             with self._serial_session():
                 self._perform_home_command(command)
+            self.invalidate_coordinate_confidence(
+                "Homing resets coordinate confidence.",
+                axes=(self.AXIS_INDEX if axis_key == "ALL" else (axis_key,)),
+            )
             self.movement_finished.emit(True, "Homing complete.")
             self.homing_action_finished.emit(True, "Homing complete.", axis_key)
         except StageControllerError as exc:
