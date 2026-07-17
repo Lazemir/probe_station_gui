@@ -49,6 +49,7 @@ class _MenuOwner(QMainWindow):
         self._rect_action = None
         self._alignment_capture_action = None
         self._alignment_exit_action = None
+        self._terminal_action = None
 
     def _record(self, name: str, value: object = None) -> None:
         self.calls.append((name, value))
@@ -85,6 +86,9 @@ class _MenuOwner(QMainWindow):
 
     def _show_lens_distortion_dialog(self) -> None:
         self._record("lens_distortion")
+
+    def show_serial_terminal_window(self) -> None:
+        self._record("terminal")
 
     def _on_measure_action_toggled(self, checked: bool) -> None:
         self._record("measure", bool(checked))
@@ -157,6 +161,7 @@ def test_setup_main_window_menus_preserves_labels_and_shortcuts(
         "Resistance",
         "Oscillation",
         "Joystick",
+        "Terminal",
         "Ruler",
         "Rectangle",
         "Calibration",
@@ -187,12 +192,14 @@ def test_setup_main_window_menus_preserves_labels_and_shortcuts(
     window._surface_map_window_action.trigger()
     window._microscope_scan_action.trigger()
     window._lens_distortion_calibration_action.trigger()
+    window._terminal_action.trigger()
 
     assert ("design", True) in window.calls
     assert ("contact", True) in window.calls
     assert ("surface", None) in window.calls
     assert ("microscope", None) in window.calls
     assert ("lens_distortion", None) in window.calls
+    assert ("terminal", None) in window.calls
 
     window.close()
 

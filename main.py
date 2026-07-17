@@ -91,7 +91,6 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -103,7 +102,6 @@ from probe_station_gui import (
     JoystickWindow,
     MicroscopeView,
     StageController,
-    SerialTerminalWindow,
 )
 from probe_station_gui.design.model import DesignDocument, DesignModelError
 from probe_station_gui.design.contact_navigation import (
@@ -367,6 +365,7 @@ from probe_station_gui.views.serial_connection_panel import SerialConnectionPane
 from probe_station_gui.views.main_window_auxiliary import (
     create_design_layout_window,
     show_connection_dialog,
+    show_serial_terminal_window as show_serial_terminal_tool_window,
     toggle_design_layout_window,
 )
 from probe_station_gui.views.main_window_docks import create_main_window_docks
@@ -438,6 +437,7 @@ if TYPE_CHECKING:
         RouteMeasurementRunConfiguration,
     )
     from probe_station_gui.views.surface_map_panel import SurfaceMapWindow
+    from probe_station_gui.views.serial_terminal_window import SerialTerminalWindow
     from probe_station_gui.views.design_navigator_panel import (
         DesignLayoutWindow,
         DesignNavigatorPanel,
@@ -587,7 +587,6 @@ class Main(QMainWindow):
         self.serial_terminal_panel: SerialTerminalWindow | None = None
         self.serial_connection_panel: SerialConnectionPanel | None = None
         self.serial_connection_dialog: QDialog | None = None
-        self.serial_connection_tabs: QTabWidget | None = None
         self.resistance_panel: ResistanceMonitorPanel | None = None
         self.oscillation_panel: OscillationPanel | None = None
         self.surface_map_window: SurfaceMapWindow | None = None
@@ -5167,10 +5166,7 @@ class Main(QMainWindow):
             self.joystick_panel.setFocus(Qt.ActiveWindowFocusReason)
 
     def show_serial_terminal_window(self) -> None:
-        if not self.serial_terminal_panel:
-            return
-        show_connection_dialog(self, "terminal")
-        self.serial_terminal_panel.setFocus(Qt.ActiveWindowFocusReason)
+        show_serial_terminal_tool_window(self)
 
     def _on_manual_motion_axis(self, axis: str) -> None:
         axis_name = axis.upper()

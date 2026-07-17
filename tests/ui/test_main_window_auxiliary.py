@@ -315,14 +315,6 @@ class _FakeConnectionPanel:
         self.resources.append(value)
 
 
-class _FakeTabs:
-    def __init__(self) -> None:
-        self.indexes: list[int] = []
-
-    def setCurrentIndex(self, value: int) -> None:  # noqa: N802 - Qt naming
-        self.indexes.append(int(value))
-
-
 class _FakeDialog:
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -342,18 +334,97 @@ class _FakeLcrForDialog:
         return "LCR0"
 
 
-def test_show_connection_dialog_updates_lcr_resource_and_selected_tab() -> None:
+def test_show_connection_dialog_updates_lcr_resource() -> None:
     owner = type("Owner", (), {})()
     owner.serial_connection_dialog = _FakeDialog()
     owner.serial_connection_panel = _FakeConnectionPanel()
-    owner.serial_connection_tabs = _FakeTabs()
     owner.lcr_controller = _FakeLcrForDialog()
 
-    show_connection_dialog(owner, "terminal")
+    show_connection_dialog(owner)
 
     assert owner.serial_connection_panel.resources == ["LCR0"]
-    assert owner.serial_connection_tabs.indexes == [1]
     assert owner.serial_connection_dialog.calls == ["show", "raise", "activate"]
+
+
+class _FakeTerminalWindow:
+    created: list["_FakeTerminalWindow"] = []
+
+    def __init__(self, parent: object) -> None:
+        self.parent = parent
+        self.manual_command_sent = _Signal()
+        self.stage_controller = None
+        self.serial_connection = None
+        self.flags: list[tuple[object, bool]] = []
+        self.title = ""
+        self.size: tuple[int, int] | None = None
+        self.calls: list[str] = []
+        self.__class__.created.append(self)
+
+    def setWindowFlag(self, flag: object, enabled: bool) -> None:  # noqa: N802
+        self.flags.append((flag, bool(enabled)))
+
+    def setWindowTitle(self, title: str) -> None:  # noqa: N802
+        self.title = str(title)
+
+    def resize(self, width: int, height: int) -> None:
+        self.size = (int(width), int(height))
+
+    def set_stage_controller(self, controller: object) -> None:
+        self.stage_controller = controller
+
+    def set_serial(self, serial_connection: object) -> None:
+        self.serial_connection = serial_connection
+
+    def show(self) -> None:
+        self.calls.append("show")
+
+    def raise_(self) -> None:
+        self.calls.append("raise")
+
+    def activateWindow(self) -> None:  # noqa: N802
+        self.calls.append("activate")
+
+    def setFocus(self, _reason: object) -> None:  # noqa: N802
+        self.calls.append("focus")
+
+
+def test_show_serial_terminal_window_creates_standalone_window_lazily_once() -> None:
+    _FakeTerminalWindow.created.clear()
+    owner = type("Owner", (), {})()
+    owner.serial_terminal_panel = None
+    owner.stage_controller = object()
+    owner.serial_connection = object()
+    owner._on_manual_terminal_command = lambda _command: None
+
+    auxiliary_ui.show_serial_terminal_window(
+        owner,
+        window_class=_FakeTerminalWindow,
+    )
+    auxiliary_ui.show_serial_terminal_window(
+        owner,
+        window_class=_FakeTerminalWindow,
+    )
+
+    assert len(_FakeTerminalWindow.created) == 1
+    terminal = _FakeTerminalWindow.created[0]
+    assert terminal.parent is owner
+    assert terminal.stage_controller is owner.stage_controller
+    assert terminal.serial_connection is owner.serial_connection
+    assert terminal.title == "Terminal"
+    assert terminal.size == (760, 520)
+    assert terminal.calls == [
+        "show",
+        "raise",
+        "activate",
+        "focus",
+        "show",
+        "raise",
+        "activate",
+        "focus",
+    ]
+    assert terminal.manual_command_sent.connections == [
+        owner._on_manual_terminal_command
+    ]
 
 
 class _FakeNavigatorPanel:
@@ -408,6 +479,8 @@ class _FakeDesignLayoutWindow:
     def __init__(self) -> None:
         self.navigator_panel = _FakeNavigatorPanel()
         self.calibration_point_selected = _Signal()
+        self.alignment_draft_accepted = _Signal()
+        self.alignment_draft_discarded = _Signal()
         self.move_requested = _Signal()
         self.route_point_requested = _Signal()
         self.point_requested = _Signal()
@@ -477,6 +550,8 @@ class _DesignOwner:
         "_on_design_target_selected",
         "_on_design_snap_enabled_changed",
         "_on_design_layout_point_selected",
+        "_on_alignment_draft_accepted",
+        "_on_alignment_draft_discarded",
         "_add_design_route_point",
         "_on_design_layout_window_visibility_changed",
     )

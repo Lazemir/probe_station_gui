@@ -10,12 +10,10 @@ from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
     QPushButton,
-    QTabWidget,
     QVBoxLayout,
 )
 
 from probe_station_gui.views.joystick_window import JoystickWindow
-from probe_station_gui.views.serial_terminal_window import SerialTerminalWindow
 from probe_station_gui.views.alignment_panel import AlignmentPanel
 from probe_station_gui.views.contact_oscillation_window import (
     ContactOscillationWindow,
@@ -38,9 +36,7 @@ class MainWindowDockOwner(Protocol):
     lcr_controller: Any
     settings_manager: Any
     serial_connection_dialog: Any
-    serial_connection_tabs: Any
     serial_connection_panel: Any
-    serial_terminal_panel: Any
     resistance_panel: Any
     resistance_dock: Any
     joystick_panel: Any
@@ -53,7 +49,6 @@ class MainWindowDockOwner(Protocol):
     def addDockWidget(self, area: Any, dock: Any) -> None: ...  # noqa: N802
     def splitDockWidget(self, first: Any, second: Any, orientation: Any) -> None: ...  # noqa: N802
     def resizeDocks(self, docks: list[Any], sizes: list[int], orientation: Any) -> None: ...  # noqa: N802
-    def _on_manual_terminal_command(self, *args: Any) -> None: ...
     def _on_resistance_standby_enabled_changed(self, *args: Any) -> None: ...
     def _zero_b_axis(self, *args: Any) -> None: ...
     def _on_manual_axis_move_requested(self, *args: Any) -> None: ...
@@ -109,21 +104,10 @@ def _create_serial_connection_dialog(owner: MainWindowDockOwner) -> None:
     dialog_layout.setContentsMargins(8, 8, 8, 8)
     dialog_layout.setSpacing(8)
 
-    owner.serial_connection_tabs = QTabWidget(owner.serial_connection_dialog)
-    dialog_layout.addWidget(owner.serial_connection_tabs)
-
     owner.serial_connection_panel = SerialConnectionPanel(
-        owner.serial_connection_tabs
+        owner.serial_connection_dialog
     )
-    owner.serial_connection_tabs.addTab(owner.serial_connection_panel, "Connection")
-
-    owner.serial_terminal_panel = SerialTerminalWindow(owner.serial_connection_tabs)
-    owner.serial_terminal_panel.set_stage_controller(owner.stage_controller)
-    owner.serial_terminal_panel.set_serial(owner.serial_connection)
-    owner.serial_terminal_panel.manual_command_sent.connect(
-        owner._on_manual_terminal_command
-    )
-    owner.serial_connection_tabs.addTab(owner.serial_terminal_panel, "Terminal")
+    dialog_layout.addWidget(owner.serial_connection_panel)
 
     close_button_row = QHBoxLayout()
     close_button_row.addStretch(1)

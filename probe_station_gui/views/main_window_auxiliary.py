@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Protocol
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog
 
 from probe_station_gui.camera import microscope_scan
@@ -30,7 +31,7 @@ class MainWindowAuxiliaryOwner(Protocol):
     serial_connection: Any
     serial_connection_dialog: Any
     serial_connection_panel: Any
-    serial_connection_tabs: Any
+    serial_terminal_panel: Any
     settings_manager: Any
     lcr_controller: Any
     grabber: Any
@@ -44,6 +45,7 @@ class MainWindowAuxiliaryOwner(Protocol):
     def _request_stop_microscope_scan(self) -> None: ...
     def _clear_microscope_scan_dialog(self) -> None: ...
     def _show_status(self, message: str) -> None: ...
+    def _on_manual_terminal_command(self, *args: Any) -> None: ...
     def _preload_design_layout_window(self) -> None: ...
     def _collapse_alignment_panel_if_ready(self) -> None: ...
     def _stop_telegram_bot_service(self) -> None: ...
@@ -250,7 +252,6 @@ def open_settings_dialog(
 
 def show_connection_dialog(
     owner: MainWindowAuxiliaryOwner,
-    tab_name: object = None,
 ) -> None:
     """Show the existing serial/LCR connection dialog."""
 
@@ -260,13 +261,37 @@ def show_connection_dialog(
         owner.serial_connection_panel.set_lcr_resource(
             owner.lcr_controller.connection_label()
         )
-    if owner.serial_connection_tabs is not None:
-        owner.serial_connection_tabs.setCurrentIndex(
-            1 if tab_name == "terminal" else 0
-        )
     owner.serial_connection_dialog.show()
     owner.serial_connection_dialog.raise_()
     owner.serial_connection_dialog.activateWindow()
+
+
+def show_serial_terminal_window(
+    owner: MainWindowAuxiliaryOwner,
+    window_class: object | None = None,
+) -> None:
+    """Create the standalone serial terminal only when the user opens it."""
+
+    if owner.serial_terminal_panel is None:
+        if window_class is None:
+            from probe_station_gui.views.serial_terminal_window import (
+                SerialTerminalWindow,
+            )
+
+            window_class = SerialTerminalWindow
+        terminal = window_class(owner)
+        terminal.setWindowFlag(Qt.Window, True)
+        terminal.setWindowTitle("Terminal")
+        terminal.resize(760, 520)
+        terminal.set_stage_controller(owner.stage_controller)
+        terminal.set_serial(owner.serial_connection)
+        terminal.manual_command_sent.connect(owner._on_manual_terminal_command)
+        owner.serial_terminal_panel = terminal
+
+    owner.serial_terminal_panel.show()
+    owner.serial_terminal_panel.raise_()
+    owner.serial_terminal_panel.activateWindow()
+    owner.serial_terminal_panel.setFocus(Qt.ActiveWindowFocusReason)
 
 
 def create_design_layout_window(
