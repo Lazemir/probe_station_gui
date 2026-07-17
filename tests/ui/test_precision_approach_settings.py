@@ -10,10 +10,7 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtWidgets import QApplication
 
-from probe_station_gui.dialogs.settings.precision_approach import (
-    PrecisionApproachSettingsWidget,
-)
-from probe_station_gui.dialogs.settings_dialog import SettingsDialog
+from probe_station_gui.dialogs.settings.axis_settings import AxisSettingsWidget
 from probe_station_gui.settings.manager import Settings
 from probe_station_gui.settings.precision_approach import PrecisionApproachProfile
 
@@ -25,63 +22,88 @@ def _qt_app() -> QApplication:
     return app
 
 
-def test_precision_approach_widget_shows_axis_units_and_profile_state() -> None:
+def _widget(settings: Settings) -> AxisSettingsWidget:
     _qt_app()
-    settings = Settings()
-    widget = PrecisionApproachSettingsWidget(settings.precision_approach)
+    return AxisSettingsWidget(
+        settings.axis_a_calibration,
+        settings.axis_z_calibration,
+        settings.precision_approach,
+    )
 
-    assert tuple(widget._rows) == ("X", "Y", "Z", "A", "B", "C")
+
+def test_axis_settings_selector_and_per_axis_content() -> None:
+    settings = Settings()
+    widget = _widget(settings)
+
+    assert [widget._axis_list.item(index).text() for index in range(6)] == [
+        "X",
+        "Y",
+        "Z",
+        "A",
+        "B",
+        "C",
+    ]
+    assert widget.selected_axis() == "Z"
+    assert tuple(widget._pages) == ("X", "Y", "Z", "A", "B", "C")
     assert widget._rows["A"].backlash_spin.suffix() == " mm"
     assert widget._rows["B"].backlash_spin.suffix() == " °"
     assert widget._rows["Z"].enabled_checkbox.isChecked()
-    assert widget._rows["Z"].backlash_spin.isEnabled()
-    assert not widget._rows["A"].enabled_checkbox.isChecked()
-    assert not widget._rows["A"].backlash_spin.isEnabled()
     assert widget._rows["Z"].preview_label.text() == (
         "Target − 0.030 mm → target"
     )
+    assert widget._calibration_messages["X"].text() == (
+        "No calibration curve for this axis."
+    )
+    assert tuple(widget._calibration_checkboxes) == ("Z", "A")
 
     widget.deleteLater()
 
 
-def test_precision_approach_widget_keeps_disabled_values_and_saves_direction() -> None:
-    _qt_app()
+def test_axis_switch_preserves_unapplied_precision_values() -> None:
     settings = Settings()
-    widget = PrecisionApproachSettingsWidget(settings.precision_approach)
-    row = widget._rows["B"]
+    widget = _widget(settings)
+    b_row = widget._rows["B"]
 
-    row.enabled_checkbox.setChecked(True)
-    row.backlash_spin.setValue(1.25)
-    negative_index = row.direction_combo.findData(-1)
-    assert negative_index >= 0
-    row.direction_combo.setCurrentIndex(negative_index)
-    assert row.preview_label.text() == "Target + 1.250 ° → target"
-    row.enabled_checkbox.setChecked(False)
+    b_row.enabled_checkbox.setChecked(True)
+    b_row.backlash_spin.setValue(1.25)
+    b_row.direction_combo.setCurrentIndex(
+        b_row.direction_combo.findData(-1)
+    )
+    widget.select_axis("X")
+    widget.select_axis("B")
 
+    assert b_row.preview_label.text() == "Target + 1.250 ° → target"
     widget.to_settings(settings)
-
     assert settings.precision_approach.profiles["B"] == PrecisionApproachProfile(
-        False,
+        True,
         1.25,
         -1,
     )
+
     widget.deleteLater()
 
 
-def test_settings_dialog_contains_and_collects_precision_approach_tab() -> None:
-    _qt_app()
-    dialog = SettingsDialog(Settings(), initial_tab="Precision approach")
+def test_axis_calibration_controls_preserve_read_only_metadata() -> None:
+    settings = Settings()
+    settings.axis_a_calibration.configured = True
+    settings.axis_z_calibration.configured = True
+    original_a = settings.axis_a_calibration.clone()
+    original_z = settings.axis_z_calibration.clone()
+    widget = _widget(settings)
 
-    labels = [dialog._tabs.tabText(index) for index in range(dialog._tabs.count())]
-    assert "Precision approach" in labels
-    assert dialog._tabs.currentWidget() is dialog._precision_approach_tab
+    assert widget._calibration_sources["A"].text() == original_a.source
+    assert widget._calibration_sources["Z"].text() == original_z.source
+    assert "RMSE" in widget._calibration_errors["A"].text()
+    assert "max" in widget._calibration_errors["Z"].text()
 
-    row = dialog._precision_approach_tab._rows["X"]
-    row.enabled_checkbox.setChecked(True)
-    row.backlash_spin.setValue(0.4)
-    dialog._collect_settings()
+    widget._calibration_checkboxes["A"].setChecked(False)
+    widget.to_settings(settings)
 
-    assert dialog.result_settings().precision_approach.profiles["X"] == (
-        PrecisionApproachProfile(True, 0.4, 1)
-    )
-    dialog.deleteLater()
+    assert settings.axis_a_calibration.configured is False
+    assert settings.axis_z_calibration.configured is True
+    assert settings.axis_a_calibration.source == original_a.source
+    assert settings.axis_a_calibration.amplitude_mm == original_a.amplitude_mm
+    assert settings.axis_z_calibration.source == original_z.source
+    assert settings.axis_z_calibration.coefficients_mm == original_z.coefficients_mm
+
+    widget.deleteLater()
