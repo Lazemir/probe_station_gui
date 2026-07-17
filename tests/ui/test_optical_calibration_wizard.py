@@ -41,14 +41,11 @@ def test_full_mode_runs_flat_field_then_lens_distortion(
 
     wizard.next()
     assert flat_spy.count() == 1
+    assert len(flat_spy.at(0)) == 0
     assert wizard.currentId() == wizard.FLAT_FIELD_PAGE_ID
     assert wizard.is_running()
 
-    wizard.set_flat_field_result(
-        True,
-        "Flat field saved.",
-        run_id=wizard.active_run_id(),
-    )
+    wizard.set_flat_field_result(True, "Flat field saved.")
     qt_app.processEvents()
     assert wizard.currentId() == wizard.LENS_DISTORTION_PAGE_ID
     assert not wizard.is_running()
@@ -201,6 +198,29 @@ def test_stale_or_duplicate_completion_does_not_unlock_capture(
     assert wizard.currentId() == wizard.RESULT_PAGE_ID
     wizard.set_lens_distortion_result(False, "duplicate", run_id=lens_run_id)
     assert wizard.currentId() == wizard.RESULT_PAGE_ID
+    wizard.close()
+
+
+def test_stale_progress_does_not_overwrite_current_capture(
+    qt_app: QApplication,
+) -> None:
+    wizard = OpticalCalibrationWizard()
+    wizard.set_mode(OpticalCalibrationMode.FULL)
+    _show(wizard, qt_app)
+    wizard.next()
+    wizard.next()
+    flat_run_id = wizard.active_run_id()
+    wizard.set_flat_field_result(True, "saved", run_id=flat_run_id)
+    qt_app.processEvents()
+    wizard.next()
+    lens_run_id = wizard.active_run_id()
+
+    assert wizard.set_progress("stale flat progress", run_id=flat_run_id) is False
+    assert "stale" not in wizard.currentPage().status_text()
+    assert wizard.set_progress("Lens: capture 2/9", run_id=lens_run_id) is True
+    assert "capture 2/9" in wizard.currentPage().status_text()
+
+    wizard.set_lens_distortion_result(False, "stopped", run_id=lens_run_id)
     wizard.close()
 
 

@@ -162,8 +162,8 @@ class OpticalCalibrationWizard(QWizard):
     LENS_DISTORTION_PAGE_ID = 2
     RESULT_PAGE_ID = 3
 
-    start_flat_field_requested = Signal(int)
-    start_lens_distortion_requested = Signal(int)
+    start_flat_field_requested = Signal()
+    start_lens_distortion_requested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -255,17 +255,23 @@ class OpticalCalibrationWizard(QWizard):
     def active_run_id(self) -> int | None:
         return self._active_run_id
 
-    def set_progress(self, message: str) -> None:
+    def set_progress(self, message: str, *, run_id: int | None = None) -> bool:
+        if not self._running:
+            return False
+        if run_id is not None and run_id != self._active_run_id:
+            return False
         page = self.currentPage()
         if isinstance(page, _CapturePage):
             page.set_status(message)
+            return True
+        return False
 
     def set_flat_field_result(
         self,
         success: bool,
         message: str,
         *,
-        run_id: int | None,
+        run_id: int | None = None,
     ) -> None:
         accepted = self._set_capture_result(
             self.FLAT_FIELD_PAGE_ID,
@@ -282,7 +288,7 @@ class OpticalCalibrationWizard(QWizard):
         success: bool,
         message: str,
         *,
-        run_id: int | None,
+        run_id: int | None = None,
     ) -> None:
         accepted = self._set_capture_result(
             self.LENS_DISTORTION_PAGE_ID,
@@ -330,7 +336,7 @@ class OpticalCalibrationWizard(QWizard):
         self._active_run_id = run_id
         self._active_page_id = self.currentId()
         self._set_navigation_enabled(False)
-        signal.emit(run_id)
+        signal.emit()
 
     def _set_capture_result(
         self,
@@ -344,7 +350,10 @@ class OpticalCalibrationWizard(QWizard):
         if (
             not self._running
             or self._active_page_id != page_id
-            or self._active_run_id != run_id
+            or (
+                run_id is not None
+                and self._active_run_id != run_id
+            )
         ):
             return False
         page.set_status(message)
