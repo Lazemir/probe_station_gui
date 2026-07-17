@@ -15,6 +15,15 @@ from probe_station_gui.settings.objective_config import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _stable_geometry_mask_backend(monkeypatch) -> None:
+    monkeypatch.setattr(
+        main_module,
+        "_load_geometry_mask_backend",
+        lambda: geometry_mask,
+    )
+
+
 class _FakeStage:
     def __init__(self) -> None:
         self.events: list[tuple[object, ...]] = []

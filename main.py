@@ -443,6 +443,12 @@ class _LensDistortionCalibrationOutput:
     after_preview: QImage
 
 
+def _load_geometry_mask_backend() -> object:
+    from probe_station_gui.camera import geometry_mask
+
+    return geometry_mask
+
+
 def _application_icon() -> QIcon:
     icon_path = resources.files("probe_station_gui").joinpath(APP_ICON_RESOURCE)
     icon = QIcon(str(icon_path))
@@ -5196,7 +5202,7 @@ class Main(QMainWindow):
         frame_size: tuple[int, int],
         scale: object,
     ) -> _LensDistortionCalibrationOutput:
-        from probe_station_gui.camera import geometry_mask
+        geometry_mask = _load_geometry_mask_backend()
 
         stored_pixels_to_mm = parse_pixels_to_mm_matrix(
             getattr(scale, "pixels_to_mm", None)
