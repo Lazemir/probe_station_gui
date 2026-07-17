@@ -23,6 +23,16 @@ _MANIFEST_VERSION = 1
 _COORDINATE_SPACE = "raw camera frame, before lens distortion correction"
 _APPLICATION_ORDER = ["flat_field", "lens_distortion", "mosaic"]
 _SAFE_OBJECTIVE_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,119}\Z")
+_WINDOWS_RESERVED_DEVICE_NAMES = frozenset(
+    {
+        "con",
+        "prn",
+        "aux",
+        "nul",
+        *(f"com{index}" for index in range(1, 10)),
+        *(f"lpt{index}" for index in range(1, 10)),
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -175,16 +185,20 @@ class FlatFieldCalibrationStore:
 
 
 def _safe_objective_name(value: str) -> str:
-    objective = str(value or "").strip()
+    objective = str(value or "")
     path = Path(objective)
+    device_stem = objective.split(".", 1)[0].casefold()
     if (
         not objective
+        or objective != objective.strip()
         or objective in {".", ".."}
+        or objective.endswith((".", " "))
         or path.is_absolute()
         or path.name != objective
         or "/" in objective
         or "\\" in objective
         or _SAFE_OBJECTIVE_COMPONENT.fullmatch(objective) is None
+        or device_stem in _WINDOWS_RESERVED_DEVICE_NAMES
     ):
         raise ValueError("objective name must be a single safe path component")
     return objective

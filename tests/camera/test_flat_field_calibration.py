@@ -100,9 +100,70 @@ def test_failed_install_keeps_previous_current_manifest(
     assert store.load("X20").reference_image == first.reference_image
 
 
+def test_profile_manifest_write_failure_keeps_previous_current_manifest(
+    tmp_path: Path,
+    flat_frames: list[QImage],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = FlatFieldCalibrationStore(tmp_path)
+    first = store.install("X20", flat_frames)
+    previous_current = first.current_manifest.read_bytes()
+
+    from probe_station_gui.camera import flat_field_calibration
+
+    real_write_json = flat_field_calibration._write_json
+
+    def fail_profile_manifest(path: Path, payload: object) -> None:
+        if path.name == "profile.json":
+            raise OSError("profile manifest write failed")
+        real_write_json(path, payload)
+
+    monkeypatch.setattr(flat_field_calibration, "_write_json", fail_profile_manifest)
+
+    with pytest.raises(OSError, match="profile manifest write failed"):
+        store.install("X20", flat_frames)
+
+    assert first.current_manifest.read_bytes() == previous_current
+    assert FlatFieldCalibrationStore(tmp_path).load("X20").reference_image == first.reference_image
+
+
+def test_current_pointer_replacement_failure_keeps_previous_current_manifest(
+    tmp_path: Path,
+    flat_frames: list[QImage],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = FlatFieldCalibrationStore(tmp_path)
+    first = store.install("X20", flat_frames)
+    previous_current = first.current_manifest.read_bytes()
+
+    def fail_replace(_path: Path, _target: Path) -> Path:
+        raise OSError("current pointer replacement failed")
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="current pointer replacement failed"):
+        store.install("X20", flat_frames)
+
+    assert first.current_manifest.read_bytes() == previous_current
+    assert FlatFieldCalibrationStore(tmp_path).load("X20").reference_image == first.reference_image
+
+
 @pytest.mark.parametrize(
     "objective_name",
-    ["", ".", "..", "X20/extra", "X20\\extra", "X20:alternate"],
+    [
+        "",
+        ".",
+        "..",
+        "X20/extra",
+        "X20\\extra",
+        "X20:alternate",
+        "X20.",
+        "X20 ",
+        "CON",
+        "NUL",
+        "COM1",
+        "LPT1",
+    ],
 )
 def test_store_rejects_objective_that_is_not_a_safe_path_component(
     tmp_path: Path,

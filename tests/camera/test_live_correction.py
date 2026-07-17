@@ -89,6 +89,44 @@ def test_pipeline_does_not_rebuild_unchanged_flat_field_profile(
     assert len(build_calls) == 1
 
 
+def test_pipeline_recompiles_and_applies_second_installed_profile(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from probe_station_gui.camera import live_correction
+    from probe_station_gui.camera.flat_field_calibration import FlatFieldCalibrationStore
+
+    compile_calls: list[str] = []
+    real_compile = live_correction.compile_flat_field_correction
+
+    def counted_compile(profile):
+        compile_calls.append(profile.source)
+        return real_compile(profile)
+
+    monkeypatch.setattr(
+        live_correction,
+        "compile_flat_field_correction",
+        counted_compile,
+    )
+    store = FlatFieldCalibrationStore(tmp_path)
+    store.install("X20", [_gradient_frame(reverse=False)], blur_radius_px=9)
+    pipeline = LiveCameraCorrectionPipeline(tmp_path, profile_refresh_s=0.0)
+    request = LiveCameraCorrectionRequest(
+        sequence=1,
+        frame=_frame(100),
+        objective_name="X20",
+        distortion_configured=False,
+        distortion_payload={},
+    )
+
+    first = pipeline.process(request)
+    store.install("X20", [_gradient_frame(reverse=True)], blur_radius_px=9)
+    second = pipeline.process(request)
+
+    assert len(compile_calls) == 2
+    assert first.frame.pixelColor(4, 8) != second.frame.pixelColor(4, 8)
+
+
 def test_pipeline_applies_flat_field_before_distortion(tmp_path: Path) -> None:
     events: list[str] = []
     flat_model = object()
@@ -209,4 +247,14 @@ def _write_current_profile(
 def _frame(shade: int) -> QImage:
     image = QImage(31, 17, QImage.Format_RGB32)
     image.fill(QColor(shade, shade, shade))
+    return image
+
+
+def _gradient_frame(*, reverse: bool) -> QImage:
+    image = QImage(31, 17, QImage.Format_RGB32)
+    for y in range(image.height()):
+        for x in range(image.width()):
+            coordinate = image.width() - 1 - x if reverse else x
+            shade = 50 + 5 * coordinate
+            image.setPixelColor(x, y, QColor(shade, shade, shade))
     return image
