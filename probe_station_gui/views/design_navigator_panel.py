@@ -116,6 +116,9 @@ class DesignNavigatorPanel(QWidget):
     tool_measure_preview_changed = Signal(object)
     tool_measurements_changed = Signal(object)
     active_design_tool_changed = Signal(str)
+    alignment_draft_changed = Signal(object)
+    alignment_draft_accepted = Signal(object)
+    alignment_draft_discarded = Signal()
     selection_requested = Signal(object, str)
     delete_selection_requested = Signal()
     guide_undo_requested = Signal()
@@ -164,6 +167,7 @@ class DesignNavigatorPanel(QWidget):
         self._ruler_anchor: Point2D | None = None
         self._ruler_end: Point2D | None = None
         self._ruler_segments: list[tuple[Point2D, Point2D]] = []
+        self._alignment_draft_points: list[Point2D] = []
         self._updating_route_controls = False
 
         root_layout = QVBoxLayout(self)
@@ -271,6 +275,11 @@ class DesignNavigatorPanel(QWidget):
             "Point",
             self._make_tool_icon("point"),
         )
+        self._align_tool_button = self._make_tool_button(
+            self._tool_toolbar_widget,
+            "Align",
+            self._make_tool_icon("align"),
+        )
         self._guide_tool_button = self._make_tool_button(
             self._tool_toolbar_widget,
             "Guide",
@@ -294,6 +303,7 @@ class DesignNavigatorPanel(QWidget):
         self._rotate_tool_button.setCheckable(False)
         self._tool_button_group.addButton(self._select_tool_button)
         self._tool_button_group.addButton(self._point_tool_button)
+        self._tool_button_group.addButton(self._align_tool_button)
         self._tool_button_group.addButton(self._guide_tool_button)
         self._tool_button_group.addButton(self._ruler_tool_button)
         self._tool_button_group.addButton(self._array_tool_button)
@@ -307,6 +317,7 @@ class DesignNavigatorPanel(QWidget):
         self._select_tool_button.setChecked(True)
         tool_buttons.addWidget(self._select_tool_button)
         tool_buttons.addWidget(self._point_tool_button)
+        tool_buttons.addWidget(self._align_tool_button)
         tool_buttons.addWidget(self._guide_tool_button)
         tool_buttons.addWidget(self._ruler_tool_button)
         tool_buttons.addWidget(self._array_tool_button)
@@ -411,6 +422,22 @@ class DesignNavigatorPanel(QWidget):
         array_layout.addWidget(self._route_array_create_button, 4, 2)
         array_layout.addWidget(self._route_array_cancel_button, 4, 3)
         self._tool_stack.addWidget(array_page)
+
+        align_page = QWidget(self._tool_group)
+        align_layout = QVBoxLayout(align_page)
+        align_layout.setContentsMargins(0, 0, 0, 0)
+        self._alignment_points_label = QLabel("No design points.", align_page)
+        self._alignment_points_label.setWordWrap(True)
+        align_layout.addWidget(self._alignment_points_label)
+        align_buttons = QHBoxLayout()
+        self._alignment_undo_button = QPushButton("Undo", align_page)
+        self._alignment_clear_button = QPushButton("Clear", align_page)
+        self._alignment_done_button = QPushButton("Done", align_page)
+        align_buttons.addWidget(self._alignment_undo_button)
+        align_buttons.addWidget(self._alignment_clear_button)
+        align_buttons.addWidget(self._alignment_done_button)
+        align_layout.addLayout(align_buttons)
+        self._tool_stack.addWidget(align_page)
 
         tool_layout.addWidget(self._tool_stack)
         route_layout.addWidget(self._tool_group)
@@ -543,6 +570,9 @@ class DesignNavigatorPanel(QWidget):
         self._point_tool_button.clicked.connect(
             lambda _checked=False: self._set_design_tool("point")
         )
+        self._align_tool_button.clicked.connect(
+            lambda _checked=False: self._set_design_tool("align")
+        )
         self._guide_tool_button.clicked.connect(
             lambda _checked=False: self._set_design_tool("guide")
         )
@@ -567,6 +597,9 @@ class DesignNavigatorPanel(QWidget):
         self._ruler_cancel_button.clicked.connect(
             lambda _checked=False: self._set_design_tool("select")
         )
+        self._alignment_undo_button.clicked.connect(self._undo_alignment_point)
+        self._alignment_clear_button.clicked.connect(self._clear_alignment_draft)
+        self._alignment_done_button.clicked.connect(self.accept_alignment_draft)
         self._route_array_pick_dir1_button.clicked.connect(
             lambda _checked=False: self._start_route_pick_mode("array_dir1")
         )
@@ -609,6 +642,7 @@ class DesignNavigatorPanel(QWidget):
 
         self._update_availability()
         self._update_enabled_state()
+        self._refresh_alignment_draft_ui()
         self._set_design_tool("select")
 
     def set_document(self, document: DesignDocument | None) -> None:
@@ -617,6 +651,7 @@ class DesignNavigatorPanel(QWidget):
         self._document = document
         self._source_design_marks = [None, None]
         self._source_stage_marks = [None, None]
+        self._clear_alignment_draft()
         if document is None:
             self._document_label.setText("No design loaded.")
             self._top_cell_combo.blockSignals(True)
@@ -1108,6 +1143,7 @@ class DesignNavigatorPanel(QWidget):
     ) -> None:
         self._select_tool_button.setEnabled(state.can_edit_design)
         self._point_tool_button.setEnabled(state.can_edit_design)
+        self._align_tool_button.setEnabled(state.can_edit_design)
         self._guide_tool_button.setEnabled(state.can_edit_design)
         self._ruler_tool_button.setEnabled(state.can_edit_design)
         self._array_tool_button.setEnabled(state.can_edit_design)
@@ -1381,12 +1417,16 @@ class DesignNavigatorPanel(QWidget):
         self._update_route_array_preview()
 
     def _set_design_tool(self, tool: str) -> None:
-        if tool not in {"select", "point", "guide", "ruler", "array"}:
+        if tool not in {"select", "point", "guide", "ruler", "array", "align"}:
             tool = "select"
+        previous_tool = self._active_design_tool
+        if previous_tool == "align" and tool != "align" and self._alignment_draft_points:
+            self._clear_alignment_draft(emit_discarded=True)
         self._active_design_tool = tool
         button_by_tool = {
             "select": self._select_tool_button,
             "point": self._point_tool_button,
+            "align": self._align_tool_button,
             "guide": self._guide_tool_button,
             "ruler": self._ruler_tool_button,
             "array": self._array_tool_button,
@@ -1401,6 +1441,7 @@ class DesignNavigatorPanel(QWidget):
             "guide": 2,
             "ruler": 3,
             "array": 4,
+            "align": 5,
         }
         self._tool_stack.setCurrentIndex(stack_index_by_tool[tool])
         self._clear_route_pick_mode("")
@@ -1416,6 +1457,11 @@ class DesignNavigatorPanel(QWidget):
             self.mixed_array_preview_changed.emit([], [])
             self.tool_measure_preview_changed.emit(None)
             self._tool_status_label.setText("")
+        elif tool == "align":
+            self.route_preview_changed.emit(None)
+            self.mixed_array_preview_changed.emit([], [])
+            self.tool_measure_preview_changed.emit(None)
+            self._refresh_alignment_draft_ui()
         elif tool == "guide":
             self.route_preview_changed.emit(None)
             self.mixed_array_preview_changed.emit([], [])
@@ -1444,7 +1490,63 @@ class DesignNavigatorPanel(QWidget):
             self._ruler_end = None
             self._update_ruler_labels()
             self.tool_measure_preview_changed.emit(None)
+        if self._active_design_tool == "align":
+            self._clear_alignment_draft(emit_discarded=True)
         self._set_design_tool("select")
+
+    @property
+    def alignment_draft_points(self) -> tuple[Point2D, ...]:
+        return tuple(self._alignment_draft_points)
+
+    def append_alignment_point(self, x_value: float, y_value: float) -> None:
+        if self._active_design_tool != "align":
+            return
+        self._alignment_draft_points.append((float(x_value), float(y_value)))
+        self.alignment_draft_changed.emit(self.alignment_draft_points)
+        self._refresh_alignment_draft_ui()
+
+    def accept_alignment_draft(self) -> None:
+        if self._active_design_tool != "align" or not self._alignment_draft_is_valid():
+            return
+        points = self.alignment_draft_points
+        self._clear_alignment_draft()
+        self._set_design_tool("select")
+        self.alignment_draft_accepted.emit(points)
+
+    def _undo_alignment_point(self) -> None:
+        if not self._alignment_draft_points:
+            return
+        self._alignment_draft_points.pop()
+        self.alignment_draft_changed.emit(self.alignment_draft_points)
+        self._refresh_alignment_draft_ui()
+
+    def _clear_alignment_draft(self, *, emit_discarded: bool = False) -> None:
+        had_points = bool(self._alignment_draft_points)
+        self._alignment_draft_points.clear()
+        if had_points:
+            self.alignment_draft_changed.emit(())
+        if emit_discarded:
+            self.alignment_draft_discarded.emit()
+        self._refresh_alignment_draft_ui()
+
+    def _alignment_draft_is_valid(self) -> bool:
+        return (
+            len(self._alignment_draft_points) >= 2
+            and len(set(self._alignment_draft_points)) >= 2
+        )
+
+    def _refresh_alignment_draft_ui(self) -> None:
+        if not self._alignment_draft_points:
+            text = "Click geometry to add D1, D2, and more."
+        else:
+            text = "\n".join(
+                f"D{index}: {self._format_point(point)}"
+                for index, point in enumerate(self._alignment_draft_points, start=1)
+            )
+        self._alignment_points_label.setText(text)
+        self._alignment_undo_button.setEnabled(bool(self._alignment_draft_points))
+        self._alignment_clear_button.setEnabled(bool(self._alignment_draft_points))
+        self._alignment_done_button.setEnabled(self._alignment_draft_is_valid())
 
     def _clear_ruler(self) -> None:
         self._ruler_anchor = None
@@ -1910,6 +2012,8 @@ class DesignLayoutWindow(QWidget):
     """Top-level design window combining the layout view and design controls."""
 
     calibration_point_selected = Signal(int, float, float)
+    alignment_draft_accepted = Signal(object)
+    alignment_draft_discarded = Signal()
     move_requested = Signal(float, float)
     route_point_requested = Signal(float, float)
     point_requested = Signal(float, float)
@@ -1961,6 +2065,9 @@ class DesignLayoutWindow(QWidget):
         self._main_view.move_requested.connect(self.move_requested.emit)
         self._main_view.route_point_requested.connect(self.route_point_requested.emit)
         self._main_view.point_requested.connect(self.point_requested.emit)
+        self._main_view.alignment_point_requested.connect(
+            self.navigator_panel.append_alignment_point
+        )
         self._main_view.guide_requested.connect(self.guide_requested.emit)
         self._main_view.entity_selection_requested.connect(
             self._apply_selection_request
@@ -1987,6 +2094,15 @@ class DesignLayoutWindow(QWidget):
         self.navigator_panel.active_design_tool_changed.connect(
             self._main_view.set_active_design_tool
         )
+        self.navigator_panel.alignment_draft_changed.connect(
+            self._main_view.set_alignment_draft_points
+        )
+        self.navigator_panel.alignment_draft_accepted.connect(
+            self.alignment_draft_accepted.emit
+        )
+        self.navigator_panel.alignment_draft_discarded.connect(
+            self.alignment_draft_discarded.emit
+        )
         self.navigator_panel.selection_requested.connect(
             self._apply_selection_request
         )
@@ -2011,6 +2127,16 @@ class DesignLayoutWindow(QWidget):
         self._escape_shortcut = QShortcut(QKeySequence("Esc"), self)
         self._escape_shortcut.setContext(Qt.WindowShortcut)
         self._escape_shortcut.activated.connect(self._cancel_active_interaction)
+        self._accept_alignment_shortcut = QShortcut(QKeySequence("Return"), self)
+        self._accept_alignment_shortcut.setContext(Qt.WindowShortcut)
+        self._accept_alignment_shortcut.activated.connect(
+            self.navigator_panel.accept_alignment_draft
+        )
+        self._accept_alignment_enter_shortcut = QShortcut(QKeySequence("Enter"), self)
+        self._accept_alignment_enter_shortcut.setContext(Qt.WindowShortcut)
+        self._accept_alignment_enter_shortcut.activated.connect(
+            self.navigator_panel.accept_alignment_draft
+        )
         self._main_view.set_active_design_tool("select")
 
         content_layout = QHBoxLayout()
@@ -2142,6 +2268,11 @@ class DesignLayoutWindow(QWidget):
     ) -> None:
         self._main_view.set_registration_marks(source_design_marks, check_design_marks)
         self.navigator_panel.set_registration_marks(source_design_marks, check_design_marks)
+
+    def set_alignment_capture_points(self, points: object) -> None:
+        """Keep accepted D1..Dn visible while their stage points are captured."""
+
+        self._main_view.set_alignment_draft_points(points)
 
     def set_navigation_enabled(self, enabled: bool) -> None:
         """Toggle click-to-move behavior in the design plot."""

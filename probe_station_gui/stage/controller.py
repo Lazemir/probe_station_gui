@@ -118,6 +118,7 @@ class StageController(
     calibration_changed: Signal = Signal(float, float)
     movement_started: Signal = Signal()
     movement_finished: Signal = Signal(bool, str)
+    b_rotation_started: Signal = Signal()
     click_move_started: Signal = Signal(float, float, float)
     absolute_xy_move_started: Signal = Signal(float, float, float)
     stage_position_changed: Signal = Signal(object)

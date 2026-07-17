@@ -134,6 +134,8 @@ class _MicroscopeScanDialog:
 class _Preparation:
     rotation_deg: float = 1.25
     distance_ratio: float = 0.875
+    rms_residual_mm: float = 0.0123
+    max_residual_mm: float = 0.0456
 
 
 class _Owner:
@@ -190,6 +192,7 @@ class _Owner:
         self.design_position_refreshes = 0
         self.alignment_panel_collapses = 0
         self.quick_alignment_collapses = 0
+        self.finished_alignment_drafts = 0
         self._stage_motion_axes: set[str] = set()
         self._stage_motion_blink_dimmed = False
         self._stage_motion_blink_timer = types.SimpleNamespace(
@@ -267,6 +270,9 @@ class _Owner:
 
     def _collapse_alignment_panel_if_design_open(self) -> None:
         self.quick_alignment_collapses += 1
+
+    def _finish_alignment_draft(self) -> None:
+        self.finished_alignment_drafts += 1
 
     def _refresh_stage_axis_styles(self) -> None:
         self.axis_style_refreshes += 1
@@ -400,12 +406,14 @@ def test_move_finish_alignment_preparation_returns_before_normal_finish_cleanup(
     assert owner.design_panel_refreshes == 1
     assert owner.design_position_refreshes == 1
     assert owner.alignment_panel_collapses == 1
+    assert owner.finished_alignment_drafts == 1
     assert owner.view.cleared_target_crosses == 1
     assert owner.status_refreshes == [owner.MANUAL_JOG_SETTLE_POLL_DELAYS_MS]
     assert owner.cancel_refreshes == 0
     assert owner.statuses == [
         (
-            "Design calibration complete. Rotation +1.250 deg, spacing ratio 0.875.",
+            "Design calibration complete. Rotation +1.250 deg, spacing ratio 0.875. "
+            "RMS 0.0123 mm, max 0.0456 mm.",
             7000,
         )
     ]

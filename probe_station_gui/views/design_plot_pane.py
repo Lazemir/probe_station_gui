@@ -69,6 +69,7 @@ class _DesignPlotPane(QWidget):
     move_requested = Signal(float, float)
     route_point_requested = Signal(float, float)
     point_requested = Signal(float, float)
+    alignment_point_requested = Signal(float, float)
     guide_requested = Signal(object, object)
     entity_selection_requested = Signal(object, str)
     route_pick_requested = Signal(str, float, float, bool, bool)
@@ -94,6 +95,8 @@ class _DesignPlotPane(QWidget):
         self._tool_measure_segments: list[tuple[Point2D, Point2D]] = []
         self._tool_measure_points: list[Point2D] = []
         self._tool_measure_label_items: list[object] = []
+        self._alignment_draft_points: list[Point2D] = []
+        self._alignment_draft_label_items: list[object] = []
         self._tool_sketch_segments: list[tuple[Point2D, Point2D]] = []
         self._tool_sketch_points: list[Point2D] = []
         self._markup: MarkupDocument | None = None
@@ -367,6 +370,12 @@ class _DesignPlotPane(QWidget):
             size=12,
             symbol="t",
         )
+        self._alignment_draft_item = pg.ScatterPlotItem(
+            pen=pg.mkPen("#00bcd4", width=2),
+            brush=pg.mkBrush(0, 188, 212, 150),
+            size=11,
+            symbol="o",
+        )
         self._check_mark_item = pg.ScatterPlotItem(
             pen=pg.mkPen("#ab47bc", width=2),
             brush=pg.mkBrush(171, 71, 188, 180),
@@ -405,6 +414,7 @@ class _DesignPlotPane(QWidget):
         self._plot.addItem(self._current_item)
         self._plot.addItem(self._source_mark_1_item)
         self._plot.addItem(self._source_mark_2_item)
+        self._plot.addItem(self._alignment_draft_item)
         self._plot.addItem(self._check_mark_item)
         self._preview_overlay_items = tuple(
             item
@@ -773,6 +783,7 @@ class _DesignPlotPane(QWidget):
             *self._preview_overlay_items,
             *self._probe_route_number_items,
             *self._tool_measure_label_items,
+            *self._alignment_draft_label_items,
         ):
             item.setVisible(bool(visible))
 
@@ -782,7 +793,15 @@ class _DesignPlotPane(QWidget):
 
     def set_active_design_tool(self, tool: str) -> None:
         normalized = str(tool).strip().lower()
-        if normalized not in {"select", "point", "guide", "ruler", "array", "legacy"}:
+        if normalized not in {
+            "select",
+            "point",
+            "guide",
+            "ruler",
+            "array",
+            "align",
+            "legacy",
+        }:
             raise ValueError(f"Unknown design tool {tool!r}.")
         if normalized != "guide":
             self._guide_anchor = None
@@ -792,7 +811,7 @@ class _DesignPlotPane(QWidget):
         if self._plot is not None:
             cursor = (
                 Qt.CrossCursor
-                if normalized in {"point", "guide", "ruler", "array"}
+                if normalized in {"point", "guide", "ruler", "array", "align"}
                 else Qt.ArrowCursor
             )
             self._plot.setCursor(cursor)
@@ -873,7 +892,8 @@ class _DesignPlotPane(QWidget):
         self._pending_clicks = {
             request_id: pending
             for request_id, pending in self._pending_clicks.items()
-            if pending.action not in {"point", "guide_point", "route_pick"}
+            if pending.action
+            not in {"point", "guide_point", "route_pick", "alignment_point"}
         }
 
     @staticmethod
@@ -954,6 +974,14 @@ class _DesignPlotPane(QWidget):
         while len(self._source_design_marks) < 2:
             self._source_design_marks.append(None)
         self._redraw_overlays()
+
+    def set_alignment_draft_points(self, points: object) -> None:
+        self._alignment_draft_points = [
+            (float(point[0]), float(point[1]))
+            for point in points
+            if isinstance(point, (list, tuple)) and len(point) == 2
+        ] if isinstance(points, (list, tuple)) else []
+        self._redraw_alignment_draft()
 
     def set_current_design_position(
         self,
@@ -1118,6 +1146,7 @@ class _DesignPlotPane(QWidget):
         self._redraw_mixed_preview()
         self._redraw_tool_measure()
         self._redraw_axis_triad()
+        self._redraw_alignment_draft()
 
         selected_target = next(
             (target for target in self._targets if target.id == self._selected_target_id),
@@ -1143,6 +1172,30 @@ class _DesignPlotPane(QWidget):
         else:
             self._check_mark_item.setData([], [])
         self._redraw_hover()
+
+    def _redraw_alignment_draft(self) -> None:
+        if self._plot is None or not hasattr(self, "_alignment_draft_item"):
+            return
+        for item in self._alignment_draft_label_items:
+            self._plot.removeItem(item)
+        self._alignment_draft_label_items.clear()
+        if not self._alignment_draft_points:
+            self._alignment_draft_item.setData([], [])
+            return
+        self._alignment_draft_item.setData(
+            [point[0] for point in self._alignment_draft_points],
+            [point[1] for point in self._alignment_draft_points],
+        )
+        for index, point in enumerate(self._alignment_draft_points, start=1):
+            label = pg.TextItem(
+                text=f"D{index}",
+                color="#80deea",
+                anchor=(0.0, 1.0),
+                fill=pg.mkBrush(0, 0, 0, 150),
+            )
+            label.setPos(point[0], point[1])
+            self._plot.addItem(label)
+            self._alignment_draft_label_items.append(label)
 
     def _redraw_current_position_overlay(self) -> None:
         if self._plot is None:
@@ -1626,6 +1679,9 @@ class _DesignPlotPane(QWidget):
             modifiers
         )
         active_tool = getattr(self, "_active_design_tool", "legacy")
+        if active_tool == "align" and not is_left_click:
+            return
+        alignment_click = active_tool == "align" and is_left_click
         route_pick = self._route_pick_mode is not None and is_left_click
         guide_click = (
             not route_pick
@@ -1640,7 +1696,7 @@ class _DesignPlotPane(QWidget):
             and active_tool in {"legacy", "point"}
         )
         select_click = active_tool == "select" and is_left_click
-        if route_pick or route_click or guide_click or select_click:
+        if alignment_click or route_pick or route_click or guide_click or select_click:
             slot = None
         elif self._navigation_enabled and is_left_click:
             if not is_double_click:
@@ -1652,7 +1708,10 @@ class _DesignPlotPane(QWidget):
             slot = 1
         else:
             return
-        if route_pick:
+        if alignment_click:
+            action = "alignment_point"
+            payload = ()
+        elif route_pick:
             action = "route_pick"
             payload: tuple[object, ...] = (str(self._route_pick_mode),)
         elif guide_click:
@@ -1715,7 +1774,7 @@ class _DesignPlotPane(QWidget):
                 control_constraint,
             )
             return
-        if guide_click or route_click:
+        if guide_click or route_click or alignment_click:
             self._execute_click_action(
                 action,
                 payload,
@@ -1818,6 +1877,8 @@ class _DesignPlotPane(QWidget):
             self.route_point_requested.emit(x_value, y_value)
         elif action == "point":
             self.point_requested.emit(x_value, y_value)
+        elif action == "alignment_point":
+            self.alignment_point_requested.emit(x_value, y_value)
         elif action == "guide_point":
             self._accept_guide_point((x_value, y_value))
         elif action == "move":

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from probe_station_gui.settings.precision_approach import (
     PRECISION_APPROACH_AXES,
@@ -96,6 +96,7 @@ class StageControllerPrecisionMotionMixin:
         allow_unhomed: bool,
         wait_for_completion: bool = True,
         ignore_needle_safety: bool = False,
+        before_first_segment: Callable[[], None] | None = None,
     ) -> None:
         ordered_targets = {
             axis: float(targets[axis])
@@ -113,6 +114,8 @@ class StageControllerPrecisionMotionMixin:
             self._check_cancelled()
             if not ignore_needle_safety:
                 self._move_safety_check()
+            if before_first_segment is not None:
+                before_first_segment()
             self._send_absolute_axis_targets_move(
                 ordered_targets,
                 ignore_needle_safety=True,
@@ -163,12 +166,16 @@ class StageControllerPrecisionMotionMixin:
         segments.append(self._raw_precision_targets(plan.final_target))
 
         sent_segment = False
+        first_segment = True
         self._precision_motion_in_flight = True
         try:
             for segment in segments:
                 self._check_cancelled()
                 if not ignore_needle_safety:
                     self._move_safety_check()
+                if first_segment and before_first_segment is not None:
+                    before_first_segment()
+                first_segment = False
                 sent_segment = True
                 self._send_absolute_axis_targets_move(
                     segment,

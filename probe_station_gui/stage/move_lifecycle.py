@@ -57,6 +57,7 @@ class StageMoveLifecycleOwner(Protocol):
     def _refresh_design_position(self) -> None: ...
     def _collapse_alignment_panel_if_ready(self) -> None: ...
     def _collapse_alignment_panel_if_design_open(self) -> None: ...
+    def _finish_alignment_draft(self) -> None: ...
     def _update_stage_coordinate_apply_state(self) -> None: ...
 
 
@@ -356,6 +357,7 @@ def _finish_pending_alignment_preparation(
     owner._pending_alignment_preparation = None
     if success:
         owner._design_session.apply_prepared_alignment(preparation)
+        owner._finish_alignment_draft()
         owner._set_design_snap_enabled(False)
         owner._refresh_design_panel()
         owner._refresh_design_position()
@@ -364,7 +366,9 @@ def _finish_pending_alignment_preparation(
         owner._show_status(
             "Design calibration complete. "
             f"Rotation {preparation.rotation_deg:+.3f} deg, "
-            f"spacing ratio {preparation.distance_ratio:.3f}.",
+            f"spacing ratio {preparation.distance_ratio:.3f}. "
+            f"RMS {preparation.rms_residual_mm:.4f} mm, "
+            f"max {preparation.max_residual_mm:.4f} mm.",
             7000,
         )
     else:

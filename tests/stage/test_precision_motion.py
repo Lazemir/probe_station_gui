@@ -373,7 +373,41 @@ def test_b_rotation_resolves_relative_angle_to_precision_absolute_target() -> No
     assert moves == [
         (
             {"B": 7.5},
-            {"feedrate": None, "allow_unhomed": True},
+            {
+                "feedrate": None,
+                "allow_unhomed": True,
+                "before_first_segment": controller.b_rotation_started.emit,
+            },
         )
     ]
+    controller.shutdown()
+
+
+def test_b_rotation_started_signal_runs_at_first_precision_segment() -> None:
+    controller = StageController()
+    controller._serial = _FakeSerial()
+    controller._query_current_status_with_required_coordinates = (
+        lambda **_kwargs: SimpleNamespace(values={"B": 5.0})
+    )
+    controller._axis_value_for_configured_mode = (
+        lambda status, axis: status.values.get(axis)
+    )
+    events: list[str] = []
+    controller.b_rotation_started = SimpleNamespace(
+        emit=lambda: events.append("started")
+    )
+
+    def execute(_targets, **kwargs) -> None:
+        assert events == []
+        kwargs["before_first_segment"]()
+        events.append("sent")
+
+    controller._execute_precision_axis_targets_locked = execute
+    controller.movement_started = SimpleNamespace(emit=lambda: None)
+    controller.movement_finished = SimpleNamespace(emit=lambda *_args: None)
+    controller.status_message = SimpleNamespace(emit=lambda _message: None)
+
+    controller._run_rotate_b(2.5)
+
+    assert events == ["started", "sent"]
     controller.shutdown()

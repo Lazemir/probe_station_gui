@@ -638,6 +638,9 @@ class Main(QMainWindow):
         self._current_design_stage_xy: tuple[float, float] | None = None
         self._pending_design_stage_xy: tuple[float, float] | None = None
         self._pending_alignment_preparation: AlignmentPreparation | None = None
+        self._alignment_design_draft: tuple[tuple[float, float], ...] = ()
+        self._alignment_stage_draft: list[tuple[float, float] | None] = []
+        self._alignment_draft_fit_residuals: tuple[float, float] | None = None
         self._pending_quick_alignment_rotation = False
         self._manual_alignment_pick_slot: int | None = None
         self._manual_alignment_points: list[tuple[float, float] | None] = [None, None]
@@ -843,6 +846,9 @@ class Main(QMainWindow):
                 success,
                 message,
             )
+        )
+        self.stage_controller.b_rotation_started.connect(
+            self._on_alignment_b_rotation_started
         )
         self.stage_controller.click_move_started.connect(self._on_click_move_started)
         self.stage_controller.absolute_xy_move_started.connect(
@@ -3819,6 +3825,41 @@ class Main(QMainWindow):
             4000,
         )
 
+    def _on_alignment_draft_accepted(self, points: object) -> None:
+        if self._pending_alignment_preparation is not None:
+            self._show_status("Chip rotation is already in progress.", 4000)
+            return
+        if not isinstance(points, (list, tuple)):
+            return
+        try:
+            normalized = tuple(
+                (float(point[0]), float(point[1]))
+                for point in points
+                if isinstance(point, (list, tuple)) and len(point) == 2
+            )
+        except (TypeError, ValueError):
+            return
+        if len(normalized) < 2 or len(set(normalized)) < 2:
+            self._show_status("Align requires at least two distinct design points.", 5000)
+            return
+        self._alignment_design_draft = normalized
+        self._alignment_stage_draft = [None] * len(normalized)
+        self._alignment_draft_fit_residuals = None
+        self._manual_alignment_pick_slot = None
+        design_layout_window = getattr(self, "design_layout_window", None)
+        if design_layout_window is not None:
+            design_layout_window.set_alignment_capture_points(normalized)
+        self._set_alignment_panel_expanded()
+        self._refresh_manual_alignment_ui()
+        self._update_stage_coordinate_apply_state()
+        self._show_status(
+            f"Align: {len(normalized)} design points ready. Capture S1 next.",
+            5000,
+        )
+
+    def _on_alignment_draft_discarded(self) -> None:
+        self._show_status("Align draft discarded.", 2500)
+
     def _apply_settings(self) -> None:
         connection_flow.apply_axis_feedrate_limits(
             self,
@@ -4753,7 +4794,12 @@ class Main(QMainWindow):
             self._show_status(message, 7000)
 
     def _design_backed_alignment_active(self) -> bool:
-        return self._design_session.has_complete_source_design_marks()
+        return len(getattr(self, "_alignment_design_draft", ())) >= 2
+
+    def _alignment_capture_slot_count(self) -> int:
+        if self._design_backed_alignment_active():
+            return len(self._alignment_design_draft)
+        return 2
 
     def _design_window_is_open(self) -> bool:
         return self.design_layout_window is not None and self.design_layout_window.isVisible()
@@ -4778,7 +4824,7 @@ class Main(QMainWindow):
         self.alignment_dock.raise_()
 
     def _arm_manual_alignment_pick(self, slot: int) -> None:
-        if slot not in (0, 1):
+        if not 0 <= slot < self._alignment_capture_slot_count():
             return
         self._manual_alignment_pick_slot = slot
         self._set_alignment_panel_expanded()
@@ -4811,10 +4857,11 @@ class Main(QMainWindow):
         if self._design_backed_alignment_active():
             self._pending_alignment_preparation = None
             self._pending_quick_alignment_rotation = False
-            self._design_session.clear_source_stage_marks()
+            self._alignment_stage_draft = [None] * len(
+                self._alignment_design_draft
+            )
+            self._alignment_draft_fit_residuals = None
             self._set_design_snap_enabled(True)
-            self._refresh_design_panel()
-            self._refresh_design_position()
         else:
             self._reset_manual_alignment(cancel_pick=False)
             self._pending_quick_alignment_rotation = False
@@ -4846,7 +4893,7 @@ class Main(QMainWindow):
         return plan.stage_xy
 
     def _capture_manual_alignment_center(self, slot: int) -> None:
-        if slot not in (0, 1):
+        if not 0 <= slot < self._alignment_capture_slot_count():
             return
         center_xy = self._resolve_alignment_capture_stage_position()
         if center_xy is None:
@@ -4895,7 +4942,7 @@ class Main(QMainWindow):
     def _capture_manual_alignment_point(
         self, slot: int, captured: tuple[float, float], *, source: str
     ) -> None:
-        if slot not in (0, 1):
+        if not 0 <= slot < self._alignment_capture_slot_count():
             return
         self._manual_alignment_pick_slot = None
         self._refresh_manual_alignment_ui()
@@ -4904,19 +4951,33 @@ class Main(QMainWindow):
         if self._design_backed_alignment_active():
             registration_stage_xy = self._camera_stage_xy_from_raw_stage_xy(captured)
             self._pending_alignment_preparation = None
-            self._design_session.set_source_stage_mark(slot, registration_stage_xy)
-            self._refresh_design_panel()
-            self._refresh_design_position()
-            pair_count = self._design_session.source_pair_count()
+            required_pair_count = len(self._alignment_design_draft)
+            if len(self._alignment_stage_draft) != required_pair_count:
+                self._alignment_stage_draft = [None] * required_pair_count
+            self._alignment_stage_draft[slot] = registration_stage_xy
+            pair_count = sum(
+                point is not None for point in self._alignment_stage_draft
+            )
             preparation = None
             preparation_error = None
             spacing_reasonable = True
-            if pair_count >= 2:
+            if pair_count == required_pair_count:
                 try:
-                    preparation = self._design_session.prepare_source_alignment()
+                    preparation = self._design_session.prepare_alignment_draft(
+                        self._alignment_design_draft,
+                        tuple(
+                            point
+                            for point in self._alignment_stage_draft
+                            if point is not None
+                        ),
+                    )
                 except DesignModelError as exc:
                     preparation_error = str(exc)
                 else:
+                    self._alignment_draft_fit_residuals = (
+                        preparation.rms_residual_mm,
+                        preparation.max_residual_mm,
+                    )
                     spacing_reasonable = self._design_spacing_ratio_is_reasonable(
                         preparation.distance_ratio
                     )
@@ -4925,6 +4986,7 @@ class Main(QMainWindow):
                 stage_xy=registration_stage_xy,
                 source=source,
                 pair_count=pair_count,
+                required_pair_count=required_pair_count,
                 preparation=preparation,
                 preparation_error=preparation_error,
                 spacing_reasonable=spacing_reasonable,
@@ -4945,6 +5007,7 @@ class Main(QMainWindow):
             self._manual_alignment_points = plan.points
         if plan.apply_prepared_alignment and plan.preparation is not None:
             self._design_session.apply_prepared_alignment(plan.preparation)
+            self._finish_alignment_draft()
         if plan.pending_preparation is not None:
             self._pending_alignment_preparation = plan.pending_preparation
         if plan.pending_quick_alignment_rotation:
@@ -4969,20 +5032,42 @@ class Main(QMainWindow):
         if plan.request_b_rotation and plan.rotation_deg is not None:
             self.stage_controller.request_rotate_b(plan.rotation_deg)
 
+    def _on_alignment_b_rotation_started(self) -> None:
+        if self._pending_alignment_preparation is None:
+            return
+        self._design_session.invalidate_registration(
+            "Design registration stale after B-axis rotation started."
+        )
+        self._refresh_design_panel()
+        self._refresh_design_position()
+
+    def _finish_alignment_draft(self) -> None:
+        self._alignment_design_draft = ()
+        self._alignment_stage_draft = []
+        self._alignment_draft_fit_residuals = None
+        design_layout_window = getattr(self, "design_layout_window", None)
+        if design_layout_window is not None:
+            design_layout_window.set_alignment_capture_points(())
+
     def _refresh_manual_alignment_ui(self) -> None:
         presentation = alignment.alignment_presentation(
             design_backed=self._design_backed_alignment_active(),
-            design_stage_marks=self._design_session.source_stage_marks,
+            design_stage_marks=self._alignment_stage_draft,
             manual_points=self._manual_alignment_points,
             pick_slot=self._manual_alignment_pick_slot,
+            required_design_mark_count=len(self._alignment_design_draft),
         )
         if self.alignment_panel is not None:
-            self.alignment_panel.set_design_marks(self._design_session.source_design_marks)
+            self.alignment_panel.set_design_marks(self._alignment_design_draft)
             self.alignment_panel.set_captured_points(presentation.captured_points)
             self.alignment_panel.set_pick_slot(presentation.pick_slot)
             self.alignment_panel.set_registration_status(
                 self._design_session.registration_status
             )
+            if self._alignment_draft_fit_residuals is not None:
+                self.alignment_panel.set_fit_residuals(
+                    *self._alignment_draft_fit_residuals
+                )
         self.view.set_alignment_mode(presentation.alignment_mode)
         self.view.set_alignment_instruction(presentation.instruction)
 

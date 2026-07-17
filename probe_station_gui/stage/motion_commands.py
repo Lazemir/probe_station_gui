@@ -284,6 +284,7 @@ class StageControllerMotionCommandsMixin:
                     {"B": float(current_b) + float(delta_deg)},
                     feedrate=None,
                     allow_unhomed=True,
+                    before_first_segment=self.b_rotation_started.emit,
                 )
             self.movement_finished.emit(
                 True,

@@ -381,10 +381,22 @@ class DesignSession:
     def prepare_source_alignment(self) -> AlignmentPreparation:
         """Fit all captured pairs and prepare their B-axis correction."""
 
+        return self.prepare_alignment_draft(
+            tuple(self.source_design_marks_compact()),
+            tuple(self.source_stage_marks_compact()),
+        )
+
+    def prepare_alignment_draft(
+        self,
+        design_marks: tuple[Point2D, ...],
+        stage_marks: tuple[Point2D, ...],
+    ) -> AlignmentPreparation:
+        """Prepare an alignment without changing the active registration."""
+
         if self.document is None:
             raise DesignModelError("No design document is loaded.")
-        design_marks = tuple(self.source_design_marks_compact())
-        stage_marks = tuple(self.source_stage_marks_compact())
+        design_marks = tuple(self._point(point) for point in design_marks)
+        stage_marks = tuple(self._point(point) for point in stage_marks)
         if len(design_marks) < 2 or len(design_marks) != len(stage_marks):
             raise DesignModelError("At least two complete mark pairs are required.")
 

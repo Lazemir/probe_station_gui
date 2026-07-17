@@ -328,6 +328,46 @@ def test_point_action_stays_in_point_tool(pane: _DesignPlotPane) -> None:
     assert pane.active_design_tool == "point"
 
 
+def test_align_action_emits_snapped_point_and_supports_arbitrary_draft_overlay(
+    pane: _DesignPlotPane,
+) -> None:
+    emitted: list[tuple[float, float]] = []
+    pane.alignment_point_requested.connect(
+        lambda x_value, y_value: emitted.append((x_value, y_value))
+    )
+    pane.set_active_design_tool("align")
+    pane.set_alignment_draft_points([(1.0, 2.0), (3.0, 4.0), (5.0, 6.0)])
+
+    pane._execute_click_action(
+        "alignment_point",
+        (),
+        SnapResult((7.0, 8.0), "vertex", 0.1),
+    )
+
+    assert emitted == [(7.0, 8.0)]
+    assert pane._alignment_draft_points == [(1.0, 2.0), (3.0, 4.0), (5.0, 6.0)]
+    assert pane.active_design_tool == "align"
+
+
+def test_align_right_click_does_not_emit_legacy_calibration_point(
+    pane: _DesignPlotPane,
+) -> None:
+    from types import SimpleNamespace
+
+    pane._document = object()
+    pane.set_active_design_tool("align")
+    emitted: list[object] = []
+    pane.calibration_point_selected.connect(lambda *args: emitted.append(args))
+    event = SimpleNamespace(
+        button=lambda: Qt.RightButton,
+        modifiers=lambda: Qt.NoModifier,
+    )
+
+    pane._on_mouse_clicked(event)
+
+    assert emitted == []
+
+
 def test_mixed_array_preview_draws_points_and_dashed_segments(
     pane: _DesignPlotPane,
 ) -> None:
@@ -387,6 +427,26 @@ def test_plot_uses_canonical_ruler_tool_token(pane: _DesignPlotPane) -> None:
     assert pane.active_design_tool == "ruler"
     with pytest.raises(ValueError, match="Unknown design tool"):
         pane.set_active_design_tool("measure")
+
+
+def test_layout_window_enter_accepts_align_draft(
+    qt_app: QApplication,
+) -> None:
+    window = DesignLayoutWindow()
+    window.navigator_panel._document = object()
+    window.navigator_panel._update_enabled_state()
+    accepted: list[object] = []
+    window.alignment_draft_accepted.connect(accepted.append)
+    window.navigator_panel._align_tool_button.click()
+    window.navigator_panel.append_alignment_point(1.0, 2.0)
+    window.navigator_panel.append_alignment_point(3.0, 4.0)
+
+    window._accept_alignment_shortcut.activated.emit()
+
+    assert accepted == [((1.0, 2.0), (3.0, 4.0))]
+    assert window._main_view.active_design_tool == "select"
+    window.close()
+    window.deleteLater()
 
 
 def test_layout_window_escape_cancels_transient_tool_state_and_selects(
