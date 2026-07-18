@@ -12,7 +12,10 @@ from probe_station_gui.api.server import _coordinate_mode_from_payload
 from probe_station_gui.api.server import _feedrate_from_payload
 from probe_station_gui.api.server import _voltage_sweep_from_payload
 from probe_station_gui.api.server import ProbeStationApiServer
-from probe_station_gui.camera.exposure_policy import ExposurePolicyBusyError
+from probe_station_gui.camera.exposure_policy import (
+    ExposurePolicyBusyError,
+    ExposurePolicyError,
+)
 
 
 class ApiServerPayloadTest(unittest.TestCase):
@@ -68,6 +71,7 @@ class ApiServerHttpTest(unittest.TestCase):
         camera_exposure_policy_snapshot_callback=None,
         camera_exposure_policy_set_callback=None,
         camera_exposure_once_callback=None,
+        raise_server_exceptions=True,
     ):
         from fastapi.testclient import TestClient
 
@@ -86,7 +90,7 @@ class ApiServerHttpTest(unittest.TestCase):
             camera_exposure_once_callback=camera_exposure_once_callback,
         )
         app, _uvicorn = server._create_app()
-        return TestClient(app)
+        return TestClient(app, raise_server_exceptions=raise_server_exceptions)
 
     def test_health_and_status_endpoints_return_callback_payloads(self) -> None:
         client = self._client(
@@ -333,6 +337,26 @@ class ApiServerHttpTest(unittest.TestCase):
 
         self.assertEqual(update.status_code, 409)
         self.assertEqual(once.status_code, 409)
+
+    def test_exposure_policy_errors_return_structured_service_unavailable(self) -> None:
+        def unavailable(*_args, **_kwargs):
+            raise ExposurePolicyError("Camera settings write failed.")
+
+        client = self._client(
+            camera_exposure_policy_set_callback=unavailable,
+            camera_exposure_once_callback=unavailable,
+            raise_server_exceptions=False,
+        )
+
+        update = client.put(
+            "/api/v1/camera/exposure-policy",
+            json={"auto_enabled": False, "engine": "software"},
+        )
+        once = client.post("/api/v1/camera/exposure-once", json={})
+
+        self.assertEqual(update.status_code, 503)
+        self.assertEqual(once.status_code, 503)
+        self.assertEqual(update.json()["detail"]["message"], "Camera settings write failed.")
 
     def test_exposure_policy_endpoints_preserve_camera_permissions(self) -> None:
         client = self._client(

@@ -148,6 +148,25 @@ class ExposurePolicyController:
         self._ensure_commands_allowed()
         return self._run_exclusive(self._run_selected_engine_once)
 
+    def run_manual_exposure_write(
+        self,
+        command: Callable[[], Mapping[str, Any]],
+    ) -> dict[str, object]:
+        """Run one public manual exposure-time write under policy ownership."""
+
+        def run() -> dict[str, object]:
+            with self._state_lock:
+                if self._policy.auto_enabled:
+                    raise ExposurePolicyError(
+                        "ExposureTime cannot be changed while automatic exposure is enabled."
+                    )
+            result = command()
+            if not isinstance(result, Mapping):
+                raise ExposurePolicyError("Camera settings write returned an invalid result.")
+            return dict(result)
+
+        return self._run_exclusive(run)
+
     def start(self) -> dict[str, object]:
         """Activate the configured policy and start the monitor lazily."""
 

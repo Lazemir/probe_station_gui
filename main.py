@@ -1069,7 +1069,6 @@ class Main(QMainWindow):
             camera_settings_read_callback=self._camera_api_broker.read_settings,
             camera_settings_write_callback=self._camera_api_broker.write_settings,
             camera_frame_callback=self._api_camera_frame,
-            camera_auto_exposure_callback=self._api_camera_auto_exposure,
             host=api_settings.host,
             port=api_settings.port,
         )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from types import SimpleNamespace
 
 from PySide6.QtCore import QByteArray
 from PySide6.QtGui import QColor, QImage
@@ -12,6 +13,44 @@ restore_real_imports_for_main()
 
 from main import Main
 from probe_station_gui.camera.auto_exposure import AutoExposureBusyError
+
+
+def test_api_server_setup_does_not_pass_removed_auto_exposure_callback(
+    monkeypatch,
+) -> None:
+    import main as main_module
+
+    created: list[dict[str, object]] = []
+
+    class FakeServer:
+        def __init__(self, **kwargs) -> None:
+            created.append(kwargs)
+
+    window = Main.__new__(Main)
+    window.settings_manager = SimpleNamespace(
+        api_configuration=lambda: SimpleNamespace(
+            enabled=True,
+            host="127.0.0.1",
+            port=8765,
+        )
+    )
+    window._api_settings_signature = None
+    window._api_server = None
+    window._submit_api_move_request = lambda _request: {}
+    window._submit_api_status_request = lambda: {}
+    window._submit_api_command_request_from_api_thread = lambda _request: {}
+    window._authorize_api_request = lambda _key, _permission: {}
+    window._camera_api_broker = SimpleNamespace(
+        read_settings=lambda _names=None: {},
+        write_settings=lambda _settings: {},
+    )
+    window._api_camera_frame = lambda _space, _counter, _timeout: {}
+    monkeypatch.setattr(main_module, "ProbeStationApiServer", FakeServer)
+
+    Main._configure_api_server_from_settings(window, start_if_enabled=False)
+
+    assert len(created) == 1
+    assert "camera_auto_exposure_callback" not in created[0]
 
 
 def test_camera_api_frame_selects_raw_and_corrected_storage() -> None:

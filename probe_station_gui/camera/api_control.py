@@ -27,7 +27,7 @@ _OPERATOR_CAMERA_NODE_SET = frozenset(OPERATOR_CAMERA_NODE_NAMES)
 SnapshotSubmitter = Callable[[str, list[str]], None]
 BatchSubmitter = Callable[[str, list[tuple[str, object]]], None]
 FrameCounter = Callable[[], int]
-ExposurePolicySnapshot = Callable[[], Mapping[str, object]]
+ManualExposureWrite = Callable[[Callable[[], dict[str, Any]]], Mapping[str, Any]]
 
 
 @dataclass
@@ -45,14 +45,14 @@ class CameraApiBroker(QObject):
         snapshot_submit: SnapshotSubmitter,
         batch_submit: BatchSubmitter,
         frame_counter: FrameCounter,
-        exposure_policy_snapshot: ExposurePolicySnapshot | None = None,
+        manual_exposure_write: ManualExposureWrite | None = None,
         timeout_s: float = 5.0,
     ) -> None:
         super().__init__()
         self._snapshot_submit = snapshot_submit
         self._batch_submit = batch_submit
         self._frame_counter = frame_counter
-        self._exposure_policy_snapshot = exposure_policy_snapshot
+        self._manual_exposure_write = manual_exposure_write
         self._timeout_s = max(0.001, float(timeout_s))
         self._lock = threading.RLock()
         self._pending: dict[str, _PendingCameraOperation] = {}
@@ -84,27 +84,82 @@ class CameraApiBroker(QObject):
         self,
         settings: Sequence[Mapping[str, object]],
     ) -> dict[str, Any]:
+        return self._write_settings(settings, trusted=False)
+
+    def write_settings_trusted(
+        self,
+        settings: Sequence[Mapping[str, object] | tuple[str, object]],
+    ) -> dict[str, Any]:
+        """Submit controller-owned settings without public policy guards."""
+
+        return self._write_settings(settings, trusted=True)
+
+    def set_manual_exposure_write(
+        self,
+        callback: ManualExposureWrite | None,
+    ) -> None:
+        """Install the controller-owned guard for public exposure-time writes."""
+
+        self._manual_exposure_write = callback
+
+    def _write_settings(
+        self,
+        settings: Sequence[Mapping[str, object] | tuple[str, object]],
+        *,
+        trusted: bool,
+    ) -> dict[str, Any]:
         ordered: list[tuple[str, object]] = []
         for item in settings:
-            if not isinstance(item, Mapping):
-                return _rejected("Each camera setting must be an object.", 400)
-            name = str(item.get("name") or "").strip()
-            if not name:
-                return _rejected("Camera setting name is required.", 400)
-            if "value" not in item:
-                return _rejected(f"Camera setting value is required: {name}.", 400)
-            ordered.append((name, item.get("value")))
+            if isinstance(item, Mapping):
+                name = str(item.get("name") or "").strip()
+                if not name:
+                    return _rejected("Camera setting name is required.", 400)
+                if "value" not in item:
+                    return _rejected(f"Camera setting value is required: {name}.", 400)
+                ordered.append((name, item.get("value")))
+                continue
+            if trusted and isinstance(item, tuple) and len(item) == 2:
+                name = str(item[0] or "").strip()
+                if not name:
+                    return _rejected("Camera setting name is required.", 400)
+                ordered.append((name, item[1]))
+                continue
+            return _rejected("Each camera setting must be an object.", 400)
         if not ordered:
             return _rejected("Provide at least one camera setting.", 400)
         error = _camera_node_names_error([name for name, _value in ordered])
         if error:
             return _rejected(error, 400)
-        policy_error = self._policy_write_error(ordered)
-        if policy_error:
-            return policy_error
-        result = self._submit_and_wait(
-            lambda request_id: self._batch_submit(request_id, ordered)
-        )
+        if not trusted:
+            names = {name for name, _value in ordered}
+            if "ExposureAuto" in names:
+                return _rejected(
+                    "ExposureAuto is managed by the exposure policy.",
+                    409,
+                )
+            guarded_write = self._manual_exposure_write
+            if "ExposureTime" in names:
+                if guarded_write is None:
+                    return _rejected(
+                        "ExposureTime requires the camera exposure policy.",
+                        503,
+                    )
+                try:
+                    result = guarded_write(
+                        lambda: self._submit_batch_and_wait(ordered)
+                    )
+                except Exception as exc:
+                    return _rejected(
+                        str(exc) or "Camera exposure write was rejected.",
+                        409,
+                    )
+            else:
+                result = self._submit_batch_and_wait(ordered)
+        else:
+            result = self._submit_batch_and_wait(ordered)
+        if not isinstance(result, Mapping):
+            return _rejected("Camera settings write returned an invalid result.", 500)
+        result = dict(result)
         if result.get("accepted", False):
             result["nodes"] = [
                 _api_node_payload(node)
@@ -113,39 +168,13 @@ class CameraApiBroker(QObject):
             ]
         return result
 
-    def _policy_write_error(
+    def _submit_batch_and_wait(
         self,
-        settings: Sequence[tuple[str, object]],
-    ) -> dict[str, Any] | None:
-        names = {name for name, _value in settings}
-        if "ExposureAuto" in names:
-            return _rejected(
-                "ExposureAuto is managed by the exposure policy.",
-                409,
-            )
-        if "ExposureTime" not in names:
-            return None
-
-        snapshot = self._exposure_policy_snapshot
-        if snapshot is None:
-            return None
-        try:
-            state = snapshot()
-        except Exception as exc:
-            return _rejected(f"Exposure policy is unavailable: {exc}", 503)
-        if not isinstance(state, Mapping):
-            return _rejected("Exposure policy state is invalid.", 503)
-        if bool(state.get("auto_enabled", False)):
-            return _rejected(
-                "ExposureTime cannot be changed while automatic exposure is enabled.",
-                409,
-            )
-        if bool(state.get("busy", False)) or bool(state.get("session_active", False)):
-            return _rejected(
-                "ExposureTime cannot be changed while camera exposure is busy.",
-                409,
-            )
-        return None
+        ordered: list[tuple[str, object]],
+    ) -> dict[str, Any]:
+        return self._submit_and_wait(
+            lambda request_id: self._batch_submit(request_id, ordered)
+        )
 
     @Slot(object)
     def complete(self, result: object) -> None:

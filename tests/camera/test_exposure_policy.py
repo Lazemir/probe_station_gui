@@ -13,6 +13,7 @@ from probe_station_gui.camera.exposure_policy import (
     ExposurePolicyBusyError,
     ExposurePolicyController,
     ExposurePolicyError,
+    OpticalSessionManager,
 )
 
 
@@ -87,6 +88,26 @@ def test_policy_transitions_cover_manual_and_automatic_modes() -> None:
         {"auto_enabled": False, "engine": "software"},
     ]
     rig.controller.shutdown()
+
+
+def test_manual_exposure_write_rejects_auto_and_optical_session() -> None:
+    auto_rig = PolicyRig(auto_enabled=True, engine="software")
+    command_calls: list[object] = []
+
+    with pytest.raises(ExposurePolicyError, match="automatic exposure"):
+        auto_rig.controller.run_manual_exposure_write(
+            lambda: command_calls.append("auto") or {"accepted": True}
+        )
+
+    manual_rig = PolicyRig(auto_enabled=False, engine="software")
+    sessions = OpticalSessionManager(manual_rig.controller)
+    with sessions.open("scan"):
+        with pytest.raises(ExposurePolicyBusyError, match="session"):
+            manual_rig.controller.run_manual_exposure_write(
+                lambda: command_calls.append("session") or {"accepted": True}
+            )
+
+    assert command_calls == []
 
 
 def test_callback_can_unsubscribe_itself_without_deadlocking() -> None:
