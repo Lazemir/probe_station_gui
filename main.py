@@ -3071,11 +3071,15 @@ class Main(QMainWindow):
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         if bool(payload.get("reset", False)):
-            self._reset_lens_distortion_calibration()
+            accepted, message = self._reset_lens_distortion_calibration()
             return {
-                "accepted": True,
-                "status_code": 200,
-                "message": "Lens distortion calibration reset requested.",
+                "accepted": accepted,
+                "status_code": 200 if accepted else 409,
+                "message": (
+                    "Lens distortion calibration reset requested."
+                    if accepted
+                    else message
+                ),
             }
         if self._lens_distortion_calibration_running():
             return {
@@ -4535,14 +4539,61 @@ class Main(QMainWindow):
             self._apply_objective_change_offset(plan.old_name, plan.new_name)
         self._show_plan_status(plan)
 
-    def _objective_mutation_busy(self, *, allow_stage_task: bool = False) -> bool:
-        if self._optical_calibration_worker_active() or self._microscope_scan_running():
+    def _objective_mutation_busy(
+        self,
+        *,
+        allow_stage_task: bool = False,
+        optical_context: _OpticalCalibrationRunContext | None = None,
+    ) -> bool:
+        if self._microscope_scan_running():
+            return True
+        optical_owner = self._optical_mutation_context_is_current(optical_context)
+        if (
+            self._optical_calibration_worker_active()
+            or self._optical_calibration_outer_owned_or_closing()
+        ) and not optical_owner:
             return True
         stage_controller = getattr(self, "stage_controller", None)
         return (
             stage_controller is not None
             and stage_controller.is_busy()
             and not allow_stage_task
+        )
+
+    def _optical_mutation_context_is_current(
+        self,
+        context: _OpticalCalibrationRunContext | None,
+    ) -> bool:
+        if not isinstance(context, _OpticalCalibrationRunContext):
+            return False
+        for attribute in (
+            "_flat_field_calibration_context",
+            "_lens_distortion_context",
+        ):
+            active_context = getattr(self, attribute, None)
+            if (
+                isinstance(active_context, _OpticalCalibrationRunContext)
+                and active_context.operation_id == context.operation_id
+            ):
+                return True
+        return False
+
+    def _objective_profile_mutation_busy(
+        self,
+        objective_name: str,
+        *,
+        allow_stage_task: bool = False,
+        optical_context: _OpticalCalibrationRunContext | None = None,
+    ) -> bool:
+        name = normalize_objective_name(objective_name)
+        active_name = normalize_objective_name(
+            self.settings_manager.settings.objectives.active_name
+        )
+        if not name or name != active_name:
+            return False
+        return self._objective_mutation_busy(
+            allow_stage_task=allow_stage_task,
+            optical_context=optical_context,
         )
 
     def _apply_objective_change_offset(self, old_name: str, new_name: str) -> None:
@@ -5505,23 +5556,26 @@ class Main(QMainWindow):
         self._show_status("Lens distortion calibration started.", 4000)
         return True
 
-    def _reset_lens_distortion_calibration(self) -> None:
-        if self._lens_distortion_calibration_running():
-            self._show_status("Wait for lens distortion calibration to finish.", 4000)
-            return
-        if self.stage_controller.is_busy():
-            self._show_status("Stage is busy; lens correction not reset.", 5000)
-            return
+    def _reset_lens_distortion_calibration(self) -> tuple[bool, str]:
+        active_name = normalize_objective_name(
+            self.settings_manager.settings.objectives.active_name
+        )
+        if self._objective_profile_mutation_busy(active_name):
+            message = (
+                "Lens correction cannot be reset while a scan or calibration is active."
+            )
+            self._show_status(message, 5000)
+            return False, message
         try:
             self._save_active_objective_distortion(None)
         except Exception as exc:
             logger.exception("Unable to reset lens distortion correction")
-            self._show_status(f"Lens correction reset failed: {exc}", 8000)
-            return
-        self._show_status(
-            "Lens correction cleared. Recalibrate click-to-move.",
-            8000,
-        )
+            message = f"Lens correction reset failed: {exc}"
+            self._show_status(message, 8000)
+            return False, message
+        message = "Lens correction cleared. Recalibrate click-to-move."
+        self._show_status(message, 8000)
+        return True, message
 
     def _lens_distortion_calibration_running(self) -> bool:
         thread = getattr(self, "_lens_distortion_thread", None)
@@ -6060,14 +6114,6 @@ class Main(QMainWindow):
         thread = getattr(self, "_lens_distortion_thread", None)
         if thread is not None and not thread.is_alive():
             thread.join(timeout=0.1)
-        self._lens_distortion_thread = None
-        self._lens_distortion_context = None
-        if (
-            context is not None
-            and context.full_wizard
-            and self._optical_calibration_outer_close_was_requested()
-        ):
-            self._schedule_optical_calibration_outer_close()
 
         payload: dict[str, object] | None = None
         before_preview: QImage | None = None
@@ -6107,9 +6153,18 @@ class Main(QMainWindow):
                     self._lens_distortion_payload_invalidates_click_calibration(payload)
                 )
                 if save_objective_name is None:
-                    self._save_active_objective_distortion(payload)
+                    self._save_active_objective_distortion(
+                        payload,
+                        optical_context=context,
+                        allow_stage_task=True,
+                    )
                 else:
-                    self._save_objective_distortion(payload, save_objective_name)
+                    self._save_objective_distortion(
+                        payload,
+                        save_objective_name,
+                        optical_context=context,
+                        allow_stage_task=True,
+                    )
             except Exception as exc:
                 logger.exception("Unable to save lens distortion correction")
                 success = False
@@ -6117,6 +6172,15 @@ class Main(QMainWindow):
             else:
                 if click_calibration_invalidated:
                     message = self._append_click_recalibration_message(message)
+
+        self._lens_distortion_thread = None
+        self._lens_distortion_context = None
+        if (
+            context is not None
+            and context.full_wizard
+            and self._optical_calibration_outer_close_was_requested()
+        ):
+            self._schedule_optical_calibration_outer_close()
 
         if self._lens_distortion_dialog is not None:
             self._lens_distortion_dialog.set_running(False)
@@ -6179,22 +6243,45 @@ class Main(QMainWindow):
             and active_context.operation_id == context.operation_id
         )
 
-    def _save_active_objective_distortion(self, payload: object | None) -> None:
+    def _save_active_objective_distortion(
+        self,
+        payload: object | None,
+        *,
+        optical_context: _OpticalCalibrationRunContext | None = None,
+        allow_stage_task: bool = False,
+    ) -> None:
         active_name = normalize_objective_name(
             self.settings_manager.settings.objectives.active_name
         )
-        self._save_objective_distortion(payload, active_name)
+        self._save_objective_distortion(
+            payload,
+            active_name,
+            optical_context=optical_context,
+            allow_stage_task=allow_stage_task,
+        )
 
     def _save_objective_distortion(
         self,
         payload: object | None,
         objective_name: str,
+        *,
+        optical_context: _OpticalCalibrationRunContext | None = None,
+        allow_stage_task: bool = False,
     ) -> None:
         settings = self.settings_manager.settings.clone()
         objectives = settings.objectives
         objective_name = normalize_objective_name(objective_name)
         if not objective_name:
             raise RuntimeError("No active objective selected.")
+        if self._objective_profile_mutation_busy(
+            objective_name,
+            allow_stage_task=allow_stage_task,
+            optical_context=optical_context,
+        ):
+            raise RuntimeError(
+                "Active objective correction cannot change while a scan or "
+                "calibration is active."
+            )
         profile = objectives.objectives.get(objective_name)
         if profile is None:
             raise RuntimeError(f"Objective profile {objective_name} is missing.")
@@ -6250,6 +6337,18 @@ class Main(QMainWindow):
     def _on_objective_calibration_updated(
         self, objective_name: str, pixels_to_mm: object
     ) -> None:
+        objective_name = normalize_objective_name(objective_name)
+        if self._objective_profile_mutation_busy(
+            objective_name,
+            allow_stage_task=True,
+        ):
+            message = (
+                "Click-to-move calibration result ignored because a scan or "
+                "calibration is active."
+            )
+            logger.warning(message)
+            self._show_status(message, 7000)
+            return
         pixels_to_mm = self._objective_pixels_to_mm_for_calibration_update(
             objective_name,
             pixels_to_mm,
