@@ -357,6 +357,67 @@ def test_lens_result_requires_both_finite_metric_pairs_for_previews(
     wizard.close()
 
 
+@pytest.mark.parametrize("metric_index", (0, 1), ids=("mean", "max"))
+@pytest.mark.parametrize("metric_pair", ("without", "with"))
+@pytest.mark.parametrize(
+    "invalid_value",
+    (-0.01, float("nan"), float("inf"), -float("inf")),
+    ids=("negative", "nan", "positive-infinity", "negative-infinity"),
+)
+def test_lens_result_rejects_invalid_preview_metrics(
+    qt_app: QApplication,
+    metric_index: int,
+    metric_pair: str,
+    invalid_value: float,
+) -> None:
+    wizard = OpticalCalibrationWizard()
+    result = wizard._result_page
+    without_metrics = [2.56, 5.00]
+    with_metrics = [2.42, 6.41]
+    metric_pairs = {"without": without_metrics, "with": with_metrics}
+    metric_pairs[metric_pair][metric_index] = invalid_value
+
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        result.set_lens_result(
+            "Lens correction saved.",
+            before_preview=_preview(QColor("red")),
+            after_preview=_preview(QColor("green")),
+            without_calibration_metrics=tuple(without_metrics),
+            with_calibration_metrics=tuple(with_metrics),
+        )
+
+    qt_app.processEvents()
+    assert result._comparison_container.isHidden()
+    assert result._before_preview_source is None
+    assert result._after_preview_source is None
+    assert _has_no_pixmap(result._before_preview_label)
+    assert _has_no_pixmap(result._after_preview_label)
+    assert result._without_metrics.text() == ""
+    assert result._with_metrics.text() == ""
+    wizard.close()
+
+
+def test_lens_result_formats_signed_zero_preview_metrics_without_minus_sign(
+    qt_app: QApplication,
+) -> None:
+    wizard = OpticalCalibrationWizard()
+    result = wizard._result_page
+
+    result.set_lens_result(
+        "Lens correction saved.",
+        before_preview=_preview(QColor("red")),
+        after_preview=_preview(QColor("green")),
+        without_calibration_metrics=(-0.0, 0.0),
+        with_calibration_metrics=(0.0, -0.0),
+    )
+
+    qt_app.processEvents()
+    assert not result._comparison_container.isHidden()
+    assert result._without_metrics.text() == "0.00 px mean · 0.00 px max"
+    assert result._with_metrics.text() == "0.00 px mean · 0.00 px max"
+    wizard.close()
+
+
 def test_lens_result_displays_three_rgb_seam_pictograms(
     qt_app: QApplication,
 ) -> None:

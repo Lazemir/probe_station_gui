@@ -69,6 +69,8 @@ def _format_residual_metrics(metrics: tuple[float, float]) -> str:
         raise ValueError(
             "Lens calibration preview metrics must be finite and non-negative."
         )
+    mean_px = 0.0 if mean_px == 0.0 else mean_px
+    max_px = 0.0 if max_px == 0.0 else max_px
     return f"{mean_px:.2f} px mean · {max_px:.2f} px max"
 
 
