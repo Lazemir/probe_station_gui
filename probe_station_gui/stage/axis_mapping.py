@@ -21,6 +21,8 @@ def interpolate_calibration_curve(
 ) -> float:
     """Linearly interpolate a normalized calibration curve, clamping endpoints."""
 
+    if math.isnan(x_value):
+        return x_value
     if x_value <= x_points[0]:
         return y_points[0]
     if x_value >= x_points[-1]:

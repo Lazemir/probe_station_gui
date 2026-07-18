@@ -66,3 +66,33 @@ Result: `All checks passed!`.
 - Invalid or incomplete interpolation snapshots disable that axis calibration
   safely instead of partially applying it.
 - Commit message: `feat: map axis coordinates by linear interpolation`.
+
+## Review follow-up
+
+The review identified that `bisect_right` could select an out-of-range upper
+index when a malformed status frame supplied `NaN` to the interpolation helper.
+
+The public controller regression was added first and run with:
+
+`C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/stage/test_controller_axis_needles.py::StageControllerLinearInterpolationCalibrationTest::test_nan_status_value_is_preserved_without_mapping_failure -q`
+
+RED: both A and Z subtests raised `IndexError` from
+`interpolate_calibration_curve`.
+
+The minimal fix returns a `NaN` input unchanged before endpoint comparison or
+bisection. This matches the legacy pass-through behavior and prevents status UI
+flow from failing. Positive and negative infinity retain endpoint-clamping
+behavior.
+
+Additional review hardening covers:
+
+- A/Z display-to-raw-to-display interior composition;
+- mismatched interpolation lengths;
+- non-finite G-code and display points;
+- nonpositive and non-finite `steps_per_mm`;
+- unordered G-code and non-strict display points.
+
+Follow-up verification result: `64 passed, 20 subtests passed`; targeted Ruff
+checks passed.
+
+Follow-up commit message: `fix: handle non-finite interpolation input`.

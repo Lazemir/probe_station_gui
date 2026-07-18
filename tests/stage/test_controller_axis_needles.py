@@ -697,6 +697,39 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
 
 
 class StageControllerLinearInterpolationCalibrationTest(unittest.TestCase):
+    def test_nan_status_value_is_preserved_without_mapping_failure(self) -> None:
+        controller = StageController()
+        try:
+            controller.apply_axis_a_calibration(
+                AxisACalibrationSettings(
+                    configured=True,
+                    model="linear_interpolation",
+                    interpolation_gcode_mm=[-3.0, -1.0, 0.0],
+                    interpolation_display_mm=[-5.0, -2.0, 0.0],
+                )
+            )
+            controller.apply_axis_z_calibration(
+                AxisZCalibrationSettings(
+                    configured=True,
+                    model="linear_interpolation",
+                    interpolation_gcode_mm=[0.0, 1.0, 3.0],
+                    interpolation_display_mm=[0.0, 2.0, 5.0],
+                )
+            )
+
+            for axis in ("A", "Z"):
+                with self.subTest(axis=axis):
+                    self.assertTrue(
+                        math.isnan(
+                            controller.calibrated_axis_display_value(
+                                axis,
+                                math.nan,
+                            )
+                        )
+                    )
+        finally:
+            controller.shutdown()
+
     def test_axis_z_calibration_interpolates_forward_and_inverse(self) -> None:
         controller = StageController()
         try:
@@ -776,6 +809,17 @@ class StageControllerLinearInterpolationCalibrationTest(unittest.TestCase):
                         raw_value,
                     )
 
+            for axis, display_value in (("A", -3.25), ("Z", 3.25)):
+                with self.subTest(axis=axis, direction="inverse"):
+                    raw_value = controller.calibrated_axis_raw_value(
+                        axis,
+                        display_value,
+                    )
+                    self.assertAlmostEqual(
+                        controller.calibrated_axis_display_value(axis, raw_value),
+                        display_value,
+                    )
+
             self.assertEqual(controller.calibrated_axis_display_value("A", -4.0), -5.0)
             self.assertEqual(controller.calibrated_axis_display_value("A", 1.0), 0.0)
             self.assertEqual(controller.calibrated_axis_raw_value("A", -6.0), -3.0)
@@ -790,25 +834,94 @@ class StageControllerLinearInterpolationCalibrationTest(unittest.TestCase):
     def test_invalid_interpolation_snapshots_disable_axis_calibration(self) -> None:
         controller = StageController()
         try:
-            controller.apply_axis_a_calibration(
-                AxisACalibrationSettings(
-                    configured=True,
-                    model="linear_interpolation",
-                    interpolation_gcode_mm=[-3.0, -1.0, 0.0],
-                    interpolation_display_mm=[-5.0, -2.0, -2.0],
-                )
+            axis_cases = (
+                (
+                    "A",
+                    AxisACalibrationSettings,
+                    controller.apply_axis_a_calibration,
+                    [-3.0, -1.0, 0.0],
+                    [-5.0, -2.0, 0.0],
+                    -1.5,
+                ),
+                (
+                    "Z",
+                    AxisZCalibrationSettings,
+                    controller.apply_axis_z_calibration,
+                    [0.0, 1.0, 3.0],
+                    [0.0, 2.0, 5.0],
+                    0.5,
+                ),
             )
-            controller.apply_axis_z_calibration(
-                AxisZCalibrationSettings(
-                    configured=True,
-                    model="linear_interpolation",
-                    interpolation_gcode_mm=[0.0, 3.0, 1.0],
-                    interpolation_display_mm=[0.0, 2.0, 5.0],
+            for (
+                axis,
+                settings_type,
+                apply_calibration,
+                gcode_points,
+                display_points,
+                probe_value,
+            ) in axis_cases:
+                invalid_cases = (
+                    (
+                        "mismatched_lengths",
+                        {"interpolation_display_mm": [0.0, 1.0]},
+                    ),
+                    (
+                        "non_finite_gcode",
+                        {
+                            "interpolation_gcode_mm": [
+                                gcode_points[0],
+                                math.nan,
+                                gcode_points[2],
+                            ]
+                        },
+                    ),
+                    (
+                        "non_finite_display",
+                        {
+                            "interpolation_display_mm": [
+                                display_points[0],
+                                math.inf,
+                                display_points[2],
+                            ]
+                        },
+                    ),
+                    ("nonpositive_steps", {"steps_per_mm": 0.0}),
+                    ("non_finite_steps", {"steps_per_mm": math.nan}),
+                    (
+                        "unordered_gcode",
+                        {
+                            "interpolation_gcode_mm": [
+                                gcode_points[0],
+                                gcode_points[2],
+                                gcode_points[1],
+                            ]
+                        },
+                    ),
+                    (
+                        "non_strict_display",
+                        {
+                            "interpolation_display_mm": [
+                                display_points[0],
+                                display_points[1],
+                                display_points[1],
+                            ]
+                        },
+                    ),
                 )
-            )
-
-            self.assertEqual(controller.calibrated_axis_display_value("A", -1.5), -1.5)
-            self.assertEqual(controller.calibrated_axis_display_value("Z", 0.5), 0.5)
+                valid_values = {
+                    "configured": True,
+                    "model": "linear_interpolation",
+                    "interpolation_gcode_mm": gcode_points,
+                    "interpolation_display_mm": display_points,
+                }
+                for name, overrides in invalid_cases:
+                    with self.subTest(axis=axis, case=name):
+                        apply_calibration(settings_type(**valid_values))
+                        apply_calibration(settings_type(**(valid_values | overrides)))
+                        self.assertEqual(
+                            controller.calibrated_axis_display_value(axis, probe_value),
+                            probe_value,
+                        )
         finally:
             controller.shutdown()
 

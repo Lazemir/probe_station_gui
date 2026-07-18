@@ -1,3 +1,4 @@
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -20,6 +21,9 @@ def test_interpolate_calibration_curve_is_piecewise_linear_and_clamped() -> None
     assert interpolate_calibration_curve(x_points, y_points, 2.0) == pytest.approx(3.5)
     assert interpolate_calibration_curve(x_points, y_points, -1.0) == 0.0
     assert interpolate_calibration_curve(x_points, y_points, 4.0) == 5.0
+    assert math.isnan(interpolate_calibration_curve(x_points, y_points, math.nan))
+    assert interpolate_calibration_curve(x_points, y_points, -math.inf) == 0.0
+    assert interpolate_calibration_curve(x_points, y_points, math.inf) == 5.0
 
 
 def _axis_a_calibration() -> dict[str, float | str]:
