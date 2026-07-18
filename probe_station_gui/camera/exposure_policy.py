@@ -121,6 +121,13 @@ class ExposurePolicyController:
             if callback not in self._callbacks:
                 self._callbacks.append(callback)
 
+    def unsubscribe(self, callback: StateChanged) -> None:
+        """Stop notifying a listener after the current emission completes."""
+
+        with self._state_lock:
+            if callback in self._callbacks:
+                self._callbacks.remove(callback)
+
     def snapshot(self) -> dict[str, object]:
         with self._state_lock:
             return self._state_payload_locked()

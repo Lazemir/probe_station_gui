@@ -117,6 +117,77 @@ def test_exposure_time_is_only_manual_and_uses_the_worker(
     widget.deleteLater()
 
 
+def test_exposure_time_latest_pending_write_replaces_stale_completion(
+    app: QApplication,
+    source: _ExposurePolicySource,
+) -> None:
+    widget = CameraSettingsWidget(source.grabber, exposure_policy_source=source)
+    _load_manual_exposure_time(widget, source)
+
+    widget._exposure_time_edit.setText("2200.0")
+    widget._exposure_time_edit.editingFinished.emit()
+    widget._exposure_time_edit.setText("2300.0")
+    widget._exposure_time_edit.editingFinished.emit()
+
+    assert source.grabber.setting_updates == [("camera", "ExposureTime", 2200.0)]
+    source.grabber.camera_setting_changed.emit(
+        _exposure_time_changed_payload(2200.0)
+    )
+
+    assert widget._exposure_time_edit.text() == "2300.0"
+    assert source.grabber.setting_updates == [
+        ("camera", "ExposureTime", 2200.0),
+        ("camera", "ExposureTime", 2300.0),
+    ]
+    widget.deleteLater()
+
+
+def _load_manual_exposure_time(
+    widget: CameraSettingsWidget,
+    source: _ExposurePolicySource,
+) -> None:
+    widget.refresh()
+    source.grabber.camera_settings_snapshot_ready.emit(
+        {
+            "ok": True,
+            "maps": [
+                {
+                    "key": "camera",
+                    "nodes": [
+                        {
+                            "name": "ExposureTime",
+                            "type": "float",
+                            "value": 1500.0,
+                            "minimum": 10.0,
+                            "maximum": 30000.0,
+                            "available": True,
+                            "writable": True,
+                            "unit": "us",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    source.set_state(auto_enabled=False, engine="software")
+
+
+def _exposure_time_changed_payload(value: float) -> dict[str, object]:
+    return {
+        "ok": True,
+        "message": "Camera setting updated.",
+        "map_key": "camera",
+        "node_name": "ExposureTime",
+        "node": {
+            "name": "ExposureTime",
+            "type": "float",
+            "value": value,
+            "available": True,
+            "writable": True,
+        },
+    }
+
+
 class _Grabber(QObject):
     camera_settings_snapshot_ready = Signal(object)
     camera_setting_changed = Signal(object)

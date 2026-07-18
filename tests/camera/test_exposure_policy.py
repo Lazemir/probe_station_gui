@@ -89,6 +89,21 @@ def test_policy_transitions_cover_manual_and_automatic_modes() -> None:
     rig.controller.shutdown()
 
 
+def test_callback_can_unsubscribe_itself_without_deadlocking() -> None:
+    rig = PolicyRig(auto_enabled=False, engine="software")
+    callbacks: list[dict[str, object]] = []
+
+    def callback(state: dict[str, object]) -> None:
+        callbacks.append(state)
+        rig.controller.unsubscribe(callback)
+
+    rig.controller.subscribe(callback)
+    rig.controller.set_policy(auto_enabled=False, engine="camera")
+    rig.controller.set_policy(auto_enabled=False, engine="software")
+
+    assert [state["engine"] for state in callbacks] == ["camera"]
+
+
 def test_software_monitor_checks_brightness_before_adjusting() -> None:
     rig = PolicyRig(auto_enabled=True, engine="software", brightness=230)
     rig.controller.start()

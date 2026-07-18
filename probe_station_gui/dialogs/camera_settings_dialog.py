@@ -705,16 +705,24 @@ class CameraSettingsWidget(QWidget):
         key = (map_key, node_name)
         had_applied_value = key in self._applying_settings
         applied_value = self._applying_settings.pop(key, None)
+        has_newer_pending_value = (
+            had_applied_value
+            and key in self._pending_settings
+            and self._pending_settings[key] != applied_value
+        )
         if payload.get("ok", False):
             node = payload.get("node")
-            if isinstance(node, dict):
+            if isinstance(node, dict) and not has_newer_pending_value:
                 self._update_pages_for_node(map_key, node)
-            if had_applied_value and self._pending_settings.get(key) == applied_value:
+            if had_applied_value and not has_newer_pending_value:
                 self._pending_settings.pop(key, None)
             if self._pending_settings:
                 self._set_pending_status()
         else:
-            self._pending_settings.pop(key, None)
+            if had_applied_value and not has_newer_pending_value:
+                self._pending_settings.pop(key, None)
+        if has_newer_pending_value:
+            self._write_pending_settings()
 
     def _queue_setting(self, map_key: str, node_name: str, value: object) -> None:
         if not node_name:
