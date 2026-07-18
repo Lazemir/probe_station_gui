@@ -7,6 +7,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from probe_station_gui.camera.exposure_policy_qt import (
@@ -91,6 +92,101 @@ def test_closed_adapter_reports_timeout_and_survives_destruction() -> None:
 
     assert finished == []
     assert controller.unsubscribe_calls == 1
+
+
+def test_shutdown_waits_for_registered_state_emission_and_blocks_copied_callback() -> None:
+    _app()
+    controller = _BlockingController()
+    adapter = ExposurePolicyQtAdapter(controller)
+    emission_entered = threading.Event()
+    release_emission = threading.Event()
+    emission_calls: list[dict[str, object]] = []
+    shutdown_complete = threading.Event()
+    shutdown_errors: list[BaseException] = []
+
+    def block_emission(state: dict[str, object]) -> None:
+        emission_calls.append(state)
+        emission_entered.set()
+        assert release_emission.wait(1.0)
+
+    adapter.state_changed.connect(block_emission, Qt.ConnectionType.DirectConnection)
+    copied_callback = tuple(controller._callbacks)[0]
+    emitter = threading.Thread(
+        target=lambda: copied_callback(
+            {"auto_enabled": True, "engine": "software", "busy": False}
+        )
+    )
+    emitter.start()
+    assert emission_entered.wait(1.0)
+
+    def shutdown_adapter() -> None:
+        try:
+            adapter.shutdown(timeout_s=1.0)
+        except BaseException as exc:
+            shutdown_errors.append(exc)
+        finally:
+            shutdown_complete.set()
+
+    shutdown = threading.Thread(target=shutdown_adapter)
+    shutdown.start()
+    try:
+        assert not shutdown_complete.wait(0.05)
+    finally:
+        release_emission.set()
+        emitter.join(1.0)
+        shutdown.join(1.0)
+
+    copied_callback({"auto_enabled": False, "engine": "camera", "busy": False})
+
+    assert not emitter.is_alive()
+    assert not shutdown.is_alive()
+    assert shutdown_errors == []
+    assert len(emission_calls) == 1
+
+
+def test_shutdown_waits_for_registered_command_finished_emission() -> None:
+    _app()
+    controller = _BlockingController()
+    adapter = ExposurePolicyQtAdapter(controller)
+    emission_entered = threading.Event()
+    release_emission = threading.Event()
+    shutdown_complete = threading.Event()
+    shutdown_errors: list[BaseException] = []
+
+    def block_emission(_result: dict[str, object]) -> None:
+        emission_entered.set()
+        assert release_emission.wait(1.0)
+
+    adapter.command_finished.connect(
+        block_emission,
+        Qt.ConnectionType.DirectConnection,
+    )
+    emitter = threading.Thread(
+        target=lambda: adapter._run_command(lambda: {"accepted": True})
+    )
+    emitter.start()
+    assert emission_entered.wait(1.0)
+
+    def shutdown_adapter() -> None:
+        try:
+            adapter.shutdown(timeout_s=1.0)
+        except BaseException as exc:
+            shutdown_errors.append(exc)
+        finally:
+            shutdown_complete.set()
+
+    shutdown = threading.Thread(target=shutdown_adapter)
+    shutdown.start()
+    try:
+        assert not shutdown_complete.wait(0.05)
+    finally:
+        release_emission.set()
+        emitter.join(1.0)
+        shutdown.join(1.0)
+
+    assert not emitter.is_alive()
+    assert not shutdown.is_alive()
+    assert shutdown_errors == []
 
 
 class _BlockingController:
