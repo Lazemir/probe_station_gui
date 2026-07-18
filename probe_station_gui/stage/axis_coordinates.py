@@ -15,6 +15,9 @@ from probe_station_gui.stage.needle_targets import normalise_needle_lowering_tar
 from probe_station_gui.stage.types import _Status
 
 
+CALIBRATED_TARGET_DOMAIN_TOLERANCE = 1e-9
+
+
 def _linear_interpolation_values(calibration: object) -> dict[str, object] | None:
     try:
         gcode_points = tuple(
@@ -247,7 +250,12 @@ class StageControllerAxisCoordinatesMixin:
         if not isinstance(points, tuple) or len(points) < 2:
             return False
         target = float(value)
-        return math.isfinite(target) and points[0] <= target <= points[-1]
+        return (
+            math.isfinite(target)
+            and points[0] - CALIBRATED_TARGET_DOMAIN_TOLERANCE
+            <= target
+            <= points[-1] + CALIBRATED_TARGET_DOMAIN_TOLERANCE
+        )
 
     def _axis_calibration_mapper(self) -> StageAxisCalibrationMapper:
         return StageAxisCalibrationMapper(
@@ -323,6 +331,24 @@ class StageControllerAxisCoordinatesMixin:
             status,
         )
 
+    def _axis_a_configured_target_for_lowering(
+        self,
+        lowering_mm: float,
+        status: _Status | None = None,
+    ) -> float:
+        machine_coordinate = self.calibrated_axis_raw_target_value(
+            "A",
+            -float(lowering_mm),
+        )
+        if machine_coordinate is None:
+            raise StageControllerError(
+                "A target cannot be represented by the calibrated axis mapping."
+            )
+        return machine_coordinate - self._axis_work_offset_for_configured_mode(
+            "A",
+            status,
+        )
+
     def _axis_a_gcode_coordinate_for_calibrated_coordinate(
         self,
         calibrated_coordinate_mm: float,
@@ -351,9 +377,10 @@ class StageControllerAxisCoordinatesMixin:
         current_a: float,
         requested_step_mm: float,
     ) -> float:
-        return self._axis_calibration_mapper().axis_a_gcode_coordinate_for_lowering_step(
-            current_a,
-            requested_step_mm,
+        current_lowering = self._axis_a_lowering_for_configured_coordinate(current_a)
+        target_lowering = current_lowering - float(requested_step_mm)
+        return self._axis_a_configured_target_for_lowering(
+            target_lowering,
         )
 
     @staticmethod

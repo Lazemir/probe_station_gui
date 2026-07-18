@@ -18,7 +18,10 @@ from tests.app.main_coordinate_feedrate_support import (
     main_module,
 )
 from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
-from probe_station_gui.settings.axis_calibration_config import AxisZCalibrationSettings
+from probe_station_gui.settings.axis_calibration_config import (
+    AxisACalibrationSettings,
+    AxisZCalibrationSettings,
+)
 from probe_station_gui.stage.controller import StageController
 from probe_station_gui.views import main_window_homing as homing_ui
 from probe_station_gui.views import main_window_needle_calibration as needle_calibration_ui
@@ -216,6 +219,78 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
             "Saved needle down target and set current A position to A0.",
             statuses,
         )
+
+    def test_display_needle_target_outside_curve_is_rejected_without_save(self) -> None:
+        controller = StageController()
+        try:
+            controller.apply_axis_a_calibration(
+                AxisACalibrationSettings(
+                    configured=True,
+                    model="linear_interpolation",
+                    interpolation_gcode_mm=[-2.0, -1.0, 0.0],
+                    interpolation_display_mm=[-2.0, -1.0, 0.0],
+                )
+            )
+            settings_manager = _FakeSettingsManager()
+            statuses: list[str] = []
+            owner = types.SimpleNamespace(
+                stage_controller=controller,
+                settings_manager=settings_manager,
+                joystick_panel=None,
+                contact_calibration_window=None,
+                _display_a_for_needle_lowering=lambda value: -float(value),
+                _show_status=lambda message: statuses.append(str(message)),
+            )
+
+            needle_calibration_ui.save_needle_position_from_display_a_coordinate(
+                owner,
+                "lower",
+                -3.0,
+            )
+
+            self.assertEqual(settings_manager.saved_count, 0)
+            self.assertEqual(settings_manager.replaced_settings, [])
+            self.assertIn("outside the coordinate calibration range", statuses[-1])
+        finally:
+            controller.shutdown()
+
+    def test_display_needle_target_at_curve_endpoint_is_saved(self) -> None:
+        controller = StageController()
+        try:
+            controller.apply_axis_a_calibration(
+                AxisACalibrationSettings(
+                    configured=True,
+                    model="linear_interpolation",
+                    interpolation_gcode_mm=[-2.0, -1.0, 0.0],
+                    interpolation_display_mm=[-2.0, -1.0, 0.0],
+                )
+            )
+            settings_manager = _FakeSettingsManager()
+            statuses: list[str] = []
+            owner = types.SimpleNamespace(
+                stage_controller=controller,
+                settings_manager=settings_manager,
+                joystick_panel=None,
+                contact_calibration_window=None,
+                _display_a_for_needle_lowering=lambda value: -float(value),
+                _show_status=lambda message: statuses.append(str(message)),
+            )
+
+            needle_calibration_ui.save_needle_position_from_display_a_coordinate(
+                owner,
+                "lower",
+                -2.0,
+            )
+
+            self.assertEqual(settings_manager.saved_count, 1)
+            self.assertEqual(len(settings_manager.replaced_settings), 1)
+            self.assertEqual(
+                settings_manager.settings.needle_calibration.down_position_mm,
+                2.0,
+            )
+            self.assertIn("Saved needle lower target", statuses[-1])
+        finally:
+            controller.shutdown()
 
     def test_coordinate_move_records_programmed_feedrate(self) -> None:
         window, stage_controller, _joystick, timer, _statuses = _make_main(120.0)

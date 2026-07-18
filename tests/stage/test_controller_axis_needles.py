@@ -697,6 +697,204 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
 
 
 class StageControllerLinearInterpolationCalibrationTest(unittest.TestCase):
+    def test_checked_raw_and_display_targets_allow_floating_point_endpoint_noise(
+        self,
+    ) -> None:
+        controller = StageController()
+        try:
+            controller.apply_axis_z_calibration(
+                AxisZCalibrationSettings(
+                    configured=True,
+                    model="linear_interpolation",
+                    interpolation_gcode_mm=[0.0, 0.3],
+                    interpolation_display_mm=[0.0, 0.3],
+                )
+            )
+            noisy_endpoint = 0.1 + 0.2
+
+            controller.validate_calibrated_axis_raw_target("Z", noisy_endpoint)
+            raw_target = controller.calibrated_axis_raw_target_value(
+                "Z",
+                noisy_endpoint,
+            )
+
+            self.assertIsNotNone(raw_target)
+            self.assertAlmostEqual(raw_target, 0.3)
+        finally:
+            controller.shutdown()
+
+    def test_needles_reject_physical_lowering_outside_curve_before_send(self) -> None:
+        controller = StageController()
+        try:
+            controller._serial = _FakeSerial()
+            controller._position_reporting_mode = "machine"
+            controller.apply_axis_a_calibration(
+                AxisACalibrationSettings(
+                    configured=True,
+                    model="linear_interpolation",
+                    interpolation_gcode_mm=[-2.0, -1.0, 0.0],
+                    interpolation_display_mm=[-2.0, -1.0, 0.0],
+                )
+            )
+            controller.apply_axis_max_feedrates({"A": 500.0})
+            controller.apply_needle_calibration(down_position_mm=3.0)
+            controller._query_status = lambda _serial: types.SimpleNamespace(
+                state="Idle",
+                position=(0.0, 0.0, 0.0, 0.0),
+                work_position=(0.0, 0.0, 0.0, 0.0),
+                display_position=(0.0, 0.0, 0.0, 0.0),
+                homed_axes={"A"},
+            )
+            sent: list[tuple[str, float]] = []
+            state_updates: list[float] = []
+            results: list[tuple[bool, str, str]] = []
+            controller._send_absolute_axis_move = (
+                lambda axis, value, **_kwargs: sent.append((axis, value))
+            )
+            controller._update_needles_from_a_position = state_updates.append
+            controller.needles_action_started = types.SimpleNamespace(emit=lambda *_args: None)
+            controller.needles_action_finished = types.SimpleNamespace(
+                emit=lambda success, message, action: results.append(
+                    (success, message, action)
+                )
+            )
+
+            controller._run_needles_action("lower", feedrate=80.0)
+
+            self.assertEqual(sent, [])
+            self.assertEqual(state_updates, [])
+            self.assertFalse(results[-1][0])
+            self.assertIn("cannot be represented", results[-1][1])
+        finally:
+            controller.shutdown()
+
+    def test_needles_adjust_rejects_physical_target_outside_curve_before_send(
+        self,
+    ) -> None:
+        controller = StageController()
+        try:
+            controller._serial = _FakeSerial()
+            controller._position_reporting_mode = "machine"
+            controller.apply_axis_a_calibration(
+                AxisACalibrationSettings(
+                    configured=True,
+                    model="linear_interpolation",
+                    interpolation_gcode_mm=[-2.0, -1.0, 0.0],
+                    interpolation_display_mm=[-2.0, -1.0, 0.0],
+                )
+            )
+            controller._query_status = lambda _serial: types.SimpleNamespace(
+                state="Idle",
+                position=(0.0, 0.0, 0.0, -2.0),
+                work_position=(0.0, 0.0, 0.0, -2.0),
+                display_position=(0.0, 0.0, 0.0, -2.0),
+                homed_axes={"A"},
+            )
+            sent: list[tuple[str, float]] = []
+            state_updates: list[float] = []
+            results: list[tuple[bool, str, str]] = []
+            controller._send_absolute_axis_move = (
+                lambda axis, value, **_kwargs: sent.append((axis, value))
+            )
+            controller._update_needles_from_a_position = state_updates.append
+            controller.needles_action_finished = types.SimpleNamespace(
+                emit=lambda success, message, action: results.append(
+                    (success, message, action)
+                )
+            )
+
+            controller._run_needles_adjust(-1.0, feedrate=80.0)
+
+            self.assertEqual(sent, [])
+            self.assertEqual(state_updates, [])
+            self.assertFalse(results[-1][0])
+            self.assertIn("cannot be represented", results[-1][1])
+        finally:
+            controller.shutdown()
+
+    def test_oscillation_needles_rejects_physical_target_before_relative_send(
+        self,
+    ) -> None:
+        controller = StageController()
+        try:
+            controller._position_reporting_mode = "machine"
+            controller._last_machine_position = (0.0, 0.0, 0.0, 0.0)
+            controller.apply_axis_a_calibration(
+                AxisACalibrationSettings(
+                    configured=True,
+                    model="linear_interpolation",
+                    interpolation_gcode_mm=[-2.0, -1.0, 0.0],
+                    interpolation_display_mm=[-2.0, -1.0, 0.0],
+                )
+            )
+            controller.apply_needle_calibration(down_position_mm=3.0)
+            writes: list[MoveVector] = []
+            state_updates: list[float] = []
+            results: list[tuple[bool, str, str]] = []
+            controller._write_relative_g1_unchecked = (
+                lambda move, **_kwargs: writes.append(move)
+            )
+            controller._update_needles_from_a_position = state_updates.append
+            controller.needles_action_finished = types.SimpleNamespace(
+                emit=lambda success, message, action: results.append(
+                    (success, message, action)
+                )
+            )
+
+            controller._execute_oscillation_needles_action(
+                "lower",
+                None,
+                80.0,
+            )
+
+            self.assertEqual(writes, [])
+            self.assertEqual(state_updates, [])
+            self.assertFalse(results[-1][0])
+            self.assertIn("cannot be represented", results[-1][1])
+        finally:
+            controller.shutdown()
+
+    def test_needles_accept_floating_point_physical_endpoint(self) -> None:
+        controller = StageController()
+        try:
+            controller._serial = _FakeSerial()
+            controller._position_reporting_mode = "machine"
+            controller.apply_axis_a_calibration(
+                AxisACalibrationSettings(
+                    configured=True,
+                    model="linear_interpolation",
+                    interpolation_gcode_mm=[-0.3, 0.0],
+                    interpolation_display_mm=[-0.3, 0.0],
+                )
+            )
+            controller.apply_axis_max_feedrates({"A": 500.0})
+            controller.apply_needle_calibration(down_position_mm=0.1 + 0.2)
+            controller._query_status = lambda _serial: types.SimpleNamespace(
+                state="Idle",
+                position=(0.0, 0.0, 0.0, 0.0),
+                work_position=(0.0, 0.0, 0.0, 0.0),
+                display_position=(0.0, 0.0, 0.0, 0.0),
+                homed_axes={"A"},
+            )
+            sent: list[tuple[str, float]] = []
+            results: list[tuple[bool, str, str]] = []
+            controller._send_absolute_axis_move = (
+                lambda axis, value, **_kwargs: sent.append((axis, value))
+            )
+            controller.needles_action_started = types.SimpleNamespace(emit=lambda *_args: None)
+            controller.needles_action_finished = types.SimpleNamespace(
+                emit=lambda success, message, action: results.append(
+                    (success, message, action)
+                )
+            )
+
+            controller._run_needles_action("lower", feedrate=80.0)
+
+            self.assertTrue(results[-1][0])
+            self.assertAlmostEqual(sent[-1][1], -0.3)
+        finally:
+            controller.shutdown()
+
     def test_nan_status_value_is_preserved_without_mapping_failure(self) -> None:
         controller = StageController()
         try:
@@ -1422,7 +1620,7 @@ class StageControllerPrecisionNeedleTargetTest(unittest.TestCase):
         profiles = PrecisionApproachSettings()
         profiles.profiles["A"] = PrecisionApproachProfile(True, 0.1, -1)
         controller.apply_precision_approach_configuration(profiles)
-        controller._axis_a_configured_coordinate_for_lowering = (
+        controller._axis_a_configured_target_for_lowering = (
             lambda lowering, _status=None: float(lowering)
         )
         controller._needle_motion_profile_segments = (

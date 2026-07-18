@@ -119,7 +119,7 @@ class StageControllerNeedleActionsMixin:
             target_lowering = self._needle_target_lowering_for_action(action)
         else:
             target_lowering = max(0.0, float(target_lowering))
-        target_a = self._axis_a_configured_coordinate_for_lowering(
+        target_a = self._axis_a_configured_target_for_lowering(
             target_lowering,
             status,
         )
@@ -148,7 +148,7 @@ class StageControllerNeedleActionsMixin:
         feedrate: float | None,
         status: _Status | None,
     ) -> bool:
-        target_a = self._axis_a_configured_coordinate_for_lowering(
+        target_a = self._axis_a_configured_target_for_lowering(
             target_lowering,
             status,
         )
@@ -164,7 +164,7 @@ class StageControllerNeedleActionsMixin:
             return False
         for segment_index, (segment_lowering, segment_feedrate, slow_zone) in enumerate(segments):
             self._check_cancelled()
-            segment_target_a = self._axis_a_configured_coordinate_for_lowering(
+            segment_target_a = self._axis_a_configured_target_for_lowering(
                 segment_lowering,
                 status,
             )
@@ -249,7 +249,7 @@ class StageControllerNeedleActionsMixin:
                     raise StageControllerError("Unable to read A position for needles.")
                 self._require_homed_axes(status, {"A"})
                 target_lowering = self._needle_target_lowering_for_action(action)
-                target_a = self._axis_a_configured_coordinate_for_lowering(
+                target_a = self._axis_a_configured_target_for_lowering(
                     target_lowering,
                     status,
                 )
@@ -399,7 +399,7 @@ class StageControllerNeedleActionsMixin:
                 )
             if action in {"raise", "lift", "lower"}:
                 target_lowering = self._needle_target_lowering_for_action(action)
-                target_a = self._axis_a_configured_coordinate_for_lowering(
+                target_a = self._axis_a_configured_target_for_lowering(
                     target_lowering
                 )
                 segments = self._needle_motion_profile_segments(
@@ -426,7 +426,7 @@ class StageControllerNeedleActionsMixin:
                     return
                 new_a = current_a
                 for segment_lowering, segment_feedrate, slow_zone in segments:
-                    segment_target_a = self._axis_a_configured_coordinate_for_lowering(
+                    segment_target_a = self._axis_a_configured_target_for_lowering(
                         segment_lowering
                     )
                     relative_a_move = segment_target_a - new_a

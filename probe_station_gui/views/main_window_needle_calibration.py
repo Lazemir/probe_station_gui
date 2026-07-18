@@ -150,7 +150,10 @@ def save_needle_position_from_display_a_coordinate(
     if display_a is None:
         owner._show_status("Invalid A coordinate.")
         return
-    raw_a = owner.stage_controller.calibrated_axis_raw_value("A", display_a)
+    raw_a = owner.stage_controller.calibrated_axis_raw_target_value("A", display_a)
+    if raw_a is None:
+        owner._show_status("A coordinate is outside the coordinate calibration range.")
+        return
     save_needle_position_from_raw_a_coordinate(owner, action, raw_a)
 
 

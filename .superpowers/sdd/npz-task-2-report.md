@@ -152,3 +152,71 @@ Full verification: `1743 passed, 30 subtests passed`.
 
 Targeted Ruff checks passed. Commit message:
 `fix: reject calibration targets outside curve`.
+
+## Needle target safety follow-up
+
+A second motion-path audit found that physical needle lowering still used the
+legacy clamping inverse directly. With a linear A curve spanning display/G-code
+`[-2.0, 0.0]`, a saved lowering of `3.0 mm` was silently clamped to raw
+`A=-2.0` and accepted as a shorter physical move. The display-coordinate
+needle-calibration save path had the same unchecked inverse behavior.
+
+### RED-GREEN evidence
+
+Physical needle lowering test:
+
+`C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/stage/test_controller_axis_needles.py::StageControllerLinearInterpolationCalibrationTest::test_needles_reject_physical_lowering_outside_curve_before_send -q`
+
+RED: the normal lowering path sent `A=-2.0` for the unrepresentable `3.0 mm`
+physical target. GREEN: it emits a failed needle action and performs neither a
+serial send nor a needle-state update.
+
+Display needle-calibration save test:
+
+`C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/app/test_main_stage_coordinate_controls.py::MainStageCoordinateControlsTest::test_display_needle_target_outside_curve_is_rejected_without_save -q`
+
+RED: the out-of-domain display target was persisted (`saved_count == 1`).
+GREEN: it produces an operator status message and leaves settings unchanged.
+
+Floating-point endpoint test:
+
+`C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/stage/test_controller_axis_needles.py::StageControllerLinearInterpolationCalibrationTest::test_checked_raw_and_display_targets_allow_floating_point_endpoint_noise -q`
+
+RED: `0.1 + 0.2` was rejected against an exact `0.3` endpoint. GREEN: a named
+`1e-9` domain tolerance admits only insignificant representation noise, after
+which interpolation clamps to the exact endpoint.
+
+### Audited paths and regressions
+
+- Normal needle raise/lower/lift: direct target validation, motion-profile
+  construction, and every profile segment now use the checked physical-target
+  converter before any absolute move.
+- Incremental needle adjust: the shared lowering-step converter validates the
+  resulting physical target; a regression confirms an out-of-range adjustment
+  performs no send or state update.
+- Oscillation needle raise/lower/lift: initial and per-segment targets use the
+  checked converter before any relative write; a focused orchestration test
+  confirms rejection before `_write_relative_g1_unchecked`.
+- Oscillation adjust uses the same checked lowering-step converter as normal
+  adjust.
+- Display-coordinate needle calibration rejects an out-of-domain value before
+  cloning or saving settings, while an exact curve endpoint still saves.
+- A valid physical endpoint affected by floating-point noise still completes
+  and sends the exact raw endpoint.
+- Legacy non-linear A calibration keeps its existing conversion behavior
+  because domain rejection is enabled only for linear-interpolation snapshots.
+
+Focused verification:
+
+`C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/stage/test_controller_axis_needles.py tests/app/test_main_stage_coordinate_controls.py tests/stage/test_precision_motion.py -q`
+
+Result: `104 passed, 20 subtests passed`.
+
+Full verification:
+
+`C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests -q`
+
+Result: `1750 passed, 30 subtests passed`.
+
+Targeted Ruff checks passed. Commit message:
+`fix: reject out-of-range needle calibration targets`.
