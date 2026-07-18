@@ -23,6 +23,7 @@ from probe_station_gui.settings.sections import (
     ApiSettings,
     ClickToMoveSettings,
     CoordinateSystemSettings,
+    ExposurePolicySettings,
 )
 
 
@@ -58,6 +59,7 @@ def normalize_default_settings_data(
     data = raw_data if isinstance(raw_data, dict) else {}
     _ensure_logging_section(data, log_path=log_path)
     _ensure_dict_section(data, "api", ApiSettings().to_dict())
+    _ensure_camera_exposure_section(data)
     _ensure_telegram_section(data)
     _ensure_feedrates_section(data)
     _ensure_dict_section(data, "jog", JogSettings().to_dict())
@@ -90,6 +92,17 @@ def _ensure_dict_section(data: dict, key: str, defaults: dict) -> dict:
     for default_key, default_value in defaults.items():
         section.setdefault(default_key, default_value)
     return section
+
+
+def _ensure_camera_exposure_section(data: dict) -> None:
+    camera = _ensure_dict_section(data, "camera", {})
+    defaults = ExposurePolicySettings().to_dict()
+    exposure = camera.get("exposure")
+    if not isinstance(exposure, dict):
+        camera["exposure"] = defaults
+        return
+    for key, value in defaults.items():
+        exposure.setdefault(key, value)
 
 
 def _ensure_telegram_section(data: dict) -> None:
