@@ -44,6 +44,14 @@ API_ROUTE_CONTROL_ACTIONS = frozenset(
     }
 )
 
+GUI_SERIALIZED_API_ACTIONS = API_ROUTE_CONTROL_ACTIONS | frozenset(
+    {
+        "lens_distortion_calibration",
+        "click_to_move_calibration",
+        "microscope_area_scan",
+    }
+)
+
 
 @dataclass(frozen=True)
 class ApiCommandDispatchHandlers:
@@ -164,7 +172,7 @@ def submit_api_command_request_from_api_thread(
     route_window_required: RouteWindowRequirement = probe_route_api_requires_window,
 ) -> ApiResponse:
     action, payload = api_command_action_payload(command_request)
-    if action in API_ROUTE_CONTROL_ACTIONS:
+    if action in GUI_SERIALIZED_API_ACTIONS:
         return submit_on_gui_thread(command_request)
     if route_window_required(action, payload):
         guard = submit_probe_route_window_guard_on_gui_thread(action, payload)
@@ -213,6 +221,7 @@ def handle_api_request(
 
 __all__ = [
     "API_ROUTE_CONTROL_ACTIONS",
+    "GUI_SERIALIZED_API_ACTIONS",
     "ApiBridgeRequestHandlers",
     "ApiCommandDispatchHandlers",
     "api_command_action_payload",

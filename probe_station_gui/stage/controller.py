@@ -69,6 +69,7 @@ from probe_station_gui.stage.needle_status import StageControllerNeedleStatusMix
 from probe_station_gui.stage.types import (
     AutofocusResult as AutofocusResult,
     MoveVector,
+    StageTaskToken,
     _AutofocusContext as _AutofocusContext,
     _FocusSweepResult as _FocusSweepResult,
     _QueuedSerialWrite,
@@ -165,8 +166,8 @@ class StageController(
     absolute_xy_move_started: Signal = Signal(float, float, float)
     stage_position_changed: Signal = Signal(object)
     autofocus_finished: Signal = Signal(bool, str)
-    objective_calibration_updated: Signal = Signal(str, object)
-    objective_mismatch_detected: Signal = Signal(str, str)
+    objective_calibration_updated: Signal = Signal(str, object, object)
+    objective_mismatch_detected: Signal = Signal(str, str, object)
     homing_status_changed: Signal = Signal(object)
     limit_axes_changed: Signal = Signal(object)
     axis_a_ready_changed: Signal = Signal(bool)
@@ -289,6 +290,8 @@ class StageController(
         self._frame_condition = threading.Condition()
         self._task_lock = threading.RLock()
         self._active_thread: Optional[threading.Thread] = None
+        self._stage_task_generation = 0
+        self._latest_stage_task_token: StageTaskToken | None = None
         self._status_refresh_thread: Optional[threading.Thread] = None
         self._cancel_event = threading.Event()
         self._axis_limits: dict[str, tuple[float, float]] = {}
@@ -530,6 +533,8 @@ class StageController(
     ) -> None:
         """Apply the active objective profile to calibration and autofocus."""
 
+        with self._task_lock:
+            self._new_stage_task_token_locked("objective_configuration")
         if objective is None:
             self._active_objective_name = "X5"
             self._pixels_to_mm = None
@@ -861,6 +866,35 @@ class StageController(
         with self._task_lock:
             return bool(self._active_thread and self._active_thread.is_alive())
 
+    def _new_stage_task_token_locked(self, source: str) -> StageTaskToken:
+        self._stage_task_generation += 1
+        token = StageTaskToken(
+            generation=self._stage_task_generation,
+            source=str(source),
+        )
+        self._latest_stage_task_token = token
+        return token
+
+    def _calibration_signal_token(self, source: str) -> StageTaskToken:
+        thread_token = getattr(
+            threading.current_thread(),
+            "_probe_station_stage_task_token",
+            None,
+        )
+        with self._task_lock:
+            if isinstance(thread_token, StageTaskToken):
+                return thread_token
+            return self._new_stage_task_token_locked(source)
+
+    def is_calibration_task_token_current(self, token: object) -> bool:
+        """Return whether a callback token still owns the latest stage generation."""
+
+        with self._task_lock:
+            return bool(
+                isinstance(token, StageTaskToken)
+                and token is self._latest_stage_task_token
+            )
+
     def _start_background_task(
         self,
         *,
@@ -879,6 +913,8 @@ class StageController(
                 before_create()
             self._cancel_event.clear()
             thread = threading.Thread(target=target, args=args, daemon=True)
+            token = self._new_stage_task_token_locked(target.__name__)
+            setattr(thread, "_probe_station_stage_task_token", token)
             self._active_thread = thread
             if before_start is not None:
                 before_start()
@@ -894,7 +930,10 @@ class StageController(
                     f"Stage is busy. Cannot start {label}."
                 )
             self._cancel_event.clear()
-            self._active_thread = threading.current_thread()
+            current_thread = threading.current_thread()
+            token = self._new_stage_task_token_locked(f"external:{label}")
+            setattr(current_thread, "_probe_station_stage_task_token", token)
+            self._active_thread = current_thread
 
     def finish_external_task(self) -> None:
         """Release a controller reservation created by begin_external_task."""

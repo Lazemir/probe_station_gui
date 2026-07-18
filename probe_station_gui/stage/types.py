@@ -6,6 +6,14 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
+@dataclass(frozen=True)
+class StageTaskToken:
+    """Identity of one stage operation that may emit calibration callbacks."""
+
+    generation: int
+    source: str
+
+
 @dataclass
 class MoveVector:
     """Represents a movement across the available motion axes."""

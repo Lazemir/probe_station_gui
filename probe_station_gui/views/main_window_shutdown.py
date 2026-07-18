@@ -25,6 +25,7 @@ class MainWindowShutdownOwner(Protocol):
     surface_map_window: Any
     microscope_scan_dialog: Any
     _api_server: Any
+    _api_bridge: Any
     _design_position_timer: Any
     _manual_jog_timer: Any
     _stage_motion_blink_timer: Any
@@ -91,6 +92,9 @@ def _persist_shutdown_state(
 
 
 def _stop_services_and_timers(owner: MainWindowShutdownOwner) -> None:
+    api_bridge = getattr(owner, "_api_bridge", None)
+    if api_bridge is not None:
+        api_bridge.close()
     if owner._api_server is not None:
         owner._api_server.stop()
     owner._stop_telegram_bot_service()

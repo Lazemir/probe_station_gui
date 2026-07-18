@@ -211,6 +211,41 @@ def test_submit_from_api_thread_routes_api_route_control_status_through_gui_thre
     assert calls == [{"action": "api_route_control_status"}]
 
 
+@pytest.mark.parametrize(
+    "action",
+    (
+        "lens_distortion_calibration",
+        "click_to_move_calibration",
+        "microscope_area_scan",
+    ),
+)
+def test_submit_from_api_thread_serializes_optical_mutations_on_gui_thread(
+    action: str,
+) -> None:
+    gui_calls: list[dict[str, Any]] = []
+    direct_calls: list[dict[str, Any]] = []
+    command = {"action": action, "payload": {"reset": True}}
+
+    response = submit_api_command_request_from_api_thread(
+        command,
+        submit_on_gui_thread=lambda request: (
+            gui_calls.append(dict(request))
+            or {"accepted": True, "bridged": True}
+        ),
+        submit_probe_route_window_guard_on_gui_thread=lambda _action, _payload: {
+            "accepted": True
+        },
+        dispatch_direct=lambda request, *, apply_route_control_guard: (
+            direct_calls.append(dict(request))
+            or {"accepted": True, "direct": True}
+        ),
+    )
+
+    assert response == {"accepted": True, "bridged": True}
+    assert gui_calls == [command]
+    assert direct_calls == []
+
+
 def test_submit_from_api_thread_checks_route_window_guard_before_direct_dispatch() -> None:
     guard_calls: list[tuple[str, dict[str, Any]]] = []
     dispatch_calls: list[tuple[dict[str, Any], bool]] = []

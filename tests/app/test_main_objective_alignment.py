@@ -1,6 +1,7 @@
 import types
 
-from PySide6.QtWidgets import QDialog
+import pytest
+from PySide6.QtWidgets import QDialog, QInputDialog, QMessageBox
 
 from main import Main
 from probe_station_gui.design.objective_offsets import ObjectiveOffsetReference
@@ -244,7 +245,11 @@ def test_settings_objective_change_is_rejected_for_alive_microscope_scan() -> No
     window._microscope_scan_thread = types.SimpleNamespace(is_alive=lambda: True)
     window._sync_objective_combo = lambda _name: None
     window._refresh_objective_calibration_ui = lambda: None
-    window._apply_settings = lambda: Main._apply_objective_settings(window)
+    window._apply_settings = lambda *, apply_objective_runtime=True: (
+        Main._apply_objective_settings(window)
+        if apply_objective_runtime
+        else None
+    )
     window._stop_telegram_bot_service = lambda: None
     window._configure_telegram_bot_from_settings = lambda: None
     window.grabber = None
@@ -260,20 +265,85 @@ def test_settings_objective_change_is_rejected_for_alive_microscope_scan() -> No
         == original_active_profile
     )
     assert manager.settings.objectives.objectives["X20"].magnification == 25.0
-    applied_active_profile = stage.applied_objectives[-1][0]
-    assert applied_active_profile.to_dict() == original_active_profile
+    assert stage.applied_objectives == []
     assert _SettingsDialog.instance is not None
     assert _SettingsDialog.instance.restored_active_names == ["X5"]
     assert statuses == ["Stage is busy; active objective settings not changed."]
 
 
+def test_settings_apply_during_click_calibration_keeps_computed_runtime_matrix() -> None:
+    window, stage, manager, _statuses = _window()
+    stage.busy = True
+    computed_matrix = [[0.025, 0.0], [0.0, 0.025]]
+    submitted = manager.settings.clone()
+    submitted.design_last_directory = "C:/updated-designs"
+    submitted.objectives.objectives["X20"].magnification = 25.0
+    objective_runtime_applies: list[bool] = []
+    unrelated_applies: list[bool] = []
+
+    def apply_settings(*, apply_objective_runtime: bool = True) -> None:
+        unrelated_applies.append(True)
+        if apply_objective_runtime:
+            objective_runtime_applies.append(True)
+
+    window._apply_settings = apply_settings
+    stage.runtime_matrix = computed_matrix
+
+    Main._apply_settings_from_dialog(window, submitted)
+
+    assert manager.settings.design_last_directory == "C:/updated-designs"
+    assert manager.settings.objectives.objectives["X20"].magnification == 25.0
+    assert unrelated_applies == [True]
+    assert objective_runtime_applies == []
+    assert stage.runtime_matrix == computed_matrix
+
+
+def test_add_objective_rechecks_busy_after_name_dialog_returns(monkeypatch) -> None:
+    window, _stage, manager, statuses = _window()
+
+    def get_text(*_args, **_kwargs):
+        window._microscope_scan_thread = types.SimpleNamespace(is_alive=lambda: True)
+        return "X50", True
+
+    monkeypatch.setattr(QInputDialog, "getText", get_text)
+
+    Main._add_objective_profile(window)
+
+    assert "X50" not in manager.settings.objectives.objectives
+    assert manager.saved_count == 0
+    assert statuses == ["Stage is busy; objective not added."]
+
+
+def test_delete_objective_rechecks_busy_after_confirmation_returns(monkeypatch) -> None:
+    window, _stage, manager, statuses = _window()
+
+    def question(*_args, **_kwargs):
+        window._microscope_scan_thread = types.SimpleNamespace(is_alive=lambda: True)
+        return QMessageBox.Yes
+
+    monkeypatch.setattr(QMessageBox, "question", question)
+
+    Main._delete_objective_profile(window, "X20")
+
+    assert "X20" in manager.settings.objectives.objectives
+    assert manager.saved_count == 0
+    assert statuses == ["Stage is busy; objective not deleted."]
+
+
 def test_objective_mismatch_cannot_bypass_alive_scan_guard() -> None:
     window, stage, manager, statuses = _window()
+    task_token = object()
+    stage.is_calibration_task_token_current = lambda token: token is task_token
     restored: list[str] = []
     window._microscope_scan_thread = types.SimpleNamespace(is_alive=lambda: True)
     window._sync_objective_combo = lambda name: restored.append(name)
 
-    Main._on_objective_mismatch_detected(window, "X20", "Objective mismatch.")
+    Main._on_objective_mismatch_detected(
+        window,
+        "X20",
+        "Objective mismatch.",
+        task_token,
+    )
 
     assert manager.settings.objectives.active_name == "X5"
     assert manager.saved_count == 0
@@ -282,6 +352,28 @@ def test_objective_mismatch_cannot_bypass_alive_scan_guard() -> None:
     assert statuses == [
         "Stage is busy; objective not changed.",
         "Objective mismatch.",
+    ]
+
+
+def test_stale_objective_mismatch_a_cannot_switch_objective_during_task_b() -> None:
+    window, stage, manager, statuses = _window()
+    token_a = object()
+    token_b = object()
+    stage.busy = True
+    stage.is_calibration_task_token_current = lambda token: token is token_b
+
+    Main._on_objective_mismatch_detected(
+        window,
+        "X20",
+        "Objective mismatch from calibration A.",
+        token_a,
+    )
+
+    assert manager.settings.objectives.active_name == "X5"
+    assert manager.saved_count == 0
+    assert stage.applied_objectives == []
+    assert statuses == [
+        "Objective mismatch ignored because its calibration task is no longer current."
     ]
 
 

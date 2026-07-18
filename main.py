@@ -4301,7 +4301,7 @@ class Main(QMainWindow):
             4000,
         )
 
-    def _apply_settings(self) -> None:
+    def _apply_settings(self, *, apply_objective_runtime: bool = True) -> None:
         connection_flow.apply_axis_feedrate_limits(
             self,
             self.stage_controller.axis_max_feedrates(),
@@ -4328,7 +4328,8 @@ class Main(QMainWindow):
             startup_mode=coordinate_settings.startup_mode,
             preferred_system=coordinate_settings.preferred_system,
         )
-        self._apply_objective_settings()
+        if apply_objective_runtime:
+            self._apply_objective_settings()
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_design_dialog_directory(
                 self.settings_manager.design_last_directory()
@@ -4387,7 +4388,8 @@ class Main(QMainWindow):
             return
         settings_to_apply = new_settings.clone()
         active_objective_update_rejected = False
-        if self._objective_mutation_busy():
+        objective_mutation_busy = self._objective_mutation_busy()
+        if objective_mutation_busy:
             current_objectives = self.settings_manager.objectives_configuration()
             current_active_name = normalize_objective_name(
                 current_objectives.active_name
@@ -4418,7 +4420,10 @@ class Main(QMainWindow):
             settings_to_apply,
             preserve_exposure_policy=True,
         )
-        self._apply_settings()
+        if objective_mutation_busy:
+            self._apply_settings(apply_objective_runtime=False)
+        else:
+            self._apply_settings()
         if active_objective_update_rejected:
             self._show_status(
                 "Stage is busy; active objective settings not changed.",
@@ -4766,6 +4771,9 @@ class Main(QMainWindow):
         raw_name, accepted = QInputDialog.getText(self, "Add Objective", "Objective name")
         if not accepted:
             return
+        if self._objective_mutation_busy():
+            self._show_status("Stage is busy; objective not added.", 4000)
+            return
         plan = alignment.profile_add_plan(self.settings_manager.settings, raw_name)
         if plan.select_existing_name is not None:
             self._set_active_objective(plan.select_existing_name, apply_motion=True)
@@ -4792,6 +4800,10 @@ class Main(QMainWindow):
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
         if response != QMessageBox.Yes:
+            return
+        if self._objective_mutation_busy():
+            self._show_status("Stage is busy; objective not deleted.", 4000)
+            self._refresh_click_calibration_ui()
             return
         plan = alignment.profile_delete_plan(
             self.settings_manager.settings, name, confirmed=True
@@ -6353,8 +6365,19 @@ class Main(QMainWindow):
         return f"{text} {suffix}"
 
     def _on_objective_calibration_updated(
-        self, objective_name: str, pixels_to_mm: object
+        self,
+        objective_name: str,
+        pixels_to_mm: object,
+        task_token: object,
     ) -> None:
+        if not self._calibration_callback_token_is_current(task_token):
+            message = (
+                "Click-to-move calibration result ignored because its stage task "
+                "is no longer current."
+            )
+            logger.warning(message)
+            self._show_status(message, 7000)
+            return
         objective_name = normalize_objective_name(objective_name)
         if self._objective_profile_mutation_busy(
             objective_name,
@@ -6386,6 +6409,21 @@ class Main(QMainWindow):
             return
         self._persist_objective_plan(plan)
 
+    def _calibration_callback_token_is_current(self, task_token: object) -> bool:
+        stage_controller = getattr(self, "stage_controller", None)
+        validator = getattr(
+            stage_controller,
+            "is_calibration_task_token_current",
+            None,
+        )
+        if not callable(validator):
+            return False
+        try:
+            return bool(validator(task_token))
+        except Exception:
+            logger.exception("Unable to validate stage calibration callback token")
+            return False
+
     def _objective_pixels_to_mm_for_calibration_update(
         self,
         objective_name: str,
@@ -6410,7 +6448,16 @@ class Main(QMainWindow):
         self,
         suggested_name: str,
         message: str,
+        task_token: object,
     ) -> None:
+        if not self._calibration_callback_token_is_current(task_token):
+            stale_message = (
+                "Objective mismatch ignored because its calibration task is no "
+                "longer current."
+            )
+            logger.warning(stale_message)
+            self._show_status(stale_message, 7000)
+            return
         name = normalize_objective_name(suggested_name)
         objective_settings = self.settings_manager.objectives_configuration()
         if name in objective_settings.objectives:

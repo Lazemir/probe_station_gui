@@ -165,6 +165,22 @@ class _FakeFrame:
         return 1200
 
 
+class _CalibrationTokenStage:
+    def __init__(self, current_token: object, *, busy: bool = True) -> None:
+        self.current_token = current_token
+        self.busy = busy
+        self.applied: list[object] = []
+
+    def is_busy(self) -> bool:
+        return self.busy
+
+    def is_calibration_task_token_current(self, token: object) -> bool:
+        return token is self.current_token
+
+    def apply_objective_configuration(self, objective, _objectives) -> None:
+        self.applied.append(objective)
+
+
 @pytest.mark.parametrize(
     "start_calibration",
     (
@@ -1630,13 +1646,22 @@ def test_click_calibration_update_keeps_stage_calibrated_distortion_matrix() -> 
         },
     )
     persisted = []
+    task_token = object()
     window.settings_manager = manager
+    window.stage_controller = _CalibrationTokenStage(task_token, busy=False)
+    window._flat_field_calibration_thread = None
+    window._flat_field_calibration_context = None
+    window._lens_distortion_thread = None
+    window._lens_distortion_context = None
+    window._microscope_scan_thread = None
     window._persist_objective_plan = lambda plan: persisted.append(plan)
+    window._show_status = lambda *_args: None
 
     Main._on_objective_calibration_updated(
         window,
         "X50",
         [[-0.000119, 0.0], [0.0, -0.000112]],
+        task_token,
     )
 
     profile = persisted[0].settings.objectives.objectives["X50"]
@@ -1779,11 +1804,10 @@ def test_click_calibration_active_update_is_rejected_after_new_operation_starts(
     restored: list[list[list[float]]] = []
     statuses: list[str] = []
     window.settings_manager = manager
-    window.stage_controller = SimpleNamespace(
-        is_busy=lambda: True,
-        apply_objective_configuration=lambda objective, _objectives: restored.append(
-            objective.pixels_to_mm
-        ),
+    task_token = object()
+    window.stage_controller = _CalibrationTokenStage(task_token)
+    window.stage_controller.apply_objective_configuration = (
+        lambda objective, _objectives: restored.append(objective.pixels_to_mm)
     )
     window._flat_field_calibration_thread = None
     window._flat_field_calibration_context = None
@@ -1810,6 +1834,7 @@ def test_click_calibration_active_update_is_rejected_after_new_operation_starts(
         window,
         "X20",
         [[0.02, 0.0], [0.0, 0.02]],
+        task_token,
     )
 
     assert persisted == []
@@ -1828,8 +1853,9 @@ def test_click_calibration_active_update_allows_own_stage_task() -> None:
         objectives={"X20": ObjectiveCalibrationSettings(name="X20")},
     )
     persisted: list[object] = []
+    task_token = object()
     window.settings_manager = manager
-    window.stage_controller = SimpleNamespace(is_busy=lambda: True)
+    window.stage_controller = _CalibrationTokenStage(task_token)
     window._flat_field_calibration_thread = None
     window._flat_field_calibration_context = None
     window._lens_distortion_thread = None
@@ -1842,6 +1868,7 @@ def test_click_calibration_active_update_allows_own_stage_task() -> None:
         window,
         "X20",
         [[0.02, 0.0], [0.0, 0.02]],
+        task_token,
     )
 
     assert len(persisted) == 1
@@ -1858,8 +1885,9 @@ def test_click_calibration_inactive_update_is_allowed_during_scan() -> None:
         },
     )
     persisted: list[object] = []
+    task_token = object()
     window.settings_manager = manager
-    window.stage_controller = SimpleNamespace(is_busy=lambda: True)
+    window.stage_controller = _CalibrationTokenStage(task_token)
     window._flat_field_calibration_thread = None
     window._flat_field_calibration_context = None
     window._lens_distortion_thread = None
@@ -1872,11 +1900,82 @@ def test_click_calibration_inactive_update_is_allowed_during_scan() -> None:
         window,
         "X20",
         [[0.02, 0.0], [0.0, 0.02]],
+        task_token,
     )
 
     assert len(persisted) == 1
     updated = persisted[0].settings.objectives.objectives["X20"]
     assert updated.pixels_to_mm == [[0.02, 0.0], [0.0, 0.02]]
+
+
+def test_stale_click_calibration_a_does_not_overwrite_runtime_owned_by_b() -> None:
+    window = Main.__new__(Main)
+    manager = _FakeSettingsManager()
+    persisted_matrix = [[0.01, 0.0], [0.0, 0.01]]
+    manager.settings.objectives = ObjectivesSettings(
+        active_name="X20",
+        objectives={
+            "X20": ObjectiveCalibrationSettings(
+                name="X20",
+                pixels_to_mm=persisted_matrix,
+                xy_calibration_configured=True,
+            )
+        },
+    )
+    token_a = object()
+    token_b = object()
+    stage = _CalibrationTokenStage(token_b)
+    stage.runtime_matrix = [[0.03, 0.0], [0.0, 0.03]]
+    persisted: list[object] = []
+    statuses: list[str] = []
+    window.settings_manager = manager
+    window.stage_controller = stage
+    window._flat_field_calibration_thread = None
+    window._flat_field_calibration_context = None
+    window._lens_distortion_thread = None
+    window._lens_distortion_context = None
+    window._microscope_scan_thread = None
+    window._persist_objective_plan = persisted.append
+    window._apply_objective_settings = lambda: pytest.fail(
+        "stale A callback reapplied persisted state over calibration B"
+    )
+    window._show_status = lambda message, _timeout=0: statuses.append(str(message))
+
+    Main._on_objective_calibration_updated(
+        window,
+        "X20",
+        [[0.02, 0.0], [0.0, 0.02]],
+        token_a,
+    )
+
+    assert persisted == []
+    assert stage.runtime_matrix == [[0.03, 0.0], [0.0, 0.03]]
+    assert "no longer current" in statuses[-1].lower()
+
+
+def test_tokenless_click_calibration_callback_is_never_accepted() -> None:
+    window = Main.__new__(Main)
+    manager = _FakeSettingsManager()
+    manager.settings.objectives = ObjectivesSettings(
+        active_name="X20",
+        objectives={"X20": ObjectiveCalibrationSettings(name="X20")},
+    )
+    persisted: list[object] = []
+    statuses: list[str] = []
+    window.settings_manager = manager
+    window.stage_controller = _CalibrationTokenStage(object(), busy=False)
+    window._persist_objective_plan = persisted.append
+    window._show_status = lambda message, _timeout=0: statuses.append(str(message))
+
+    Main._on_objective_calibration_updated(
+        window,
+        "X20",
+        [[0.02, 0.0], [0.0, 0.02]],
+        None,
+    )
+
+    assert persisted == []
+    assert "no longer current" in statuses[-1].lower()
 
 
 @pytest.mark.parametrize("blocker", ("scan", "calibration"))

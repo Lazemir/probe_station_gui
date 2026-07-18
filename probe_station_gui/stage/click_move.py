@@ -169,7 +169,14 @@ class StageControllerClickMoveMixin:
             self._pixels_to_mm = None
             self._objective_matrices.pop(self._active_objective_name, None)
             self._objective_calibration_verified[self._active_objective_name] = False
-        self.objective_calibration_updated.emit(self._active_objective_name, [])
+            task_token = self._new_stage_task_token_locked(
+                "click_calibration_reset"
+            )
+        self.objective_calibration_updated.emit(
+            self._active_objective_name,
+            [],
+            task_token,
+        )
         self.status_message.emit(reason)
 
     def _run_move(self, dx_pixels: float, dy_pixels: float) -> None:
@@ -489,6 +496,7 @@ class StageControllerClickMoveMixin:
             self.objective_calibration_updated.emit(
                 self._active_objective_name,
                 pixels_to_mm.tolist(),
+                self._calibration_signal_token("click_calibration"),
             )
             self._objective_matrices[self._active_objective_name] = pixels_to_mm
             self._objective_calibration_verified[self._active_objective_name] = True
@@ -570,7 +578,11 @@ class StageControllerClickMoveMixin:
                     f"Selected objective appears to be {suggestion}, not "
                     f"{self._active_objective_name}. Objective switched; click again."
                 )
-                self.objective_mismatch_detected.emit(suggestion, message)
+                self.objective_mismatch_detected.emit(
+                    suggestion,
+                    message,
+                    self._calibration_signal_token("click_calibration_check"),
+                )
                 raise StageControllerError(message)
             raise StageControllerError(
                 "Click calibration does not match the selected objective. "
