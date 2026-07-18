@@ -423,9 +423,33 @@ class _MicroscopeScanCapturedFrame:
 
 @dataclass(frozen=True)
 class _MicroscopeDesignScanRequest:
-    document: object
+    bounds: tuple[float, float, float, float]
     scale: object
     overlap_fraction: float
+    registration_matrix: tuple[tuple[float, float], tuple[float, float]]
+    registration_offset: tuple[float, float]
+    objective_xy_offset: tuple[float, float]
+
+    def design_to_raw_stage(
+        self,
+        design_xy: tuple[float, float],
+    ) -> tuple[float, float]:
+        x_value = float(design_xy[0])
+        y_value = float(design_xy[1])
+        camera_x = (
+            self.registration_matrix[0][0] * x_value
+            + self.registration_matrix[0][1] * y_value
+            + self.registration_offset[0]
+        )
+        camera_y = (
+            self.registration_matrix[1][0] * x_value
+            + self.registration_matrix[1][1] * y_value
+            + self.registration_offset[1]
+        )
+        return (
+            camera_x + self.objective_xy_offset[0],
+            camera_y + self.objective_xy_offset[1],
+        )
 
 
 @dataclass(frozen=True)
@@ -4888,21 +4912,12 @@ class Main(QMainWindow):
         if self.stage_controller.is_busy():
             self._show_status("Stage is busy; flat-field calibration not started.", 5000)
             return False
-        try:
-            position = self.stage_controller.current_stage_position()
-        except StageControllerError as exc:
-            self._show_status(str(exc), 5000)
-            return False
-        if len(position) < 2:
-            self._show_status("Unable to read X/Y stage position.", 5000)
-            return False
         objective_name, _magnification = self._active_objective_metadata()
         objective_name = normalize_objective_name(objective_name)
         if not objective_name:
             self._show_status("No active objective selected.", 5000)
             return False
 
-        start_xy = (float(position[0]), float(position[1]))
         context = _OpticalCalibrationRunContext(
             operation_id=uuid.uuid4().hex,
             wizard_run_id=wizard_run_id,
@@ -4912,7 +4927,6 @@ class Main(QMainWindow):
         thread = threading.Thread(
             target=self._run_flat_field_calibration,
             args=(
-                start_xy,
                 self._coordinate_feedrate_for_axes(("X", "Y")),
                 self._current_needle_feedrate(),
                 context,
@@ -4965,7 +4979,6 @@ class Main(QMainWindow):
 
     def _run_flat_field_calibration(
         self,
-        start_xy: tuple[float, float],
         linear_feedrate: float | None = None,
         needle_feedrate: float | None = None,
         context: _OpticalCalibrationRunContext | None = None,
@@ -4975,6 +4988,7 @@ class Main(QMainWindow):
         message = "Flat-field calibration stopped."
         stage_reserved = False
         stage_position_changed = False
+        start_xy: tuple[float, float] | None = None
         camera_restore_key: str | None = None
         optical_session: object | None = None
         optical_session_snapshot: dict[str, object] = {}
@@ -5008,6 +5022,7 @@ class Main(QMainWindow):
                 raise RuntimeError("Flat-field calibration stopped by user.")
             self.stage_controller.begin_external_task("flat-field calibration")
             stage_reserved = True
+            start_xy = self._reserved_stage_start_xy()
 
             if scale is None:
                 raise RuntimeError(
@@ -5281,21 +5296,12 @@ class Main(QMainWindow):
         if self.stage_controller.is_busy():
             self._show_status("Stage is busy; lens distortion calibration not started.", 5000)
             return False
-        try:
-            position = self.stage_controller.current_stage_position()
-        except StageControllerError as exc:
-            self._show_status(str(exc), 5000)
-            return False
-        if len(position) < 2:
-            self._show_status("Unable to read X/Y stage position.", 5000)
-            return False
         objective_name, _magnification = self._active_objective_metadata()
         objective_name = normalize_objective_name(objective_name)
         if not objective_name:
             self._show_status("No active objective selected.", 5000)
             return False
 
-        start_xy = (float(position[0]), float(position[1]))
         linear_feedrate = self._coordinate_feedrate_for_axes(("X", "Y"))
         needle_feedrate = self._current_needle_feedrate()
         context = _OpticalCalibrationRunContext(
@@ -5307,7 +5313,7 @@ class Main(QMainWindow):
         )
         thread = threading.Thread(
             target=self._run_lens_distortion_calibration,
-            args=(start_xy, linear_feedrate, needle_feedrate, context),
+            args=(linear_feedrate, needle_feedrate, context),
             daemon=True,
         )
         self._lens_distortion_thread = thread
@@ -5373,7 +5379,6 @@ class Main(QMainWindow):
 
     def _run_lens_distortion_calibration(
         self,
-        start_xy: tuple[float, float],
         linear_feedrate: float | None = None,
         needle_feedrate: float | None = None,
         context: _OpticalCalibrationRunContext | None = None,
@@ -5383,6 +5388,7 @@ class Main(QMainWindow):
         message = "Lens distortion calibration stopped."
         reserved = False
         stage_position_changed = False
+        start_xy: tuple[float, float] | None = None
         camera_restore_key: str | None = None
         optical_session: object | None = None
         optical_session_snapshot: dict[str, object] = {}
@@ -5416,6 +5422,7 @@ class Main(QMainWindow):
                 raise RuntimeError("Lens distortion calibration stopped by user.")
             self.stage_controller.begin_external_task("lens distortion calibration")
             reserved = True
+            start_xy = self._reserved_stage_start_xy()
 
             camera_restore_key = self._apply_microscope_scan_camera_lock(
                 microscope_scan.CameraLockSettings(
@@ -9786,11 +9793,30 @@ class Main(QMainWindow):
         scale_preflight = microscope_scan.start_scale_decision(scale=scale)
         if self._show_microscope_scan_start_rejection(scale_preflight):
             return
-        planning_request = _MicroscopeDesignScanRequest(
-            document=document,
-            scale=scale,
-            overlap_fraction=configuration.overlap_fraction,
-        )
+        try:
+            matrix = registration.matrix
+            registration_offset = registration.offset
+            objective_offset = self._active_objective_xy_offset()
+            planning_request = _MicroscopeDesignScanRequest(
+                bounds=tuple(float(value) for value in document.bounds),
+                scale=scale,
+                overlap_fraction=float(configuration.overlap_fraction),
+                registration_matrix=(
+                    (float(matrix[0][0]), float(matrix[0][1])),
+                    (float(matrix[1][0]), float(matrix[1][1])),
+                ),
+                registration_offset=(
+                    float(registration_offset[0]),
+                    float(registration_offset[1]),
+                ),
+                objective_xy_offset=(
+                    float(objective_offset[0]),
+                    float(objective_offset[1]),
+                ),
+            )
+        except (AttributeError, IndexError, TypeError, ValueError):
+            self._show_status("Design registration is invalid.", 6000)
+            return
         self._microscope_scan_stop_requested.clear()
         if self.microscope_scan_dialog is not None:
             self.microscope_scan_dialog.set_running(True)
@@ -9818,17 +9844,19 @@ class Main(QMainWindow):
         self,
         planning_request: object,
         frame_size_px: tuple[int, int],
+        *,
+        center_stage_xy: tuple[float, float] | None = None,
     ) -> MicroscopeScanPlan:
         width_px, height_px = (int(frame_size_px[0]), int(frame_size_px[1]))
         if width_px <= 0 or height_px <= 0:
             raise RuntimeError("Camera frame size is unavailable.")
         if isinstance(planning_request, _MicroscopeDesignScanRequest):
             decision = microscope_scan.scan_plan_decision(
-                document=planning_request.document,
+                document=planning_request,
                 scale=planning_request.scale,
                 frame_size_px=(width_px, height_px),
                 overlap_fraction=planning_request.overlap_fraction,
-                design_to_stage_xy=self._raw_stage_xy_from_design_xy,
+                design_to_stage_xy=planning_request.design_to_raw_stage,
             )
             if not decision.accepted or decision.plan is None:
                 message = (
@@ -9839,12 +9867,11 @@ class Main(QMainWindow):
                 raise RuntimeError(message)
             return decision.plan
         if isinstance(planning_request, _MicroscopeAreaScanRequest):
-            latest_position = self.stage_controller.latest_stage_position()
-            if latest_position is None or len(latest_position) < 2:
+            if center_stage_xy is None or len(center_stage_xy) < 2:
                 raise RuntimeError("Unable to read X/Y stage position.")
             center_stage_xy = (
-                float(latest_position[0]),
-                float(latest_position[1]),
+                float(center_stage_xy[0]),
+                float(center_stage_xy[1]),
             )
             if not all(math.isfinite(value) for value in center_stage_xy):
                 raise RuntimeError("Unable to read X/Y stage position.")
@@ -9943,6 +9970,9 @@ class Main(QMainWindow):
                 raise RuntimeError(
                     "Active objective has no calibrated microscope scale."
                 )
+            self.stage_controller.begin_external_task("microscope design scan")
+            stage_task_started = True
+            start_stage_xy = self._reserved_stage_start_xy()
             before_counter = self._latest_camera_counter()
             frame, _counter = self._wait_for_camera_frame(
                 after_counter=before_counter,
@@ -9953,12 +9983,10 @@ class Main(QMainWindow):
             plan = self._build_microscope_scan_plan(
                 planning_request,
                 (int(frame.width()), int(frame.height())),
+                center_stage_xy=start_stage_xy,
             )
             self.microscope_scan_status.emit(microscope_scan.starting_status(plan))
             output_dir.mkdir(parents=True, exist_ok=True)
-            self.stage_controller.begin_external_task("microscope design scan")
-            stage_task_started = True
-            start_stage_xy = self._microscope_scan_start_xy()
             camera_restore_key = self._apply_microscope_scan_camera_lock(
                 camera_lock_settings
             )
@@ -10188,9 +10216,9 @@ class Main(QMainWindow):
             )
         return False, f"{message} {operation.capitalize()} failed: {detail}"
 
-    def _microscope_scan_start_xy(self) -> tuple[float, float]:
-        position = self.stage_controller.latest_stage_position()
-        if position is None or len(position) < 2:
+    def _reserved_stage_start_xy(self) -> tuple[float, float]:
+        position = self.stage_controller.run_external_current_stage_position()
+        if len(position) < 2:
             raise RuntimeError("Unable to read X/Y stage position.")
         start_xy = (float(position[0]), float(position[1]))
         if not all(math.isfinite(value) for value in start_xy):

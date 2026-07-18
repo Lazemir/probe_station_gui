@@ -8,11 +8,23 @@ from main import Main
 
 
 class _FakeStage:
-    def __init__(self, events: list[tuple[object, ...]]) -> None:
+    def __init__(
+        self,
+        events: list[tuple[object, ...]],
+        *,
+        position_error: Exception | None = None,
+    ) -> None:
         self.events = events
+        self.position_error = position_error
 
     def begin_external_task(self, label: str) -> None:
         self.events.append(("begin", label))
+
+    def run_external_current_stage_position(self) -> tuple[float, ...]:
+        self.events.append(("position",))
+        if self.position_error is not None:
+            raise self.position_error
+        return (10.0, 20.0, 3.0)
 
     def run_external_needles_action(self, action: str, feedrate: float) -> None:
         self.events.append(("needles", action, feedrate))
@@ -138,11 +150,12 @@ def test_flat_field_runner_captures_raw_grid_and_restores_stage(monkeypatch) -> 
     )
     monkeypatch.setattr("main.time.sleep", lambda _seconds: None)
 
-    Main._run_flat_field_calibration(window, (10.0, 20.0), 120.0, 70.0)
+    Main._run_flat_field_calibration(window, 120.0, 70.0)
 
-    assert events[:2] == [
+    assert events[:3] == [
         ("session_open", "flat-field calibration", None),
         ("begin", "flat-field calibration"),
+        ("position",),
     ]
     assert events.index(("camera_lock", True, (
         ("GainAuto", "Off"),
@@ -192,10 +205,50 @@ def test_flat_field_runner_does_not_reserve_or_move_when_session_open_fails() ->
         lambda success, message, payload: finished.append((success, message, payload))
     )
 
-    Main._run_flat_field_calibration(window, (10.0, 20.0), 120.0, 70.0)
+    Main._run_flat_field_calibration(window, 120.0, 70.0)
 
     assert not any(event[0] == "move" for event in events)
     assert events == [
         ("session_open", "flat-field calibration", None),
     ]
     assert finished == [(False, "Flat-field calibration failed: Exposure did not converge.", None)]
+
+
+def test_flat_field_position_failure_releases_stage_and_session_without_camera_work() -> None:
+    events: list[tuple[object, ...]] = []
+    finished: list[tuple[bool, str, object]] = []
+    window = Main.__new__(Main)
+    window.stage_controller = _FakeStage(
+        events,
+        position_error=RuntimeError("position unavailable"),
+    )
+    window._flat_field_calibration_store = _FakeStore(events)
+    window._optical_session_manager = _FakeSessionManager(events)
+    window._active_microscope_scale = lambda: SimpleNamespace(
+        pixel_size_x_mm=0.001,
+        pixel_size_y_mm=0.001,
+    )
+    window._active_objective_metadata = lambda: ("X20", 20.0)
+    window._wait_for_raw_camera_frame = lambda **_kwargs: (_ for _ in ()).throw(
+        AssertionError("position failure reached camera work")
+    )
+    window._emit_flat_field_calibration_finished = (
+        lambda success, message, payload: finished.append((success, message, payload))
+    )
+
+    Main._run_flat_field_calibration(window, 120.0, 70.0)
+
+    assert events == [
+        ("session_open", "flat-field calibration", None),
+        ("begin", "flat-field calibration"),
+        ("position",),
+        ("finish",),
+        ("session_close",),
+    ]
+    assert finished == [
+        (
+            False,
+            "Flat-field calibration failed: position unavailable",
+            None,
+        )
+    ]

@@ -967,8 +967,29 @@ class StageController(
         with self._task_lock:
             if self._active_thread and self._active_thread.is_alive():
                 raise StageControllerError("Stage is busy. Wait for the current operation to finish.")
-            with self._serial_session():
-                status = self._query_synced_status_for_absolute_motion(min_axes=3)
+            status = self._query_current_stage_position_status()
+        return self._stage_position_from_status(status)
+
+    def run_external_current_stage_position(self) -> tuple[float, ...]:
+        """Read stage position from the worker that owns an external reservation."""
+
+        current_thread = threading.current_thread()
+        with self._task_lock:
+            if self._active_thread is not current_thread:
+                raise StageControllerError(
+                    "Current thread does not own an external stage task."
+                )
+            status = self._query_current_stage_position_status()
+        return self._stage_position_from_status(status)
+
+    def _query_current_stage_position_status(self) -> _Status | None:
+        with self._serial_session():
+            return self._query_synced_status_for_absolute_motion(min_axes=3)
+
+    def _stage_position_from_status(
+        self,
+        status: _Status | None,
+    ) -> tuple[float, ...]:
         if status is None or status.display_position is None:
             raise StageControllerError("Unable to read stage position.")
         if len(status.display_position) < 3:

@@ -25,11 +25,18 @@ def _stable_geometry_mask_backend(monkeypatch) -> None:
 
 
 class _FakeStage:
-    def __init__(self) -> None:
+    def __init__(self, *, position_error: Exception | None = None) -> None:
         self.events: list[tuple[object, ...]] = []
+        self.position_error = position_error
 
     def begin_external_task(self, label: str) -> None:
         self.events.append(("begin", label))
+
+    def run_external_current_stage_position(self) -> tuple[float, ...]:
+        self.events.append(("position",))
+        if self.position_error is not None:
+            raise self.position_error
+        return (10.0, 20.0, 3.0)
 
     def run_external_needles_action(self, action: str, feedrate: float) -> None:
         self.events.append(("needles", action, feedrate))
@@ -121,6 +128,19 @@ class _DeadThread:
         self.joined = True
 
 
+class _DeferredThread:
+    def __init__(self, *, target, args, daemon, **_kwargs) -> None:
+        self.target = target
+        self.args = args
+        self.daemon = daemon
+
+    def is_alive(self) -> bool:
+        return False
+
+    def start(self) -> None:
+        return None
+
+
 class _FakeDialog:
     def __init__(self) -> None:
         self.running: list[bool] = []
@@ -143,6 +163,50 @@ class _FakeFrame:
 
     def height(self) -> int:
         return 1200
+
+
+@pytest.mark.parametrize(
+    "start_calibration",
+    (
+        lambda window: Main._start_flat_field_calibration(window),
+        lambda window: Main._start_lens_distortion_calibration(window),
+        lambda window: Main._start_flat_field_calibration(
+            window,
+            wizard_run_id=41,
+            full_wizard=True,
+        ),
+        lambda window: Main._start_lens_distortion_calibration(
+            window,
+            wizard_run_id=41,
+            parent_session_token="outer-token",
+            full_wizard=True,
+        ),
+    ),
+)
+def test_standalone_and_wizard_calibration_launch_do_not_read_serial_position(
+    monkeypatch,
+    start_calibration,
+) -> None:
+    window = Main.__new__(Main)
+    window.stage_controller = SimpleNamespace(
+        is_busy=lambda: False,
+        current_stage_position=lambda: pytest.fail(
+            "Qt calibration launch slot read the serial stage position"
+        ),
+    )
+    window._stage_serial_ready = lambda: True
+    window._flat_field_calibration_thread = None
+    window._flat_field_calibration_context = None
+    window._lens_distortion_thread = None
+    window._lens_distortion_context = None
+    window._active_objective_metadata = lambda: ("X20", 20.0)
+    window._coordinate_feedrate_for_axes = lambda _axes: 120.0
+    window._current_needle_feedrate = lambda: 70.0
+    window._lens_distortion_dialog = None
+    window._show_status = lambda *_args: None
+    monkeypatch.setattr(main_module.threading, "Thread", _DeferredThread)
+
+    assert start_calibration(window) is True
 
 
 def _lens_output(
@@ -389,11 +453,12 @@ def test_run_lens_distortion_calibration_captures_offset_grid(
     )
     monkeypatch.setattr(main_module.time, "sleep", lambda _seconds: None)
 
-    Main._run_lens_distortion_calibration(window, (10.0, 20.0))
+    Main._run_lens_distortion_calibration(window)
 
-    assert stage.events[:4] == [
+    assert stage.events[:5] == [
         ("session_open", "lens distortion calibration", None),
         ("begin", "lens distortion calibration"),
+        ("position",),
         ("camera_lock", True),
         ("needles", "raise", 71.0),
     ]
@@ -451,11 +516,12 @@ def test_lens_distortion_calibration_does_not_require_flat_field_before_motion()
         lambda success, message, payload: finished.append((success, message, payload))
     )
 
-    Main._run_lens_distortion_calibration(window, (10.0, 20.0))
+    Main._run_lens_distortion_calibration(window)
 
     assert stage.events == [
         ("session_open", "lens distortion calibration", None),
         ("begin", "lens distortion calibration"),
+        ("position",),
         ("finish",),
         ("session_close",),
     ]
@@ -486,7 +552,7 @@ def test_lens_distortion_session_failure_does_not_reserve_or_move() -> None:
         lambda success, message, payload: finished.append((success, message, payload))
     )
 
-    Main._run_lens_distortion_calibration(window, (10.0, 20.0), 120.0, 70.0)
+    Main._run_lens_distortion_calibration(window, 120.0, 70.0)
 
     assert stage.events == [
         ("session_open", "lens distortion calibration", None),
@@ -495,6 +561,42 @@ def test_lens_distortion_session_failure_does_not_reserve_or_move() -> None:
         (
             False,
             "Lens distortion calibration failed: Exposure did not converge.",
+            None,
+        )
+    ]
+
+
+def test_lens_position_failure_releases_stage_and_session_without_camera_work() -> None:
+    stage = _FakeStage(position_error=RuntimeError("position unavailable"))
+    finished: list[tuple[bool, str, object]] = []
+    window = Main.__new__(Main)
+    window.stage_controller = stage
+    window._optical_session_manager = _FakeSessionManager(stage.events)
+    window._active_objective_metadata = lambda: ("X20", 20.0)
+    window._active_microscope_scale = lambda: SimpleNamespace(
+        pixel_size_x_mm=0.001,
+        pixel_size_y_mm=0.001,
+    )
+    window._wait_for_raw_camera_frame = lambda **_kwargs: (_ for _ in ()).throw(
+        AssertionError("position failure reached camera work")
+    )
+    window._emit_lens_distortion_finished = (
+        lambda success, message, payload: finished.append((success, message, payload))
+    )
+
+    Main._run_lens_distortion_calibration(window, 120.0, 70.0)
+
+    assert stage.events == [
+        ("session_open", "lens distortion calibration", None),
+        ("begin", "lens distortion calibration"),
+        ("position",),
+        ("finish",),
+        ("session_close",),
+    ]
+    assert finished == [
+        (
+            False,
+            "Lens distortion calibration failed: position unavailable",
             None,
         )
     ]

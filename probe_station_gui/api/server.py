@@ -772,6 +772,9 @@ class ProbeStationApiServer:
         ) -> JSONResponse:
             authorize_request(API_PERMISSION_STAGE_WRITE, auth_headers)
             body = dict(payload or {})
+            camera_lock = body.get("camera_lock")
+            if isinstance(camera_lock, dict) and "settings" in camera_lock:
+                authorize_request(API_PERMISSION_CAMERA_WRITE, auth_headers)
             if "auto_exposure" in body:
                 raise HTTPException(
                     status_code=400,

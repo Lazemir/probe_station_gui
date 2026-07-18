@@ -107,6 +107,31 @@ def _install_result_signals(controller, events: list[object]) -> None:
     )
 
 
+def test_reserved_position_read_is_available_only_to_external_task_owner(
+    controller,
+) -> None:
+    controller._query_current_stage_position_status = lambda: SimpleNamespace(
+        display_position=(10.0, 20.0, 3.0),
+        state="Idle",
+    )
+    controller._ensure_b_axis_zero_reference = lambda _status: None
+
+    with pytest.raises(StageControllerError, match="external stage task"):
+        controller.run_external_current_stage_position()
+
+    controller.begin_external_task("calibration")
+    try:
+        with pytest.raises(StageControllerError, match="Stage is busy"):
+            controller.current_stage_position()
+        assert controller.run_external_current_stage_position() == (
+            10.0,
+            20.0,
+            3.0,
+        )
+    finally:
+        controller.finish_external_task()
+
+
 def test_gui_autofocus_holds_session_from_before_movement_through_success(
     controller,
 ) -> None:

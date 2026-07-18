@@ -216,6 +216,116 @@ class ApiServerHttpTest(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertIn("auto_exposure", response.json()["detail"]["message"])
 
+    def test_area_scan_default_camera_lock_requires_only_stage_write(self) -> None:
+        auth_calls = []
+
+        def authorize(_api_key, permission):
+            auth_calls.append(permission)
+            return {
+                "accepted": permission == API_PERMISSION_STAGE_WRITE,
+                "status_code": 403,
+                "message": "camera write denied",
+            }
+
+        client = self._client(
+            auth_callback=authorize,
+            command_callback=lambda _request: {
+                "accepted": True,
+                "status_code": 202,
+            },
+        )
+
+        response = client.post(
+            "/api/v1/camera/area-scan",
+            json={"rows": 2, "columns": 2},
+        )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(auth_calls, [API_PERMISSION_STAGE_WRITE])
+
+    def test_area_scan_custom_camera_lock_requires_camera_write(self) -> None:
+        auth_calls = []
+        dispatch_calls = []
+
+        def authorize(_api_key, permission):
+            auth_calls.append(permission)
+            return {
+                "accepted": permission == API_PERMISSION_STAGE_WRITE,
+                "status_code": 403,
+                "message": "camera write denied",
+            }
+
+        client = self._client(
+            auth_callback=authorize,
+            command_callback=lambda request: dispatch_calls.append(request)
+            or {"accepted": True, "status_code": 202},
+        )
+
+        response = client.post(
+            "/api/v1/camera/area-scan",
+            json={
+                "camera_lock": {
+                    "enabled": True,
+                    "settings": [
+                        {"node_name": "GainAuto", "value": "Off"},
+                    ],
+                }
+            },
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            auth_calls,
+            [API_PERMISSION_STAGE_WRITE, API_PERMISSION_CAMERA_WRITE],
+        )
+        self.assertEqual(dispatch_calls, [])
+
+    def test_area_scan_custom_allowed_lock_accepts_both_write_permissions(
+        self,
+    ) -> None:
+        auth_calls = []
+        dispatch_calls = []
+        client = self._client(
+            auth_callback=lambda _key, permission: auth_calls.append(permission)
+            or {"accepted": True},
+            command_callback=lambda request: dispatch_calls.append(request)
+            or {"accepted": True, "status_code": 202},
+        )
+        payload = {
+            "camera_lock": {
+                "enabled": True,
+                "settings": [
+                    {"node_name": "Gain", "value": 4.0},
+                ],
+            }
+        }
+
+        response = client.post("/api/v1/camera/area-scan", json=payload)
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(
+            auth_calls,
+            [API_PERMISSION_STAGE_WRITE, API_PERMISSION_CAMERA_WRITE],
+        )
+        self.assertEqual(
+            dispatch_calls,
+            [{"action": "microscope_area_scan", "payload": payload}],
+        )
+
+    def test_area_scan_preserves_rejected_command_status(self) -> None:
+        client = self._client(
+            command_callback=lambda _request: {
+                "accepted": False,
+                "status_code": 409,
+                "message": "stage became busy",
+            }
+        )
+
+        response = client.post("/api/v1/camera/area-scan", json={})
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["detail"]["message"], "stage became busy")
+
     def test_camera_settings_endpoints_preserve_names_and_ordered_writes(self) -> None:
         reads = []
         writes = []
