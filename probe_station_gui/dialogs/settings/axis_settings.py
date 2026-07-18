@@ -2,23 +2,40 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
-from PySide6.QtCore import QLocale
+from PySide6.QtCore import (
+    QLocale,
+    QObject,
+    QRunnable,
+    QThreadPool,
+    Signal,
+    Slot,
+)
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
+    QPushButton,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from probe_station_gui.settings.axis_calibration_npz import (
+    AxisCalibrationImportError,
+    ImportedAxisCalibration,
+    LINEAR_INTERPOLATION_MODEL,
+    load_axis_calibration_npz,
+)
 from probe_station_gui.settings.axis_calibration_config import (
     AxisACalibrationSettings,
     AxisZCalibrationSettings,
@@ -42,7 +59,36 @@ class _AxisPrecisionControls:
     enabled_checkbox: QCheckBox
     backlash_spin: QDoubleSpinBox
     direction_combo: QComboBox
-    preview_label: QLabel
+
+
+class _CalibrationImportSignals(QObject):
+    """Deliver a completed calibration import to the GUI thread."""
+
+    finished = Signal(str, object, str)
+
+
+class _CalibrationImportTask(QRunnable):
+    """Read and validate one calibration file outside the GUI thread."""
+
+    def __init__(self, axis: str, path: str, final_direction: int) -> None:
+        super().__init__()
+        self._axis = axis
+        self._path = path
+        self._final_direction = final_direction
+        self.signals = _CalibrationImportSignals()
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            imported = load_axis_calibration_npz(
+                self._path,
+                axis=self._axis,
+                final_direction=self._final_direction,
+            )
+        except AxisCalibrationImportError as exc:
+            self.signals.finished.emit(self._axis, None, str(exc))
+        else:
+            self.signals.finished.emit(self._axis, imported, "")
 
 
 class AxisSettingsWidget(QWidget):
@@ -62,8 +108,12 @@ class AxisSettingsWidget(QWidget):
         self._rows: dict[str, _AxisPrecisionControls] = {}
         self._calibration_messages: dict[str, QLabel] = {}
         self._calibration_checkboxes: dict[str, QCheckBox] = {}
-        self._calibration_sources: dict[str, QLabel] = {}
-        self._calibration_errors: dict[str, QLabel] = {}
+        self._calibration_file_edits: dict[str, QLineEdit] = {}
+        self._calibration_browse_buttons: dict[str, QPushButton] = {}
+        self._calibration_reset_buttons: dict[str, QPushButton] = {}
+        self._calibration_status_labels: dict[str, QLabel] = {}
+        self._calibration_tasks: set[_CalibrationImportTask] = set()
+        self._calibration_tasks_running = 0
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -100,7 +150,7 @@ class AxisSettingsWidget(QWidget):
         self._axis_list.setCurrentRow(index)
 
     def to_settings(self, settings: Settings) -> None:
-        """Persist edits while retaining read-only calibration metadata."""
+        """Persist precision profiles and the current calibration snapshots."""
 
         settings.precision_approach = PrecisionApproachSettings(
             {
@@ -112,12 +162,23 @@ class AxisSettingsWidget(QWidget):
                 for axis, row in self._rows.items()
             }
         )
-        axis_a = self._axis_a_calibration.clone()
-        axis_a.configured = self._calibration_checkboxes["A"].isChecked()
-        settings.axis_a_calibration = axis_a
-        axis_z = self._axis_z_calibration.clone()
-        axis_z.configured = self._calibration_checkboxes["Z"].isChecked()
-        settings.axis_z_calibration = axis_z
+        for axis in ("A", "Z"):
+            calibration = self._calibration_for_axis(axis)
+            assert calibration is not None
+            saved = calibration.clone()
+            saved.source = ""
+            enabled = self._calibration_checkboxes[axis].isChecked()
+            if saved.model == LINEAR_INTERPOLATION_MODEL and not (
+                self._has_valid_interpolation_points(saved)
+                and self._direction_matches(axis, saved)
+            ):
+                enabled = False
+                self._calibration_checkboxes[axis].setChecked(False)
+            saved.configured = enabled
+            if axis == "A":
+                settings.axis_a_calibration = saved
+            else:
+                settings.axis_z_calibration = saved
 
     def _create_axis_page(
         self,
@@ -154,33 +215,24 @@ class AxisSettingsWidget(QWidget):
         direction_combo.setCurrentIndex(
             max(0, direction_combo.findData(profile.final_direction))
         )
-        preview_label = QLabel(group)
         row = _AxisPrecisionControls(
             enabled_checkbox,
             backlash_spin,
             direction_combo,
-            preview_label,
         )
         self._rows[axis] = row
 
         layout.addRow(enabled_checkbox)
         layout.addRow("Backlash", backlash_spin)
         layout.addRow("Final direction", direction_combo)
-        layout.addRow("Path", preview_label)
 
         enabled_checkbox.toggled.connect(
-            lambda enabled, controls=row: self._set_precision_enabled(
-                controls, enabled
-            )
-        )
-        backlash_spin.valueChanged.connect(
-            lambda _value, current_axis=axis: self._update_preview(current_axis)
+            lambda enabled, controls=row: self._set_precision_enabled(controls, enabled)
         )
         direction_combo.currentIndexChanged.connect(
-            lambda _index, current_axis=axis: self._update_preview(current_axis)
+            lambda _index, current_axis=axis: self._direction_changed(current_axis)
         )
         self._set_precision_enabled(row, profile.enabled)
-        self._update_preview(axis)
         return group
 
     def _create_calibration_group(self, axis: str) -> QGroupBox:
@@ -193,24 +245,44 @@ class AxisSettingsWidget(QWidget):
             layout.addRow(message)
             return group
 
-        checkbox = QCheckBox(
-            f"Use calibrated {axis}-axis coordinate curve",
-            group,
-        )
+        checkbox = QCheckBox("Enabled", group)
         checkbox.setChecked(calibration.configured)
-        source = QLabel(calibration.source, group)
-        source.setWordWrap(True)
-        error = QLabel(
-            f"RMSE {calibration.fit_rmse_mm:.6f} mm, "
-            f"max {calibration.fit_max_abs_error_mm:.6f} mm",
-            group,
-        )
+        file_edit = QLineEdit(calibration.calibration_file, group)
+        file_edit.setReadOnly(True)
+        browse_button = QPushButton("Browse", group)
+        reset_button = QPushButton("Reset", group)
+        file_row = QWidget(group)
+        file_layout = QHBoxLayout(file_row)
+        file_layout.setContentsMargins(0, 0, 0, 0)
+        file_layout.addWidget(file_edit, 1)
+        file_layout.addWidget(browse_button)
+        file_layout.addWidget(reset_button)
+        status = QLabel(self._calibration_status(calibration), group)
+        status.setWordWrap(True)
         self._calibration_checkboxes[axis] = checkbox
-        self._calibration_sources[axis] = source
-        self._calibration_errors[axis] = error
+        self._calibration_file_edits[axis] = file_edit
+        self._calibration_browse_buttons[axis] = browse_button
+        self._calibration_reset_buttons[axis] = reset_button
+        self._calibration_status_labels[axis] = status
         layout.addRow(checkbox)
-        layout.addRow("Curve source", source)
-        layout.addRow("Fit error", error)
+        layout.addRow("File", file_row)
+        layout.addRow("Status", status)
+        browse_button.clicked.connect(
+            lambda _checked=False, current_axis=axis: self._browse_calibration(
+                current_axis
+            )
+        )
+        reset_button.clicked.connect(
+            lambda _checked=False, current_axis=axis: self._reset_calibration(
+                current_axis
+            )
+        )
+        checkbox.toggled.connect(
+            lambda enabled, current_axis=axis: self._calibration_toggled(
+                current_axis, enabled
+            )
+        )
+        self._direction_changed(axis)
         return group
 
     def _calibration_for_axis(
@@ -229,15 +301,160 @@ class AxisSettingsWidget(QWidget):
     ) -> None:
         row.backlash_spin.setEnabled(enabled)
         row.direction_combo.setEnabled(enabled)
-        row.preview_label.setEnabled(enabled)
 
-    def _update_preview(self, axis: str) -> None:
-        row = self._rows[axis]
-        operator = "\N{MINUS SIGN}" if int(row.direction_combo.currentData() or 1) > 0 else "+"
-        row.preview_label.setText(
-            f"Target {operator} {row.backlash_spin.value():.3f} "
-            f"{_axis_unit(axis)} \N{RIGHTWARDS ARROW} target"
+    def _browse_calibration(self, axis: str) -> None:
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "Choose calibration file",
+            self._calibration_file_edits[axis].text(),
+            "NumPy calibration (*.npz)",
         )
+        if path:
+            self._start_calibration_import(axis, path)
+
+    def _start_calibration_import(self, axis: str, path: str) -> None:
+        """Start an NPZ import without reading the file in the GUI thread."""
+
+        final_direction = int(self._rows[axis].direction_combo.currentData() or 1)
+        task = _CalibrationImportTask(axis, path, final_direction)
+        task.signals.finished.connect(self._finish_calibration_import)
+        self._calibration_tasks.add(task)
+        self._calibration_tasks_running = len(self._calibration_tasks)
+        self._set_calibration_controls_enabled(axis, False)
+        self._calibration_status_labels[axis].setText("Loading calibration.")
+        QThreadPool.globalInstance().start(task)
+
+    @Slot(str, object, str)
+    def _finish_calibration_import(
+        self,
+        axis: str,
+        imported: ImportedAxisCalibration | None,
+        error: str,
+    ) -> None:
+        sender = self.sender()
+        self._calibration_tasks = {
+            task for task in self._calibration_tasks if task.signals is not sender
+        }
+        self._calibration_tasks_running = len(self._calibration_tasks)
+        self._set_calibration_controls_enabled(axis, True)
+        if imported is None:
+            self._calibration_status_labels[axis].setText(error)
+            return
+
+        calibration = self._calibration_for_axis(axis)
+        assert calibration is not None
+        replacement = calibration.clone()
+        replacement.configured = True
+        replacement.model = LINEAR_INTERPOLATION_MODEL
+        replacement.calibration_file = imported.calibration_file
+        replacement.interpolation_gcode_mm = list(imported.gcode_points_mm)
+        replacement.interpolation_display_mm = list(imported.display_points_mm)
+        replacement.interpolation_direction = imported.branch_direction
+        replacement.source = ""
+        if axis == "A":
+            self._axis_a_calibration = replacement
+        else:
+            self._axis_z_calibration = replacement
+        self._calibration_file_edits[axis].setText(imported.calibration_file)
+        self._calibration_status_labels[axis].setText(
+            self._calibration_status(replacement)
+        )
+        self._calibration_checkboxes[axis].setChecked(True)
+        self._direction_changed(axis)
+
+    def _reset_calibration(self, axis: str) -> None:
+        calibration = self._calibration_for_axis(axis)
+        assert calibration is not None
+        reset = calibration.clone()
+        reset.configured = False
+        reset.calibration_file = ""
+        reset.interpolation_gcode_mm = []
+        reset.interpolation_display_mm = []
+        reset.interpolation_direction = None
+        reset.source = ""
+        if axis == "A":
+            self._axis_a_calibration = reset
+        else:
+            self._axis_z_calibration = reset
+        self._calibration_checkboxes[axis].setChecked(False)
+        self._calibration_file_edits[axis].clear()
+        self._calibration_status_labels[axis].clear()
+
+    def _direction_changed(self, axis: str) -> None:
+        calibration = self._calibration_for_axis(axis)
+        if calibration is None or axis not in self._calibration_status_labels:
+            return
+        if not self._direction_matches(axis, calibration):
+            self._calibration_checkboxes[axis].setChecked(False)
+            self._calibration_status_labels[axis].setText(
+                "Choose a curve for this direction."
+            )
+        elif self._has_valid_interpolation_points(calibration):
+            self._calibration_status_labels[axis].setText(
+                self._calibration_status(calibration)
+            )
+
+    def _calibration_toggled(self, axis: str, enabled: bool) -> None:
+        if not enabled:
+            return
+        calibration = self._calibration_for_axis(axis)
+        assert calibration is not None
+        if calibration.model == LINEAR_INTERPOLATION_MODEL and not (
+            self._has_valid_interpolation_points(calibration)
+            and self._direction_matches(axis, calibration)
+        ):
+            self._calibration_checkboxes[axis].setChecked(False)
+            if not self._direction_matches(axis, calibration):
+                self._calibration_status_labels[axis].setText(
+                    "Choose a curve for this direction."
+                )
+
+    def _direction_matches(
+        self,
+        axis: str,
+        calibration: AxisACalibrationSettings | AxisZCalibrationSettings,
+    ) -> bool:
+        if calibration.model != LINEAR_INTERPOLATION_MODEL:
+            return True
+        direction = calibration.interpolation_direction
+        selected = int(self._rows[axis].direction_combo.currentData() or 1)
+        return direction is None or direction == selected
+
+    @staticmethod
+    def _has_valid_interpolation_points(
+        calibration: AxisACalibrationSettings | AxisZCalibrationSettings,
+    ) -> bool:
+        if calibration.model != LINEAR_INTERPOLATION_MODEL:
+            return False
+        try:
+            gcode = [float(value) for value in calibration.interpolation_gcode_mm]
+            display = [float(value) for value in calibration.interpolation_display_mm]
+        except (TypeError, ValueError):
+            return False
+        return (
+            len(gcode) >= 2
+            and len(gcode) == len(display)
+            and all(math.isfinite(value) for value in (*gcode, *display))
+            and all(right > left for left, right in zip(gcode, gcode[1:]))
+            and all(right > left for left, right in zip(display, display[1:]))
+        )
+
+    @classmethod
+    def _calibration_status(
+        cls,
+        calibration: AxisACalibrationSettings | AxisZCalibrationSettings,
+    ) -> str:
+        if not cls._has_valid_interpolation_points(calibration):
+            return ""
+        points = calibration.interpolation_gcode_mm
+        return (
+            f"{len(points)} points \N{MIDDLE DOT} "
+            f"{min(points):.3f}\N{EN DASH}{max(points):.3f} mm"
+        )
+
+    def _set_calibration_controls_enabled(self, axis: str, enabled: bool) -> None:
+        self._calibration_browse_buttons[axis].setEnabled(enabled)
+        self._calibration_reset_buttons[axis].setEnabled(enabled)
 
 
 def _axis_unit(axis: str) -> str:
