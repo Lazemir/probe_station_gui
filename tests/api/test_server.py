@@ -12,6 +12,7 @@ from probe_station_gui.api.server import _coordinate_mode_from_payload
 from probe_station_gui.api.server import _feedrate_from_payload
 from probe_station_gui.api.server import _voltage_sweep_from_payload
 from probe_station_gui.api.server import ProbeStationApiServer
+from probe_station_gui.camera.exposure_policy import ExposurePolicyBusyError
 
 
 class ApiServerPayloadTest(unittest.TestCase):
@@ -64,7 +65,9 @@ class ApiServerHttpTest(unittest.TestCase):
         camera_settings_read_callback=None,
         camera_settings_write_callback=None,
         camera_frame_callback=None,
-        camera_auto_exposure_callback=None,
+        camera_exposure_policy_snapshot_callback=None,
+        camera_exposure_policy_set_callback=None,
+        camera_exposure_once_callback=None,
     ):
         from fastapi.testclient import TestClient
 
@@ -76,7 +79,11 @@ class ApiServerHttpTest(unittest.TestCase):
             camera_settings_read_callback=camera_settings_read_callback,
             camera_settings_write_callback=camera_settings_write_callback,
             camera_frame_callback=camera_frame_callback,
-            camera_auto_exposure_callback=camera_auto_exposure_callback,
+            camera_exposure_policy_snapshot_callback=(
+                camera_exposure_policy_snapshot_callback
+            ),
+            camera_exposure_policy_set_callback=camera_exposure_policy_set_callback,
+            camera_exposure_once_callback=camera_exposure_once_callback,
         )
         app, _uvicorn = server._create_app()
         return TestClient(app)
@@ -215,7 +222,7 @@ class ApiServerHttpTest(unittest.TestCase):
             "/api/v1/camera/settings",
             json={
                 "settings": [
-                    {"name": "ExposureAuto", "value": "Off"},
+                    {"name": "Gain", "value": 0.0},
                     {"name": "ExposureTime", "value": 1800.0},
                 ]
             },
@@ -228,7 +235,7 @@ class ApiServerHttpTest(unittest.TestCase):
             writes,
             [
                 [
-                    {"name": "ExposureAuto", "value": "Off"},
+                    {"name": "Gain", "value": 0.0},
                     {"name": "ExposureTime", "value": 1800.0},
                 ]
             ],
@@ -265,64 +272,95 @@ class ApiServerHttpTest(unittest.TestCase):
         self.assertEqual(response.headers["X-Camera-Frame-Width"], "640")
         self.assertEqual(response.headers["X-Camera-Frame-Height"], "480")
 
-    def test_camera_auto_exposure_endpoint_validates_and_passes_config(self) -> None:
+    def test_exposure_policy_endpoints_return_and_update_controller_state(self) -> None:
+        policy_updates = []
+        client = self._client(
+            camera_exposure_policy_snapshot_callback=lambda: {
+                "auto_enabled": True,
+                "engine": "software",
+                "busy": False,
+            },
+            camera_exposure_policy_set_callback=lambda *, auto_enabled, engine: (
+                policy_updates.append((auto_enabled, engine))
+                or {
+                    "auto_enabled": auto_enabled,
+                    "engine": engine,
+                    "busy": False,
+                }
+            ),
+        )
+
+        read_response = client.get("/api/v1/camera/exposure-policy")
+        write_response = client.put(
+            "/api/v1/camera/exposure-policy",
+            json={"auto_enabled": False, "engine": "camera"},
+        )
+
+        self.assertEqual(read_response.status_code, 200)
+        self.assertEqual(read_response.json()["engine"], "software")
+        self.assertEqual(write_response.status_code, 200)
+        self.assertEqual(write_response.json()["engine"], "camera")
+        self.assertEqual(policy_updates, [(False, "camera")])
+
+    def test_exposure_policy_rejects_invalid_engine_before_controller_call(self) -> None:
         calls = []
         client = self._client(
-            camera_auto_exposure_callback=lambda config: (
-                calls.append(config)
-                or {
-                    "accepted": True,
-                    "converged": True,
-                    "final_exposure_us": 2400.0,
-                }
-            )
+            camera_exposure_policy_set_callback=lambda **policy: calls.append(policy)
         )
 
-        response = client.post(
-            "/api/v1/camera/auto-exposure",
-            json={"config": {"target_level": 230.0}},
-        )
-        invalid = client.post(
-            "/api/v1/camera/auto-exposure",
-            json={"config": "invalid"},
+        response = client.put(
+            "/api/v1/camera/exposure-policy",
+            json={"auto_enabled": True, "engine": "invalid"},
         )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(calls, [{"target_level": 230.0}])
-        self.assertEqual(response.json()["final_exposure_us"], 2400.0)
-        self.assertEqual(invalid.status_code, 400)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(calls, [])
 
-    def test_camera_auto_exposure_endpoint_reports_unavailable_and_rejection(self) -> None:
-        unavailable = self._client().post(
-            "/api/v1/camera/auto-exposure",
-            json={},
+    def test_exposure_policy_commands_report_controller_busy_as_conflict(self) -> None:
+        def busy(*_args, **_kwargs):
+            raise ExposurePolicyBusyError("Camera exposure policy is busy.")
+
+        client = self._client(
+            camera_exposure_policy_set_callback=busy,
+            camera_exposure_once_callback=busy,
         )
-        rejected = self._client(
-            camera_auto_exposure_callback=lambda _config: {
-                "accepted": False,
-                "status_code": 409,
-                "message": "Camera auto exposure is already running.",
-            }
-        ).post("/api/v1/camera/auto-exposure", json={})
 
-        self.assertEqual(unavailable.status_code, 501)
-        self.assertEqual(rejected.status_code, 409)
+        update = client.put(
+            "/api/v1/camera/exposure-policy",
+            json={"auto_enabled": False, "engine": "software"},
+        )
+        once = client.post("/api/v1/camera/exposure-once", json={})
 
-    def test_camera_auto_exposure_requires_camera_write_permission(self) -> None:
+        self.assertEqual(update.status_code, 409)
+        self.assertEqual(once.status_code, 409)
+
+    def test_exposure_policy_endpoints_preserve_camera_permissions(self) -> None:
         client = self._client(
             auth_callback=lambda _key, permission: {
                 "accepted": permission != API_PERMISSION_CAMERA_WRITE,
                 "status_code": 403,
                 "message": "camera write denied",
             },
-            camera_auto_exposure_callback=lambda _config: {
-                "accepted": True,
-            },
+            camera_exposure_policy_snapshot_callback=lambda: {"busy": False},
+            camera_exposure_policy_set_callback=lambda **_policy: {"busy": False},
+            camera_exposure_once_callback=lambda: {"busy": False},
         )
 
-        response = client.post("/api/v1/camera/auto-exposure", json={})
+        read = client.get("/api/v1/camera/exposure-policy")
+        update = client.put(
+            "/api/v1/camera/exposure-policy",
+            json={"auto_enabled": False, "engine": "software"},
+        )
+        once = client.post("/api/v1/camera/exposure-once", json={})
 
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(read.status_code, 200)
+        self.assertEqual(update.status_code, 403)
+        self.assertEqual(once.status_code, 403)
+
+    def test_old_auto_exposure_route_is_removed(self) -> None:
+        response = self._client().post("/api/v1/camera/auto-exposure", json={})
+
+        self.assertEqual(response.status_code, 404)
 
     def test_camera_endpoints_require_separate_camera_permissions(self) -> None:
         auth_calls = []

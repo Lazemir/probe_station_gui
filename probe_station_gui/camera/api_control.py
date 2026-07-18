@@ -27,6 +27,7 @@ _OPERATOR_CAMERA_NODE_SET = frozenset(OPERATOR_CAMERA_NODE_NAMES)
 SnapshotSubmitter = Callable[[str, list[str]], None]
 BatchSubmitter = Callable[[str, list[tuple[str, object]]], None]
 FrameCounter = Callable[[], int]
+ExposurePolicySnapshot = Callable[[], Mapping[str, object]]
 
 
 @dataclass
@@ -44,12 +45,14 @@ class CameraApiBroker(QObject):
         snapshot_submit: SnapshotSubmitter,
         batch_submit: BatchSubmitter,
         frame_counter: FrameCounter,
+        exposure_policy_snapshot: ExposurePolicySnapshot | None = None,
         timeout_s: float = 5.0,
     ) -> None:
         super().__init__()
         self._snapshot_submit = snapshot_submit
         self._batch_submit = batch_submit
         self._frame_counter = frame_counter
+        self._exposure_policy_snapshot = exposure_policy_snapshot
         self._timeout_s = max(0.001, float(timeout_s))
         self._lock = threading.RLock()
         self._pending: dict[str, _PendingCameraOperation] = {}
@@ -96,6 +99,9 @@ class CameraApiBroker(QObject):
         error = _camera_node_names_error([name for name, _value in ordered])
         if error:
             return _rejected(error, 400)
+        policy_error = self._policy_write_error(ordered)
+        if policy_error:
+            return policy_error
         result = self._submit_and_wait(
             lambda request_id: self._batch_submit(request_id, ordered)
         )
@@ -106,6 +112,40 @@ class CameraApiBroker(QObject):
                 if isinstance(node, Mapping)
             ]
         return result
+
+    def _policy_write_error(
+        self,
+        settings: Sequence[tuple[str, object]],
+    ) -> dict[str, Any] | None:
+        names = {name for name, _value in settings}
+        if "ExposureAuto" in names:
+            return _rejected(
+                "ExposureAuto is managed by the exposure policy.",
+                409,
+            )
+        if "ExposureTime" not in names:
+            return None
+
+        snapshot = self._exposure_policy_snapshot
+        if snapshot is None:
+            return None
+        try:
+            state = snapshot()
+        except Exception as exc:
+            return _rejected(f"Exposure policy is unavailable: {exc}", 503)
+        if not isinstance(state, Mapping):
+            return _rejected("Exposure policy state is invalid.", 503)
+        if bool(state.get("auto_enabled", False)):
+            return _rejected(
+                "ExposureTime cannot be changed while automatic exposure is enabled.",
+                409,
+            )
+        if bool(state.get("busy", False)) or bool(state.get("session_active", False)):
+            return _rejected(
+                "ExposureTime cannot be changed while camera exposure is busy.",
+                409,
+            )
+        return None
 
     @Slot(object)
     def complete(self, result: object) -> None:
@@ -220,6 +260,8 @@ def _api_node_payload(node: Mapping[str, object]) -> dict[str, Any]:
     payload = dict(node)
     entries = payload.pop("entries", payload.get("enum_entries", []))
     payload["enum_entries"] = list(entries) if isinstance(entries, (list, tuple)) else []
+    if payload.get("name") == "ExposureAuto":
+        payload["managed_by"] = "exposure_policy"
     return payload
 
 

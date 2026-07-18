@@ -150,10 +150,9 @@ class ProbeStationApiServer:
             [str, int | None, float], dict[str, Any]
         ]
         | None = None,
-        camera_auto_exposure_callback: Callable[
-            [dict[str, Any] | None], dict[str, Any]
-        ]
-        | None = None,
+        camera_exposure_policy_snapshot_callback: Callable[[], dict[str, Any]] | None = None,
+        camera_exposure_policy_set_callback: Callable[..., dict[str, Any]] | None = None,
+        camera_exposure_once_callback: Callable[[], dict[str, Any]] | None = None,
         host: str | None = None,
         port: int | None = None,
     ) -> None:
@@ -166,7 +165,11 @@ class ProbeStationApiServer:
         self._camera_settings_read_callback = camera_settings_read_callback
         self._camera_settings_write_callback = camera_settings_write_callback
         self._camera_frame_callback = camera_frame_callback
-        self._camera_auto_exposure_callback = camera_auto_exposure_callback
+        self._camera_exposure_policy_snapshot_callback = (
+            camera_exposure_policy_snapshot_callback
+        )
+        self._camera_exposure_policy_set_callback = camera_exposure_policy_set_callback
+        self._camera_exposure_once_callback = camera_exposure_once_callback
         self._server: object | None = None
         self._thread: threading.Thread | None = None
 
@@ -305,6 +308,29 @@ class ProbeStationApiServer:
         ) -> dict[str, Any]:
             authorize_request(permission, auth_headers)
             return dispatch_command_result(action, payload)
+
+        def exposure_policy_result(
+            callback: Callable[..., dict[str, Any]],
+            *args: Any,
+            **kwargs: Any,
+        ) -> dict[str, Any]:
+            from probe_station_gui.camera.exposure_policy import ExposurePolicyBusyError
+
+            try:
+                result = callback(*args, **kwargs)
+            except ExposurePolicyBusyError as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"message": str(exc)},
+                ) from exc
+            if not isinstance(result, dict):
+                raise HTTPException(
+                    status_code=500,
+                    detail={"message": "Exposure policy returned an invalid result."},
+                )
+            if "accepted" in result:
+                _raise_for_rejected(result)
+            return result
 
         def contact_payload(
             contact_number: int,
@@ -641,34 +667,73 @@ class ProbeStationApiServer:
                 },
             )
 
-        @app.post("/api/v1/camera/auto-exposure")
-        def camera_auto_exposure(
+        @app.get("/api/v1/camera/exposure-policy")
+        def camera_exposure_policy(
+            auth_headers: tuple[str | None, str | None] = Depends(api_auth_headers),
+        ) -> dict[str, Any]:
+            authorize_request(API_PERMISSION_CAMERA_READ, auth_headers)
+            callback = self._camera_exposure_policy_snapshot_callback
+            if callback is None:
+                raise HTTPException(
+                    status_code=501,
+                    detail={"message": "Camera exposure policy API is unavailable."},
+                )
+            return exposure_policy_result(callback)
+
+        @app.put("/api/v1/camera/exposure-policy")
+        def update_camera_exposure_policy(
             payload: dict[str, Any] = Body(...),
             auth_headers: tuple[str | None, str | None] = Depends(api_auth_headers),
         ) -> dict[str, Any]:
             authorize_request(API_PERMISSION_CAMERA_WRITE, auth_headers)
-            unknown = sorted(set(payload) - {"config"})
+            unknown = sorted(set(payload) - {"auto_enabled", "engine"})
             if unknown:
                 raise HTTPException(
                     status_code=400,
                     detail={"message": f"Unknown request setting: {unknown[0]}."},
                 )
-            raw_config = payload.get("config")
-            if raw_config is not None and not isinstance(raw_config, dict):
+            auto_enabled = payload.get("auto_enabled")
+            if not isinstance(auto_enabled, bool):
                 raise HTTPException(
                     status_code=400,
-                    detail={"message": "config must be an object."},
+                    detail={"message": "auto_enabled must be a boolean."},
                 )
-            callback = self._camera_auto_exposure_callback
+            engine = payload.get("engine")
+            if not isinstance(engine, str) or engine not in {"software", "camera"}:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"message": "engine must be software or camera."},
+                )
+            callback = self._camera_exposure_policy_set_callback
             if callback is None:
                 raise HTTPException(
                     status_code=501,
-                    detail={"message": "Camera auto exposure API is unavailable."},
+                    detail={"message": "Camera exposure policy API is unavailable."},
                 )
-            config = None if raw_config is None else dict(raw_config)
-            result = callback(config)
-            _raise_for_rejected(result)
-            return result
+            return exposure_policy_result(
+                callback,
+                auto_enabled=auto_enabled,
+                engine=engine,
+            )
+
+        @app.post("/api/v1/camera/exposure-once")
+        def camera_exposure_once(
+            payload: dict[str, Any] | None = Body(default=None),
+            auth_headers: tuple[str | None, str | None] = Depends(api_auth_headers),
+        ) -> dict[str, Any]:
+            authorize_request(API_PERMISSION_CAMERA_WRITE, auth_headers)
+            if payload not in (None, {}):
+                raise HTTPException(
+                    status_code=400,
+                    detail={"message": "exposure-once does not accept settings."},
+                )
+            callback = self._camera_exposure_once_callback
+            if callback is None:
+                raise HTTPException(
+                    status_code=501,
+                    detail={"message": "Camera exposure policy API is unavailable."},
+                )
+            return exposure_policy_result(callback)
 
         add_body_command_route(
             "/api/v1/stage/focus/local",

@@ -123,19 +123,26 @@ class ProbeStationCameraClient:
             height=int(normalized_headers.get("x-camera-frame-height", "0")),
         )
 
-    def auto_exposure(
+    def exposure_policy(self) -> dict[str, Any]:
+        return self._client._request("GET", "/api/v1/camera/exposure-policy")
+
+    def set_exposure_policy(
         self,
-        config: Mapping[str, object] | None = None,
         *,
-        timeout_s: float = 30.0,
+        auto_enabled: bool,
+        engine: str,
     ) -> dict[str, Any]:
-        payload: dict[str, object] = {}
-        if config is not None:
-            payload["config"] = dict(config)
+        return self._client._request(
+            "PUT",
+            "/api/v1/camera/exposure-policy",
+            {"auto_enabled": bool(auto_enabled), "engine": str(engine)},
+        )
+
+    def exposure_once(self, *, timeout_s: float = 30.0) -> dict[str, Any]:
         return self._client._request(
             "POST",
-            "/api/v1/camera/auto-exposure",
-            payload,
+            "/api/v1/camera/exposure-once",
+            {},
             timeout_s=float(timeout_s),
         )
 
