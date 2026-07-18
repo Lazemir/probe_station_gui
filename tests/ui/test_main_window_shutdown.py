@@ -80,6 +80,15 @@ def test_shutdown_fails_closed_when_outer_session_cleanup_cannot_start() -> None
         shutdown_ui._stop_optical_calibration(owner)
 
 
+def test_shutdown_fails_closed_while_api_stage_worker_is_running() -> None:
+    owner = SimpleNamespace(
+        _wait_for_api_stage_command_workers=lambda *, timeout_s: False,
+    )
+
+    with pytest.raises(RuntimeError, match="API stage command is still stopping"):
+        shutdown_ui._stop_api_stage_command_workers(owner)
+
+
 def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
     events: list[object] = []
     monkeypatch.setattr(
@@ -127,6 +136,9 @@ def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
         _microscope_scan_thread=scan_thread,
         _microscope_scan_stop_requested=SimpleNamespace(
             set=lambda: events.append(("scan_stop_requested",))
+        ),
+        _wait_for_api_stage_command_workers=lambda *, timeout_s: (
+            events.append(("api_workers", timeout_s)) or True
         ),
         _exposure_policy_adapter=SimpleNamespace(
             shutdown=lambda **kwargs: events.append(
@@ -202,6 +214,7 @@ def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
         ("route_thread", "join", 2.0),
         ("scan_stop_requested",),
         ("scan_thread", "join", 2.0),
+        ("api_workers", 2.0),
         ("stop_jog", "application shutdown", True),
         ("force_jog_stop", {"timeout": 0.8}),
         ("exposure_adapter_shutdown", {"timeout_s": 2.0}),

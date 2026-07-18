@@ -70,6 +70,7 @@ from probe_station_gui.stage.types import (
     AutofocusResult as AutofocusResult,
     MoveVector,
     StageTaskToken,
+    _ObjectiveCalibrationCandidate,
     _AutofocusContext as _AutofocusContext,
     _FocusSweepResult as _FocusSweepResult,
     _QueuedSerialWrite,
@@ -292,6 +293,10 @@ class StageController(
         self._active_thread: Optional[threading.Thread] = None
         self._stage_task_generation = 0
         self._latest_stage_task_token: StageTaskToken | None = None
+        self._objective_calibration_candidates: dict[
+            int,
+            _ObjectiveCalibrationCandidate,
+        ] = {}
         self._status_refresh_thread: Optional[threading.Thread] = None
         self._cancel_event = threading.Event()
         self._axis_limits: dict[str, tuple[float, float]] = {}
@@ -822,6 +827,7 @@ class StageController(
 
         self._cancel_event.set()
         with self._task_lock:
+            self._new_stage_task_token_locked("cancel_active_task")
             had_needles_action = (
                 self._active_needles_action is not None
                 or bool(self._queued_needles_actions)
@@ -840,6 +846,8 @@ class StageController(
         """Cancel a jog-backed motion without resetting controller state."""
 
         self._cancel_event.set()
+        with self._task_lock:
+            self._new_stage_task_token_locked("cancel_active_motion")
         self.queue_jog_stop()
         self.status_message.emit(reason)
 
@@ -853,6 +861,7 @@ class StageController(
 
         self._cancel_event.set()
         with self._task_lock:
+            self._new_stage_task_token_locked(f"reset_controller:{source}")
             self._queued_needles_actions.clear()
             self._oscillation_needles_actions.clear()
             self._active_needles_action = None
@@ -867,6 +876,10 @@ class StageController(
             return bool(self._active_thread and self._active_thread.is_alive())
 
     def _new_stage_task_token_locked(self, source: str) -> StageTaskToken:
+        for candidate in self._objective_calibration_candidates.values():
+            if not candidate.decision.is_set():
+                candidate.accepted = False
+                candidate.decision.set()
         self._stage_task_generation += 1
         token = StageTaskToken(
             generation=self._stage_task_generation,
@@ -874,6 +887,129 @@ class StageController(
         )
         self._latest_stage_task_token = token
         return token
+
+    @staticmethod
+    def _calibration_matrix_candidate(value: object) -> object | None:
+        try:
+            matrix = np.asarray(value, dtype=float)
+        except (TypeError, ValueError):
+            return None
+        if matrix.shape != (2, 2) or not np.isfinite(matrix).all():
+            return None
+        if abs(float(np.linalg.det(matrix))) < 1e-18:
+            return None
+        return matrix.copy()
+
+    def offer_objective_calibration_candidate(
+        self,
+        token: object,
+        objective_name: str,
+        pixels_to_mm: object,
+    ) -> bool:
+        matrix = self._calibration_matrix_candidate(pixels_to_mm)
+        if matrix is None:
+            return False
+        with self._task_lock:
+            if (
+                not isinstance(token, StageTaskToken)
+                or token is not self._latest_stage_task_token
+                or self._cancel_event.is_set()
+            ):
+                return False
+            existing = self._objective_calibration_candidates.get(id(token))
+            if existing is not None and not existing.decision.is_set():
+                return False
+            self._objective_calibration_candidates[id(token)] = (
+                _ObjectiveCalibrationCandidate(
+                    token=token,
+                    objective_name=str(objective_name),
+                    pixels_to_mm=matrix,
+                )
+            )
+        return True
+
+    def accept_objective_calibration_candidate(
+        self,
+        token: object,
+        pixels_to_mm: object,
+    ) -> bool:
+        matrix = self._calibration_matrix_candidate(pixels_to_mm)
+        if matrix is None:
+            return False
+        with self._task_lock:
+            candidate = self._objective_calibration_candidates.get(id(token))
+            if (
+                isinstance(token, StageTaskToken)
+                and candidate is not None
+                and candidate.token is token
+                and token is self._latest_stage_task_token
+                and not self._cancel_event.is_set()
+                and not candidate.decision.is_set()
+                and not candidate.accepted
+            ):
+                candidate.pixels_to_mm = matrix
+                candidate.accepted = True
+                return True
+        return False
+
+    def publish_objective_calibration_candidate(self, token: object) -> bool:
+        published = False
+        with self._task_lock:
+            candidate = self._objective_calibration_candidates.get(id(token))
+            if (
+                isinstance(token, StageTaskToken)
+                and candidate is not None
+                and candidate.token is token
+                and token is self._latest_stage_task_token
+                and not self._cancel_event.is_set()
+                and candidate.accepted
+                and not candidate.decision.is_set()
+            ):
+                matrix = np.asarray(candidate.pixels_to_mm, dtype=float).copy()
+                self._pixels_to_mm = matrix
+                self._objective_matrices[candidate.objective_name] = matrix
+                self._objective_calibration_verified[candidate.objective_name] = True
+                candidate.published = True
+                candidate.decision.set()
+                published = True
+        if published:
+            mm_per_pixel_x, mm_per_pixel_y = self._calibration_magnitudes()
+            self.calibration_changed.emit(mm_per_pixel_x, mm_per_pixel_y)
+        return published
+
+    def reject_objective_calibration_candidate(self, token: object) -> bool:
+        with self._task_lock:
+            candidate = self._objective_calibration_candidates.get(id(token))
+            if candidate is None or candidate.token is not token:
+                return False
+            if not candidate.decision.is_set():
+                candidate.accepted = False
+                candidate.decision.set()
+            return True
+
+    def wait_for_objective_calibration_candidate(
+        self,
+        token: object,
+        *,
+        timeout_s: float,
+    ) -> bool:
+        with self._task_lock:
+            candidate = self._objective_calibration_candidates.get(id(token))
+            if candidate is None or candidate.token is not token:
+                return False
+            decision = candidate.decision
+        decided = decision.wait(timeout_s)
+        with self._task_lock:
+            candidate = self._objective_calibration_candidates.pop(id(token), None)
+            return bool(
+                decided
+                and candidate is not None
+                and candidate.token is token
+                and candidate.accepted
+                and candidate.published
+                and token is self._latest_stage_task_token
+                and not self._cancel_event.is_set()
+            )
 
     def _calibration_signal_token(self, source: str) -> StageTaskToken:
         thread_token = getattr(
@@ -893,6 +1029,7 @@ class StageController(
             return bool(
                 isinstance(token, StageTaskToken)
                 and token is self._latest_stage_task_token
+                and not self._cancel_event.is_set()
             )
 
     def _start_background_task(

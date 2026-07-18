@@ -166,6 +166,7 @@ class StageControllerClickMoveMixin:
                 raise StageControllerError(
                     "Stage is busy. Wait for the current operation to finish."
                 )
+            self._cancel_event.clear()
             self._pixels_to_mm = None
             self._objective_matrices.pop(self._active_objective_name, None)
             self._objective_calibration_verified[self._active_objective_name] = False
@@ -490,21 +491,46 @@ class StageControllerClickMoveMixin:
             if abs(determinant) < 1e-9:
                 raise StageControllerError("Calibration matrix is singular.")
             pixels_to_mm = np.linalg.inv(calibration_matrix)
-            self._pixels_to_mm = pixels_to_mm
-            mm_per_pixel_x, mm_per_pixel_y = self._calibration_magnitudes()
-            self.calibration_changed.emit(mm_per_pixel_x, mm_per_pixel_y)
+            task_token = self._calibration_signal_token("click_calibration")
+            self._check_cancelled()
+            if not self.offer_objective_calibration_candidate(
+                task_token,
+                self._active_objective_name,
+                pixels_to_mm,
+            ):
+                raise StageControllerError(
+                    "Click calibration result is no longer owned by this task."
+                )
+            self._check_cancelled()
+            if not self.is_calibration_task_token_current(task_token):
+                self.reject_objective_calibration_candidate(task_token)
+                raise StageControllerError(
+                    "Click calibration result is no longer owned by this task."
+                )
             self.objective_calibration_updated.emit(
                 self._active_objective_name,
                 pixels_to_mm.tolist(),
-                self._calibration_signal_token("click_calibration"),
+                task_token,
             )
-            self._objective_matrices[self._active_objective_name] = pixels_to_mm
-            self._objective_calibration_verified[self._active_objective_name] = True
+            if not self.wait_for_objective_calibration_candidate(
+                task_token,
+                timeout_s=10.0,
+            ):
+                raise StageControllerError(
+                    "Click calibration result was cancelled or not accepted."
+                )
+            self._check_cancelled()
+            if self._pixels_to_mm is None:
+                raise StageControllerError("Calibration result was not applied.")
+            mm_per_pixel_x, mm_per_pixel_y = self._calibration_magnitudes()
             target_handled, before_counter = self._move_from_calibration_to_target(
                 origin,
                 target_pixels,
             )
         except Exception:
+            task_token = locals().get("task_token")
+            if task_token is not None:
+                self.reject_objective_calibration_candidate(task_token)
             self._return_to_origin(origin)
             raise
 
@@ -578,10 +604,18 @@ class StageControllerClickMoveMixin:
                     f"Selected objective appears to be {suggestion}, not "
                     f"{self._active_objective_name}. Objective switched; click again."
                 )
+                task_token = self._calibration_signal_token(
+                    "click_calibration_check"
+                )
+                self._check_cancelled()
+                if not self.is_calibration_task_token_current(task_token):
+                    raise StageControllerError(
+                        "Calibration check result is no longer owned by this task."
+                    )
                 self.objective_mismatch_detected.emit(
                     suggestion,
                     message,
-                    self._calibration_signal_token("click_calibration_check"),
+                    task_token,
                 )
                 raise StageControllerError(message)
             raise StageControllerError(

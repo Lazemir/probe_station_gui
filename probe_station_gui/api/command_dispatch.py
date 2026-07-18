@@ -6,11 +6,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from probe_station_gui.api.request_bridge import DeferredApiResponse
 from probe_station_gui.route.api_window_guard import probe_route_api_requires_window
 
 
 ApiResponse = dict[str, Any]
+ApiBridgeResponse = ApiResponse | DeferredApiResponse
 PayloadHandler = Callable[[dict[str, Any]], ApiResponse]
+BridgePayloadHandler = Callable[[dict[str, Any]], ApiBridgeResponse]
 NoPayloadHandler = Callable[[], ApiResponse]
 RouteControlGuard = Callable[[str, dict[str, Any]], ApiResponse | None]
 RouteWindowGuardSubmitter = Callable[[str, dict[str, Any]], ApiResponse]
@@ -44,8 +47,22 @@ API_ROUTE_CONTROL_ACTIONS = frozenset(
     }
 )
 
-GUI_SERIALIZED_API_ACTIONS = API_ROUTE_CONTROL_ACTIONS | frozenset(
+GUI_STAGE_WORKER_ACTIONS = frozenset(
     {
+        "move_to_contact",
+        "contact_needles",
+        "check_contact",
+        "stage_local_focus",
+        "route_contact_focus",
+        "contact_seek",
+        "start_route_session",
+        "raw_voltage_sweep",
+    }
+)
+
+GUI_SERIALIZED_API_ACTIONS = API_ROUTE_CONTROL_ACTIONS | GUI_STAGE_WORKER_ACTIONS | frozenset(
+    {
+        "route_session_action",
         "lens_distortion_calibration",
         "click_to_move_calibration",
         "microscope_area_scan",
@@ -85,7 +102,7 @@ class ApiCommandDispatchHandlers:
 class ApiBridgeRequestHandlers:
     move_to_coordinates: MoveToCoordinatesHandler
     stage_status: NoPayloadHandler
-    submit_command: PayloadHandler
+    submit_command: BridgePayloadHandler
     route_control_guard: RouteControlGuard
 
 
@@ -185,7 +202,7 @@ def submit_api_command_request_from_api_thread(
 def handle_api_request(
     request: dict[str, Any],
     handlers: ApiBridgeRequestHandlers,
-) -> ApiResponse:
+) -> ApiBridgeResponse:
     action = str(request.get("action", "")).strip().lower()
     if action == "move_to_coordinates":
         return handlers.move_to_coordinates(
@@ -222,6 +239,7 @@ def handle_api_request(
 __all__ = [
     "API_ROUTE_CONTROL_ACTIONS",
     "GUI_SERIALIZED_API_ACTIONS",
+    "GUI_STAGE_WORKER_ACTIONS",
     "ApiBridgeRequestHandlers",
     "ApiCommandDispatchHandlers",
     "api_command_action_payload",

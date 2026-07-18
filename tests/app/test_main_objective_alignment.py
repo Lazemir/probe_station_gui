@@ -11,6 +11,7 @@ from probe_station_gui.settings.objective_config import (
     ObjectiveCalibrationSettings,
     ObjectivesSettings,
 )
+from probe_station_gui.stage.types import StageTaskToken
 from probe_station_gui.views.main_window_auxiliary import open_settings_dialog
 
 
@@ -332,7 +333,7 @@ def test_delete_objective_rechecks_busy_after_confirmation_returns(monkeypatch) 
 
 def test_objective_mismatch_cannot_bypass_alive_scan_guard() -> None:
     window, stage, manager, statuses = _window()
-    task_token = object()
+    task_token = StageTaskToken(1, "_run_move")
     stage.is_calibration_task_token_current = lambda token: token is task_token
     restored: list[str] = []
     window._microscope_scan_thread = types.SimpleNamespace(is_alive=lambda: True)
@@ -357,8 +358,8 @@ def test_objective_mismatch_cannot_bypass_alive_scan_guard() -> None:
 
 def test_stale_objective_mismatch_a_cannot_switch_objective_during_task_b() -> None:
     window, stage, manager, statuses = _window()
-    token_a = object()
-    token_b = object()
+    token_a = StageTaskToken(1, "_run_move")
+    token_b = StageTaskToken(2, "_run_move")
     stage.busy = True
     stage.is_calibration_task_token_current = lambda token: token is token_b
 

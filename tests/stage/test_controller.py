@@ -1423,8 +1423,18 @@ class StageControllerObjectiveTest(unittest.TestCase):
         controller.calibration_changed = types.SimpleNamespace(
             emit=lambda *args, **kwargs: None
         )
+        def accept_candidate(_name, matrix, token) -> None:
+            self.assertIsNone(controller._pixels_to_mm)
+            self.assertTrue(
+                controller.accept_objective_calibration_candidate(token, matrix)
+            )
+            self.assertIsNone(controller._pixels_to_mm)
+            self.assertTrue(
+                controller.publish_objective_calibration_candidate(token)
+            )
+
         controller.objective_calibration_updated = types.SimpleNamespace(
-            emit=lambda *args, **kwargs: None
+            emit=accept_candidate
         )
         controller.status_message = types.SimpleNamespace(
             emit=lambda *args, **kwargs: None

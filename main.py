@@ -135,7 +135,7 @@ from probe_station_gui.design.selection_model import (
 )
 from probe_station_gui.design.session import AlignmentPreparation, DesignSession
 from probe_station_gui.shared.diagnostics import configure_crash_diagnostics
-from probe_station_gui.api.request_bridge import ApiRequestBridge
+from probe_station_gui.api.request_bridge import ApiRequestBridge, DeferredApiResponse
 from probe_station_gui.api.server import ProbeStationApiServer
 from probe_station_gui.api.keys import API_KEY_FILENAME, ApiKeyStore
 from probe_station_gui.camera.api_control import (
@@ -162,6 +162,7 @@ from probe_station_gui.camera.flat_field_calibration import FlatFieldCalibration
 from probe_station_gui.api.command_dispatch import (
     ApiBridgeRequestHandlers,
     ApiCommandDispatchHandlers,
+    GUI_STAGE_WORKER_ACTIONS,
     api_command_action_payload as command_dispatch_action_payload,
     dispatch_api_command_request as command_dispatch_request,
     handle_api_request as command_dispatch_handle_api_request,
@@ -204,6 +205,7 @@ from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
 from probe_station_gui.stage import position_update as stage_position_update
 from probe_station_gui.shared.wheel_guard import GuardedComboBox as QComboBox
 from probe_station_gui.stage.controller import StageControllerError
+from probe_station_gui.stage.types import StageTaskToken
 from probe_station_gui.views import (
     main_window_stage_position_panel as stage_position_panel_adapter,
 )
@@ -723,6 +725,8 @@ class Main(QMainWindow):
         )
         self._api_bridge: ApiRequestBridge | None = None
         self._api_server: ProbeStationApiServer | None = None
+        self._api_stage_command_worker_lock = threading.Lock()
+        self._api_stage_command_workers: set[threading.Thread] = set()
         self._api_settings_signature: tuple[bool, str, int] | None = None
         self._telegram_bot_service: TelegramBotCommandService | None = None
         self._telegram_bot_signature: tuple[str, str] | None = None
@@ -1562,11 +1566,106 @@ class Main(QMainWindow):
             }
         return self._api_bridge.submit({"action": "status"})
 
-    def _submit_api_command_request(self, command_request: dict[str, Any]) -> dict[str, Any]:
+    def _submit_api_command_request(
+        self,
+        command_request: dict[str, Any],
+    ) -> dict[str, Any] | DeferredApiResponse:
+        action, payload = self._api_command_action_payload(command_request)
+        if action in GUI_STAGE_WORKER_ACTIONS:
+            route_guard = self._probe_route_api_window_guard(action, payload)
+            if route_guard is not None:
+                return route_guard
+            return self._start_deferred_api_stage_command(command_request, action)
         return self._dispatch_api_command_request(
             command_request,
             apply_route_control_guard=True,
         )
+
+    def _api_stage_command_worker_state(
+        self,
+    ) -> tuple[threading.Lock, set[threading.Thread]]:
+        lock = getattr(self, "_api_stage_command_worker_lock", None)
+        workers = getattr(self, "_api_stage_command_workers", None)
+        if lock is None or workers is None:
+            lock = threading.Lock()
+            workers = set()
+            self._api_stage_command_worker_lock = lock
+            self._api_stage_command_workers = workers
+        return lock, workers
+
+    def _api_stage_command_worker_active(self) -> bool:
+        lock, workers = self._api_stage_command_worker_state()
+        with lock:
+            return bool(workers)
+
+    def _wait_for_api_stage_command_workers(self, *, timeout_s: float) -> bool:
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        lock, workers = self._api_stage_command_worker_state()
+        while True:
+            with lock:
+                finished = {
+                    thread for thread in workers if not thread.is_alive()
+                }
+                workers.difference_update(finished)
+                active = tuple(workers)
+            if not active:
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                return False
+            for thread in active:
+                thread.join(timeout=max(0.0, deadline - time.monotonic()))
+
+    def _start_deferred_api_stage_command(
+        self,
+        command_request: dict[str, Any],
+        action: str,
+    ) -> dict[str, Any] | DeferredApiResponse:
+        completion = DeferredApiResponse()
+        request = dict(command_request)
+        thread = threading.Thread(
+            target=self._run_deferred_api_stage_command,
+            args=(request, completion),
+            name=f"ApiStageCommand-{action}",
+            daemon=True,
+        )
+        lock, workers = self._api_stage_command_worker_state()
+        with lock:
+            workers.add(thread)
+        try:
+            thread.start()
+        except Exception as exc:
+            with lock:
+                workers.discard(thread)
+            return {
+                "accepted": False,
+                "status_code": 500,
+                "message": f"API stage command could not start: {exc}",
+            }
+        return completion
+
+    def _run_deferred_api_stage_command(
+        self,
+        command_request: dict[str, Any],
+        completion: DeferredApiResponse,
+    ) -> None:
+        try:
+            response = self._dispatch_api_command_request(
+                command_request,
+                apply_route_control_guard=False,
+            )
+        except Exception as exc:
+            logger.exception("API stage command failed.")
+            response = {
+                "accepted": False,
+                "status_code": 500,
+                "message": str(exc),
+            }
+        finally:
+            lock, workers = self._api_stage_command_worker_state()
+            with lock:
+                workers.discard(threading.current_thread())
+        completion.complete(response)
 
     def _submit_api_command_request_from_api_thread(
         self,
@@ -1707,7 +1806,10 @@ class Main(QMainWindow):
                 return False
         return True
 
-    def _handle_api_request(self, request: dict[str, Any]) -> dict[str, Any]:
+    def _handle_api_request(
+        self,
+        request: dict[str, Any],
+    ) -> dict[str, Any] | DeferredApiResponse:
         return command_dispatch_handle_api_request(
             request,
             ApiBridgeRequestHandlers(
@@ -4559,6 +4661,8 @@ class Main(QMainWindow):
         allow_stage_task: bool = False,
         optical_context: _OpticalCalibrationRunContext | None = None,
     ) -> bool:
+        if self._api_stage_command_worker_active():
+            return True
         if self._microscope_scan_running():
             return True
         optical_owner = self._optical_mutation_context_is_current(optical_context)
@@ -4663,7 +4767,13 @@ class Main(QMainWindow):
         if plan.status:
             self._show_status(plan.status, plan.status_timeout_ms)
 
-    def _persist_objective_plan(self, plan, *, show_status: bool = True) -> bool:
+    def _persist_objective_plan(
+        self,
+        plan,
+        *,
+        show_status: bool = True,
+        apply_objective_runtime: bool = True,
+    ) -> bool:
         if plan.settings is None:
             if show_status:
                 self._show_plan_status(plan)
@@ -4672,7 +4782,7 @@ class Main(QMainWindow):
             plan.settings,
             preserve_exposure_policy=True,
         )
-        if getattr(plan, "apply_settings", False):
+        if getattr(plan, "apply_settings", False) and apply_objective_runtime:
             self._apply_objective_settings()
         if getattr(plan, "refresh_design_position", False):
             self._refresh_design_position()
@@ -6370,7 +6480,20 @@ class Main(QMainWindow):
         pixels_to_mm: object,
         task_token: object,
     ) -> None:
-        if not self._calibration_callback_token_is_current(task_token):
+        reset_callback = (
+            isinstance(task_token, StageTaskToken)
+            and task_token.source == "click_calibration_reset"
+        )
+        expected_sources = (
+            {"click_calibration_reset"}
+            if reset_callback
+            else {"_run_move", "click_calibration"}
+        )
+        if not self._calibration_callback_token_is_current(
+            task_token,
+            expected_sources=expected_sources,
+        ):
+            self._reject_objective_calibration_candidate(task_token)
             message = (
                 "Click-to-move calibration result ignored because its stage task "
                 "is no longer current."
@@ -6383,19 +6506,12 @@ class Main(QMainWindow):
             objective_name,
             allow_stage_task=True,
         ):
+            self._reject_objective_calibration_candidate(task_token)
             message = (
                 "Click-to-move calibration result ignored because a scan or "
                 "calibration is active."
             )
             logger.warning(message)
-            try:
-                self._apply_objective_settings()
-            except Exception as exc:
-                logger.exception(
-                    "Unable to restore persisted objective calibration after "
-                    "ignoring a late result"
-                )
-                message = f"{message} Restore failed: {exc}"
             self._show_status(message, 7000)
             return
         pixels_to_mm = self._objective_pixels_to_mm_for_calibration_update(
@@ -6406,10 +6522,113 @@ class Main(QMainWindow):
             self.settings_manager.settings, objective_name, pixels_to_mm
         )
         if plan.settings is None:
+            self._reject_objective_calibration_candidate(task_token)
             return
-        self._persist_objective_plan(plan)
+        if reset_callback:
+            self._persist_objective_plan(plan)
+            return
 
-    def _calibration_callback_token_is_current(self, task_token: object) -> bool:
+        accept = getattr(
+            self.stage_controller,
+            "accept_objective_calibration_candidate",
+            None,
+        )
+        accepted = False
+        if callable(accept):
+            try:
+                accepted = bool(accept(task_token, pixels_to_mm))
+            except Exception:
+                logger.exception("Unable to accept click calibration candidate")
+        if not accepted:
+            self._reject_objective_calibration_candidate(task_token)
+            self._show_status(
+                "Click-to-move calibration was cancelled before it could be applied.",
+                7000,
+            )
+            return
+
+        previous_settings = self.settings_manager.settings.clone()
+        try:
+            persisted = self._persist_objective_plan(
+                plan,
+                apply_objective_runtime=False,
+            )
+        except Exception as exc:
+            logger.exception("Unable to persist accepted click calibration")
+            self._reject_objective_calibration_candidate(task_token)
+            message = (
+                "Click-to-move calibration could not be saved: "
+                f"{exc}"
+            )
+            try:
+                self.settings_manager.replace_and_save(
+                    previous_settings,
+                    preserve_exposure_policy=True,
+                )
+            except Exception as restore_exc:
+                logger.exception(
+                    "Unable to restore settings after click calibration save failure"
+                )
+                message = f"{message} Settings restore failed: {restore_exc}"
+            self._show_status(message, 7000)
+            return
+        if not persisted:
+            self._reject_objective_calibration_candidate(task_token)
+            return
+
+        publish = getattr(
+            self.stage_controller,
+            "publish_objective_calibration_candidate",
+            None,
+        )
+        published = False
+        if callable(publish):
+            try:
+                published = bool(publish(task_token))
+            except Exception:
+                logger.exception("Unable to publish click calibration candidate")
+        if published:
+            return
+
+        self._reject_objective_calibration_candidate(task_token)
+        try:
+            self.settings_manager.replace_and_save(
+                previous_settings,
+                preserve_exposure_policy=True,
+            )
+        except Exception as exc:
+            logger.exception("Unable to roll back rejected click calibration settings")
+            message = (
+                "Click-to-move calibration was cancelled before it could be applied. "
+                f"Settings restore failed: {exc}"
+            )
+        else:
+            message = "Click-to-move calibration was cancelled before it could be applied."
+        self._show_status(message, 7000)
+
+    def _reject_objective_calibration_candidate(self, task_token: object) -> None:
+        reject = getattr(
+            getattr(self, "stage_controller", None),
+            "reject_objective_calibration_candidate",
+            None,
+        )
+        if not callable(reject):
+            return
+        try:
+            reject(task_token)
+        except Exception:
+            logger.exception("Unable to reject click calibration candidate")
+
+    def _calibration_callback_token_is_current(
+        self,
+        task_token: object,
+        *,
+        expected_sources: set[str] | frozenset[str] | None = None,
+    ) -> bool:
+        if not isinstance(task_token, StageTaskToken):
+            return False
+        if expected_sources is not None and task_token.source not in expected_sources:
+            return False
         stage_controller = getattr(self, "stage_controller", None)
         validator = getattr(
             stage_controller,
@@ -6450,7 +6669,10 @@ class Main(QMainWindow):
         message: str,
         task_token: object,
     ) -> None:
-        if not self._calibration_callback_token_is_current(task_token):
+        if not self._calibration_callback_token_is_current(
+            task_token,
+            expected_sources={"_run_move", "click_calibration_check"},
+        ):
             stale_message = (
                 "Objective mismatch ignored because its calibration task is no "
                 "longer current."

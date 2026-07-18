@@ -65,6 +65,7 @@ def close_event(owner: MainWindowShutdownOwner, event: Any) -> None:
     _stop_route_worker(owner)
     _stop_microscope_scan(owner)
     try:
+        _stop_api_stage_command_workers(owner)
         _stop_optical_calibration(owner)
         _close_serial_and_panels(owner)
     except Exception as exc:
@@ -125,6 +126,12 @@ def _stop_microscope_scan(owner: MainWindowShutdownOwner) -> None:
         and owner._microscope_scan_thread.is_alive()
     ):
         owner._microscope_scan_thread.join(timeout=2.0)
+
+
+def _stop_api_stage_command_workers(owner: MainWindowShutdownOwner) -> None:
+    wait = getattr(owner, "_wait_for_api_stage_command_workers", None)
+    if callable(wait) and not wait(timeout_s=2.0):
+        raise RuntimeError("API stage command is still stopping.")
 
 
 def _stop_optical_calibration(owner: MainWindowShutdownOwner) -> None:

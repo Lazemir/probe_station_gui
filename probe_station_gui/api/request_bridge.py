@@ -11,6 +11,54 @@ from PySide6.QtCore import QObject, Qt, Signal
 
 logger = logging.getLogger(__name__)
 
+_QUEUED = "queued"
+_HANDLING = "handling"
+_COMPLETED = "completed"
+_CANCELLED = "cancelled"
+
+
+class DeferredApiResponse:
+    """A worker-owned API result whose completion must wake the bridge submitter."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._event = threading.Event()
+        self._result: dict[str, Any] | None = None
+        self._callbacks: list[Callable[[dict[str, Any]], None]] = []
+
+    def complete(self, result: dict[str, Any]) -> bool:
+        callbacks: tuple[Callable[[dict[str, Any]], None], ...]
+        response = dict(result)
+        with self._lock:
+            if self._result is not None:
+                return False
+            self._result = response
+            callbacks = tuple(self._callbacks)
+            self._callbacks.clear()
+            self._event.set()
+        for callback in callbacks:
+            callback(dict(response))
+        return True
+
+    def add_done_callback(
+        self,
+        callback: Callable[[dict[str, Any]], None],
+    ) -> None:
+        result: dict[str, Any] | None = None
+        with self._lock:
+            if self._result is None:
+                self._callbacks.append(callback)
+            else:
+                result = dict(self._result)
+        if result is not None:
+            callback(result)
+
+    def wait(self, *, timeout_s: float | None = None) -> dict[str, Any] | None:
+        if not self._event.wait(timeout_s):
+            return None
+        with self._lock:
+            return None if self._result is None else dict(self._result)
+
 
 class ApiRequestBridge(QObject):
     """Route API thread requests onto the Qt GUI thread."""
@@ -19,7 +67,10 @@ class ApiRequestBridge(QObject):
 
     def __init__(
         self,
-        handler: Callable[[dict[str, Any]], dict[str, Any]],
+        handler: Callable[
+            [dict[str, Any]],
+            dict[str, Any] | DeferredApiResponse,
+        ],
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -43,7 +94,7 @@ class ApiRequestBridge(QObject):
             "request": dict(request),
             "result": None,
             "event": event,
-            "state": "queued",
+            "state": _QUEUED,
         }
         envelope_id = id(envelope)
         with self._pending_lock:
@@ -57,13 +108,19 @@ class ApiRequestBridge(QObject):
                 "status_code": 503,
                 "message": "GUI did not process the API request in time.",
             }
+            wait_for_completion = False
             with self._pending_lock:
-                pending = self._pending.pop(envelope_id, None)
-                if pending is envelope:
-                    envelope["state"] = "cancelled"
+                pending = self._pending.get(envelope_id)
+                state = envelope.get("state")
+                if pending is envelope and state == _QUEUED:
+                    self._pending.pop(envelope_id, None)
+                    envelope["state"] = _CANCELLED
                     envelope["result"] = timeout_response
                     event.set()
-            return timeout_response
+                elif pending is envelope and state == _HANDLING:
+                    wait_for_completion = True
+            if wait_for_completion:
+                event.wait()
         result = envelope.get("result")
         if isinstance(result, dict):
             return result
@@ -82,7 +139,7 @@ class ApiRequestBridge(QObject):
             self._pending.clear()
             response = self._shutdown_response()
             for envelope in pending:
-                envelope["state"] = "cancelled"
+                envelope["state"] = _CANCELLED
                 envelope["result"] = dict(response)
                 event = envelope.get("event")
                 if isinstance(event, threading.Event):
@@ -102,11 +159,14 @@ class ApiRequestBridge(QObject):
         event = envelope.get("event")
         envelope_id = id(envelope)
         with self._pending_lock:
-            if self._pending.get(envelope_id) is not envelope:
+            if (
+                self._pending.get(envelope_id) is not envelope
+                or envelope.get("state") != _QUEUED
+            ):
                 if isinstance(event, threading.Event):
                     event.set()
                 return
-            envelope["state"] = "handling"
+            envelope["state"] = _HANDLING
         result: dict[str, Any] = {
             "accepted": False,
             "status_code": 500,
@@ -124,11 +184,32 @@ class ApiRequestBridge(QObject):
                 "status_code": 500,
                 "message": str(exc),
             }
-        finally:
-            with self._pending_lock:
-                pending = self._pending.pop(envelope_id, None)
-                if pending is envelope and envelope.get("state") != "cancelled":
-                    envelope["result"] = result
-                    envelope["state"] = "completed"
-            if isinstance(event, threading.Event):
-                event.set()
+        if isinstance(result, DeferredApiResponse):
+            result.add_done_callback(
+                lambda response: self._complete_request(envelope, response)
+            )
+            return
+        self._complete_request(envelope, result)
+
+    def _complete_request(
+        self,
+        envelope: dict[str, Any],
+        result: dict[str, Any],
+    ) -> None:
+        event = envelope.get("event")
+        envelope_id = id(envelope)
+        completed = False
+        with self._pending_lock:
+            if (
+                self._pending.get(envelope_id) is envelope
+                and envelope.get("state") == _HANDLING
+            ):
+                self._pending.pop(envelope_id, None)
+                envelope["result"] = dict(result)
+                envelope["state"] = _COMPLETED
+                completed = True
+        if completed and isinstance(event, threading.Event):
+            event.set()
+
+
+__all__ = ["ApiRequestBridge", "DeferredApiResponse"]
