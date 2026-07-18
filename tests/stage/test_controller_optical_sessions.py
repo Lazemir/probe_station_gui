@@ -6,8 +6,6 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from probe_station_gui.camera.exposure_policy import ExposurePolicyError
-
 try:
     from .controller_test_support import (
         AutofocusContext,
@@ -31,13 +29,20 @@ class _FakeLease:
         self,
         events: list[object],
         *,
-        close_error: Exception | None = None,
+        enter_error: BaseException | None = None,
+        close_error: BaseException | None = None,
+        suppress: bool = False,
     ) -> None:
         self.events = events
+        self.enter_error = enter_error
         self.close_error = close_error
+        self.suppress = suppress
         self.token = "session-token"
 
     def __enter__(self):
+        if self.enter_error is not None:
+            self.events.append("enter")
+            raise self.enter_error
         self.events.append("exposure ready")
         return self
 
@@ -45,7 +50,7 @@ class _FakeLease:
         self.events.append("close")
         if self.close_error is not None:
             raise self.close_error
-        return False
+        return self.suppress
 
 
 class _FakeSessionManager:
@@ -53,18 +58,27 @@ class _FakeSessionManager:
         self,
         events: list[object],
         *,
-        open_error: Exception | None = None,
-        close_error: Exception | None = None,
+        open_error: BaseException | None = None,
+        enter_error: BaseException | None = None,
+        close_error: BaseException | None = None,
+        suppress: bool = False,
     ) -> None:
         self.events = events
         self.open_error = open_error
+        self.enter_error = enter_error
         self.close_error = close_error
+        self.suppress = suppress
 
     def open(self, operation: str, parent_token: str | None = None) -> _FakeLease:
         self.events.append(("open", operation, parent_token))
         if self.open_error is not None:
             raise self.open_error
-        return _FakeLease(self.events, close_error=self.close_error)
+        return _FakeLease(
+            self.events,
+            enter_error=self.enter_error,
+            close_error=self.close_error,
+            suppress=self.suppress,
+        )
 
 
 @pytest.fixture
@@ -122,7 +136,7 @@ def test_gui_autofocus_open_failure_prevents_movement_and_capture(controller) ->
     controller.set_optical_session_manager(
         _FakeSessionManager(
             events,
-            open_error=ExposurePolicyError("camera adjustment failed"),
+            open_error=RuntimeError("camera adjustment failed"),
         )
     )
     _install_result_signals(controller, events)
@@ -135,6 +149,27 @@ def test_gui_autofocus_open_failure_prevents_movement_and_capture(controller) ->
     assert "autofocus work" not in events
     assert events[-1][0:2] == ("autofocus result", False)
     assert "camera adjustment failed" in events[-1][2]
+
+
+def test_gui_autofocus_enter_failure_prevents_movement_and_capture(controller) -> None:
+    events: list[object] = []
+    controller._serial = _FakeSerial()
+    controller.set_optical_session_manager(
+        _FakeSessionManager(
+            events,
+            enter_error=RuntimeError("camera lease failed"),
+        )
+    )
+    _install_result_signals(controller, events)
+    controller._run_autofocus_locked = lambda: events.append("autofocus work")
+
+    controller._run_autofocus()
+
+    assert events[:2] == [("open", "autofocus", None), "enter"]
+    assert "movement started" not in events
+    assert "autofocus work" not in events
+    assert events[-1][0:2] == ("autofocus result", False)
+    assert "camera lease failed" in events[-1][2]
 
 
 def test_gui_autofocus_failure_closes_session_before_failure_result(controller) -> None:
@@ -188,7 +223,7 @@ def test_external_local_autofocus_translates_session_close_failure(controller) -
     controller.set_optical_session_manager(
         _FakeSessionManager(
             events,
-            close_error=ExposurePolicyError("camera restore failed"),
+            close_error=RuntimeError("camera restore failed"),
         )
     )
     _install_result_signals(controller, events)
@@ -198,8 +233,84 @@ def test_external_local_autofocus_translates_session_close_failure(controller) -
     with pytest.raises(StageControllerError, match="camera restore failed"):
         controller.run_external_local_autofocus(range_mm=0.03)
 
+    assert not any(
+        isinstance(event, tuple)
+        and event[0] in {"autofocus result", "movement result"}
+        and event[1] is True
+        for event in events
+    )
     assert events[-2][0:2] == ("autofocus result", False)
     assert events[-1][0:2] == ("movement result", False)
+
+
+def test_body_stage_error_remains_original_after_normal_session_close(
+    controller,
+) -> None:
+    events: list[object] = []
+    controller._serial = _FakeSerial()
+    controller.set_optical_session_manager(_FakeSessionManager(events))
+    _install_result_signals(controller, events)
+    body_error = StageControllerError("autofocus body failed")
+
+    def _fail_body(**_kwargs):
+        raise body_error
+
+    controller._run_local_autofocus_locked = _fail_body
+
+    with pytest.raises(StageControllerError) as caught:
+        controller.run_external_local_autofocus(range_mm=0.03)
+
+    assert caught.value is body_error
+    assert "close" in events
+
+
+def test_optical_session_preserves_lease_suppression(controller) -> None:
+    events: list[object] = []
+    controller.set_optical_session_manager(
+        _FakeSessionManager(events, suppress=True)
+    )
+
+    with controller._open_optical_session("test operation"):
+        events.append("body")
+        raise StageControllerError("suppressed body error")
+
+    assert events == [
+        ("open", "test operation", None),
+        "exposure ready",
+        "body",
+        "close",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("phase", "boundary_error"),
+    [
+        ("open", KeyboardInterrupt()),
+        ("enter", SystemExit()),
+        ("exit", KeyboardInterrupt()),
+    ],
+)
+def test_optical_session_does_not_normalize_base_exceptions(
+    controller,
+    phase: str,
+    boundary_error: BaseException,
+) -> None:
+    events: list[object] = []
+    error_argument = {
+        "open": "open_error",
+        "enter": "enter_error",
+        "exit": "close_error",
+    }[phase]
+    manager_kwargs = {error_argument: boundary_error}
+    controller.set_optical_session_manager(
+        _FakeSessionManager(events, **manager_kwargs)
+    )
+
+    with pytest.raises(type(boundary_error)) as caught:
+        with controller._open_optical_session("test operation"):
+            pass
+
+    assert caught.value is boundary_error
 
 
 def test_cancelled_local_autofocus_restores_start_z_before_session_close(
@@ -323,7 +434,7 @@ def test_click_session_open_failure_prevents_movement_and_capture(controller) ->
     controller.set_optical_session_manager(
         _FakeSessionManager(
             events,
-            open_error=ExposurePolicyError("camera adjustment failed"),
+            open_error=RuntimeError("camera adjustment failed"),
         )
     )
     _install_result_signals(controller, events)

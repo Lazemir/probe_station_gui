@@ -5,9 +5,8 @@ from __future__ import annotations
 import logging
 import math
 import importlib
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable
 from collections import deque
-from contextlib import contextmanager
 from queue import PriorityQueue
 import re
 import threading
@@ -17,7 +16,6 @@ from typing import Callable, Optional
 import serial
 from PySide6.QtCore import QObject, Signal
 
-from probe_station_gui.camera.exposure_policy import ExposurePolicyError
 from probe_station_gui.stage.autofocus_flow import StageControllerAutofocusMixin
 from probe_station_gui.stage.click_move import StageControllerClickMoveMixin
 from probe_station_gui.stage.axis_coordinates import StageControllerAxisCoordinatesMixin
@@ -95,6 +93,51 @@ class _LazyModule:
 
 
 np = _LazyModule("numpy")
+
+
+class _OpticalSessionBoundary:
+    """Normalize only failures raised by the injected session dependency."""
+
+    def __init__(
+        self,
+        manager: object,
+        operation: str,
+        parent_token: str | None,
+    ) -> None:
+        self._manager = manager
+        self._operation = operation
+        self._parent_token = parent_token
+        self._lease: object | None = None
+
+    def __enter__(self) -> object:
+        try:
+            lease = self._manager.open(
+                self._operation,
+                parent_token=self._parent_token,
+            )
+        except Exception as exc:
+            raise StageControllerError(
+                f"Unable to open the {self._operation} optical session: {exc}"
+            ) from exc
+        self._lease = lease
+        try:
+            return lease.__enter__()
+        except Exception as exc:
+            raise StageControllerError(
+                f"Unable to enter the {self._operation} optical session: {exc}"
+            ) from exc
+
+    def __exit__(self, exc_type, exc, traceback) -> object:
+        lease = self._lease
+        if lease is None:
+            return False
+        try:
+            return lease.__exit__(exc_type, exc, traceback)
+        except Exception as boundary_error:
+            raise StageControllerError(
+                f"Unable to close the {self._operation} optical session: "
+                f"{boundary_error}"
+            ) from boundary_error
 
 
 class StageController(
@@ -317,13 +360,12 @@ class StageController(
             raise TypeError("Optical session manager must provide open().")
         self._optical_session_manager = manager
 
-    @contextmanager
     def _open_optical_session(
         self,
         operation: str,
         *,
         parent_token: str | None = None,
-    ) -> Iterator[object]:
+    ) -> _OpticalSessionBoundary:
         """Open one policy-owned fixed-exposure session for stage optical work."""
 
         manager = getattr(self, "_optical_session_manager", None)
@@ -331,13 +373,7 @@ class StageController(
             raise StageControllerError(
                 f"Optical session manager is unavailable for {operation}."
             )
-        try:
-            with manager.open(operation, parent_token=parent_token) as lease:
-                yield lease
-        except ExposurePolicyError as exc:
-            raise StageControllerError(
-                f"Unable to use the {operation} optical session: {exc}"
-            ) from exc
+        return _OpticalSessionBoundary(manager, operation, parent_token)
 
     # Jog stop confirmation is handled in the joystick layer to avoid serial contention.
     def shutdown(self) -> None:
