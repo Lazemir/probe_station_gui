@@ -979,7 +979,7 @@ class StageController(
                 raise StageControllerError(
                     "Current thread does not own an external stage task."
                 )
-            status = self._query_current_stage_position_status()
+        status = self._query_current_stage_position_status()
         return self._stage_position_from_status(status)
 
     def _query_current_stage_position_status(self) -> _Status | None:

@@ -88,6 +88,29 @@ def test_microscope_scan_missing_design_does_not_read_scale_or_camera() -> None:
     assert calls == []
 
 
+def _scan_launch_snapshot(
+    *,
+    scale: object | None = None,
+) -> main_module._MicroscopeScanLaunchSnapshot:
+    return main_module._MicroscopeScanLaunchSnapshot(
+        objective_name="X20",
+        magnification=20.0,
+        scan_name="test-scan",
+        document_identity="C:/designs/test-scan.gds",
+        scale=object() if scale is None else scale,
+        registration_matrix=((1.0, 0.0), (0.0, 1.0)),
+        registration_offset=(0.0, 0.0),
+        objective_xy_offset=(0.0, 0.0),
+    )
+
+
+def _set_area_scan_launch_sources(window: Main, scale: object) -> None:
+    window._active_microscope_scale = lambda: scale
+    window._active_objective_metadata = lambda: ("X20", 20.0)
+    window._active_objective_xy_offset = lambda: (0.0, 0.0)
+    window._design_session = types.SimpleNamespace(document=None, registration=None)
+
+
 def test_design_scan_entry_starts_worker_without_waiting_for_camera(
     monkeypatch,
 ) -> None:
@@ -113,6 +136,7 @@ def test_design_scan_entry_starts_worker_without_waiting_for_camera(
         pixel_size_x_mm=0.001,
         pixel_size_y_mm=0.001,
     )
+    window._active_objective_metadata = lambda: ("X20", 20.0)
     window._wait_for_camera_frame = lambda **_kwargs: pytest.fail(
         "GUI entry path must not wait for a camera frame"
     )
@@ -161,6 +185,7 @@ def test_design_scan_plan_uses_launch_registration_and_objective_offset_snapshot
     )
     window._microscope_scan_running = lambda: False
     window._active_microscope_scale = lambda: scale
+    window._active_objective_metadata = lambda: ("X20", 20.0)
     window._active_objective_xy_offset = lambda: objective_state["offset"]
     window._microscope_scan_stop_requested = types.SimpleNamespace(clear=lambda: None)
     window.microscope_scan_dialog = None
@@ -172,6 +197,7 @@ def test_design_scan_plan_uses_launch_registration_and_objective_offset_snapshot
         types.SimpleNamespace(overlap_fraction=0.0),
     )
     planning_request = created_threads[0].args[1]
+    launch_snapshot = created_threads[0].args[2]
 
     window._design_session.registration = mutated_registration
     objective_state["offset"] = (50.0, 75.0)
@@ -182,6 +208,7 @@ def test_design_scan_plan_uses_launch_registration_and_objective_offset_snapshot
         window,
         planning_request,
         (100, 100),
+        launch_snapshot=launch_snapshot,
     )
 
     expected = microscope_scan.scan_plan_decision(
@@ -201,6 +228,134 @@ def test_design_scan_plan_uses_launch_registration_and_objective_offset_snapshot
     assert _tile_signature(actual_plan.tiles) == _tile_signature(expected.plan.tiles)
 
 
+def test_design_scan_artifacts_use_launch_snapshot_after_objective_and_design_mutation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    events: list[object] = []
+    window, configuration, _unused_plan = _returning_scan_runner(
+        events,
+        tmp_path,
+        outcome="success",
+    )
+    created_threads: list[_FakeScanThread] = []
+    monkeypatch.setattr(
+        main_module.threading,
+        "Thread",
+        lambda **kwargs: created_threads.append(_FakeScanThread(**kwargs))
+        or created_threads[-1],
+    )
+    launch_document = types.SimpleNamespace(
+        path=tmp_path / "design-a.gds",
+        bounds=(0.0, 0.0, 0.2, 0.2),
+    )
+    launch_registration = DesignRegistration.from_marks(
+        ((0.0, 0.0), (1.0, 0.0)),
+        ((10.0, 20.0), (11.0, 20.0)),
+    )
+    launch_scale = MicroscopeScaleCalibration(1000.0, 1000.0)
+    objective_state = {"metadata": ("X5", 5.0), "offset": (0.5, -0.25)}
+    window.serial_connection = types.SimpleNamespace(is_open=True)
+    window._design_session = types.SimpleNamespace(
+        document=launch_document,
+        registration=launch_registration,
+    )
+    window._microscope_scan_running = lambda: False
+    window._active_microscope_scale = lambda: launch_scale
+    window._active_objective_metadata = lambda: objective_state["metadata"]
+    window._active_objective_xy_offset = lambda: objective_state["offset"]
+    window._microscope_scan_stop_requested = types.SimpleNamespace(
+        clear=lambda: None,
+        is_set=lambda: False,
+    )
+    window.microscope_scan_dialog = None
+    window._update_stage_coordinate_apply_state = lambda: None
+    window._show_status = lambda *_args: None
+    window.stage_controller.latest_stage_position = lambda: (10.0, 20.0, 3.0)
+    saved: list[tuple[str, object, object]] = []
+
+    def save_image(*, frame, output_dir, filename_stem, metadata, scale, **_kwargs):
+        saved.append((filename_stem, metadata, scale))
+        return types.SimpleNamespace(
+            raw_image=frame,
+            image_path=output_dir / f"{filename_stem}.png",
+            metadata_path=output_dir / f"{filename_stem}.json",
+            metadata=metadata.to_dict(),
+            raw_image_path=None,
+        )
+
+    monkeypatch.setattr(main_module, "save_microscope_image", save_image)
+    monkeypatch.setitem(
+        Main._run_microscope_scan.__globals__,
+        "stitch_scan_tiles",
+        lambda **_kwargs: QImage(8, 6, QImage.Format_RGB32),
+    )
+    monkeypatch.setattr(
+        microscope_scan,
+        "write_manifest",
+        lambda **_kwargs: tmp_path / "manifest.json",
+    )
+    del window._save_microscope_scan_tile
+    del window._save_microscope_scan_mosaic
+    window._correct_microscope_scan_frame = (
+        lambda frame, _options, *, flat_field_profile: frame
+    )
+
+    Main._start_microscope_scan(window, configuration)
+    assert len(created_threads) == 1
+
+    window._design_session = types.SimpleNamespace(
+        document=types.SimpleNamespace(
+            path=tmp_path / "design-b.gds",
+            bounds=(100.0, 100.0, 200.0, 200.0),
+        ),
+        registration=DesignRegistration.from_marks(
+            ((0.0, 0.0), (1.0, 0.0)),
+            ((100.0, 200.0), (102.0, 200.0)),
+        ),
+    )
+    objective_state.update(metadata=("X99", 99.0), offset=(50.0, 75.0))
+    window._active_objective_metadata = lambda: pytest.fail(
+        "artifact save read mutable objective metadata"
+    )
+    window._active_objective_xy_offset = lambda: pytest.fail(
+        "artifact save read mutable objective offset"
+    )
+    window._active_microscope_scale = lambda: pytest.fail(
+        "worker read mutable objective scale"
+    )
+    window._design_xy_from_raw_stage_xy = lambda _xy: pytest.fail(
+        "artifact save read mutable design transform"
+    )
+
+    created_threads[0].target(*created_threads[0].args)
+
+    assert window.finished[-1][0] is True
+    assert len(saved) == 2
+    tile_name, tile_metadata, tile_scale = saved[0]
+    mosaic_name, mosaic_metadata, mosaic_scale = saved[1]
+    assert tile_name.startswith("design-a_")
+    assert mosaic_name.startswith("design-a_mosaic_")
+    assert tile_scale is launch_scale
+    assert mosaic_scale is launch_scale
+    assert tile_metadata.objective_name == "X5"
+    assert mosaic_metadata.objective_name == "X5"
+    assert tile_metadata.magnification == pytest.approx(5.0)
+    assert mosaic_metadata.magnification == pytest.approx(5.0)
+    launch_metadata = tile_metadata.extra["scan_launch"]
+    assert launch_metadata["scan_name"] == "design-a"
+    assert launch_metadata["document_identity"] == str(launch_document.path)
+    assert mosaic_metadata.extra["scan_launch"] == launch_metadata
+    camera_stage_xy = (
+        tile_metadata.stage_xy[0] - 0.5,
+        tile_metadata.stage_xy[1] + 0.25,
+    )
+    assert tile_metadata.design_xy == pytest.approx(
+        launch_registration.stage_to_design(camera_stage_xy)
+    )
+    assert ("move", *tile_metadata.stage_xy) in events
+
+
 def test_area_scan_thread_start_failure_clears_unstarted_state(
     monkeypatch,
 ) -> None:
@@ -217,9 +372,10 @@ def test_area_scan_thread_start_failure_clears_unstarted_state(
     window.stage_controller = types.SimpleNamespace(is_busy=lambda: False)
     window._microscope_scan_running = lambda: False
     window._stage_serial_ready = lambda: True
-    window._active_microscope_scale = lambda: types.SimpleNamespace(
+    scale = types.SimpleNamespace(
         pixels_to_mm=((0.001, 0.0), (0.0, -0.001))
     )
+    _set_area_scan_launch_sources(window, scale)
     window._wait_for_camera_frame = lambda **_kwargs: pytest.fail(
         "API entry path must not wait for a camera frame"
     )
@@ -376,7 +532,12 @@ def test_microscope_scan_opens_session_before_stage_camera_and_motion(tmp_path) 
         tiles=(types.SimpleNamespace(index=1, stage_xy=(1.0, 2.0)),)
     )
 
-    Main._run_microscope_scan(window, configuration, plan)
+    Main._run_microscope_scan(
+        window,
+        configuration,
+        plan,
+        _scan_launch_snapshot(),
+    )
 
     assert events[:6] == [
         "session_open",
@@ -401,8 +562,9 @@ def test_microscope_scan_worker_opens_session_before_fresh_frame_plan_and_stage(
     window._wait_for_camera_frame = lambda **kwargs: (
         events.append(("fresh_frame", kwargs)) or (_FakeFrame(), 8)
     )
+    launch_snapshot = _scan_launch_snapshot()
     window._build_microscope_scan_plan = (
-        lambda request, frame_size, *, center_stage_xy: (
+        lambda request, frame_size, *, launch_snapshot, center_stage_xy: (
             events.append(("plan", request, frame_size, center_stage_xy)) or plan
         )
     )
@@ -414,6 +576,7 @@ def test_microscope_scan_worker_opens_session_before_fresh_frame_plan_and_stage(
         window,
         _scan_runner_configuration(tmp_path),
         planning_request,
+        launch_snapshot,
     )
 
     assert events[:7] == [
@@ -438,6 +601,7 @@ def test_microscope_scan_frame_failure_releases_reservation_without_return(
         window,
         _scan_runner_configuration(tmp_path),
         object(),
+        _scan_launch_snapshot(),
     )
 
     assert events == [
@@ -479,7 +643,7 @@ def test_area_scan_plan_and_return_share_reserved_start_when_cached_position_cha
     )
     window._microscope_scan_running = lambda: False
     window._stage_serial_ready = lambda: True
-    window._active_microscope_scale = lambda: scale
+    _set_area_scan_launch_sources(window, scale)
     window._microscope_area_scan_default_output_dir = lambda: str(tmp_path / "scan")
     window._microscope_scan_stop_requested = types.SimpleNamespace(
         clear=lambda: None,
@@ -488,11 +652,12 @@ def test_area_scan_plan_and_return_share_reserved_start_when_cached_position_cha
     window._update_stage_coordinate_apply_state = lambda: None
     planned: list[tuple[object, tuple[float, float]]] = []
 
-    def build_plan(request, frame_size, *, center_stage_xy):
+    def build_plan(request, frame_size, *, launch_snapshot, center_stage_xy):
         plan = Main._build_microscope_scan_plan(
             window,
             request,
             frame_size,
+            launch_snapshot=launch_snapshot,
             center_stage_xy=center_stage_xy,
         )
         planned.append((plan, center_stage_xy))
@@ -566,7 +731,12 @@ def test_microscope_scan_returns_to_start_before_release_on_every_exit(
         lambda **_kwargs: tmp_path / "manifest.json",
     )
 
-    Main._run_microscope_scan(window, configuration, plan)
+    Main._run_microscope_scan(
+        window,
+        configuration,
+        plan,
+        _scan_launch_snapshot(),
+    )
 
     tile_move = events.index(("move", 1.0, 2.0))
     return_move = events.index(("move", 10.0, 20.0))
@@ -600,7 +770,12 @@ def test_microscope_scan_returns_before_camera_restore_failure_is_reported(
         lambda **_kwargs: tmp_path / "manifest.json",
     )
 
-    Main._run_microscope_scan(window, configuration, plan)
+    Main._run_microscope_scan(
+        window,
+        configuration,
+        plan,
+        _scan_launch_snapshot(),
+    )
 
     assert events.index(("move", 10.0, 20.0)) < events.index("camera_restore")
     assert window.finished[-1][0] is False
@@ -620,7 +795,12 @@ def test_microscope_scan_preserves_failure_when_return_to_start_also_fails(
         return_error="return jammed",
     )
 
-    Main._run_microscope_scan(window, configuration, plan)
+    Main._run_microscope_scan(
+        window,
+        configuration,
+        plan,
+        _scan_launch_snapshot(),
+    )
 
     message = window.finished[-1][1].lower()
     assert "capture failed" in message
@@ -643,7 +823,12 @@ def test_microscope_scan_session_rejection_never_acquires_stage_or_camera(
     configuration = _scan_runner_configuration(tmp_path)
     plan = types.SimpleNamespace(tiles=())
 
-    Main._run_microscope_scan(window, configuration, plan)
+    Main._run_microscope_scan(
+        window,
+        configuration,
+        plan,
+        _scan_launch_snapshot(),
+    )
 
     assert events == ["session_open"]
     assert window.finished == [
@@ -771,7 +956,12 @@ def test_microscope_scan_captures_every_tile_at_session_fixed_exposure(
         )
     )
 
-    Main._run_microscope_scan(window, configuration, plan)
+    Main._run_microscope_scan(
+        window,
+        configuration,
+        plan,
+        _scan_launch_snapshot(),
+    )
 
     assert observed_exposure == [("Off", 2600.0), ("Off", 2600.0)]
     assert events.index("session_open") < events.index("begin")
@@ -971,9 +1161,10 @@ def test_api_microscope_area_scan_builds_stitch_debug_plan(monkeypatch) -> None:
     )
     window._microscope_scan_running = lambda: False
     window._stage_serial_ready = lambda: True
-    window._active_microscope_scale = lambda: types.SimpleNamespace(
+    scale = types.SimpleNamespace(
         pixels_to_mm=((0.001, 0.0), (0.0, -0.001))
     )
+    _set_area_scan_launch_sources(window, scale)
     window._wait_for_camera_frame = lambda **_kwargs: pytest.fail(
         "API entry path must not wait for a camera frame"
     )
@@ -995,13 +1186,14 @@ def test_api_microscope_area_scan_builds_stitch_debug_plan(monkeypatch) -> None:
     assert response["columns"] == 3
     assert response["pattern"] == "stitch_debug"
     thread = created_threads[0]
-    configuration, planning_request = thread.args
+    configuration, planning_request, launch_snapshot = thread.args
     assert configuration.refine_scale_from_overlaps is False
     assert configuration.overlap_fraction == pytest.approx(0.25)
     plan = Main._build_microscope_scan_plan(
         window,
         planning_request,
         (1000, 800),
+        launch_snapshot=launch_snapshot,
         center_stage_xy=(10.0, 20.0),
     )
     assert plan.overlap_fraction == pytest.approx(0.25)
@@ -1032,9 +1224,10 @@ def test_api_microscope_area_scan_defaults_to_large_area_overlap(
     )
     window._microscope_scan_running = lambda: False
     window._stage_serial_ready = lambda: True
-    window._active_microscope_scale = lambda: types.SimpleNamespace(
+    scale = types.SimpleNamespace(
         pixels_to_mm=((0.001, 0.0), (0.0, -0.001))
     )
+    _set_area_scan_launch_sources(window, scale)
     window._wait_for_camera_frame = lambda **_kwargs: pytest.fail(
         "API entry path must not wait for a camera frame"
     )
@@ -1045,13 +1238,19 @@ def test_api_microscope_area_scan_defaults_to_large_area_overlap(
     response = Main._api_microscope_area_scan(window, {"flat_field": False})
 
     assert response["accepted"] is True
-    configuration, planning_request = created_threads[0].args
+    configuration, planning_request, launch_snapshot = created_threads[0].args
     assert configuration.overlap_fraction == pytest.approx(0.25)
     assert not hasattr(configuration, "auto_exposure_options")
+    assert launch_snapshot.objective_name == "X20"
+    assert launch_snapshot.magnification == pytest.approx(20.0)
+    assert launch_snapshot.scan_name == "design_scan"
+    assert launch_snapshot.document_identity == ""
+    assert launch_snapshot.scale is scale
     plan = Main._build_microscope_scan_plan(
         window,
         planning_request,
         (1000, 800),
+        launch_snapshot=launch_snapshot,
         center_stage_xy=(10.0, 20.0),
     )
     assert plan.overlap_fraction == pytest.approx(0.25)

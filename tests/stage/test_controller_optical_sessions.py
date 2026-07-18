@@ -132,6 +132,76 @@ def test_reserved_position_read_is_available_only_to_external_task_owner(
         controller.finish_external_task()
 
 
+def test_blocked_external_position_query_does_not_hold_task_lock(
+    controller,
+) -> None:
+    query_started = threading.Event()
+    release_query = threading.Event()
+    busy_done = threading.Event()
+    cancel_done = threading.Event()
+    busy_results: list[bool] = []
+    owner_errors: list[BaseException] = []
+    controller._serial = _FakeSerial()
+    controller._ensure_b_axis_zero_reference = lambda _status: None
+    controller.status_message = SimpleNamespace(emit=lambda *_args: None)
+    controller.queue_jog_stop = lambda: None
+
+    def blocked_query(*, min_axes: int):
+        assert min_axes == 3
+        query_started.set()
+        if not release_query.wait(5.0):
+            raise RuntimeError("test did not release status query")
+        return SimpleNamespace(
+            display_position=(10.0, 20.0, 3.0),
+            state="Idle",
+        )
+
+    controller._query_synced_status_for_absolute_motion = blocked_query
+
+    def read_position_as_owner() -> None:
+        controller.begin_external_task("scan")
+        try:
+            controller.run_external_current_stage_position()
+        except BaseException as exc:  # pragma: no cover - asserted below
+            owner_errors.append(exc)
+        finally:
+            controller.finish_external_task()
+
+    owner = threading.Thread(target=read_position_as_owner)
+    owner.start()
+    assert query_started.wait(1.0)
+
+    busy_reader = threading.Thread(
+        target=lambda: (
+            busy_results.append(controller.is_busy()),
+            busy_done.set(),
+        )
+    )
+    canceller = threading.Thread(
+        target=lambda: (
+            controller.cancel_active_task("cancel blocked position query"),
+            cancel_done.set(),
+        )
+    )
+    busy_reader.start()
+    canceller.start()
+    try:
+        assert busy_done.wait(1.0)
+        assert cancel_done.wait(1.0)
+        assert busy_results == [True]
+        assert controller._cancel_event.is_set()
+    finally:
+        release_query.set()
+        owner.join(timeout=2.0)
+        busy_reader.join(timeout=2.0)
+        canceller.join(timeout=2.0)
+
+    assert not owner.is_alive()
+    assert not busy_reader.is_alive()
+    assert not canceller.is_alive()
+    assert owner_errors == []
+
+
 def test_gui_autofocus_holds_session_from_before_movement_through_success(
     controller,
 ) -> None:

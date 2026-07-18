@@ -175,6 +175,22 @@ def test_set_active_objective_busy_restores_combo_and_does_not_save() -> None:
     assert statuses == ["Stage is busy; objective not changed."]
 
 
+def test_objective_combo_change_is_rejected_for_alive_microscope_scan() -> None:
+    window, stage, manager, statuses = _window()
+    restored: list[str] = []
+    window._microscope_scan_thread = types.SimpleNamespace(is_alive=lambda: True)
+    window._objective_combo = types.SimpleNamespace(currentData=lambda: "X20")
+    window._sync_objective_combo = lambda name: restored.append(name)
+
+    Main._on_objective_combo_changed(window, 1)
+
+    assert manager.settings.objectives.active_name == "X5"
+    assert manager.saved_count == 0
+    assert stage.absolute_moves == []
+    assert restored == ["X5"]
+    assert statuses == ["Stage is busy; objective not changed."]
+
+
 def test_set_active_objective_reports_selected_after_offset_motion_status() -> None:
     window, stage, manager, statuses = _window()
 

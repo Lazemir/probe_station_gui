@@ -422,18 +422,24 @@ class _MicroscopeScanCapturedFrame:
 
 
 @dataclass(frozen=True)
-class _MicroscopeDesignScanRequest:
-    bounds: tuple[float, float, float, float]
+class _MicroscopeScanLaunchSnapshot:
+    objective_name: str
+    magnification: float | None
+    scan_name: str
+    document_identity: str
     scale: object
-    overlap_fraction: float
-    registration_matrix: tuple[tuple[float, float], tuple[float, float]]
-    registration_offset: tuple[float, float]
+    registration_matrix: (
+        tuple[tuple[float, float], tuple[float, float]] | None
+    )
+    registration_offset: tuple[float, float] | None
     objective_xy_offset: tuple[float, float]
 
     def design_to_raw_stage(
         self,
         design_xy: tuple[float, float],
     ) -> tuple[float, float]:
+        if self.registration_matrix is None or self.registration_offset is None:
+            raise RuntimeError("Design registration is unavailable.")
         x_value = float(design_xy[0])
         y_value = float(design_xy[1])
         camera_x = (
@@ -451,10 +457,50 @@ class _MicroscopeDesignScanRequest:
             camera_y + self.objective_xy_offset[1],
         )
 
+    def raw_stage_to_design(
+        self,
+        raw_stage_xy: tuple[float, float],
+    ) -> tuple[float, float] | None:
+        if self.registration_matrix is None or self.registration_offset is None:
+            return None
+        camera_x = float(raw_stage_xy[0]) - self.objective_xy_offset[0]
+        camera_y = float(raw_stage_xy[1]) - self.objective_xy_offset[1]
+        shifted_x = camera_x - self.registration_offset[0]
+        shifted_y = camera_y - self.registration_offset[1]
+        (a, b), (c, d) = self.registration_matrix
+        determinant = a * d - b * c
+        if abs(determinant) < 1e-18:
+            raise RuntimeError("Design registration is singular.")
+        return (
+            (d * shifted_x - b * shifted_y) / determinant,
+            (-c * shifted_x + a * shifted_y) / determinant,
+        )
+
+    def metadata(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "objective_name": self.objective_name,
+            "magnification": self.magnification,
+            "scan_name": self.scan_name,
+            "document_identity": self.document_identity,
+            "objective_xy_offset_mm": list(self.objective_xy_offset),
+        }
+        if self.registration_matrix is not None:
+            payload["registration_matrix"] = [
+                list(row) for row in self.registration_matrix
+            ]
+        if self.registration_offset is not None:
+            payload["registration_offset"] = list(self.registration_offset)
+        return payload
+
+
+@dataclass(frozen=True)
+class _MicroscopeDesignScanRequest:
+    bounds: tuple[float, float, float, float]
+    overlap_fraction: float
+
 
 @dataclass(frozen=True)
 class _MicroscopeAreaScanRequest:
-    scale: object
     row_count: int
     column_count: int
     overlap_fraction: float
@@ -3227,6 +3273,19 @@ class Main(QMainWindow):
                     "status_code": 409,
                     "message": "Stitch debug scan requires full pixel-to-stage calibration.",
                 }
+        design_session = getattr(self, "_design_session", None)
+        try:
+            launch_snapshot = self._capture_microscope_scan_launch_snapshot(
+                scale=scale,
+                document=getattr(design_session, "document", None),
+                registration=getattr(design_session, "registration", None),
+            )
+        except (AttributeError, IndexError, TypeError, ValueError) as exc:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": f"Microscope scan launch state is invalid: {exc}",
+            }
         configuration = SimpleNamespace(
             output_dir=output_dir,
             overlap_fraction=overlap_fraction,
@@ -3240,7 +3299,6 @@ class Main(QMainWindow):
             camera_lock_settings=camera_lock_settings,
         )
         planning_request = _MicroscopeAreaScanRequest(
-            scale=scale,
             row_count=rows,
             column_count=columns,
             overlap_fraction=overlap_fraction,
@@ -3251,7 +3309,7 @@ class Main(QMainWindow):
         self._microscope_scan_stop_requested.clear()
         thread = threading.Thread(
             target=self._run_microscope_scan,
-            args=(configuration, planning_request),
+            args=(configuration, planning_request, launch_snapshot),
             name="MicroscopeAreaScan",
             daemon=True,
         )
@@ -3859,6 +3917,69 @@ class Main(QMainWindow):
             magnification = None
         return name, magnification
 
+    def _capture_microscope_scan_launch_snapshot(
+        self,
+        *,
+        scale: object,
+        document: object | None,
+        registration: object | None,
+    ) -> _MicroscopeScanLaunchSnapshot:
+        objective_name, magnification = self._active_objective_metadata()
+        objective_offset = tuple(
+            float(value) for value in self._active_objective_xy_offset()
+        )
+        if len(objective_offset) != 2 or not all(
+            math.isfinite(value) for value in objective_offset
+        ):
+            raise ValueError("Active objective offset is invalid.")
+
+        registration_matrix = None
+        registration_offset = None
+        if registration is not None and bool(getattr(registration, "valid", False)):
+            matrix = getattr(registration, "matrix")
+            offset_value = getattr(registration, "offset")
+            registration_matrix = (
+                (float(matrix[0][0]), float(matrix[0][1])),
+                (float(matrix[1][0]), float(matrix[1][1])),
+            )
+            registration_offset = (
+                float(offset_value[0]),
+                float(offset_value[1]),
+            )
+            transform_values = (
+                *registration_matrix[0],
+                *registration_matrix[1],
+                *registration_offset,
+            )
+            determinant = (
+                registration_matrix[0][0] * registration_matrix[1][1]
+                - registration_matrix[0][1] * registration_matrix[1][0]
+            )
+            if not all(math.isfinite(value) for value in transform_values):
+                raise ValueError("Design registration is invalid.")
+            if abs(determinant) < 1e-18:
+                raise ValueError("Design registration is singular.")
+
+        document_path = (
+            getattr(document, "path", None) if document is not None else None
+        )
+        document_identity = str(document_path or "")
+        scan_name = (
+            Path(document_identity).stem
+            if document_identity
+            else microscope_scan.scan_name_from_document(None)
+        )
+        return _MicroscopeScanLaunchSnapshot(
+            objective_name=str(objective_name),
+            magnification=magnification,
+            scan_name=scan_name,
+            document_identity=document_identity,
+            scale=scale,
+            registration_matrix=registration_matrix,
+            registration_offset=registration_offset,
+            objective_xy_offset=(objective_offset[0], objective_offset[1]),
+        )
+
     def _optical_calibration_objective_metadata(
         self,
         context: _OpticalCalibrationRunContext | None,
@@ -4359,10 +4480,7 @@ class Main(QMainWindow):
         plan = alignment.select_active_objective(
             self.settings_manager.settings,
             objective_name,
-            is_busy=(
-                self.stage_controller.is_busy()
-                or self._optical_calibration_worker_active()
-            ),
+            is_busy=self._objective_mutation_busy(),
             apply_motion=apply_motion,
             allow_busy=allow_busy,
         )
@@ -4377,6 +4495,13 @@ class Main(QMainWindow):
         if plan.apply_offset_motion:
             self._apply_objective_change_offset(plan.old_name, plan.new_name)
         self._show_plan_status(plan)
+
+    def _objective_mutation_busy(self) -> bool:
+        return (
+            self.stage_controller.is_busy()
+            or self._optical_calibration_worker_active()
+            or self._microscope_scan_running()
+        )
 
     def _apply_objective_change_offset(self, old_name: str, new_name: str) -> None:
         plan = alignment.objective_change_offset_plan(
@@ -4531,7 +4656,7 @@ class Main(QMainWindow):
         self._lens_distortion_dialog.activateWindow()
 
     def _add_objective_profile(self) -> None:
-        if self.stage_controller.is_busy():
+        if self._objective_mutation_busy():
             self._show_status("Stage is busy; objective not added.", 4000)
             return
         raw_name, accepted = QInputDialog.getText(self, "Add Objective", "Objective name")
@@ -4545,7 +4670,7 @@ class Main(QMainWindow):
         self._persist_objective_plan(plan)
 
     def _delete_objective_profile(self, objective_name: str) -> None:
-        if self.stage_controller.is_busy():
+        if self._objective_mutation_busy():
             self._show_status("Stage is busy; objective not deleted.", 4000)
             self._refresh_click_calibration_ui()
             return
@@ -4570,7 +4695,7 @@ class Main(QMainWindow):
         self._persist_objective_plan(plan)
 
     def _set_objective_offset_reference(self) -> None:
-        if self.stage_controller.is_busy():
+        if self._objective_mutation_busy():
             self._show_status("Stage is busy; objective offset reference not set.", 4000)
             return
         raw_stage_xy = self._resolve_alignment_capture_stage_position()
@@ -4589,7 +4714,7 @@ class Main(QMainWindow):
         self._show_plan_status(plan)
 
     def _save_active_objective_offset(self) -> None:
-        if self.stage_controller.is_busy():
+        if self._objective_mutation_busy():
             self._show_status("Stage is busy; objective offset not saved.", 4000)
             return
         if self._objective_offset_reference is None:
@@ -4604,7 +4729,7 @@ class Main(QMainWindow):
         self._persist_objective_plan(plan)
 
     def _reset_active_objective_offset(self) -> None:
-        if self.stage_controller.is_busy():
+        if self._objective_mutation_busy():
             self._show_status("Stage is busy; objective offset not reset.", 4000)
             return
         plan = alignment.reset_active_objective_offset(self.settings_manager.settings)
@@ -9794,25 +9919,14 @@ class Main(QMainWindow):
         if self._show_microscope_scan_start_rejection(scale_preflight):
             return
         try:
-            matrix = registration.matrix
-            registration_offset = registration.offset
-            objective_offset = self._active_objective_xy_offset()
+            launch_snapshot = self._capture_microscope_scan_launch_snapshot(
+                scale=scale,
+                document=document,
+                registration=registration,
+            )
             planning_request = _MicroscopeDesignScanRequest(
                 bounds=tuple(float(value) for value in document.bounds),
-                scale=scale,
                 overlap_fraction=float(configuration.overlap_fraction),
-                registration_matrix=(
-                    (float(matrix[0][0]), float(matrix[0][1])),
-                    (float(matrix[1][0]), float(matrix[1][1])),
-                ),
-                registration_offset=(
-                    float(registration_offset[0]),
-                    float(registration_offset[1]),
-                ),
-                objective_xy_offset=(
-                    float(objective_offset[0]),
-                    float(objective_offset[1]),
-                ),
             )
         except (AttributeError, IndexError, TypeError, ValueError):
             self._show_status("Design registration is invalid.", 6000)
@@ -9823,7 +9937,7 @@ class Main(QMainWindow):
             self.microscope_scan_dialog.set_status("Microscope scan starting.")
         thread = threading.Thread(
             target=self._run_microscope_scan,
-            args=(configuration, planning_request),
+            args=(configuration, planning_request, launch_snapshot),
             name="MicroscopeDesignScan",
             daemon=True,
         )
@@ -9845,6 +9959,7 @@ class Main(QMainWindow):
         planning_request: object,
         frame_size_px: tuple[int, int],
         *,
+        launch_snapshot: _MicroscopeScanLaunchSnapshot,
         center_stage_xy: tuple[float, float] | None = None,
     ) -> MicroscopeScanPlan:
         width_px, height_px = (int(frame_size_px[0]), int(frame_size_px[1]))
@@ -9853,10 +9968,10 @@ class Main(QMainWindow):
         if isinstance(planning_request, _MicroscopeDesignScanRequest):
             decision = microscope_scan.scan_plan_decision(
                 document=planning_request,
-                scale=planning_request.scale,
+                scale=launch_snapshot.scale,
                 frame_size_px=(width_px, height_px),
                 overlap_fraction=planning_request.overlap_fraction,
-                design_to_stage_xy=planning_request.design_to_raw_stage,
+                design_to_stage_xy=launch_snapshot.design_to_raw_stage,
             )
             if not decision.accepted or decision.plan is None:
                 message = (
@@ -9875,7 +9990,7 @@ class Main(QMainWindow):
             )
             if not all(math.isfinite(value) for value in center_stage_xy):
                 raise RuntimeError("Unable to read X/Y stage position.")
-            pixels_to_mm = getattr(planning_request.scale, "pixels_to_mm", None)
+            pixels_to_mm = getattr(launch_snapshot.scale, "pixels_to_mm", None)
             if planning_request.scan_pattern == "stitch_debug":
                 return microscope_scan.stitch_debug_scan_plan_from_pixel_matrix(
                     center_stage_xy=center_stage_xy,
@@ -9895,8 +10010,8 @@ class Main(QMainWindow):
                     overlap_fraction=planning_request.overlap_fraction,
                 )
             fov_size_mm = (
-                float(width_px) * float(planning_request.scale.pixel_size_x_mm),
-                float(height_px) * float(planning_request.scale.pixel_size_y_mm),
+                float(width_px) * float(launch_snapshot.scale.pixel_size_x_mm),
+                float(height_px) * float(launch_snapshot.scale.pixel_size_y_mm),
             )
             return microscope_scan.centered_area_scan_plan(
                 center_stage_xy=center_stage_xy,
@@ -9913,17 +10028,12 @@ class Main(QMainWindow):
         self,
         configuration: MicroscopeScanConfiguration,
         planning_request: object,
+        launch_snapshot: _MicroscopeScanLaunchSnapshot,
     ) -> None:
         success = False
         message = "Microscope scan stopped."
         output_dir = microscope_scan.output_dir_from_configuration(configuration)
-        if isinstance(
-            planning_request,
-            (_MicroscopeDesignScanRequest, _MicroscopeAreaScanRequest),
-        ):
-            scale = planning_request.scale
-        else:
-            scale = self._active_microscope_scale()
+        scale = launch_snapshot.scale
         flat_field_options = getattr(
             configuration,
             "flat_field_options",
@@ -9983,6 +10093,7 @@ class Main(QMainWindow):
             plan = self._build_microscope_scan_plan(
                 planning_request,
                 (int(frame.width()), int(frame.height())),
+                launch_snapshot=launch_snapshot,
                 center_stage_xy=start_stage_xy,
             )
             self.microscope_scan_status.emit(microscope_scan.starting_status(plan))
@@ -10045,6 +10156,7 @@ class Main(QMainWindow):
                         captured_at=captured.captured_at,
                         output_dir=output_dir,
                         scale=scale,
+                        launch_snapshot=launch_snapshot,
                         corrections=corrections,
                         actual_stage_position=captured.actual_stage_position,
                     )
@@ -10083,6 +10195,7 @@ class Main(QMainWindow):
                                 group_plan,
                                 output_dir=output_dir,
                                 scale=stitch_scale,
+                                launch_snapshot=launch_snapshot,
                                 corrections=corrections,
                                 filename_suffix=group.name,
                                 extra={
@@ -10106,6 +10219,7 @@ class Main(QMainWindow):
                         plan,
                         output_dir=output_dir,
                         scale=stitch_scale,
+                        launch_snapshot=launch_snapshot,
                         corrections=corrections,
                     )
                 manifest_path = microscope_scan.write_manifest(
@@ -10390,26 +10504,26 @@ class Main(QMainWindow):
         captured_at: str,
         output_dir: Path,
         scale: Any,
+        launch_snapshot: _MicroscopeScanLaunchSnapshot,
         corrections: dict[str, object],
         actual_stage_position: tuple[float, ...] | None = None,
     ) -> MicroscopeCaptureResult:
-        objective_name, magnification = self._active_objective_metadata()
-        extra: dict[str, object] = {}
+        extra: dict[str, object] = {
+            "scan_launch": launch_snapshot.metadata(),
+        }
         if corrections:
             extra["corrections"] = corrections
         if actual_stage_position is not None:
             extra["actual_stage_position"] = [float(value) for value in actual_stage_position]
         save_plan = microscope_scan.tile_image_save_plan(
             output_dir=output_dir,
-            scan_name=microscope_scan.scan_name_from_document(
-                self._design_session.document
-            ),
+            scan_name=launch_snapshot.scan_name,
             tile=tile,
             plan=plan,
             captured_at=captured_at,
-            objective_name=objective_name,
-            magnification=magnification,
-            design_xy=self._design_xy_from_raw_stage_xy(tile.stage_xy),
+            objective_name=launch_snapshot.objective_name,
+            magnification=launch_snapshot.magnification,
+            design_xy=launch_snapshot.raw_stage_to_design(tile.stage_xy),
             stage_position=self._stage_position_for_image_metadata(
                 stage_xy=tile.stage_xy
             ),
@@ -10431,25 +10545,24 @@ class Main(QMainWindow):
         *,
         output_dir: Path,
         scale: Any,
+        launch_snapshot: _MicroscopeScanLaunchSnapshot,
         corrections: dict[str, object],
         filename_suffix: str = "",
         extra: dict[str, object] | None = None,
     ) -> MicroscopeCaptureResult:
-        objective_name, magnification = self._active_objective_metadata()
         metadata_extra: dict[str, object] = {}
         if corrections:
             metadata_extra["corrections"] = corrections
         if extra:
             metadata_extra.update(extra)
+        metadata_extra["scan_launch"] = launch_snapshot.metadata()
         save_plan = microscope_scan.mosaic_image_save_plan(
             output_dir=output_dir,
-            scan_name=microscope_scan.scan_name_from_document(
-                self._design_session.document
-            ),
+            scan_name=launch_snapshot.scan_name,
             plan=plan,
             captured_at=utc_timestamp(),
-            objective_name=objective_name,
-            magnification=magnification,
+            objective_name=launch_snapshot.objective_name,
+            magnification=launch_snapshot.magnification,
             filename_suffix=filename_suffix,
             extra=metadata_extra or None,
         )
