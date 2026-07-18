@@ -211,6 +211,53 @@ def test_manual_final_once_warning_includes_fixed_exposure_restore_failure() -> 
     assert rig.camera.state["ExposureAuto"] == "Off"
 
 
+def test_manual_final_once_runs_when_fixed_exposure_snapshot_read_fails() -> None:
+    rig = PolicyRig(auto_enabled=False, engine="software")
+    sessions = OpticalSessionManager(rig.controller)
+    lease = sessions.open("scan")
+    before_close = rig.software_once_calls
+    original_read = rig.controller._settings_read
+
+    def fail_exposure_snapshot(names):
+        if names == ["ExposureTime"]:
+            return {"accepted": False, "message": "snapshot read failed"}
+        return original_read(names)
+
+    rig.controller._settings_read = fail_exposure_snapshot
+
+    result = lease.close()
+
+    assert result["accepted"] is True
+    assert rig.software_once_calls == before_close + 1
+    assert "snapshot read failed" in result["warning"]
+    assert rig.camera.state["ExposureAuto"] == "Off"
+
+
+def test_manual_final_once_runs_when_fixed_exposure_value_is_none() -> None:
+    rig = PolicyRig(auto_enabled=False, engine="software")
+    sessions = OpticalSessionManager(rig.controller)
+    lease = sessions.open("scan")
+    before_close = rig.software_once_calls
+    original_read = rig.controller._settings_read
+
+    def none_exposure_snapshot(names):
+        if names == ["ExposureTime"]:
+            return {
+                "accepted": True,
+                "nodes": [{"name": "ExposureTime", "value": None}],
+            }
+        return original_read(names)
+
+    rig.controller._settings_read = none_exposure_snapshot
+
+    result = lease.close()
+
+    assert result["accepted"] is True
+    assert rig.software_once_calls == before_close + 1
+    assert "unavailable" in result["warning"].lower()
+    assert rig.camera.state["ExposureAuto"] == "Off"
+
+
 def test_outer_lease_cannot_close_before_nested_lease() -> None:
     rig = PolicyRig(auto_enabled=False, engine="software")
     sessions = OpticalSessionManager(rig.controller)

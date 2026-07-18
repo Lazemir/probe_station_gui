@@ -148,20 +148,31 @@ class ExposurePolicyController:
         with self._state_lock:
             if self._started:
                 return self._state_payload_locked()
-        result = self._run_exclusive(self._activate_configured_policy)
+        return self._run_exclusive(self._activate_and_publish_monitor)
+
+    def _activate_and_publish_monitor(self) -> dict[str, object]:
+        result = self._activate_configured_policy()
         with self._state_lock:
-            if not self._started:
-                self._started = True
-                self._stop_event.clear()
-                thread = threading.Thread(
-                    target=self._monitor_loop,
-                    name="camera-exposure-monitor",
-                    daemon=True,
-                )
-                self._monitor_thread = thread
-                thread.start()
+            if self._shutdown_requested:
+                raise ExposurePolicyError("Camera exposure policy is shutting down.")
+            self._started = True
+            self._stop_event.clear()
+            thread = threading.Thread(
+                target=self._monitor_loop,
+                name="camera-exposure-monitor",
+                daemon=True,
+            )
+            self._monitor_thread = thread
+        try:
+            thread.start()
+        except Exception:
+            self._stop_event.set()
+            with self._state_lock:
+                if self._monitor_thread is thread:
+                    self._monitor_thread = None
+                    self._started = False
+            raise
         self._wake_event.set()
-        self._emit_state()
         return result
 
     def shutdown(self, timeout_s: float = 2.0) -> None:
@@ -201,6 +212,15 @@ class ExposurePolicyController:
             if thread is not None and thread.is_alive():
                 raise ExposurePolicyError(
                     "Camera exposure shutdown did not stop the monitor thread."
+                )
+            if time.monotonic() > deadline:
+                raise ExposurePolicyError(
+                    "Camera exposure shutdown did not stop active camera work."
+                )
+            self._write_settings([("ExposureAuto", "Off")])
+            if time.monotonic() > deadline:
+                raise ExposurePolicyError(
+                    "Camera exposure shutdown did not stop active camera work."
                 )
             with self._state_lock:
                 self._monitor_thread = None
@@ -714,17 +734,18 @@ class OpticalSessionManager:
         try:
             nodes, _response = controller._read_nodes(("ExposureTime",))
             fixed_exposure = nodes["ExposureTime"].get("value")
+            if fixed_exposure is None:
+                errors.append("Fixed exposure snapshot is unavailable.")
         except Exception as exc:
             errors.append(f"Fixed exposure snapshot failed: {_error_text(exc)}")
 
-        if fixed_exposure is not None:
-            try:
-                if policy.engine is ExposureEngine.SOFTWARE:
-                    controller._software_once_result()
-                else:
-                    controller._hardware_once()
-            except Exception as exc:
-                errors.append(f"Final exposure Once failed: {_error_text(exc)}")
+        try:
+            if policy.engine is ExposureEngine.SOFTWARE:
+                controller._software_once_result()
+            else:
+                controller._hardware_once()
+        except Exception as exc:
+            errors.append(f"Final exposure Once failed: {_error_text(exc)}")
 
         try:
             controller._write_settings([("ExposureAuto", "Off")])

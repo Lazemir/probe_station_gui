@@ -398,6 +398,104 @@ def test_shutdown_state_callback_runs_after_controller_locks_are_released() -> N
     assert lock_checks[-1] == (True, True, True)
 
 
+def test_shutdown_cannot_complete_in_start_monitor_publication_gap() -> None:
+    rig = PolicyRig(auto_enabled=False, engine="software")
+    emit_entered = threading.Event()
+    release_emit = threading.Event()
+    original_emit = rig.controller._emit_state
+    start_errors: list[BaseException] = []
+
+    def block_starter_emit() -> None:
+        if threading.current_thread().name == "policy-starter":
+            emit_entered.set()
+            assert release_emit.wait(1.0)
+        original_emit()
+
+    rig.controller._emit_state = block_starter_emit
+
+    def start_policy() -> None:
+        try:
+            rig.controller.start()
+        except BaseException as exc:
+            start_errors.append(exc)
+
+    starter = threading.Thread(target=start_policy, name="policy-starter", daemon=True)
+    starter.start()
+    assert emit_entered.wait(1.0)
+
+    rig.controller.shutdown(timeout_s=1.0)
+    release_emit.set()
+    starter.join(1.0)
+
+    assert not starter.is_alive()
+    assert start_errors == []
+    assert rig.controller.snapshot()["shutdown_complete"] is True
+    assert rig.controller._monitor_thread is None
+
+
+def test_shutdown_final_off_wins_check_then_continuous_race() -> None:
+    rig = PolicyRig(auto_enabled=True, engine="camera")
+    rig.controller.start()
+    rig.clear_activity()
+    continuous_entered = threading.Event()
+    release_continuous = threading.Event()
+    original_write = rig.controller._settings_write
+    command_errors: list[BaseException] = []
+    shutdown_errors: list[BaseException] = []
+
+    def block_continuous(settings):
+        if (
+            settings == [("ExposureAuto", "Continuous")]
+            and threading.current_thread().name == "policy-once"
+        ):
+            continuous_entered.set()
+            assert release_continuous.wait(1.0)
+        return original_write(settings)
+
+    rig.controller._settings_write = block_continuous
+
+    def run_once() -> None:
+        try:
+            rig.controller.run_once()
+        except BaseException as exc:
+            command_errors.append(exc)
+
+    command = threading.Thread(target=run_once, name="policy-once", daemon=True)
+    command.start()
+    assert continuous_entered.wait(1.0)
+
+    def shutdown_policy() -> None:
+        try:
+            rig.controller.shutdown(timeout_s=1.0)
+        except BaseException as exc:
+            shutdown_errors.append(exc)
+
+    shutdown = threading.Thread(
+        target=shutdown_policy,
+        name="policy-shutdown",
+        daemon=True,
+    )
+    shutdown.start()
+    deadline = time.monotonic() + 1.0
+    while (
+        not rig.controller.snapshot()["shutdown_requested"]
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.001)
+    assert rig.controller.snapshot()["shutdown_requested"] is True
+
+    release_continuous.set()
+    command.join(1.0)
+    shutdown.join(1.0)
+
+    assert not command.is_alive()
+    assert not shutdown.is_alive()
+    assert command_errors == []
+    assert shutdown_errors == []
+    assert rig.controller.snapshot()["shutdown_complete"] is True
+    assert rig.camera.state["ExposureAuto"] == "Off"
+
+
 class PolicyRig:
     def __init__(
         self,
