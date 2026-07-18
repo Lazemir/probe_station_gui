@@ -696,6 +696,123 @@ class StageControllerAxisACalibrationTest(unittest.TestCase):
             controller.shutdown()
 
 
+class StageControllerLinearInterpolationCalibrationTest(unittest.TestCase):
+    def test_axis_z_calibration_interpolates_forward_and_inverse(self) -> None:
+        controller = StageController()
+        try:
+            controller.apply_axis_z_calibration(
+                AxisZCalibrationSettings(
+                    configured=True,
+                    model="linear_interpolation",
+                    interpolation_gcode_mm=[0.0, 1.0, 3.0],
+                    interpolation_display_mm=[0.0, 2.0, 5.0],
+                )
+            )
+
+            self.assertAlmostEqual(
+                controller.calibrated_axis_display_value("Z", 0.5),
+                1.0,
+            )
+            self.assertAlmostEqual(
+                controller.calibrated_axis_raw_value("Z", 3.5),
+                2.0,
+            )
+        finally:
+            controller.shutdown()
+
+    def test_axis_a_calibration_interpolates_forward_and_inverse(self) -> None:
+        controller = StageController()
+        try:
+            controller.apply_axis_a_calibration(
+                AxisACalibrationSettings(
+                    configured=True,
+                    model="linear_interpolation",
+                    interpolation_gcode_mm=[-3.0, -1.0, 0.0],
+                    interpolation_display_mm=[-5.0, -2.0, 0.0],
+                )
+            )
+
+            self.assertAlmostEqual(
+                controller.calibrated_axis_display_value("A", -2.0),
+                -3.5,
+            )
+            self.assertAlmostEqual(
+                controller.calibrated_axis_raw_value("A", -1.0),
+                -0.5,
+            )
+        finally:
+            controller.shutdown()
+
+    def test_interpolation_clamps_endpoints_and_round_trips_interior_values(
+        self,
+    ) -> None:
+        controller = StageController()
+        try:
+            curves = {
+                "A": AxisACalibrationSettings(
+                    configured=True,
+                    model="linear_interpolation",
+                    interpolation_gcode_mm=[-3.0, -1.0, 0.0],
+                    interpolation_display_mm=[-5.0, -2.0, 0.0],
+                ),
+                "Z": AxisZCalibrationSettings(
+                    configured=True,
+                    model="linear_interpolation",
+                    interpolation_gcode_mm=[0.0, 1.0, 3.0],
+                    interpolation_display_mm=[0.0, 2.0, 5.0],
+                ),
+            }
+            controller.apply_axis_a_calibration(curves["A"])
+            controller.apply_axis_z_calibration(curves["Z"])
+
+            for axis, raw_value in (("A", -2.25), ("Z", 1.75)):
+                with self.subTest(axis=axis, direction="forward"):
+                    display_value = controller.calibrated_axis_display_value(
+                        axis,
+                        raw_value,
+                    )
+                    self.assertAlmostEqual(
+                        controller.calibrated_axis_raw_value(axis, display_value),
+                        raw_value,
+                    )
+
+            self.assertEqual(controller.calibrated_axis_display_value("A", -4.0), -5.0)
+            self.assertEqual(controller.calibrated_axis_display_value("A", 1.0), 0.0)
+            self.assertEqual(controller.calibrated_axis_raw_value("A", -6.0), -3.0)
+            self.assertEqual(controller.calibrated_axis_raw_value("A", 1.0), 0.0)
+            self.assertEqual(controller.calibrated_axis_display_value("Z", -1.0), 0.0)
+            self.assertEqual(controller.calibrated_axis_display_value("Z", 4.0), 5.0)
+            self.assertEqual(controller.calibrated_axis_raw_value("Z", -1.0), 0.0)
+            self.assertEqual(controller.calibrated_axis_raw_value("Z", 6.0), 3.0)
+        finally:
+            controller.shutdown()
+
+    def test_invalid_interpolation_snapshots_disable_axis_calibration(self) -> None:
+        controller = StageController()
+        try:
+            controller.apply_axis_a_calibration(
+                AxisACalibrationSettings(
+                    configured=True,
+                    model="linear_interpolation",
+                    interpolation_gcode_mm=[-3.0, -1.0, 0.0],
+                    interpolation_display_mm=[-5.0, -2.0, -2.0],
+                )
+            )
+            controller.apply_axis_z_calibration(
+                AxisZCalibrationSettings(
+                    configured=True,
+                    model="linear_interpolation",
+                    interpolation_gcode_mm=[0.0, 3.0, 1.0],
+                    interpolation_display_mm=[0.0, 2.0, 5.0],
+                )
+            )
+
+            self.assertEqual(controller.calibrated_axis_display_value("A", -1.5), -1.5)
+            self.assertEqual(controller.calibrated_axis_display_value("Z", 0.5), 0.5)
+        finally:
+            controller.shutdown()
+
+
 class StageControllerAxisMotionFitTest(unittest.TestCase):
     CALIBRATIONS = Path(__file__).resolve().parents[2] / "calibrations"
 

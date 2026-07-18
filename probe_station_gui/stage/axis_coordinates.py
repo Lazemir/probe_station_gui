@@ -7,8 +7,42 @@ from typing import Optional
 
 from probe_station_gui.stage.axis_calibration import StageAxisCalibrationMapper
 from probe_station_gui.stage.axis_mapping import evaluate_polynomial
+from probe_station_gui.settings.axis_calibration_npz import (
+    LINEAR_INTERPOLATION_MODEL,
+)
 from probe_station_gui.stage.needle_targets import normalise_needle_lowering_target
 from probe_station_gui.stage.types import _Status
+
+
+def _linear_interpolation_values(calibration: object) -> dict[str, object] | None:
+    try:
+        gcode_points = tuple(
+            float(value) for value in getattr(calibration, "interpolation_gcode_mm")
+        )
+        display_points = tuple(
+            float(value) for value in getattr(calibration, "interpolation_display_mm")
+        )
+        steps_per_mm = float(getattr(calibration, "steps_per_mm"))
+    except (AttributeError, OverflowError, TypeError, ValueError):
+        return None
+    if (
+        not math.isfinite(steps_per_mm)
+        or steps_per_mm <= 0
+        or len(gcode_points) < 2
+        or len(gcode_points) != len(display_points)
+        or not all(math.isfinite(value) for value in (*gcode_points, *display_points))
+        or any(right <= left for left, right in zip(gcode_points, gcode_points[1:]))
+        or any(right <= left for left, right in zip(display_points, display_points[1:]))
+    ):
+        return None
+    return {
+        "model": LINEAR_INTERPOLATION_MODEL,
+        "steps_per_mm": steps_per_mm,
+        "min": gcode_points[0],
+        "max": gcode_points[-1],
+        "gcode_points": gcode_points,
+        "display_points": display_points,
+    }
 
 
 class StageControllerAxisCoordinatesMixin:
@@ -21,6 +55,9 @@ class StageControllerAxisCoordinatesMixin:
             self._axis_a_calibration = None
             return
         model = str(getattr(calibration, "model", "")).strip()
+        if model == LINEAR_INTERPOLATION_MODEL:
+            self._axis_a_calibration = _linear_interpolation_values(calibration)
+            return
         if model != "cosine_displacement":
             self._axis_a_calibration = None
             return
@@ -63,6 +100,9 @@ class StageControllerAxisCoordinatesMixin:
             self._axis_z_calibration = None
             return
         model = str(getattr(calibration, "model", "")).strip()
+        if model == LINEAR_INTERPOLATION_MODEL:
+            self._axis_z_calibration = _linear_interpolation_values(calibration)
+            return
         if model != "quintic_polynomial":
             self._axis_z_calibration = None
             return

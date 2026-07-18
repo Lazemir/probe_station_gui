@@ -3,10 +3,32 @@
 from __future__ import annotations
 
 import math
+from bisect import bisect_right
 from collections.abc import Mapping
+
+from probe_station_gui.settings.axis_calibration_npz import (
+    LINEAR_INTERPOLATION_MODEL,
+)
 
 
 AxisCalibration = Mapping[str, object] | None
+
+
+def interpolate_calibration_curve(
+    x_points: tuple[float, ...],
+    y_points: tuple[float, ...],
+    x_value: float,
+) -> float:
+    """Linearly interpolate a normalized calibration curve, clamping endpoints."""
+
+    if x_value <= x_points[0]:
+        return y_points[0]
+    if x_value >= x_points[-1]:
+        return y_points[-1]
+    upper = bisect_right(x_points, x_value)
+    lower = upper - 1
+    fraction = (x_value - x_points[lower]) / (x_points[upper] - x_points[lower])
+    return y_points[lower] + fraction * (y_points[upper] - y_points[lower])
 
 
 def axis_a_model_parameters(
@@ -50,6 +72,15 @@ def axis_a_calibrated_coordinate_for_gcode_coordinate(
     calibration: AxisCalibration,
     a_coordinate_mm: float,
 ) -> float:
+    if (
+        calibration is not None
+        and calibration.get("model") == LINEAR_INTERPOLATION_MODEL
+    ):
+        return interpolate_calibration_curve(
+            calibration["gcode_points"],
+            calibration["display_points"],
+            float(a_coordinate_mm),
+        )
     commanded_lowering = -float(a_coordinate_mm)
     if calibration is None:
         return float(a_coordinate_mm)
@@ -81,6 +112,15 @@ def axis_a_gcode_coordinate_for_calibrated_coordinate(
     calibration: AxisCalibration,
     calibrated_coordinate_mm: float,
 ) -> float:
+    if (
+        calibration is not None
+        and calibration.get("model") == LINEAR_INTERPOLATION_MODEL
+    ):
+        return interpolate_calibration_curve(
+            calibration["display_points"],
+            calibration["gcode_points"],
+            float(calibrated_coordinate_mm),
+        )
     commanded_lowering = axis_a_commanded_lowering_for_calibrated_coordinate(
         calibration,
         calibrated_coordinate_mm,
@@ -104,6 +144,12 @@ def axis_a_commanded_lowering_for_calibrated_coordinate(
 ) -> float:
     if calibration is None:
         return -float(calibrated_coordinate_mm)
+    if calibration.get("model") == LINEAR_INTERPOLATION_MODEL:
+        return -interpolate_calibration_curve(
+            calibration["display_points"],
+            calibration["gcode_points"],
+            float(calibrated_coordinate_mm),
+        )
     low = float(calibration["min"])
     high = float(calibration["max"])
     origin_value = axis_a_model_calibrated_coordinate_for_commanded(calibration, low)
@@ -147,6 +193,15 @@ def axis_z_display_for_gcode_coordinate(
     calibration: AxisCalibration,
     z_coordinate_mm: float,
 ) -> float:
+    if (
+        calibration is not None
+        and calibration.get("model") == LINEAR_INTERPOLATION_MODEL
+    ):
+        return interpolate_calibration_curve(
+            calibration["gcode_points"],
+            calibration["display_points"],
+            float(z_coordinate_mm),
+        )
     coefficients = axis_z_coefficients(calibration)
     if coefficients is None:
         return float(z_coordinate_mm)
@@ -157,6 +212,15 @@ def axis_z_gcode_coordinate_for_display(
     calibration: AxisCalibration,
     display_mm: float,
 ) -> float:
+    if (
+        calibration is not None
+        and calibration.get("model") == LINEAR_INTERPOLATION_MODEL
+    ):
+        return interpolate_calibration_curve(
+            calibration["display_points"],
+            calibration["gcode_points"],
+            float(display_mm),
+        )
     coefficients = axis_z_coefficients(calibration)
     if calibration is None or coefficients is None:
         return float(display_mm)

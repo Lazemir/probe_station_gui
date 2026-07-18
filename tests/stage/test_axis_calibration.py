@@ -5,12 +5,21 @@ import pytest
 from probe_station_gui.stage.axis_calibration import StageAxisCalibrationMapper
 from probe_station_gui.stage.axis_mapping import (
     axis_a_gcode_coordinate_for_lowering,
-    axis_a_lowering_for_gcode_coordinate,
     axis_z_display_for_gcode_coordinate,
+    interpolate_calibration_curve,
 )
 
 
 AXIS_INDEX = {"X": 0, "Y": 1, "Z": 2, "A": 3, "B": 4, "C": 5}
+
+
+def test_interpolate_calibration_curve_is_piecewise_linear_and_clamped() -> None:
+    x_points = (0.0, 1.0, 3.0)
+    y_points = (0.0, 2.0, 5.0)
+
+    assert interpolate_calibration_curve(x_points, y_points, 2.0) == pytest.approx(3.5)
+    assert interpolate_calibration_curve(x_points, y_points, -1.0) == 0.0
+    assert interpolate_calibration_curve(x_points, y_points, 4.0) == 5.0
 
 
 def _axis_a_calibration() -> dict[str, float | str]:

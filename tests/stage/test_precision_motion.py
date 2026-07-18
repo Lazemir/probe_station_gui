@@ -6,6 +6,7 @@ import pytest
 
 try:
     from .controller_test_support import (
+        AxisZCalibrationSettings,
         StageController,
         StageControllerError,
         _FakeSerial,
@@ -14,6 +15,7 @@ try:
     )
 except ImportError:
     from controller_test_support import (
+        AxisZCalibrationSettings,
         StageController,
         StageControllerError,
         _FakeSerial,
@@ -204,6 +206,33 @@ def test_calibrated_z_boundary_rejects_clamped_preparation_before_send() -> None
         "max": 10.0,
         "coefficients": (0.0, 0.0, 0.0, 0.0, 2.0, 1.0),
     }
+    controller.apply_precision_approach_configuration(
+        _settings(Z=PrecisionApproachProfile(True, 0.03, 1))
+    )
+    sent, _safety = _configure_fake_precision_runtime(controller, {"Z": 0.0})
+
+    with controller._serial_session():
+        with pytest.raises(StageControllerError, match="cannot be represented"):
+            controller._execute_precision_axis_targets_locked(
+                {"Z": 0.0},
+                feedrate=20.0,
+                allow_unhomed=False,
+            )
+
+    assert sent == []
+    controller.shutdown()
+
+
+def test_interpolated_z_boundary_rejects_clamped_preparation_before_send() -> None:
+    controller = StageController()
+    controller.apply_axis_z_calibration(
+        AxisZCalibrationSettings(
+            configured=True,
+            model="linear_interpolation",
+            interpolation_gcode_mm=[0.0, 1.0, 3.0],
+            interpolation_display_mm=[0.0, 2.0, 5.0],
+        )
+    )
     controller.apply_precision_approach_configuration(
         _settings(Z=PrecisionApproachProfile(True, 0.03, 1))
     )
