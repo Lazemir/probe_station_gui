@@ -412,9 +412,16 @@ def _preview_grid_roles(
         spacing * _PREVIEW_GRID_ZERO_TOLERANCE_FRACTION for spacing in spacings
     )
     roles: list[str | None] = []
+    signed_coordinates: list[tuple[int, int]] = []
     for x_value, y_value in displacements:
         x_zero = abs(float(x_value)) <= zero_tolerances[0]
         y_zero = abs(float(y_value)) <= zero_tolerances[1]
+        signed_coordinates.append(
+            (
+                0 if x_zero else (1 if x_value > 0.0 else -1),
+                0 if y_zero else (1 if y_value > 0.0 else -1),
+            )
+        )
         if x_zero and y_zero:
             roles.append(None)
         elif not x_zero and y_zero:
@@ -424,8 +431,19 @@ def _preview_grid_roles(
         else:
             roles.append("diagonal")
 
-    if roles.count(None) != 1 or any(
-        roles.count(role) != count for role, count in _PREVIEW_ROLE_COUNTS.items()
+    expected_coordinates = {
+        (x_sign, y_sign)
+        for x_sign in (-1, 0, 1)
+        for y_sign in (-1, 0, 1)
+    }
+    if (
+        roles.count(None) != 1
+        or any(
+            roles.count(role) != count
+            for role, count in _PREVIEW_ROLE_COUNTS.items()
+        )
+        or len(signed_coordinates) != len(expected_coordinates)
+        or set(signed_coordinates) != expected_coordinates
     ):
         raise GeometryAlignmentPreviewError(
             "Preview captures must form a complete 3x3 grid."

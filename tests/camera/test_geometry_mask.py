@@ -1136,6 +1136,28 @@ def test_geometry_alignment_previews_require_a_complete_3x3_grid() -> None:
         build_geometry_alignment_previews(*_identity_preview_args(frames, masks))
 
 
+def test_geometry_alignment_previews_reject_role_counts_without_signed_grid() -> None:
+    malformed_offsets = (
+        (0.0, 0.0),
+        (4.0, 0.0),
+        (8.0, 0.0),
+        (0.0, 4.0),
+        (0.0, 8.0),
+        (4.0, 4.0),
+        (4.0, 8.0),
+        (8.0, 4.0),
+        (8.0, 8.0),
+    )
+    frames = tuple(
+        GridCalibrationFrame(frame=None, stage_offset_mm=offset)
+        for offset in malformed_offsets
+    )
+    masks = _preview_landmark_masks(frames)
+
+    with pytest.raises(GeometryAlignmentPreviewError, match="complete 3x3"):
+        build_geometry_alignment_previews(*_identity_preview_args(frames, masks))
+
+
 def test_geometry_alignment_previews_ignore_disagreement_outside_shared_footprint() -> None:
     frames = _nine_preview_frames()
     masks = list(_preview_landmark_masks(frames, frame_size=(40, 32)))
