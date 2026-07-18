@@ -6,6 +6,9 @@ import math
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
+from probe_station_gui.settings.axis_calibration_npz import (
+    LINEAR_INTERPOLATION_MODEL,
+)
 from probe_station_gui.settings.value_parsing import coerce_bool as _coerce_bool
 from probe_station_gui.settings.value_parsing import coerce_float as _coerce_float
 
@@ -16,6 +19,10 @@ class AxisACalibrationConfig:
 
     configured: bool = False
     model: str = "cosine_displacement"
+    calibration_file: str = ""
+    interpolation_gcode_mm: list[float] = field(default_factory=list)
+    interpolation_display_mm: list[float] = field(default_factory=list)
+    interpolation_direction: int | None = None
     steps_per_mm: float = 2600.0
     commanded_lowering_min_mm: float = 0.0
     commanded_lowering_max_mm: float = 5.5
@@ -25,7 +32,7 @@ class AxisACalibrationConfig:
     phase_rad: float = 0.9304927419233507
     fit_rmse_mm: float = 0.03390421874833405
     fit_max_abs_error_mm: float = 0.044862806662900656
-    source: str = "calibrations/axis_a_spm2600_pulloff0p25_forward_reverse_settle1p0_20260504.png"
+    source: str = ""
     created_at: str = "2026-05-06T00:00:00+03:00"
 
 
@@ -35,6 +42,10 @@ class AxisZCalibrationConfig:
 
     configured: bool = False
     model: str = "quintic_polynomial"
+    calibration_file: str = ""
+    interpolation_gcode_mm: list[float] = field(default_factory=list)
+    interpolation_display_mm: list[float] = field(default_factory=list)
+    interpolation_direction: int | None = None
     steps_per_mm: float = 6335.0
     gcode_min_mm: float = 0.02
     gcode_max_mm: float = 23.4
@@ -52,7 +63,7 @@ class AxisZCalibrationConfig:
     fit_max_abs_error_mm: float = 0.020464954405667868
     section2_indicator_offset_mm: float = 8.661368914604154
     section3_indicator_offset_mm: float = 13.56547962940159
-    source: str = "calibrations/axis_z_spm6335_full_hysteresis_precise_s1_s2_s3_honest_stitches_20260505.png"
+    source: str = ""
     created_at: str = "2026-05-06T00:00:00+03:00"
 
 
@@ -65,10 +76,13 @@ class AxisACalibrationSettings(AxisACalibrationConfig):
 
         return AxisACalibrationSettings(**self.to_dict())
 
-    def to_dict(self) -> dict[str, bool | float | str]:
+    def to_dict(self) -> dict[str, object]:
         """Serialize the A-axis calibration model."""
 
-        return dict(self.__dict__)
+        data = dict(self.__dict__)
+        data["interpolation_gcode_mm"] = list(self.interpolation_gcode_mm)
+        data["interpolation_display_mm"] = list(self.interpolation_display_mm)
+        return data
 
 
 @dataclass
@@ -80,11 +94,13 @@ class AxisZCalibrationSettings(AxisZCalibrationConfig):
 
         return AxisZCalibrationSettings(**self.to_dict())
 
-    def to_dict(self) -> dict[str, bool | float | str | list[float]]:
+    def to_dict(self) -> dict[str, object]:
         """Serialize the Z-axis calibration model."""
 
         data = dict(self.__dict__)
         data["coefficients_mm"] = list(self.coefficients_mm)
+        data["interpolation_gcode_mm"] = list(self.interpolation_gcode_mm)
+        data["interpolation_display_mm"] = list(self.interpolation_display_mm)
         return data
 
 
@@ -103,8 +119,19 @@ def parse_axis_a_calibration(
         raw_calibration.get("model", defaults.model),
         default=defaults.model,
     )
-    if model != expected_model:
+    if model not in {expected_model, LINEAR_INTERPOLATION_MODEL}:
         model = expected_model
+
+    interpolation_gcode_mm, interpolation_display_mm = _interpolation_points(
+        raw_calibration.get(
+            "interpolation_gcode_mm",
+            defaults.interpolation_gcode_mm,
+        ),
+        raw_calibration.get(
+            "interpolation_display_mm",
+            defaults.interpolation_display_mm,
+        ),
+    )
 
     calibration = AxisACalibrationConfig(
         configured=_coerce_bool(
@@ -112,6 +139,18 @@ def parse_axis_a_calibration(
             default=defaults.configured,
         ),
         model=model,
+        calibration_file=_strip_string(
+            raw_calibration.get("calibration_file", defaults.calibration_file),
+            default=defaults.calibration_file,
+        ),
+        interpolation_gcode_mm=interpolation_gcode_mm,
+        interpolation_display_mm=interpolation_display_mm,
+        interpolation_direction=_interpolation_direction(
+            raw_calibration.get(
+                "interpolation_direction",
+                defaults.interpolation_direction,
+            )
+        ),
         steps_per_mm=_coerce_float(
             raw_calibration.get("steps_per_mm", defaults.steps_per_mm),
             default=defaults.steps_per_mm,
@@ -164,7 +203,7 @@ def parse_axis_a_calibration(
             ),
             default=defaults.fit_max_abs_error_mm,
         ),
-        source=_strip_string(
+        source=_normalized_source(
             raw_calibration.get("source", defaults.source),
             default=defaults.source,
         ),
@@ -173,7 +212,10 @@ def parse_axis_a_calibration(
             default=defaults.created_at,
         ),
     )
-    if (
+    if calibration.model == LINEAR_INTERPOLATION_MODEL:
+        if len(calibration.interpolation_gcode_mm) < 2:
+            calibration.configured = False
+    elif (
         calibration.steps_per_mm <= 0
         or calibration.commanded_lowering_max_mm
         <= calibration.commanded_lowering_min_mm
@@ -197,8 +239,19 @@ def parse_axis_z_calibration(
         raw_calibration.get("model", defaults.model),
         default=defaults.model,
     )
-    if model != defaults.model:
+    if model not in {defaults.model, LINEAR_INTERPOLATION_MODEL}:
         model = defaults.model
+
+    interpolation_gcode_mm, interpolation_display_mm = _interpolation_points(
+        raw_calibration.get(
+            "interpolation_gcode_mm",
+            defaults.interpolation_gcode_mm,
+        ),
+        raw_calibration.get(
+            "interpolation_display_mm",
+            defaults.interpolation_display_mm,
+        ),
+    )
 
     calibration = AxisZCalibrationConfig(
         configured=_coerce_bool(
@@ -206,6 +259,18 @@ def parse_axis_z_calibration(
             default=defaults.configured,
         ),
         model=model,
+        calibration_file=_strip_string(
+            raw_calibration.get("calibration_file", defaults.calibration_file),
+            default=defaults.calibration_file,
+        ),
+        interpolation_gcode_mm=interpolation_gcode_mm,
+        interpolation_display_mm=interpolation_display_mm,
+        interpolation_direction=_interpolation_direction(
+            raw_calibration.get(
+                "interpolation_direction",
+                defaults.interpolation_direction,
+            )
+        ),
         steps_per_mm=_coerce_float(
             raw_calibration.get("steps_per_mm", defaults.steps_per_mm),
             default=defaults.steps_per_mm,
@@ -247,7 +312,7 @@ def parse_axis_z_calibration(
             ),
             default=defaults.section3_indicator_offset_mm,
         ),
-        source=_strip_string(
+        source=_normalized_source(
             raw_calibration.get("source", defaults.source),
             default=defaults.source,
         ),
@@ -256,7 +321,10 @@ def parse_axis_z_calibration(
             default=defaults.created_at,
         ),
     )
-    if (
+    if calibration.model == LINEAR_INTERPOLATION_MODEL:
+        if len(calibration.interpolation_gcode_mm) < 2:
+            calibration.configured = False
+    elif (
         calibration.steps_per_mm <= 0
         or calibration.gcode_max_mm <= calibration.gcode_min_mm
     ):
@@ -281,13 +349,55 @@ def _coefficients(raw_values: object, *, fallback: list[float]) -> list[float]:
     return values
 
 
+def _interpolation_points(
+    raw_gcode: object,
+    raw_display: object,
+) -> tuple[list[float], list[float]]:
+    gcode = _finite_float_list(raw_gcode)
+    display = _finite_float_list(raw_display)
+    if (
+        len(gcode) < 2
+        or len(gcode) != len(display)
+        or any(right <= left for left, right in zip(gcode, gcode[1:]))
+        or any(right <= left for left, right in zip(display, display[1:]))
+    ):
+        return [], []
+    return gcode, display
+
+
+def _finite_float_list(raw_values: object) -> list[float]:
+    if not isinstance(raw_values, Iterable) or isinstance(raw_values, (str, bytes)):
+        return []
+    values: list[float] = []
+    for raw_value in raw_values:
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            return []
+        if not math.isfinite(value):
+            return []
+        values.append(value)
+    return values
+
+
+def _interpolation_direction(raw_direction: object) -> int | None:
+    if isinstance(raw_direction, bool) or raw_direction not in (-1, 1):
+        return None
+    return int(raw_direction)
+
+
 def _clone_axis_a(defaults: AxisACalibrationConfig) -> AxisACalibrationConfig:
-    return AxisACalibrationConfig(**defaults.__dict__)
+    data = dict(defaults.__dict__)
+    data["interpolation_gcode_mm"] = list(defaults.interpolation_gcode_mm)
+    data["interpolation_display_mm"] = list(defaults.interpolation_display_mm)
+    return AxisACalibrationConfig(**data)
 
 
 def _clone_axis_z(defaults: AxisZCalibrationConfig) -> AxisZCalibrationConfig:
     data = dict(defaults.__dict__)
     data["coefficients_mm"] = list(defaults.coefficients_mm)
+    data["interpolation_gcode_mm"] = list(defaults.interpolation_gcode_mm)
+    data["interpolation_display_mm"] = list(defaults.interpolation_display_mm)
     return AxisZCalibrationConfig(**data)
 
 
@@ -295,3 +405,8 @@ def _strip_string(value: object, *, default: str) -> str:
     if isinstance(value, str):
         return value.strip()
     return default
+
+
+def _normalized_source(value: object, *, default: str) -> str:
+    source = _strip_string(value, default=default)
+    return "" if source.lower().endswith(".png") else source
