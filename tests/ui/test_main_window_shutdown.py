@@ -77,6 +77,16 @@ def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
         _microscope_scan_stop_requested=SimpleNamespace(
             set=lambda: events.append(("scan_stop_requested",))
         ),
+        _exposure_policy_adapter=SimpleNamespace(
+            shutdown=lambda **kwargs: events.append(
+                ("exposure_adapter_shutdown", kwargs)
+            )
+        ),
+        _exposure_policy_controller=SimpleNamespace(
+            shutdown=lambda **kwargs: events.append(
+                ("exposure_controller_shutdown", kwargs)
+            )
+        ),
         grabber=SimpleNamespace(stop=lambda: events.append(("grabber_stop",))),
         _live_camera_frame_processor=SimpleNamespace(
             shutdown=lambda **kwargs: events.append(("frame_processor_shutdown", kwargs))
@@ -143,6 +153,8 @@ def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
         ("scan_thread", "join", 2.0),
         ("stop_jog", "application shutdown", True),
         ("force_jog_stop", {"timeout": 0.8}),
+        ("exposure_adapter_shutdown", {"timeout_s": 2.0}),
+        ("exposure_controller_shutdown", {"timeout_s": 2.0}),
         ("frame_processor_shutdown", {"timeout_s": 2.0}),
         ("grabber_stop",),
         ("camera_thread_quit",),
@@ -157,6 +169,82 @@ def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
         ("route_close",),
         ("serial_panel_shutdown",),
         ("event_accept",),
+    ]
+
+
+def test_exposure_shutdown_timeout_blocks_camera_teardown_and_close(
+    monkeypatch,
+) -> None:
+    events: list[object] = []
+    monkeypatch.setattr(
+        shutdown_ui,
+        "_persist_shutdown_state",
+        lambda *_args, **_kwargs: events.append(("persist",)),
+    )
+    monkeypatch.setattr(
+        shutdown_ui,
+        "_stop_services_and_timers",
+        lambda _owner: events.append(("services",)),
+    )
+    monkeypatch.setattr(
+        shutdown_ui,
+        "_stop_route_worker",
+        lambda _owner: events.append(("route",)),
+    )
+    monkeypatch.setattr(
+        shutdown_ui,
+        "_stop_microscope_scan",
+        lambda _owner: events.append(("scan",)),
+    )
+
+    def fail_adapter_shutdown(**kwargs) -> None:
+        events.append(("exposure_adapter_shutdown", kwargs))
+        raise RuntimeError("Camera exposure adapter did not stop active command.")
+
+    owner = SimpleNamespace(
+        serial_connection=SimpleNamespace(is_open=False),
+        lcr_controller=SimpleNamespace(is_connected=lambda: False),
+        _exposure_policy_adapter=SimpleNamespace(shutdown=fail_adapter_shutdown),
+        _exposure_policy_controller=SimpleNamespace(
+            shutdown=lambda **kwargs: events.append(
+                ("exposure_controller_shutdown", kwargs)
+            )
+        ),
+        _live_camera_frame_processor=SimpleNamespace(
+            shutdown=lambda **kwargs: events.append(("frame_processor_shutdown", kwargs))
+        ),
+        grabber=SimpleNamespace(stop=lambda: events.append(("grabber_stop",))),
+        thread=SimpleNamespace(
+            quit=lambda: events.append(("camera_thread_quit",)),
+            wait=lambda: events.append(("camera_thread_wait",)),
+        ),
+        joystick_panel=None,
+        stage_controller=SimpleNamespace(force_jog_stop=lambda **_kwargs: None),
+        serial_terminal_panel=None,
+        serial_connection_panel=None,
+        _show_status=lambda message, timeout: events.append(
+            ("status", message, timeout)
+        ),
+    )
+    event = SimpleNamespace(
+        accept=lambda: events.append(("event_accept",)),
+        ignore=lambda: events.append(("event_ignore",)),
+    )
+
+    shutdown_ui.close_event(owner, event)
+
+    assert events == [
+        ("persist",),
+        ("services",),
+        ("route",),
+        ("scan",),
+        ("exposure_adapter_shutdown", {"timeout_s": 2.0}),
+        (
+            "status",
+            "Camera shutdown blocked: Camera exposure adapter did not stop active command.",
+            10000,
+        ),
+        ("event_ignore",),
     ]
 
 

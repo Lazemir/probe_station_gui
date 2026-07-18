@@ -755,7 +755,14 @@ class CameraSettingsWidget(QWidget):
         self._set_status(f"Writing {len(pending_items)} camera settings.")
         for (map_key, node_name), value in pending_items:
             self._applying_settings[(map_key, node_name)] = value
-            self._grabber.request_camera_setting_update(map_key, node_name, value)
+            if (
+                map_key == "camera"
+                and node_name == "ExposureTime"
+                and self._exposure_policy_source is not None
+            ):
+                self._exposure_policy_source.request_exposure_time(float(value))
+            else:
+                self._grabber.request_camera_setting_update(map_key, node_name, value)
         return True
 
     def _update_pages_for_node(self, map_key: str, node: NodePayload) -> None:
@@ -847,8 +854,43 @@ class CameraSettingsWidget(QWidget):
     def _on_exposure_policy_command_finished(self, result: object) -> None:
         if not isinstance(result, Mapping):
             return
+        if result.get("operation") == "manual_exposure_write":
+            self._on_exposure_time_write_finished(result)
+            return
         if not bool(result.get("accepted", False)):
             self._set_status(str(result.get("message") or "Camera exposure failed."))
+            self._apply_exposure_policy_state(self._exposure_policy_snapshot())
+
+    def _on_exposure_time_write_finished(
+        self,
+        result: Mapping[str, object],
+    ) -> None:
+        nodes = result.get("nodes")
+        node = (
+            next(
+                (
+                    item
+                    for item in nodes
+                    if isinstance(item, dict)
+                    and str(item.get("name") or "") == "ExposureTime"
+                ),
+                None,
+            )
+            if isinstance(nodes, list)
+            else None
+        )
+        self._on_setting_changed(
+            {
+                "ok": bool(result.get("accepted", False)),
+                "message": str(
+                    result.get("message") or "Camera exposure time updated."
+                ),
+                "map_key": "camera",
+                "node_name": "ExposureTime",
+                "node": node,
+            }
+        )
+        if not bool(result.get("accepted", False)):
             self._apply_exposure_policy_state(self._exposure_policy_snapshot())
 
     def _apply_exposure_policy_state(self, state: Mapping[str, object]) -> None:

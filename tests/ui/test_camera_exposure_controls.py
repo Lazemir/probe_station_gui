@@ -58,7 +58,7 @@ def test_optical_session_disables_entire_exposure_block(
     widget.deleteLater()
 
 
-def test_exposure_time_is_only_manual_and_uses_the_worker(
+def test_exposure_time_is_only_manual_and_uses_the_policy_adapter(
     app: QApplication,
     source: _ExposurePolicySource,
 ) -> None:
@@ -94,22 +94,9 @@ def test_exposure_time_is_only_manual_and_uses_the_worker(
     assert widget._exposure_time_edit.isEnabled() is True
     widget._exposure_time_edit.setText("2200.5")
     widget._exposure_time_edit.editingFinished.emit()
-    assert source.grabber.setting_updates[-1] == ("camera", "ExposureTime", 2200.5)
-    source.grabber.camera_setting_changed.emit(
-        {
-            "ok": True,
-            "message": "Camera setting updated.",
-            "map_key": "camera",
-            "node_name": "ExposureTime",
-            "node": {
-                "name": "ExposureTime",
-                "type": "float",
-                "value": 2201.0,
-                "available": True,
-                "writable": True,
-            },
-        }
-    )
+    assert source.exposure_time_requests == [2200.5]
+    assert source.grabber.setting_updates == []
+    source.finish_exposure_time(2201.0)
     assert widget._exposure_time_edit.text() == "2201.0"
 
     source.set_state(auto_enabled=True, engine="software")
@@ -129,16 +116,12 @@ def test_exposure_time_latest_pending_write_replaces_stale_completion(
     widget._exposure_time_edit.setText("2300.0")
     widget._exposure_time_edit.editingFinished.emit()
 
-    assert source.grabber.setting_updates == [("camera", "ExposureTime", 2200.0)]
-    source.grabber.camera_setting_changed.emit(
-        _exposure_time_changed_payload(2200.0)
-    )
+    assert source.exposure_time_requests == [2200.0]
+    assert source.grabber.setting_updates == []
+    source.finish_exposure_time(2200.0)
 
     assert widget._exposure_time_edit.text() == "2300.0"
-    assert source.grabber.setting_updates == [
-        ("camera", "ExposureTime", 2200.0),
-        ("camera", "ExposureTime", 2300.0),
-    ]
+    assert source.exposure_time_requests == [2200.0, 2300.0]
     widget.deleteLater()
 
 
@@ -221,6 +204,7 @@ class _ExposurePolicySource(QObject):
         self.grabber = _Grabber()
         self.updates: list[tuple[bool, str]] = []
         self.once_calls = 0
+        self.exposure_time_requests: list[float] = []
         self._state: dict[str, object] = {
             "auto_enabled": True,
             "engine": "software",
@@ -237,6 +221,20 @@ class _ExposurePolicySource(QObject):
 
     def request_once(self) -> None:
         self.once_calls += 1
+
+    def request_exposure_time(self, value: float) -> None:
+        self.exposure_time_requests.append(float(value))
+
+    def finish_exposure_time(self, value: float) -> None:
+        payload = _exposure_time_changed_payload(value)
+        self.command_finished.emit(
+            {
+                "accepted": True,
+                "operation": "manual_exposure_write",
+                "message": payload["message"],
+                "nodes": [payload["node"]],
+            }
+        )
 
     def set_state(self, **updates: object) -> None:
         self._state.update(updates)

@@ -34,12 +34,15 @@ class MainWindowShutdownOwner(Protocol):
     _microscope_scan_thread: Any
     _microscope_scan_stop_requested: Any
     _live_camera_frame_processor: Any
+    _exposure_policy_adapter: Any
+    _exposure_policy_controller: Any
     _route_measurement_dialog: Any
 
     def _stop_telegram_bot_service(self) -> None: ...
     def _save_pending_linear_feedrate_default(self) -> None: ...
     def _stop_design_markup_store(self) -> None: ...
     def _route_runtime_presenter(self) -> Any: ...
+    def _show_status(self, message: str, timeout: int) -> None: ...
 
 
 def close_event(owner: MainWindowShutdownOwner, event: Any) -> None:
@@ -55,7 +58,13 @@ def close_event(owner: MainWindowShutdownOwner, event: Any) -> None:
     _stop_services_and_timers(owner)
     _stop_route_worker(owner)
     _stop_microscope_scan(owner)
-    _close_serial_and_panels(owner)
+    try:
+        _close_serial_and_panels(owner)
+    except Exception as exc:
+        logger.exception("Camera shutdown blocked before worker teardown")
+        owner._show_status(f"Camera shutdown blocked: {exc}", 10000)
+        event.ignore()
+        return
     _shutdown_controllers(owner)
     close_auxiliary_windows(owner, force_route_dialog=True)
     if owner.serial_connection_panel:
@@ -110,6 +119,8 @@ def _stop_microscope_scan(owner: MainWindowShutdownOwner) -> None:
 
 def _close_serial_and_panels(owner: MainWindowShutdownOwner) -> None:
     stop_jog_before_serial_close(owner, "application shutdown")
+    owner._exposure_policy_adapter.shutdown(timeout_s=2.0)
+    owner._exposure_policy_controller.shutdown(timeout_s=2.0)
     owner._live_camera_frame_processor.shutdown(timeout_s=2.0)
     owner.grabber.stop()
     owner.thread.quit()

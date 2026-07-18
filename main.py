@@ -149,6 +149,11 @@ from probe_station_gui.camera.auto_exposure import (
     CameraAutoExposureController,
     auto_exposure_config_from_mapping,
 )
+from probe_station_gui.camera.exposure_policy import (
+    ExposurePolicyController,
+    OpticalSessionManager,
+)
+from probe_station_gui.camera.exposure_policy_qt import ExposurePolicyQtAdapter
 from probe_station_gui.camera.live_correction import (
     LatestFrameProcessor,
     LiveCameraCorrectionPipeline,
@@ -737,6 +742,7 @@ class Main(QMainWindow):
         self._latest_camera_frame_counter = 0
         self._latest_raw_camera_frame: QImage | None = None
         self._latest_raw_camera_frame_counter = 0
+        self._exposure_policy_start_requested = False
         self._latest_camera_frame_condition = threading.Condition()
         self._latest_camera_frame_for_notifications: QImage | None = None
         self._live_camera_correction_pipeline = LiveCameraCorrectionPipeline(
@@ -845,6 +851,7 @@ class Main(QMainWindow):
             settings_write=self._write_camera_auto_exposure_settings,
             frame_read=self._read_camera_auto_exposure_frame,
         )
+        self._compose_camera_exposure_policy()
         self.grabber.camera_settings_snapshot_ready.connect(
             self._camera_api_broker.complete
         )
@@ -1044,6 +1051,28 @@ class Main(QMainWindow):
         if message:
             self._show_status(message, 5000)
 
+    def _compose_camera_exposure_policy(self) -> None:
+        self._exposure_policy_controller = ExposurePolicyController(
+            initial_policy=self.settings_manager.exposure_policy_configuration(),
+            software_once=self._camera_auto_exposure_controller.run,
+            settings_read=self._camera_api_broker.read_settings,
+            settings_write=self._camera_api_broker.write_settings_trusted,
+            frame_read=self._read_camera_auto_exposure_frame,
+            persist=self.settings_manager.set_exposure_policy_configuration,
+        )
+        self._optical_session_manager = OpticalSessionManager(
+            self._exposure_policy_controller
+        )
+        self._exposure_policy_adapter = ExposurePolicyQtAdapter(
+            self._exposure_policy_controller,
+            settings_write=self._camera_api_broker.write_settings_trusted,
+        )
+        self._camera_api_broker.set_manual_exposure_write(
+            lambda command: self._exposure_policy_controller.run_manual_exposure_write(
+                command
+            )
+        )
+
     def _configure_api_server_from_settings(self, *, start_if_enabled: bool) -> None:
         api_settings = self.settings_manager.api_configuration()
         signature = (
@@ -1069,6 +1098,13 @@ class Main(QMainWindow):
             camera_settings_read_callback=self._camera_api_broker.read_settings,
             camera_settings_write_callback=self._camera_api_broker.write_settings,
             camera_frame_callback=self._api_camera_frame,
+            camera_exposure_policy_snapshot_callback=(
+                self._exposure_policy_controller.snapshot
+            ),
+            camera_exposure_policy_set_callback=(
+                self._exposure_policy_controller.set_policy
+            ),
+            camera_exposure_once_callback=self._exposure_policy_controller.run_once,
             host=api_settings.host,
             port=api_settings.port,
         )
@@ -1108,12 +1144,7 @@ class Main(QMainWindow):
         self,
         settings: list[tuple[str, object]],
     ) -> dict[str, Any]:
-        return self._camera_api_broker.write_settings(
-            [
-                {"name": name, "value": value}
-                for name, value in settings
-            ]
-        )
+        return self._camera_api_broker.write_settings_trusted(settings)
 
     def _read_camera_auto_exposure_frame(
         self,
@@ -3639,6 +3670,14 @@ class Main(QMainWindow):
             )
             sequence = int(self._latest_raw_camera_frame_counter)
             self._latest_camera_frame_condition.notify_all()
+        exposure_adapter = getattr(self, "_exposure_policy_adapter", None)
+        if (
+            not qimg.isNull()
+            and exposure_adapter is not None
+            and not getattr(self, "_exposure_policy_start_requested", False)
+        ):
+            self._exposure_policy_start_requested = True
+            exposure_adapter.request_start()
         objective = self.settings_manager.active_objective_configuration()
         request = LiveCameraCorrectionRequest(
             sequence=sequence,

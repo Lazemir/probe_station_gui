@@ -52,6 +52,53 @@ def test_adapter_dispatches_policy_commands_from_a_worker_and_rejects_busy() -> 
     assert any(result.get("accepted") is True for result in finished)
 
 
+def test_adapter_starts_controller_from_a_worker() -> None:
+    app = _app()
+    controller = _StartController()
+    adapter = ExposurePolicyQtAdapter(controller)
+    finished: list[dict[str, object]] = []
+    adapter.command_finished.connect(finished.append)
+
+    gui_thread = threading.get_ident()
+    adapter.request_start()
+    assert controller.started.wait(1.0)
+    controller.release.set()
+    _wait_until(app, lambda: len(finished) == 1)
+
+    assert controller.start_thread != gui_thread
+    assert controller.start_calls == 1
+    assert finished[0]["accepted"] is True
+    adapter.shutdown()
+
+
+def test_adapter_routes_exposure_time_through_atomic_controller_write() -> None:
+    app = _app()
+    controller = _ManualWriteController()
+    trusted_writes: list[list[tuple[str, object]]] = []
+
+    def settings_write(settings) -> dict[str, object]:
+        trusted_writes.append(list(settings))
+        return {
+            "accepted": True,
+            "nodes": [{"name": "ExposureTime", "value": 2200.5}],
+        }
+
+    adapter = ExposurePolicyQtAdapter(controller, settings_write=settings_write)
+    finished: list[dict[str, object]] = []
+    adapter.command_finished.connect(finished.append)
+
+    gui_thread = threading.get_ident()
+    adapter.request_exposure_time(2200.5)
+    _wait_until(app, lambda: len(finished) == 1)
+
+    assert controller.manual_write_threads != [gui_thread]
+    assert controller.manual_write_calls == 1
+    assert trusted_writes == [[("ExposureTime", 2200.5)]]
+    assert finished[0]["operation"] == "manual_exposure_write"
+    assert finished[0]["accepted"] is True
+    adapter.shutdown()
+
+
 def test_adapter_shutdown_joins_active_command_and_suppresses_late_signals() -> None:
     app = _app()
     controller = _BlockingController()
@@ -225,3 +272,29 @@ class _BlockingController:
     def run_once(self) -> dict[str, object]:
         self.once_calls += 1
         return {"accepted": True}
+
+
+class _StartController(_BlockingController):
+    def __init__(self) -> None:
+        super().__init__()
+        self.start_calls = 0
+        self.start_thread = 0
+
+    def start(self) -> dict[str, object]:
+        self.start_calls += 1
+        self.start_thread = threading.get_ident()
+        self.started.set()
+        assert self.release.wait(1.0)
+        return {"accepted": True}
+
+
+class _ManualWriteController(_BlockingController):
+    def __init__(self) -> None:
+        super().__init__()
+        self.manual_write_calls = 0
+        self.manual_write_threads: list[int] = []
+
+    def run_manual_exposure_write(self, command) -> dict[str, object]:
+        self.manual_write_calls += 1
+        self.manual_write_threads.append(threading.get_ident())
+        return dict(command())

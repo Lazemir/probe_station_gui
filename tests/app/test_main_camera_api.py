@@ -13,13 +13,110 @@ restore_real_imports_for_main()
 
 from main import Main
 from probe_station_gui.camera.auto_exposure import AutoExposureBusyError
+from probe_station_gui.settings.sections import ExposurePolicySettings
 
 
-def test_api_server_setup_does_not_pass_removed_auto_exposure_callback(
+class _CameraBroker:
+    def __init__(self) -> None:
+        self.manual_exposure_write = None
+        self.trusted_writes: list[list[tuple[str, object]]] = []
+
+    def read_settings(self, _names=None) -> dict[str, object]:
+        return {"accepted": True, "nodes": []}
+
+    def write_settings(self, _settings) -> dict[str, object]:
+        raise AssertionError("controller-owned writes must not use the public path")
+
+    def write_settings_trusted(self, settings) -> dict[str, object]:
+        self.trusted_writes.append(list(settings))
+        return {"accepted": True, "nodes": []}
+
+    def set_manual_exposure_write(self, callback) -> None:
+        self.manual_exposure_write = callback
+
+
+def _compose_policy_window(
+    *,
+    auto_enabled: bool = True,
+    engine: str = "software",
+):
+    saved: list[object] = []
+    window = Main.__new__(Main)
+    window.settings_manager = SimpleNamespace(
+        exposure_policy_configuration=lambda: ExposurePolicySettings(
+            auto_enabled=auto_enabled,
+            engine=engine,
+        ),
+        set_exposure_policy_configuration=saved.append,
+    )
+    window._camera_api_broker = _CameraBroker()
+    window._camera_auto_exposure_controller = SimpleNamespace(
+        run=lambda _config=None: {"accepted": True, "converged": True}
+    )
+    window._read_camera_auto_exposure_frame = lambda _counter, _timeout: None
+    Main._compose_camera_exposure_policy(window)
+    return window, saved
+
+
+def _shutdown_policy_window(window) -> None:
+    window._exposure_policy_adapter.shutdown()
+    window._exposure_policy_controller.shutdown()
+
+
+def test_main_composes_policy_from_persisted_settings() -> None:
+    window, _saved = _compose_policy_window()
+    try:
+        state = window._exposure_policy_controller.snapshot()
+
+        assert state["engine"] == "software"
+        assert state["auto_enabled"] is True
+        assert window._optical_session_manager._controller is (
+            window._exposure_policy_controller
+        )
+        assert window._exposure_policy_adapter._controller is (
+            window._exposure_policy_controller
+        )
+    finally:
+        _shutdown_policy_window(window)
+
+
+def test_main_policy_persists_and_public_exposure_write_uses_controller_guard() -> None:
+    window, saved = _compose_policy_window(auto_enabled=False)
+    try:
+        window._exposure_policy_controller.set_policy(
+            auto_enabled=False,
+            engine="camera",
+        )
+        result = window._camera_api_broker.manual_exposure_write(
+            lambda: {"accepted": True, "nodes": []}
+        )
+
+        assert saved[-1].auto_enabled is False
+        assert saved[-1].engine.value == "camera"
+        assert result["accepted"] is True
+    finally:
+        _shutdown_policy_window(window)
+
+
+def test_controller_owned_camera_writes_use_trusted_broker_path() -> None:
+    window = Main.__new__(Main)
+    broker = _CameraBroker()
+    window._camera_api_broker = broker
+
+    result = Main._write_camera_auto_exposure_settings(
+        window,
+        [("ExposureAuto", "Off"), ("ExposureTime", 1800.0)],
+    )
+
+    assert result["accepted"] is True
+    assert broker.trusted_writes == [
+        [("ExposureAuto", "Off"), ("ExposureTime", 1800.0)]
+    ]
+
+
+def test_api_server_setup_passes_exposure_policy_controller_callbacks(
     monkeypatch,
 ) -> None:
-    import main as main_module
-
     created: list[dict[str, object]] = []
 
     class FakeServer:
@@ -44,13 +141,26 @@ def test_api_server_setup_does_not_pass_removed_auto_exposure_callback(
         read_settings=lambda _names=None: {},
         write_settings=lambda _settings: {},
     )
+    policy = SimpleNamespace(
+        snapshot=lambda: {"auto_enabled": True, "engine": "software"},
+        set_policy=lambda **_policy: {"accepted": True},
+        run_once=lambda: {"accepted": True},
+    )
+    window._exposure_policy_controller = policy
     window._api_camera_frame = lambda _space, _counter, _timeout: {}
-    monkeypatch.setattr(main_module, "ProbeStationApiServer", FakeServer)
+    monkeypatch.setitem(
+        Main._configure_api_server_from_settings.__globals__,
+        "ProbeStationApiServer",
+        FakeServer,
+    )
 
     Main._configure_api_server_from_settings(window, start_if_enabled=False)
 
     assert len(created) == 1
     assert "camera_auto_exposure_callback" not in created[0]
+    assert created[0]["camera_exposure_policy_snapshot_callback"] is policy.snapshot
+    assert created[0]["camera_exposure_policy_set_callback"] is policy.set_policy
+    assert created[0]["camera_exposure_once_callback"] is policy.run_once
 
 
 def test_camera_api_frame_selects_raw_and_corrected_storage() -> None:
@@ -70,6 +180,38 @@ def test_camera_api_frame_selects_raw_and_corrected_storage() -> None:
     assert corrected["counter"] == 13
     assert raw_image.pixelColor(0, 0) == QColor("red")
     assert corrected_image.pixelColor(0, 0) == QColor("blue")
+
+
+def test_exposure_policy_starts_once_after_first_real_raw_frame() -> None:
+    class StartAdapter:
+        def __init__(self) -> None:
+            self.start_requests = 0
+
+        def request_start(self) -> None:
+            self.start_requests += 1
+
+    window = Main.__new__(Main)
+    window._latest_camera_frame_condition = threading.Condition()
+    window._latest_raw_camera_frame = None
+    window._latest_raw_camera_frame_counter = 0
+    window._exposure_policy_start_requested = False
+    window._exposure_policy_adapter = StartAdapter()
+    window.settings_manager = SimpleNamespace(
+        active_objective_configuration=lambda: SimpleNamespace(
+            name="",
+            distortion_correction_configured=False,
+            distortion_correction={},
+        )
+    )
+    window._suppress_next_camera_ui_gap = False
+    window._live_camera_frame_processor = SimpleNamespace(submit=lambda _request: True)
+
+    Main._on_camera_frame(window, QImage())
+    Main._on_camera_frame(window, _solid_image("red"))
+    Main._on_camera_frame(window, _solid_image("blue"))
+
+    assert window._exposure_policy_adapter.start_requests == 1
+    assert window._latest_raw_camera_frame_counter == 3
 
 
 def test_camera_api_submitters_forward_request_ids_and_order() -> None:
