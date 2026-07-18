@@ -1162,9 +1162,31 @@ def test_geometry_alignment_previews_ignore_disagreement_outside_shared_footprin
     frames = _nine_preview_frames()
     masks = list(_preview_landmark_masks(frames, frame_size=(40, 32)))
     masks[5][16, 0] = True
+    matrix = np.array(((1.0, 0.0), (0.0, -1.0)))
 
-    values = _render_preview_rgb(frames, tuple(masks))
+    before, after = build_geometry_alignment_previews(
+        frames,
+        tuple(masks),
+        matrix,
+        _preview_payload(
+            frame_size=(40, 32),
+            pixels_to_mm=matrix,
+            center_px=(20.0, 16.0),
+            k1=-0.05,
+        ),
+    )
+    values = _preview_rgb_array(before)
     row = int(np.rint(16.0 + 16.0))
     column = 12
 
     assert int(values[row, column].max() - values[row, column].min()) == 0
+    fitted_values = _preview_rgb_array(after)
+    transformed_column = 13
+    assert fitted_values[row, transformed_column].max() > 0
+    assert (
+        int(
+            fitted_values[row, transformed_column].max()
+            - fitted_values[row, transformed_column].min()
+        )
+        == 0
+    )

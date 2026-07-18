@@ -981,6 +981,61 @@ def test_lens_distortion_validation_allows_high_finite_baseline_metrics() -> Non
     Main._validate_lens_distortion_fit_payload(payload)
 
 
+@pytest.mark.parametrize(
+    "field",
+    (
+        "baseline_residual_mean_px",
+        "baseline_residual_max_px",
+        "residual_mean_px",
+        "residual_max_px",
+    ),
+)
+def test_lens_distortion_validation_rejects_negative_residual_metrics(
+    field: str,
+) -> None:
+    payload = _stage_geometry_payload(**{field: -0.01})
+
+    with pytest.raises(RuntimeError, match=field):
+        Main._validate_lens_distortion_fit_payload(payload)
+
+
+def test_negative_baseline_metric_does_not_save_or_report_wizard_success() -> None:
+    context = main_module._OpticalCalibrationRunContext(
+        operation_id="negative-baseline",
+        wizard_run_id=52,
+        objective_name="X20",
+    )
+    payload = _stage_geometry_payload(baseline_residual_mean_px=-0.01)
+    window = Main.__new__(Main)
+    saved: list[object] = []
+    wizard_calls: list[tuple[object, ...]] = []
+    window._lens_distortion_context = context
+    window._lens_distortion_thread = _DeadThread()
+    window._lens_distortion_dialog = None
+    window._optical_calibration_context_is_current = (
+        lambda kind, candidate: kind == "lens" and candidate is context
+    )
+    window._save_objective_distortion = lambda *args: saved.append(args)
+    window._optical_calibration_wizard = SimpleNamespace(
+        set_lens_distortion_result=lambda *args, **kwargs: wizard_calls.append(
+            (*args, kwargs)
+        )
+    )
+    window._show_status = lambda *_args: None
+
+    Main._on_lens_distortion_calibration_finished(
+        window,
+        context,
+        True,
+        "done",
+        _lens_output(payload),
+    )
+
+    assert saved == []
+    assert wizard_calls[0][0] is False
+    assert wizard_calls[0][-1] == {"run_id": 52}
+
+
 def test_fit_lens_distortion_output_requires_click_calibration() -> None:
     frames = [
         main_module.GridCalibrationFrame(_FakeFrame(), (0.0, 0.0)),

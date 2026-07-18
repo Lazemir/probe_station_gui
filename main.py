@@ -5322,6 +5322,10 @@ class Main(QMainWindow):
                 raise RuntimeError(
                     f"Lens distortion calibration {field} is not finite."
                 )
+            if residual < 0.0:
+                raise RuntimeError(
+                    f"Lens distortion calibration {field} is negative."
+                )
             residuals[field] = residual
         residual_mean_px = residuals["residual_mean_px"]
         residual_max_px = residuals["residual_max_px"]

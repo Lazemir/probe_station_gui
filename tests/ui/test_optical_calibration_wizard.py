@@ -103,12 +103,13 @@ def test_full_mode_runs_flat_field_then_lens_distortion(
     assert lens_spy.count() == 1
     assert wizard.currentId() == wizard.LENS_DISTORTION_PAGE_ID
 
-    wizard.set_lens_distortion_result(
-        True,
-        "Lens correction saved.",
+    _complete_lens_capture(
+        wizard,
+        qt_app,
         run_id=wizard.active_run_id(),
+        before=_preview(QColor("red")),
+        after=_preview(QColor("green")),
     )
-    qt_app.processEvents()
     assert wizard.currentId() == wizard.RESULT_PAGE_ID
     assert wizard.button(QWizard.FinishButton).isEnabled()
 
@@ -149,13 +150,15 @@ def test_individual_mode_skips_the_other_capture(
     if mode is OpticalCalibrationMode.FLAT_FIELD:
         wizard.set_flat_field_result(True, "saved", run_id=wizard.active_run_id())
     else:
-        wizard.set_lens_distortion_result(
-            True,
-            "saved",
+        _complete_lens_capture(
+            wizard,
+            qt_app,
             run_id=wizard.active_run_id(),
+            before=_preview(QColor("red")),
+            after=_preview(QColor("green")),
         )
-    qt_app.processEvents()
 
+    qt_app.processEvents()
     assert wizard.currentId() == wizard.RESULT_PAGE_ID
     wizard.close()
 
@@ -242,8 +245,13 @@ def test_stale_or_duplicate_completion_does_not_unlock_capture(
     assert wizard.active_run_id() == lens_run_id
     assert wizard.currentId() == wizard.LENS_DISTORTION_PAGE_ID
 
-    wizard.set_lens_distortion_result(True, "saved", run_id=lens_run_id)
-    qt_app.processEvents()
+    _complete_lens_capture(
+        wizard,
+        qt_app,
+        run_id=lens_run_id,
+        before=_preview(QColor("red")),
+        after=_preview(QColor("green")),
+    )
     assert wizard.currentId() == wizard.RESULT_PAGE_ID
     wizard.set_lens_distortion_result(False, "duplicate", run_id=lens_run_id)
     assert wizard.currentId() == wizard.RESULT_PAGE_ID
@@ -357,6 +365,54 @@ def test_lens_result_requires_both_finite_metric_pairs_for_previews(
     wizard.close()
 
 
+@pytest.mark.parametrize(
+    "invalid_result",
+    (
+        {"before_preview": QImage()},
+        {"after_preview": None},
+        {"without_calibration_metrics": None},
+        {"with_calibration_metrics": (float("nan"), 6.41)},
+    ),
+    ids=(
+        "null-before-preview",
+        "missing-after-preview",
+        "missing-without-metrics",
+        "nonfinite-with-metrics",
+    ),
+)
+def test_invalid_lens_result_does_not_complete_active_capture(
+    qt_app: QApplication,
+    invalid_result: dict[str, object],
+) -> None:
+    wizard = OpticalCalibrationWizard()
+    run_id = _start_lens_capture(wizard, qt_app)
+    result = wizard._result_page
+    result_args: dict[str, object] = {
+        "before_preview": _preview(QColor("red")),
+        "after_preview": _preview(QColor("green")),
+        "without_calibration_metrics": (2.56, 5.00),
+        "with_calibration_metrics": (2.42, 6.41),
+    }
+    result_args.update(invalid_result)
+
+    with pytest.raises(ValueError):
+        wizard.set_lens_distortion_result(
+            True,
+            "Lens correction saved.",
+            run_id=run_id,
+            **result_args,
+        )
+
+    qt_app.processEvents()
+    assert wizard.currentId() == wizard.LENS_DISTORTION_PAGE_ID
+    assert wizard.is_running()
+    assert wizard.active_run_id() == run_id
+    assert wizard.LENS_DISTORTION_PAGE_ID not in wizard._completed_pages
+    assert result._comparison_container.isHidden()
+    wizard.set_lens_distortion_result(False, "stopped", run_id=run_id)
+    wizard.close()
+
+
 @pytest.mark.parametrize("metric_index", (0, 1), ids=("mean", "max"))
 @pytest.mark.parametrize("metric_pair", ("without", "with"))
 @pytest.mark.parametrize(
@@ -418,6 +474,28 @@ def test_lens_result_formats_signed_zero_preview_metrics_without_minus_sign(
     wizard.close()
 
 
+def test_lens_result_uses_compact_metrics_without_widening_layout(
+    qt_app: QApplication,
+) -> None:
+    wizard = OpticalCalibrationWizard()
+    result = wizard._result_page
+
+    result.set_lens_result(
+        "Lens correction saved.",
+        before_preview=_preview(QColor("red")),
+        after_preview=_preview(QColor("green")),
+        without_calibration_metrics=(1e300, 1e300),
+        with_calibration_metrics=(2.42, 6.41),
+    )
+
+    qt_app.processEvents()
+    assert result._without_metrics.text() == (
+        "1.00e+300 px mean \u00b7 1.00e+300 px max"
+    )
+    assert result._without_metrics.minimumSizeHint().width() < 500
+    wizard.close()
+
+
 def test_lens_result_displays_three_rgb_seam_pictograms(
     qt_app: QApplication,
 ) -> None:
@@ -437,6 +515,16 @@ def test_lens_result_displays_three_rgb_seam_pictograms(
         "Horizontal seams: center compared with left and right.",
         "Vertical seams: center compared with top and bottom.",
         "Corner seams: center compared with four corners.",
+    ]
+    assert [icon.accessibleName() for icon in result._seam_legend_icons] == [
+        "Horizontal seams",
+        "Vertical seams",
+        "Corner seams",
+    ]
+    assert [icon.accessibleDescription() for icon in result._seam_legend_icons] == [
+        "Center compared with left and right.",
+        "Center compared with top and bottom.",
+        "Center compared with four corners.",
     ]
     assert not [
         label

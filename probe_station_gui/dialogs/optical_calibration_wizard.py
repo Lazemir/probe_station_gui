@@ -34,6 +34,8 @@ class _SeamLegendIcon(QWidget):
         highlighted_cells: tuple[tuple[int, int], ...],
         color: QColor,
         tooltip: str,
+        accessible_name: str,
+        accessible_description: str,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -41,6 +43,8 @@ class _SeamLegendIcon(QWidget):
         self._color = QColor(color)
         self.setFixedSize(28, 28)
         self.setToolTip(tooltip)
+        self.setAccessibleName(accessible_name)
+        self.setAccessibleDescription(accessible_description)
 
     def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802 - Qt virtual method
         del event
@@ -63,6 +67,9 @@ class _SeamLegendIcon(QWidget):
                 )
 
 
+_COMPACT_METRIC_THRESHOLD_PX = 1_000_000.0
+
+
 def _format_residual_metrics(metrics: tuple[float, float]) -> str:
     mean_px, max_px = metrics
     if not all(math.isfinite(value) and value >= 0.0 for value in metrics):
@@ -71,7 +78,16 @@ def _format_residual_metrics(metrics: tuple[float, float]) -> str:
         )
     mean_px = 0.0 if mean_px == 0.0 else mean_px
     max_px = 0.0 if max_px == 0.0 else max_px
-    return f"{mean_px:.2f} px mean · {max_px:.2f} px max"
+    return (
+        f"{_format_residual_metric(mean_px)} px mean · "
+        f"{_format_residual_metric(max_px)} px max"
+    )
+
+
+def _format_residual_metric(value: float) -> str:
+    if value >= _COMPACT_METRIC_THRESHOLD_PX:
+        return f"{value:.2e}"
+    return f"{value:.2f}"
 
 
 class OpticalCalibrationMode(str, Enum):
@@ -242,18 +258,24 @@ class _ResultPage(QWizardPage):
                 ((1, 0), (1, 2)),
                 QColor(255, 63, 72),
                 "Horizontal seams: center compared with left and right.",
+                "Horizontal seams",
+                "Center compared with left and right.",
                 self._comparison_container,
             ),
             _SeamLegendIcon(
                 ((0, 1), (2, 1)),
                 QColor(45, 219, 104),
                 "Vertical seams: center compared with top and bottom.",
+                "Vertical seams",
+                "Center compared with top and bottom.",
                 self._comparison_container,
             ),
             _SeamLegendIcon(
                 ((0, 0), (0, 2), (2, 0), (2, 2)),
                 QColor(67, 132, 255),
                 "Corner seams: center compared with four corners.",
+                "Corner seams",
+                "Center compared with four corners.",
                 self._comparison_container,
             ),
         ]
@@ -286,37 +308,66 @@ class _ResultPage(QWizardPage):
         without_calibration_metrics: tuple[float, float] | None = None,
         with_calibration_metrics: tuple[float, float] | None = None,
     ) -> None:
-        self._lens_label.setText(str(message or "Complete"))
         if (
             before_preview is None
-            or after_preview is None
-            or before_preview.isNull()
-            or after_preview.isNull()
+            and after_preview is None
+            and without_calibration_metrics is None
+            and with_calibration_metrics is None
         ):
+            self._lens_label.setText(str(message or "Complete"))
             self.clear_lens_previews()
             return
-        if (
-            without_calibration_metrics is None
-            or with_calibration_metrics is None
-        ):
-            self.clear_lens_previews()
-            raise ValueError(
-                "Lens calibration preview metrics must be finite and non-negative."
-            )
         try:
-            without_metrics_text = _format_residual_metrics(
-                without_calibration_metrics
+            without_metrics_text, with_metrics_text = (
+                self.validate_lens_preview_result(
+                    before_preview=before_preview,
+                    after_preview=after_preview,
+                    without_calibration_metrics=without_calibration_metrics,
+                    with_calibration_metrics=with_calibration_metrics,
+                )
             )
-            with_metrics_text = _format_residual_metrics(with_calibration_metrics)
-        except (TypeError, ValueError):
+        except ValueError:
             self.clear_lens_previews()
             raise
+        self._lens_label.setText(str(message or "Complete"))
         self._before_preview_source = before_preview.copy()
         self._after_preview_source = after_preview.copy()
         self._without_metrics.setText(without_metrics_text)
         self._with_metrics.setText(with_metrics_text)
         self._comparison_container.show()
         self._refresh_preview_pixmaps()
+
+    @staticmethod
+    def validate_lens_preview_result(
+        *,
+        before_preview: QImage | None,
+        after_preview: QImage | None,
+        without_calibration_metrics: tuple[float, float] | None,
+        with_calibration_metrics: tuple[float, float] | None,
+    ) -> tuple[str, str]:
+        if (
+            not isinstance(before_preview, QImage)
+            or before_preview.isNull()
+            or not isinstance(after_preview, QImage)
+            or after_preview.isNull()
+        ):
+            raise ValueError("Lens calibration preview images are invalid.")
+        if (
+            without_calibration_metrics is None
+            or with_calibration_metrics is None
+        ):
+            raise ValueError(
+                "Lens calibration preview metrics must be finite and non-negative."
+            )
+        try:
+            return (
+                _format_residual_metrics(without_calibration_metrics),
+                _format_residual_metrics(with_calibration_metrics),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "Lens calibration preview metrics must be finite and non-negative."
+            ) from exc
 
     def clear_lens_previews(self) -> None:
         self._before_preview_source = None
@@ -501,6 +552,13 @@ class OpticalCalibrationWizard(QWizard):
         without_calibration_metrics: tuple[float, float] | None = None,
         with_calibration_metrics: tuple[float, float] | None = None,
     ) -> None:
+        if success:
+            _ResultPage.validate_lens_preview_result(
+                before_preview=before_preview,
+                after_preview=after_preview,
+                without_calibration_metrics=without_calibration_metrics,
+                with_calibration_metrics=with_calibration_metrics,
+            )
         accepted = self._set_capture_result(
             self.LENS_DISTORTION_PAGE_ID,
             self._lens_page,
