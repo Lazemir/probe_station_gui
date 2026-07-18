@@ -130,6 +130,14 @@ def test_import_wraps_malformed_numeric_arrays(tmp_path) -> None:
         load_axis_calibration_npz(path, axis="Z", final_direction=1)
 
 
+def test_import_wraps_corrupted_zip_archive(tmp_path) -> None:
+    path = tmp_path / "corrupted.npz"
+    path.write_bytes(b"PK\x03\x04" + bytes(26))
+
+    with pytest.raises(AxisCalibrationImportError, match="could not be read"):
+        load_axis_calibration_npz(path, axis="Z", final_direction=1)
+
+
 def test_import_rejects_curve_reduced_to_one_display_point(tmp_path) -> None:
     path = tmp_path / "flat.npz"
     np.savez(path, gcode=[0.0, 1.0, 2.0], indicator=[1.0, 1.0, 1.0])

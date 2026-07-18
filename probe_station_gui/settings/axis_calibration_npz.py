@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from zipfile import BadZipFile
 
 import numpy as np
 
@@ -45,7 +46,7 @@ def load_axis_calibration_npz(
         )
     except AxisCalibrationImportError:
         raise
-    except (EOFError, OSError, TypeError, ValueError) as error:
+    except (BadZipFile, EOFError, OSError, TypeError, ValueError) as error:
         raise AxisCalibrationImportError(
             f"Calibration file '{calibration_path}' could not be read."
         ) from error
@@ -104,7 +105,7 @@ def _load_axis_calibration_npz(
     indicator = np.asarray(
         [
             np.median(indicator[start : start + count])
-            for start, count in zip(group_starts, group_counts, strict=True)
+            for start, count in zip(group_starts, group_counts)
         ]
     )
     gcode = unique_gcode
@@ -114,11 +115,7 @@ def _load_axis_calibration_npz(
     gcode = np.asarray(
         [
             np.median(gcode[start:end])
-            for start, end in zip(
-                plateau_starts,
-                plateau_ends,
-                strict=True,
-            )
+            for start, end in zip(plateau_starts, plateau_ends)
         ]
     )
     display = display[plateau_starts]

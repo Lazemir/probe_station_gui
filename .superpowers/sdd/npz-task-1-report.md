@@ -118,3 +118,29 @@ tracked files.
   settings parsing.
 - Runtime interpolation consumption and direction-compatibility GUI behavior
   remain intentionally deferred to Tasks 2 and 3.
+
+## Review follow-up
+
+Two Important findings were addressed in a separate follow-up:
+
+- Added a real truncated-ZIP regression. Before the fix,
+  `load_axis_calibration_npz` leaked `zipfile.BadZipFile: File is not a zip
+  file`; the importer now translates `BadZipFile` into the same
+  operator-facing `AxisCalibrationImportError` used for other malformed
+  calibration files.
+- Removed both `zip(..., strict=True)` calls while preserving the already
+  validated equal-length iteration logic, keeping the importer compatible
+  with the project's Python 3.9 minimum.
+
+Fresh review-fix verification:
+
+```text
+C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/settings/test_axis_calibration_npz.py tests/settings/test_axis_calibration_config.py tests/settings/test_default_file.py -q
+37 passed in 0.31s
+
+C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m ruff check probe_station_gui/settings/axis_calibration_npz.py tests/settings/test_axis_calibration_npz.py
+All checks passed!
+
+C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m ruff format --check probe_station_gui/settings/axis_calibration_npz.py tests/settings/test_axis_calibration_npz.py
+2 files already formatted
+```
