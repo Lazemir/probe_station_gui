@@ -113,19 +113,35 @@ class StageControllerClickMoveMixin:
                 raise StageControllerError(
                     "Stage is busy. Wait for the current operation to finish."
                 )
-            with self._serial_session():
-                status = self._query_current_status_with_required_coordinates(
-                    axes=("X", "Y"),
-                )
-                if status is None or status.display_position is None:
-                    raise StageControllerError("Unable to read stage position.")
-                self._ensure_calibration()
+            if self._click_calibration_required():
+                with self._open_optical_session("click-to-move calibration"):
+                    status = self._resolve_clicked_point_status_locked()
+            else:
+                status = self._resolve_clicked_point_status_locked()
         if self._pixels_to_mm is None:
             raise StageControllerError("Calibration failed. Cannot resolve clicked position.")
         return self._resolve_xy_from_center(
             tuple(float(value) for value in status.display_position),
             dx_pixels,
             dy_pixels,
+        )
+
+    def _resolve_clicked_point_status_locked(self) -> object:
+        """Read stage position and ensure click calibration while task-locked."""
+
+        with self._serial_session():
+            status = self._query_current_status_with_required_coordinates(
+                axes=("X", "Y"),
+            )
+            if status is None or status.display_position is None:
+                raise StageControllerError("Unable to read stage position.")
+            self._ensure_calibration()
+        return status
+
+    def _click_calibration_required(self) -> bool:
+        return self._pixels_to_mm is None or not self._objective_calibration_verified.get(
+            self._active_objective_name,
+            False,
         )
 
     def preview_clicked_point_xy(
@@ -157,32 +173,48 @@ class StageControllerClickMoveMixin:
         self.status_message.emit(reason)
 
     def _run_move(self, dx_pixels: float, dy_pixels: float) -> None:
-        self.movement_started.emit()
         try:
-            self._check_cancelled()
-            with self._serial_session():
-                self._move_safety_check()
-                before_counter = self._prepare_click_move_without_status_locked(
+            if self._click_calibration_required():
+                with self._open_optical_session("click-to-move calibration"):
+                    self.movement_started.emit()
+                    success, message = self._execute_click_move(
+                        dx_pixels,
+                        dy_pixels,
+                    )
+            else:
+                self.movement_started.emit()
+                success, message = self._execute_click_move(
                     dx_pixels,
                     dy_pixels,
                 )
-            if before_counter is None:
-                self.movement_finished.emit(True, "Target already centered.")
-                return
-            after_frame, _ = self._wait_for_new_frame(before_counter, timeout=4.0)
-            if after_frame is None:
-                self.movement_finished.emit(
-                    False,
-                    "Movement command sent but camera did not provide an updated frame.",
-                )
-                return
-
-            self.movement_finished.emit(True, "Move complete.")
+            self.movement_finished.emit(success, message)
         except StageControllerError as exc:
             self.movement_finished.emit(False, str(exc))
         finally:
             with self._task_lock:
                 setattr(self, "_active_thread", None)
+
+    def _execute_click_move(
+        self,
+        dx_pixels: float,
+        dy_pixels: float,
+    ) -> tuple[bool, str]:
+        self._check_cancelled()
+        with self._serial_session():
+            self._move_safety_check()
+            before_counter = self._prepare_click_move_without_status_locked(
+                dx_pixels,
+                dy_pixels,
+            )
+        if before_counter is None:
+            return (True, "Target already centered.")
+        after_frame, _ = self._wait_for_new_frame(before_counter, timeout=4.0)
+        if after_frame is None:
+            return (
+                False,
+                "Movement command sent but camera did not provide an updated frame.",
+            )
+        return (True, "Move complete.")
 
     def _run_move_to_xy(self, target_x_mm: float, target_y_mm: float) -> None:
         self.movement_started.emit()

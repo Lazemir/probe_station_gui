@@ -41,6 +41,19 @@ except ImportError:
     )
 
 
+class _PassthroughOpticalLease:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> bool:
+        return False
+
+
+class _PassthroughOpticalSessionManager:
+    def open(self, _operation, parent_token=None):
+        return _PassthroughOpticalLease()
+
+
 class StageControllerOpticalSessionDependencyTest(unittest.TestCase):
     def test_stores_explicit_optical_session_manager(self) -> None:
         controller = StageController()
@@ -748,6 +761,9 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
         controller = StageController()
         controller._serial = _FakeSerial()
         controller._pixels_to_mm = _stage_controller_module.np.eye(2) * 0.1
+        controller._objective_calibration_verified[
+            controller._active_objective_name
+        ] = True
         controller._move_safety_check = lambda: None
         controller._ensure_calibration = lambda target_pixels=None: (
             False,
@@ -964,6 +980,7 @@ class StageControllerAutofocusTest(unittest.TestCase):
 
     def test_autofocus_holds_serial_lock_and_refreshes_work_offsets(self) -> None:
         controller = StageController()
+        controller.set_optical_session_manager(_PassthroughOpticalSessionManager())
         lock = _TrackingLock()
         controller._serial_session_lock = lock
         serial_connection = _LockedLineFakeSerial(
@@ -1133,6 +1150,7 @@ class StageControllerAutofocusTest(unittest.TestCase):
 
     def test_external_local_autofocus_uses_static_refinement_window(self) -> None:
         controller = StageController()
+        controller.set_optical_session_manager(_PassthroughOpticalSessionManager())
         serial_connection = _FakeSerial()
         controller._serial = serial_connection
         calls: list[tuple[object, ...]] = []
@@ -1188,6 +1206,7 @@ class StageControllerAutofocusTest(unittest.TestCase):
 
     def test_external_local_autofocus_cancel_restores_start_z(self) -> None:
         controller = StageController()
+        controller.set_optical_session_manager(_PassthroughOpticalSessionManager())
         serial_connection = _WritableFakeSerial()
         controller._serial = serial_connection
         current_z = [10.025]

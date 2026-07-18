@@ -5,8 +5,9 @@ from __future__ import annotations
 import logging
 import math
 import importlib
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from collections import deque
+from contextlib import contextmanager
 from queue import PriorityQueue
 import re
 import threading
@@ -16,6 +17,7 @@ from typing import Callable, Optional
 import serial
 from PySide6.QtCore import QObject, Signal
 
+from probe_station_gui.camera.exposure_policy import ExposurePolicyError
 from probe_station_gui.stage.autofocus_flow import StageControllerAutofocusMixin
 from probe_station_gui.stage.click_move import StageControllerClickMoveMixin
 from probe_station_gui.stage.axis_coordinates import StageControllerAxisCoordinatesMixin
@@ -314,6 +316,28 @@ class StageController(
         if manager is None or not callable(getattr(manager, "open", None)):
             raise TypeError("Optical session manager must provide open().")
         self._optical_session_manager = manager
+
+    @contextmanager
+    def _open_optical_session(
+        self,
+        operation: str,
+        *,
+        parent_token: str | None = None,
+    ) -> Iterator[object]:
+        """Open one policy-owned fixed-exposure session for stage optical work."""
+
+        manager = getattr(self, "_optical_session_manager", None)
+        if manager is None:
+            raise StageControllerError(
+                f"Optical session manager is unavailable for {operation}."
+            )
+        try:
+            with manager.open(operation, parent_token=parent_token) as lease:
+                yield lease
+        except ExposurePolicyError as exc:
+            raise StageControllerError(
+                f"Unable to use the {operation} optical session: {exc}"
+            ) from exc
 
     # Jog stop confirmation is handled in the joystick layer to avoid serial contention.
     def shutdown(self) -> None:
