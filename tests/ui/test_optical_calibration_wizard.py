@@ -10,7 +10,7 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtTest import QSignalSpy
-from PySide6.QtWidgets import QApplication, QWizard
+from PySide6.QtWidgets import QApplication, QLabel, QWizard
 
 from probe_station_gui.dialogs.optical_calibration_wizard import (
     OpticalCalibrationMode,
@@ -59,6 +59,8 @@ def _complete_lens_capture(
     run_id: int,
     before: QImage,
     after: QImage,
+    without_calibration_metrics: tuple[float, float] = (2.56, 5.00),
+    with_calibration_metrics: tuple[float, float] = (2.42, 6.41),
 ) -> None:
     wizard.set_lens_distortion_result(
         True,
@@ -66,6 +68,8 @@ def _complete_lens_capture(
         run_id=run_id,
         before_preview=before,
         after_preview=after,
+        without_calibration_metrics=without_calibration_metrics,
+        with_calibration_metrics=with_calibration_metrics,
     )
     qt_app.processEvents()
     assert wizard.currentId() == wizard.RESULT_PAGE_ID
@@ -313,6 +317,10 @@ def test_lens_result_displays_copied_previews_in_equal_bounds(
 
     result = wizard._result_page
     assert result._comparison_container.isVisible()
+    assert result._without_heading.text() == "Without calibration"
+    assert result._with_heading.text() == "With calibration"
+    assert result._without_metrics.text() == "2.56 px mean \u00b7 5.00 px max"
+    assert result._with_metrics.text() == "2.42 px mean \u00b7 6.41 px max"
     before_pixmap = result._before_preview_label.pixmap()
     after_pixmap = result._after_preview_label.pixmap()
     assert before_pixmap is not None and not before_pixmap.isNull()
@@ -325,6 +333,70 @@ def test_lens_result_displays_copied_previews_in_equal_bounds(
     assert before_pixmap.size() == after_pixmap.size()
     assert before_pixmap.toImage().pixelColor(0, 0) == QColor("red")
     assert after_pixmap.toImage().pixelColor(0, 0) == QColor("green")
+    wizard.close()
+
+
+def test_lens_result_requires_both_finite_metric_pairs_for_previews(
+    qt_app: QApplication,
+) -> None:
+    wizard = OpticalCalibrationWizard()
+    result = wizard._result_page
+
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        result.set_lens_result(
+            "Lens correction saved.",
+            before_preview=_preview(QColor("red")),
+            after_preview=_preview(QColor("green")),
+            without_calibration_metrics=(2.56, 5.00),
+        )
+
+    qt_app.processEvents()
+    assert result._comparison_container.isHidden()
+    assert result._without_metrics.text() == ""
+    assert result._with_metrics.text() == ""
+    wizard.close()
+
+
+def test_lens_result_displays_three_rgb_seam_pictograms(
+    qt_app: QApplication,
+) -> None:
+    wizard = OpticalCalibrationWizard()
+    run_id = _start_lens_capture(wizard, qt_app)
+    _complete_lens_capture(
+        wizard,
+        qt_app,
+        run_id=run_id,
+        before=_preview(QColor("red")),
+        after=_preview(QColor("green")),
+    )
+
+    result = wizard._result_page
+    assert len(result._seam_legend_icons) == 3
+    assert [icon.toolTip() for icon in result._seam_legend_icons] == [
+        "Horizontal seams: center compared with left and right.",
+        "Vertical seams: center compared with top and bottom.",
+        "Corner seams: center compared with four corners.",
+    ]
+    assert not [
+        label
+        for label in result._comparison_container.findChildren(QLabel)
+        if "seam" in label.text().lower()
+    ]
+
+    horizontal, vertical, corners = (
+        icon.grab().toImage() for icon in result._seam_legend_icons
+    )
+    assert horizontal.pixelColor(4, 14) == QColor(255, 63, 72)
+    assert horizontal.pixelColor(24, 14) == QColor(255, 63, 72)
+    assert vertical.pixelColor(14, 4) == QColor(45, 219, 104)
+    assert vertical.pixelColor(14, 24) == QColor(45, 219, 104)
+    for x, y in ((4, 4), (24, 4), (4, 24), (24, 24)):
+        assert corners.pixelColor(x, y) == QColor(67, 132, 255)
+    for image in (horizontal, vertical, corners):
+        center = image.pixelColor(14, 14)
+        assert center.red() < 80
+        assert center.green() < 80
+        assert center.blue() < 80
     wizard.close()
 
 
@@ -382,6 +454,8 @@ def test_prepare_clears_lens_previews(qt_app: QApplication) -> None:
     assert result._after_preview_source is None
     assert _has_no_pixmap(result._before_preview_label)
     assert _has_no_pixmap(result._after_preview_label)
+    assert result._without_metrics.text() == ""
+    assert result._with_metrics.text() == ""
     wizard.close()
 
 
@@ -414,6 +488,8 @@ def test_stale_lens_result_cannot_overwrite_current_previews(
         run_id=first_run_id,
         before_preview=_preview(QColor("red")),
         after_preview=_preview(QColor("green")),
+        without_calibration_metrics=(99.00, 100.00),
+        with_calibration_metrics=(98.00, 101.00),
     )
 
     result = wizard._result_page
@@ -425,6 +501,8 @@ def test_stale_lens_result_cannot_overwrite_current_previews(
     assert result._after_preview_label.pixmap().toImage().pixelColor(0, 0) == QColor(
         "green"
     )
+    assert result._without_metrics.text() == "2.56 px mean \u00b7 5.00 px max"
+    assert result._with_metrics.text() == "2.42 px mean \u00b7 6.41 px max"
     wizard.set_lens_distortion_result(False, "stopped", run_id=current_run_id)
     wizard.close()
 
@@ -462,6 +540,8 @@ def test_current_failed_lens_result_clears_and_hides_rendered_previews(
         "Previous calibration.",
         before_preview=_preview(QColor("red")),
         after_preview=_preview(QColor("green")),
+        without_calibration_metrics=(2.56, 5.00),
+        with_calibration_metrics=(2.42, 6.41),
     )
     qt_app.processEvents()
     assert not result._comparison_container.isHidden()
@@ -476,6 +556,8 @@ def test_current_failed_lens_result_clears_and_hides_rendered_previews(
     assert result._after_preview_source is None
     assert _has_no_pixmap(result._before_preview_label)
     assert _has_no_pixmap(result._after_preview_label)
+    assert result._without_metrics.text() == ""
+    assert result._with_metrics.text() == ""
     wizard.close()
 
 

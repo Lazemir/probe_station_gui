@@ -66,7 +66,14 @@ class _FakeWizard:
     def set_flat_field_result(self, success, message, *, run_id=None) -> None:
         self.results.append(("flat", success, message, run_id))
 
-    def set_lens_distortion_result(self, success, message, *, run_id=None) -> None:
+    def set_lens_distortion_result(
+        self,
+        success,
+        message,
+        *,
+        run_id=None,
+        **kwargs,
+    ) -> None:
         self.results.append(("lens", success, message, run_id))
 
     def set_progress(self, message, *, run_id=None) -> bool:

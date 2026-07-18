@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 from enum import Enum
+import math
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QCloseEvent, QImage, QPixmap
+from PySide6.QtGui import QColor, QCloseEvent, QImage, QPaintEvent, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFormLayout,
     QGridLayout,
+    QHBoxLayout,
     QLabel,
     QRadioButton,
     QSizePolicy,
@@ -18,6 +20,56 @@ from PySide6.QtWidgets import (
     QWizardPage,
     QWidget,
 )
+
+
+class _SeamLegendIcon(QWidget):
+    """Pictogram showing the cells compared across one seam orientation."""
+
+    _CELL_GAP = 2
+    _CENTER_COLOR = QColor(42, 47, 54)
+    _INACTIVE_COLOR = QColor(137, 144, 153)
+
+    def __init__(
+        self,
+        highlighted_cells: tuple[tuple[int, int], ...],
+        color: QColor,
+        tooltip: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._highlighted_cells = frozenset(highlighted_cells)
+        self._color = QColor(color)
+        self.setFixedSize(28, 28)
+        self.setToolTip(tooltip)
+
+    def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802 - Qt virtual method
+        del event
+        painter = QPainter(self)
+        cell_size = (self.width() - (2 * self._CELL_GAP)) // 3
+        for row in range(3):
+            for column in range(3):
+                if (row, column) == (1, 1):
+                    color = self._CENTER_COLOR
+                elif (row, column) in self._highlighted_cells:
+                    color = self._color
+                else:
+                    color = self._INACTIVE_COLOR
+                painter.fillRect(
+                    column * (cell_size + self._CELL_GAP),
+                    row * (cell_size + self._CELL_GAP),
+                    cell_size,
+                    cell_size,
+                    color,
+                )
+
+
+def _format_residual_metrics(metrics: tuple[float, float]) -> str:
+    mean_px, max_px = metrics
+    if not all(math.isfinite(value) and value >= 0.0 for value in metrics):
+        raise ValueError(
+            "Lens calibration preview metrics must be finite and non-negative."
+        )
+    return f"{mean_px:.2f} px mean · {max_px:.2f} px max"
 
 
 class OpticalCalibrationMode(str, Enum):
@@ -157,16 +209,56 @@ class _ResultPage(QWizardPage):
         preview_layout.setColumnStretch(0, 1)
         preview_layout.setColumnStretch(1, 1)
         preview_layout.setRowStretch(1, 1)
-        before_heading = QLabel("Before", self)
-        after_heading = QLabel("After", self)
-        before_heading.setAlignment(Qt.AlignCenter)
-        after_heading.setAlignment(Qt.AlignCenter)
+        self._without_heading = QLabel("Without calibration", self)
+        self._with_heading = QLabel("With calibration", self)
+        self._without_metrics = QLabel(self)
+        self._with_metrics = QLabel(self)
+        without_heading_layout = QHBoxLayout()
+        with_heading_layout = QHBoxLayout()
+        for heading, metrics, heading_layout in (
+            (
+                self._without_heading,
+                self._without_metrics,
+                without_heading_layout,
+            ),
+            (self._with_heading, self._with_metrics, with_heading_layout),
+        ):
+            heading.setAlignment(Qt.AlignCenter)
+            metrics.setAlignment(Qt.AlignCenter)
+            heading_layout.addWidget(heading)
+            heading_layout.addWidget(metrics)
         self._before_preview_label = self._create_preview_label()
         self._after_preview_label = self._create_preview_label()
-        preview_layout.addWidget(before_heading, 0, 0)
-        preview_layout.addWidget(after_heading, 0, 1)
+        preview_layout.addLayout(without_heading_layout, 0, 0)
+        preview_layout.addLayout(with_heading_layout, 0, 1)
         preview_layout.addWidget(self._before_preview_label, 1, 0)
         preview_layout.addWidget(self._after_preview_label, 1, 1)
+        seam_legend_layout = QHBoxLayout()
+        seam_legend_layout.addStretch(1)
+        self._seam_legend_icons = [
+            _SeamLegendIcon(
+                ((1, 0), (1, 2)),
+                QColor(255, 63, 72),
+                "Horizontal seams: center compared with left and right.",
+                self._comparison_container,
+            ),
+            _SeamLegendIcon(
+                ((0, 1), (2, 1)),
+                QColor(45, 219, 104),
+                "Vertical seams: center compared with top and bottom.",
+                self._comparison_container,
+            ),
+            _SeamLegendIcon(
+                ((0, 0), (0, 2), (2, 0), (2, 2)),
+                QColor(67, 132, 255),
+                "Corner seams: center compared with four corners.",
+                self._comparison_container,
+            ),
+        ]
+        for icon in self._seam_legend_icons:
+            seam_legend_layout.addWidget(icon)
+        seam_legend_layout.addStretch(1)
+        preview_layout.addLayout(seam_legend_layout, 2, 0, 1, 2)
         layout.addWidget(self._comparison_container, 1)
         self._comparison_container.hide()
 
@@ -189,6 +281,8 @@ class _ResultPage(QWizardPage):
         *,
         before_preview: QImage | None = None,
         after_preview: QImage | None = None,
+        without_calibration_metrics: tuple[float, float] | None = None,
+        with_calibration_metrics: tuple[float, float] | None = None,
     ) -> None:
         self._lens_label.setText(str(message or "Complete"))
         if (
@@ -199,8 +293,26 @@ class _ResultPage(QWizardPage):
         ):
             self.clear_lens_previews()
             return
+        if (
+            without_calibration_metrics is None
+            or with_calibration_metrics is None
+        ):
+            self.clear_lens_previews()
+            raise ValueError(
+                "Lens calibration preview metrics must be finite and non-negative."
+            )
+        try:
+            without_metrics_text = _format_residual_metrics(
+                without_calibration_metrics
+            )
+            with_metrics_text = _format_residual_metrics(with_calibration_metrics)
+        except (TypeError, ValueError):
+            self.clear_lens_previews()
+            raise
         self._before_preview_source = before_preview.copy()
         self._after_preview_source = after_preview.copy()
+        self._without_metrics.setText(without_metrics_text)
+        self._with_metrics.setText(with_metrics_text)
         self._comparison_container.show()
         self._refresh_preview_pixmaps()
 
@@ -209,6 +321,8 @@ class _ResultPage(QWizardPage):
         self._after_preview_source = None
         self._before_preview_label.clear()
         self._after_preview_label.clear()
+        self._without_metrics.clear()
+        self._with_metrics.clear()
         self._comparison_container.hide()
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt virtual method
@@ -382,6 +496,8 @@ class OpticalCalibrationWizard(QWizard):
         run_id: int | None = None,
         before_preview: QImage | None = None,
         after_preview: QImage | None = None,
+        without_calibration_metrics: tuple[float, float] | None = None,
+        with_calibration_metrics: tuple[float, float] | None = None,
     ) -> None:
         accepted = self._set_capture_result(
             self.LENS_DISTORTION_PAGE_ID,
@@ -397,6 +513,8 @@ class OpticalCalibrationWizard(QWizard):
                 message,
                 before_preview=before_preview,
                 after_preview=after_preview,
+                without_calibration_metrics=without_calibration_metrics,
+                with_calibration_metrics=with_calibration_metrics,
             )
             return
         self._result_page.clear_lens_previews()
