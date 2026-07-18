@@ -354,7 +354,7 @@ def test_flat_field_reference_mode_requires_reference_images() -> None:
         )
 
 
-def test_camera_lock_settings_default_to_fixed_auto_modes() -> None:
+def test_camera_lock_settings_exclude_session_owned_exposure_nodes() -> None:
     disabled = microscope_scan.camera_lock_settings_from_payload(
         {"camera_lock": False},
         default_enabled=True,
@@ -368,31 +368,30 @@ def test_camera_lock_settings_default_to_fixed_auto_modes() -> None:
     )
     assert enabled.enabled is True
     assert enabled.settings == (
-        ("ExposureAuto", "Off"),
         ("GainAuto", "Off"),
         ("BalanceWhiteAuto", "Off"),
     )
-
-
-def test_auto_exposure_scan_options_default_enabled_and_accept_opt_out() -> None:
-    defaults = microscope_scan.auto_exposure_options_from_payload(
-        {},
-        default_enabled=True,
+    assert not {"ExposureAuto", "ExposureTime"}.intersection(
+        name for name, _value in enabled.settings
     )
-    assert defaults.enabled is True
-    assert defaults.to_metadata() == {"enabled": True}
 
-    disabled = microscope_scan.auto_exposure_options_from_payload(
-        {"auto_exposure": False},
-        default_enabled=True,
+    manually_configured = microscope_scan.CameraLockSettings(
+        enabled=True,
+        settings=(
+            ("ExposureAuto", "Off"),
+            ("ExposureTime", 2000.0),
+            ("GainAuto", "Off"),
+        ),
     )
-    assert disabled.enabled is False
+    assert manually_configured.settings == (("GainAuto", "Off"),)
+    assert manually_configured.to_metadata()["settings"] == [
+        {"node_name": "GainAuto", "value": "Off"}
+    ]
 
-    configured = microscope_scan.auto_exposure_options_from_payload(
-        {"auto_exposure": {"enabled": True}},
-        default_enabled=False,
-    )
-    assert configured.enabled is True
+
+def test_scan_module_has_no_scan_specific_exposure_option() -> None:
+    assert not hasattr(microscope_scan, "AutoExposureScanOptions")
+    assert not hasattr(microscope_scan, "auto_exposure_options_from_payload")
 
 
 def test_tile_and_mosaic_save_plans_preserve_metadata_payloads() -> None:

@@ -29,6 +29,35 @@ def test_outer_session_adjusts_before_ready_and_nested_session_does_not() -> Non
     rig.controller.shutdown()
 
 
+def test_session_snapshot_reports_policy_and_fixed_exposure_without_tokens() -> None:
+    rig = PolicyRig(auto_enabled=True, engine="software")
+    sessions = OpticalSessionManager(rig.controller)
+
+    with sessions.open("optical calibration") as outer:
+        outer_snapshot = outer.snapshot()
+        with sessions.open("flat-field calibration", parent_token=outer.token) as nested:
+            nested_snapshot = nested.snapshot()
+
+    assert outer_snapshot == {
+        "operation": "optical calibration",
+        "outer_operation": "optical calibration",
+        "policy": {"auto_enabled": True, "engine": "software"},
+        "fixed_exposure_us": pytest.approx(1500.0),
+        "adjustment": {
+            "accepted": True,
+            "converged": True,
+            "engine": "software",
+            "final_exposure_us": pytest.approx(1500.0),
+            "final_frame_counter": 21,
+        },
+    }
+    assert nested_snapshot == {
+        **outer_snapshot,
+        "operation": "flat-field calibration",
+    }
+    assert "token" not in repr(outer_snapshot).lower()
+
+
 def test_unrelated_and_invalid_nested_sessions_are_rejected() -> None:
     rig = PolicyRig(auto_enabled=False, engine="software")
     sessions = OpticalSessionManager(rig.controller)

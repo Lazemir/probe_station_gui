@@ -419,6 +419,7 @@ class OpticalCalibrationWizard(QWizard):
 
     start_flat_field_requested = Signal()
     start_lens_distortion_requested = Signal()
+    cancel_requested = Signal(object)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -455,6 +456,7 @@ class OpticalCalibrationWizard(QWizard):
         self._active_run_id: int | None = None
         self._active_page_id: int | None = None
         self._completed_pages: set[int] = set()
+        self._cancel_notified = False
         self.currentIdChanged.connect(self._update_button_text)
         self._update_button_text(self.currentId())
 
@@ -466,6 +468,7 @@ class OpticalCalibrationWizard(QWizard):
         self._active_run_id = None
         self._active_page_id = None
         self._completed_pages.clear()
+        self._cancel_notified = False
         self._flat_page.set_status("Ready.")
         self._lens_page.set_status("Ready.")
         self._result_page.set_flat_result("Not run")
@@ -595,15 +598,18 @@ class OpticalCalibrationWizard(QWizard):
         return super().validateCurrentPage()
 
     def reject(self) -> None:
-        if self._running:
-            return
+        self._emit_cancel_requested()
         super().reject()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt virtual method
-        if self._running:
-            event.ignore()
-            return
+        self._emit_cancel_requested()
         super().closeEvent(event)
+
+    def _emit_cancel_requested(self) -> None:
+        if self._cancel_notified:
+            return
+        self._cancel_notified = True
+        self.cancel_requested.emit(self._active_run_id)
 
     def _start_capture(self, page: _CapturePage, signal: object) -> None:
         if self._running:

@@ -33,6 +33,9 @@ class MainWindowShutdownOwner(Protocol):
     _route_measurement_thread: Any
     _microscope_scan_thread: Any
     _microscope_scan_stop_requested: Any
+    _flat_field_calibration_thread: Any
+    _lens_distortion_thread: Any
+    _optical_calibration_outer_close_thread: Any
     _live_camera_frame_processor: Any
     _exposure_policy_adapter: Any
     _exposure_policy_controller: Any
@@ -43,6 +46,8 @@ class MainWindowShutdownOwner(Protocol):
     def _stop_design_markup_store(self) -> None: ...
     def _route_runtime_presenter(self) -> Any: ...
     def _show_status(self, message: str, timeout: int) -> None: ...
+    def _cancel_optical_calibration_wizard(self) -> None: ...
+    def _schedule_optical_calibration_outer_close(self) -> None: ...
 
 
 def close_event(owner: MainWindowShutdownOwner, event: Any) -> None:
@@ -59,6 +64,7 @@ def close_event(owner: MainWindowShutdownOwner, event: Any) -> None:
     _stop_route_worker(owner)
     _stop_microscope_scan(owner)
     try:
+        _stop_optical_calibration(owner)
         _close_serial_and_panels(owner)
     except Exception as exc:
         logger.exception("Camera shutdown blocked before worker teardown")
@@ -115,6 +121,29 @@ def _stop_microscope_scan(owner: MainWindowShutdownOwner) -> None:
         and owner._microscope_scan_thread.is_alive()
     ):
         owner._microscope_scan_thread.join(timeout=2.0)
+
+
+def _stop_optical_calibration(owner: MainWindowShutdownOwner) -> None:
+    cancel = getattr(owner, "_cancel_optical_calibration_wizard", None)
+    if cancel is None:
+        return
+    cancel()
+    for attribute in (
+        "_flat_field_calibration_thread",
+        "_lens_distortion_thread",
+    ):
+        thread = getattr(owner, attribute, None)
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+        if thread is not None and thread.is_alive():
+            raise RuntimeError("Optical calibration is still stopping.")
+
+    owner._schedule_optical_calibration_outer_close()
+    close_thread = getattr(owner, "_optical_calibration_outer_close_thread", None)
+    if close_thread is not None and close_thread.is_alive():
+        close_thread.join(timeout=2.0)
+    if close_thread is not None and close_thread.is_alive():
+        raise RuntimeError("Optical calibration exposure restore is still running.")
 
 
 def _close_serial_and_panels(owner: MainWindowShutdownOwner) -> None:

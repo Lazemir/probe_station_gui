@@ -48,6 +48,40 @@ class _FakeStore:
         )
 
 
+class _FakeSessionLease:
+    def __init__(self, events: list[tuple[object, ...]]) -> None:
+        self._events = events
+        self.token = "private-token"
+
+    def snapshot(self) -> dict[str, object]:
+        return {
+            "operation": "flat-field calibration",
+            "policy": {"auto_enabled": True, "engine": "software"},
+            "fixed_exposure_us": 4000.0,
+        }
+
+    def close(self) -> dict[str, object]:
+        self._events.append(("session_close",))
+        return {"accepted": True}
+
+
+class _FakeSessionManager:
+    def __init__(
+        self,
+        events: list[tuple[object, ...]],
+        *,
+        open_error: Exception | None = None,
+    ) -> None:
+        self._events = events
+        self._open_error = open_error
+
+    def open(self, operation: str, parent_token=None) -> _FakeSessionLease:
+        self._events.append(("session_open", operation, parent_token))
+        if self._open_error is not None:
+            raise self._open_error
+        return _FakeSessionLease(self._events)
+
+
 def _frame() -> QImage:
     frame = QImage(100, 50, QImage.Format_RGB32)
     frame.fill(QColor(100, 110, 120))
@@ -82,20 +116,12 @@ def test_flat_field_runner_captures_raw_grid_and_restores_stage(monkeypatch) -> 
     window = Main.__new__(Main)
     window.stage_controller = stage
     window._flat_field_calibration_store = store
+    window._optical_session_manager = _FakeSessionManager(events)
     window._active_microscope_scale = lambda: SimpleNamespace(
         pixel_size_x_mm=0.001,
         pixel_size_y_mm=0.002,
     )
     window._active_objective_metadata = lambda: ("X20", 20.0)
-    window._run_camera_auto_exposure = lambda: (
-        events.append(("auto_exposure",))
-        or {
-            "accepted": True,
-            "converged": True,
-            "final_exposure_us": 4000.0,
-            "final_gain_db": 0.0,
-        }
-    )
     window._wait_for_raw_camera_frame = wait_for_frame
     window._latest_raw_camera_counter = lambda: frame_counter
     window._apply_microscope_scan_camera_lock = lambda settings: (
@@ -114,11 +140,11 @@ def test_flat_field_runner_captures_raw_grid_and_restores_stage(monkeypatch) -> 
 
     Main._run_flat_field_calibration(window, (10.0, 20.0), 120.0, 70.0)
 
-    assert events.index(("begin", "flat-field calibration")) < events.index(
-        ("auto_exposure",)
-    )
+    assert events[:2] == [
+        ("session_open", "flat-field calibration", None),
+        ("begin", "flat-field calibration"),
+    ]
     assert events.index(("camera_lock", True, (
-        ("ExposureAuto", "Off"),
         ("GainAuto", "Off"),
         ("BalanceWhiteAuto", "Off"),
     ))) > events.index(("begin", "flat-field calibration"))
@@ -134,31 +160,33 @@ def test_flat_field_runner_captures_raw_grid_and_restores_stage(monkeypatch) -> 
     metadata = store.calls[0]["metadata"]
     assert metadata["capture_grid"] == [3, 3]
     assert metadata["overlap_fraction"] == 0.8
-    assert metadata["auto_exposure"]["final_exposure_us"] == 4000.0
-    assert events[-3:] == [
+    assert metadata["optical_session"]["fixed_exposure_us"] == 4000.0
+    assert "token" not in repr(metadata["optical_session"]).lower()
+    assert events[-4:] == [
         ("move", 10.0, 20.0, 120.0),
         ("camera_restore", "lock-key"),
         ("finish",),
+        ("session_close",),
     ]
     assert finished[0][0] is True
     assert "saved" in finished[0][1].lower()
 
 
-def test_flat_field_runner_does_not_move_when_auto_exposure_fails() -> None:
+def test_flat_field_runner_does_not_reserve_or_move_when_session_open_fails() -> None:
     events: list[tuple[object, ...]] = []
     finished: list[tuple[bool, str, object]] = []
     window = Main.__new__(Main)
     window.stage_controller = _FakeStage(events)
     window._flat_field_calibration_store = _FakeStore(events)
+    window._optical_session_manager = _FakeSessionManager(
+        events,
+        open_error=RuntimeError("Exposure did not converge."),
+    )
     window._active_microscope_scale = lambda: SimpleNamespace(
         pixel_size_x_mm=0.001,
         pixel_size_y_mm=0.001,
     )
     window._active_objective_metadata = lambda: ("X20", 20.0)
-    window._run_camera_auto_exposure = lambda: {
-        "accepted": False,
-        "message": "Exposure did not converge.",
-    }
     window._show_status = lambda *_args: None
     window._emit_flat_field_calibration_finished = (
         lambda success, message, payload: finished.append((success, message, payload))
@@ -168,7 +196,6 @@ def test_flat_field_runner_does_not_move_when_auto_exposure_fails() -> None:
 
     assert not any(event[0] == "move" for event in events)
     assert events == [
-        ("begin", "flat-field calibration"),
-        ("finish",),
+        ("session_open", "flat-field calibration", None),
     ]
     assert finished == [(False, "Flat-field calibration failed: Exposure did not converge.", None)]

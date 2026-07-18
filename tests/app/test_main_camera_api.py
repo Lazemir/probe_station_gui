@@ -13,7 +13,6 @@ from tests.app.import_reset import restore_real_imports_for_main
 restore_real_imports_for_main()
 
 from main import Main
-from probe_station_gui.camera.auto_exposure import AutoExposureBusyError
 from probe_station_gui.settings.sections import ExposurePolicySettings
 from probe_station_gui.settings.manager import Settings, SettingsManager
 
@@ -372,47 +371,6 @@ def test_camera_api_submitters_forward_request_ids_and_order() -> None:
             {"request_id": "write-1", "map_key": "camera"},
         ),
     ]
-
-
-def test_camera_auto_exposure_api_parses_config_and_runs_controller() -> None:
-    window = Main.__new__(Main)
-    window._microscope_scan_running = lambda: False
-    calls = []
-    window._run_camera_auto_exposure = (
-        lambda config: calls.append(config)
-        or {
-            "accepted": True,
-            "converged": True,
-            "final_exposure_us": 2300.0,
-        }
-    )
-
-    result = Main._api_camera_auto_exposure(
-        window,
-        {"target_level": 230.0, "settling_frames": 1},
-    )
-
-    assert result["accepted"] is True
-    assert calls[0].target_level == 230.0
-    assert calls[0].settling_frames == 1
-
-
-def test_camera_auto_exposure_api_rejects_scan_and_busy_controller() -> None:
-    window = Main.__new__(Main)
-    window._microscope_scan_running = lambda: True
-
-    scan_busy = Main._api_camera_auto_exposure(window, None)
-
-    assert scan_busy["status_code"] == 409
-    window._microscope_scan_running = lambda: False
-    window._run_camera_auto_exposure = lambda _config: (_ for _ in ()).throw(
-        AutoExposureBusyError("Camera auto exposure is already running.")
-    )
-
-    camera_busy = Main._api_camera_auto_exposure(window, None)
-
-    assert camera_busy["status_code"] == 409
-    assert "already running" in camera_busy["message"]
 
 
 def _solid_image(color: str) -> QImage:

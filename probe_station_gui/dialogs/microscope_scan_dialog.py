@@ -7,7 +7,6 @@ from pathlib import Path
 
 from PySide6.QtCore import QLocale, Signal
 from PySide6.QtWidgets import (
-    QCheckBox,
     QDialog,
     QFileDialog,
     QFormLayout,
@@ -29,7 +28,6 @@ class MicroscopeScanConfiguration:
     overlap_fraction: float
     settle_s: float
     tile_approach_mm: float = 0.010
-    auto_exposure: bool = True
 
 
 class MicroscopeScanDialog(QDialog):
@@ -89,9 +87,6 @@ class MicroscopeScanDialog(QDialog):
         self._approach_spin.setValue(0.010)
         form.addRow(QLabel("Approach", self), self._approach_spin)
 
-        self._auto_exposure_check = QCheckBox(self)
-        self._auto_exposure_check.setChecked(True)
-        form.addRow(QLabel("Auto exposure", self), self._auto_exposure_check)
         layout.addLayout(form)
 
         self._status_label = QLabel("Idle.", self)
@@ -121,7 +116,6 @@ class MicroscopeScanDialog(QDialog):
             overlap_fraction=float(self._overlap_spin.value()) / 100.0,
             settle_s=float(self._settle_spin.value()),
             tile_approach_mm=float(self._approach_spin.value()),
-            auto_exposure=bool(self._auto_exposure_check.isChecked()),
         )
 
     def set_status(self, message: str) -> None:
@@ -135,7 +129,6 @@ class MicroscopeScanDialog(QDialog):
             self._overlap_spin,
             self._settle_spin,
             self._approach_spin,
-            self._auto_exposure_check,
         ):
             widget.setEnabled(not self._running)
         self._start_button.setEnabled(not self._running)

@@ -6,7 +6,7 @@ import math
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass
 from typing import Any
 
 import numpy as np
@@ -187,33 +187,6 @@ class CameraAutoExposureController:
         return result
 
 
-def auto_exposure_config_from_mapping(
-    value: Mapping[str, object] | None,
-) -> AutoExposureConfig:
-    if value is None:
-        return AutoExposureConfig()
-    allowed = {item.name: item for item in fields(AutoExposureConfig)}
-    unknown = sorted(set(value) - set(allowed))
-    if unknown:
-        raise ValueError(f"Unknown auto exposure setting: {unknown[0]}.")
-    integer_names = {
-        "saturation_level",
-        "settling_frames",
-        "convergence_window",
-        "max_iterations",
-        "frame_timeout_ms",
-    }
-    converted: dict[str, object] = {}
-    for name, raw in value.items():
-        try:
-            converted[name] = int(raw) if name in integer_names else float(raw)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"auto exposure {name} must be numeric.") from exc
-    config = AutoExposureConfig(**converted)
-    validate_auto_exposure_config(config)
-    return config
-
-
 def validate_auto_exposure_config(config: AutoExposureConfig) -> None:
     finite_fields = {
         "target_percentile": config.target_percentile,
@@ -385,7 +358,6 @@ __all__ = [
     "AutoExposureConfig",
     "AutoExposureFrame",
     "CameraAutoExposureController",
-    "auto_exposure_config_from_mapping",
     "highlight_level",
     "next_exposure_us",
     "validate_auto_exposure_config",

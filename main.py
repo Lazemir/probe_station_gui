@@ -12,7 +12,7 @@ import re
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
@@ -143,13 +143,11 @@ from probe_station_gui.camera.api_control import (
     encode_camera_frame_png,
 )
 from probe_station_gui.camera.auto_exposure import (
-    AutoExposureBusyError,
-    AutoExposureConfig,
     AutoExposureFrame,
     CameraAutoExposureController,
-    auto_exposure_config_from_mapping,
 )
 from probe_station_gui.camera.exposure_policy import (
+    ExposurePolicyBusyError,
     ExposurePolicyController,
     OpticalSessionManager,
 )
@@ -439,6 +437,8 @@ class _OpticalCalibrationRunContext:
     operation_id: str
     wizard_run_id: int | None
     objective_name: str
+    parent_session_token: str | None = None
+    full_wizard: bool = False
 
 
 @dataclass(frozen=True)
@@ -446,6 +446,7 @@ class _LensDistortionCalibrationOutput:
     payload: dict[str, object]
     before_preview: QImage
     after_preview: QImage
+    session_restore_error: str = ""
 
 
 def _load_geometry_mask_backend() -> object:
@@ -817,6 +818,13 @@ class Main(QMainWindow):
         self._flat_field_calibration_context: _OpticalCalibrationRunContext | None = None
         self._lens_distortion_thread: threading.Thread | None = None
         self._lens_distortion_context: _OpticalCalibrationRunContext | None = None
+        self._optical_calibration_state_lock = threading.RLock()
+        self._optical_calibration_cancel_event_state = threading.Event()
+        self._optical_calibration_outer_lease: object | None = None
+        self._optical_calibration_outer_token: str | None = None
+        self._optical_calibration_outer_close_requested = False
+        self._optical_calibration_outer_close_in_progress = False
+        self._optical_calibration_outer_close_thread: threading.Thread | None = None
         self._sample_handling_thread: threading.Thread | None = None
         self._last_sample_focus_z_by_objective: dict[str, float] = {}
         self._route_telegram = RouteTelegramPhotoState()
@@ -1198,12 +1206,6 @@ class Main(QMainWindow):
         rgb = rows[:, : width * 3].reshape((height, width, 3)).copy(order="C")
         return AutoExposureFrame(rgb=rgb, counter=int(counter))
 
-    def _run_camera_auto_exposure(
-        self,
-        config: AutoExposureConfig | None = None,
-    ) -> dict[str, Any]:
-        return self._camera_auto_exposure_controller.run(config)
-
     def _api_camera_frame(
         self,
         space: str,
@@ -1239,35 +1241,6 @@ class Main(QMainWindow):
                 "space": space,
             }
         return encode_camera_frame_png(frame, counter=counter, space=space)
-
-    def _api_camera_auto_exposure(
-        self,
-        config: Mapping[str, object] | None,
-    ) -> dict[str, Any]:
-        if self._microscope_scan_running():
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": (
-                    "Camera auto exposure is unavailable during a microscope scan."
-                ),
-            }
-        try:
-            parsed = auto_exposure_config_from_mapping(config)
-        except ValueError as exc:
-            return {
-                "accepted": False,
-                "status_code": 400,
-                "message": str(exc),
-            }
-        try:
-            return self._run_camera_auto_exposure(parsed)
-        except AutoExposureBusyError as exc:
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": str(exc),
-            }
 
     def _configure_telegram_bot_from_settings(self) -> None:
         telegram_settings = self.settings_manager.telegram_configuration()
@@ -3198,12 +3171,6 @@ class Main(QMainWindow):
                 payload,
                 default_enabled=True,
             )
-            auto_exposure_options = (
-                microscope_scan.auto_exposure_options_from_payload(
-                    payload,
-                    default_enabled=True,
-                )
-            )
             camera_lock_settings = microscope_scan.camera_lock_settings_from_payload(
                 payload,
                 default_enabled=True,
@@ -3274,7 +3241,6 @@ class Main(QMainWindow):
             structure_size_mm=structure_size_mm,
             placement_fraction=placement_fraction,
             flat_field_options=flat_field_options,
-            auto_exposure_options=auto_exposure_options,
             camera_lock_settings=camera_lock_settings,
         )
         self._microscope_scan_stop_requested.clear()
@@ -4496,6 +4462,7 @@ class Main(QMainWindow):
             wizard.start_lens_distortion_requested.connect(
                 self._start_lens_distortion_calibration_from_wizard
             )
+            wizard.cancel_requested.connect(self._cancel_optical_calibration_wizard)
             self._optical_calibration_wizard = wizard
 
         objectives = self.settings_manager.objectives_configuration()
@@ -4651,6 +4618,7 @@ class Main(QMainWindow):
         if wizard is None:
             return
         run_id = wizard.active_run_id()
+        full_wizard = wizard.mode() is OpticalCalibrationMode.FULL
         if not self._optical_calibration_objective_matches_wizard(wizard):
             wizard.set_flat_field_result(
                 False,
@@ -4658,28 +4626,195 @@ class Main(QMainWindow):
                 run_id=run_id,
             )
             return
-        if self._start_flat_field_calibration(wizard_run_id=run_id):
+        self._optical_calibration_cancel_event().clear()
+        if self._start_flat_field_calibration(
+            wizard_run_id=run_id,
+            full_wizard=full_wizard,
+        ):
             return
+        if full_wizard:
+            self._cancel_optical_calibration_wizard(run_id)
         wizard.set_flat_field_result(
             False,
             "Flat-field calibration did not start.",
             run_id=run_id,
         )
 
+    def _optical_calibration_lock(self) -> threading.RLock:
+        lock = getattr(self, "_optical_calibration_state_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._optical_calibration_state_lock = lock
+        return lock
+
+    def _optical_calibration_cancel_event(self) -> threading.Event:
+        event = getattr(self, "_optical_calibration_cancel_event_state", None)
+        if event is None:
+            event = threading.Event()
+            self._optical_calibration_cancel_event_state = event
+        return event
+
+    def _optical_calibration_should_stop(
+        self,
+        context: _OpticalCalibrationRunContext | None,
+    ) -> bool:
+        return bool(
+            context is not None
+            and context.wizard_run_id is not None
+            and self._optical_calibration_cancel_event().is_set()
+        )
+
+    def _wait_optical_calibration_settle(
+        self,
+        seconds: float,
+        context: _OpticalCalibrationRunContext | None,
+    ) -> bool:
+        duration = max(0.0, float(seconds))
+        if context is not None and context.wizard_run_id is not None:
+            return not self._optical_calibration_cancel_event().wait(duration)
+        time.sleep(duration)
+        return True
+
+    def _open_optical_calibration_stage_session(
+        self,
+        operation: str,
+        context: _OpticalCalibrationRunContext,
+    ) -> tuple[object, _OpticalCalibrationRunContext]:
+        parent_token = context.parent_session_token
+        opened_outer = False
+        if context.full_wizard and parent_token is None:
+            outer_lease = self._optical_session_manager.open("optical calibration")
+            parent_token = str(outer_lease.token)
+            with self._optical_calibration_lock():
+                if getattr(self, "_optical_calibration_outer_lease", None) is not None:
+                    outer_lease.close()
+                    raise RuntimeError("Optical calibration session is already active.")
+                self._optical_calibration_outer_lease = outer_lease
+                self._optical_calibration_outer_token = parent_token
+                self._optical_calibration_outer_close_requested = False
+                self._optical_calibration_outer_close_in_progress = False
+            context = replace(context, parent_session_token=parent_token)
+            opened_outer = True
+        try:
+            lease = self._optical_session_manager.open(
+                operation,
+                parent_token=parent_token,
+            )
+        except Exception:
+            if opened_outer:
+                self._close_optical_calibration_outer_session()
+            raise
+        return lease, context
+
+    def _optical_calibration_outer_parent_token(self) -> str | None:
+        with self._optical_calibration_lock():
+            token = getattr(self, "_optical_calibration_outer_token", None)
+            return None if token is None else str(token)
+
+    def _optical_calibration_outer_close_was_requested(self) -> bool:
+        with self._optical_calibration_lock():
+            return bool(
+                getattr(self, "_optical_calibration_outer_close_requested", False)
+            )
+
+    def _close_optical_calibration_outer_session(self) -> str:
+        with self._optical_calibration_lock():
+            lease = getattr(self, "_optical_calibration_outer_lease", None)
+            if lease is None:
+                return ""
+            if getattr(self, "_optical_calibration_outer_close_in_progress", False):
+                return ""
+            self._optical_calibration_outer_close_in_progress = True
+
+        error = ""
+        try:
+            while True:
+                try:
+                    result = lease.close()
+                    error = str(result.get("warning") or "")
+                    break
+                except ExposurePolicyBusyError:
+                    time.sleep(0.05)
+                except Exception as exc:
+                    error = str(exc) or type(exc).__name__
+                    break
+        finally:
+            with self._optical_calibration_lock():
+                self._optical_calibration_outer_lease = None
+                self._optical_calibration_outer_token = None
+                self._optical_calibration_outer_close_requested = False
+                self._optical_calibration_outer_close_in_progress = False
+        return error
+
+    def _cancel_optical_calibration_wizard(self, _run_id: object = None) -> None:
+        self._optical_calibration_cancel_event().set()
+        with self._optical_calibration_lock():
+            self._optical_calibration_outer_close_requested = True
+        if not self._optical_calibration_worker_active():
+            self._schedule_optical_calibration_outer_close()
+
+    def _schedule_optical_calibration_outer_close(self) -> None:
+        with self._optical_calibration_lock():
+            if getattr(self, "_optical_calibration_outer_lease", None) is None:
+                return
+            thread = getattr(self, "_optical_calibration_outer_close_thread", None)
+            if thread is not None and thread.is_alive():
+                return
+            thread = threading.Thread(
+                target=self._run_optical_calibration_outer_close,
+                name="OpticalCalibrationSessionClose",
+                daemon=True,
+            )
+            self._optical_calibration_outer_close_thread = thread
+        thread.start()
+
+    def _run_optical_calibration_outer_close(self) -> None:
+        error = self._close_optical_calibration_outer_session()
+        with self._optical_calibration_lock():
+            self._optical_calibration_outer_close_thread = None
+        if error:
+            try:
+                self.status_message_requested.emit(
+                    f"Exposure policy restore failed: {error}",
+                    10000,
+                )
+            except RuntimeError:
+                pass
+
     def _start_lens_distortion_calibration_from_wizard(self) -> None:
         wizard = self._optical_calibration_wizard
         if wizard is None:
             return
         run_id = wizard.active_run_id()
+        full_wizard = wizard.mode() is OpticalCalibrationMode.FULL
         if not self._optical_calibration_objective_matches_wizard(wizard):
+            if full_wizard:
+                self._cancel_optical_calibration_wizard(run_id)
             wizard.set_lens_distortion_result(
                 False,
                 "Active objective changed. Reopen optical calibration.",
                 run_id=run_id,
             )
             return
-        if self._start_lens_distortion_calibration(wizard_run_id=run_id):
+        parent_session_token = (
+            self._optical_calibration_outer_parent_token() if full_wizard else None
+        )
+        if full_wizard and parent_session_token is None:
+            wizard.set_lens_distortion_result(
+                False,
+                "Optical calibration exposure session is unavailable.",
+                run_id=run_id,
+            )
             return
+        self._optical_calibration_cancel_event().clear()
+        if self._start_lens_distortion_calibration(
+            wizard_run_id=run_id,
+            parent_session_token=parent_session_token,
+            full_wizard=full_wizard,
+        ):
+            return
+        if full_wizard:
+            self._cancel_optical_calibration_wizard(run_id)
         wizard.set_lens_distortion_result(
             False,
             "Lens distortion calibration did not start.",
@@ -4695,7 +4830,12 @@ class Main(QMainWindow):
             wizard.objective_text()
         )
 
-    def _start_flat_field_calibration(self, *, wizard_run_id: int | None = None) -> bool:
+    def _start_flat_field_calibration(
+        self,
+        *,
+        wizard_run_id: int | None = None,
+        full_wizard: bool = False,
+    ) -> bool:
         if self._flat_field_calibration_running():
             self._show_status("Flat-field calibration is already running.", 4000)
             return False
@@ -4727,6 +4867,7 @@ class Main(QMainWindow):
             operation_id=uuid.uuid4().hex,
             wizard_run_id=wizard_run_id,
             objective_name=objective_name,
+            full_wizard=bool(full_wizard),
         )
         thread = threading.Thread(
             target=self._run_flat_field_calibration,
@@ -4785,6 +4926,8 @@ class Main(QMainWindow):
         stage_reserved = False
         stage_position_changed = False
         camera_restore_key: str | None = None
+        optical_session: object | None = None
+        optical_session_snapshot: dict[str, object] = {}
         feedrate = (
             self._coordinate_feedrate_for_axes(("X", "Y"))
             if linear_feedrate is None
@@ -4799,19 +4942,22 @@ class Main(QMainWindow):
             objective_name, magnification, scale = (
                 self._optical_calibration_objective_metadata(context)
             )
-            self.stage_controller.begin_external_task("flat-field calibration")
-            stage_reserved = True
-            self._report_flat_field_calibration_progress(
-                "Flat-field calibration: adjusting exposure.", context
-            )
-            auto_exposure = self._run_camera_auto_exposure()
-            if not bool(auto_exposure.get("accepted", False)):
-                raise RuntimeError(
-                    str(
-                        auto_exposure.get("message")
-                        or "Camera auto exposure failed."
+            if context is None:
+                optical_session = self._optical_session_manager.open(
+                    "flat-field calibration"
+                )
+            else:
+                optical_session, context = (
+                    self._open_optical_calibration_stage_session(
+                        "flat-field calibration",
+                        context,
                     )
                 )
+            optical_session_snapshot = optical_session.snapshot()
+            if self._optical_calibration_should_stop(context):
+                raise RuntimeError("Flat-field calibration stopped by user.")
+            self.stage_controller.begin_external_task("flat-field calibration")
+            stage_reserved = True
 
             if scale is None:
                 raise RuntimeError(
@@ -4842,6 +4988,8 @@ class Main(QMainWindow):
             frames: list[QImage] = []
             total = len(capture_offsets)
             for index, (dx_mm, dy_mm) in enumerate(capture_offsets, start=1):
+                if self._optical_calibration_should_stop(context):
+                    raise RuntimeError("Flat-field calibration stopped by user.")
                 self._report_flat_field_calibration_progress(
                     f"Flat-field calibration: capture {index}/{total}.", context
                 )
@@ -4851,7 +4999,11 @@ class Main(QMainWindow):
                     start_xy[1] + dy_mm,
                     feedrate=feedrate,
                 )
-                time.sleep(self.FLAT_FIELD_CAPTURE_SETTLE_S)
+                if not self._wait_optical_calibration_settle(
+                    self.FLAT_FIELD_CAPTURE_SETTLE_S,
+                    context,
+                ):
+                    raise RuntimeError("Flat-field calibration stopped by user.")
                 before_counter = self._latest_raw_camera_counter()
                 frame, _counter = self._wait_for_raw_camera_frame(
                     after_counter=before_counter,
@@ -4879,7 +5031,7 @@ class Main(QMainWindow):
                         [float(dx_mm), float(dy_mm)]
                         for dx_mm, dy_mm in capture_offsets
                     ],
-                    "auto_exposure": dict(auto_exposure),
+                    "optical_session": dict(optical_session_snapshot),
                 },
             )
             payload = {
@@ -4919,6 +5071,40 @@ class Main(QMainWindow):
                             f"{restore_error}"
                         )
                 self.stage_controller.finish_external_task()
+            if optical_session is not None:
+                try:
+                    session_result = optical_session.close()
+                    session_error = str(session_result.get("warning") or "")
+                except Exception as exc:
+                    session_error = str(exc) or type(exc).__name__
+                if session_error:
+                    logger.error(
+                        "Flat-field exposure policy restore failed: %s",
+                        session_error,
+                    )
+                    if success:
+                        success = False
+                        message = (
+                            "Flat-field calibration saved, but exposure policy "
+                            f"restore failed: {session_error}"
+                        )
+                    else:
+                        message = f"{message} Exposure policy restore failed: {session_error}"
+            if (
+                context is not None
+                and context.full_wizard
+                and (
+                    not success
+                    or self._optical_calibration_should_stop(context)
+                    or self._optical_calibration_outer_close_was_requested()
+                )
+            ):
+                outer_error = self._close_optical_calibration_outer_session()
+                if outer_error:
+                    success = False
+                    message = (
+                        f"{message} Exposure policy restore failed: {outer_error}"
+                    )
             if context is None:
                 self._emit_flat_field_calibration_finished(success, message, payload)
             else:
@@ -5024,6 +5210,8 @@ class Main(QMainWindow):
         self,
         *,
         wizard_run_id: int | None = None,
+        parent_session_token: str | None = None,
+        full_wizard: bool = False,
     ) -> bool:
         if self._lens_distortion_calibration_running():
             self._show_status("Lens distortion calibration is already running.", 4000)
@@ -5058,6 +5246,8 @@ class Main(QMainWindow):
             operation_id=uuid.uuid4().hex,
             wizard_run_id=wizard_run_id,
             objective_name=objective_name,
+            parent_session_token=parent_session_token,
+            full_wizard=bool(full_wizard),
         )
         thread = threading.Thread(
             target=self._run_lens_distortion_calibration,
@@ -5127,6 +5317,8 @@ class Main(QMainWindow):
         reserved = False
         stage_position_changed = False
         camera_restore_key: str | None = None
+        optical_session: object | None = None
+        optical_session_snapshot: dict[str, object] = {}
         feedrate = (
             self._coordinate_feedrate_for_axes(("X", "Y"))
             if linear_feedrate is None
@@ -5141,19 +5333,22 @@ class Main(QMainWindow):
             _objective_name, _magnification, scale = (
                 self._optical_calibration_objective_metadata(context)
             )
-            self.stage_controller.begin_external_task("lens distortion calibration")
-            reserved = True
-            self._report_lens_distortion_calibration_progress(
-                "Lens distortion calibration: adjusting exposure.", context
-            )
-            auto_exposure = self._run_camera_auto_exposure()
-            if not bool(auto_exposure.get("accepted", False)):
-                raise RuntimeError(
-                    str(
-                        auto_exposure.get("message")
-                        or "Camera auto exposure failed."
+            if context is None:
+                optical_session = self._optical_session_manager.open(
+                    "lens distortion calibration"
+                )
+            else:
+                optical_session, context = (
+                    self._open_optical_calibration_stage_session(
+                        "lens distortion calibration",
+                        context,
                     )
                 )
+            optical_session_snapshot = optical_session.snapshot()
+            if self._optical_calibration_should_stop(context):
+                raise RuntimeError("Lens distortion calibration stopped by user.")
+            self.stage_controller.begin_external_task("lens distortion calibration")
+            reserved = True
 
             camera_restore_key = self._apply_microscope_scan_camera_lock(
                 microscope_scan.CameraLockSettings(
@@ -5182,6 +5377,8 @@ class Main(QMainWindow):
             frames: list[GridCalibrationFrame] = []
             total = len(capture_offsets)
             for index, offset in enumerate(capture_offsets, start=1):
+                if self._optical_calibration_should_stop(context):
+                    raise RuntimeError("Lens distortion calibration stopped by user.")
                 dx_mm, dy_mm = offset
                 self._report_lens_distortion_calibration_progress(
                     f"Lens distortion calibration: capture {index}/{total}.", context
@@ -5192,7 +5389,11 @@ class Main(QMainWindow):
                     start_xy[1] + dy_mm,
                     feedrate=feedrate,
                 )
-                time.sleep(self.LENS_DISTORTION_CAPTURE_SETTLE_S)
+                if not self._wait_optical_calibration_settle(
+                    self.LENS_DISTORTION_CAPTURE_SETTLE_S,
+                    context,
+                ):
+                    raise RuntimeError("Lens distortion calibration stopped by user.")
                 before_counter = self._latest_raw_camera_counter()
                 frame, _counter = self._wait_for_raw_camera_frame(
                     after_counter=before_counter,
@@ -5219,6 +5420,7 @@ class Main(QMainWindow):
                 frame_size=frame_size,
                 scale=scale,
             )
+            output.payload["optical_session"] = dict(optical_session_snapshot)
             success = True
             message = self._lens_distortion_fit_success_message(output.payload)
         except Exception as exc:
@@ -5251,6 +5453,42 @@ class Main(QMainWindow):
                             f"{restore_error}"
                         )
                 self.stage_controller.finish_external_task()
+            if optical_session is not None:
+                try:
+                    session_result = optical_session.close()
+                    session_error = str(session_result.get("warning") or "")
+                except Exception as exc:
+                    session_error = str(exc) or type(exc).__name__
+                if session_error:
+                    logger.error(
+                        "Lens distortion exposure policy restore failed: %s",
+                        session_error,
+                    )
+                    if success:
+                        if output is not None:
+                            output = replace(
+                                output,
+                                session_restore_error=session_error,
+                            )
+                        success = False
+                        message = (
+                            "Lens distortion calibration complete, but exposure "
+                            f"policy restore failed: {session_error}"
+                        )
+                    else:
+                        message = f"{message} Exposure policy restore failed: {session_error}"
+            if context is not None and context.full_wizard:
+                outer_error = self._close_optical_calibration_outer_session()
+                if outer_error:
+                    if success and output is not None:
+                        output = replace(
+                            output,
+                            session_restore_error=outer_error,
+                        )
+                    success = False
+                    message = (
+                        f"{message} Exposure policy restore failed: {outer_error}"
+                    )
             if context is None:
                 self._emit_lens_distortion_finished(success, message, output)
             else:
@@ -5592,7 +5830,11 @@ class Main(QMainWindow):
             before_preview = output.before_preview
             after_preview = output.after_preview
 
-        if success:
+        completed_with_session_error = bool(
+            isinstance(output, _LensDistortionCalibrationOutput)
+            and output.session_restore_error
+        )
+        if success or completed_with_session_error:
             try:
                 if not isinstance(output, _LensDistortionCalibrationOutput):
                     raise RuntimeError("Invalid lens calibration output.")
@@ -9528,17 +9770,9 @@ class Main(QMainWindow):
             "camera_lock_settings",
             microscope_scan.CameraLockSettings(enabled=False),
         )
-        auto_exposure_options = getattr(
-            configuration,
-            "auto_exposure_options",
-            microscope_scan.AutoExposureScanOptions(
-                enabled=bool(getattr(configuration, "auto_exposure", True))
-            ),
-        )
         corrections = self._microscope_scan_corrections_metadata(
             flat_field_options=flat_field_options,
             camera_lock_settings=camera_lock_settings,
-            auto_exposure_options=auto_exposure_options,
         )
         scan_pattern = str(getattr(configuration, "scan_pattern", "grid") or "grid")
         refine_scale_from_overlaps = bool(
@@ -9552,24 +9786,18 @@ class Main(QMainWindow):
         captured_frames: list[_MicroscopeScanCapturedFrame] = []
         camera_restore_key: str | None = None
         stage_task_started = False
+        optical_session: object | None = None
         try:
             output_dir.mkdir(parents=True, exist_ok=True)
-            if bool(getattr(auto_exposure_options, "enabled", True)):
-                self.microscope_scan_status.emit(
-                    "Microscope scan: adjusting exposure."
+            self.microscope_scan_status.emit("Microscope scan: fixing exposure.")
+            optical_session = self._optical_session_manager.open("microscope scan")
+            corrections.update(
+                self._microscope_scan_corrections_metadata(
+                    flat_field_options=flat_field_options,
+                    camera_lock_settings=camera_lock_settings,
+                    optical_session=optical_session.snapshot(),
                 )
-                auto_exposure_result = self._run_camera_auto_exposure()
-                if not bool(auto_exposure_result.get("accepted", False)):
-                    raise RuntimeError(
-                        str(
-                            auto_exposure_result.get("message")
-                            or "Camera auto exposure failed."
-                        )
-                    )
-                corrections["auto_exposure"] = {
-                    "enabled": True,
-                    **auto_exposure_result,
-                }
+            )
             self.stage_controller.begin_external_task("microscope design scan")
             stage_task_started = True
             camera_restore_key = self._apply_microscope_scan_camera_lock(
@@ -9734,6 +9962,25 @@ class Main(QMainWindow):
                         )
             if stage_task_started:
                 self.stage_controller.finish_external_task()
+            if optical_session is not None:
+                try:
+                    session_result = optical_session.close()
+                    session_error = str(session_result.get("warning") or "")
+                except Exception as exc:
+                    session_error = str(exc) or type(exc).__name__
+                if session_error:
+                    logger.error(
+                        "Microscope scan exposure policy restore failed: %s",
+                        session_error,
+                    )
+                    if success:
+                        success = False
+                        message = (
+                            "Microscope scan complete, but exposure policy restore "
+                            f"failed: {session_error}"
+                        )
+                    else:
+                        message = f"{message} Exposure policy restore failed: {session_error}"
             self.microscope_scan_finished.emit(success, message)
 
     def _move_to_microscope_scan_tile(
@@ -9848,8 +10095,7 @@ class Main(QMainWindow):
         *,
         flat_field_options: object,
         camera_lock_settings: object,
-        auto_exposure_options: object | None = None,
-        auto_exposure_result: Mapping[str, object] | None = None,
+        optical_session: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
         corrections: dict[str, object] = {}
         if hasattr(flat_field_options, "to_metadata"):
@@ -9860,11 +10106,8 @@ class Main(QMainWindow):
             lock_metadata = camera_lock_settings.to_metadata()
             if bool(lock_metadata.get("enabled")):
                 corrections["camera_lock"] = lock_metadata
-        if bool(getattr(auto_exposure_options, "enabled", False)):
-            corrections["auto_exposure"] = {
-                "enabled": True,
-                **dict(auto_exposure_result or {}),
-            }
+        if optical_session is not None:
+            corrections["optical_session"] = dict(optical_session)
         return corrections
 
     def _capture_microscope_scan_frame(self, *, raw: bool = False) -> QImage:

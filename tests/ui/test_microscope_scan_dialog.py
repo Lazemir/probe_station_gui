@@ -17,13 +17,11 @@ def app():
     created.quit()
 
 
-def test_scan_dialog_enables_auto_exposure_by_default(app) -> None:
+def test_scan_dialog_has_no_scan_specific_exposure_control(app) -> None:
     dialog = MicroscopeScanDialog(default_output_dir="C:/scan")
     try:
         configuration = dialog.current_configuration()
-        assert configuration.auto_exposure is True
-
-        dialog._auto_exposure_check.setChecked(False)
-        assert dialog.current_configuration().auto_exposure is False
+        assert not hasattr(configuration, "auto_exposure")
+        assert not hasattr(dialog, "_auto_exposure_check")
     finally:
         dialog.close()

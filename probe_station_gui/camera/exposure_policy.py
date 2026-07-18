@@ -630,6 +630,7 @@ class OpticalSessionManager:
         self._outer_token: str | None = None
         self._saved_policy: ExposurePolicy | None = None
         self._camera_snapshot: dict[str, object] | None = None
+        self._session_snapshot: dict[str, object] | None = None
 
     def open(
         self,
@@ -668,10 +669,12 @@ class OpticalSessionManager:
             try:
                 controller._write_settings([("ExposureAuto", "Off")])
                 if policy.engine is ExposureEngine.SOFTWARE:
-                    controller._software_once_result()
+                    adjustment = controller._software_once_result()
                 else:
-                    controller._hardware_once()
+                    adjustment = controller._hardware_once()
                 controller._write_settings([("ExposureAuto", "Off")])
+                nodes, _response = controller._read_nodes(("ExposureTime",))
+                fixed_exposure = float(nodes["ExposureTime"].get("value"))
             except Exception:
                 try:
                     controller._restore_camera_snapshot(camera_snapshot)
@@ -683,6 +686,24 @@ class OpticalSessionManager:
             self._outer_token = token
             self._saved_policy = policy
             self._camera_snapshot = camera_snapshot
+            adjustment_snapshot = {
+                key: adjustment[key]
+                for key in (
+                    "accepted",
+                    "converged",
+                    "engine",
+                    "final_exposure_us",
+                    "final_frame_counter",
+                )
+                if key in adjustment
+            }
+            adjustment_snapshot["final_exposure_us"] = fixed_exposure
+            self._session_snapshot = {
+                "outer_operation": name,
+                "policy": policy.to_dict(),
+                "fixed_exposure_us": fixed_exposure,
+                "adjustment": adjustment_snapshot,
+            }
             self._records[token] = _SessionRecord(token, name, None)
             controller._set_session_state(True, name)
             state_changed = True
@@ -739,6 +760,7 @@ class OpticalSessionManager:
                 self._outer_token = None
                 self._saved_policy = None
                 self._camera_snapshot = None
+                self._session_snapshot = None
                 controller._set_session_state(False)
                 controller._set_warning(warning)
                 emit = True
@@ -752,6 +774,18 @@ class OpticalSessionManager:
             controller._command_lock.release()
             if emit:
                 controller._emit_state()
+
+    def snapshot(self, token: str) -> dict[str, object]:
+        controller = self._controller
+        with controller._state_lock:
+            record = self._records.get(token)
+            session_snapshot = self._session_snapshot
+            if record is None or session_snapshot is None:
+                raise ExposurePolicyError("Optical session token is not active.")
+            return {
+                "operation": record.operation,
+                **session_snapshot,
+            }
 
     def _finalize_manual_session(self, policy: ExposurePolicy) -> str:
         controller = self._controller
@@ -812,6 +846,9 @@ class OpticalSessionLease:
         if self._close_result is None:
             self._close_result = self._manager.close(self.token)
         return dict(self._close_result)
+
+    def snapshot(self) -> dict[str, object]:
+        return self._manager.snapshot(self.token)
 
     def __enter__(self) -> OpticalSessionLease:
         return self

@@ -26,7 +26,6 @@ Point2D = tuple[float, float]
 DEFAULT_FLAT_FIELD_BLUR_RADIUS_PX = 401
 DEFAULT_FLAT_FIELD_MAX_GAIN = 4.0
 DEFAULT_CAMERA_LOCK_SETTINGS: tuple[tuple[str, object], ...] = (
-    ("ExposureAuto", "Off"),
     ("GainAuto", "Off"),
     ("BalanceWhiteAuto", "Off"),
 )
@@ -77,6 +76,14 @@ class CameraLockSettings:
     enabled: bool
     settings: tuple[tuple[str, object], ...] = ()
 
+    def __post_init__(self) -> None:
+        filtered = tuple(
+            (str(node_name), value)
+            for node_name, value in self.settings
+            if str(node_name) not in {"ExposureAuto", "ExposureTime"}
+        )
+        object.__setattr__(self, "settings", filtered)
+
     def to_metadata(self) -> dict[str, object]:
         return {
             "enabled": bool(self.enabled),
@@ -85,14 +92,6 @@ class CameraLockSettings:
                 for node_name, value in self.settings
             ],
         }
-
-
-@dataclass(frozen=True)
-class AutoExposureScanOptions:
-    enabled: bool = True
-
-    def to_metadata(self) -> dict[str, object]:
-        return {"enabled": bool(self.enabled)}
 
 
 @dataclass(frozen=True)
@@ -517,22 +516,6 @@ def camera_lock_settings_from_payload(
     return CameraLockSettings(enabled=enabled, settings=settings)
 
 
-def auto_exposure_options_from_payload(
-    payload: Mapping[str, object],
-    *,
-    default_enabled: bool = True,
-) -> AutoExposureScanOptions:
-    value = payload.get("auto_exposure", default_enabled)
-    if isinstance(value, Mapping):
-        unknown = sorted(set(value) - {"enabled"})
-        if unknown:
-            raise ValueError(f"Unknown auto_exposure setting: {unknown[0]}.")
-        enabled = _bool_from_payload(value.get("enabled", default_enabled))
-    else:
-        enabled = _bool_from_payload(value)
-    return AutoExposureScanOptions(enabled=enabled)
-
-
 def starting_status(plan: MicroscopeScanPlan) -> str:
     return f"Microscope scan starting: {len(plan.tiles)} tiles."
 
@@ -826,8 +809,6 @@ def _bool_from_payload(value: object) -> bool:
 
 
 __all__ = [
-    "AutoExposureScanOptions",
-    "auto_exposure_options_from_payload",
     "CameraLockSettings",
     "FlatFieldScanOptions",
     "MicroscopeScanStartDecision",

@@ -47,6 +47,40 @@ class _FakeStage:
         self.events.append(("finish",))
 
 
+class _FakeSessionLease:
+    def __init__(self, events: list[tuple[object, ...]]) -> None:
+        self._events = events
+        self.token = "private-token"
+
+    def snapshot(self) -> dict[str, object]:
+        return {
+            "operation": "lens distortion calibration",
+            "policy": {"auto_enabled": True, "engine": "camera"},
+            "fixed_exposure_us": 3200.0,
+        }
+
+    def close(self) -> dict[str, object]:
+        self._events.append(("session_close",))
+        return {"accepted": True}
+
+
+class _FakeSessionManager:
+    def __init__(
+        self,
+        events: list[tuple[object, ...]],
+        *,
+        open_error: Exception | None = None,
+    ) -> None:
+        self._events = events
+        self._open_error = open_error
+
+    def open(self, operation: str, parent_token=None) -> _FakeSessionLease:
+        self._events.append(("session_open", operation, parent_token))
+        if self._open_error is not None:
+            raise self._open_error
+        return _FakeSessionLease(self._events)
+
+
 class _FakeSettingsManager:
     def __init__(self) -> None:
         self.settings = Settings()
@@ -116,6 +150,7 @@ def _lens_output(
     *,
     before_preview: QImage | None = None,
     after_preview: QImage | None = None,
+    session_restore_error: str = "",
 ) -> main_module._LensDistortionCalibrationOutput:
     return main_module._LensDistortionCalibrationOutput(
         payload=payload,
@@ -129,6 +164,7 @@ def _lens_output(
             if after_preview is not None
             else QImage(4, 3, QImage.Format_Grayscale8)
         ),
+        session_restore_error=session_restore_error,
     )
 
 
@@ -305,15 +341,12 @@ def test_run_lens_distortion_calibration_captures_offset_grid(
         return before_preview, after_preview
 
     window.stage_controller = stage
+    window._optical_session_manager = _FakeSessionManager(stage.events)
     window._active_objective_metadata = lambda: ("X20", 20.0)
     window._flat_field_calibration_store = SimpleNamespace(
         load=lambda _objective: (_ for _ in ()).throw(
             AssertionError("lens calibration loaded flat-field data")
         )
-    )
-    window._run_camera_auto_exposure = lambda: (
-        stage.events.append(("auto_exposure",))
-        or {"accepted": True, "converged": True}
     )
     window._apply_microscope_scan_camera_lock = lambda settings: (
         stage.events.append(("camera_lock", settings.enabled)) or "lens-lock"
@@ -359,8 +392,8 @@ def test_run_lens_distortion_calibration_captures_offset_grid(
     Main._run_lens_distortion_calibration(window, (10.0, 20.0))
 
     assert stage.events[:4] == [
+        ("session_open", "lens distortion calibration", None),
         ("begin", "lens distortion calibration"),
-        ("auto_exposure",),
         ("camera_lock", True),
         ("needles", "raise", 71.0),
     ]
@@ -376,9 +409,10 @@ def test_run_lens_distortion_calibration_captures_offset_grid(
         index for index, event in enumerate(stage.events) if event[0] == "segment"
     )
     assert restore_index < first_segment_index
-    assert stage.events[-2:] == [
+    assert stage.events[-3:] == [
         ("camera_restore", "lens-lock"),
         ("finish",),
+        ("session_close",),
     ]
     assert captured_offsets == list(expected_offsets)
     assert len(segmented_frames) == len(expected_offsets) == 9
@@ -391,6 +425,8 @@ def test_run_lens_distortion_calibration_captures_offset_grid(
     assert isinstance(output, main_module._LensDistortionCalibrationOutput)
     assert output.before_preview is before_preview
     assert output.after_preview is after_preview
+    assert output.payload["optical_session"]["fixed_exposure_us"] == 3200.0
+    assert "token" not in repr(output.payload["optical_session"]).lower()
     assert "calibration_input" not in output.payload
     assert "calibration_candidates" not in output.payload
 
@@ -400,6 +436,7 @@ def test_lens_distortion_calibration_does_not_require_flat_field_before_motion()
     stage = _FakeStage()
     finished: list[tuple[bool, str, object]] = []
     window.stage_controller = stage
+    window._optical_session_manager = _FakeSessionManager(stage.events)
     window._active_microscope_scale = lambda: SimpleNamespace(
         pixels_to_mm=((0.1, 0.0), (0.0, 0.1)),
     )
@@ -416,16 +453,25 @@ def test_lens_distortion_calibration_does_not_require_flat_field_before_motion()
 
     Main._run_lens_distortion_calibration(window, (10.0, 20.0))
 
-    assert stage.events == [("begin", "lens distortion calibration"), ("finish",)]
+    assert stage.events == [
+        ("session_open", "lens distortion calibration", None),
+        ("begin", "lens distortion calibration"),
+        ("finish",),
+        ("session_close",),
+    ]
     assert finished[0][0] is False
     assert "flat-field" not in finished[0][1].lower()
 
 
-def test_lens_distortion_auto_exposure_failure_releases_stage_without_move() -> None:
+def test_lens_distortion_session_failure_does_not_reserve_or_move() -> None:
     stage = _FakeStage()
     finished: list[tuple[bool, str, object]] = []
     window = Main.__new__(Main)
     window.stage_controller = stage
+    window._optical_session_manager = _FakeSessionManager(
+        stage.events,
+        open_error=RuntimeError("Exposure did not converge."),
+    )
     window._active_objective_metadata = lambda: ("X20", 20.0)
     window._active_microscope_scale = lambda: SimpleNamespace(
         pixel_size_x_mm=0.001,
@@ -436,22 +482,65 @@ def test_lens_distortion_auto_exposure_failure_releases_stage_without_move() -> 
             AssertionError("lens calibration loaded flat-field data")
         )
     )
-    window._run_camera_auto_exposure = lambda: {
-        "accepted": False,
-        "message": "Exposure did not converge.",
-    }
     window._emit_lens_distortion_finished = (
         lambda success, message, payload: finished.append((success, message, payload))
     )
 
     Main._run_lens_distortion_calibration(window, (10.0, 20.0), 120.0, 70.0)
 
-    assert stage.events == [("begin", "lens distortion calibration"), ("finish",)]
+    assert stage.events == [
+        ("session_open", "lens distortion calibration", None),
+    ]
     assert finished == [
         (
             False,
             "Lens distortion calibration failed: Exposure did not converge.",
             None,
+        )
+    ]
+
+
+def test_completed_lens_artifact_is_saved_when_session_restore_fails() -> None:
+    window = Main.__new__(Main)
+    context = main_module._OpticalCalibrationRunContext(
+        operation_id="lens-restore-warning",
+        wizard_run_id=61,
+        objective_name="X20",
+    )
+    output = _lens_output(
+        _stage_geometry_payload(),
+        session_restore_error="native Continuous restore failed",
+    )
+    saved: list[tuple[dict[str, object], str]] = []
+    wizard_results: list[tuple[bool, str, int | None]] = []
+    window._lens_distortion_thread = None
+    window._lens_distortion_context = context
+    window._lens_distortion_dialog = None
+    window._optical_calibration_wizard = SimpleNamespace(
+        set_lens_distortion_result=lambda success, message, *, run_id=None, **_kwargs: (
+            wizard_results.append((bool(success), str(message), run_id))
+        )
+    )
+    window._save_objective_distortion = (
+        lambda payload, objective: saved.append((payload, objective))
+    )
+    window._lens_distortion_payload_invalidates_click_calibration = lambda _payload: False
+    window._show_status = lambda *_args: None
+
+    Main._on_lens_distortion_calibration_finished(
+        window,
+        context,
+        False,
+        "Lens distortion calibration complete, but exposure policy restore failed.",
+        output,
+    )
+
+    assert saved == [(output.payload, "X20")]
+    assert wizard_results == [
+        (
+            False,
+            "Lens distortion calibration complete, but exposure policy restore failed.",
+            61,
         )
     ]
 

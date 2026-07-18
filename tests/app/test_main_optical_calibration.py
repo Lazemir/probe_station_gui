@@ -24,9 +24,9 @@ class _Signal:
     def connect(self, callback) -> None:
         self.callbacks.append(callback)
 
-    def emit(self) -> None:
+    def emit(self, *args: object) -> None:
         for callback in tuple(self.callbacks):
-            callback()
+            callback(*args)
 
 
 class _RecordingSignal:
@@ -41,6 +41,7 @@ class _FakeWizard:
     def __init__(self, _parent=None) -> None:
         self.start_flat_field_requested = _Signal()
         self.start_lens_distortion_requested = _Signal()
+        self.cancel_requested = _Signal()
         self.prepared = []
         self.objectives = []
         self.results = []
@@ -49,6 +50,7 @@ class _FakeWizard:
         self.raised = 0
         self.activated = 0
         self.run_id = 17
+        self.selected_mode = OpticalCalibrationMode.FULL
 
     def prepare(self, mode=None) -> bool:
         self.prepared.append(mode)
@@ -62,6 +64,9 @@ class _FakeWizard:
 
     def objective_text(self) -> str:
         return "X20"
+
+    def mode(self) -> OpticalCalibrationMode:
+        return self.selected_mode
 
     def set_flat_field_result(self, success, message, *, run_id=None) -> None:
         self.results.append(("flat", success, message, run_id))
@@ -109,6 +114,32 @@ class _FakeLensDialog:
 class _LiveThread:
     def is_alive(self) -> bool:
         return True
+
+
+class _SessionLease:
+    def __init__(self, token: str, operation: str, events: list[tuple[object, ...]]) -> None:
+        self.token = token
+        self.operation = operation
+        self.events = events
+
+    def snapshot(self) -> dict[str, object]:
+        return {"operation": self.operation, "fixed_exposure_us": 2600.0}
+
+    def close(self) -> dict[str, object]:
+        self.events.append(("close", self.operation))
+        return {"accepted": True}
+
+
+class _SessionManager:
+    def __init__(self) -> None:
+        self.events: list[tuple[object, ...]] = []
+        self._counter = 0
+
+    def open(self, operation: str, parent_token=None) -> _SessionLease:
+        self._counter += 1
+        token = f"session-{self._counter}"
+        self.events.append(("open", operation, parent_token, token))
+        return _SessionLease(token, operation, self.events)
 
 
 class _ObjectiveSettingsManager:
@@ -306,6 +337,184 @@ def test_lens_start_captures_context_before_worker_thread_starts(monkeypatch) ->
     assert len(started_contexts) == 1
     assert started_contexts[0].wizard_run_id == 41
     assert started_contexts[0].objective_name == "X20"
+
+
+def test_full_wizard_uses_one_outer_session_and_explicit_nested_stage_tokens() -> None:
+    window = Main.__new__(Main)
+    manager = _SessionManager()
+    window._optical_session_manager = manager
+    flat_context = main_module._OpticalCalibrationRunContext(
+        operation_id="flat-full",
+        wizard_run_id=41,
+        objective_name="X20",
+        full_wizard=True,
+    )
+
+    flat_lease, flat_context = Main._open_optical_calibration_stage_session(
+        window,
+        "flat-field calibration",
+        flat_context,
+    )
+    flat_lease.close()
+    lens_context = main_module._OpticalCalibrationRunContext(
+        operation_id="lens-full",
+        wizard_run_id=42,
+        objective_name="X20",
+        parent_session_token=flat_context.parent_session_token,
+        full_wizard=True,
+    )
+    lens_lease, lens_context = Main._open_optical_calibration_stage_session(
+        window,
+        "lens distortion calibration",
+        lens_context,
+    )
+    lens_lease.close()
+    close_error = Main._close_optical_calibration_outer_session(window)
+
+    outer_token = flat_context.parent_session_token
+    assert outer_token is not None
+    assert lens_context.parent_session_token == outer_token
+    assert manager.events == [
+        ("open", "optical calibration", None, outer_token),
+        ("open", "flat-field calibration", outer_token, "session-2"),
+        ("close", "flat-field calibration"),
+        ("open", "lens distortion calibration", outer_token, "session-3"),
+        ("close", "lens distortion calibration"),
+        ("close", "optical calibration"),
+    ]
+    assert close_error == ""
+
+
+def test_outer_session_close_waits_through_exposure_policy_contention(
+    monkeypatch,
+) -> None:
+    window = Main.__new__(Main)
+    attempts = 0
+    busy_error = Main._close_optical_calibration_outer_session.__globals__[
+        "ExposurePolicyBusyError"
+    ]
+
+    class _ContendedLease:
+        def close(self) -> dict[str, object]:
+            nonlocal attempts
+            attempts += 1
+            if attempts <= 25:
+                raise busy_error("Camera exposure policy is busy.")
+            return {"accepted": True}
+
+    window._optical_calibration_outer_lease = _ContendedLease()
+    window._optical_calibration_outer_token = "outer-token"
+    monkeypatch.setitem(
+        Main._close_optical_calibration_outer_session.__globals__,
+        "time",
+        SimpleNamespace(sleep=lambda _seconds: None),
+    )
+
+    close_error = Main._close_optical_calibration_outer_session(window)
+
+    assert attempts == 26
+    assert close_error == ""
+    assert window._optical_calibration_outer_lease is None
+
+
+def test_full_wizard_objective_mismatch_requests_outer_session_close() -> None:
+    window = Main.__new__(Main)
+    wizard = _FakeWizard()
+    closes = []
+    window._optical_calibration_wizard = wizard
+    window._active_objective_metadata = lambda: ("X5", 5.0)
+    window._start_lens_distortion_calibration = lambda **_kwargs: pytest.fail(
+        "mismatched objective must not launch lens calibration"
+    )
+    window._cancel_optical_calibration_wizard = lambda run_id=None: closes.append(run_id)
+
+    Main._start_lens_distortion_calibration_from_wizard(window)
+
+    assert closes == [17]
+    assert wizard.results == [
+        (
+            "lens",
+            False,
+            "Active objective changed. Reopen optical calibration.",
+            17,
+        )
+    ]
+
+
+def test_full_wizard_lens_launch_failure_requests_outer_session_close() -> None:
+    window = Main.__new__(Main)
+    wizard = _FakeWizard()
+    closes = []
+    window._optical_calibration_wizard = wizard
+    window._active_objective_metadata = lambda: ("X20", 20.0)
+    window._optical_calibration_outer_parent_token = lambda: "outer-token"
+    window._start_lens_distortion_calibration = lambda **_kwargs: False
+    window._cancel_optical_calibration_wizard = lambda run_id=None: closes.append(run_id)
+
+    Main._start_lens_distortion_calibration_from_wizard(window)
+
+    assert closes == [17]
+    assert wizard.results == [
+        (
+            "lens",
+            False,
+            "Lens distortion calibration did not start.",
+            17,
+        )
+    ]
+
+
+def test_wizard_cancel_closes_retained_outer_session_off_gui_thread(
+    monkeypatch,
+) -> None:
+    window = Main.__new__(Main)
+    manager = _SessionManager()
+    window._optical_session_manager = manager
+    context = main_module._OpticalCalibrationRunContext(
+        operation_id="flat-full",
+        wizard_run_id=51,
+        objective_name="X20",
+        full_wizard=True,
+    )
+    nested, _context = Main._open_optical_calibration_stage_session(
+        window,
+        "flat-field calibration",
+        context,
+    )
+    nested.close()
+    window._flat_field_calibration_thread = None
+    window._flat_field_calibration_context = None
+    window._lens_distortion_thread = None
+    window._lens_distortion_context = None
+    window.status_message_requested = _RecordingSignal()
+    created_threads = []
+
+    class _DeferredThread:
+        def __init__(self, *, target, name, daemon) -> None:
+            self.target = target
+            self.name = name
+            self.daemon = daemon
+            self.started = False
+            created_threads.append(self)
+
+        def is_alive(self) -> bool:
+            return self.started
+
+        def start(self) -> None:
+            self.started = True
+
+    monkeypatch.setattr(main_module.threading, "Thread", _DeferredThread)
+
+    Main._cancel_optical_calibration_wizard(window, 51)
+
+    assert Main._optical_calibration_cancel_event(window).is_set()
+    assert len(created_threads) == 1
+    assert created_threads[0].started is True
+    assert ("close", "optical calibration") not in manager.events
+
+    created_threads[0].target()
+
+    assert manager.events[-1] == ("close", "optical calibration")
 
 
 @pytest.mark.parametrize(

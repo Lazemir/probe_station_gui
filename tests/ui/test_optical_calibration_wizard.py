@@ -188,22 +188,27 @@ def test_failed_capture_stays_on_page_and_can_retry(qt_app: QApplication) -> Non
     wizard.close()
 
 
-def test_running_capture_rejects_close(qt_app: QApplication) -> None:
+def test_running_capture_close_requests_asynchronous_cancellation(
+    qt_app: QApplication,
+) -> None:
     wizard = OpticalCalibrationWizard()
     wizard.set_mode(OpticalCalibrationMode.FLAT_FIELD)
+    cancel_spy = QSignalSpy(wizard.cancel_requested)
     _show(wizard, qt_app)
     wizard.next()
     wizard.next()
+    run_id = wizard.active_run_id()
 
     wizard.close()
     qt_app.processEvents()
 
-    assert wizard.isVisible()
-    wizard.set_flat_field_result(False, "stopped", run_id=wizard.active_run_id())
-    wizard.close()
+    assert not wizard.isVisible()
+    assert cancel_spy.count() == 1
+    assert cancel_spy.at(0) == [run_id]
+    wizard.set_flat_field_result(False, "stopped", run_id=run_id)
 
 
-def test_prepare_during_capture_preserves_running_close_guard(
+def test_prepare_during_capture_preserves_run_identity_until_cancel_completes(
     qt_app: QApplication,
 ) -> None:
     wizard = OpticalCalibrationWizard()
@@ -220,9 +225,8 @@ def test_prepare_during_capture_preserves_running_close_guard(
 
     wizard.close()
     qt_app.processEvents()
-    assert wizard.isVisible()
+    assert not wizard.isVisible()
     wizard.set_flat_field_result(False, "stopped", run_id=run_id)
-    wizard.close()
 
 
 def test_stale_or_duplicate_completion_does_not_unlock_capture(

@@ -29,6 +29,34 @@ class _AliveThread:
         self.joined = True
 
 
+def test_shutdown_waits_for_calibration_and_outer_session_close() -> None:
+    events: list[object] = []
+    calibration_thread = _AliveThread(events, "calibration_thread")
+    close_thread = _AliveThread(events, "session_close_thread")
+    owner = SimpleNamespace(
+        _flat_field_calibration_thread=calibration_thread,
+        _lens_distortion_thread=None,
+        _optical_calibration_outer_close_thread=None,
+        _optical_calibration_outer_lease=object(),
+        _cancel_optical_calibration_wizard=lambda: events.append(("cancel",)),
+    )
+
+    def schedule_close() -> None:
+        events.append(("schedule_close",))
+        owner._optical_calibration_outer_close_thread = close_thread
+
+    owner._schedule_optical_calibration_outer_close = schedule_close
+
+    shutdown_ui._stop_optical_calibration(owner)
+
+    assert events == [
+        ("cancel",),
+        ("calibration_thread", "join", 2.0),
+        ("schedule_close",),
+        ("session_close_thread", "join", 2.0),
+    ]
+
+
 def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
     events: list[object] = []
     monkeypatch.setattr(
