@@ -1,3 +1,6 @@
+import json
+from importlib import resources
+
 from probe_station_gui.notifications.telegram_settings import default_telegram_alerts
 from probe_station_gui.settings.default_file import normalize_default_settings_data
 
@@ -63,3 +66,13 @@ def test_normalize_default_settings_data_preserves_legacy_defaults_and_adds_gaps
     assert profile["magnification"] == 100.0
     assert profile["xy_offset_configured"] is False
     assert profile["autofocus_range_mm"] == 1.0
+
+
+def test_bundled_defaults_include_camera_exposure_policy() -> None:
+    path = resources.files("probe_station_gui").joinpath("default_settings.json")
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
+
+    assert data["camera"]["exposure"] == {
+        "auto_enabled": True,
+        "engine": "software",
+    }

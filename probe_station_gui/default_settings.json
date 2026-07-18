@@ -79,6 +79,12 @@
     "host": "127.0.0.1",
     "port": 8765
   },
+  "camera": {
+    "exposure": {
+      "auto_enabled": true,
+      "engine": "software"
+    }
+  },
   "telegram": {
     "enabled": false,
     "bot_username": "",

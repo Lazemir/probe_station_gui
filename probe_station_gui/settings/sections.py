@@ -37,6 +37,24 @@ class LoggingSettings:
 
 
 @dataclass
+class ExposurePolicySettings:
+    """Configuration for camera exposure control."""
+
+    auto_enabled: bool = True
+    engine: str = "software"
+
+    def clone(self) -> "ExposurePolicySettings":
+        """Return a copy of the exposure policy preferences."""
+
+        return ExposurePolicySettings(self.auto_enabled, self.engine)
+
+    def to_dict(self) -> dict[str, bool | str]:
+        """Serialize the exposure policy preferences."""
+
+        return {"auto_enabled": self.auto_enabled, "engine": self.engine}
+
+
+@dataclass
 class ApiSettings:
     """Configuration for the optional local API server."""
 
@@ -111,6 +129,7 @@ __all__ = [
     "ApiSettings",
     "ClickToMoveSettings",
     "CoordinateSystemSettings",
+    "ExposurePolicySettings",
     "LoggingSettings",
     "WORK_COORDINATE_SYSTEMS",
 ]
