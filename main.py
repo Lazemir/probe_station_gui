@@ -3132,14 +3132,23 @@ class Main(QMainWindow):
                 "status_code": 409,
                 "message": "Connect the stage controller before calibration.",
             }
-        if self.stage_controller.is_busy():
+        if self._objective_mutation_busy():
             return {
                 "accepted": False,
                 "status_code": 409,
-                "message": "Stage is busy; click-to-move calibration not started.",
+                "message": (
+                    "Click-to-move calibration cannot start while a scan, "
+                    "calibration, or stage task is active."
+                ),
             }
         if force:
-            self.stage_controller.reset_calibration("Click-to-move calibration reset.")
+            reset, message = self._reset_click_calibration()
+            if not reset:
+                return {
+                    "accepted": False,
+                    "status_code": 409,
+                    "message": message,
+                }
         if not self._start_click_to_move(dx_px, dy_px):
             return {
                 "accepted": False,
@@ -3607,7 +3616,7 @@ class Main(QMainWindow):
         )
 
     def _start_click_to_move(self, dx: float, dy: float) -> bool:
-        if not self._stage_serial_ready() or self.stage_controller.is_busy():
+        if not self._stage_serial_ready() or self._objective_mutation_busy():
             return False
         accepted = self.stage_controller.request_move(dx, dy)
         if accepted:
@@ -4565,6 +4574,8 @@ class Main(QMainWindow):
         context: _OpticalCalibrationRunContext | None,
     ) -> bool:
         if not isinstance(context, _OpticalCalibrationRunContext):
+            return False
+        if self._optical_calibration_should_stop(context):
             return False
         for attribute in (
             "_flat_field_calibration_context",
@@ -6273,6 +6284,13 @@ class Main(QMainWindow):
         objective_name = normalize_objective_name(objective_name)
         if not objective_name:
             raise RuntimeError("No active objective selected.")
+        if (
+            optical_context is not None
+            and not self._optical_mutation_context_is_current(optical_context)
+        ):
+            raise RuntimeError(
+                "Optical calibration result was canceled or is no longer current."
+            )
         if self._objective_profile_mutation_busy(
             objective_name,
             allow_stage_task=allow_stage_task,
@@ -6347,6 +6365,14 @@ class Main(QMainWindow):
                 "calibration is active."
             )
             logger.warning(message)
+            try:
+                self._apply_objective_settings()
+            except Exception as exc:
+                logger.exception(
+                    "Unable to restore persisted objective calibration after "
+                    "ignoring a late result"
+                )
+                message = f"{message} Restore failed: {exc}"
             self._show_status(message, 7000)
             return
         pixels_to_mm = self._objective_pixels_to_mm_for_calibration_update(
@@ -6512,13 +6538,30 @@ class Main(QMainWindow):
         except Exception as exc:
             self._show_status(str(exc), 5000)
 
-    def _reset_click_calibration(self) -> None:
-        try:
-            self.stage_controller.reset_calibration(
-                "Click-to-move calibration cleared. Click in the microscope view to recalibrate the active objective."
+    def _reset_click_calibration(self) -> tuple[bool, str]:
+        active_name = normalize_objective_name(
+            self.settings_manager.settings.objectives.active_name
+        )
+        if self._objective_profile_mutation_busy(active_name):
+            message = (
+                "Click-to-move calibration cannot be reset while a scan or "
+                "calibration is active."
             )
+            self._refresh_click_calibration_ui()
+            self._show_status(message, 5000)
+            return False, message
+        message = (
+            "Click-to-move calibration cleared. Click in the microscope view "
+            "to recalibrate the active objective."
+        )
+        try:
+            self.stage_controller.reset_calibration(message)
         except Exception as exc:
-            self._show_status(str(exc), 5000)
+            error = str(exc)
+            self._refresh_click_calibration_ui()
+            self._show_status(error, 5000)
+            return False, error
+        return True, message
 
     def _capture_manual_alignment_clicked(
         self, dx_pixels: float = 0.0, dy_pixels: float = 0.0

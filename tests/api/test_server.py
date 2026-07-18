@@ -346,6 +346,26 @@ class ApiServerHttpTest(unittest.TestCase):
             "lens correction is busy",
         )
 
+    def test_click_force_reset_preserves_rejected_command_status(self) -> None:
+        client = self._client(
+            command_callback=lambda _request: {
+                "accepted": False,
+                "status_code": 409,
+                "message": "objective calibration is busy",
+            }
+        )
+
+        response = client.post(
+            "/api/v1/calibration/click-to-move",
+            json={"force": True},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["detail"]["message"],
+            "objective calibration is busy",
+        )
+
     def test_camera_settings_endpoints_preserve_names_and_ordered_writes(self) -> None:
         reads = []
         writes = []

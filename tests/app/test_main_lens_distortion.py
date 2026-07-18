@@ -1699,28 +1699,92 @@ def test_late_lens_completion_does_not_mutate_active_correction_during_scan() ->
     assert statuses[-1] == dialog.statuses[-1]
 
 
+def test_cancelled_wizard_lens_completion_does_not_save_correction() -> None:
+    window = Main.__new__(Main)
+    manager = _FakeSettingsManager()
+    context = main_module._OpticalCalibrationRunContext(
+        operation_id="cancelled-lens",
+        wizard_run_id=73,
+        objective_name="X20",
+    )
+    original_payload = {"model_version": 1, "camera_matrix": [[20.0]]}
+    manager.settings.objectives = ObjectivesSettings(
+        active_name="X20",
+        objectives={
+            "X20": ObjectiveCalibrationSettings(
+                name="X20",
+                distortion_correction=original_payload,
+                distortion_correction_configured=True,
+            )
+        },
+    )
+    wizard_results: list[tuple[bool, str, int | None]] = []
+    dialog = _FakeDialog()
+    window.settings_manager = manager
+    window.stage_controller = SimpleNamespace(is_busy=lambda: False)
+    window._flat_field_calibration_thread = None
+    window._flat_field_calibration_context = None
+    window._lens_distortion_thread = _DeadThread()
+    window._lens_distortion_context = context
+    window._microscope_scan_thread = None
+    window._lens_distortion_dialog = dialog
+    window._optical_calibration_wizard = SimpleNamespace(
+        set_lens_distortion_result=lambda success, message, *, run_id=None, **_kwargs: (
+            wizard_results.append((bool(success), str(message), run_id))
+        )
+    )
+    window._apply_objective_settings = lambda: pytest.fail(
+        "cancelled lens completion applied active correction"
+    )
+    window._refresh_objective_calibration_ui = lambda: None
+    window._show_status = lambda *_args: None
+
+    Main._cancel_optical_calibration_wizard(window, 73)
+    Main._on_lens_distortion_calibration_finished(
+        window,
+        context,
+        True,
+        "Lens distortion calibration saved.",
+        _lens_output(_stage_geometry_payload()),
+    )
+
+    profile = manager.settings.objectives.objectives["X20"]
+    assert manager.saved_count == 0
+    assert profile.distortion_correction == original_payload
+    assert wizard_results[0][0] is False
+    assert wizard_results[0][2] == 73
+    assert "save failed" in wizard_results[0][1].lower()
+    assert window._lens_distortion_context is None
+
+
 @pytest.mark.parametrize("blocker", ("scan", "calibration"))
 def test_click_calibration_active_update_is_rejected_after_new_operation_starts(
     blocker: str,
 ) -> None:
     window = Main.__new__(Main)
     manager = _FakeSettingsManager()
-    old_matrix = [[0.01, 0.0], [0.0, 0.01]]
+    newer_matrix = [[0.03, 0.0], [0.0, 0.03]]
     manager.settings.objectives = ObjectivesSettings(
         active_name="X20",
         objectives={
             "X20": ObjectiveCalibrationSettings(
                 name="X20",
                 magnification=20.0,
-                pixels_to_mm=old_matrix,
+                pixels_to_mm=newer_matrix,
                 xy_calibration_configured=True,
             )
         },
     )
     persisted: list[object] = []
+    restored: list[list[list[float]]] = []
     statuses: list[str] = []
     window.settings_manager = manager
-    window.stage_controller = SimpleNamespace(is_busy=lambda: True)
+    window.stage_controller = SimpleNamespace(
+        is_busy=lambda: True,
+        apply_objective_configuration=lambda objective, _objectives: restored.append(
+            objective.pixels_to_mm
+        ),
+    )
     window._flat_field_calibration_thread = None
     window._flat_field_calibration_context = None
     window._lens_distortion_thread = None
@@ -1737,6 +1801,9 @@ def test_click_calibration_active_update_is_rejected_after_new_operation_starts(
         SimpleNamespace(is_alive=lambda: True) if blocker == "scan" else None
     )
     window._persist_objective_plan = lambda plan: persisted.append(plan)
+    window._sync_objective_combo = lambda _name: None
+    window._refresh_objective_calibration_ui = lambda: None
+    window._design_session = SimpleNamespace(document=None)
     window._show_status = lambda message, _timeout=0: statuses.append(str(message))
 
     Main._on_objective_calibration_updated(
@@ -1746,7 +1813,8 @@ def test_click_calibration_active_update_is_rejected_after_new_operation_starts(
     )
 
     assert persisted == []
-    assert manager.settings.objectives.objectives["X20"].pixels_to_mm == old_matrix
+    assert manager.settings.objectives.objectives["X20"].pixels_to_mm == newer_matrix
+    assert restored == [newer_matrix]
     assert statuses == [
         "Click-to-move calibration result ignored because a scan or calibration is active."
     ]
@@ -1862,6 +1930,95 @@ def test_api_lens_reset_returns_conflict_during_active_operation(
     assert statuses == [response["message"]]
 
 
+def test_api_force_click_reset_returns_conflict_during_scan_startup() -> None:
+    window = Main.__new__(Main)
+    manager = _FakeSettingsManager()
+    manager.settings.objectives = ObjectivesSettings(
+        active_name="X20",
+        objectives={"X20": ObjectiveCalibrationSettings(name="X20")},
+    )
+    resets: list[str] = []
+    starts: list[tuple[float, float]] = []
+    window.settings_manager = manager
+    window.stage_controller = SimpleNamespace(
+        is_busy=lambda: False,
+        reset_calibration=lambda reason: resets.append(str(reason)),
+    )
+    window._flat_field_calibration_thread = None
+    window._flat_field_calibration_context = None
+    window._lens_distortion_thread = None
+    window._lens_distortion_context = None
+    window._microscope_scan_thread = SimpleNamespace(is_alive=lambda: True)
+    window._stage_serial_ready = lambda: True
+    window._start_click_to_move = lambda dx, dy: starts.append((dx, dy)) or True
+
+    response = Main._api_click_to_move_calibration(
+        window,
+        {"dx_px": 1.0, "dy_px": -1.0, "force": True},
+    )
+
+    assert response["accepted"] is False
+    assert response["status_code"] == 409
+    assert resets == []
+    assert starts == []
+
+
+def test_click_to_move_start_is_rejected_during_scan_startup() -> None:
+    window = Main.__new__(Main)
+    requests: list[tuple[float, float]] = []
+    window.stage_controller = SimpleNamespace(
+        is_busy=lambda: False,
+        request_move=lambda dx, dy: requests.append((dx, dy)) or True,
+    )
+    window._flat_field_calibration_thread = None
+    window._flat_field_calibration_context = None
+    window._lens_distortion_thread = None
+    window._lens_distortion_context = None
+    window._microscope_scan_thread = SimpleNamespace(is_alive=lambda: True)
+    window._stage_serial_ready = lambda: True
+
+    accepted = Main._start_click_to_move(window, 4.0, -3.0)
+
+    assert accepted is False
+    assert requests == []
+
+
+def test_gui_click_reset_is_rejected_during_calibration_startup() -> None:
+    window = Main.__new__(Main)
+    manager = _FakeSettingsManager()
+    manager.settings.objectives = ObjectivesSettings(
+        active_name="X20",
+        objectives={"X20": ObjectiveCalibrationSettings(name="X20")},
+    )
+    resets: list[str] = []
+    statuses: list[str] = []
+    refreshes: list[str] = []
+    window.settings_manager = manager
+    window.stage_controller = SimpleNamespace(
+        is_busy=lambda: False,
+        reset_calibration=lambda reason: resets.append(str(reason)),
+    )
+    window._flat_field_calibration_thread = None
+    window._flat_field_calibration_context = None
+    window._lens_distortion_thread = None
+    window._lens_distortion_context = main_module._OpticalCalibrationRunContext(
+        operation_id="starting-lens",
+        wizard_run_id=None,
+        objective_name="X20",
+    )
+    window._microscope_scan_thread = None
+    window._show_status = lambda message, _timeout=0: statuses.append(str(message))
+    window._refresh_click_calibration_ui = lambda: refreshes.append("refresh")
+
+    Main._reset_click_calibration(window)
+
+    assert resets == []
+    assert refreshes == ["refresh"]
+    assert statuses == [
+        "Click-to-move calibration cannot be reset while a scan or calibration is active."
+    ]
+
+
 def test_reset_lens_distortion_preserves_click_calibration() -> None:
     window = Main.__new__(Main)
     manager = _FakeSettingsManager()
@@ -1899,7 +2056,13 @@ def test_reset_lens_distortion_preserves_click_calibration() -> None:
 
 def test_api_click_to_move_calibration_force_resets_before_start() -> None:
     window = Main.__new__(Main)
+    manager = _FakeSettingsManager()
+    manager.settings.objectives = ObjectivesSettings(
+        active_name="X20",
+        objectives={"X20": ObjectiveCalibrationSettings(name="X20")},
+    )
     events: list[tuple[object, ...]] = []
+    window.settings_manager = manager
     window.stage_controller = SimpleNamespace(
         is_busy=lambda: False,
         reset_calibration=lambda reason: events.append(("reset", reason)),
@@ -1917,7 +2080,11 @@ def test_api_click_to_move_calibration_force_resets_before_start() -> None:
     assert response["accepted"] is True
     assert response["status_code"] == 202
     assert events == [
-        ("reset", "Click-to-move calibration reset."),
+        (
+            "reset",
+            "Click-to-move calibration cleared. Click in the microscope view "
+            "to recalibrate the active objective.",
+        ),
         ("start", 1.5, -2.0),
     ]
 
