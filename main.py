@@ -5301,7 +5301,12 @@ class Main(QMainWindow):
                 "Lens distortion calibration model_type must be stage_geometry."
             )
         residuals: dict[str, float] = {}
-        for field in ("residual_mean_px", "residual_max_px"):
+        for field in (
+            "baseline_residual_mean_px",
+            "baseline_residual_max_px",
+            "residual_mean_px",
+            "residual_max_px",
+        ):
             value = payload.get(field)
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise RuntimeError(
@@ -5527,6 +5532,14 @@ class Main(QMainWindow):
                 ):
                     raise RuntimeError("Invalid lens calibration previews.")
                 self._validate_lens_distortion_fit_payload(payload)
+                without_calibration_metrics = (
+                    float(payload["baseline_residual_mean_px"]),
+                    float(payload["baseline_residual_max_px"]),
+                )
+                with_calibration_metrics = (
+                    float(payload["residual_mean_px"]),
+                    float(payload["residual_max_px"]),
+                )
                 click_calibration_invalidated = (
                     self._lens_distortion_payload_invalidates_click_calibration(payload)
                 )
@@ -5555,6 +5568,8 @@ class Main(QMainWindow):
                     run_id=run_id,
                     before_preview=before_preview,
                     after_preview=after_preview,
+                    without_calibration_metrics=without_calibration_metrics,
+                    with_calibration_metrics=with_calibration_metrics,
                 )
             else:
                 wizard.set_lens_distortion_result(

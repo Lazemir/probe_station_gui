@@ -132,6 +132,8 @@ def _stage_geometry_payload(**overrides: object) -> dict[str, object]:
         "k2": -0.002,
         "p1": 0.0005,
         "p2": -0.0003,
+        "baseline_residual_mean_px": 0.8,
+        "baseline_residual_max_px": 1.4,
         "residual_mean_px": 0.5,
         "residual_max_px": 1.0,
         "feature_count": 8,
@@ -680,6 +682,8 @@ def test_fit_lens_distortion_output_rejects_high_residual(monkeypatch) -> None:
             return {
                 "model_version": 1,
                 "model_type": "stage_geometry",
+                "baseline_residual_mean_px": 0.8,
+                "baseline_residual_max_px": 1.4,
                 "residual_mean_px": 5.2,
                 "residual_max_px": 17.4,
             }
@@ -783,29 +787,41 @@ def test_fit_lens_distortion_output_rejects_unsupported_model_type_before_previe
     (
         {
             "model_type": "stage_geometry",
+            "baseline_residual_mean_px": 0.8,
+            "baseline_residual_max_px": 1.4,
             "residual_max_px": 1.0,
         },
         {
             "model_type": "stage_geometry",
+            "baseline_residual_mean_px": 0.8,
+            "baseline_residual_max_px": 1.4,
             "residual_mean_px": 0.5,
         },
         {
             "model_type": "stage_geometry",
+            "baseline_residual_mean_px": 0.8,
+            "baseline_residual_max_px": 1.4,
             "residual_mean_px": "not-a-number",
             "residual_max_px": 1.0,
         },
         {
             "model_type": "stage_geometry",
+            "baseline_residual_mean_px": 0.8,
+            "baseline_residual_max_px": 1.4,
             "residual_mean_px": 0.5,
             "residual_max_px": "not-a-number",
         },
         {
             "model_type": "stage_geometry",
+            "baseline_residual_mean_px": 0.8,
+            "baseline_residual_max_px": 1.4,
             "residual_mean_px": float("nan"),
             "residual_max_px": 1.0,
         },
         {
             "model_type": "stage_geometry",
+            "baseline_residual_mean_px": 0.8,
+            "baseline_residual_max_px": 1.4,
             "residual_mean_px": 0.5,
             "residual_max_px": float("inf"),
         },
@@ -876,14 +892,23 @@ def test_fit_lens_distortion_output_rejects_invalid_residual_metrics_before_prev
 @pytest.mark.parametrize(
     "payload",
     (
-        {"model_type": "stage_geometry", "residual_max_px": 1.0},
         {
             "model_type": "stage_geometry",
+            "baseline_residual_mean_px": 0.8,
+            "baseline_residual_max_px": 1.4,
+            "residual_max_px": 1.0,
+        },
+        {
+            "model_type": "stage_geometry",
+            "baseline_residual_mean_px": 0.8,
+            "baseline_residual_max_px": 1.4,
             "residual_mean_px": "not-a-number",
             "residual_max_px": 1.0,
         },
         {
             "model_type": "stage_geometry",
+            "baseline_residual_mean_px": 0.8,
+            "baseline_residual_max_px": 1.4,
             "residual_mean_px": 0.5,
             "residual_max_px": float("nan"),
         },
@@ -892,6 +917,57 @@ def test_fit_lens_distortion_output_rejects_invalid_residual_metrics_before_prev
 def test_lens_distortion_success_message_rejects_invalid_metrics(payload) -> None:
     with pytest.raises(RuntimeError, match="residual"):
         Main._lens_distortion_fit_success_message(payload)
+
+
+@pytest.mark.parametrize(
+    "field, value, missing",
+    (
+        ("baseline_residual_mean_px", None, True),
+        ("baseline_residual_mean_px", True, False),
+        ("baseline_residual_mean_px", float("nan"), False),
+        ("baseline_residual_mean_px", float("inf"), False),
+        ("baseline_residual_max_px", None, True),
+        ("baseline_residual_max_px", True, False),
+        ("baseline_residual_max_px", float("nan"), False),
+        ("baseline_residual_max_px", float("inf"), False),
+    ),
+    ids=(
+        "missing-baseline-mean",
+        "boolean-baseline-mean",
+        "nan-baseline-mean",
+        "infinite-baseline-mean",
+        "missing-baseline-max",
+        "boolean-baseline-max",
+        "nan-baseline-max",
+        "infinite-baseline-max",
+    ),
+)
+def test_lens_distortion_completion_rejects_invalid_baseline_metrics_without_save(
+    field,
+    value,
+    missing,
+) -> None:
+    payload = _stage_geometry_payload()
+    if missing:
+        payload.pop(field)
+    else:
+        payload[field] = value
+
+    with pytest.raises(RuntimeError, match=field):
+        Main._validate_lens_distortion_fit_payload(payload)
+
+    window = Main.__new__(Main)
+    saved: list[object] = []
+    window._lens_distortion_thread = _DeadThread()
+    window._lens_distortion_dialog = None
+    window._save_active_objective_distortion = lambda *args: saved.append(args)
+    window._show_status = lambda *_args: None
+
+    Main._on_lens_distortion_calibration_finished(
+        window, True, "done", _lens_output(payload)
+    )
+
+    assert saved == []
 
 
 def test_fit_lens_distortion_output_requires_click_calibration() -> None:
@@ -938,6 +1014,8 @@ def test_lens_distortion_finished_rejects_structurally_incomplete_payload() -> N
         "model_version": 1,
         "model_type": "stage_geometry",
         "frame_size": [640, 480],
+        "baseline_residual_mean_px": 0.8,
+        "baseline_residual_max_px": 1.4,
         "residual_mean_px": 0.2,
         "residual_max_px": 0.4,
     }
@@ -1059,8 +1137,8 @@ def test_lens_distortion_completion_saves_to_captured_objective_after_active_swi
     window._refresh_objective_calibration_ui = lambda: None
     window._show_status = lambda *_args: None
 
-    before_preview = QImage(7, 5, QImage.Format_Grayscale8)
-    after_preview = QImage(7, 5, QImage.Format_Grayscale8)
+    before_preview = QImage(7, 5, QImage.Format_RGB888)
+    after_preview = QImage(7, 5, QImage.Format_RGB888)
     output = _lens_output(
         payload,
         before_preview=before_preview,
@@ -1093,6 +1171,8 @@ def test_lens_distortion_completion_saves_to_captured_objective_after_active_swi
                 "run_id": 27,
                 "before_preview": before_preview,
                 "after_preview": after_preview,
+                "without_calibration_metrics": (0.8, 1.4),
+                "with_calibration_metrics": (0.2, 0.4),
             },
         )
     ]
