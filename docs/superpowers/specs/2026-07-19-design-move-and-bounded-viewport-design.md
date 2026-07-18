@@ -59,10 +59,13 @@ Move is enabled only when:
 
 - a design document is loaded; and
 - design registration is valid, so a design coordinate can be converted to a
-  stage target.
+  stage target;
+- no design load is in progress; and
+- no route measurement is running.
 
-Stage busy state and needle safety remain execution-time concerns owned by the
-existing controller path. The toolbar does not duplicate those safety rules.
+Other stage busy state and needle safety remain execution-time concerns owned
+by the existing controller path. The toolbar does not duplicate those safety
+rules.
 
 Move remains active after a successful or rejected movement, allowing several
 successive targets. Escape cancels any pending click interaction and returns to
@@ -109,14 +112,15 @@ Two bounds have distinct purposes:
 
 - **GDS bounds** come from `DesignDocument.bounds` and define the initial and
   Home view.
-- **Content bounds** are the union of GDS bounds and every finite visible
-  coordinate belonging to the current route and persisted markup. Segment
-  endpoints and rendered route offsets are included, so a distant entity always
-  remains reachable and deletable.
+- **Content bounds** are the union of GDS bounds and every finite coordinate
+  belonging to the current route and persisted markup, including currently
+  disabled route points and hidden markup. Segment endpoints and route offsets
+  are included, so a distant entity remains accounted for when it is made
+  visible or enabled and can then be reached and deleted.
 
 No route or markup coordinate is classified as an outlier merely because it is
-far from the GDS. Non-finite or structurally invalid coordinates remain model
-validation errors and do not enter ViewBox limits.
+far from the GDS. Non-finite or structurally invalid coordinates are logged as
+model validation errors and ignored when ViewBox limits are built.
 
 Content bounds receive a small named proportional padding. The padded bounds
 are aspect-fitted to the current canvas to produce the **navigation frame**.
@@ -147,17 +151,19 @@ larger internal content envelope available through ordinary pan and zoom.
 
 The navigation frame is recomputed when:
 
-- the design document, top cell, rotation, or visible persistent content
+- the design document, top cell, rotation, or persistent content
   changes;
 - a route point or markup entity is added, moved, arrayed, rotated, restored,
   or deleted;
 - the canvas aspect ratio changes.
 
-Expanding the frame never changes the current visible range automatically.
-When the frame shrinks, an already-valid view is preserved. A view outside the
-new frame is clamped once to the nearest valid range; if it is larger than the
-new maximum, it is reduced to that maximum. Deleting a distant last entity
-therefore cannot leave the operator stranded in now-invalid empty space.
+Expanding the frame never triggers a content-wide refocus. An aspect-locked
+canvas resize may expand one visible axis around the current center, but it
+does not jump back to GDS or content bounds. When the frame shrinks, an
+already-valid view is preserved. A view outside the new frame is clamped once
+to the nearest valid range; if it is larger than the new maximum, it is reduced
+to that maximum. Deleting a distant last entity therefore cannot leave the
+operator stranded in now-invalid empty space.
 
 Bounds computation is a pure helper over model coordinates. It does not parse
 GDS, perform hardware I/O, or rebuild widgets.
@@ -195,10 +201,16 @@ segments. Each request receives named limits for:
 
 - recursive shapes inspected;
 - generated geometry candidates; and
-- elapsed wall time checked periodically during iteration.
+- elapsed wall time checked cooperatively between recursive-iterator and
+  contour steps.
 
 Exceeding any limit aborts that snap as unavailable; partial geometry is never
 reported as a trustworthy nearest result.
+
+The time budget does not claim to preempt one already-running native KLayout
+call. The useful-scale guard rejects the known extreme query before the first
+recursive iterator is constructed; after entry, elapsed and cancellation
+checks take effect whenever control returns to Python.
 
 The worker already coalesces pending hover requests. It additionally exposes a
 thread-safe cooperative cancellation check to the in-flight backend loop. A
