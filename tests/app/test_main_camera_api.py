@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 from types import SimpleNamespace
 
@@ -14,6 +15,7 @@ restore_real_imports_for_main()
 from main import Main
 from probe_station_gui.camera.auto_exposure import AutoExposureBusyError
 from probe_station_gui.settings.sections import ExposurePolicySettings
+from probe_station_gui.settings.manager import Settings, SettingsManager
 
 
 class _CameraBroker:
@@ -80,6 +82,30 @@ def test_main_composes_policy_from_persisted_settings() -> None:
         _shutdown_policy_window(window)
 
 
+def test_main_injects_optical_session_manager_into_stage_controller(
+    monkeypatch,
+) -> None:
+    class FakeStageController:
+        def __init__(self) -> None:
+            self.session_manager = None
+
+        def set_optical_session_manager(self, manager) -> None:
+            self.session_manager = manager
+
+    manager = SimpleNamespace(open=lambda _operation: None)
+    window = Main.__new__(Main)
+    window._optical_session_manager = manager
+    monkeypatch.setitem(
+        Main._create_stage_controller.__globals__,
+        "StageController",
+        FakeStageController,
+    )
+
+    controller = Main._create_stage_controller(window)
+
+    assert controller.session_manager is manager
+
+
 def test_main_policy_persists_and_public_exposure_write_uses_controller_guard() -> None:
     window, saved = _compose_policy_window(auto_enabled=False)
     try:
@@ -96,6 +122,36 @@ def test_main_policy_persists_and_public_exposure_write_uses_controller_guard() 
         assert result["accepted"] is True
     finally:
         _shutdown_policy_window(window)
+
+
+def test_settings_dialog_transaction_preserves_concurrent_exposure_policy(
+    tmp_path,
+) -> None:
+    manager = SettingsManager.__new__(SettingsManager)
+    manager._settings = Settings(
+        exposure_policy=ExposurePolicySettings(
+            auto_enabled=False,
+            engine="camera",
+        )
+    )
+    manager._config_dir = tmp_path
+    manager._config_path = tmp_path / "settings.json"
+    manager._logger = logging.getLogger(__name__)
+    manager._settings_lock = threading.RLock()
+    manager.apply = lambda: None
+    stale_dialog_settings = Settings()
+    stale_dialog_settings.design_last_directory = "C:/dialog-selection"
+    window = Main.__new__(Main)
+    window.settings_manager = manager
+    window._apply_settings = lambda: None
+
+    Main._apply_settings_from_dialog(window, stale_dialog_settings)
+
+    assert manager.settings.design_last_directory == "C:/dialog-selection"
+    assert manager.settings.exposure_policy.to_dict() == {
+        "auto_enabled": False,
+        "engine": "camera",
+    }
 
 
 def test_controller_owned_camera_writes_use_trusted_broker_path() -> None:
@@ -182,7 +238,7 @@ def test_camera_api_frame_selects_raw_and_corrected_storage() -> None:
     assert corrected_image.pixelColor(0, 0) == QColor("blue")
 
 
-def test_exposure_policy_starts_once_after_first_real_raw_frame() -> None:
+def test_exposure_policy_successful_start_latches_after_first_real_raw_frame() -> None:
     class StartAdapter:
         def __init__(self) -> None:
             self.start_requests = 0
@@ -194,7 +250,9 @@ def test_exposure_policy_starts_once_after_first_real_raw_frame() -> None:
     window._latest_camera_frame_condition = threading.Condition()
     window._latest_raw_camera_frame = None
     window._latest_raw_camera_frame_counter = 0
-    window._exposure_policy_start_requested = False
+    window._exposure_policy_start_in_flight = False
+    window._exposure_policy_started = False
+    window._exposure_policy_start_retry_after = 0.0
     window._exposure_policy_adapter = StartAdapter()
     window.settings_manager = SimpleNamespace(
         active_objective_configuration=lambda: SimpleNamespace(
@@ -209,9 +267,76 @@ def test_exposure_policy_starts_once_after_first_real_raw_frame() -> None:
     Main._on_camera_frame(window, QImage())
     Main._on_camera_frame(window, _solid_image("red"))
     Main._on_camera_frame(window, _solid_image("blue"))
+    Main._on_exposure_policy_command_finished(
+        window,
+        {"operation": "start", "accepted": True},
+    )
+    Main._on_camera_frame(window, _solid_image("green"))
 
     assert window._exposure_policy_adapter.start_requests == 1
-    assert window._latest_raw_camera_frame_counter == 3
+    assert window._exposure_policy_start_in_flight is False
+    assert window._exposure_policy_started is True
+    assert window._latest_raw_camera_frame_counter == 4
+
+
+def test_exposure_policy_failed_start_retries_after_backoff(monkeypatch) -> None:
+    class StartAdapter:
+        def __init__(self) -> None:
+            self.start_requests = 0
+
+        def request_start(self) -> None:
+            self.start_requests += 1
+
+    statuses: list[tuple[str, int]] = []
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(
+        Main._on_camera_frame.__globals__["time"],
+        "monotonic",
+        lambda: clock.now,
+    )
+    window = Main.__new__(Main)
+    window._latest_camera_frame_condition = threading.Condition()
+    window._latest_raw_camera_frame = None
+    window._latest_raw_camera_frame_counter = 0
+    window._exposure_policy_start_in_flight = False
+    window._exposure_policy_started = False
+    window._exposure_policy_start_retry_after = 0.0
+    window._exposure_policy_adapter = StartAdapter()
+    window.settings_manager = SimpleNamespace(
+        active_objective_configuration=lambda: SimpleNamespace(
+            name="",
+            distortion_correction_configured=False,
+            distortion_correction={},
+        )
+    )
+    window._suppress_next_camera_ui_gap = False
+    window._live_camera_frame_processor = SimpleNamespace(submit=lambda _request: True)
+    window._show_status = lambda message, timeout: statuses.append((message, timeout))
+
+    Main._on_camera_frame(window, _solid_image("red"))
+    Main._on_exposure_policy_command_finished(
+        window,
+        {
+            "operation": "start",
+            "accepted": False,
+            "message": "Camera settings unavailable.",
+        },
+    )
+    retry_after = window._exposure_policy_start_retry_after
+    Main._on_camera_frame(window, _solid_image("blue"))
+    clock.now = retry_after
+    Main._on_camera_frame(window, _solid_image("green"))
+
+    assert retry_after == 101.0
+    assert window._exposure_policy_adapter.start_requests == 2
+    assert window._exposure_policy_start_in_flight is True
+    assert window._exposure_policy_started is False
+    assert statuses == [
+        (
+            "Camera exposure setup failed: Camera settings unavailable.",
+            8000,
+        )
+    ]
 
 
 def test_camera_api_submitters_forward_request_ids_and_order() -> None:

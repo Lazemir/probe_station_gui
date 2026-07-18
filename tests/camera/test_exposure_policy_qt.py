@@ -68,6 +68,7 @@ def test_adapter_starts_controller_from_a_worker() -> None:
     assert controller.start_thread != gui_thread
     assert controller.start_calls == 1
     assert finished[0]["accepted"] is True
+    assert finished[0]["operation"] == "start"
     adapter.shutdown()
 
 
@@ -139,6 +140,31 @@ def test_closed_adapter_reports_timeout_and_survives_destruction() -> None:
 
     assert finished == []
     assert controller.unsubscribe_calls == 1
+
+
+def test_shutdown_tracks_worker_until_final_state_path_completes() -> None:
+    _app()
+    controller = _BlockingController()
+    adapter = ExposurePolicyQtAdapter(controller)
+    final_snapshot_entered = threading.Event()
+    release_final_snapshot = threading.Event()
+    original_snapshot = adapter.snapshot
+
+    def blocking_snapshot() -> dict[str, object]:
+        if threading.current_thread().name == "camera-exposure-command":
+            final_snapshot_entered.set()
+            assert release_final_snapshot.wait(1.0)
+        return original_snapshot()
+
+    adapter.snapshot = blocking_snapshot
+    adapter.request_once()
+    assert final_snapshot_entered.wait(1.0)
+
+    with pytest.raises(ExposurePolicyQtAdapterError, match="did not stop"):
+        adapter.shutdown(timeout_s=0.01)
+
+    release_final_snapshot.set()
+    adapter.shutdown(timeout_s=1.0)
 
 
 def test_shutdown_waits_for_registered_state_emission_and_blocks_copied_callback() -> None:

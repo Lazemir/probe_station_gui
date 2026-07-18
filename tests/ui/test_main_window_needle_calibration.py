@@ -76,6 +76,34 @@ class _StopFlag:
         return False
 
 
+def test_save_needle_calibration_uses_serialized_settings_transaction() -> None:
+    calls: list[tuple[object, bool]] = []
+    needle_settings = SimpleNamespace(
+        raise_position_mm=1.0,
+        raise_position_configured=True,
+        down_position_mm=2.0,
+        down_position_configured=True,
+        contact_zone_mm=0.25,
+        chip_position=None,
+        stone_position=None,
+    )
+    settings = SimpleNamespace(needle_calibration=needle_settings)
+    owner = SimpleNamespace(
+        settings_manager=SimpleNamespace(
+            replace_and_save=lambda value, *, preserve_exposure_policy: calls.append(
+                (value, preserve_exposure_policy)
+            )
+        ),
+        stage_controller=SimpleNamespace(apply_needle_calibration=lambda **_kwargs: None),
+        joystick_panel=None,
+        contact_calibration_window=None,
+    )
+
+    calibration_ui.save_needle_calibration_settings(owner, settings)
+
+    assert calls == [(settings, True)]
+
+
 def test_request_contact_seek_rejects_disconnected_instrument_without_thread() -> None:
     statuses: list[str] = []
     owner = SimpleNamespace(

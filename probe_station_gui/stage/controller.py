@@ -308,6 +308,13 @@ class StageController(
         )
         self._async_write_thread.start()
 
+    def set_optical_session_manager(self, manager: object) -> None:
+        """Inject the fixed-exposure session dependency for optical operations."""
+
+        if manager is None or not callable(getattr(manager, "open", None)):
+            raise TypeError("Optical session manager must provide open().")
+        self._optical_session_manager = manager
+
     # Jog stop confirmation is handled in the joystick layer to avoid serial contention.
     def shutdown(self) -> None:
         """Stop any outstanding background task before application exit."""

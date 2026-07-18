@@ -60,6 +60,18 @@ class _FakeSettingsManager:
     def save(self) -> None:
         self.saved_count += 1
 
+    def replace_and_save(
+        self,
+        settings: Settings,
+        *,
+        preserve_exposure_policy: bool = False,
+    ) -> None:
+        updated = settings.clone()
+        if preserve_exposure_policy:
+            updated.exposure_policy = self.settings.exposure_policy.clone()
+        self.replace(updated)
+        self.save()
+
     def objectives_configuration(self) -> ObjectivesSettings:
         return self.settings.objectives
 

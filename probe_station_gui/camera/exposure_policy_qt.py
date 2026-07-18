@@ -36,7 +36,8 @@ class ExposurePolicyQtAdapter(QObject):
         self._settings_write = settings_write
         self._command_state_lock = threading.Lock()
         self._command_active = False
-        self._command_thread: threading.Thread | None = None
+        self._command_threads: set[threading.Thread] = set()
+        self._controller_subscribed = True
         self._emission_gate = threading.Condition()
         self._emission_closed = False
         self._emissions_in_progress = 0
@@ -52,7 +53,7 @@ class ExposurePolicyQtAdapter(QObject):
 
     @Slot()
     def request_start(self) -> None:
-        self._start_command(self._controller.start)
+        self._start_command(self._controller.start, operation="start")
 
     @Slot(bool, str)
     def request_update(self, auto_enabled: bool, engine: str) -> None:
@@ -86,18 +87,24 @@ class ExposurePolicyQtAdapter(QObject):
         with self._emission_gate:
             self._emission_closed = True
         with self._command_state_lock:
-            thread = self._command_thread
-        self._controller.unsubscribe(self._on_controller_state_changed)
-        if thread is threading.current_thread() and thread.is_alive():
-            raise ExposurePolicyQtAdapterError(
-                "Camera exposure adapter cannot join its active command."
-            )
-        if thread is not None and thread.is_alive():
-            thread.join(max(0.0, deadline - time.monotonic()))
+            threads = tuple(self._command_threads)
+            subscribed = self._controller_subscribed
+            self._controller_subscribed = False
+        if subscribed:
+            self._controller.unsubscribe(self._on_controller_state_changed)
+        for thread in threads:
+            if thread is threading.current_thread() and thread.is_alive():
+                raise ExposurePolicyQtAdapterError(
+                    "Camera exposure adapter cannot join its active command."
+                )
+            if thread.is_alive():
+                thread.join(max(0.0, deadline - time.monotonic()))
             if thread.is_alive():
                 raise ExposurePolicyQtAdapterError(
                     "Camera exposure adapter did not stop active command."
                 )
+        with self._command_state_lock:
+            self._command_threads.difference_update(threads)
         with self._emission_gate:
             while self._emissions_in_progress:
                 remaining = deadline - time.monotonic()
@@ -117,6 +124,9 @@ class ExposurePolicyQtAdapter(QObject):
             if self._emission_closed:
                 return
             with self._command_state_lock:
+                self._command_threads = {
+                    thread for thread in self._command_threads if thread.is_alive()
+                }
                 if self._command_active:
                     rejected = True
                 else:
@@ -128,12 +138,12 @@ class ExposurePolicyQtAdapter(QObject):
                         name="camera-exposure-command",
                         daemon=True,
                     )
-                    self._command_thread = thread
+                    self._command_threads.add(thread)
                     try:
                         thread.start()
                     except Exception as exc:
                         self._command_active = False
-                        self._command_thread = None
+                        self._command_threads.discard(thread)
                         start_error = exc
                     else:
                         start_error = None
@@ -190,8 +200,6 @@ class ExposurePolicyQtAdapter(QObject):
     def _finish_command(self) -> None:
         with self._command_state_lock:
             self._command_active = False
-            if self._command_thread is threading.current_thread():
-                self._command_thread = None
 
     def _emit(self, signal: Signal, payload: object) -> None:
         with self._emission_gate:

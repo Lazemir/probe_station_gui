@@ -561,6 +561,7 @@ class Main(QMainWindow):
     STAGE_AXIS_EDITED_FOREGROUND = "#1f1233"
     B_POSITION_CHANGE_TOLERANCE_DEG = 1e-3
     CAMERA_UI_FRAME_GAP_WARNING_S = 0.25
+    EXPOSURE_POLICY_START_RETRY_BACKOFF_S = 1.0
     CLICK_TO_MOVE_PENDING_RETRY_MS = 150
     CLICK_TARGET_ANIMATION_PADDING_S = 0.03
     MICROSCOPE_AREA_SCAN_DEFAULT_ROWS = 3
@@ -742,7 +743,9 @@ class Main(QMainWindow):
         self._latest_camera_frame_counter = 0
         self._latest_raw_camera_frame: QImage | None = None
         self._latest_raw_camera_frame_counter = 0
-        self._exposure_policy_start_requested = False
+        self._exposure_policy_start_in_flight = False
+        self._exposure_policy_started = False
+        self._exposure_policy_start_retry_after = 0.0
         self._latest_camera_frame_condition = threading.Condition()
         self._latest_camera_frame_for_notifications: QImage | None = None
         self._live_camera_correction_pipeline = LiveCameraCorrectionPipeline(
@@ -942,7 +945,7 @@ class Main(QMainWindow):
             )
         )
 
-        self.stage_controller = StageController()
+        self.stage_controller = self._create_stage_controller()
         self.stage_controller.status_message.connect(self._show_status)
         self.stage_controller.movement_finished.connect(
             lambda success, message: stage_move_lifecycle.on_move_finished(
@@ -1067,11 +1070,35 @@ class Main(QMainWindow):
             self._exposure_policy_controller,
             settings_write=self._camera_api_broker.write_settings_trusted,
         )
+        self._exposure_policy_adapter.command_finished.connect(
+            self._on_exposure_policy_command_finished
+        )
         self._camera_api_broker.set_manual_exposure_write(
             lambda command: self._exposure_policy_controller.run_manual_exposure_write(
                 command
             )
         )
+
+    def _create_stage_controller(self) -> StageController:
+        controller = StageController()
+        controller.set_optical_session_manager(self._optical_session_manager)
+        return controller
+
+    def _on_exposure_policy_command_finished(self, result: object) -> None:
+        if not isinstance(result, Mapping) or result.get("operation") != "start":
+            return
+        self._exposure_policy_start_in_flight = False
+        if bool(result.get("accepted", False)):
+            self._exposure_policy_started = True
+            self._exposure_policy_start_retry_after = 0.0
+            return
+        self._exposure_policy_started = False
+        self._exposure_policy_start_retry_after = (
+            time.monotonic() + self.EXPOSURE_POLICY_START_RETRY_BACKOFF_S
+        )
+        message = str(result.get("message") or "Camera exposure setup failed.")
+        logger.warning("Camera exposure policy startup failed: %s", message)
+        self._show_status(f"Camera exposure setup failed: {message}", 8000)
 
     def _configure_api_server_from_settings(self, *, start_if_enabled: bool) -> None:
         api_settings = self.settings_manager.api_configuration()
@@ -3671,12 +3698,15 @@ class Main(QMainWindow):
             sequence = int(self._latest_raw_camera_frame_counter)
             self._latest_camera_frame_condition.notify_all()
         exposure_adapter = getattr(self, "_exposure_policy_adapter", None)
+        now = time.monotonic()
         if (
             not qimg.isNull()
             and exposure_adapter is not None
-            and not getattr(self, "_exposure_policy_start_requested", False)
+            and not getattr(self, "_exposure_policy_start_in_flight", False)
+            and not getattr(self, "_exposure_policy_started", False)
+            and now >= getattr(self, "_exposure_policy_start_retry_after", 0.0)
         ):
-            self._exposure_policy_start_requested = True
+            self._exposure_policy_start_in_flight = True
             exposure_adapter.request_start()
         objective = self.settings_manager.active_objective_configuration()
         request = LiveCameraCorrectionRequest(
@@ -4239,8 +4269,10 @@ class Main(QMainWindow):
     def _apply_settings_from_dialog(self, new_settings: object) -> None:
         if not isinstance(new_settings, Settings):
             return
-        self.settings_manager.replace(new_settings)
-        self.settings_manager.save()
+        self.settings_manager.replace_and_save(
+            new_settings,
+            preserve_exposure_policy=True,
+        )
         self._apply_settings()
         logger.info("Settings updated from dialog")
 
@@ -4420,8 +4452,10 @@ class Main(QMainWindow):
             if show_status:
                 self._show_plan_status(plan)
             return False
-        self.settings_manager.replace(plan.settings)
-        self.settings_manager.save()
+        self.settings_manager.replace_and_save(
+            plan.settings,
+            preserve_exposure_policy=True,
+        )
         if getattr(plan, "apply_settings", False):
             self._apply_objective_settings()
         if getattr(plan, "refresh_design_position", False):
@@ -5695,8 +5729,10 @@ class Main(QMainWindow):
         else:
             raise RuntimeError("Invalid lens correction payload.")
         objectives.objectives[objective_name] = updated
-        self.settings_manager.replace(settings)
-        self.settings_manager.save()
+        self.settings_manager.replace_and_save(
+            settings,
+            preserve_exposure_policy=True,
+        )
         self._apply_objective_settings()
         self._refresh_objective_calibration_ui()
 
@@ -6226,8 +6262,10 @@ class Main(QMainWindow):
         settings.jog.manual_axis_distance_mm = distance
         settings.jog.manual_axis_mode = mode
         settings.jog.manual_axis_feedrate_mm_min = feedrate
-        self.settings_manager.replace(settings)
-        self.settings_manager.save()
+        self.settings_manager.replace_and_save(
+            settings,
+            preserve_exposure_policy=True,
+        )
 
     def _save_jog_control_mode(self, mode: str) -> None:
         control_mode = str(mode).strip().lower()
@@ -6237,8 +6275,10 @@ class Main(QMainWindow):
         if settings.jog.mode == control_mode:
             return
         settings.jog.mode = control_mode
-        self.settings_manager.replace(settings)
-        self.settings_manager.save()
+        self.settings_manager.replace_and_save(
+            settings,
+            preserve_exposure_policy=True,
+        )
 
     def _save_jog_feedrate_setting(self, key: str, feedrate_mm_min: float) -> None:
         try:
@@ -6250,8 +6290,10 @@ class Main(QMainWindow):
         if current is not None and abs(float(current) - feedrate) <= 1e-9:
             return
         setattr(settings.jog, key, feedrate)
-        self.settings_manager.replace(settings)
-        self.settings_manager.save()
+        self.settings_manager.replace_and_save(
+            settings,
+            preserve_exposure_policy=True,
+        )
 
     def _on_step_feedrate_changed(self, feedrate_mm_min: float) -> None:
         self._save_jog_feedrate_setting("manual_axis_feedrate_mm_min", feedrate_mm_min)
@@ -6343,8 +6385,10 @@ class Main(QMainWindow):
         settings = self.settings_manager.settings.clone()
         if abs(settings.needle_calibration.feedrate_mm_min - feedrate) > 1e-9:
             settings.needle_calibration.feedrate_mm_min = feedrate
-            self.settings_manager.replace(settings)
-            self.settings_manager.save()
+            self.settings_manager.replace_and_save(
+                settings,
+                preserve_exposure_policy=True,
+            )
         self.stage_controller.queue_active_needles_feedrate(feedrate)
 
     def _on_needle_step_feedrate_changed(self, feedrate_mm_min: float) -> None:
@@ -6363,8 +6407,10 @@ class Main(QMainWindow):
         if abs(settings.feedrates.linear.default - feedrate) <= 1e-9:
             return
         settings.feedrates.linear.default = feedrate
-        self.settings_manager.replace(settings)
-        self.settings_manager.save()
+        self.settings_manager.replace_and_save(
+            settings,
+            preserve_exposure_policy=True,
+        )
 
     def _current_linear_feedrate(self) -> float:
         if self.joystick_panel is not None:
@@ -10211,8 +10257,10 @@ class Main(QMainWindow):
         settings.oscillation.amplitude_mm = float(amplitude_mm)
         settings.oscillation.feedrate_mm_min = float(feedrate_mm_min)
         settings.oscillation.turns_per_sweep = float(turns_per_sweep)
-        self.settings_manager.replace(settings)
-        self.settings_manager.save()
+        self.settings_manager.replace_and_save(
+            settings,
+            preserve_exposure_policy=True,
+        )
 
 
 def _screen_available_geometry(window: QMainWindow):

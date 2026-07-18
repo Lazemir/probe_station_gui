@@ -40,6 +40,20 @@ except ImportError:
         _stage_controller_module,
     )
 
+
+class StageControllerOpticalSessionDependencyTest(unittest.TestCase):
+    def test_stores_explicit_optical_session_manager(self) -> None:
+        controller = StageController()
+        manager = types.SimpleNamespace(open=lambda _operation: None)
+        try:
+            controller.set_optical_session_manager(manager)
+
+            self.assertIs(controller._optical_session_manager, manager)
+            with self.assertRaises(TypeError):
+                controller.set_optical_session_manager(None)
+        finally:
+            controller.shutdown()
+
 class StageControllerStartupLimitsTest(unittest.TestCase):
     def test_parse_startup_limits(self) -> None:
         lines = [

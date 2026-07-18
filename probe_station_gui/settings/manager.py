@@ -7,10 +7,11 @@ import logging
 import os
 import platform
 import re
+import threading
 from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Callable, Dict, Iterable, List
 
 from probe_station_gui.settings.axis_calibration_config import (
     AxisACalibrationConfig,
@@ -283,6 +284,7 @@ class SettingsManager:
     CYRILLIC_PATTERN = re.compile(r"[\u0400-\u04FF]")
 
     def __init__(self) -> None:
+        self._settings_lock = threading.RLock()
         self._config_dir = self._determine_config_dir()
         self._config_path = self._config_dir / self.CONFIG_FILENAME
         self._logger = logging.getLogger(__name__)
@@ -305,17 +307,71 @@ class SettingsManager:
     def replace(self, settings: Settings) -> None:
         """Replace the stored settings with the provided instance."""
 
-        self._settings = self._normalise_settings(settings)
-        self.apply()
+        with self._settings_lock:
+            self._replace_locked(settings, apply_runtime=True)
 
     def save(self) -> None:
         """Persist the current settings to disk."""
 
+        with self._settings_lock:
+            self._save_locked()
+
+    def replace_and_save(
+        self,
+        settings: Settings,
+        *,
+        preserve_exposure_policy: bool = False,
+        apply_runtime: bool = True,
+    ) -> None:
+        """Replace and atomically persist settings as one serialized transaction."""
+
+        with self._settings_lock:
+            updated = settings.clone()
+            if preserve_exposure_policy:
+                updated.exposure_policy = self._settings.exposure_policy.clone()
+            self._replace_locked(updated, apply_runtime=apply_runtime)
+            self._save_locked()
+
+    def update_and_save(
+        self,
+        mutation: Callable[[Settings], None],
+        *,
+        apply_runtime: bool = False,
+    ) -> None:
+        """Mutate a fresh settings clone and persist it under one lock."""
+
+        with self._settings_lock:
+            updated = self._settings.clone()
+            mutation(updated)
+            self._replace_locked(updated, apply_runtime=apply_runtime)
+            self._save_locked()
+
+    def _replace_locked(self, settings: Settings, *, apply_runtime: bool) -> None:
+        self._settings = self._normalise_settings(settings)
+        if apply_runtime:
+            self.apply()
+
+    def _save_locked(self) -> None:
         data = self._settings.to_dict()
-        self._config_dir.mkdir(parents=True, exist_ok=True)
-        with self._config_path.open("w", encoding="utf-8") as handle:
-            json.dump(data, handle, indent=2, ensure_ascii=False)
+        self._write_settings_file_atomic(data)
         self._logger.info("Settings saved to %s", self._config_path)
+
+    def _write_settings_file_atomic(self, data: dict) -> None:
+        self._config_dir.mkdir(parents=True, exist_ok=True)
+        temporary_path = self._config_path.with_name(
+            f".{self._config_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        try:
+            with temporary_path.open("w", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=2, ensure_ascii=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, self._config_path)
+        finally:
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
 
     def apply(self) -> None:
         """Apply runtime-affecting settings such as logging configuration."""
@@ -1039,20 +1095,21 @@ class SettingsManager:
             except OSError:
                 pass
             new_value = str(path)
-        if self._settings.design_last_directory == new_value:
-            return
-        updated = self._settings.clone()
-        updated.design_last_directory = new_value
-        self.replace(updated)
-        self.save()
+        with self._settings_lock:
+            if self._settings.design_last_directory == new_value:
+                return
+            updated = self._settings.clone()
+            updated.design_last_directory = new_value
+            self._replace_locked(updated, apply_runtime=False)
+            self._save_locked()
 
     def set_exposure_policy_configuration(
         self, settings: ExposurePolicySettings
     ) -> None:
         """Persist the camera exposure policy settings."""
 
-        updated = self._settings.clone()
-        updated.exposure_policy = settings.clone()
-        self.replace(updated)
-        self.save()
+        def update_exposure_policy(updated: Settings) -> None:
+            updated.exposure_policy = settings.clone()
+
+        self.update_and_save(update_exposure_policy)
 
