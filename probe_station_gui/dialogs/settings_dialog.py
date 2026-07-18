@@ -969,6 +969,7 @@ class SettingsDialog(QDialog):
         *,
         initial_tab: str | None = None,
         camera_settings_source: object | None = None,
+        exposure_policy_source: object | None = None,
         api_key_store: ApiKeyStore | None = None,
     ) -> None:
         super().__init__(parent)
@@ -1011,7 +1012,11 @@ class SettingsDialog(QDialog):
             self,
         )
         if camera_settings_source is not None:
-            self._camera_tab = CameraSettingsWidget(camera_settings_source, self)
+            self._camera_tab = CameraSettingsWidget(
+                camera_settings_source,
+                self,
+                exposure_policy_source=exposure_policy_source,
+            )
         self._tabs.addTab(self._controls_tab, "Controls")
         self._tabs.addTab(self._api_tab, "API")
         if self._camera_tab is not None:

@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QDoubleValidator
 from PySide6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QFrame,
+    QGroupBox,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -531,8 +533,6 @@ class CameraSettingsWidget(QWidget):
         "TriggerDelay",
         "TriggerSoftware",
         "ExposureMode",
-        "ExposureAuto",
-        "ExposureTime",
         "ExposureCompensationAuto",
         "ExposureCompensation",
         "GainAuto",
@@ -543,17 +543,29 @@ class CameraSettingsWidget(QWidget):
         "BalanceRatio",
     )
 
-    def __init__(self, grabber: object, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        grabber: object,
+        parent: QWidget | None = None,
+        *,
+        exposure_policy_source: object | None = None,
+    ) -> None:
         super().__init__(parent)
         self._grabber = grabber
+        self._exposure_policy_source = exposure_policy_source
         self._pending_settings: dict[tuple[str, str], object] = {}
         self._applying_settings: dict[tuple[str, str], object] = {}
         self._snapshot_pending = False
         self._snapshot_show_status = False
         self._status_text = ""
         self._loaded_once = False
+        self._policy_state: dict[str, object] = {}
+        self._exposure_time_node: NodePayload | None = None
 
         layout = QVBoxLayout(self)
+
+        if exposure_policy_source is not None:
+            self._create_exposure_controls(layout)
 
         self._page = _FeatureListPage(
             "camera",
@@ -570,6 +582,15 @@ class CameraSettingsWidget(QWidget):
         self._live_refresh_timer.setInterval(self.LIVE_REFRESH_INTERVAL_MS)
         self._live_refresh_timer.timeout.connect(self._refresh_live_snapshot)
 
+        if exposure_policy_source is not None:
+            exposure_policy_source.state_changed.connect(
+                self._on_exposure_policy_state_changed
+            )
+            exposure_policy_source.command_finished.connect(
+                self._on_exposure_policy_command_finished
+            )
+            self._apply_exposure_policy_state(self._exposure_policy_snapshot())
+
     def has_loaded(self) -> bool:
         return self._loaded_once
 
@@ -579,7 +600,7 @@ class CameraSettingsWidget(QWidget):
             return
         self._request_snapshot(
             show_status=True,
-            node_names=list(self.OPERATOR_NODE_NAMES),
+            node_names=self._snapshot_node_names(),
         )
 
     def _refresh_live_snapshot(self) -> None:
@@ -591,7 +612,7 @@ class CameraSettingsWidget(QWidget):
             return
         if self._has_edit_focus():
             return
-        node_names = self._page.node_names()
+        node_names = self._snapshot_node_names(self._page.node_names())
         if not node_names:
             return
         self._request_snapshot(
@@ -613,7 +634,7 @@ class CameraSettingsWidget(QWidget):
             self._set_status("Loading camera controls.")
         self._grabber.request_camera_settings_snapshot(
             map_key="camera",
-            node_names=node_names or list(self.OPERATOR_NODE_NAMES),
+            node_names=node_names or self._snapshot_node_names(),
         )
 
     def _has_edit_focus(self) -> bool:
@@ -650,12 +671,19 @@ class CameraSettingsWidget(QWidget):
         if camera_map is not None:
             nodes = camera_map.get("nodes")
             camera_nodes = nodes if isinstance(nodes, list) else []
+            self._update_exposure_time_node(camera_nodes)
+            operator_nodes = [
+                node
+                for node in camera_nodes
+                if isinstance(node, dict)
+                and str(node.get("name") or "") not in {"ExposureAuto", "ExposureTime"}
+            ]
             if self._loaded_once:
-                for node in camera_nodes:
+                for node in operator_nodes:
                     if isinstance(node, dict):
                         self._page.update_node(node)
             else:
-                self._page.set_nodes(camera_nodes)
+                self._page.set_nodes(operator_nodes)
 
         self._loaded_once = True
         if not self._live_refresh_timer.isActive():
@@ -724,6 +752,9 @@ class CameraSettingsWidget(QWidget):
 
     def _update_pages_for_node(self, map_key: str, node: NodePayload) -> None:
         if map_key == "camera":
+            if str(node.get("name") or "") == "ExposureTime":
+                self._update_exposure_time_node([node])
+                return
             self._page.update_node(node)
 
     def _execute_command(self, map_key: str, node_name: str) -> None:
@@ -731,6 +762,173 @@ class CameraSettingsWidget(QWidget):
             return
         self._set_status(f"Executing {node_name}.")
         self._grabber.request_camera_command_execute(map_key, node_name)
+
+    def _create_exposure_controls(self, layout: QVBoxLayout) -> None:
+        self._exposure_group = QGroupBox("Exposure", self)
+        controls = QGridLayout(self._exposure_group)
+        controls.setColumnStretch(1, 1)
+
+        controls.addWidget(QLabel("Exposure", self._exposure_group), 0, 0)
+        auto_row = QHBoxLayout()
+        self._auto_group = QButtonGroup(self)
+        self._manual_button = QPushButton("Manual", self._exposure_group)
+        self._auto_button = QPushButton("Auto", self._exposure_group)
+        for button, button_id in ((self._manual_button, 0), (self._auto_button, 1)):
+            button.setCheckable(True)
+            self._auto_group.addButton(button, button_id)
+            auto_row.addWidget(button)
+        controls.addLayout(auto_row, 0, 1)
+
+        controls.addWidget(QLabel("Engine", self._exposure_group), 1, 0)
+        engine_row = QHBoxLayout()
+        self._engine_group = QButtonGroup(self)
+        self._software_engine_button = QPushButton("Software", self._exposure_group)
+        self._camera_engine_button = QPushButton("Camera", self._exposure_group)
+        for button, button_id in (
+            (self._software_engine_button, 0),
+            (self._camera_engine_button, 1),
+        ):
+            button.setCheckable(True)
+            self._engine_group.addButton(button, button_id)
+            engine_row.addWidget(button)
+        controls.addLayout(engine_row, 1, 1)
+
+        controls.addWidget(QLabel("Exposure time", self._exposure_group), 2, 0)
+        exposure_time_row = QHBoxLayout()
+        self._exposure_time_edit = QLineEdit(self._exposure_group)
+        self._exposure_time_edit.setFixedWidth(96)
+        self._exposure_time_edit.setPlaceholderText("Exposure time")
+        self._exposure_time_unit = QLabel(self._exposure_group)
+        exposure_time_row.addWidget(self._exposure_time_edit)
+        exposure_time_row.addWidget(self._exposure_time_unit)
+        exposure_time_row.addStretch(1)
+        controls.addLayout(exposure_time_row, 2, 1)
+
+        self._once_button = QPushButton("Once", self._exposure_group)
+        controls.addWidget(self._once_button, 3, 1, alignment=Qt.AlignLeft)
+        layout.addWidget(self._exposure_group)
+
+        self._auto_group.idClicked.connect(self._request_exposure_policy_update)
+        self._engine_group.idClicked.connect(self._request_exposure_policy_update)
+        self._once_button.clicked.connect(self._request_exposure_once)
+        self._exposure_time_edit.editingFinished.connect(self._queue_exposure_time)
+
+    def _snapshot_node_names(
+        self,
+        operator_nodes: list[str] | None = None,
+    ) -> list[str]:
+        names = list(operator_nodes or self.OPERATOR_NODE_NAMES)
+        if self._exposure_policy_source is not None and "ExposureTime" not in names:
+            names.append("ExposureTime")
+        return names
+
+    def _exposure_policy_snapshot(self) -> dict[str, object]:
+        source = self._exposure_policy_source
+        if source is None:
+            return {}
+        try:
+            state = source.snapshot()
+        except Exception:
+            return {}
+        return dict(state) if isinstance(state, Mapping) else {}
+
+    def _on_exposure_policy_state_changed(self, state: object) -> None:
+        if isinstance(state, Mapping):
+            self._apply_exposure_policy_state(dict(state))
+
+    def _on_exposure_policy_command_finished(self, result: object) -> None:
+        if not isinstance(result, Mapping):
+            return
+        if not bool(result.get("accepted", False)):
+            self._set_status(str(result.get("message") or "Camera exposure failed."))
+            self._apply_exposure_policy_state(self._exposure_policy_snapshot())
+
+    def _apply_exposure_policy_state(self, state: Mapping[str, object]) -> None:
+        if self._exposure_policy_source is None:
+            return
+        self._policy_state.update(state)
+        auto_enabled = bool(self._policy_state.get("auto_enabled", True))
+        engine = str(self._policy_state.get("engine") or "software")
+        self._manual_button.setChecked(not auto_enabled)
+        self._auto_button.setChecked(auto_enabled)
+        self._software_engine_button.setChecked(engine != "camera")
+        self._camera_engine_button.setChecked(engine == "camera")
+        busy = bool(self._policy_state.get("busy", False)) or bool(
+            self._policy_state.get("session_active", False)
+        )
+        self._exposure_group.setEnabled(not busy)
+        self._set_exposure_time_edit_enabled()
+
+    def _request_exposure_policy_update(self, _button_id: int) -> None:
+        if self._exposure_policy_source is None or not self._exposure_group.isEnabled():
+            return
+        self._exposure_policy_source.request_update(
+            self._auto_group.checkedId() == 1,
+            "camera" if self._engine_group.checkedId() == 1 else "software",
+        )
+
+    def _request_exposure_once(self) -> None:
+        if self._exposure_policy_source is None or not self._exposure_group.isEnabled():
+            return
+        self._exposure_policy_source.request_once()
+
+    def _update_exposure_time_node(self, nodes: list[object]) -> None:
+        if self._exposure_policy_source is None:
+            return
+        node = next(
+            (
+                item
+                for item in nodes
+                if isinstance(item, dict)
+                and str(item.get("name") or "") == "ExposureTime"
+            ),
+            None,
+        )
+        if node is None:
+            return
+        self._exposure_time_node = dict(node)
+        if not self._exposure_time_edit.hasFocus():
+            value = node.get("value")
+            self._exposure_time_edit.setText("" if value is None else str(value))
+        minimum = self._exposure_time_value(node.get("minimum"))
+        maximum = self._exposure_time_value(node.get("maximum"))
+        validator = QDoubleValidator(self._exposure_time_edit)
+        if minimum is not None:
+            validator.setBottom(minimum)
+        if maximum is not None:
+            validator.setTop(maximum)
+        validator.setNotation(QDoubleValidator.StandardNotation)
+        self._exposure_time_edit.setValidator(validator)
+        self._exposure_time_unit.setText(str(node.get("unit") or ""))
+        self._set_exposure_time_edit_enabled()
+
+    def _set_exposure_time_edit_enabled(self) -> None:
+        if self._exposure_policy_source is None:
+            return
+        node = self._exposure_time_node
+        manual = not bool(self._policy_state.get("auto_enabled", True))
+        busy = bool(self._policy_state.get("busy", False)) or bool(
+            self._policy_state.get("session_active", False)
+        )
+        writable = bool(node and node.get("available") and node.get("writable"))
+        self._exposure_time_edit.setEnabled(manual and not busy and writable)
+
+    def _queue_exposure_time(self) -> None:
+        if self._exposure_policy_source is None or not self._exposure_time_edit.isEnabled():
+            return
+        if not self._exposure_time_edit.hasAcceptableInput():
+            return
+        value = self._exposure_time_value(self._exposure_time_edit.text())
+        if value is None:
+            return
+        self._queue_setting("camera", "ExposureTime", value)
+
+    @staticmethod
+    def _exposure_time_value(value: object) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     def _set_status(self, message: str) -> None:
         self._status_text = message
