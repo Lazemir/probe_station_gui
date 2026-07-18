@@ -250,6 +250,40 @@ def test_interpolated_z_boundary_rejects_clamped_preparation_before_send() -> No
     controller.shutdown()
 
 
+def test_interpolated_z_rejects_direct_raw_target_outside_curve_before_send() -> None:
+    controller = StageController()
+    controller.apply_axis_z_calibration(
+        AxisZCalibrationSettings(
+            configured=True,
+            model="linear_interpolation",
+            interpolation_gcode_mm=[0.0, 1.0, 3.0],
+            interpolation_display_mm=[0.0, 2.0, 5.0],
+        )
+    )
+    controller.apply_precision_approach_configuration(
+        _settings(Z=PrecisionApproachProfile(True, 0.03, 1))
+    )
+    sent, _safety = _configure_fake_precision_runtime(controller, {"Z": 1.0})
+    movement_results: list[tuple[bool, str]] = []
+    controller.movement_started = SimpleNamespace(emit=lambda: None)
+    controller.movement_finished = SimpleNamespace(
+        emit=lambda success, message: movement_results.append((success, message))
+    )
+    controller.status_message = SimpleNamespace(emit=lambda _message: None)
+
+    with pytest.raises(StageControllerError, match="cannot be represented"):
+        controller.run_external_absolute_axis_targets_move(
+            {"Z": 4.0},
+            feedrate=20.0,
+            allow_unhomed=False,
+        )
+
+    assert movement_results[-1][0] is False
+    assert "cannot be represented" in movement_results[-1][1]
+    assert sent == []
+    controller.shutdown()
+
+
 def test_calibrated_a_boundary_rejects_clamped_preparation_before_send() -> None:
     controller = StageController()
     controller._axis_a_calibration = {

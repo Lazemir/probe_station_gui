@@ -96,3 +96,59 @@ Follow-up verification result: `64 passed, 20 subtests passed`; targeted Ruff
 checks passed.
 
 Follow-up commit message: `fix: handle non-finite interpolation input`.
+
+## Final integrated safety review
+
+The final review found two request paths that could lose an out-of-domain
+target through endpoint clamping:
+
+1. `probe_station_gui/stage/precision_motion.py` converted an original raw
+   target to display coordinates before planning. Raw Z `4.0` on a curve whose
+   G-code domain ends at `3.0` became display endpoint `5.0`, then inverse
+   conversion sent raw endpoint `3.0`.
+2. `probe_station_gui/views/main_window_stage_position_panel.py` used the
+   clamping inverse converter for GUI/API display targets before the existing
+   display software-limit check. Display Z `6.0` therefore became raw endpoint
+   `3.0` before the motion request retained the original domain information.
+
+### RED-GREEN evidence
+
+Direct raw request test:
+
+`C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/stage/test_precision_motion.py::test_interpolated_z_rejects_direct_raw_target_outside_curve_before_send -q`
+
+RED: the request completed successfully and sent the clamped endpoint. GREEN:
+the public blocking request raises that the target cannot be represented,
+reports failure, and leaves the send list empty.
+
+Calibrated-display API test:
+
+`C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/app/test_main_stage_coordinate_controls.py::MainStageCoordinateControlsTest::test_api_calibrated_display_target_outside_curve_is_rejected_before_send -q`
+
+RED: the API response was accepted and the fake controller recorded a motion
+request. GREEN: the response is rejected with status 409 and no request is
+recorded.
+
+### Implementation paths
+
+- `probe_station_gui/stage/axis_coordinates.py`: explicit checked raw/display
+  target-domain contract for linear interpolation curves.
+- `probe_station_gui/stage/precision_motion.py`: validate each original raw
+  request before planner conversion, safety checks, or any send.
+- `probe_station_gui/views/main_window_stage_position_panel.py`: the actual
+  Main GUI/API coordinate resolver now prefers checked display-target
+  conversion; legacy controllers keep the original fallback.
+- `tests/stage/test_precision_motion.py`: direct raw request safety regression.
+- `tests/app/test_main_stage_coordinate_controls.py`: real Main/API
+  calibrated-display request regression.
+
+Status display still uses the clamping `calibrated_axis_display_value` path.
+Legacy parametric calibration branches, existing display software-limit
+checks, safety, cancellation, and route behavior remain unchanged.
+
+Focused verification: `104 passed, 20 subtests passed`.
+
+Full verification: `1743 passed, 30 subtests passed`.
+
+Targeted Ruff checks passed. Commit message:
+`fix: reject calibration targets outside curve`.

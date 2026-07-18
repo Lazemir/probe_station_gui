@@ -126,6 +126,8 @@ class StageControllerPrecisionMotionMixin:
         }
         if not ordered_targets:
             raise StageControllerError("No coordinate targets provided.")
+        for axis, value in ordered_targets.items():
+            self.validate_calibrated_axis_raw_target(axis, value)
         enabled_axes = {
             axis
             for axis in ordered_targets

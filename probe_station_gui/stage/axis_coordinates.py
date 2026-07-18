@@ -10,6 +10,7 @@ from probe_station_gui.stage.axis_mapping import evaluate_polynomial
 from probe_station_gui.settings.axis_calibration_npz import (
     LINEAR_INTERPOLATION_MODEL,
 )
+from probe_station_gui.stage.errors import StageControllerError
 from probe_station_gui.stage.needle_targets import normalise_needle_lowering_target
 from probe_station_gui.stage.types import _Status
 
@@ -192,6 +193,61 @@ class StageControllerAxisCoordinatesMixin:
         if axis == "Z":
             return self._axis_z_gcode_coordinate_for_display(display_value)
         return float(display_value)
+
+    def calibrated_axis_raw_target_value(
+        self,
+        axis: str,
+        display_value: float,
+    ) -> float | None:
+        """Map a motion target only when it is inside the calibrated display domain."""
+
+        axis = axis.upper().strip()
+        if not self._calibrated_axis_target_is_in_domain(
+            axis,
+            display_value,
+            points_key="display_points",
+        ):
+            return None
+        return self.calibrated_axis_raw_value(axis, display_value)
+
+    def validate_calibrated_axis_raw_target(
+        self,
+        axis: str,
+        raw_value: float,
+    ) -> None:
+        """Reject a raw motion target outside a linear calibration curve."""
+
+        axis = axis.upper().strip()
+        if not self._calibrated_axis_target_is_in_domain(
+            axis,
+            raw_value,
+            points_key="gcode_points",
+        ):
+            raise StageControllerError(
+                f"{axis} target cannot be represented by the calibrated axis mapping."
+            )
+
+    def _calibrated_axis_target_is_in_domain(
+        self,
+        axis: str,
+        value: float,
+        *,
+        points_key: str,
+    ) -> bool:
+        calibration = {
+            "A": self._axis_a_calibration,
+            "Z": self._axis_z_calibration,
+        }.get(axis)
+        if (
+            not isinstance(calibration, dict)
+            or calibration.get("model") != LINEAR_INTERPOLATION_MODEL
+        ):
+            return True
+        points = calibration.get(points_key)
+        if not isinstance(points, tuple) or len(points) < 2:
+            return False
+        target = float(value)
+        return math.isfinite(target) and points[0] <= target <= points[-1]
 
     def _axis_calibration_mapper(self) -> StageAxisCalibrationMapper:
         return StageAxisCalibrationMapper(

@@ -76,7 +76,17 @@ def raw_axis_value_from_display(
     owner: MainWindowStagePositionPanelOwner,
     axis_name: str,
     display_value: float,
-) -> float:
+) -> float | None:
+    checked_converter = getattr(
+        getattr(owner, "stage_controller", None),
+        "calibrated_axis_raw_target_value",
+        None,
+    )
+    if callable(checked_converter):
+        return checked_converter(
+            axis_name.strip().upper(),
+            float(display_value),
+        )
     converter = getattr(
         getattr(owner, "stage_controller", None),
         "calibrated_axis_raw_value",

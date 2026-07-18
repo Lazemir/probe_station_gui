@@ -18,7 +18,8 @@ from tests.app.main_coordinate_feedrate_support import (
     main_module,
 )
 from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
-from probe_station_gui.stage import position_update as stage_position_update
+from probe_station_gui.settings.axis_calibration_config import AxisZCalibrationSettings
+from probe_station_gui.stage.controller import StageController
 from probe_station_gui.views import main_window_homing as homing_ui
 from probe_station_gui.views import main_window_needle_calibration as needle_calibration_ui
 from probe_station_gui.views import (
@@ -236,6 +237,42 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         self.assertTrue(timer.started)
         self.assertEqual(_joystick.common_targets, [])
         self.assertEqual(_joystick.common_cleared, 1)
+
+    def test_api_calibrated_display_target_outside_curve_is_rejected_before_send(
+        self,
+    ) -> None:
+        window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
+        calibrated_controller = StageController()
+        try:
+            calibrated_controller.apply_axis_z_calibration(
+                AxisZCalibrationSettings(
+                    configured=True,
+                    model="linear_interpolation",
+                    interpolation_gcode_mm=[0.0, 1.0, 3.0],
+                    interpolation_display_mm=[0.0, 2.0, 5.0],
+                )
+            )
+            stage_controller.calibrated_axis_raw_value = (
+                calibrated_controller.calibrated_axis_raw_value
+            )
+            stage_controller.calibrated_axis_raw_target_value = (
+                calibrated_controller.calibrated_axis_raw_target_value
+            )
+            stage_controller.coordinate_display_name = lambda: "Machine"
+            window._stage_axis_raw_values["Z"] = 1.0
+            window._stage_axis_display_values["Z"] = 2.0
+
+            response = Main._api_move_to_coordinates(
+                window,
+                {"Z": 6.0},
+                mode="G90",
+            )
+
+            self.assertFalse(response["accepted"])
+            self.assertEqual(response["status_code"], 409)
+            self.assertEqual(stage_controller.requests, [])
+        finally:
+            calibrated_controller.shutdown()
 
     def test_mixed_axis_coordinate_move_shows_common_feedrate(self) -> None:
         window, _stage_controller, joystick, _timer, _statuses = _make_main(120.0)
