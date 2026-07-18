@@ -104,7 +104,7 @@ def test_planner_prepares_when_final_direction_is_not_confirmed(
     assert plan.prepared_axes == frozenset({"Z"})
 
 
-def test_planner_holds_other_target_axes_during_mixed_axis_preparation() -> None:
+def test_planner_moves_nonprepared_axes_directly_to_final_during_preparation() -> None:
     plan = PrecisionApproachPlanner().plan(
         current={"X": 0.0, "Z": 5.0, "B": 1.0},
         target={"X": 10.0, "Z": 5.01, "B": 0.5},
@@ -120,12 +120,38 @@ def test_planner_holds_other_target_axes_during_mixed_axis_preparation() -> None
     )
 
     assert plan.preparation_target == {
-        "X": pytest.approx(0.0),
+        "X": pytest.approx(10.0),
         "Z": pytest.approx(4.98),
-        "B": pytest.approx(1.0),
+        "B": pytest.approx(0.5),
     }
     assert plan.final_target == {"X": 10.0, "Z": 5.01, "B": 0.5}
     assert plan.prepared_axes == frozenset({"Z"})
+
+
+@pytest.mark.parametrize(
+    ("target", "prepared_axis", "expected_preparation"),
+    [
+        ({"X": 0.024, "Y": -0.026}, "Y", {"X": 0.024, "Y": -0.031}),
+        ({"X": -0.031, "Y": 0.027}, "X", {"X": -0.036, "Y": 0.027}),
+    ],
+)
+def test_mixed_sign_xy_preparation_keeps_other_axis_at_final_target(
+    target: dict[str, float],
+    prepared_axis: str,
+    expected_preparation: dict[str, float],
+) -> None:
+    exact = AxisCoordinateConfidence(exact=True, loaded_direction=1)
+    plan = PrecisionApproachPlanner().plan(
+        current={"X": 0.0, "Y": 0.0},
+        target=target,
+        profiles={"X": _profile(backlash=0.005), "Y": _profile(backlash=0.005)},
+        confidence={"X": exact, "Y": exact},
+        validate_target=lambda _values: None,
+    )
+
+    assert plan.prepared_axes == frozenset({prepared_axis})
+    assert plan.preparation_target == pytest.approx(expected_preparation)
+    assert plan.final_target == target
 
 
 def test_planner_validates_every_segment_before_returning() -> None:

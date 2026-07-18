@@ -106,7 +106,10 @@ def _configure_real_precision_send_runtime(
     return serial_connection
 
 
-def test_coordinate_task_executes_preparation_and_final_as_one_operation() -> None:
+def test_coordinate_task_executes_preparation_and_final_as_one_operation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("DEBUG", logger="probe_station_gui.stage.precision_motion")
     controller = StageController()
     controller.apply_precision_approach_configuration(
         _settings(Z=PrecisionApproachProfile(True, 0.03, 1))
@@ -129,6 +132,12 @@ def test_coordinate_task_executes_preparation_and_final_as_one_operation() -> No
     assert len([event for event in events if event == "started"]) == 1
     assert events[-1][0] is True
     assert controller.coordinate_confidence()["Z"].exact
+    assert any(
+        "Precision move plan" in record.message
+        and "preparation" in record.message
+        and "final" in record.message
+        for record in caplog.records
+    )
     controller.shutdown()
 
 

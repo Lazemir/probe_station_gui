@@ -61,7 +61,7 @@ class PrecisionApproachPlanner:
                     - profiles.get(axis, _DISABLED_PROFILE).final_direction
                     * profiles.get(axis, _DISABLED_PROFILE).backlash
                     if axis in prepared_axes
-                    else float(current[axis])
+                    else final_target[axis]
                 )
                 for axis in final_target
             }

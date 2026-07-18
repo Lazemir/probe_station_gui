@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Callable
@@ -17,6 +18,9 @@ from probe_station_gui.settings.precision_approach import (
 from probe_station_gui.stage.coordinate_confidence import AxisCoordinateConfidence
 from probe_station_gui.stage.errors import StageControllerError
 from probe_station_gui.stage.precision_approach import PrecisionApproachPlanner
+
+
+logger = logging.getLogger(__name__)
 
 
 COORDINATE_CONFIDENCE_STATE_VERSION = 1
@@ -182,6 +186,12 @@ class StageControllerPrecisionMotionMixin:
         if plan.preparation_target is not None:
             segments.append(self._raw_precision_targets(plan.preparation_target))
         segments.append(self._raw_precision_targets(plan.final_target))
+        logger.debug(
+            "Precision move plan: prepared=%s preparation=%s final=%s",
+            sorted(plan.prepared_axes),
+            dict(plan.preparation_target or {}),
+            dict(plan.final_target),
+        )
 
         sent_segment = False
         first_segment = True
