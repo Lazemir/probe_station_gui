@@ -39,7 +39,7 @@ def test_bridge_timeout_cancels_queued_request_before_late_gui_delivery() -> Non
     assert captured[0]["state"] == "cancelled"
 
 
-def test_bridge_close_wakes_waiting_api_request_with_shutdown_error() -> None:
+def test_bridge_stop_accepting_cancels_queued_request_before_dispatch() -> None:
     handled: list[dict[str, object]] = []
     captured: list[dict[str, object]] = []
     bridge = ApiRequestBridge(
@@ -58,7 +58,7 @@ def test_bridge_close_wakes_waiting_api_request_with_shutdown_error() -> None:
 
     worker.start()
     _wait_for(lambda: bool(getattr(bridge, "_pending", {})))
-    bridge.close()
+    bridge.stop_accepting()
     worker.join(timeout=1.0)
 
     assert not worker.is_alive()
@@ -73,9 +73,16 @@ def test_bridge_close_wakes_waiting_api_request_with_shutdown_error() -> None:
     bridge._handle_request(captured[0])
     assert handled == []
     assert captured[0]["state"] == "cancelled"
+    assert bridge.submit({"action": "status"}, timeout_s=0.01) == {
+        "accepted": False,
+        "status_code": 503,
+        "message": "GUI API bridge is shutting down.",
+    }
+    assert bridge.wait_for_inflight(timeout_s=0.0)
+    assert bridge.close()
 
 
-def test_bridge_close_preserves_shutdown_result_for_in_flight_handler() -> None:
+def test_bridge_shutdown_drains_started_handler_to_definitive_result() -> None:
     handler_started = threading.Event()
     release_handler = threading.Event()
     captured: list[dict[str, object]] = []
@@ -102,19 +109,52 @@ def test_bridge_close_preserves_shutdown_result_for_in_flight_handler() -> None:
     delivery.start()
     assert handler_started.wait(timeout=1.0)
 
-    bridge.close()
-    submitter.join(timeout=1.0)
+    bridge.stop_accepting()
+    assert not bridge.wait_for_inflight(timeout_s=0.01)
+    assert not bridge.close()
+    assert submitter.is_alive()
     release_handler.set()
     delivery.join(timeout=1.0)
+    submitter.join(timeout=1.0)
 
-    expected = {
-        "accepted": False,
-        "status_code": 503,
-        "message": "GUI API bridge is shutting down.",
-    }
+    expected = {"accepted": True}
     assert result == [expected]
     assert captured[0]["result"] == expected
-    assert captured[0]["state"] == "cancelled"
+    assert captured[0]["state"] == "completed"
+    assert bridge.wait_for_inflight(timeout_s=0.0)
+    assert bridge.close()
+
+
+def test_bridge_shutdown_drains_deferred_worker_completion() -> None:
+    deferred = DeferredApiResponse()
+    captured: list[dict[str, object]] = []
+    bridge = ApiRequestBridge(lambda _request: deferred)
+    bridge.request_received.connect(
+        captured.append,
+        Qt.ConnectionType.DirectConnection,
+    )
+    result: list[dict[str, object]] = []
+    submitter = threading.Thread(
+        target=lambda: result.append(
+            bridge.submit({"action": "command"}, timeout_s=30.0)
+        )
+    )
+    submitter.start()
+    _wait_for(lambda: len(captured) == 1)
+    bridge._handle_request(captured[0])
+
+    bridge.stop_accepting()
+    assert not bridge.wait_for_inflight(timeout_s=0.01)
+    assert not bridge.close()
+    assert submitter.is_alive()
+
+    deferred.complete({"accepted": True, "operation_id": "mutated-once"})
+    submitter.join(timeout=1.0)
+
+    assert result == [{"accepted": True, "operation_id": "mutated-once"}]
+    assert captured[0]["state"] == "completed"
+    assert bridge.wait_for_inflight(timeout_s=0.0)
+    assert bridge.close()
 
 
 def test_bridge_timeout_after_handler_start_waits_for_definitive_completion() -> None:

@@ -89,6 +89,22 @@ def test_shutdown_fails_closed_while_api_stage_worker_is_running() -> None:
         shutdown_ui._stop_api_stage_command_workers(owner)
 
 
+def test_bridge_drain_failure_does_not_close_handling_request() -> None:
+    events: list[object] = []
+    bridge = SimpleNamespace(
+        wait_for_inflight=lambda *, timeout_s: (
+            events.append(("bridge_wait", timeout_s)) or False
+        ),
+        close=lambda: events.append(("bridge_close",)) or True,
+    )
+    owner = SimpleNamespace(_api_bridge=bridge)
+
+    with pytest.raises(RuntimeError, match="API request completion is still pending"):
+        shutdown_ui._drain_and_close_api_bridge(owner)
+
+    assert events == [("bridge_wait", 2.0)]
+
+
 def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
     events: list[object] = []
     monkeypatch.setattr(
@@ -109,6 +125,13 @@ def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
     serial = _Serial(events)
     route_thread = _AliveThread(events, "route_thread")
     scan_thread = _AliveThread(events, "scan_thread")
+    api_bridge = SimpleNamespace(
+        stop_accepting=lambda: events.append(("bridge_stop_accepting",)),
+        wait_for_inflight=lambda *, timeout_s: (
+            events.append(("bridge_wait", timeout_s)) or True
+        ),
+        close=lambda: events.append(("bridge_close",)) or True,
+    )
     owner = SimpleNamespace(
         serial_connection=serial,
         lcr_controller=SimpleNamespace(
@@ -116,6 +139,7 @@ def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
             shutdown=lambda: events.append(("lcr_shutdown",)),
         ),
         _api_server=SimpleNamespace(stop=lambda: events.append(("api_stop",))),
+        _api_bridge=api_bridge,
         _design_position_timer=SimpleNamespace(
             stop=lambda: events.append(("design_timer_stop",))
         ),
@@ -202,6 +226,7 @@ def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
         ("persist_serial", True),
         ("persist_lcr", True),
         ("persist_controller",),
+        ("bridge_stop_accepting",),
         ("api_stop",),
         ("telegram_stop",),
         ("design_timer_stop",),
@@ -210,11 +235,13 @@ def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
         ("feedrate_timer_stop",),
         ("save_feedrate",),
         ("markup_store_stop",),
+        ("api_workers", 2.0),
+        ("bridge_wait", 2.0),
+        ("bridge_close",),
         ("route_runner_stop",),
         ("route_thread", "join", 2.0),
         ("scan_stop_requested",),
         ("scan_thread", "join", 2.0),
-        ("api_workers", 2.0),
         ("stop_jog", "application shutdown", True),
         ("force_jog_stop", {"timeout": 0.8}),
         ("exposure_adapter_shutdown", {"timeout_s": 2.0}),
@@ -233,6 +260,59 @@ def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
         ("route_close",),
         ("serial_panel_shutdown",),
         ("event_accept",),
+    ]
+
+
+def test_close_event_keeps_bridge_open_when_worker_drain_times_out(
+    monkeypatch,
+) -> None:
+    events: list[object] = []
+    monkeypatch.setattr(shutdown_ui, "_persist_shutdown_state", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        shutdown_ui,
+        "_stop_services_and_timers",
+        lambda _owner: events.append(("stop_intake",)),
+    )
+    monkeypatch.setattr(shutdown_ui, "_stop_route_worker", lambda _owner: None)
+    monkeypatch.setattr(shutdown_ui, "_stop_microscope_scan", lambda _owner: None)
+
+    def fail_worker_drain(_owner) -> None:
+        events.append(("worker_drain",))
+        raise RuntimeError("API stage command is still stopping.")
+
+    monkeypatch.setattr(
+        shutdown_ui,
+        "_stop_api_stage_command_workers",
+        fail_worker_drain,
+    )
+    monkeypatch.setattr(
+        shutdown_ui,
+        "_drain_and_close_api_bridge",
+        lambda _owner: events.append(("bridge_close",)),
+    )
+    owner = SimpleNamespace(
+        serial_connection=SimpleNamespace(is_open=False),
+        lcr_controller=SimpleNamespace(is_connected=lambda: False),
+        _show_status=lambda message, timeout: events.append(
+            ("status", message, timeout)
+        ),
+    )
+    event = SimpleNamespace(
+        accept=lambda: events.append(("event_accept",)),
+        ignore=lambda: events.append(("event_ignore",)),
+    )
+
+    shutdown_ui.close_event(owner, event)
+
+    assert events == [
+        ("stop_intake",),
+        ("worker_drain",),
+        (
+            "status",
+            "Camera shutdown blocked: API stage command is still stopping.",
+            10000,
+        ),
+        ("event_ignore",),
     ]
 
 

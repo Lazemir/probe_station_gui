@@ -62,10 +62,11 @@ def close_event(owner: MainWindowShutdownOwner, event: Any) -> None:
         lcr_was_connected=lcr_was_connected,
     )
     _stop_services_and_timers(owner)
-    _stop_route_worker(owner)
-    _stop_microscope_scan(owner)
     try:
         _stop_api_stage_command_workers(owner)
+        _drain_and_close_api_bridge(owner)
+        _stop_route_worker(owner)
+        _stop_microscope_scan(owner)
         _stop_optical_calibration(owner)
         _close_serial_and_panels(owner)
     except Exception as exc:
@@ -95,7 +96,7 @@ def _persist_shutdown_state(
 def _stop_services_and_timers(owner: MainWindowShutdownOwner) -> None:
     api_bridge = getattr(owner, "_api_bridge", None)
     if api_bridge is not None:
-        api_bridge.close()
+        api_bridge.stop_accepting()
     if owner._api_server is not None:
         owner._api_server.stop()
     owner._stop_telegram_bot_service()
@@ -132,6 +133,16 @@ def _stop_api_stage_command_workers(owner: MainWindowShutdownOwner) -> None:
     wait = getattr(owner, "_wait_for_api_stage_command_workers", None)
     if callable(wait) and not wait(timeout_s=2.0):
         raise RuntimeError("API stage command is still stopping.")
+
+
+def _drain_and_close_api_bridge(owner: MainWindowShutdownOwner) -> None:
+    bridge = getattr(owner, "_api_bridge", None)
+    if bridge is None:
+        return
+    if not bridge.wait_for_inflight(timeout_s=2.0):
+        raise RuntimeError("API request completion is still pending.")
+    if not bridge.close():
+        raise RuntimeError("API request completion could not be published.")
 
 
 def _stop_optical_calibration(owner: MainWindowShutdownOwner) -> None:

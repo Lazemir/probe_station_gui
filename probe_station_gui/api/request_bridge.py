@@ -76,7 +76,9 @@ class ApiRequestBridge(QObject):
         super().__init__(parent)
         self._handler = handler
         self._pending_lock = threading.Lock()
+        self._pending_changed = threading.Condition(self._pending_lock)
         self._pending: dict[int, dict[str, Any]] = {}
+        self._accepting = True
         self._closed = False
         self.request_received.connect(
             self._handle_request,
@@ -98,7 +100,7 @@ class ApiRequestBridge(QObject):
         }
         envelope_id = id(envelope)
         with self._pending_lock:
-            if self._closed:
+            if self._closed or not self._accepting:
                 return self._shutdown_response()
             self._pending[envelope_id] = envelope
         self.request_received.emit(envelope)
@@ -117,6 +119,7 @@ class ApiRequestBridge(QObject):
                     envelope["state"] = _CANCELLED
                     envelope["result"] = timeout_response
                     event.set()
+                    self._pending_changed.notify_all()
                 elif pending is envelope and state == _HANDLING:
                     wait_for_completion = True
             if wait_for_completion:
@@ -130,20 +133,48 @@ class ApiRequestBridge(QObject):
             "message": "GUI returned an invalid API response.",
         }
 
-    def close(self) -> None:
-        """Reject queued API requests and wake API threads during shutdown."""
+    def stop_accepting(self) -> None:
+        """Reject new and queued requests while preserving handling requests."""
 
         with self._pending_lock:
-            self._closed = True
-            pending = tuple(self._pending.values())
-            self._pending.clear()
+            self._accepting = False
             response = self._shutdown_response()
-            for envelope in pending:
+            queued = tuple(
+                (envelope_id, envelope)
+                for envelope_id, envelope in self._pending.items()
+                if envelope.get("state") == _QUEUED
+            )
+            for envelope_id, envelope in queued:
+                self._pending.pop(envelope_id, None)
                 envelope["state"] = _CANCELLED
                 envelope["result"] = dict(response)
                 event = envelope.get("event")
                 if isinstance(event, threading.Event):
                     event.set()
+            self._pending_changed.notify_all()
+
+    def wait_for_inflight(self, *, timeout_s: float) -> bool:
+        """Wait for every handling request to publish its definitive response."""
+
+        timeout = max(0.0, float(timeout_s))
+        with self._pending_changed:
+            return bool(
+                self._pending_changed.wait_for(
+                    lambda: not self._pending,
+                    timeout=timeout,
+                )
+            )
+
+    def close(self) -> bool:
+        """Close after intake is stopped and every handling request has drained."""
+
+        self.stop_accepting()
+        with self._pending_lock:
+            if self._pending:
+                return False
+            self._closed = True
+            self._pending_changed.notify_all()
+            return True
 
     @staticmethod
     def _shutdown_response() -> dict[str, Any]:
@@ -208,6 +239,7 @@ class ApiRequestBridge(QObject):
                 envelope["result"] = dict(result)
                 envelope["state"] = _COMPLETED
                 completed = True
+                self._pending_changed.notify_all()
         if completed and isinstance(event, threading.Event):
             event.set()
 

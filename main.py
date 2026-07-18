@@ -531,6 +531,15 @@ class _OpticalCalibrationRunContext:
     full_wizard: bool = False
 
 
+@dataclass
+class _ApiStageCommandReservation:
+    operation_id: str
+    action: str
+    completion: DeferredApiResponse
+    thread: threading.Thread | None = None
+    state: str = "reserved"
+
+
 @dataclass(frozen=True)
 class _LensDistortionCalibrationOutput:
     payload: dict[str, object]
@@ -726,7 +735,10 @@ class Main(QMainWindow):
         self._api_bridge: ApiRequestBridge | None = None
         self._api_server: ProbeStationApiServer | None = None
         self._api_stage_command_worker_lock = threading.Lock()
-        self._api_stage_command_workers: set[threading.Thread] = set()
+        self._api_stage_command_worker_changed = threading.Condition(
+            self._api_stage_command_worker_lock
+        )
+        self._api_stage_command_reservation: _ApiStageCommandReservation | None = None
         self._api_settings_signature: tuple[bool, str, int] | None = None
         self._telegram_bot_service: TelegramBotCommandService | None = None
         self._telegram_bot_signature: tuple[str, str] | None = None
@@ -1583,38 +1595,49 @@ class Main(QMainWindow):
 
     def _api_stage_command_worker_state(
         self,
-    ) -> tuple[threading.Lock, set[threading.Thread]]:
+    ) -> tuple[threading.Lock, threading.Condition]:
         lock = getattr(self, "_api_stage_command_worker_lock", None)
-        workers = getattr(self, "_api_stage_command_workers", None)
-        if lock is None or workers is None:
+        changed = getattr(self, "_api_stage_command_worker_changed", None)
+        if lock is None or changed is None:
             lock = threading.Lock()
-            workers = set()
+            changed = threading.Condition(lock)
             self._api_stage_command_worker_lock = lock
-            self._api_stage_command_workers = workers
-        return lock, workers
+            self._api_stage_command_worker_changed = changed
+        if not hasattr(self, "_api_stage_command_reservation"):
+            self._api_stage_command_reservation = None
+        return lock, changed
 
     def _api_stage_command_worker_active(self) -> bool:
-        lock, workers = self._api_stage_command_worker_state()
+        lock, _changed = self._api_stage_command_worker_state()
         with lock:
-            return bool(workers)
+            reservation = self._api_stage_command_reservation
+            return bool(reservation is not None and reservation.state != "released")
 
     def _wait_for_api_stage_command_workers(self, *, timeout_s: float) -> bool:
-        deadline = time.monotonic() + max(0.0, float(timeout_s))
-        lock, workers = self._api_stage_command_worker_state()
-        while True:
-            with lock:
-                finished = {
-                    thread for thread in workers if not thread.is_alive()
-                }
-                workers.difference_update(finished)
-                active = tuple(workers)
-            if not active:
-                return True
-            remaining = deadline - time.monotonic()
-            if remaining <= 0.0:
+        _lock, changed = self._api_stage_command_worker_state()
+        with changed:
+            return bool(
+                changed.wait_for(
+                    lambda: self._api_stage_command_reservation is None,
+                    timeout=max(0.0, float(timeout_s)),
+                )
+            )
+
+    def _release_api_stage_command_reservation(
+        self,
+        reservation: _ApiStageCommandReservation,
+    ) -> bool:
+        lock, changed = self._api_stage_command_worker_state()
+        with lock:
+            if (
+                self._api_stage_command_reservation is not reservation
+                or reservation.state == "released"
+            ):
                 return False
-            for thread in active:
-                thread.join(timeout=max(0.0, deadline - time.monotonic()))
+            reservation.state = "released"
+            self._api_stage_command_reservation = None
+            changed.notify_all()
+            return True
 
     def _start_deferred_api_stage_command(
         self,
@@ -1622,21 +1645,37 @@ class Main(QMainWindow):
         action: str,
     ) -> dict[str, Any] | DeferredApiResponse:
         completion = DeferredApiResponse()
-        request = dict(command_request)
-        thread = threading.Thread(
-            target=self._run_deferred_api_stage_command,
-            args=(request, completion),
-            name=f"ApiStageCommand-{action}",
-            daemon=True,
+        reservation = _ApiStageCommandReservation(
+            operation_id=uuid.uuid4().hex,
+            action=str(action),
+            completion=completion,
         )
-        lock, workers = self._api_stage_command_worker_state()
+        lock, changed = self._api_stage_command_worker_state()
         with lock:
-            workers.add(thread)
+            active = self._api_stage_command_reservation
+            if active is not None and active.state != "released":
+                return {
+                    "accepted": False,
+                    "status_code": 409,
+                    "message": f"API stage command is already running: {active.action}.",
+                }
+            self._api_stage_command_reservation = reservation
+            changed.notify_all()
+        request = dict(command_request)
         try:
+            thread = threading.Thread(
+                target=self._run_deferred_api_stage_command,
+                args=(request, reservation),
+                name=f"ApiStageCommand-{action}",
+                daemon=True,
+            )
+            with lock:
+                reservation.thread = thread
+                reservation.state = "running"
+                changed.notify_all()
             thread.start()
         except Exception as exc:
-            with lock:
-                workers.discard(thread)
+            self._release_api_stage_command_reservation(reservation)
             return {
                 "accepted": False,
                 "status_code": 500,
@@ -1647,7 +1686,7 @@ class Main(QMainWindow):
     def _run_deferred_api_stage_command(
         self,
         command_request: dict[str, Any],
-        completion: DeferredApiResponse,
+        reservation: _ApiStageCommandReservation,
     ) -> None:
         try:
             response = self._dispatch_api_command_request(
@@ -1661,11 +1700,15 @@ class Main(QMainWindow):
                 "status_code": 500,
                 "message": str(exc),
             }
+        lock, changed = self._api_stage_command_worker_state()
+        with lock:
+            if self._api_stage_command_reservation is reservation:
+                reservation.state = "publishing"
+                changed.notify_all()
+        try:
+            reservation.completion.complete(response)
         finally:
-            lock, workers = self._api_stage_command_worker_state()
-            with lock:
-                workers.discard(threading.current_thread())
-        completion.complete(response)
+            self._release_api_stage_command_reservation(reservation)
 
     def _submit_api_command_request_from_api_thread(
         self,
