@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import uuid
 from collections.abc import Mapping, Sequence
@@ -22,6 +23,12 @@ from probe_station_gui.camera.imaging import (
 _MANIFEST_VERSION = 1
 _COORDINATE_SPACE = "raw camera frame, before lens distortion correction"
 _APPLICATION_ORDER = ["flat_field", "lens_distortion", "mosaic"]
+_AUTO_BLUR_SHORT_SIDE_DIVISOR = 40.0
+_AUTO_BLUR_RADIUS_MIN_PX = 5
+_AUTO_BLUR_RADIUS_MAX_PX = 101
+_AUTO_MAX_GAIN_FLOOR = 4.0
+_AUTO_MAX_GAIN_CEILING = 16.0
+_AUTO_MAX_GAIN_MARGIN = 1.1
 _SAFE_OBJECTIVE_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,119}\Z")
 _WINDOWS_RESERVED_DEVICE_NAMES = frozenset(
     {
@@ -125,18 +132,23 @@ class FlatFieldCalibrationStore:
         objective_name: str,
         frames: Sequence[QImage],
         *,
-        blur_radius_px: int = 401,
-        max_gain: float = 4.0,
+        blur_radius_px: int | None = None,
+        max_gain: float | None = None,
         metadata: Mapping[str, object] | None = None,
     ) -> StoredFlatFieldCalibration:
         """Persist a new profile and atomically make it the active objective profile."""
 
         objective = _safe_objective_name(objective_name)
         reference = median_flat_field_reference(frames)
-        profile = build_flat_field_profile(
+        selected_blur_radius, selected_max_gain = _profile_parameters(
             reference,
             blur_radius_px=blur_radius_px,
             max_gain=max_gain,
+        )
+        profile = build_flat_field_profile(
+            reference,
+            blur_radius_px=selected_blur_radius,
+            max_gain=selected_max_gain,
             source=f"{objective} flat-field",
         )
         current_manifest = self.current_manifest_path(objective)
@@ -215,6 +227,45 @@ def _reference_path(payload: Mapping[str, object], base_dir: Path) -> Path:
         raise ValueError("flat-field reference_image is missing")
     reference = Path(value).expanduser()
     return reference if reference.is_absolute() else base_dir / reference
+
+
+def _profile_parameters(
+    reference: QImage,
+    *,
+    blur_radius_px: int | None,
+    max_gain: float | None,
+) -> tuple[int, float]:
+    if blur_radius_px is None:
+        short_side = min(int(reference.width()), int(reference.height()))
+        radius = int(round(float(short_side) / _AUTO_BLUR_SHORT_SIDE_DIVISOR))
+        radius = min(
+            _AUTO_BLUR_RADIUS_MAX_PX,
+            max(_AUTO_BLUR_RADIUS_MIN_PX, radius),
+        )
+        if radius % 2 == 0:
+            radius += 1
+    else:
+        radius = int(blur_radius_px)
+
+    if max_gain is not None:
+        return radius, float(max_gain)
+
+    import numpy as np
+
+    provisional = build_flat_field_profile(
+        reference,
+        blur_radius_px=radius,
+        max_gain=_AUTO_MAX_GAIN_CEILING,
+        source="flat-field parameter selection",
+    )
+    illumination = provisional.illumination_rgb.astype(np.float32, copy=False)
+    mean = np.asarray(provisional.mean_rgb, dtype=np.float32).reshape((1, 1, 3))
+    required_gain = float(np.max(mean / np.maximum(illumination, 1.0)))
+    selected_gain = math.ceil(required_gain * _AUTO_MAX_GAIN_MARGIN)
+    return radius, min(
+        _AUTO_MAX_GAIN_CEILING,
+        max(_AUTO_MAX_GAIN_FLOOR, float(selected_gain)),
+    )
 
 
 def _manifest_payload(

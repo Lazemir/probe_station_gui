@@ -4794,8 +4794,6 @@ class Main(QMainWindow):
             stored = self._flat_field_calibration_store.install(
                 objective_name,
                 frames,
-                blur_radius_px=microscope_scan.DEFAULT_FLAT_FIELD_BLUR_RADIUS_PX,
-                max_gain=microscope_scan.DEFAULT_FLAT_FIELD_MAX_GAIN,
                 metadata={
                     "calibrated_at": utc_timestamp(),
                     "magnification": magnification,

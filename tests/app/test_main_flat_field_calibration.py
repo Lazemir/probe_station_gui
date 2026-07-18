@@ -129,8 +129,8 @@ def test_flat_field_runner_captures_raw_grid_and_restores_stage(monkeypatch) -> 
     assert len(store.calls) == 1
     assert store.calls[0]["objective_name"] == "X20"
     assert len(store.calls[0]["frames"]) == 9
-    assert store.calls[0]["blur_radius_px"] == 401
-    assert store.calls[0]["max_gain"] == 4.0
+    assert "blur_radius_px" not in store.calls[0]
+    assert "max_gain" not in store.calls[0]
     metadata = store.calls[0]["metadata"]
     assert metadata["capture_grid"] == [3, 3]
     assert metadata["overlap_fraction"] == 0.8

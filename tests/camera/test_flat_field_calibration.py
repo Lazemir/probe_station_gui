@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from probe_station_gui.camera.flat_field_calibration import (
     FlatFieldCalibrationStore,
     median_flat_field_reference,
 )
+from probe_station_gui.camera.imaging import apply_flat_field_correction
 
 
 @pytest.fixture
@@ -51,6 +53,28 @@ def test_install_writes_versioned_reference_and_current_manifest(
     assert manifest["objective"] == "X20"
     assert manifest["metadata"] == {"tiles": 9}
     assert stored.reference_image.parent.name != "X20"
+
+
+def test_default_install_corrects_steep_corner_vignetting(tmp_path: Path) -> None:
+    width = 240
+    height = 160
+    sigma = 18.0
+    frame = QImage(width, height, QImage.Format_RGB32)
+    for y in range(height):
+        for x in range(width):
+            distance_sq = float((width - 1 - x) ** 2 + y**2)
+            corner_falloff = math.exp(-distance_sq / (2.0 * sigma**2))
+            shade = int(round(140.0 * (1.0 - 0.9 * corner_falloff)))
+            frame.setPixelColor(x, y, QColor(shade, shade, shade))
+
+    stored = FlatFieldCalibrationStore(tmp_path).install("X50", [frame] * 3)
+    corrected = apply_flat_field_correction(frame, stored.profile)
+
+    center = corrected.pixelColor(width // 2, height // 2).red()
+    corner = corrected.pixelColor(width - 1, 0).red()
+    assert corner >= 0.9 * center
+    assert stored.profile.blur_radius_px < 401
+    assert stored.profile.max_gain > 4.0
 
 
 def test_load_accepts_existing_current_manifest_shape(tmp_path: Path) -> None:
