@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from probe_station_gui.camera.exposure_policy import (
@@ -8,6 +10,75 @@ from probe_station_gui.camera.exposure_policy import (
     OpticalSessionManager,
 )
 from tests.camera.test_exposure_policy import PolicyRig
+
+
+def _close_lease_while_policy_lock_is_contended(rig, lease) -> dict[str, object]:
+    entered = threading.Event()
+    finished = threading.Event()
+    result: dict[str, object] = {}
+    errors: list[Exception] = []
+
+    def close_lease() -> None:
+        entered.set()
+        try:
+            result.update(lease.close())
+        except Exception as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    rig.controller._command_lock.acquire()
+    thread = threading.Thread(target=close_lease, daemon=True)
+    thread.start()
+    assert entered.wait(1.0)
+    try:
+        assert not finished.wait(0.05)
+    finally:
+        rig.controller._command_lock.release()
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    assert errors == []
+    return result
+
+
+@pytest.mark.parametrize(
+    "operation",
+    (
+        "flat-field calibration",
+        "lens distortion calibration",
+        "microscope scan",
+    ),
+)
+def test_standalone_lease_close_waits_for_policy_contention(operation: str) -> None:
+    rig = PolicyRig(auto_enabled=True, engine="software")
+    sessions = OpticalSessionManager(rig.controller)
+    lease = sessions.open(operation)
+
+    result = _close_lease_while_policy_lock_is_contended(rig, lease)
+
+    assert result["accepted"] is True
+    assert rig.controller.snapshot()["session_active"] is False
+    assert sessions._records == {}
+
+
+def test_full_wizard_nested_and_outer_close_wait_for_policy_contention() -> None:
+    rig = PolicyRig(auto_enabled=True, engine="software")
+    sessions = OpticalSessionManager(rig.controller)
+    outer = sessions.open("optical calibration")
+    nested = sessions.open(
+        "flat-field calibration",
+        parent_token=outer.token,
+    )
+
+    nested_result = _close_lease_while_policy_lock_is_contended(rig, nested)
+
+    assert nested_result == {"accepted": True, "nested": True}
+    assert rig.controller.snapshot()["session_active"] is True
+    outer_result = _close_lease_while_policy_lock_is_contended(rig, outer)
+    assert outer_result["accepted"] is True
+    assert rig.controller.snapshot()["session_active"] is False
+    assert sessions._records == {}
 
 
 def test_outer_session_adjusts_before_ready_and_nested_session_does_not() -> None:

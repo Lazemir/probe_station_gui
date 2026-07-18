@@ -422,6 +422,24 @@ class _MicroscopeScanCapturedFrame:
 
 
 @dataclass(frozen=True)
+class _MicroscopeDesignScanRequest:
+    document: object
+    scale: object
+    overlap_fraction: float
+
+
+@dataclass(frozen=True)
+class _MicroscopeAreaScanRequest:
+    scale: object
+    row_count: int
+    column_count: int
+    overlap_fraction: float
+    scan_pattern: str
+    structure_size_mm: float | None = None
+    placement_fraction: float | None = None
+
+
+@dataclass(frozen=True)
 class _PendingDesignMarkupLoad:
     generation: int
     session: DesignSession
@@ -3061,6 +3079,12 @@ class Main(QMainWindow):
         }
 
     def _api_microscope_area_scan(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if "auto_exposure" in payload:
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": "auto_exposure is no longer supported for area scans.",
+            }
         if self._microscope_scan_running():
             return {
                 "accepted": False,
@@ -3085,20 +3109,6 @@ class Main(QMainWindow):
                 "accepted": False,
                 "status_code": 409,
                 "message": "Calibrate click-to-move for the active objective before scanning.",
-            }
-        frame, _counter = self._wait_for_camera_frame(timeout_s=0.5)
-        if frame is None:
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": "Camera frame is unavailable; cannot scan.",
-            }
-        latest_position = self.stage_controller.latest_stage_position()
-        if latest_position is None or len(latest_position) < 2:
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": "Unable to read X/Y stage position.",
             }
         try:
             scan_pattern = self._microscope_area_scan_pattern(payload)
@@ -3185,8 +3195,6 @@ class Main(QMainWindow):
         output_dir = str(payload.get("output_dir") or "").strip()
         if not output_dir:
             output_dir = self._microscope_area_scan_default_output_dir()
-        center_stage_xy = (float(latest_position[0]), float(latest_position[1]))
-        frame_size_px = (int(frame.width()), int(frame.height()))
         pixels_to_mm = getattr(scale, "pixels_to_mm", None)
         if scan_pattern == "stitch_debug":
             if pixels_to_mm is None:
@@ -3195,42 +3203,6 @@ class Main(QMainWindow):
                     "status_code": 409,
                     "message": "Stitch debug scan requires full pixel-to-stage calibration.",
                 }
-            try:
-                plan = microscope_scan.stitch_debug_scan_plan_from_pixel_matrix(
-                    center_stage_xy=center_stage_xy,
-                    frame_size_px=frame_size_px,
-                    pixels_to_mm=pixels_to_mm,
-                    structure_size_mm=float(structure_size_mm),
-                    placement_fraction=float(placement_fraction),
-                    overlap_fraction=float(overlap_fraction),
-                )
-            except ValueError as exc:
-                return {
-                    "accepted": False,
-                    "status_code": 400,
-                    "message": str(exc),
-                }
-        elif pixels_to_mm is not None:
-            plan = microscope_scan.centered_area_scan_plan_from_pixel_matrix(
-                center_stage_xy=center_stage_xy,
-                frame_size_px=frame_size_px,
-                pixels_to_mm=pixels_to_mm,
-                row_count=rows,
-                column_count=columns,
-                overlap_fraction=overlap_fraction,
-            )
-        else:
-            fov_size_mm = (
-                float(frame.width()) * float(scale.pixel_size_x_mm),
-                float(frame.height()) * float(scale.pixel_size_y_mm),
-            )
-            plan = microscope_scan.centered_area_scan_plan(
-                center_stage_xy=center_stage_xy,
-                fov_size_mm=fov_size_mm,
-                row_count=rows,
-                column_count=columns,
-                overlap_fraction=overlap_fraction,
-            )
         configuration = SimpleNamespace(
             output_dir=output_dir,
             overlap_fraction=overlap_fraction,
@@ -3243,19 +3215,39 @@ class Main(QMainWindow):
             flat_field_options=flat_field_options,
             camera_lock_settings=camera_lock_settings,
         )
+        planning_request = _MicroscopeAreaScanRequest(
+            scale=scale,
+            row_count=rows,
+            column_count=columns,
+            overlap_fraction=overlap_fraction,
+            scan_pattern=scan_pattern,
+            structure_size_mm=structure_size_mm,
+            placement_fraction=placement_fraction,
+        )
         self._microscope_scan_stop_requested.clear()
-        self._microscope_scan_thread = threading.Thread(
+        thread = threading.Thread(
             target=self._run_microscope_scan,
-            args=(configuration, plan),
+            args=(configuration, planning_request),
             name="MicroscopeAreaScan",
             daemon=True,
         )
-        self._microscope_scan_thread.start()
+        self._microscope_scan_thread = thread
+        try:
+            thread.start()
+        except Exception as exc:
+            if self._microscope_scan_thread is thread:
+                self._microscope_scan_thread = None
+            self._update_stage_coordinate_apply_state()
+            return {
+                "accepted": False,
+                "status_code": 500,
+                "message": f"Microscope area scan could not start: {exc}",
+            }
         self._update_stage_coordinate_apply_state()
         return {
             "accepted": True,
             "status_code": 202,
-            "message": f"Microscope area scan started: {len(plan.tiles)} tiles.",
+            "message": "Microscope area scan started.",
             "output_dir": output_dir,
             "rows": rows,
             "columns": columns,
@@ -4465,6 +4457,13 @@ class Main(QMainWindow):
             wizard.cancel_requested.connect(self._cancel_optical_calibration_wizard)
             self._optical_calibration_wizard = wizard
 
+        if self._optical_calibration_outer_owned_or_closing():
+            self._show_status("Optical calibration is still active.", 5000)
+            self._optical_calibration_wizard.show()
+            self._optical_calibration_wizard.raise_()
+            self._optical_calibration_wizard.activateWindow()
+            return
+
         objectives = self.settings_manager.objectives_configuration()
         active_name = normalize_objective_name(objectives.active_name)
         profile = objectives.objectives.get(active_name)
@@ -4711,6 +4710,23 @@ class Main(QMainWindow):
             token = getattr(self, "_optical_calibration_outer_token", None)
             return None if token is None else str(token)
 
+    def _optical_calibration_outer_owned_or_closing(self) -> bool:
+        with self._optical_calibration_lock():
+            thread = getattr(
+                self,
+                "_optical_calibration_outer_close_thread",
+                None,
+            )
+            return bool(
+                getattr(self, "_optical_calibration_outer_lease", None) is not None
+                or getattr(
+                    self,
+                    "_optical_calibration_outer_close_in_progress",
+                    False,
+                )
+                or (thread is not None and thread.is_alive())
+            )
+
     def _optical_calibration_outer_close_was_requested(self) -> bool:
         with self._optical_calibration_lock():
             return bool(
@@ -4727,22 +4743,31 @@ class Main(QMainWindow):
             self._optical_calibration_outer_close_in_progress = True
 
         error = ""
+        closed = False
         try:
             while True:
                 try:
                     result = lease.close()
                     error = str(result.get("warning") or "")
+                    closed = True
                     break
                 except ExposurePolicyBusyError:
                     time.sleep(0.05)
                 except Exception as exc:
                     error = str(exc) or type(exc).__name__
+                    try:
+                        closed = not bool(lease.is_active())
+                    except Exception:
+                        closed = False
                     break
         finally:
             with self._optical_calibration_lock():
-                self._optical_calibration_outer_lease = None
-                self._optical_calibration_outer_token = None
-                self._optical_calibration_outer_close_requested = False
+                if closed:
+                    self._optical_calibration_outer_lease = None
+                    self._optical_calibration_outer_token = None
+                    self._optical_calibration_outer_close_requested = False
+                else:
+                    self._optical_calibration_outer_close_requested = True
                 self._optical_calibration_outer_close_in_progress = False
         return error
 
@@ -4753,20 +4778,35 @@ class Main(QMainWindow):
         if not self._optical_calibration_worker_active():
             self._schedule_optical_calibration_outer_close()
 
-    def _schedule_optical_calibration_outer_close(self) -> None:
+    def _schedule_optical_calibration_outer_close(self) -> bool:
         with self._optical_calibration_lock():
             if getattr(self, "_optical_calibration_outer_lease", None) is None:
-                return
+                return True
             thread = getattr(self, "_optical_calibration_outer_close_thread", None)
             if thread is not None and thread.is_alive():
-                return
+                return True
             thread = threading.Thread(
                 target=self._run_optical_calibration_outer_close,
                 name="OpticalCalibrationSessionClose",
                 daemon=True,
             )
             self._optical_calibration_outer_close_thread = thread
-        thread.start()
+        try:
+            thread.start()
+        except Exception as exc:
+            with self._optical_calibration_lock():
+                if self._optical_calibration_outer_close_thread is thread:
+                    self._optical_calibration_outer_close_thread = None
+                self._optical_calibration_outer_close_requested = True
+            try:
+                self.status_message_requested.emit(
+                    f"Exposure policy restore could not start: {exc}",
+                    10000,
+                )
+            except RuntimeError:
+                pass
+            return False
+        return True
 
     def _run_optical_calibration_outer_close(self) -> None:
         error = self._close_optical_calibration_outer_session()
@@ -4882,8 +4922,18 @@ class Main(QMainWindow):
         )
         self._flat_field_calibration_thread = thread
         self._flat_field_calibration_context = context
+        try:
+            thread.start()
+        except Exception as exc:
+            if self._flat_field_calibration_thread is thread:
+                self._flat_field_calibration_thread = None
+                self._flat_field_calibration_context = None
+            self._show_status(
+                f"Flat-field calibration could not start: {exc}",
+                8000,
+            )
+            return False
         self._show_status("Flat-field calibration started.", 4000)
-        thread.start()
         return True
 
     def _flat_field_calibration_running(self) -> bool:
@@ -5196,6 +5246,12 @@ class Main(QMainWindow):
             thread.join(timeout=0.1)
         self._flat_field_calibration_thread = None
         self._flat_field_calibration_context = None
+        if (
+            context is not None
+            and context.full_wizard
+            and self._optical_calibration_outer_close_was_requested()
+        ):
+            self._schedule_optical_calibration_outer_close()
         run_id = context.wizard_run_id if context is not None else None
         wizard = getattr(self, "_optical_calibration_wizard", None)
         if wizard is not None and run_id is not None:
@@ -5261,8 +5317,19 @@ class Main(QMainWindow):
             self._lens_distortion_dialog.set_status(
                 "Lens distortion calibration started."
             )
+        try:
+            thread.start()
+        except Exception as exc:
+            if self._lens_distortion_thread is thread:
+                self._lens_distortion_thread = None
+                self._lens_distortion_context = None
+            message = f"Lens distortion calibration could not start: {exc}"
+            if self._lens_distortion_dialog is not None:
+                self._lens_distortion_dialog.set_running(False)
+                self._lens_distortion_dialog.set_status(message)
+            self._show_status(message, 8000)
+            return False
         self._show_status("Lens distortion calibration started.", 4000)
-        thread.start()
         return True
 
     def _reset_lens_distortion_calibration(self) -> None:
@@ -5821,6 +5888,12 @@ class Main(QMainWindow):
             thread.join(timeout=0.1)
         self._lens_distortion_thread = None
         self._lens_distortion_context = None
+        if (
+            context is not None
+            and context.full_wizard
+            and self._optical_calibration_outer_close_was_requested()
+        ):
+            self._schedule_optical_calibration_outer_close()
 
         payload: dict[str, object] | None = None
         before_preview: QImage | None = None
@@ -9713,50 +9786,117 @@ class Main(QMainWindow):
         scale_preflight = microscope_scan.start_scale_decision(scale=scale)
         if self._show_microscope_scan_start_rejection(scale_preflight):
             return
-        frame, _counter = self._wait_for_camera_frame(timeout_s=0.1)
-        frame_size_px = None if frame is None else (frame.width(), frame.height())
-        decision = microscope_scan.scan_plan_decision(
+        planning_request = _MicroscopeDesignScanRequest(
             document=document,
             scale=scale,
-            frame_size_px=frame_size_px,
             overlap_fraction=configuration.overlap_fraction,
-            design_to_stage_xy=self._raw_stage_xy_from_design_xy,
         )
-        if self._show_microscope_scan_start_rejection(decision):
-            return
-        plan = decision.plan
-        if plan is None:
-            return
         self._microscope_scan_stop_requested.clear()
         if self.microscope_scan_dialog is not None:
             self.microscope_scan_dialog.set_running(True)
-            self.microscope_scan_dialog.set_status(
-                microscope_scan.starting_status(plan)
-            )
-        self._microscope_scan_thread = threading.Thread(
+            self.microscope_scan_dialog.set_status("Microscope scan starting.")
+        thread = threading.Thread(
             target=self._run_microscope_scan,
-            args=(configuration, plan),
+            args=(configuration, planning_request),
             name="MicroscopeDesignScan",
             daemon=True,
         )
-        self._microscope_scan_thread.start()
+        self._microscope_scan_thread = thread
+        try:
+            thread.start()
+        except Exception as exc:
+            if self._microscope_scan_thread is thread:
+                self._microscope_scan_thread = None
+            message = f"Microscope scan could not start: {exc}"
+            if self.microscope_scan_dialog is not None:
+                self.microscope_scan_dialog.set_running(False)
+                self.microscope_scan_dialog.set_status(message)
+            self._show_status(message, 8000)
         self._update_stage_coordinate_apply_state()
+
+    def _build_microscope_scan_plan(
+        self,
+        planning_request: object,
+        frame_size_px: tuple[int, int],
+    ) -> MicroscopeScanPlan:
+        width_px, height_px = (int(frame_size_px[0]), int(frame_size_px[1]))
+        if width_px <= 0 or height_px <= 0:
+            raise RuntimeError("Camera frame size is unavailable.")
+        if isinstance(planning_request, _MicroscopeDesignScanRequest):
+            decision = microscope_scan.scan_plan_decision(
+                document=planning_request.document,
+                scale=planning_request.scale,
+                frame_size_px=(width_px, height_px),
+                overlap_fraction=planning_request.overlap_fraction,
+                design_to_stage_xy=self._raw_stage_xy_from_design_xy,
+            )
+            if not decision.accepted or decision.plan is None:
+                message = (
+                    decision.status.message
+                    if decision.status is not None
+                    else "Microscope scan plan is unavailable."
+                )
+                raise RuntimeError(message)
+            return decision.plan
+        if isinstance(planning_request, _MicroscopeAreaScanRequest):
+            latest_position = self.stage_controller.latest_stage_position()
+            if latest_position is None or len(latest_position) < 2:
+                raise RuntimeError("Unable to read X/Y stage position.")
+            center_stage_xy = (
+                float(latest_position[0]),
+                float(latest_position[1]),
+            )
+            if not all(math.isfinite(value) for value in center_stage_xy):
+                raise RuntimeError("Unable to read X/Y stage position.")
+            pixels_to_mm = getattr(planning_request.scale, "pixels_to_mm", None)
+            if planning_request.scan_pattern == "stitch_debug":
+                return microscope_scan.stitch_debug_scan_plan_from_pixel_matrix(
+                    center_stage_xy=center_stage_xy,
+                    frame_size_px=(width_px, height_px),
+                    pixels_to_mm=pixels_to_mm,
+                    structure_size_mm=float(planning_request.structure_size_mm),
+                    placement_fraction=float(planning_request.placement_fraction),
+                    overlap_fraction=planning_request.overlap_fraction,
+                )
+            if pixels_to_mm is not None:
+                return microscope_scan.centered_area_scan_plan_from_pixel_matrix(
+                    center_stage_xy=center_stage_xy,
+                    frame_size_px=(width_px, height_px),
+                    pixels_to_mm=pixels_to_mm,
+                    row_count=planning_request.row_count,
+                    column_count=planning_request.column_count,
+                    overlap_fraction=planning_request.overlap_fraction,
+                )
+            fov_size_mm = (
+                float(width_px) * float(planning_request.scale.pixel_size_x_mm),
+                float(height_px) * float(planning_request.scale.pixel_size_y_mm),
+            )
+            return microscope_scan.centered_area_scan_plan(
+                center_stage_xy=center_stage_xy,
+                fov_size_mm=fov_size_mm,
+                row_count=planning_request.row_count,
+                column_count=planning_request.column_count,
+                overlap_fraction=planning_request.overlap_fraction,
+            )
+        if hasattr(planning_request, "tiles"):
+            return planning_request
+        raise RuntimeError("Microscope scan planning request is invalid.")
 
     def _run_microscope_scan(
         self,
         configuration: MicroscopeScanConfiguration,
-        plan: MicroscopeScanPlan,
+        planning_request: object,
     ) -> None:
         success = False
         message = "Microscope scan stopped."
         output_dir = microscope_scan.output_dir_from_configuration(configuration)
-        scale = self._active_microscope_scale()
-        if scale is None:
-            self.microscope_scan_finished.emit(
-                False,
-                "Active objective has no calibrated microscope scale.",
-            )
-            return
+        if isinstance(
+            planning_request,
+            (_MicroscopeDesignScanRequest, _MicroscopeAreaScanRequest),
+        ):
+            scale = planning_request.scale
+        else:
+            scale = self._active_microscope_scale()
         flat_field_options = getattr(
             configuration,
             "flat_field_options",
@@ -9786,9 +9926,10 @@ class Main(QMainWindow):
         captured_frames: list[_MicroscopeScanCapturedFrame] = []
         camera_restore_key: str | None = None
         stage_task_started = False
+        start_stage_xy: tuple[float, float] | None = None
+        stage_position_changed = False
         optical_session: object | None = None
         try:
-            output_dir.mkdir(parents=True, exist_ok=True)
             self.microscope_scan_status.emit("Microscope scan: fixing exposure.")
             optical_session = self._optical_session_manager.open("microscope scan")
             corrections.update(
@@ -9798,8 +9939,26 @@ class Main(QMainWindow):
                     optical_session=optical_session.snapshot(),
                 )
             )
+            if scale is None:
+                raise RuntimeError(
+                    "Active objective has no calibrated microscope scale."
+                )
+            before_counter = self._latest_camera_counter()
+            frame, _counter = self._wait_for_camera_frame(
+                after_counter=before_counter,
+                timeout_s=2.0,
+            )
+            if frame is None:
+                raise RuntimeError("Camera frame is unavailable; cannot scan.")
+            plan = self._build_microscope_scan_plan(
+                planning_request,
+                (int(frame.width()), int(frame.height())),
+            )
+            self.microscope_scan_status.emit(microscope_scan.starting_status(plan))
+            output_dir.mkdir(parents=True, exist_ok=True)
             self.stage_controller.begin_external_task("microscope design scan")
             stage_task_started = True
+            start_stage_xy = self._microscope_scan_start_xy()
             camera_restore_key = self._apply_microscope_scan_camera_lock(
                 camera_lock_settings
             )
@@ -9815,6 +9974,7 @@ class Main(QMainWindow):
                 self.microscope_scan_status.emit(
                     microscope_scan.tile_status(tile, len(plan.tiles))
                 )
+                stage_position_changed = True
                 self._move_to_microscope_scan_tile(
                     tile,
                     tile_approach_mm=float(
@@ -9948,20 +10108,50 @@ class Main(QMainWindow):
             logger.exception("Microscope scan failed")
             message = f"Microscope scan failed: {exc}"
         finally:
+            if (
+                stage_task_started
+                and stage_position_changed
+                and start_stage_xy is not None
+            ):
+                try:
+                    self.microscope_scan_status.emit(
+                        "Microscope scan: returning to start."
+                    )
+                    self.stage_controller.run_external_move_to_xy(
+                        start_stage_xy[0],
+                        start_stage_xy[1],
+                    )
+                except Exception as exc:
+                    logger.exception("Microscope scan return to start failed")
+                    success, message = self._microscope_scan_cleanup_failure(
+                        success,
+                        message,
+                        "return to start",
+                        exc,
+                    )
             if camera_restore_key is not None:
                 restore_error = self._restore_microscope_scan_camera_lock(
                     camera_restore_key
                 )
                 if restore_error:
                     logger.error("Microscope scan camera restore failed: %s", restore_error)
-                    if success:
-                        success = False
-                        message = (
-                            "Microscope scan complete, but camera settings restore "
-                            f"failed: {restore_error}"
-                        )
+                    success, message = self._microscope_scan_cleanup_failure(
+                        success,
+                        message,
+                        "camera settings restore",
+                        restore_error,
+                    )
             if stage_task_started:
-                self.stage_controller.finish_external_task()
+                try:
+                    self.stage_controller.finish_external_task()
+                except Exception as exc:
+                    logger.exception("Microscope scan stage release failed")
+                    success, message = self._microscope_scan_cleanup_failure(
+                        success,
+                        message,
+                        "stage release",
+                        exc,
+                    )
             if optical_session is not None:
                 try:
                     session_result = optical_session.close()
@@ -9982,6 +10172,30 @@ class Main(QMainWindow):
                     else:
                         message = f"{message} Exposure policy restore failed: {session_error}"
             self.microscope_scan_finished.emit(success, message)
+
+    @staticmethod
+    def _microscope_scan_cleanup_failure(
+        success: bool,
+        message: str,
+        operation: str,
+        error: object,
+    ) -> tuple[bool, str]:
+        detail = str(error) or type(error).__name__
+        if success:
+            return (
+                False,
+                f"Microscope scan complete, but {operation} failed: {detail}",
+            )
+        return False, f"{message} {operation.capitalize()} failed: {detail}"
+
+    def _microscope_scan_start_xy(self) -> tuple[float, float]:
+        position = self.stage_controller.latest_stage_position()
+        if position is None or len(position) < 2:
+            raise RuntimeError("Unable to read X/Y stage position.")
+        start_xy = (float(position[0]), float(position[1]))
+        if not all(math.isfinite(value) for value in start_xy):
+            raise RuntimeError("Unable to read X/Y stage position.")
+        return start_xy
 
     def _move_to_microscope_scan_tile(
         self,

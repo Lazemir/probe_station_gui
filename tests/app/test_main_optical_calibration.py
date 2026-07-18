@@ -116,6 +116,17 @@ class _LiveThread:
         return True
 
 
+class _StartFailThread:
+    def __init__(self, **_kwargs) -> None:
+        pass
+
+    def is_alive(self) -> bool:
+        return False
+
+    def start(self) -> None:
+        raise RuntimeError("thread start failed")
+
+
 class _SessionLease:
     def __init__(self, token: str, operation: str, events: list[tuple[object, ...]]) -> None:
         self.token = token
@@ -197,6 +208,36 @@ def test_show_optical_calibration_wizard_reports_active_objective(
     assert wizard.shown == wizard.raised == wizard.activated == 1
 
 
+def test_show_optical_calibration_wizard_does_not_reprepare_retained_full_run(
+    tmp_path: Path,
+) -> None:
+    manifest = tmp_path / "current.json"
+    manifest.write_text("{}", encoding="utf-8")
+    window = Main.__new__(Main)
+    wizard = _FakeWizard()
+    statuses: list[tuple[str, int]] = []
+    window._optical_calibration_wizard = wizard
+    window._optical_calibration_outer_lease = object()
+    window._optical_calibration_outer_close_in_progress = False
+    window.settings_manager = SimpleNamespace(
+        objectives_configuration=_objective_settings,
+    )
+    window._flat_field_calibration_store = SimpleNamespace(
+        current_manifest_path=lambda _objective: manifest,
+    )
+    window._show_status = lambda message, timeout=0: statuses.append(
+        (str(message), int(timeout))
+    )
+
+    Main._show_optical_calibration_wizard(window)
+
+    assert wizard.run_id == 17
+    assert wizard.prepared == []
+    assert wizard.objectives == []
+    assert wizard.shown == wizard.raised == wizard.activated == 1
+    assert statuses == [("Optical calibration is still active.", 5000)]
+
+
 def test_wizard_routes_run_identity_through_progress_and_completion() -> None:
     window = Main.__new__(Main)
     wizard = _FakeWizard()
@@ -220,6 +261,43 @@ def test_wizard_routes_run_identity_through_progress_and_completion() -> None:
     assert wizard.progress == [("Flat field: capture 3/9.", 17)]
     assert wizard.results == [("flat", True, "saved", 17)]
     assert window._flat_field_calibration_context is None
+
+
+def test_flat_completion_schedules_cleanup_when_cancel_arrived_while_queued() -> None:
+    window = Main.__new__(Main)
+    wizard = _FakeWizard()
+    context = main_module._OpticalCalibrationRunContext(
+        operation_id="flat-cancel-race",
+        wizard_run_id=17,
+        objective_name="X20",
+        parent_session_token="outer-token",
+        full_wizard=True,
+    )
+    scheduled: list[str] = []
+    window._optical_calibration_wizard = wizard
+    window._flat_field_calibration_thread = _LiveThread()
+    window._flat_field_calibration_context = context
+    window._lens_distortion_thread = None
+    window._lens_distortion_context = None
+    window._show_status = lambda *_args: None
+    window._schedule_optical_calibration_outer_close = lambda: scheduled.append(
+        "close"
+    )
+
+    Main._cancel_optical_calibration_wizard(window, 17)
+    assert scheduled == []
+
+    window._flat_field_calibration_thread = None
+    Main._on_flat_field_calibration_finished(
+        window,
+        context,
+        False,
+        "Flat-field calibration stopped by user.",
+        None,
+    )
+
+    assert window._flat_field_calibration_context is None
+    assert scheduled == ["close"]
 
 
 def test_failed_lens_wizard_stage_returns_matching_result() -> None:
@@ -339,6 +417,81 @@ def test_lens_start_captures_context_before_worker_thread_starts(monkeypatch) ->
     assert started_contexts[0].objective_name == "X20"
 
 
+def test_flat_worker_start_failure_clears_only_unstarted_worker_state(
+    monkeypatch,
+) -> None:
+    window = Main.__new__(Main)
+    statuses: list[str] = []
+    window.stage_controller = SimpleNamespace(
+        is_busy=lambda: False,
+        current_stage_position=lambda: (10.0, 20.0),
+    )
+    window._stage_serial_ready = lambda: True
+    window._flat_field_calibration_thread = None
+    window._flat_field_calibration_context = None
+    window._lens_distortion_thread = None
+    window._lens_distortion_context = None
+    window._active_objective_metadata = lambda: ("X20", 20.0)
+    window._coordinate_feedrate_for_axes = lambda _axes: 120.0
+    window._current_needle_feedrate = lambda: 70.0
+    window._show_status = lambda message, _timeout=0: statuses.append(str(message))
+    monkeypatch.setattr(
+        Main._start_flat_field_calibration.__globals__["threading"],
+        "Thread",
+        _StartFailThread,
+    )
+
+    started = Main._start_flat_field_calibration(window, wizard_run_id=41)
+
+    assert started is False
+    assert window._flat_field_calibration_thread is None
+    assert window._flat_field_calibration_context is None
+    assert statuses[-1] == "Flat-field calibration could not start: thread start failed"
+
+
+def test_lens_worker_start_failure_preserves_existing_outer_lease(
+    monkeypatch,
+) -> None:
+    window = Main.__new__(Main)
+    statuses: list[str] = []
+    outer_lease = object()
+    window.stage_controller = SimpleNamespace(
+        is_busy=lambda: False,
+        current_stage_position=lambda: (10.0, 20.0),
+    )
+    window._stage_serial_ready = lambda: True
+    window._flat_field_calibration_thread = None
+    window._flat_field_calibration_context = None
+    window._lens_distortion_thread = None
+    window._lens_distortion_context = None
+    window._optical_calibration_outer_lease = outer_lease
+    window._optical_calibration_outer_token = "outer-token"
+    window._active_objective_metadata = lambda: ("X20", 20.0)
+    window._coordinate_feedrate_for_axes = lambda _axes: 120.0
+    window._current_needle_feedrate = lambda: 70.0
+    window._lens_distortion_dialog = None
+    window._show_status = lambda message, _timeout=0: statuses.append(str(message))
+    monkeypatch.setattr(
+        Main._start_lens_distortion_calibration.__globals__["threading"],
+        "Thread",
+        _StartFailThread,
+    )
+
+    started = Main._start_lens_distortion_calibration(
+        window,
+        wizard_run_id=42,
+        parent_session_token="outer-token",
+        full_wizard=True,
+    )
+
+    assert started is False
+    assert window._lens_distortion_thread is None
+    assert window._lens_distortion_context is None
+    assert window._optical_calibration_outer_lease is outer_lease
+    assert window._optical_calibration_outer_token == "outer-token"
+    assert statuses[-1] == "Lens distortion calibration could not start: thread start failed"
+
+
 def test_full_wizard_uses_one_outer_session_and_explicit_nested_stage_tokens() -> None:
     window = Main.__new__(Main)
     manager = _SessionManager()
@@ -415,6 +568,46 @@ def test_outer_session_close_waits_through_exposure_policy_contention(
     assert attempts == 26
     assert close_error == ""
     assert window._optical_calibration_outer_lease is None
+
+
+def test_outer_session_close_retains_owner_while_nested_child_is_active() -> None:
+    window = Main.__new__(Main)
+    child_active = True
+
+    class _OuterLease:
+        token = "outer-token"
+
+        def __init__(self) -> None:
+            self.active = True
+
+        def close(self) -> dict[str, object]:
+            if child_active:
+                raise RuntimeError("Close nested optical sessions before their parent.")
+            self.active = False
+            return {"accepted": True}
+
+        def is_active(self) -> bool:
+            return self.active
+
+    lease = _OuterLease()
+    window._optical_calibration_outer_lease = lease
+    window._optical_calibration_outer_token = lease.token
+    window._optical_calibration_outer_close_requested = True
+
+    first_error = Main._close_optical_calibration_outer_session(window)
+
+    assert "nested optical sessions" in first_error
+    assert window._optical_calibration_outer_lease is lease
+    assert window._optical_calibration_outer_token == lease.token
+    assert window._optical_calibration_outer_close_requested is True
+
+    child_active = False
+    second_error = Main._close_optical_calibration_outer_session(window)
+
+    assert second_error == ""
+    assert window._optical_calibration_outer_lease is None
+    assert window._optical_calibration_outer_token is None
+    assert window._optical_calibration_outer_close_requested is False
 
 
 def test_full_wizard_objective_mismatch_requests_outer_session_close() -> None:
@@ -515,6 +708,37 @@ def test_wizard_cancel_closes_retained_outer_session_off_gui_thread(
     created_threads[0].target()
 
     assert manager.events[-1] == ("close", "optical calibration")
+
+
+def test_outer_close_worker_start_failure_retains_owner_and_reports_failure(
+    monkeypatch,
+) -> None:
+    window = Main.__new__(Main)
+    outer_lease = object()
+    window._optical_calibration_outer_lease = outer_lease
+    window._optical_calibration_outer_token = "outer-token"
+    window._optical_calibration_outer_close_requested = True
+    window._optical_calibration_outer_close_thread = None
+    window.status_message_requested = _RecordingSignal()
+    monkeypatch.setattr(
+        Main._schedule_optical_calibration_outer_close.__globals__["threading"],
+        "Thread",
+        _StartFailThread,
+    )
+
+    scheduled = Main._schedule_optical_calibration_outer_close(window)
+
+    assert scheduled is False
+    assert window._optical_calibration_outer_close_thread is None
+    assert window._optical_calibration_outer_lease is outer_lease
+    assert window._optical_calibration_outer_token == "outer-token"
+    assert window._optical_calibration_outer_close_requested is True
+    assert window.status_message_requested.calls == [
+        (
+            "Exposure policy restore could not start: thread start failed",
+            10000,
+        )
+    ]
 
 
 @pytest.mark.parametrize(

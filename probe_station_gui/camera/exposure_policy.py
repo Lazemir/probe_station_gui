@@ -721,8 +721,7 @@ class OpticalSessionManager:
 
     def close(self, token: str) -> dict[str, object]:
         controller = self._controller
-        if not controller._command_lock.acquire(blocking=False):
-            raise ExposurePolicyBusyError("Camera exposure policy is busy.")
+        controller._command_lock.acquire()
         emit = False
         try:
             record = self._records.get(token)
@@ -774,6 +773,11 @@ class OpticalSessionManager:
             controller._command_lock.release()
             if emit:
                 controller._emit_state()
+
+    def is_active(self, token: str) -> bool:
+        controller = self._controller
+        with controller._command_lock:
+            return token in self._records
 
     def snapshot(self, token: str) -> dict[str, object]:
         controller = self._controller
@@ -849,6 +853,9 @@ class OpticalSessionLease:
 
     def snapshot(self) -> dict[str, object]:
         return self._manager.snapshot(self.token)
+
+    def is_active(self) -> bool:
+        return self._manager.is_active(self.token)
 
     def __enter__(self) -> OpticalSessionLease:
         return self

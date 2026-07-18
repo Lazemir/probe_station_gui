@@ -144,6 +144,8 @@ def _stop_optical_calibration(owner: MainWindowShutdownOwner) -> None:
         close_thread.join(timeout=2.0)
     if close_thread is not None and close_thread.is_alive():
         raise RuntimeError("Optical calibration exposure restore is still running.")
+    if getattr(owner, "_optical_calibration_outer_lease", None) is not None:
+        raise RuntimeError("Optical calibration exposure session is still active.")
 
 
 def _close_serial_and_panels(owner: MainWindowShutdownOwner) -> None:

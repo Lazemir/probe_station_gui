@@ -77,12 +77,16 @@ class CameraLockSettings:
     settings: tuple[tuple[str, object], ...] = ()
 
     def __post_init__(self) -> None:
-        filtered = tuple(
-            (str(node_name), value)
+        normalized = tuple(
+            (str(node_name).strip(), value)
             for node_name, value in self.settings
-            if str(node_name) not in {"ExposureAuto", "ExposureTime"}
         )
-        object.__setattr__(self, "settings", filtered)
+        for node_name, _value in normalized:
+            if node_name.casefold() in {"exposureauto", "exposuretime"}:
+                raise ValueError(
+                    f"Camera lock setting {node_name} is owned by the optical session."
+                )
+        object.__setattr__(self, "settings", normalized)
 
     def to_metadata(self) -> dict[str, object]:
         return {
@@ -510,10 +514,45 @@ def camera_lock_settings_from_payload(
     value = payload.get("camera_lock", default_enabled)
     if isinstance(value, Mapping):
         enabled = _bool_from_payload(value.get("enabled", default_enabled))
+        configured_settings = value.get("settings")
     else:
         enabled = _bool_from_payload(value)
-    settings = DEFAULT_CAMERA_LOCK_SETTINGS if enabled else ()
+        configured_settings = None
+    if configured_settings is None:
+        settings = DEFAULT_CAMERA_LOCK_SETTINGS if enabled else ()
+    else:
+        settings = _camera_lock_settings_from_payload(configured_settings)
     return CameraLockSettings(enabled=enabled, settings=settings)
+
+
+def _camera_lock_settings_from_payload(
+    value: object,
+) -> tuple[tuple[str, object], ...]:
+    if isinstance(value, Mapping):
+        return tuple((str(name), setting) for name, setting in value.items())
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise ValueError("camera_lock.settings must be a list of camera settings.")
+    settings: list[tuple[str, object]] = []
+    for item in value:
+        if isinstance(item, Mapping):
+            node_name = str(item.get("node_name") or "").strip()
+            if not node_name or "value" not in item:
+                raise ValueError(
+                    "camera_lock.settings entries require node_name and value."
+                )
+            settings.append((node_name, item.get("value")))
+            continue
+        if (
+            isinstance(item, Sequence)
+            and not isinstance(item, (str, bytes))
+            and len(item) == 2
+        ):
+            settings.append((str(item[0]), item[1]))
+            continue
+        raise ValueError(
+            "camera_lock.settings entries require node_name and value."
+        )
+    return tuple(settings)
 
 
 def starting_status(plan: MicroscopeScanPlan) -> str:

@@ -354,7 +354,7 @@ def test_flat_field_reference_mode_requires_reference_images() -> None:
         )
 
 
-def test_camera_lock_settings_exclude_session_owned_exposure_nodes() -> None:
+def test_camera_lock_settings_reject_session_owned_exposure_nodes() -> None:
     disabled = microscope_scan.camera_lock_settings_from_payload(
         {"camera_lock": False},
         default_enabled=True,
@@ -375,18 +375,25 @@ def test_camera_lock_settings_exclude_session_owned_exposure_nodes() -> None:
         name for name, _value in enabled.settings
     )
 
-    manually_configured = microscope_scan.CameraLockSettings(
-        enabled=True,
-        settings=(
-            ("ExposureAuto", "Off"),
-            ("ExposureTime", 2000.0),
-            ("GainAuto", "Off"),
-        ),
-    )
-    assert manually_configured.settings == (("GainAuto", "Off"),)
-    assert manually_configured.to_metadata()["settings"] == [
-        {"node_name": "GainAuto", "value": "Off"}
-    ]
+    with pytest.raises(ValueError, match="ExposureAuto"):
+        microscope_scan.CameraLockSettings(
+            enabled=True,
+            settings=(
+                ("ExposureAuto", "Off"),
+                ("GainAuto", "Off"),
+            ),
+        )
+    with pytest.raises(ValueError, match="ExposureTime"):
+        microscope_scan.camera_lock_settings_from_payload(
+            {
+                "camera_lock": {
+                    "enabled": True,
+                    "settings": [
+                        {"node_name": "ExposureTime", "value": 2000.0},
+                    ],
+                }
+            }
+        )
 
 
 def test_scan_module_has_no_scan_specific_exposure_option() -> None:

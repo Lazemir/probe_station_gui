@@ -240,7 +240,7 @@ class ProbeStationApiServer:
 
     def _create_app(self):
         from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query
-        from fastapi.responses import HTMLResponse, Response
+        from fastapi.responses import HTMLResponse, JSONResponse, Response
         import uvicorn
 
         app = FastAPI(
@@ -761,12 +761,31 @@ class ProbeStationApiServer:
             permission=API_PERMISSION_STAGE_WRITE,
             action="click_to_move_calibration",
         )
-        add_body_command_route(
+        @app.post(
             "/api/v1/camera/area-scan",
             name="microscope_area_scan",
-            permission=API_PERMISSION_STAGE_WRITE,
-            action="microscope_area_scan",
+            response_model=None,
         )
+        def microscope_area_scan(
+            payload: dict[str, Any] | None = Body(default=None),
+            auth_headers: tuple[str | None, str | None] = Depends(api_auth_headers),
+        ) -> JSONResponse:
+            authorize_request(API_PERMISSION_STAGE_WRITE, auth_headers)
+            body = dict(payload or {})
+            if "auto_exposure" in body:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "message": (
+                            "auto_exposure is no longer supported for area scans."
+                        )
+                    },
+                )
+            result = dispatch_command_result(
+                "microscope_area_scan",
+                body,
+            )
+            return JSONResponse(status_code=202, content=result)
         add_command_route(
             "/api/v1/route/contacts",
             method="GET",

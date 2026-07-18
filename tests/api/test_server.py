@@ -184,7 +184,7 @@ class ApiServerHttpTest(unittest.TestCase):
             json={"rows": 3, "columns": 3, "overlap_fraction": 0.0},
         )
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 202)
         self.assertEqual(
             calls,
             [
@@ -199,6 +199,22 @@ class ApiServerHttpTest(unittest.TestCase):
             ],
         )
         self.assertEqual(response.json()["output_dir"], "C:/scan")
+
+    def test_area_scan_rejects_removed_auto_exposure_payload(self) -> None:
+        calls = []
+        client = self._client(
+            command_callback=lambda request: calls.append(request)
+            or {"accepted": True, "status_code": 202}
+        )
+
+        response = client.post(
+            "/api/v1/camera/area-scan",
+            json={"rows": 3, "columns": 3, "auto_exposure": False},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(calls, [])
+        self.assertIn("auto_exposure", response.json()["detail"]["message"])
 
     def test_camera_settings_endpoints_preserve_names_and_ordered_writes(self) -> None:
         reads = []

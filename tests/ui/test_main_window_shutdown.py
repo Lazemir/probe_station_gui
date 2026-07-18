@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from probe_station_gui.views import main_window_shutdown as shutdown_ui
 
 
@@ -16,10 +18,11 @@ class _Serial:
 
 
 class _AliveThread:
-    def __init__(self, events: list[object], name: str) -> None:
+    def __init__(self, events: list[object], name: str, on_join=None) -> None:
         self.events = events
         self.name = name
         self.joined = False
+        self.on_join = on_join
 
     def is_alive(self) -> bool:
         return not self.joined
@@ -27,12 +30,18 @@ class _AliveThread:
     def join(self, timeout: float | None = None) -> None:
         self.events.append((self.name, "join", timeout))
         self.joined = True
+        if self.on_join is not None:
+            self.on_join()
 
 
 def test_shutdown_waits_for_calibration_and_outer_session_close() -> None:
     events: list[object] = []
     calibration_thread = _AliveThread(events, "calibration_thread")
-    close_thread = _AliveThread(events, "session_close_thread")
+    close_thread = _AliveThread(
+        events,
+        "session_close_thread",
+        on_join=lambda: setattr(owner, "_optical_calibration_outer_lease", None),
+    )
     owner = SimpleNamespace(
         _flat_field_calibration_thread=calibration_thread,
         _lens_distortion_thread=None,
@@ -55,6 +64,20 @@ def test_shutdown_waits_for_calibration_and_outer_session_close() -> None:
         ("schedule_close",),
         ("session_close_thread", "join", 2.0),
     ]
+
+
+def test_shutdown_fails_closed_when_outer_session_cleanup_cannot_start() -> None:
+    owner = SimpleNamespace(
+        _flat_field_calibration_thread=None,
+        _lens_distortion_thread=None,
+        _optical_calibration_outer_close_thread=None,
+        _optical_calibration_outer_lease=object(),
+        _cancel_optical_calibration_wizard=lambda: None,
+        _schedule_optical_calibration_outer_close=lambda: False,
+    )
+
+    with pytest.raises(RuntimeError, match="exposure session is still active"):
+        shutdown_ui._stop_optical_calibration(owner)
 
 
 def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
