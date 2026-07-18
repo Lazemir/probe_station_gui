@@ -40,6 +40,8 @@ _MAX_COMPONENT_LENGTH_RELATIVE_DELTA = 0.55
 _ASSIGNMENT_BLOCKED_COST = 1e9
 _PREVIEW_CROP_MARGIN_PX = 12
 _PREVIEW_OCCUPANCY_DECAY = 0.58
+_PREVIEW_GRID_ZERO_TOLERANCE_FRACTION = 0.20
+_PREVIEW_ROLE_COUNTS = {"horizontal": 2, "vertical": 2, "diagonal": 4}
 _GUI_TO_IMAGE_PIXEL_AXES = np.diag((1.0, -1.0))
 
 
@@ -239,27 +241,37 @@ def build_geometry_alignment_previews(
         initial_pixels_to_mm,
         "initial_pixels_to_mm",
     )
+    stage_offsets = tuple(_stage_offset_mm(frame) for frame in raw_frames)
+    center_index, roles = _preview_grid_roles(stage_offsets, initial_image_matrix)
     fitted_correction, fitted_image_matrix = _fitted_preview_correction(
         fitted_payload,
         frame_size,
     )
-    stage_offsets = tuple(_stage_offset_mm(frame) for frame in raw_frames)
 
     before_masks = tuple(mask.copy() for mask in binary_masks)
+    before_footprints = tuple(np.ones_like(mask, dtype=bool) for mask in binary_masks)
     after_masks = tuple(
         _apply_fitted_geometry_to_preview_mask(mask, fitted_correction)
         for mask in binary_masks
     )
+    after_footprints = tuple(
+        _apply_fitted_geometry_to_preview_mask(footprint, fitted_correction)
+        for footprint in before_footprints
+    )
     before_placements = _preview_mask_placements(
         before_masks,
+        before_footprints,
         stage_offsets,
         initial_image_matrix,
     )
     after_placements = _preview_mask_placements(
         after_masks,
+        after_footprints,
         stage_offsets,
         fitted_image_matrix,
     )
+    if not any(np.any(mask) for mask in before_masks):
+        raise GeometryAlignmentPreviewError("The alignment preview mask union is empty.")
     canvas_origin, canvas_size = _shared_preview_canvas_bounds(
         (*before_placements, *after_placements),
     )
@@ -273,7 +285,24 @@ def build_geometry_alignment_previews(
         canvas_origin=canvas_origin,
         canvas_size=canvas_size,
     )
-    return (_preview_occupancy_qimage(before_canvas), _preview_occupancy_qimage(after_canvas))
+    before_channels = _accumulate_preview_disagreement(
+        before_placements,
+        center_index=center_index,
+        roles=roles,
+        canvas_origin=canvas_origin,
+        canvas_size=canvas_size,
+    )
+    after_channels = _accumulate_preview_disagreement(
+        after_placements,
+        center_index=center_index,
+        roles=roles,
+        canvas_origin=canvas_origin,
+        canvas_size=canvas_size,
+    )
+    return (
+        _preview_occupancy_qimage(before_canvas, before_channels),
+        _preview_occupancy_qimage(after_canvas, after_channels),
+    )
 
 
 def _preview_binary_masks(masks: Sequence[object]) -> tuple[tuple[np.ndarray, ...], tuple[int, int]]:
@@ -352,6 +381,58 @@ def _fitted_preview_correction(
     return correction, image_matrix
 
 
+def _preview_grid_roles(
+    stage_offsets: Sequence[tuple[float, float]],
+    initial_image_matrix: np.ndarray,
+) -> tuple[int, tuple[str | None, ...]]:
+    """Classify captured offsets as the positions of a complete 3x3 grid."""
+    try:
+        stage_to_pixel = np.linalg.inv(initial_image_matrix)
+        offsets = np.asarray(stage_offsets, dtype=float)
+        if offsets.ndim != 2 or offsets.shape[1] != 2 or not np.isfinite(offsets).all():
+            raise ValueError
+        displacements = offsets @ stage_to_pixel.T
+    except (TypeError, ValueError, np.linalg.LinAlgError) as exc:
+        raise GeometryAlignmentPreviewError(
+            "Preview captures must form a complete 3x3 grid."
+        ) from exc
+
+    nonzero = np.abs(displacements)
+    spacings = tuple(
+        float(np.median(axis[axis > np.finfo(float).eps]))
+        if np.any(axis > np.finfo(float).eps)
+        else 0.0
+        for axis in nonzero.T
+    )
+    if any(spacing <= 0.0 or not np.isfinite(spacing) for spacing in spacings):
+        raise GeometryAlignmentPreviewError(
+            "Preview captures must form a complete 3x3 grid."
+        )
+    zero_tolerances = tuple(
+        spacing * _PREVIEW_GRID_ZERO_TOLERANCE_FRACTION for spacing in spacings
+    )
+    roles: list[str | None] = []
+    for x_value, y_value in displacements:
+        x_zero = abs(float(x_value)) <= zero_tolerances[0]
+        y_zero = abs(float(y_value)) <= zero_tolerances[1]
+        if x_zero and y_zero:
+            roles.append(None)
+        elif not x_zero and y_zero:
+            roles.append("horizontal")
+        elif x_zero and not y_zero:
+            roles.append("vertical")
+        else:
+            roles.append("diagonal")
+
+    if roles.count(None) != 1 or any(
+        roles.count(role) != count for role, count in _PREVIEW_ROLE_COUNTS.items()
+    ):
+        raise GeometryAlignmentPreviewError(
+            "Preview captures must form a complete 3x3 grid."
+        )
+    return roles.index(None), tuple(roles)
+
+
 def _apply_fitted_geometry_to_preview_mask(
     mask: np.ndarray,
     correction: StageGeometryCorrection,
@@ -396,25 +477,30 @@ def _apply_fitted_geometry_to_preview_mask(
 
 def _preview_mask_placements(
     masks: Sequence[np.ndarray],
+    footprints: Sequence[np.ndarray],
     stage_offsets: Sequence[tuple[float, float]],
     image_matrix: np.ndarray,
-) -> tuple[tuple[np.ndarray, np.ndarray], ...]:
+) -> tuple[tuple[np.ndarray, np.ndarray, np.ndarray], ...]:
     try:
         stage_to_pixel = np.linalg.inv(image_matrix)
     except np.linalg.LinAlgError as exc:
         raise GeometryAlignmentPreviewError("Preview pixel matrix must be non-singular.") from exc
     return tuple(
-        (mask, -(stage_to_pixel @ np.asarray(stage_offset, dtype=float)))
-        for mask, stage_offset in zip(masks, stage_offsets)
+        (
+            mask,
+            footprint,
+            -(stage_to_pixel @ np.asarray(stage_offset, dtype=float)),
+        )
+        for mask, footprint, stage_offset in zip(masks, footprints, stage_offsets)
     )
 
 
 def _shared_preview_canvas_bounds(
-    placements: Sequence[tuple[np.ndarray, np.ndarray]],
+    placements: Sequence[tuple[np.ndarray, np.ndarray, np.ndarray]],
 ) -> tuple[np.ndarray, tuple[int, int]]:
     bounds: list[tuple[float, float, float, float]] = []
-    for mask, translation in placements:
-        ys, xs = np.nonzero(mask)
+    for _mask, footprint, translation in placements:
+        ys, xs = np.nonzero(footprint)
         if not xs.size:
             continue
         bounds.append(
@@ -435,14 +521,14 @@ def _shared_preview_canvas_bounds(
 
 
 def _accumulate_preview_occupancy(
-    placements: Sequence[tuple[np.ndarray, np.ndarray]],
+    placements: Sequence[tuple[np.ndarray, np.ndarray, np.ndarray]],
     *,
     canvas_origin: np.ndarray,
     canvas_size: tuple[int, int],
 ) -> np.ndarray:
     width, height = canvas_size
     occupancy = np.zeros((height, width), dtype=np.float32)
-    for mask, translation in placements:
+    for mask, _footprint, translation in placements:
         transform = np.asarray(
             (
                 (1.0, 0.0, float(translation[0] - canvas_origin[0])),
@@ -461,19 +547,102 @@ def _accumulate_preview_occupancy(
     return occupancy
 
 
-def _preview_occupancy_qimage(occupancy: np.ndarray) -> QImage:
+def _warp_preview_array(
+    values: np.ndarray,
+    translation: np.ndarray,
+    *,
+    canvas_origin: np.ndarray,
+    canvas_size: tuple[int, int],
+) -> np.ndarray:
+    transform = np.asarray(
+        (
+            (1.0, 0.0, float(translation[0] - canvas_origin[0])),
+            (0.0, 1.0, float(translation[1] - canvas_origin[1])),
+        ),
+        dtype=np.float32,
+    )
+    return cv2.warpAffine(
+        values.astype(np.uint8),
+        transform,
+        canvas_size,
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    ).astype(bool)
+
+
+def _accumulate_preview_disagreement(
+    placements: Sequence[tuple[np.ndarray, np.ndarray, np.ndarray]],
+    *,
+    center_index: int,
+    roles: Sequence[str | None],
+    canvas_origin: np.ndarray,
+    canvas_size: tuple[int, int],
+) -> np.ndarray:
+    center_mask, center_footprint, center_translation = placements[center_index]
+    warped_center_mask = _warp_preview_array(
+        center_mask,
+        center_translation,
+        canvas_origin=canvas_origin,
+        canvas_size=canvas_size,
+    )
+    warped_center_footprint = _warp_preview_array(
+        center_footprint,
+        center_translation,
+        canvas_origin=canvas_origin,
+        canvas_size=canvas_size,
+    )
+    differences = np.zeros((*warped_center_mask.shape, 3), dtype=np.float32)
+    comparisons = np.zeros_like(differences)
+    channel_indexes = {"horizontal": 0, "vertical": 1, "diagonal": 2}
+    for index, role in enumerate(roles):
+        if role is None:
+            continue
+        neighbor_mask, neighbor_footprint, neighbor_translation = placements[index]
+        warped_neighbor_mask = _warp_preview_array(
+            neighbor_mask,
+            neighbor_translation,
+            canvas_origin=canvas_origin,
+            canvas_size=canvas_size,
+        )
+        warped_neighbor_footprint = _warp_preview_array(
+            neighbor_footprint,
+            neighbor_translation,
+            canvas_origin=canvas_origin,
+            canvas_size=canvas_size,
+        )
+        valid = warped_center_footprint & warped_neighbor_footprint
+        channel = channel_indexes[role]
+        differences[:, :, channel] += (
+            (warped_center_mask != warped_neighbor_mask) & valid
+        )
+        comparisons[:, :, channel] += valid
+    return np.divide(
+        differences,
+        comparisons,
+        out=np.zeros_like(differences),
+        where=comparisons > 0,
+    )
+
+
+def _preview_occupancy_qimage(occupancy: np.ndarray, channels: np.ndarray) -> QImage:
     values = np.zeros(occupancy.shape, dtype=np.uint8)
     occupied = occupancy > 0.0
     values[occupied] = np.rint(
         255.0 * (1.0 - np.power(_PREVIEW_OCCUPANCY_DECAY, occupancy[occupied]))
     ).astype(np.uint8)
+    alpha = channels.max(axis=2, keepdims=True)
+    rgb = np.rint(
+        values[:, :, None].astype(np.float32) * (1.0 - alpha)
+        + channels * 255.0
+    ).clip(0.0, 255.0).astype(np.uint8)
     height, width = values.shape
     return QImage(
-        values.data,
+        rgb.data,
         width,
         height,
-        int(values.strides[0]),
-        QImage.Format_Grayscale8,
+        int(rgb.strides[0]),
+        QImage.Format_RGB888,
     ).copy()
 
 
