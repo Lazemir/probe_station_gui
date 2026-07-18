@@ -150,6 +150,82 @@ def test_failed_transition_rolls_back_camera_and_persisted_policy() -> None:
     rig.controller.shutdown()
 
 
+def test_manual_policy_persistence_mutation_is_compensated() -> None:
+    rig = PolicyRig(auto_enabled=False, engine="software")
+    saved = ExposurePolicy(False, "software")
+    calls: list[ExposurePolicy] = []
+
+    def persist_then_fail(policy: ExposurePolicy) -> None:
+        nonlocal saved
+        saved = policy.clone()
+        calls.append(policy.clone())
+        if len(calls) == 1:
+            raise RuntimeError("persist new policy failed")
+
+    rig.controller._persist = persist_then_fail
+
+    with pytest.raises(RuntimeError, match="persist new policy failed"):
+        rig.controller.set_policy(auto_enabled=False, engine="camera")
+
+    assert [policy.to_dict() for policy in calls] == [
+        {"auto_enabled": False, "engine": "camera"},
+        {"auto_enabled": False, "engine": "software"},
+    ]
+    assert saved.to_dict() == {"auto_enabled": False, "engine": "software"}
+    assert rig.controller.snapshot()["engine"] == "software"
+    assert rig.camera.state["ExposureAuto"] == "Off"
+
+
+def test_auto_transition_persistence_mutation_restores_old_policy_and_camera() -> None:
+    rig = PolicyRig(auto_enabled=True, engine="camera")
+    rig.controller.start()
+    rig.clear_activity()
+    saved = ExposurePolicy(True, "camera")
+    calls: list[ExposurePolicy] = []
+
+    def persist_then_fail(policy: ExposurePolicy) -> None:
+        nonlocal saved
+        saved = policy.clone()
+        calls.append(policy.clone())
+        if len(calls) == 1:
+            raise RuntimeError("persist new policy failed")
+
+    rig.controller._persist = persist_then_fail
+
+    with pytest.raises(RuntimeError, match="persist new policy failed"):
+        rig.controller.set_policy(auto_enabled=True, engine="software")
+
+    assert [policy.to_dict() for policy in calls] == [
+        {"auto_enabled": True, "engine": "software"},
+        {"auto_enabled": True, "engine": "camera"},
+    ]
+    assert saved.to_dict() == {"auto_enabled": True, "engine": "camera"}
+    assert rig.controller.snapshot()["engine"] == "camera"
+    assert rig.camera.state["ExposureAuto"] == "Continuous"
+    rig.controller.shutdown()
+
+
+def test_persistence_compensation_failure_surfaces_both_errors() -> None:
+    rig = PolicyRig(auto_enabled=False, engine="software")
+    calls: list[ExposurePolicy] = []
+
+    def fail_both(policy: ExposurePolicy) -> None:
+        calls.append(policy.clone())
+        if len(calls) == 1:
+            raise RuntimeError("persist new policy failed")
+        raise RuntimeError("persist old policy failed")
+
+    rig.controller._persist = fail_both
+
+    with pytest.raises(ExposurePolicyError) as error:
+        rig.controller.set_policy(auto_enabled=False, engine="camera")
+
+    assert "persist new policy failed" in str(error.value)
+    assert "persist old policy failed" in str(error.value)
+    assert rig.controller.snapshot()["engine"] == "software"
+    assert rig.camera.state["ExposureAuto"] == "Off"
+
+
 def test_busy_command_is_rejected_without_queueing() -> None:
     rig = PolicyRig(auto_enabled=False, engine="software")
     assert rig.controller._command_lock.acquire(blocking=False)
@@ -211,6 +287,115 @@ def test_state_callback_runs_after_controller_locks_are_released() -> None:
 
     assert callbacks[-1]["engine"] == "camera"
     assert lock_checks[-1] == (True, True)
+
+
+def test_shutdown_timeout_keeps_requested_state_and_can_be_retried() -> None:
+    rig = PolicyRig(auto_enabled=True, engine="software", brightness=230)
+    rig.controller.start()
+    rig.clear_activity()
+    entered = threading.Event()
+    release = threading.Event()
+    original_frame_read = rig.controller._frame_read
+
+    def blocking_frame_read(after_counter: int, timeout_s: float):
+        entered.set()
+        assert release.wait(1.0)
+        return original_frame_read(after_counter, timeout_s)
+
+    rig.controller._frame_read = blocking_frame_read
+    rig.controller.MONITOR_INTERVAL_S = 0.01
+    rig.controller.wake_monitor()
+    assert entered.wait(1.0)
+
+    shutdown_error = None
+    try:
+        rig.controller.shutdown(timeout_s=0.01)
+    except ExposurePolicyError as exc:
+        shutdown_error = exc
+    if shutdown_error is None:
+        release.set()
+        rig.controller.shutdown(timeout_s=1.0)
+    assert shutdown_error is not None
+    assert "did not stop" in str(shutdown_error)
+
+    timed_out = rig.controller.snapshot()
+    assert timed_out["shutdown_requested"] is True
+    assert timed_out["shutdown_complete"] is False
+    assert timed_out["monitoring"] is False
+    with pytest.raises(ExposurePolicyError, match="shutting down"):
+        rig.controller.run_once()
+
+    release.set()
+    rig.controller.shutdown(timeout_s=1.0)
+
+    complete = rig.controller.snapshot()
+    assert complete["shutdown_requested"] is True
+    assert complete["shutdown_complete"] is True
+    assert rig.controller._monitor_thread is None
+
+
+def test_shutdown_prevents_inflight_camera_once_from_reenabling_native_auto() -> None:
+    rig = PolicyRig(auto_enabled=True, engine="camera")
+    rig.controller.start()
+    rig.clear_activity()
+    entered = threading.Event()
+    release = threading.Event()
+    original_frame_read = rig.controller._frame_read
+    result: dict[str, object] = {}
+
+    def blocking_frame_read(after_counter: int, timeout_s: float):
+        entered.set()
+        assert release.wait(1.0)
+        return original_frame_read(after_counter, timeout_s)
+
+    rig.controller._frame_read = blocking_frame_read
+    worker = threading.Thread(
+        target=lambda: result.update(rig.controller.run_once()),
+        daemon=True,
+    )
+    worker.start()
+    assert entered.wait(1.0)
+
+    shutdown_error = None
+    try:
+        rig.controller.shutdown(timeout_s=0.01)
+    except ExposurePolicyError as exc:
+        shutdown_error = exc
+    if shutdown_error is None:
+        release.set()
+        worker.join(1.0)
+        rig.controller.shutdown(timeout_s=1.0)
+    assert shutdown_error is not None
+    assert "did not stop" in str(shutdown_error)
+
+    release.set()
+    worker.join(1.0)
+    assert not worker.is_alive()
+    assert result["accepted"] is True
+    assert rig.camera.state["ExposureAuto"] == "Off"
+    rig.controller.shutdown(timeout_s=1.0)
+
+
+def test_shutdown_state_callback_runs_after_controller_locks_are_released() -> None:
+    rig = PolicyRig(auto_enabled=False, engine="software")
+    lock_checks: list[tuple[bool, bool, bool]] = []
+
+    def check_locks(state: dict[str, object]) -> None:
+        command_free = rig.controller._command_lock.acquire(blocking=False)
+        if command_free:
+            rig.controller._command_lock.release()
+        state_free = rig.controller._state_lock.acquire(blocking=False)
+        if state_free:
+            rig.controller._state_lock.release()
+        lock_checks.append((command_free, state_free, bool(state["shutdown_complete"])))
+
+    rig.controller.subscribe(check_locks)
+    rig.controller.start()
+    lock_checks.clear()
+
+    rig.controller.shutdown(timeout_s=1.0)
+
+    assert lock_checks[-1] == (True, True, True)
 
 
 class PolicyRig:

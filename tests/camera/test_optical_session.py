@@ -118,6 +118,99 @@ def test_manual_final_once_failure_returns_warning_without_raising() -> None:
     assert rig.camera.state["ExposureAuto"] == "Off"
 
 
+def test_manual_hardware_final_once_restores_fixed_exposure_after_partial_mutation() -> (
+    None
+):
+    rig = PolicyRig(auto_enabled=False, engine="camera")
+    sessions = OpticalSessionManager(rig.controller)
+    lease = sessions.open("scan")
+    fixed_exposure = rig.camera.state["ExposureTime"]
+    original_write = rig.controller._settings_write
+
+    def fail_after_partial_once(settings):
+        if settings == [("ExposureAuto", "Once")]:
+            rig.camera.state["ExposureAuto"] = "Once"
+            rig.camera.state["ExposureTime"] = 2800.0
+            return {"accepted": False, "message": "native Once partially failed"}
+        return original_write(settings)
+
+    rig.controller._settings_write = fail_after_partial_once
+
+    result = lease.close()
+
+    assert result["accepted"] is True
+    assert "native Once partially failed" in result["warning"]
+    assert rig.camera.state == {
+        "ExposureAuto": "Off",
+        "ExposureTime": fixed_exposure,
+    }
+
+
+def test_manual_final_off_failure_restores_fixed_exposure_and_returns_warning() -> None:
+    rig = PolicyRig(auto_enabled=False, engine="software")
+    sessions = OpticalSessionManager(rig.controller)
+    lease = sessions.open("scan")
+    fixed_exposure = rig.camera.state["ExposureTime"]
+    original_write = rig.controller._settings_write
+    fail_next_off = True
+
+    def final_once(config=None):
+        del config
+        rig.camera.state["ExposureTime"] = 2600.0
+        return {"accepted": True, "converged": True}
+
+    def fail_one_off(settings):
+        nonlocal fail_next_off
+        if settings == [("ExposureAuto", "Off")] and fail_next_off:
+            fail_next_off = False
+            return {"accepted": False, "message": "final Off failed"}
+        return original_write(settings)
+
+    rig.controller._software_once = final_once
+    rig.controller._settings_write = fail_one_off
+
+    result = lease.close()
+
+    assert result["accepted"] is True
+    assert "final Off failed" in result["warning"]
+    assert rig.camera.state == {
+        "ExposureAuto": "Off",
+        "ExposureTime": fixed_exposure,
+    }
+
+
+def test_manual_final_once_warning_includes_fixed_exposure_restore_failure() -> None:
+    rig = PolicyRig(auto_enabled=False, engine="software")
+    sessions = OpticalSessionManager(rig.controller)
+    lease = sessions.open("scan")
+    fixed_exposure = rig.camera.state["ExposureTime"]
+    original_write = rig.controller._settings_write
+
+    def final_once(config=None):
+        del config
+        rig.camera.state["ExposureTime"] = 2600.0
+        return {
+            "accepted": False,
+            "converged": False,
+            "message": "final adjustment failed",
+        }
+
+    def fail_fixed_restore(settings):
+        if settings == [("ExposureTime", fixed_exposure)]:
+            return {"accepted": False, "message": "fixed exposure restore failed"}
+        return original_write(settings)
+
+    rig.controller._software_once = final_once
+    rig.controller._settings_write = fail_fixed_restore
+
+    result = lease.close()
+
+    assert result["accepted"] is True
+    assert "final adjustment failed" in result["warning"]
+    assert "fixed exposure restore failed" in result["warning"]
+    assert rig.camera.state["ExposureAuto"] == "Off"
+
+
 def test_outer_lease_cannot_close_before_nested_lease() -> None:
     rig = PolicyRig(auto_enabled=False, engine="software")
     sessions = OpticalSessionManager(rig.controller)

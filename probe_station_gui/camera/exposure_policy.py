@@ -111,6 +111,8 @@ class ExposurePolicyController:
         self._session_operation = ""
         self._last_error = ""
         self._warning = ""
+        self._shutdown_requested = False
+        self._shutdown_complete = False
 
     def subscribe(self, callback: StateChanged) -> None:
         """Notify a listener after subsequent state changes."""
@@ -124,6 +126,7 @@ class ExposurePolicyController:
             return self._state_payload_locked()
 
     def set_policy(self, *, auto_enabled: bool, engine: str) -> dict[str, object]:
+        self._ensure_commands_allowed()
         try:
             selected = ExposureEngine(engine)
         except ValueError as exc:
@@ -135,11 +138,13 @@ class ExposurePolicyController:
         )
 
     def run_once(self) -> dict[str, object]:
+        self._ensure_commands_allowed()
         return self._run_exclusive(self._run_selected_engine_once)
 
     def start(self) -> dict[str, object]:
         """Activate the configured policy and start the monitor lazily."""
 
+        self._ensure_commands_allowed()
         with self._state_lock:
             if self._started:
                 return self._state_payload_locked()
@@ -160,22 +165,66 @@ class ExposurePolicyController:
         return result
 
     def shutdown(self, timeout_s: float = 2.0) -> None:
-        """Stop periodic monitoring without waiting indefinitely."""
+        """Stop controller and native exposure work within a bounded timeout."""
 
+        timeout = max(0.0, float(timeout_s))
+        deadline = time.monotonic() + timeout
+        with self._state_lock:
+            if self._shutdown_complete:
+                return
+            self._shutdown_requested = True
+            self._monitoring = False
+            thread = self._monitor_thread
         self._stop_event.set()
         self._wake_event.set()
-        with self._state_lock:
-            thread = self._monitor_thread
-            self._monitoring = False
-            self._started = False
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(max(0.0, float(timeout_s)))
-        with self._state_lock:
-            if self._monitor_thread is thread and (
-                thread is None or not thread.is_alive()
-            ):
+
+        if thread is threading.current_thread():
+            self._record_shutdown_failure(
+                "Camera exposure shutdown did not stop the monitor thread."
+            )
+        remaining = max(0.0, deadline - time.monotonic())
+        if not self._command_lock.acquire(timeout=remaining):
+            self._record_shutdown_failure(
+                "Camera exposure shutdown did not stop active camera work."
+            )
+        error: Exception | None = None
+        try:
+            with self._state_lock:
+                if self._session_active:
+                    raise ExposurePolicyError(
+                        "Camera exposure shutdown did not stop the optical session."
+                    )
+                thread = self._monitor_thread
+            if thread is not None and thread.is_alive():
+                remaining = max(0.0, deadline - time.monotonic())
+                thread.join(remaining)
+            if thread is not None and thread.is_alive():
+                raise ExposurePolicyError(
+                    "Camera exposure shutdown did not stop the monitor thread."
+                )
+            with self._state_lock:
                 self._monitor_thread = None
-        self._emit_state()
+                self._started = False
+                self._shutdown_complete = True
+                self._last_error = ""
+        except Exception as exc:
+            error = exc
+            with self._state_lock:
+                self._last_error = _error_text(exc)
+        finally:
+            self._command_lock.release()
+            self._emit_state()
+        if error is not None:
+            if isinstance(error, ExposurePolicyError):
+                raise error
+            raise ExposurePolicyError(
+                f"Camera exposure shutdown did not stop camera work: {_error_text(error)}"
+            ) from error
+
+    def _record_shutdown_failure(self, message: str) -> None:
+        with self._state_lock:
+            self._last_error = str(message)
+        raise ExposurePolicyError(message)
 
     def wake_monitor(self) -> None:
         """Restart the monitor interval after a policy operation."""
@@ -190,6 +239,10 @@ class ExposurePolicyController:
             raise ExposurePolicyBusyError("Camera exposure policy is busy.")
         try:
             with self._state_lock:
+                if self._shutdown_requested:
+                    raise ExposurePolicyError(
+                        "Camera exposure policy is shutting down."
+                    )
                 if self._session_active:
                     raise ExposurePolicyBusyError(
                         "An optical session is using camera exposure."
@@ -221,7 +274,7 @@ class ExposurePolicyController:
             self._set_monitoring(True)
             return result
         result = self._hardware_once()
-        self._write_settings([("ExposureAuto", "Continuous")])
+        self._enable_native_continuous_if_allowed()
         self._set_monitoring(False)
         return result
 
@@ -235,7 +288,7 @@ class ExposurePolicyController:
         if next_policy == old_policy:
             return self.snapshot()
         if not old_policy.auto_enabled and not next_policy.auto_enabled:
-            self._persist_policy(next_policy)
+            self._persist_policy_change(next_policy, old_policy)
             with self._state_lock:
                 self._policy = next_policy
             return self.snapshot()
@@ -250,8 +303,8 @@ class ExposurePolicyController:
                     self._write_settings([("ExposureAuto", "Off")])
                 else:
                     self._hardware_once()
-                    self._write_settings([("ExposureAuto", "Continuous")])
-            self._persist_policy(next_policy)
+                    self._enable_native_continuous_if_allowed()
+            self._persist_policy_change(next_policy, old_policy)
         except Exception:
             try:
                 self._restore_camera_snapshot(camera_snapshot)
@@ -278,7 +331,7 @@ class ExposurePolicyController:
                 self._policy.auto_enabled
                 and self._policy.engine is ExposureEngine.CAMERA
             ):
-                self._write_settings([("ExposureAuto", "Continuous")])
+                self._enable_native_continuous_if_allowed()
         except Exception:
             try:
                 self._restore_camera_snapshot(camera_snapshot)
@@ -390,7 +443,7 @@ class ExposurePolicyController:
             except Exception as exc:
                 errors.append(str(exc))
         native = snapshot.get("ExposureAuto")
-        if native not in (None, "Off"):
+        if native not in (None, "Off") and not self._shutdown_is_requested():
             try:
                 self._write_settings([("ExposureAuto", native)])
             except Exception as exc:
@@ -434,19 +487,53 @@ class ExposurePolicyController:
             )
         return response
 
-    def _persist_policy(self, policy: ExposurePolicy) -> None:
-        if self._persist is not None:
-            self._persist(policy.clone())
+    def _persist_policy_change(
+        self,
+        new_policy: ExposurePolicy,
+        old_policy: ExposurePolicy,
+    ) -> None:
+        if self._persist is None:
+            return
+        try:
+            self._persist(new_policy.clone())
+        except Exception as persist_error:
+            try:
+                self._persist(old_policy.clone())
+            except Exception as rollback_error:
+                raise ExposurePolicyError(
+                    "Policy persistence failed: "
+                    f"{_error_text(persist_error)}; persistence rollback failed: "
+                    f"{_error_text(rollback_error)}"
+                ) from persist_error
+            raise
 
     def _restore_monitoring_for(self, policy: ExposurePolicy) -> None:
-        enabled = policy.auto_enabled and policy.engine is ExposureEngine.SOFTWARE
+        enabled = (
+            policy.auto_enabled
+            and policy.engine is ExposureEngine.SOFTWARE
+            and not self._shutdown_is_requested()
+        )
         self._set_monitoring(enabled)
         if enabled:
             self._wake_event.set()
 
     def _set_monitoring(self, enabled: bool) -> None:
         with self._state_lock:
-            self._monitoring = bool(enabled)
+            self._monitoring = bool(enabled and not self._shutdown_requested)
+
+    def _enable_native_continuous_if_allowed(self) -> bool:
+        if self._shutdown_is_requested():
+            return False
+        self._write_settings([("ExposureAuto", "Continuous")])
+        return True
+
+    def _ensure_commands_allowed(self) -> None:
+        if self._shutdown_is_requested():
+            raise ExposurePolicyError("Camera exposure policy is shutting down.")
+
+    def _shutdown_is_requested(self) -> bool:
+        with self._state_lock:
+            return self._shutdown_requested
 
     def _set_session_state(self, active: bool, operation: str = "") -> None:
         with self._state_lock:
@@ -466,6 +553,8 @@ class ExposurePolicyController:
             "session_operation": self._session_operation,
             "error": self._last_error,
             "warning": self._warning,
+            "shutdown_requested": self._shutdown_requested,
+            "shutdown_complete": self._shutdown_complete,
         }
 
     def _emit_state(self) -> None:
@@ -509,6 +598,7 @@ class OpticalSessionManager:
             raise ExposurePolicyBusyError("Camera exposure policy is busy.")
         state_changed = False
         try:
+            controller._ensure_commands_allowed()
             if self._outer_token is not None:
                 if parent_token is None:
                     raise ExposurePolicyBusyError(
@@ -594,17 +684,10 @@ class OpticalSessionManager:
                         controller._write_settings([("ExposureAuto", "Off")])
                         controller._restore_monitoring_for(policy)
                     else:
-                        controller._write_settings([("ExposureAuto", "Continuous")])
+                        if not controller._enable_native_continuous_if_allowed():
+                            controller._write_settings([("ExposureAuto", "Off")])
                 else:
-                    try:
-                        if policy.engine is ExposureEngine.SOFTWARE:
-                            controller._software_once_result()
-                        else:
-                            controller._hardware_once()
-                    except Exception as exc:
-                        warning = str(exc) or type(exc).__name__
-                    finally:
-                        controller._write_settings([("ExposureAuto", "Off")])
+                    warning = self._finalize_manual_session(policy)
             finally:
                 self._records.pop(token, None)
                 self._outer_token = None
@@ -623,6 +706,51 @@ class OpticalSessionManager:
             controller._command_lock.release()
             if emit:
                 controller._emit_state()
+
+    def _finalize_manual_session(self, policy: ExposurePolicy) -> str:
+        controller = self._controller
+        errors: list[str] = []
+        fixed_exposure: object | None = None
+        try:
+            nodes, _response = controller._read_nodes(("ExposureTime",))
+            fixed_exposure = nodes["ExposureTime"].get("value")
+        except Exception as exc:
+            errors.append(f"Fixed exposure snapshot failed: {_error_text(exc)}")
+
+        if fixed_exposure is not None:
+            try:
+                if policy.engine is ExposureEngine.SOFTWARE:
+                    controller._software_once_result()
+                else:
+                    controller._hardware_once()
+            except Exception as exc:
+                errors.append(f"Final exposure Once failed: {_error_text(exc)}")
+
+        try:
+            controller._write_settings([("ExposureAuto", "Off")])
+        except Exception as exc:
+            errors.append(f"Final ExposureAuto Off failed: {_error_text(exc)}")
+
+        if errors and fixed_exposure is not None:
+            errors.extend(self._restore_fixed_exposure(fixed_exposure))
+        return "; ".join(errors)
+
+    def _restore_fixed_exposure(self, fixed_exposure: object) -> list[str]:
+        controller = self._controller
+        errors: list[str] = []
+        restore_steps = (
+            ("ExposureAuto Off", [("ExposureAuto", "Off")]),
+            ("ExposureTime", [("ExposureTime", fixed_exposure)]),
+            ("final ExposureAuto Off", [("ExposureAuto", "Off")]),
+        )
+        for label, settings in restore_steps:
+            try:
+                controller._write_settings(settings)
+            except Exception as exc:
+                errors.append(
+                    f"Fixed exposure restore {label} failed: {_error_text(exc)}"
+                )
+        return errors
 
 
 class OpticalSessionLease:
@@ -657,6 +785,10 @@ def _response_counter(response: Mapping[str, Any], default: int) -> int:
         return int(response.get("frame_counter_at_completion", default))
     except (TypeError, ValueError):
         return int(default)
+
+
+def _error_text(error: BaseException) -> str:
+    return str(error) or type(error).__name__
 
 
 __all__ = [
