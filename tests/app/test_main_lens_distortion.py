@@ -970,6 +970,17 @@ def test_lens_distortion_completion_rejects_invalid_baseline_metrics_without_sav
     assert saved == []
 
 
+def test_lens_distortion_validation_allows_high_finite_baseline_metrics() -> None:
+    payload = _stage_geometry_payload(
+        baseline_residual_mean_px=1e300,
+        baseline_residual_max_px=1e300,
+        residual_mean_px=0.2,
+        residual_max_px=0.4,
+    )
+
+    Main._validate_lens_distortion_fit_payload(payload)
+
+
 def test_fit_lens_distortion_output_requires_click_calibration() -> None:
     frames = [
         main_module.GridCalibrationFrame(_FakeFrame(), (0.0, 0.0)),
