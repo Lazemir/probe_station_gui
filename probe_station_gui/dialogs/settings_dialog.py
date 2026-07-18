@@ -77,6 +77,7 @@ from probe_station_gui.settings.manager import (
     TELEGRAM_ALERT_TYPES,
     TelegramSettings,
 )
+from probe_station_gui.settings.objective_config import ObjectivesSettings
 from probe_station_gui.notifications.telegram import (
     LinkedTelegramChat,
     TELEGRAM_BOT_TOKEN_ENV,
@@ -1089,6 +1090,12 @@ class SettingsDialog(QDialog):
         """Return a clone of the adjusted settings."""
 
         return self._settings.clone()
+
+    def set_objectives(self, objectives: ObjectivesSettings) -> None:
+        """Reload effective objective settings after applying the dialog."""
+
+        self._objectives_tab.set_objectives(objectives)
+        self._settings.objectives = objectives.clone()
 
     def was_applied(self) -> bool:
         """Return True when settings were applied at least once."""

@@ -1,5 +1,7 @@
 import types
 
+from PySide6.QtWidgets import QDialog
+
 from main import Main
 from probe_station_gui.design.objective_offsets import ObjectiveOffsetReference
 from probe_station_gui.design.session import AlignmentPreparation
@@ -8,6 +10,7 @@ from probe_station_gui.settings.objective_config import (
     ObjectiveCalibrationSettings,
     ObjectivesSettings,
 )
+from probe_station_gui.views.main_window_auxiliary import open_settings_dialog
 
 
 class _SettingsManager:
@@ -189,6 +192,97 @@ def test_objective_combo_change_is_rejected_for_alive_microscope_scan() -> None:
     assert stage.absolute_moves == []
     assert restored == ["X5"]
     assert statuses == ["Stage is busy; objective not changed."]
+
+
+def test_settings_objective_change_is_rejected_for_alive_microscope_scan() -> None:
+    window, stage, manager, statuses = _window()
+    current_profile = manager.settings.objectives.objectives["X5"]
+    current_profile.pixels_to_mm = [[0.01, 0.0], [0.0, 0.01]]
+    current_profile.xy_calibration_configured = True
+    current_profile.distortion_correction = {"camera_matrix": [[5.0]]}
+    current_profile.distortion_correction_configured = True
+    original_active_profile = current_profile.to_dict()
+
+    submitted = manager.settings.clone()
+    submitted.design_last_directory = "C:/updated-designs"
+    submitted.objectives.active_name = "X20"
+    submitted.objectives.objectives["X5"].magnification = 99.0
+    submitted.objectives.objectives["X5"].distortion_correction = {
+        "camera_matrix": [[99.0]]
+    }
+    submitted.objectives.objectives["X20"].magnification = 25.0
+
+    class _Signal:
+        def __init__(self) -> None:
+            self._slots = []
+
+        def connect(self, slot) -> None:
+            self._slots.append(slot)
+
+        def emit(self, value: object) -> None:
+            for slot in self._slots:
+                slot(value)
+
+    class _SettingsDialog:
+        instance = None
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.settings_applied = _Signal()
+            self.restored_active_names: list[str] = []
+            type(self).instance = self
+
+        def exec(self):
+            self.settings_applied.emit(submitted.clone())
+            return QDialog.Accepted
+
+        def was_applied(self) -> bool:
+            return True
+
+        def set_objectives(self, objectives: ObjectivesSettings) -> None:
+            self.restored_active_names.append(str(objectives.active_name))
+
+    window._microscope_scan_thread = types.SimpleNamespace(is_alive=lambda: True)
+    window._sync_objective_combo = lambda _name: None
+    window._refresh_objective_calibration_ui = lambda: None
+    window._apply_settings = lambda: Main._apply_objective_settings(window)
+    window._stop_telegram_bot_service = lambda: None
+    window._configure_telegram_bot_from_settings = lambda: None
+    window.grabber = None
+    window._exposure_policy_adapter = None
+    window._api_key_store = None
+
+    open_settings_dialog(window, dialog_class=_SettingsDialog)
+
+    assert manager.settings.design_last_directory == "C:/updated-designs"
+    assert manager.settings.objectives.active_name == "X5"
+    assert (
+        manager.settings.objectives.objectives["X5"].to_dict()
+        == original_active_profile
+    )
+    assert manager.settings.objectives.objectives["X20"].magnification == 25.0
+    applied_active_profile = stage.applied_objectives[-1][0]
+    assert applied_active_profile.to_dict() == original_active_profile
+    assert _SettingsDialog.instance is not None
+    assert _SettingsDialog.instance.restored_active_names == ["X5"]
+    assert statuses == ["Stage is busy; active objective settings not changed."]
+
+
+def test_objective_mismatch_cannot_bypass_alive_scan_guard() -> None:
+    window, stage, manager, statuses = _window()
+    restored: list[str] = []
+    window._microscope_scan_thread = types.SimpleNamespace(is_alive=lambda: True)
+    window._sync_objective_combo = lambda name: restored.append(name)
+
+    Main._on_objective_mismatch_detected(window, "X20", "Objective mismatch.")
+
+    assert manager.settings.objectives.active_name == "X5"
+    assert manager.saved_count == 0
+    assert stage.applied_objectives == []
+    assert restored == ["X5"]
+    assert statuses == [
+        "Stage is busy; objective not changed.",
+        "Objective mismatch.",
+    ]
 
 
 def test_set_active_objective_reports_selected_after_offset_motion_status() -> None:

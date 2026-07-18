@@ -155,7 +155,6 @@ def select_active_objective(
     *,
     is_busy: bool,
     apply_motion: bool,
-    allow_busy: bool = False,
 ) -> ObjectiveSelectionPlan:
     name = normalize_objective_name(objective_name)
     if not name:
@@ -164,7 +163,7 @@ def select_active_objective(
     old_name = cloned.objectives.active_name
     if old_name == name:
         return ObjectiveSelectionPlan(refresh_calibration_ui=True)
-    if is_busy and not allow_busy:
+    if is_busy:
         return ObjectiveSelectionPlan(
             old_name=old_name,
             new_name=name,

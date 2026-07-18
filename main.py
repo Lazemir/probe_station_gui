@@ -4372,11 +4372,45 @@ class Main(QMainWindow):
     def _apply_settings_from_dialog(self, new_settings: object) -> None:
         if not isinstance(new_settings, Settings):
             return
+        settings_to_apply = new_settings.clone()
+        active_objective_update_rejected = False
+        if self._objective_mutation_busy():
+            current_objectives = self.settings_manager.objectives_configuration()
+            current_active_name = normalize_objective_name(
+                current_objectives.active_name
+            )
+            submitted_objectives = settings_to_apply.objectives
+            submitted_active_name = normalize_objective_name(
+                submitted_objectives.active_name
+            )
+            current_active_profile = current_objectives.objectives.get(
+                current_active_name
+            )
+            submitted_active_profile = submitted_objectives.objectives.get(
+                current_active_name
+            )
+            active_objective_update_rejected = (
+                submitted_active_name != current_active_name
+                or submitted_active_profile != current_active_profile
+            )
+            if active_objective_update_rejected:
+                submitted_objectives.active_name = current_active_name
+                if current_active_profile is None:
+                    submitted_objectives.objectives.pop(current_active_name, None)
+                else:
+                    submitted_objectives.objectives[current_active_name] = (
+                        current_active_profile.clone()
+                    )
         self.settings_manager.replace_and_save(
-            new_settings,
+            settings_to_apply,
             preserve_exposure_policy=True,
         )
         self._apply_settings()
+        if active_objective_update_rejected:
+            self._show_status(
+                "Stage is busy; active objective settings not changed.",
+                4000,
+            )
         logger.info("Settings updated from dialog")
 
     def _send_telegram_alert(
@@ -4475,14 +4509,19 @@ class Main(QMainWindow):
             self._set_active_objective(objective_name, apply_motion=True)
 
     def _set_active_objective(
-        self, objective_name: str, *, apply_motion: bool, allow_busy: bool = False
+        self,
+        objective_name: str,
+        *,
+        apply_motion: bool,
+        allow_stage_task: bool = False,
     ) -> None:
         plan = alignment.select_active_objective(
             self.settings_manager.settings,
             objective_name,
-            is_busy=self._objective_mutation_busy(),
+            is_busy=self._objective_mutation_busy(
+                allow_stage_task=allow_stage_task,
+            ),
             apply_motion=apply_motion,
-            allow_busy=allow_busy,
         )
         if plan.refresh_calibration_ui:
             self._refresh_objective_calibration_ui()
@@ -4496,11 +4535,14 @@ class Main(QMainWindow):
             self._apply_objective_change_offset(plan.old_name, plan.new_name)
         self._show_plan_status(plan)
 
-    def _objective_mutation_busy(self) -> bool:
+    def _objective_mutation_busy(self, *, allow_stage_task: bool = False) -> bool:
+        if self._optical_calibration_worker_active() or self._microscope_scan_running():
+            return True
+        stage_controller = getattr(self, "stage_controller", None)
         return (
-            self.stage_controller.is_busy()
-            or self._optical_calibration_worker_active()
-            or self._microscope_scan_running()
+            stage_controller is not None
+            and stage_controller.is_busy()
+            and not allow_stage_task
         )
 
     def _apply_objective_change_offset(self, old_name: str, new_name: str) -> None:
@@ -6247,7 +6289,11 @@ class Main(QMainWindow):
         name = normalize_objective_name(suggested_name)
         objective_settings = self.settings_manager.objectives_configuration()
         if name in objective_settings.objectives:
-            self._set_active_objective(name, apply_motion=False, allow_busy=True)
+            self._set_active_objective(
+                name,
+                apply_motion=False,
+                allow_stage_task=True,
+            )
         if message:
             self._show_status(message, 7000)
 
