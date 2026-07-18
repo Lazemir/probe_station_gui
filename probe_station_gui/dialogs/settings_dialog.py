@@ -879,6 +879,7 @@ class SettingsDialog(QDialog):
         self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
         self._settings = settings.clone()
         self._applied_once = False
+        self._calibration_imports_active = False
         self._camera_tab: CameraSettingsWidget | None = None
 
         root_layout = QVBoxLayout(self)
@@ -938,16 +939,20 @@ class SettingsDialog(QDialog):
         self._tabs.currentChanged.connect(self._on_tab_changed)
         self._refresh_camera_tab_if_current()
 
-        buttons = QDialogButtonBox(
+        self._button_box = QDialogButtonBox(
             QDialogButtonBox.Save | QDialogButtonBox.Apply | QDialogButtonBox.Cancel,
             self,
         )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        apply_button = buttons.button(QDialogButtonBox.Apply)
-        if apply_button is not None:
-            apply_button.clicked.connect(self._apply_without_closing)
-        root_layout.addWidget(buttons)
+        self._button_box.accepted.connect(self.accept)
+        self._button_box.rejected.connect(self.reject)
+        self._save_button = self._button_box.button(QDialogButtonBox.Save)
+        self._apply_button = self._button_box.button(QDialogButtonBox.Apply)
+        if self._apply_button is not None:
+            self._apply_button.clicked.connect(self._apply_without_closing)
+        self._axes_tab.calibration_imports_active_changed.connect(
+            self._set_calibration_imports_active
+        )
+        root_layout.addWidget(self._button_box)
 
     def _on_tab_changed(self, _index: int) -> None:
         self._refresh_camera_tab_if_current()
@@ -961,6 +966,8 @@ class SettingsDialog(QDialog):
             self._camera_tab.refresh()
 
     def accept(self) -> None:  # type: ignore[override]
+        if self._calibration_imports_active:
+            return
         self._collect_settings()
         self._applied_once = True
         self.settings_applied.emit(self._settings.clone())
@@ -968,9 +975,18 @@ class SettingsDialog(QDialog):
         super().accept()
 
     def _apply_without_closing(self) -> None:
+        if self._calibration_imports_active:
+            return
         self._collect_settings()
         self._applied_once = True
         self.settings_applied.emit(self._settings.clone())
+
+    def _set_calibration_imports_active(self, active: bool) -> None:
+        self._calibration_imports_active = active
+        if self._save_button is not None:
+            self._save_button.setEnabled(not active)
+        if self._apply_button is not None:
+            self._apply_button.setEnabled(not active)
 
     def _collect_settings(self) -> None:
         self._controls_tab.to_settings(self._settings)

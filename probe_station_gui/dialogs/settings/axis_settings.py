@@ -94,6 +94,8 @@ class _CalibrationImportTask(QRunnable):
 class AxisSettingsWidget(QWidget):
     """Edit precision approach and coordinate calibration by stage axis."""
 
+    calibration_imports_active_changed = Signal(bool)
+
     def __init__(
         self,
         axis_a_calibration: AxisACalibrationSettings,
@@ -166,7 +168,8 @@ class AxisSettingsWidget(QWidget):
             calibration = self._calibration_for_axis(axis)
             assert calibration is not None
             saved = calibration.clone()
-            saved.source = ""
+            if saved.source.strip().lower().endswith(".png"):
+                saved.source = ""
             enabled = self._calibration_checkboxes[axis].isChecked()
             if saved.model == LINEAR_INTERPOLATION_MODEL and not (
                 self._has_valid_interpolation_points(saved)
@@ -283,6 +286,7 @@ class AxisSettingsWidget(QWidget):
             )
         )
         self._direction_changed(axis)
+        self._calibration_toggled(axis, checkbox.isChecked())
         return group
 
     def _calibration_for_axis(
@@ -318,8 +322,11 @@ class AxisSettingsWidget(QWidget):
         final_direction = int(self._rows[axis].direction_combo.currentData() or 1)
         task = _CalibrationImportTask(axis, path, final_direction)
         task.signals.finished.connect(self._finish_calibration_import)
+        was_inactive = not self._calibration_tasks
         self._calibration_tasks.add(task)
         self._calibration_tasks_running = len(self._calibration_tasks)
+        if was_inactive:
+            self.calibration_imports_active_changed.emit(True)
         self._set_calibration_controls_enabled(axis, False)
         self._calibration_status_labels[axis].setText("Loading calibration.")
         QThreadPool.globalInstance().start(task)
@@ -336,9 +343,12 @@ class AxisSettingsWidget(QWidget):
             task for task in self._calibration_tasks if task.signals is not sender
         }
         self._calibration_tasks_running = len(self._calibration_tasks)
+        became_inactive = not self._calibration_tasks
         self._set_calibration_controls_enabled(axis, True)
         if imported is None:
             self._calibration_status_labels[axis].setText(error)
+            if became_inactive:
+                self.calibration_imports_active_changed.emit(False)
             return
 
         calibration = self._calibration_for_axis(axis)
@@ -361,6 +371,8 @@ class AxisSettingsWidget(QWidget):
         )
         self._calibration_checkboxes[axis].setChecked(True)
         self._direction_changed(axis)
+        if became_inactive:
+            self.calibration_imports_active_changed.emit(False)
 
     def _reset_calibration(self, axis: str) -> None:
         calibration = self._calibration_for_axis(axis)

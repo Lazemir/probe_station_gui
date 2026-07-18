@@ -11,7 +11,12 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
-from PySide6.QtWidgets import QApplication, QFileDialog, QFormLayout
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialogButtonBox,
+    QFileDialog,
+    QFormLayout,
+)
 
 from probe_station_gui.dialogs.settings.axis_settings import AxisSettingsWidget
 from probe_station_gui.dialogs.settings import axis_settings as axis_settings_module
@@ -115,6 +120,7 @@ def test_axis_calibration_controls_show_persisted_interpolation_snapshot() -> No
     calibration.interpolation_gcode_mm = [0.0, 1.0, 2.0]
     calibration.interpolation_display_mm = [0.1, 1.1, 2.1]
     calibration.interpolation_direction = 1
+    calibration.source = r"C:\legacy\z-axis.png"
     widget = _widget(settings)
 
     assert widget._calibration_file_edits["Z"].text() == calibration.calibration_file
@@ -328,6 +334,18 @@ def test_interpolation_checkbox_cannot_enable_missing_snapshot() -> None:
     widget.deleteLater()
 
 
+def test_invalid_configured_interpolation_starts_unchecked() -> None:
+    settings = Settings()
+    settings.axis_z_calibration.model = "linear_interpolation"
+    settings.axis_z_calibration.configured = True
+
+    widget = _widget(settings)
+
+    assert widget._calibration_checkboxes["Z"].isChecked() is False
+
+    widget.deleteLater()
+
+
 def test_interpolation_checkbox_cannot_enable_non_monotonic_snapshot() -> None:
     settings = Settings()
     calibration = settings.axis_z_calibration
@@ -382,10 +400,11 @@ def test_settings_dialog_uses_one_axes_tab_and_legacy_aliases(
     dialog.reject()
 
 
-def test_settings_dialog_collects_axis_settings_and_clears_legacy_source() -> None:
+def test_settings_dialog_collects_axis_settings_and_preserves_non_png_source() -> None:
     _qt_app()
     settings = Settings()
     settings.axis_a_calibration.configured = True
+    settings.axis_a_calibration.source = "indicator-calibration.csv"
     original_a = settings.axis_a_calibration.clone()
     dialog = SettingsDialog(settings)
     x_row = dialog._axes_tab._rows["X"]
@@ -404,6 +423,72 @@ def test_settings_dialog_collects_axis_settings_and_clears_legacy_source() -> No
     )
     assert result.axis_a_calibration.configured is False
     assert result.axis_a_calibration.amplitude_mm == original_a.amplitude_mm
-    assert result.axis_a_calibration.source == ""
+    assert result.axis_a_calibration.source == original_a.source
+
+    dialog.reject()
+
+
+def test_settings_dialog_blocks_save_and_apply_during_calibration_import(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _qt_app()
+    settings = Settings()
+    old = settings.axis_z_calibration
+    old.configured = True
+    old.model = "linear_interpolation"
+    old.calibration_file = "old-z-axis.npz"
+    old.interpolation_gcode_mm = [0.0, 1.0]
+    old.interpolation_display_mm = [0.0, 1.0]
+    started = threading.Event()
+    release = threading.Event()
+    new_path = str((tmp_path / "new-z-axis.npz").resolve())
+
+    def controlled_import(path, *, axis, final_direction):
+        started.set()
+        release.wait(timeout=5.0)
+        return ImportedAxisCalibration(
+            calibration_file=new_path,
+            gcode_points_mm=(0.0, 1.0, 2.0),
+            display_points_mm=(0.1, 1.1, 2.1),
+            branch_direction=None,
+        )
+
+    monkeypatch.setattr(
+        axis_settings_module,
+        "load_axis_calibration_npz",
+        controlled_import,
+    )
+    dialog = SettingsDialog(settings)
+    applied: list[Settings] = []
+    dialog.settings_applied.connect(applied.append)
+    save_button = dialog._button_box.button(QDialogButtonBox.Save)
+    apply_button = dialog._button_box.button(QDialogButtonBox.Apply)
+    cancel_button = dialog._button_box.button(QDialogButtonBox.Cancel)
+
+    dialog._axes_tab._start_calibration_import("Z", new_path)
+    assert started.wait(timeout=1.0)
+
+    assert save_button.isEnabled() is False
+    assert apply_button.isEnabled() is False
+    assert cancel_button.isEnabled() is True
+    dialog._apply_without_closing()
+    dialog.accept()
+    assert applied == []
+    assert dialog.was_applied() is False
+    assert dialog.result_settings().axis_z_calibration.calibration_file == (
+        "old-z-axis.npz"
+    )
+
+    release.set()
+    _wait_for_calibration_import(dialog._axes_tab)
+
+    assert save_button.isEnabled() is True
+    assert apply_button.isEnabled() is True
+    assert cancel_button.isEnabled() is True
+    dialog._apply_without_closing()
+    assert len(applied) == 1
+    assert applied[0].axis_z_calibration.calibration_file == new_path
+    assert applied[0].axis_z_calibration.interpolation_gcode_mm == [0.0, 1.0, 2.0]
 
     dialog.reject()
