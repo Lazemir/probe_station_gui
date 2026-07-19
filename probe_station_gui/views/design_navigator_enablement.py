@@ -54,6 +54,10 @@ class DesignNavigatorEnablement:
         return self.can_edit_design and not self.design_registration_active
 
     @property
+    def can_move_design(self) -> bool:
+        return self.can_edit_design and self.design_registration_active
+
+    @property
     def can_edit_route_offsets(self) -> bool:
         return (
             self.has_route

@@ -177,6 +177,9 @@ class _DesignPlotPane(QWidget):
         self._select_press_entity_id: str | None = None
         self._select_dragging = False
         self._select_modifiers = Qt.NoModifier
+        self._move_press_scene_pos: QPointF | None = None
+        self._move_dragging = False
+        self._suppress_move_scene_click = False
         self._source_design_marks: list[Point2D | None] = [None, None]
         self._current_design_position: Point2D | None = None
         self._fov_design_size: Point2D | None = None
@@ -1015,6 +1018,7 @@ class _DesignPlotPane(QWidget):
         normalized = str(tool).strip().lower()
         if normalized not in {
             "select",
+            "move",
             "point",
             "guide",
             "ruler",
@@ -1023,6 +1027,9 @@ class _DesignPlotPane(QWidget):
             "legacy",
         }:
             raise ValueError(f"Unknown design tool {tool!r}.")
+        if self._active_design_tool == "move" and normalized != "move":
+            self._clear_move_pointer_state()
+            self._cancel_pending_tool_snaps()
         if normalized != "guide":
             self._guide_anchor = None
             self._tool_sketch_points = []
@@ -1031,7 +1038,7 @@ class _DesignPlotPane(QWidget):
         if self._plot is not None:
             cursor = (
                 Qt.CrossCursor
-                if normalized in {"point", "guide", "ruler", "array", "align"}
+                if normalized in {"move", "point", "guide", "ruler", "array", "align"}
                 else Qt.ArrowCursor
             )
             self._plot.setCursor(cursor)
@@ -1109,6 +1116,7 @@ class _DesignPlotPane(QWidget):
 
     def cancel_active_interaction(self) -> None:
         self._cancel_pending_tool_snaps()
+        self._clear_move_pointer_state()
         self._guide_anchor = None
         self._tool_sketch_points = []
         self._clear_selection_interaction()
@@ -1125,6 +1133,14 @@ class _DesignPlotPane(QWidget):
             if pending.action
             not in {"point", "guide_point", "route_pick", "alignment_point", "move"}
         }
+
+    def _clear_move_pointer_state(self) -> None:
+        self._move_press_scene_pos = None
+        self._move_dragging = False
+        self._suppress_move_scene_click = False
+
+    def _clear_move_click_suppression(self) -> None:
+        self._suppress_move_scene_click = False
 
     @staticmethod
     def _constraint_flags(
@@ -1827,9 +1843,12 @@ class _DesignPlotPane(QWidget):
             self._plot is None
             or watched is not self._plot.scene()
             or getattr(self, "_document_preview_active", False)
-            or self._active_design_tool != "select"
             or self._document is None
         ):
+            return super().eventFilter(watched, event)
+        if self._active_design_tool == "move":
+            return self._handle_move_scene_event(event)
+        if self._active_design_tool != "select":
             return super().eventFilter(watched, event)
         event_type = event.type()
         if event_type == QEvent.GraphicsSceneMousePress:
@@ -1891,6 +1910,35 @@ class _DesignPlotPane(QWidget):
             return True
         return super().eventFilter(watched, event)
 
+    def _handle_move_scene_event(self, event) -> bool:
+        event_type = event.type()
+        if (
+            event_type == QEvent.GraphicsSceneMousePress
+            and event.button() == Qt.LeftButton
+        ):
+            self._move_press_scene_pos = QPointF(event.scenePos())
+            self._move_dragging = False
+        elif (
+            event_type == QEvent.GraphicsSceneMouseMove
+            and self._move_press_scene_pos is not None
+        ):
+            distance = (
+                event.scenePos() - self._move_press_scene_pos
+            ).manhattanLength()
+            if distance >= QApplication.startDragDistance():
+                self._move_dragging = True
+        elif (
+            event_type == QEvent.GraphicsSceneMouseRelease
+            and event.button() == Qt.LeftButton
+        ):
+            if self._move_press_scene_pos is not None:
+                self._suppress_move_scene_click = self._move_dragging
+            self._move_press_scene_pos = None
+            self._move_dragging = False
+            if self._suppress_move_scene_click:
+                QTimer.singleShot(0, self._clear_move_click_suppression)
+        return False
+
     def _on_mouse_clicked(self, event) -> None:  # pragma: no cover - UI interaction
         if (
             self._plot is None
@@ -1908,7 +1956,11 @@ class _DesignPlotPane(QWidget):
         if active_tool == "align" and not is_left_click:
             return
         alignment_click = active_tool == "align" and is_left_click
-        route_pick = self._route_pick_mode is not None and is_left_click
+        route_pick = (
+            active_tool != "move"
+            and self._route_pick_mode is not None
+            and is_left_click
+        )
         guide_click = (
             not route_pick
             and active_tool == "guide"
@@ -1922,11 +1974,18 @@ class _DesignPlotPane(QWidget):
             and active_tool in {"legacy", "point"}
         )
         select_click = active_tool == "select" and is_left_click
-        if alignment_click or route_pick or route_click or guide_click or select_click:
-            slot = None
-        elif self._navigation_enabled and is_left_click:
-            if not is_double_click:
+        move_click = (
+            active_tool == "move"
+            and self._navigation_enabled
+            and is_left_click
+            and modifiers == Qt.NoModifier
+        )
+        if active_tool == "move":
+            if not move_click or is_double_click or self._suppress_move_scene_click:
                 return
+            action = "move"
+            payload: tuple[object, ...] = ()
+        elif alignment_click or route_pick or route_click or guide_click or select_click:
             slot = None
         elif is_left_click:
             slot = 0
@@ -1934,7 +1993,10 @@ class _DesignPlotPane(QWidget):
             slot = 1
         else:
             return
-        if alignment_click:
+        if active_tool == "move":
+            action = "move"
+            payload = ()
+        elif alignment_click:
             action = "alignment_point"
             payload = ()
         elif route_pick:
@@ -2009,7 +2071,7 @@ class _DesignPlotPane(QWidget):
                 control=control_constraint,
             )
             return
-        if slot is None:
+        if action == "move":
             self.move_requested.emit(
                 snap_result.point[0],
                 snap_result.point[1],

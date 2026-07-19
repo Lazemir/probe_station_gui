@@ -160,6 +160,81 @@ def test_design_tools_are_exclusive_and_markup_eye_is_independent(
 
     assert panel._guide_tool_button.isChecked()
     assert tools[-2:] == ["point", "guide"]
+    panel.set_design_registration_active(True)
+    panel._markup_visibility_button.setChecked(True)
+    panel._move_tool_button.click()
+    assert panel._move_tool_button.isChecked()
+    assert not panel._guide_tool_button.isChecked()
+    assert panel._markup_visibility_button.isChecked()
+    panel._markup_visibility_button.click()
+    assert panel._move_tool_button.isChecked()
+    assert tools[-1] == "move"
+    panel.deleteLater()
+
+
+def test_move_tool_is_adjacent_to_select_and_requires_registration(qt_app) -> None:
+    panel = DesignNavigatorPanel()
+    panel._document = object()
+    panel._update_enabled_state()
+
+    assert panel._move_tool_button.isEnabled() is False
+    toolbar_layout = panel._tool_toolbar_widget.layout()
+    assert toolbar_layout.itemAt(0).widget() is panel._select_tool_button
+    assert toolbar_layout.itemAt(1).widget() is panel._move_tool_button
+
+    panel.set_design_registration_active(True)
+    assert panel._move_tool_button.isEnabled() is True
+
+    panel._move_tool_button.click()
+    assert panel._active_design_tool == "move"
+    panel.set_design_registration_active(False)
+    assert panel._active_design_tool == "select"
+    panel.deleteLater()
+
+
+def test_route_run_disables_move_tool(qt_app) -> None:
+    panel = DesignNavigatorPanel()
+    panel._document = object()
+    panel._update_enabled_state()
+    panel.set_design_registration_active(True)
+    panel._move_tool_button.click()
+    panel.set_route_measurement_running(True)
+    assert panel._move_tool_button.isEnabled() is False
+    assert panel._active_design_tool == "select"
+    panel.deleteLater()
+
+
+def test_design_load_disables_move_tool_and_returns_to_select(qt_app) -> None:
+    panel = DesignNavigatorPanel()
+    panel._document = object()
+    panel._update_enabled_state()
+    panel.set_design_registration_active(True)
+    panel._move_tool_button.click()
+
+    panel.set_design_load_pending(True)
+
+    assert panel._move_tool_button.isEnabled() is False
+    assert panel._active_design_tool == "select"
+    panel.deleteLater()
+
+
+def test_move_tool_is_exclusive_and_escape_returns_select(qt_app) -> None:
+    panel = DesignNavigatorPanel()
+    panel._document = object()
+    panel.set_design_registration_active(True)
+    tools: list[str] = []
+    panel.active_design_tool_changed.connect(tools.append)
+
+    panel._move_tool_button.click()
+    assert panel._move_tool_button.isChecked()
+    assert not panel._select_tool_button.isChecked()
+    assert panel._active_design_tool == "move"
+
+    panel.cancel_active_tool()
+    assert panel._select_tool_button.isChecked()
+    assert not panel._move_tool_button.isChecked()
+    assert panel._active_design_tool == "select"
+    assert tools[-2:] == ["move", "select"]
     panel.deleteLater()
 
 

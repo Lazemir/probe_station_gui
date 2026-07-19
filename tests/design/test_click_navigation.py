@@ -69,6 +69,7 @@ def _navigation_pane() -> types.SimpleNamespace:
         _route_pick_mode=None,
         _route_edit_enabled=False,
         _navigation_enabled=True,
+        _active_design_tool="select",
         move_requested=move_requested,
         route_pick_requested=_FakeSignal(),
         route_point_requested=_FakeSignal(),
@@ -80,6 +81,7 @@ def _navigation_pane() -> types.SimpleNamespace:
             mode="raw",
             distance=0.0,
         ),
+        _emit_click_selection=lambda _point, _modifiers: None,
     )
     return pane
 
@@ -106,20 +108,22 @@ def _make_document() -> DesignDocument:
     )
 
 
-def test_design_navigation_single_click_does_not_move() -> None:
+def test_design_select_single_click_does_not_move() -> None:
     pane = _navigation_pane()
+    pane._active_design_tool = "select"
 
     _DesignPlotPane._on_mouse_clicked(pane, _FakeClickEvent(double=False))
 
     assert pane.move_requested.emissions == []
 
 
-def test_design_navigation_double_click_moves() -> None:
+def test_design_select_double_click_does_not_move() -> None:
     pane = _navigation_pane()
+    pane._active_design_tool = "select"
 
     _DesignPlotPane._on_mouse_clicked(pane, _FakeClickEvent(double=True))
 
-    assert pane.move_requested.emissions == [(11.0, 22.0)]
+    assert pane.move_requested.emissions == []
 
 
 def test_minimap_single_click_handler_opens_design_window(monkeypatch) -> None:

@@ -270,6 +270,11 @@ class DesignNavigatorPanel(QWidget):
             "Select",
             self._make_tool_icon("select"),
         )
+        self._move_tool_button = self._make_tool_button(
+            self._tool_toolbar_widget,
+            "Move",
+            self._make_tool_icon("move"),
+        )
         self._point_tool_button = self._make_tool_button(
             self._tool_toolbar_widget,
             "Point",
@@ -302,6 +307,7 @@ class DesignNavigatorPanel(QWidget):
         )
         self._rotate_tool_button.setCheckable(False)
         self._tool_button_group.addButton(self._select_tool_button)
+        self._tool_button_group.addButton(self._move_tool_button)
         self._tool_button_group.addButton(self._point_tool_button)
         self._tool_button_group.addButton(self._align_tool_button)
         self._tool_button_group.addButton(self._guide_tool_button)
@@ -316,6 +322,7 @@ class DesignNavigatorPanel(QWidget):
         self._markup_visibility_button.setChecked(True)
         self._select_tool_button.setChecked(True)
         tool_buttons.addWidget(self._select_tool_button)
+        tool_buttons.addWidget(self._move_tool_button)
         tool_buttons.addWidget(self._point_tool_button)
         tool_buttons.addWidget(self._align_tool_button)
         tool_buttons.addWidget(self._guide_tool_button)
@@ -342,6 +349,12 @@ class DesignNavigatorPanel(QWidget):
         select_layout.addWidget(self._selection_count_label)
         select_layout.addWidget(self._selection_delete_button)
         self._tool_stack.addWidget(select_page)
+
+        move_page = QWidget(self._tool_group)
+        move_layout = QVBoxLayout(move_page)
+        move_layout.setContentsMargins(0, 0, 0, 0)
+        move_layout.addWidget(QLabel("Click a target. Drag to pan.", move_page))
+        self._tool_stack.addWidget(move_page)
 
         point_page = QWidget(self._tool_group)
         point_layout = QVBoxLayout(point_page)
@@ -566,6 +579,9 @@ class DesignNavigatorPanel(QWidget):
         )
         self._select_tool_button.clicked.connect(
             lambda _checked=False: self._set_design_tool("select")
+        )
+        self._move_tool_button.clicked.connect(
+            lambda _checked=False: self._set_design_tool("move")
         )
         self._point_tool_button.clicked.connect(
             lambda _checked=False: self._set_design_tool("point")
@@ -1081,7 +1097,7 @@ class DesignNavigatorPanel(QWidget):
             messages.append("pyqtgraph not installed: design window is disabled.")
         else:
             messages.append(
-                "Load a GDS for registered navigation. Use Alignment to capture chip points, then click in the design view to move."
+                "Load a GDS for registered navigation. Use Alignment to capture chip points, then use Move in the design view."
             )
         self._availability_label.setText(" ".join(messages))
 
@@ -1142,6 +1158,7 @@ class DesignNavigatorPanel(QWidget):
         state: DesignNavigatorEnablement,
     ) -> None:
         self._select_tool_button.setEnabled(state.can_edit_design)
+        self._move_tool_button.setEnabled(state.can_move_design)
         self._point_tool_button.setEnabled(state.can_edit_design)
         self._align_tool_button.setEnabled(state.can_edit_design)
         self._guide_tool_button.setEnabled(state.can_edit_design)
@@ -1151,6 +1168,8 @@ class DesignNavigatorPanel(QWidget):
         self._markup_visibility_button.setEnabled(
             state.can_use_document_controls
         )
+        if self._active_design_tool == "move" and not state.can_move_design:
+            self._set_design_tool("select")
 
     def _apply_route_edit_enabled_state(
         self,
@@ -1310,6 +1329,12 @@ class DesignNavigatorPanel(QWidget):
             )
             painter.setBrush(QBrush(QColor("#eceff1")))
             painter.drawPolygon(polygon)
+        elif name == "move":
+            painter.setPen(QPen(accent, 2.2))
+            painter.drawLine(QPointF(14, 4), QPointF(14, 24))
+            painter.drawLine(QPointF(4, 14), QPointF(24, 14))
+            painter.setBrush(QBrush(soft))
+            painter.drawEllipse(QPointF(14, 14), 3.2, 3.2)
         elif name == "point":
             painter.setPen(QPen(accent, 2.2))
             painter.drawLine(QPointF(14, 5), QPointF(14, 23))
@@ -1417,7 +1442,7 @@ class DesignNavigatorPanel(QWidget):
         self._update_route_array_preview()
 
     def _set_design_tool(self, tool: str) -> None:
-        if tool not in {"select", "point", "guide", "ruler", "array", "align"}:
+        if tool not in {"select", "move", "point", "guide", "ruler", "array", "align"}:
             tool = "select"
         previous_tool = self._active_design_tool
         if previous_tool == "align" and tool != "align" and self._alignment_draft_points:
@@ -1425,6 +1450,7 @@ class DesignNavigatorPanel(QWidget):
         self._active_design_tool = tool
         button_by_tool = {
             "select": self._select_tool_button,
+            "move": self._move_tool_button,
             "point": self._point_tool_button,
             "align": self._align_tool_button,
             "guide": self._guide_tool_button,
@@ -1437,17 +1463,23 @@ class DesignNavigatorPanel(QWidget):
             button.blockSignals(False)
         stack_index_by_tool = {
             "select": 0,
-            "point": 1,
-            "guide": 2,
-            "ruler": 3,
-            "array": 4,
-            "align": 5,
+            "move": 1,
+            "point": 2,
+            "guide": 3,
+            "ruler": 4,
+            "array": 5,
+            "align": 6,
         }
         self._tool_stack.setCurrentIndex(stack_index_by_tool[tool])
         self._clear_route_pick_mode("")
         self._tool_group.setVisible(True)
         self.active_design_tool_changed.emit(tool)
         if tool == "select":
+            self.route_preview_changed.emit(None)
+            self.mixed_array_preview_changed.emit([], [])
+            self.tool_measure_preview_changed.emit(None)
+            self._tool_status_label.setText("")
+        elif tool == "move":
             self.route_preview_changed.emit(None)
             self.mixed_array_preview_changed.emit([], [])
             self.tool_measure_preview_changed.emit(None)
