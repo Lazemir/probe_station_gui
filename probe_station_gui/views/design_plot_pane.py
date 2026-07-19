@@ -44,6 +44,7 @@ from probe_station_gui.design.klayout_types import (
     SnapRequest,
     SnapResponse,
 )
+from probe_station_gui.design.klayout_geometry import plan_snap_search
 from probe_station_gui.design.klayout_workers import KLayoutSnapWorker
 from probe_station_gui.design.selection_geometry import (
     GuideSnapCandidate,
@@ -680,6 +681,8 @@ class _DesignPlotPane(QWidget):
 
     def set_document(self, document: DesignDocument | None) -> None:
         same_document = document is self._document
+        if not same_document and self._snap_worker is not None:
+            self._snap_worker.cancel_pending()
         self._document = document
         if document is None:
             self._snap_generation += 1
@@ -1114,11 +1117,13 @@ class _DesignPlotPane(QWidget):
     def _cancel_pending_tool_snaps(self) -> None:
         self._latest_hover_request_id = 0
         self._pending_hover_markup.clear()
+        if self._snap_worker is not None:
+            self._snap_worker.cancel_hover()
         self._pending_clicks = {
             request_id: pending
             for request_id, pending in self._pending_clicks.items()
             if pending.action
-            not in {"point", "guide_point", "route_pick", "alignment_point"}
+            not in {"point", "guide_point", "route_pick", "alignment_point", "move"}
         }
 
     @staticmethod
@@ -1256,6 +1261,8 @@ class _DesignPlotPane(QWidget):
             self._markup_generation += 1
             self._pending_clicks.clear()
             self._pending_hover_markup.clear()
+            if not normalized and self._snap_worker is not None:
+                self._snap_worker.cancel_pending()
         self._snap_enabled = normalized
         if not self._snap_enabled:
             self._pending_hover_markup.clear()
@@ -2044,6 +2051,23 @@ class _DesignPlotPane(QWidget):
             return
         snap_threshold = self._snap_distance_threshold()
         radius = 0.0 if snap_threshold is None else max(0.0, snap_threshold)
+        plan = plan_snap_search(raw_point, radius, config.display_bounds)
+        if not plan.accepted:
+            logger.debug("DESIGN SNAP click skipped reason=%s", plan.skip_reason)
+            fallback = self._file_snap_fallback(raw_point)
+            self._set_hover_snap(
+                fallback,
+                shift=shift_constraint,
+                control=control_constraint,
+            )
+            self._execute_click_action(
+                action,
+                payload,
+                fallback,
+                shift=shift_constraint,
+                control=control_constraint,
+            )
+            return
         self._snap_request_id += 1
         request_id = self._snap_request_id
         self._pending_clicks[request_id] = PendingClick(
@@ -2216,6 +2240,20 @@ class _DesignPlotPane(QWidget):
         if config is None or worker is None or snap_threshold is None:
             self._set_hover_snap(None)
             return
+        radius = max(0.0, snap_threshold)
+        plan = plan_snap_search(raw_point, radius, config.display_bounds)
+        if not plan.accepted:
+            logger.debug("DESIGN SNAP hover skipped reason=%s", plan.skip_reason)
+            self._latest_hover_request_id = 0
+            self._pending_hover_markup.clear()
+            worker.cancel_hover()
+            shift_constraint, control_constraint = self._constraint_flags(modifiers)
+            self._set_hover_snap(
+                self._file_snap_fallback(raw_point),
+                shift=shift_constraint,
+                control=control_constraint,
+            )
+            return
         self._snap_request_id += 1
         self._latest_hover_request_id = self._snap_request_id
         shift_constraint, control_constraint = self._constraint_flags(modifiers)
@@ -2231,12 +2269,19 @@ class _DesignPlotPane(QWidget):
                 request_id=self._snap_request_id,
                 config=config,
                 point=raw_point,
-                radius=max(0.0, snap_threshold),
+                radius=radius,
                 purpose="hover",
             )
         )
 
     def _on_file_backed_snap_ready(self, response: SnapResponse) -> None:
+        if response.unavailable_reason is not None:
+            logger.debug(
+                "DESIGN SNAP unavailable reason=%s request_id=%d purpose=%s",
+                response.unavailable_reason,
+                response.request_id,
+                response.purpose,
+            )
         config = self._klayout_config
         if config is None or response.config_generation != config.generation:
             return
@@ -2301,6 +2346,14 @@ class _DesignPlotPane(QWidget):
             result,
             shift=pending.shift_constraint,
             control=pending.control_constraint,
+        )
+
+    def _file_snap_fallback(self, raw_point: Point2D) -> SnapResult:
+        free = SnapResult(point=raw_point, mode="free", distance=0.0)
+        return self._nearest_screen_result(
+            raw_point,
+            free,
+            self._best_markup_snap(raw_point),
         )
 
     def _nearest_screen_result(

@@ -99,6 +99,8 @@ class _SnapWorker(QObject):
         self.hover_requests = []
         self.click_requests = []
         self.stop_calls = []
+        self.cancel_hover_calls = 0
+        self.cancel_pending_calls = 0
         self.instances.append(self)
 
     def submit_hover(self, request) -> None:
@@ -106,6 +108,12 @@ class _SnapWorker(QObject):
 
     def submit_click(self, request) -> None:
         self.click_requests.append(request)
+
+    def cancel_hover(self) -> None:
+        self.cancel_hover_calls += 1
+
+    def cancel_pending(self) -> None:
+        self.cancel_pending_calls += 1
 
     def stop(self, timeout_s: float = 1.0) -> None:
         self.stop_calls.append(timeout_s)
@@ -360,7 +368,7 @@ def test_file_backed_click_uses_nearer_correlated_markup_candidate(
     design_path = tmp_path / "markup-snap.gds"
     design_path.write_bytes(b"gds")
     pane.set_document(_document(design_path))
-    pane._snap_distance_threshold = lambda: 100.0
+    pane._snap_distance_threshold = lambda: 1.0
     markup = MarkupDocument.empty(design_path).append_guide(
         (1.0, 1.0),
         (3.0, 1.0),
@@ -492,7 +500,7 @@ def test_pending_click_is_rejected_when_markup_or_snap_state_changes(
     design_path = tmp_path / f"pending-{change}.gds"
     design_path.write_bytes(b"gds")
     pane.set_document(_document(design_path))
-    pane._snap_distance_threshold = lambda: 100.0
+    pane._snap_distance_threshold = lambda: 1.0
     markup = MarkupDocument.empty(design_path).append_guide(
         (1.0, 1.0),
         (3.0, 1.0),
@@ -532,7 +540,7 @@ def test_failed_file_backed_click_does_not_execute_correlated_markup_candidate(
     design_path = tmp_path / "markup-failure.gds"
     design_path.write_bytes(b"gds")
     pane.set_document(_document(design_path))
-    pane._snap_distance_threshold = lambda: 100.0
+    pane._snap_distance_threshold = lambda: 1.0
     pane.set_markup(
         MarkupDocument.empty(design_path).append_guide(
             (1.0, 1.0),
@@ -620,7 +628,7 @@ def test_click_snap_failure_removes_only_matching_action_without_raw_fallback(
     getattr(pane, signal_name).connect(lambda *args: emitted.append(args))
     pane._submit_file_backed_click(action, (7.0, 8.0), payload)
     matching = pane._snap_worker.click_requests[-1]
-    pane._submit_file_backed_click("move", (70.0, 80.0))
+    pane._submit_file_backed_click("move", (70.0, 40.0))
     other = pane._snap_worker.click_requests[-1]
 
     pane._snap_worker.failed.emit(
@@ -677,12 +685,48 @@ def test_snap_off_invalidates_inflight_hover_response(
     request = worker.hover_requests[-1]
 
     pane.set_snap_enabled(False)
+    assert worker.cancel_pending_calls == 1
     changes.clear()
     worker.snap_ready.emit(_hover_response(request))
 
     assert pane._hover_snap is None
     assert changes == []
     assert len(pane._hover_item.getData()[0]) == 0
+
+
+def test_extreme_hover_skips_worker_but_keeps_markup_snap(pane, tmp_path) -> None:
+    source = tmp_path / "chip.gds"
+    source.write_bytes(b"gds")
+    pane.set_document(_document(source))
+    pane.set_markup(
+        MarkupDocument.empty(source).append_guide(
+            (0.0, 0.0), (10.0, 0.0), guide_id="guide"
+        )
+    )
+    pane._snap_distance_threshold = lambda: 10_000_000.0
+    worker = pane._snap_worker
+
+    pane._submit_file_backed_hover((5.0, 0.0))
+
+    assert worker.hover_requests == []
+    assert worker.cancel_hover_calls == 1
+    assert pane._hover_snap.mode in {"guide_center", "guide_intersection"}
+
+
+def test_extreme_move_click_executes_exact_cursor_once_without_worker(
+    pane, tmp_path
+) -> None:
+    source = tmp_path / "move-chip.gds"
+    source.write_bytes(b"gds")
+    pane.set_document(_document(source))
+    emitted: list[tuple[float, float]] = []
+    pane.move_requested.connect(lambda x, y: emitted.append((x, y)))
+    pane._snap_distance_threshold = lambda: 10_000_000.0
+
+    pane._submit_file_backed_click("move", (25.0, 30.0))
+
+    assert pane._snap_worker.click_requests == []
+    assert emitted == [(25.0, 30.0)]
 
 
 def test_cursor_leave_invalidates_inflight_hover_response(

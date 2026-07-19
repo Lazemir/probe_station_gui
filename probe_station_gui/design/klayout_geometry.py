@@ -4,13 +4,81 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable
+from dataclasses import dataclass
 
-from .klayout_types import Point2D
+from .klayout_types import (
+    Box2D,
+    Point2D,
+    SNAP_UNAVAILABLE_EXCESSIVE_COVERAGE,
+    SNAP_UNAVAILABLE_INVALID,
+    SNAP_UNAVAILABLE_OUTSIDE_BOUNDS,
+)
 from .model import SnapResult
 
 
 Segment2D = tuple[Point2D, Point2D]
 VERTEX_PRIORITY_RATIO = 1.8
+MAX_FILE_SNAP_GDS_FRACTION = 0.05
+
+
+@dataclass(frozen=True)
+class SnapSearchPlan:
+    search_box: Box2D | None
+    coverage_fraction: float
+    skip_reason: str | None = None
+
+    @property
+    def accepted(self) -> bool:
+        return self.skip_reason is None and self.search_box is not None
+
+
+def plan_snap_search(
+    point: Point2D,
+    radius: float,
+    gds_bounds: Box2D,
+    *,
+    max_coverage_fraction: float = MAX_FILE_SNAP_GDS_FRACTION,
+) -> SnapSearchPlan:
+    try:
+        x_value, y_value = float(point[0]), float(point[1])
+        radius_value = float(radius)
+        left, bottom, right, top = (float(value) for value in gds_bounds)
+    except (IndexError, TypeError, ValueError):
+        return SnapSearchPlan(None, 0.0, SNAP_UNAVAILABLE_INVALID)
+    values = (x_value, y_value, radius_value, left, bottom, right, top)
+    if (
+        not all(math.isfinite(value) for value in values)
+        or radius_value < 0.0
+        or right <= left
+        or top <= bottom
+    ):
+        return SnapSearchPlan(None, 0.0, SNAP_UNAVAILABLE_INVALID)
+    max_fraction = float(max_coverage_fraction)
+    if not math.isfinite(max_fraction) or not 0.0 < max_fraction <= 1.0:
+        raise ValueError("Snap coverage fraction must be in (0, 1].")
+    query = (
+        x_value - radius_value,
+        y_value - radius_value,
+        x_value + radius_value,
+        y_value + radius_value,
+    )
+    clipped = (
+        max(left, query[0]),
+        max(bottom, query[1]),
+        min(right, query[2]),
+        min(top, query[3]),
+    )
+    if clipped[2] < clipped[0] or clipped[3] < clipped[1]:
+        return SnapSearchPlan(None, 0.0, SNAP_UNAVAILABLE_OUTSIDE_BOUNDS)
+    intersection_area = (clipped[2] - clipped[0]) * (clipped[3] - clipped[1])
+    coverage = intersection_area / ((right - left) * (top - bottom))
+    if coverage > max_fraction:
+        return SnapSearchPlan(
+            clipped,
+            coverage,
+            SNAP_UNAVAILABLE_EXCESSIVE_COVERAGE,
+        )
+    return SnapSearchPlan(clipped, coverage)
 
 
 def select_snap(
@@ -124,4 +192,10 @@ def _project_point_onto_segment(
     return (start[0] + fraction * delta_x, start[1] + fraction * delta_y)
 
 
-__all__ = ["Segment2D", "select_snap"]
+__all__ = [
+    "MAX_FILE_SNAP_GDS_FRACTION",
+    "Segment2D",
+    "SnapSearchPlan",
+    "plan_snap_search",
+    "select_snap",
+]

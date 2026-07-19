@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 import threading
 import time
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeAlias
 
 from PySide6.QtCore import QObject, Qt, Signal, Slot
 from PySide6.QtGui import QImage, QTransform
 
-from .klayout_geometry import Segment2D, select_snap
+from .klayout_geometry import Segment2D, plan_snap_search, select_snap
 from .klayout_types import (
+    Box2D,
     KLayoutConfig,
     Point2D,
     RenderFailure,
@@ -23,6 +24,11 @@ from .klayout_types import (
     SnapRequest,
     SnapResponse,
     SnapFailure,
+    SnapWorkBudget,
+    SNAP_UNAVAILABLE_CANCELLED,
+    SNAP_UNAVAILABLE_CANDIDATE_BUDGET,
+    SNAP_UNAVAILABLE_SHAPE_BUDGET,
+    SNAP_UNAVAILABLE_TIME_BUDGET,
     forward_rotate_point,
     inverse_rotate_box,
     inverse_rotate_point,
@@ -41,7 +47,12 @@ class _RenderBackend(Protocol):
 class _SnapBackend(Protocol):
     def ensure_config(self, config: KLayoutConfig) -> None: ...
 
-    def snap(self, request: SnapRequest) -> SnapResponse: ...
+    def snap(
+        self,
+        request: SnapRequest,
+        *,
+        is_cancelled: Callable[[], bool],
+    ) -> SnapResponse: ...
 
     def close(self) -> None: ...
 
@@ -57,6 +68,13 @@ class _Publication:
     kind: str
     value: object
     config_generation: int | None
+
+
+@dataclass(frozen=True)
+class _SnapWork:
+    request: SnapRequest
+    cancellation_generation: int
+    hover_cancellation_generation: int
 
 
 class KLayoutRenderWorker(QObject):
@@ -267,6 +285,8 @@ class KLayoutSnapWorker(QObject):
         self._stop_requested = threading.Event()
         self._hover: SnapRequest | None = None
         self._clicks: deque[SnapRequest] = deque()
+        self._cancellation_generation = 0
+        self._hover_cancellation_generation = 0
         self._latest_config: KLayoutConfig | None = None
         self._stopping = False
         self._thread: threading.Thread | None = None
@@ -290,6 +310,22 @@ class KLayoutSnapWorker(QObject):
         """Queue a FIFO-priority click request from the worker's creator thread."""
         self._require_creator_thread()
         self._submit(request, click=True)
+
+    def cancel_hover(self) -> None:
+        self._require_creator_thread()
+        with self._condition:
+            self._hover_cancellation_generation += 1
+            self._hover = None
+            self._condition.notify_all()
+
+    def cancel_pending(self) -> None:
+        self._require_creator_thread()
+        with self._condition:
+            self._cancellation_generation += 1
+            self._hover_cancellation_generation += 1
+            self._hover = None
+            self._clicks.clear()
+            self._condition.notify_all()
 
     def stop(self, timeout_s: float = 1.0) -> None:
         """Stop accepting work from the creator thread and join up to the deadline."""
@@ -332,20 +368,32 @@ class KLayoutSnapWorker(QObject):
             backend = self._backend_factory()
             active_config: KLayoutConfig | None = None
             while True:
-                request = self._take_next()
-                if request is _STOP_WORKER:
+                work = self._take_next()
+                if work is _STOP_WORKER:
                     return
+                request = work.request
                 try:
-                    if active_config != request.config:
+                    config_changed = active_config != request.config
+                    if config_changed:
                         backend.ensure_config(request.config)
                         active_config = request.config
+                    if self._work_is_obsolete(work):
+                        continue
+                    if config_changed:
                         self._post_publication(
                             "loaded",
                             request.config,
                             request.config,
                         )
-                    response = backend.snap(request)
+                    response = backend.snap(
+                        request,
+                        is_cancelled=lambda work=work: self._work_is_obsolete(work),
+                    )
+                    if self._work_is_obsolete(work):
+                        continue
                 except Exception as exc:
+                    if self._work_is_obsolete(work):
+                        continue
                     self._post_publication(
                         "failed",
                         SnapFailure(
@@ -378,7 +426,38 @@ class KLayoutSnapWorker(QObject):
                     )
             self._post_finished()
 
-    def _take_next(self) -> SnapRequest | object:
+    def _snap_work(self, request: SnapRequest) -> _SnapWork:
+        # Called only while self._condition is held by _take_next().
+        return _SnapWork(
+            request=request,
+            cancellation_generation=self._cancellation_generation,
+            hover_cancellation_generation=self._hover_cancellation_generation,
+        )
+
+    def _work_is_obsolete(self, work: _SnapWork) -> bool:
+        with self._condition:
+            if self._stopping or self._stop_requested.is_set():
+                return True
+            if self._cancellation_generation != work.cancellation_generation:
+                return True
+            if (
+                work.request.purpose == "hover"
+                and self._hover_cancellation_generation
+                != work.hover_cancellation_generation
+            ):
+                return True
+            if work.request.config != self._latest_config:
+                return True
+            if work.request.purpose != "hover":
+                return False
+            if self._clicks:
+                return True
+            return (
+                self._hover is not None
+                and self._hover.request_id != work.request.request_id
+            )
+
+    def _take_next(self) -> _SnapWork | object:
         with self._condition:
             while True:
                 while (
@@ -393,11 +472,11 @@ class KLayoutSnapWorker(QObject):
                 while self._clicks:
                     request = self._clicks.popleft()
                     if request.config == self._latest_config:
-                        return request
+                        return self._snap_work(request)
                 request = self._hover
                 self._hover = None
                 if request is not None and request.config == self._latest_config:
-                    return request
+                    return self._snap_work(request)
 
     def _require_creator_thread(self) -> None:
         if threading.get_ident() != self._creator_thread_id:
@@ -549,7 +628,8 @@ class _KLayoutRenderBackend:
 class _KLayoutSnapBackend:
     """Own the independent KLayout database used by one snap worker thread."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, clock: Callable[[], float] = time.perf_counter) -> None:
+        self._clock = clock
         self._db: Any = None
         self._layout: Any = None
         self._top_cell: Any = None
@@ -578,19 +658,101 @@ class _KLayoutSnapBackend:
             raise RuntimeError(f"Top cell '{config.top_cell_name}' does not exist")
         self._top_cell = top_cell
 
-    def snap(self, request: SnapRequest) -> SnapResponse:
-        started = time.perf_counter()
-        source_point = inverse_rotate_point(request.point, request.config)
-        search_box = self._db.DBox(
-            source_point[0] - request.radius,
-            source_point[1] - request.radius,
-            source_point[0] + request.radius,
-            source_point[1] + request.radius,
+    def snap(
+        self,
+        request: SnapRequest,
+        *,
+        is_cancelled: Callable[[], bool],
+    ) -> SnapResponse:
+        started = self._clock()
+        if is_cancelled():
+            return self._unavailable_response(
+                request,
+                started,
+                0,
+                0,
+                SNAP_UNAVAILABLE_CANCELLED,
+            )
+        plan = plan_snap_search(
+            request.point,
+            request.radius,
+            request.config.display_bounds,
         )
-        vertices: list[Point2D] = []
-        segments: list[Segment2D] = []
-        shapes_inspected = 0
-        for layer_key in sorted(request.config.visible_layers):
+        if not plan.accepted:
+            return self._unavailable_response(
+                request,
+                started,
+                0,
+                0,
+                plan.skip_reason or SNAP_UNAVAILABLE_CANCELLED,
+            )
+        source_point = inverse_rotate_point(request.point, request.config)
+        source_search_box = inverse_rotate_box(plan.search_box, request.config)
+        shape_stream = self._iter_shape_contours(request.config, source_search_box)
+        try:
+            collected = _collect_snap_geometry(
+                shape_stream,
+                request.budget,
+                clock=self._clock,
+                is_cancelled=is_cancelled,
+            )
+        finally:
+            close = getattr(shape_stream, "close", None)
+            if close is not None:
+                close()
+        if collected.unavailable_reason is not None:
+            return self._unavailable_response(
+                request,
+                started,
+                collected.shapes_inspected,
+                collected.candidates_generated,
+                collected.unavailable_reason,
+            )
+        source_result = select_snap(
+            source_point,
+            collected.vertices,
+            collected.segments,
+            request.radius,
+        )
+        result = _rotate_snap_result(source_result, request)
+        return SnapResponse(
+            request_id=request.request_id,
+            config_generation=request.config.generation,
+            raw_point=request.point,
+            result=result,
+            elapsed_ms=(self._clock() - started) * 1000.0,
+            shapes_inspected=collected.shapes_inspected,
+            purpose=request.purpose,
+            candidates_generated=collected.candidates_generated,
+        )
+
+    def _unavailable_response(
+        self,
+        request: SnapRequest,
+        started: float,
+        shapes: int,
+        candidates: int,
+        reason: str,
+    ) -> SnapResponse:
+        return SnapResponse(
+            request_id=request.request_id,
+            config_generation=request.config.generation,
+            raw_point=request.point,
+            result=SnapResult(point=request.point, mode="free", distance=0.0),
+            elapsed_ms=(self._clock() - started) * 1000.0,
+            shapes_inspected=shapes,
+            purpose=request.purpose,
+            candidates_generated=candidates,
+            unavailable_reason=reason,
+        )
+
+    def _iter_shape_contours(
+        self,
+        config: KLayoutConfig,
+        source_search_box: Box2D,
+    ) -> Iterable[ShapeContours]:
+        search_box = self._db.DBox(*source_search_box)
+        for layer_key in sorted(config.visible_layers):
             layer_index = self._layer_indexes.get(layer_key)
             if layer_index is None:
                 continue
@@ -600,38 +762,14 @@ class _KLayoutSnapBackend:
             )
             try:
                 while not iterator.at_end():
-                    shapes_inspected += 1
-                    shape = iterator.shape()
-                    transform = iterator.dtrans()
-                    for contour, closed in _shape_contours(shape, transform, self._db):
-                        points = tuple((float(point.x), float(point.y)) for point in contour)
-                        vertices.extend(points)
-                        count = len(points) if closed else max(0, len(points) - 1)
-                        segments.extend(
-                            (points[index], points[(index + 1) % len(points)])
-                            for index in range(count)
-                        )
+                    yield _shape_contours(
+                        iterator.shape(),
+                        iterator.dtrans(),
+                        self._db,
+                    )
                     iterator.next()
             finally:
                 del iterator
-
-        source_result = select_snap(
-            source_point,
-            vertices,
-            segments,
-            request.radius,
-        )
-        result = _rotate_snap_result(source_result, request)
-        elapsed_ms = (time.perf_counter() - started) * 1000.0
-        return SnapResponse(
-            request_id=request.request_id,
-            config_generation=request.config.generation,
-            raw_point=request.point,
-            result=result,
-            elapsed_ms=elapsed_ms,
-            shapes_inspected=shapes_inspected,
-            purpose=request.purpose,
-        )
 
     def close(self) -> None:
         top_cell = self._top_cell
@@ -675,20 +813,122 @@ def _rotate_snap_result(result: SnapResult, request: SnapRequest) -> SnapResult:
     )
 
 
+ShapeContours: TypeAlias = Iterable[tuple[Iterable[Point2D], bool]]
+
+
+@dataclass(frozen=True)
+class _CollectedSnapGeometry:
+    vertices: Sequence[Point2D]
+    segments: Sequence[Segment2D]
+    shapes_inspected: int
+    candidates_generated: int
+    unavailable_reason: str | None = None
+
+
+def _collect_snap_geometry(
+    shapes: Iterable[ShapeContours],
+    budget: SnapWorkBudget,
+    *,
+    clock: Callable[[], float],
+    is_cancelled: Callable[[], bool],
+) -> _CollectedSnapGeometry:
+    started = clock()
+    vertices: list[Point2D] = []
+    segments: list[Segment2D] = []
+    shapes_inspected = 0
+    candidates_generated = 0
+
+    def abort(reason: str) -> _CollectedSnapGeometry:
+        return _CollectedSnapGeometry(
+            (),
+            (),
+            shapes_inspected,
+            candidates_generated,
+            reason,
+        )
+
+    def checkpoint() -> str | None:
+        if is_cancelled():
+            return SNAP_UNAVAILABLE_CANCELLED
+        if (clock() - started) * 1_000.0 > budget.max_elapsed_ms:
+            return SNAP_UNAVAILABLE_TIME_BUDGET
+        return None
+
+    shape_iterator = iter(shapes)
+    while True:
+        reason = checkpoint()
+        if reason is not None:
+            return abort(reason)
+        if shapes_inspected >= budget.max_shapes:
+            return abort(SNAP_UNAVAILABLE_SHAPE_BUDGET)
+        try:
+            shape_contours = next(shape_iterator)
+        except StopIteration:
+            break
+        shapes_inspected += 1
+        contour_iterator = iter(shape_contours)
+        while True:
+            reason = checkpoint()
+            if reason is not None:
+                return abort(reason)
+            try:
+                contour, closed = next(contour_iterator)
+            except StopIteration:
+                break
+            contour_points: list[Point2D] = []
+            point_iterator = iter(contour)
+            while True:
+                reason = checkpoint()
+                if reason is not None:
+                    return abort(reason)
+                try:
+                    point = next(point_iterator)
+                except StopIteration:
+                    break
+                added_candidates = 1 + int(bool(contour_points))
+                if candidates_generated + added_candidates > budget.max_candidates:
+                    return abort(SNAP_UNAVAILABLE_CANDIDATE_BUDGET)
+                vertices.append(point)
+                candidates_generated += 1
+                if contour_points:
+                    segments.append((contour_points[-1], point))
+                    candidates_generated += 1
+                contour_points.append(point)
+            if closed and len(contour_points) > 1:
+                reason = checkpoint()
+                if reason is not None:
+                    return abort(reason)
+                if candidates_generated + 1 > budget.max_candidates:
+                    return abort(SNAP_UNAVAILABLE_CANDIDATE_BUDGET)
+                segments.append((contour_points[-1], contour_points[0]))
+                candidates_generated += 1
+    return _CollectedSnapGeometry(
+        tuple(vertices),
+        tuple(segments),
+        shapes_inspected,
+        candidates_generated,
+    )
+
+
+def _point_tuples(points: Iterable[Any]) -> Iterable[Point2D]:
+    for point in points:
+        yield (float(point.x), float(point.y))
+
+
 def _shape_contours(
     shape: Any,
     transform: Any,
     db: Any,
-) -> Iterable[tuple[list[Any], bool]]:
+) -> ShapeContours:
     if shape.is_box():
         box = shape.dbox
-        points = [
+        points = (
             db.DPoint(box.left, box.bottom),
             db.DPoint(box.right, box.bottom),
             db.DPoint(box.right, box.top),
             db.DPoint(box.left, box.top),
-        ]
-        yield ([transform * point for point in points], True)
+        )
+        yield (_point_tuples(transform * point for point in points), True)
         return
 
     if shape.is_polygon():
@@ -697,14 +937,17 @@ def _shape_contours(
         polygon = transform * shape.dpath.polygon()
     elif hasattr(shape, "is_edge") and shape.is_edge():
         edge = shape.dedge
-        yield ([transform * edge.p1, transform * edge.p2], False)
+        yield (
+            _point_tuples((transform * edge.p1, transform * edge.p2)),
+            False,
+        )
         return
     else:
         return
 
-    yield (list(polygon.each_point_hull()), True)
+    yield (_point_tuples(polygon.each_point_hull()), True)
     for hole_index in range(polygon.holes()):
-        yield (list(polygon.each_point_hole(hole_index)), True)
+        yield (_point_tuples(polygon.each_point_hole(hole_index)), True)
 
 
 __all__ = ["KLayoutRenderWorker", "KLayoutSnapWorker"]
