@@ -14,10 +14,6 @@ from probe_station_gui.api.server import _coordinate_mode_from_payload
 from probe_station_gui.api.server import _feedrate_from_payload
 from probe_station_gui.api.server import _voltage_sweep_from_payload
 from probe_station_gui.api.server import ProbeStationApiServer
-from probe_station_gui.camera.exposure_policy import (
-    ExposurePolicyBusyError,
-    ExposurePolicyError,
-)
 
 
 class ApiServerPayloadTest(unittest.TestCase):
@@ -490,6 +486,10 @@ class ApiServerHttpTest(unittest.TestCase):
 
     def test_exposure_policy_commands_report_controller_busy_as_conflict(self) -> None:
         def busy(*_args, **_kwargs):
+            from probe_station_gui.camera.exposure_policy import (
+                ExposurePolicyBusyError,
+            )
+
             raise ExposurePolicyBusyError("Camera exposure policy is busy.")
 
         client = self._client(
@@ -508,6 +508,8 @@ class ApiServerHttpTest(unittest.TestCase):
 
     def test_exposure_policy_errors_return_structured_service_unavailable(self) -> None:
         def unavailable(*_args, **_kwargs):
+            from probe_station_gui.camera.exposure_policy import ExposurePolicyError
+
             raise ExposurePolicyError("Camera settings write failed.")
 
         client = self._client(
@@ -527,7 +529,10 @@ class ApiServerHttpTest(unittest.TestCase):
         self.assertEqual(update.json()["detail"]["message"], "Camera settings write failed.")
 
     def test_exposure_policy_classifies_exception_from_reloaded_module(self) -> None:
+        from importlib import import_module
+
         module_name = "probe_station_gui.camera.exposure_policy"
+        original_module = import_module(module_name)
         stale_module = ModuleType(module_name)
         stale_module.ExposurePolicyError = type(
             "ExposurePolicyError",
@@ -561,7 +566,6 @@ class ApiServerHttpTest(unittest.TestCase):
             camera_exposure_once_callback=busy_after_reload,
             raise_server_exceptions=False,
         )
-        original_module = sys.modules[module_name]
         sys.modules[module_name] = stale_module
         try:
             response = client.post("/api/v1/camera/exposure-once", json={})
