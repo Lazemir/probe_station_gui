@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import logging
+import threading
 import time
 from typing import TYPE_CHECKING, Any, cast
 
@@ -113,11 +114,108 @@ class StageControllerClickMoveMixin:
                 raise StageControllerError(
                     "Stage is busy. Wait for the current operation to finish."
                 )
-            if self._click_calibration_required():
-                with self._open_optical_session("click-to-move calibration"):
-                    status = self._resolve_clicked_point_status_locked()
-            else:
+            self._cancel_event.clear()
+            current_thread = threading.current_thread()
+            token = self._new_stage_task_token_locked("click_calibration")
+            setattr(current_thread, "_probe_station_stage_task_token", token)
+            self._active_thread = current_thread
+        try:
+            return self._resolve_clicked_point_xy_work(dx_pixels, dy_pixels)
+        finally:
+            with self._task_lock:
+                if self._active_thread is current_thread:
+                    self._active_thread = None
+
+    def request_clicked_point_resolution(
+        self,
+        request_id: object,
+        dx_pixels: float,
+        dy_pixels: float,
+    ) -> bool:
+        """Resolve an image point in a stage-owned background task."""
+
+        try:
+            return self._start_background_task(
+                target=self._run_clicked_point_resolution,
+                args=(request_id, float(dx_pixels), float(dy_pixels)),
+                busy_message="Stage is busy. Alignment point capture not started.",
+                before_create=lambda: setattr(
+                    self,
+                    "_clicked_point_resolution_request_id",
+                    request_id,
+                ),
+            )
+        except Exception:
+            with self._task_lock:
+                if self._clicked_point_resolution_request_id == request_id:
+                    self._clicked_point_resolution_request_id = None
+            raise
+
+    def _run_clicked_point_resolution(
+        self,
+        request_id: object,
+        dx_pixels: float,
+        dy_pixels: float,
+    ) -> None:
+        try:
+            center_xy, clicked_xy = self._resolve_clicked_point_xy_for_active_task(
+                dx_pixels,
+                dy_pixels,
+            )
+            self._check_cancelled()
+        except Exception as exc:
+            self._release_clicked_point_task(request_id)
+            self.clicked_point_resolved.emit(
+                request_id,
+                False,
+                None,
+                None,
+                str(exc) or type(exc).__name__,
+            )
+            return
+        self._release_clicked_point_task(request_id)
+        self.clicked_point_resolved.emit(
+            request_id,
+            True,
+            center_xy,
+            clicked_xy,
+            "",
+        )
+
+    def _release_clicked_point_task(self, request_id: object) -> None:
+        current_thread = threading.current_thread()
+        with self._task_lock:
+            if self._active_thread is current_thread:
+                self._active_thread = None
+            if self._clicked_point_resolution_request_id == request_id:
+                self._clicked_point_resolution_request_id = None
+
+    def _resolve_clicked_point_xy_for_active_task(
+        self,
+        dx_pixels: float,
+        dy_pixels: float,
+    ) -> tuple[tuple[float, float], tuple[float, float]]:
+        current_thread = threading.current_thread()
+        with self._task_lock:
+            if self._active_thread is not current_thread:
+                raise StageControllerError(
+                    "Current thread does not own the alignment stage task."
+                )
+        return self._resolve_clicked_point_xy_work(dx_pixels, dy_pixels)
+
+    def _resolve_clicked_point_xy_work(
+        self,
+        dx_pixels: float,
+        dy_pixels: float,
+    ) -> tuple[tuple[float, float], tuple[float, float]]:
+        self._check_cancelled()
+        if self._click_calibration_required():
+            with self._open_optical_session("click-to-move calibration"):
+                self._check_cancelled()
                 status = self._resolve_clicked_point_status_locked()
+        else:
+            status = self._resolve_clicked_point_status_locked()
+        self._check_cancelled()
         if self._pixels_to_mm is None:
             raise StageControllerError("Calibration failed. Cannot resolve clicked position.")
         return self._resolve_xy_from_center(
@@ -127,7 +225,7 @@ class StageControllerClickMoveMixin:
         )
 
     def _resolve_clicked_point_status_locked(self) -> object:
-        """Read stage position and ensure click calibration while task-locked."""
+        """Read stage position and ensure click calibration for the task owner."""
 
         with self._serial_session():
             status = self._query_current_status_with_required_coordinates(

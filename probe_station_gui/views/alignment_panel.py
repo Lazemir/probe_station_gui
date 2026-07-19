@@ -33,6 +33,7 @@ class AlignmentPanel(QWidget):
         self._design_marks: list[Point2D | None] = [None, None]
         self._captured_points: list[Point2D | None] = [None, None]
         self._pick_slot: int | None = None
+        self._capture_running = False
         self._registration_status = "No design registration."
 
         root_layout = QVBoxLayout(self)
@@ -150,6 +151,10 @@ class AlignmentPanel(QWidget):
         self._pick_slot = slot if slot in (0, 1) else None
         self._refresh_ui()
 
+    def set_capture_running(self, running: bool) -> None:
+        self._capture_running = bool(running)
+        self._refresh_ui()
+
     def capture_mode(self) -> str:
         value = self._capture_mode_combo.currentData()
         return str(value) if value in {"center", "image"} else "center"
@@ -170,7 +175,11 @@ class AlignmentPanel(QWidget):
         else:
             self._mode_label.setText("Mode: quick")
 
-        if self._pick_slot is not None:
+        if self._capture_running and self._pick_slot is not None:
+            self._status_label.setText(
+                f"Capturing point {self._pick_slot + 1}."
+            )
+        elif self._pick_slot is not None:
             self._status_label.setText(f"Picking point {self._pick_slot + 1} in image.")
         elif self._captured_points[0] is None and self._captured_points[1] is None:
             self._status_label.setText("No points captured.")
@@ -200,10 +209,13 @@ class AlignmentPanel(QWidget):
         self._set_point_2_button.setText(
             "Picking Point 2..." if self._pick_slot == 1 else "Set Point 2"
         )
+        self._set_point_1_button.setEnabled(not self._capture_running)
+        self._set_point_2_button.setEnabled(not self._capture_running)
+        self._capture_mode_combo.setEnabled(not self._capture_running)
 
         has_points = any(point is not None for point in self._captured_points)
         has_design_state = any(point is not None for point in self._design_marks)
-        self._reset_points_button.setEnabled(has_points)
+        self._reset_points_button.setEnabled(has_points and not self._capture_running)
         self._cancel_pick_button.setEnabled(self._pick_slot is not None)
         self._clear_registration_button.setEnabled(has_design_state)
 

@@ -167,6 +167,7 @@ class StageController(
     absolute_xy_move_started: Signal = Signal(float, float, float)
     stage_position_changed: Signal = Signal(object)
     autofocus_finished: Signal = Signal(bool, str)
+    clicked_point_resolved: Signal = Signal(object, bool, object, object, str)
     objective_calibration_updated: Signal = Signal(str, object, object)
     objective_mismatch_detected: Signal = Signal(str, str, object)
     homing_status_changed: Signal = Signal(object)
@@ -291,6 +292,7 @@ class StageController(
         self._frame_condition = threading.Condition()
         self._task_lock = threading.RLock()
         self._active_thread: Optional[threading.Thread] = None
+        self._clicked_point_resolution_request_id: object | None = None
         self._stage_task_generation = 0
         self._latest_stage_task_token: StageTaskToken | None = None
         self._objective_calibration_candidates: dict[
@@ -842,6 +844,22 @@ class StageController(
         if had_needles_action:
             self._set_needles_state(False, known=False)
 
+    def cancel_clicked_point_resolution(
+        self,
+        request_id: object,
+        reason: str = "Alignment point capture cancelled.",
+    ) -> bool:
+        """Cancel only the alignment task that owns the supplied request ID."""
+
+        with self._task_lock:
+            if self._clicked_point_resolution_request_id != request_id:
+                return False
+            self._cancel_event.set()
+            self._new_stage_task_token_locked("cancel_clicked_point_resolution")
+        self.status_message.emit(reason)
+        self.queue_jog_stop()
+        return True
+
     def cancel_active_motion(self, reason: str = "Motion cancel requested.") -> None:
         """Cancel a jog-backed motion without resetting controller state."""
 
@@ -874,6 +892,17 @@ class StageController(
 
         with self._task_lock:
             return bool(self._active_thread and self._active_thread.is_alive())
+
+    def wait_for_active_task(self, *, timeout_s: float) -> bool:
+        """Wait for the current stage worker without holding the task lock."""
+
+        with self._task_lock:
+            thread = self._active_thread
+        if thread is None or thread is threading.current_thread():
+            return thread is None
+        if thread.is_alive():
+            thread.join(timeout=max(0.0, float(timeout_s)))
+        return not thread.is_alive()
 
     def _new_stage_task_token_locked(self, source: str) -> StageTaskToken:
         for candidate in self._objective_calibration_candidates.values():
@@ -1055,7 +1084,12 @@ class StageController(
             self._active_thread = thread
             if before_start is not None:
                 before_start()
-            thread.start()
+            try:
+                thread.start()
+            except Exception:
+                if self._active_thread is thread:
+                    self._active_thread = None
+                raise
             return True
 
     def begin_external_task(self, label: str) -> None:

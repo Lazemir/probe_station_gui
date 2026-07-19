@@ -583,6 +583,121 @@ def test_resolve_clicked_point_opens_session_before_serial_or_calibration(
     ]
 
 
+def test_alignment_point_resolution_runs_and_publishes_from_stage_worker(
+    controller,
+) -> None:
+    main_thread_id = threading.get_ident()
+    resolver_started = threading.Event()
+    resolver_release = threading.Event()
+    resolver_threads: list[int] = []
+    completion_calls: list[tuple[object, ...]] = []
+    completion_threads: list[int] = []
+    controller.clicked_point_resolved = SimpleNamespace(
+        emit=lambda *args: (
+            completion_threads.append(threading.get_ident()),
+            completion_calls.append(args),
+        )
+    )
+
+    def resolve(dx_pixels: float, dy_pixels: float):
+        resolver_threads.append(threading.get_ident())
+        resolver_started.set()
+        assert resolver_release.wait(2.0)
+        return (1.0, 2.0), (1.0 + dx_pixels, 2.0 + dy_pixels)
+
+    controller._resolve_clicked_point_xy_for_active_task = resolve
+
+    assert controller.request_clicked_point_resolution(
+        "capture-1",
+        0.25,
+        -0.5,
+    ) is True
+    assert resolver_started.wait(1.0)
+    assert resolver_threads[0] != main_thread_id
+    assert completion_calls == []
+
+    resolver_release.set()
+    assert controller.wait_for_active_task(timeout_s=1.0)
+    assert completion_threads == resolver_threads
+    assert completion_calls == [
+        ("capture-1", True, (1.0, 2.0), (1.25, 1.5), "")
+    ]
+
+
+def test_cancelled_alignment_point_resolution_never_reports_success(controller) -> None:
+    resolver_started = threading.Event()
+    completion_calls: list[tuple[object, ...]] = []
+    controller.clicked_point_resolved = SimpleNamespace(
+        emit=lambda *args: completion_calls.append(args)
+    )
+
+    def resolve(_dx_pixels: float, _dy_pixels: float):
+        resolver_started.set()
+        controller._cancel_event.wait(2.0)
+        controller._check_cancelled()
+
+    controller._resolve_clicked_point_xy_for_active_task = resolve
+
+    assert controller.request_clicked_point_resolution(
+        "capture-cancelled",
+        0.0,
+        0.0,
+    ) is True
+    assert resolver_started.wait(1.0)
+    assert controller.cancel_clicked_point_resolution(
+        "capture-cancelled",
+        "Alignment capture cancelled.",
+    ) is True
+
+    assert controller.wait_for_active_task(timeout_s=1.0)
+    assert len(completion_calls) == 1
+    request_id, success, center_xy, clicked_xy, message = completion_calls[0]
+    assert request_id == "capture-cancelled"
+    assert success is False
+    assert center_xy is None
+    assert clicked_xy is None
+    assert "cancel" in message.lower()
+
+
+def test_stale_alignment_cancel_does_not_cancel_newer_stage_task(controller) -> None:
+    completion_calls: list[tuple[object, ...]] = []
+    controller.clicked_point_resolved = SimpleNamespace(
+        emit=lambda *args: completion_calls.append(args)
+    )
+    controller._resolve_clicked_point_xy_for_active_task = (
+        lambda _dx, _dy: ((1.0, 2.0), (1.0, 2.0))
+    )
+
+    assert controller.request_clicked_point_resolution(
+        "capture-old",
+        0.0,
+        0.0,
+    ) is True
+    assert controller.wait_for_active_task(timeout_s=1.0)
+
+    newer_started = threading.Event()
+    newer_release = threading.Event()
+
+    def newer_task() -> None:
+        newer_started.set()
+        assert newer_release.wait(2.0)
+
+    assert controller._start_background_task(
+        target=newer_task,
+        busy_message="busy",
+    ) is True
+    assert newer_started.wait(1.0)
+
+    assert controller.cancel_clicked_point_resolution(
+        "capture-old",
+        "stale cancellation",
+    ) is False
+    assert controller._cancel_event.is_set() is False
+
+    newer_release.set()
+    assert controller.wait_for_active_task(timeout_s=1.0)
+
+
 def test_optical_workflow_without_manager_fails_closed(controller) -> None:
     events: list[object] = []
     controller._serial = _FakeSerial()

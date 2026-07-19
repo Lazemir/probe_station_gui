@@ -34,6 +34,8 @@ class MainWindowShutdownOwner(Protocol):
     _route_measurement_thread: Any
     _microscope_scan_thread: Any
     _microscope_scan_stop_requested: Any
+    _manual_alignment_capture_context: Any
+    _manual_alignment_pick_slot: Any
     _flat_field_calibration_thread: Any
     _lens_distortion_thread: Any
     _optical_calibration_outer_close_thread: Any
@@ -67,6 +69,7 @@ def close_event(owner: MainWindowShutdownOwner, event: Any) -> None:
         _drain_and_close_api_bridge(owner)
         _stop_route_worker(owner)
         _stop_microscope_scan(owner)
+        _stop_manual_alignment_capture(owner)
         _stop_optical_calibration(owner)
         _close_serial_and_panels(owner)
     except Exception as exc:
@@ -133,6 +136,21 @@ def _stop_api_stage_command_workers(owner: MainWindowShutdownOwner) -> None:
     wait = getattr(owner, "_wait_for_api_stage_command_workers", None)
     if callable(wait) and not wait(timeout_s=2.0):
         raise RuntimeError("API stage command is still stopping.")
+
+
+def _stop_manual_alignment_capture(owner: MainWindowShutdownOwner) -> None:
+    context = getattr(owner, "_manual_alignment_capture_context", None)
+    if context is None:
+        return
+    context.cancelled.set()
+    owner.stage_controller.cancel_clicked_point_resolution(
+        context.request_id,
+        "Alignment point capture cancelled for shutdown."
+    )
+    if not owner.stage_controller.wait_for_active_task(timeout_s=2.0):
+        raise RuntimeError("Alignment point capture is still stopping.")
+    owner._manual_alignment_capture_context = None
+    owner._manual_alignment_pick_slot = None
 
 
 def _drain_and_close_api_bridge(owner: MainWindowShutdownOwner) -> None:

@@ -210,7 +210,7 @@ class _CalibrationTokenStage:
     "start_calibration",
     (
         lambda window: Main._start_flat_field_calibration(window),
-        lambda window: Main._start_lens_distortion_calibration(window),
+        lambda window: Main._start_lens_distortion_calibration(window)["accepted"],
         lambda window: Main._start_flat_field_calibration(
             window,
             wizard_run_id=41,
@@ -221,7 +221,7 @@ class _CalibrationTokenStage:
             wizard_run_id=41,
             parent_session_token="outer-token",
             full_wizard=True,
-        ),
+        )["accepted"],
     ),
 )
 def test_standalone_and_wizard_calibration_launch_do_not_read_serial_position(
@@ -2148,6 +2148,67 @@ def test_api_lens_reset_returns_conflict_during_active_operation(
         "X20"
     ].distortion_correction == payload
     assert statuses == [response["message"]]
+
+
+def test_api_lens_start_returns_flat_field_conflict_instead_of_202() -> None:
+    window = Main.__new__(Main)
+    statuses: list[str] = []
+    window._flat_field_calibration_context = main_module._OpticalCalibrationRunContext(
+        operation_id="flat-running",
+        wizard_run_id=None,
+        objective_name="X20",
+    )
+    window._flat_field_calibration_thread = None
+    window._lens_distortion_context = None
+    window._lens_distortion_thread = None
+    window._show_status = lambda message, _timeout=0: statuses.append(str(message))
+
+    response = Main._api_lens_distortion_calibration(window, {})
+
+    assert response == {
+        "accepted": False,
+        "status_code": 409,
+        "message": "Flat-field calibration is already running.",
+    }
+    assert statuses == [response["message"]]
+
+
+def test_api_lens_start_returns_thread_failure_instead_of_202(monkeypatch) -> None:
+    class _StartFailureThread:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def is_alive(self) -> bool:
+            return False
+
+        def start(self) -> None:
+            raise RuntimeError("thread start failed")
+
+    window = Main.__new__(Main)
+    statuses: list[str] = []
+    window.stage_controller = SimpleNamespace(is_busy=lambda: False)
+    window._stage_serial_ready = lambda: True
+    window._flat_field_calibration_context = None
+    window._flat_field_calibration_thread = None
+    window._lens_distortion_context = None
+    window._lens_distortion_thread = None
+    window._active_objective_metadata = lambda: ("X20", 20.0)
+    window._coordinate_feedrate_for_axes = lambda _axes: 120.0
+    window._current_needle_feedrate = lambda: 70.0
+    window._lens_distortion_dialog = None
+    window._show_status = lambda message, _timeout=0: statuses.append(str(message))
+    monkeypatch.setattr(main_module.threading, "Thread", _StartFailureThread)
+
+    response = Main._api_lens_distortion_calibration(window, {})
+
+    assert response == {
+        "accepted": False,
+        "status_code": 500,
+        "message": "Lens distortion calibration could not start: thread start failed",
+    }
+    assert window._lens_distortion_thread is None
+    assert window._lens_distortion_context is None
+    assert statuses[-1] == response["message"]
 
 
 def test_api_force_click_reset_returns_conflict_during_scan_startup() -> None:

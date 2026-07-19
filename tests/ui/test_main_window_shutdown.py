@@ -89,6 +89,42 @@ def test_shutdown_fails_closed_while_api_stage_worker_is_running() -> None:
         shutdown_ui._stop_api_stage_command_workers(owner)
 
 
+def test_shutdown_cancels_and_drains_manual_alignment_capture() -> None:
+    events: list[object] = []
+    context = SimpleNamespace(
+        request_id="capture-shutdown",
+        cancelled=SimpleNamespace(
+            set=lambda: events.append(("cancel_context",))
+        )
+    )
+    owner = SimpleNamespace(
+        _manual_alignment_capture_context=context,
+        _manual_alignment_pick_slot=1,
+        stage_controller=SimpleNamespace(
+            cancel_clicked_point_resolution=lambda request_id, reason: events.append(
+                ("cancel_stage", request_id, reason)
+            ),
+            wait_for_active_task=lambda *, timeout_s: (
+                events.append(("wait_stage", timeout_s)) or True
+            ),
+        ),
+    )
+
+    shutdown_ui._stop_manual_alignment_capture(owner)
+
+    assert events == [
+        ("cancel_context",),
+        (
+            "cancel_stage",
+            context.request_id,
+            "Alignment point capture cancelled for shutdown.",
+        ),
+        ("wait_stage", 2.0),
+    ]
+    assert owner._manual_alignment_capture_context is None
+    assert owner._manual_alignment_pick_slot is None
+
+
 def test_bridge_drain_failure_does_not_close_handling_request() -> None:
     events: list[object] = []
     bridge = SimpleNamespace(

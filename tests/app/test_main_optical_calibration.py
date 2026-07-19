@@ -410,7 +410,10 @@ def test_lens_start_captures_context_before_worker_thread_starts(monkeypatch) ->
     window._show_status = lambda *_args: None
     monkeypatch.setattr(main_module.threading, "Thread", _Thread)
 
-    assert Main._start_lens_distortion_calibration(window, wizard_run_id=41) is True
+    assert Main._start_lens_distortion_calibration(
+        window,
+        wizard_run_id=41,
+    )["accepted"] is True
 
     assert len(started_contexts) == 1
     assert started_contexts[0].wizard_run_id == 41
@@ -484,7 +487,11 @@ def test_lens_worker_start_failure_preserves_existing_outer_lease(
         full_wizard=True,
     )
 
-    assert started is False
+    assert started == {
+        "accepted": False,
+        "status_code": 500,
+        "message": "Lens distortion calibration could not start: thread start failed",
+    }
     assert window._lens_distortion_thread is None
     assert window._lens_distortion_context is None
     assert window._optical_calibration_outer_lease is outer_lease
@@ -641,7 +648,11 @@ def test_full_wizard_lens_launch_failure_requests_outer_session_close() -> None:
     window._optical_calibration_wizard = wizard
     window._active_objective_metadata = lambda: ("X20", 20.0)
     window._optical_calibration_outer_parent_token = lambda: "outer-token"
-    window._start_lens_distortion_calibration = lambda **_kwargs: False
+    window._start_lens_distortion_calibration = lambda **_kwargs: {
+        "accepted": False,
+        "status_code": 409,
+        "message": "Lens distortion calibration did not start.",
+    }
     window._cancel_optical_calibration_wizard = lambda run_id=None: closes.append(run_id)
 
     Main._start_lens_distortion_calibration_from_wizard(window)

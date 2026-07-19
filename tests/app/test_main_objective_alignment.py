@@ -1,3 +1,4 @@
+import threading
 import types
 
 import pytest
@@ -54,6 +55,10 @@ class _Stage:
         self.rotations: list[float] = []
         self.applied_objectives: list[object] = []
         self.status_refreshes = 0
+        self.alignment_resolution_requests: list[
+            tuple[object, float, float, int]
+        ] = []
+        self.cancel_reasons: list[str] = []
 
     def is_busy(self) -> bool:
         return self.busy
@@ -88,6 +93,25 @@ class _Stage:
 
     def apply_objective_configuration(self, *args: object) -> None:
         self.applied_objectives.append(args)
+
+    def request_clicked_point_resolution(
+        self,
+        request_id: object,
+        dx_pixels: float,
+        dy_pixels: float,
+    ) -> bool:
+        self.alignment_resolution_requests.append(
+            (request_id, float(dx_pixels), float(dy_pixels), threading.get_ident())
+        )
+        return True
+
+    def cancel_clicked_point_resolution(
+        self,
+        request_id: object,
+        reason: str,
+    ) -> bool:
+        self.cancel_reasons.append(f"{request_id}:{reason}")
+        return True
 
 
 def _settings() -> Settings:
@@ -128,6 +152,8 @@ def _window() -> tuple[Main, _Stage, _SettingsManager, list[str]]:
     window._click_calibration_dialog = None
     window._objective_offset_reference = None
     window._design_session = types.SimpleNamespace(document=None)
+    window._manual_alignment_pick_slot = None
+    window._manual_alignment_capture_context = None
     window._current_linear_feedrate = lambda: 123.0
     window._refresh_design_position = lambda: setattr(
         window,
@@ -489,3 +515,125 @@ def test_capture_manual_alignment_point_design_near_zero_applies_without_b_rotat
     assert "collapse" in session_calls
     assert stage.rotations == []
     assert statuses == ["Design calibration complete. Spacing ratio 1.000."]
+
+
+def test_clicked_alignment_capture_dispatches_worker_without_gui_resolution() -> None:
+    window, stage, _manager, _statuses = _window()
+    window._manual_alignment_pick_slot = 0
+    window._refresh_manual_alignment_ui = lambda: None
+    window._update_stage_coordinate_apply_state = lambda: None
+    stage.resolve_clicked_point_xy = lambda *_args: pytest.fail(
+        "GUI path called blocking point resolution"
+    )
+
+    Main._capture_manual_alignment_clicked(window, 12.0, -4.0)
+
+    assert len(stage.alignment_resolution_requests) == 1
+    request_id, dx_pixels, dy_pixels, launch_thread = (
+        stage.alignment_resolution_requests[0]
+    )
+    assert request_id == window._manual_alignment_capture_context.request_id
+    assert (dx_pixels, dy_pixels) == (12.0, -4.0)
+    assert launch_thread == threading.get_ident()
+    assert window._manual_alignment_pick_slot == 0
+
+
+def test_duplicate_clicked_alignment_capture_is_rejected() -> None:
+    window, stage, _manager, statuses = _window()
+    window._manual_alignment_pick_slot = 1
+    window._refresh_manual_alignment_ui = lambda: None
+    window._update_stage_coordinate_apply_state = lambda: None
+
+    Main._capture_manual_alignment_clicked(window, 1.0, 2.0)
+    Main._capture_manual_alignment_clicked(window, 3.0, 4.0)
+
+    assert len(stage.alignment_resolution_requests) == 1
+    assert statuses[-1] == "Alignment point capture is already running."
+
+
+def test_clicked_alignment_completion_preserves_requested_slot_order() -> None:
+    window, stage, _manager, _statuses = _window()
+    window._manual_alignment_pick_slot = 1
+    coordinate_updates: list[tuple[object, object]] = []
+    captured: list[tuple[int, tuple[float, float], str]] = []
+    window._refresh_manual_alignment_ui = lambda: None
+    window._update_stage_coordinate_apply_state = lambda: None
+    window._update_coordinate_display = lambda **kwargs: coordinate_updates.append(
+        (kwargs.get("center_xy"), kwargs.get("cursor_xy"))
+    )
+    window._capture_manual_alignment_point = (
+        lambda slot, point, *, source: captured.append((slot, point, source))
+    )
+
+    Main._capture_manual_alignment_clicked(window, 5.0, -7.0)
+    request_id = stage.alignment_resolution_requests[0][0]
+    Main._on_manual_alignment_point_resolved(
+        window,
+        request_id,
+        True,
+        (10.0, 20.0),
+        (11.0, 19.0),
+        "",
+    )
+
+    assert window._manual_alignment_capture_context is None
+    assert coordinate_updates == [((10.0, 20.0), (11.0, 19.0))]
+    assert captured == [(1, (11.0, 19.0), "image")]
+
+
+def test_cancelled_clicked_alignment_capture_restores_ui_and_ignores_late_point() -> None:
+    window, stage, _manager, statuses = _window()
+    window._manual_alignment_pick_slot = 0
+    refreshes: list[str] = []
+    captures: list[object] = []
+    window._refresh_manual_alignment_ui = lambda: refreshes.append("refresh")
+    window._update_coordinate_display = lambda **_kwargs: None
+    window._update_stage_coordinate_apply_state = lambda: None
+    window._capture_manual_alignment_point = lambda *_args, **_kwargs: captures.append(
+        "captured"
+    )
+
+    Main._capture_manual_alignment_clicked(window, 0.0, 0.0)
+    request_id = stage.alignment_resolution_requests[0][0]
+    Main._cancel_manual_alignment_pick(window)
+    Main._on_manual_alignment_point_resolved(
+        window,
+        request_id,
+        True,
+        (10.0, 20.0),
+        (10.0, 20.0),
+        "",
+    )
+
+    assert window._manual_alignment_pick_slot is None
+    assert window._manual_alignment_capture_context is None
+    assert stage.cancel_reasons == [
+        f"{request_id}:Alignment point capture cancelled."
+    ]
+    assert captures == []
+    assert len(refreshes) >= 2
+    assert statuses[-1] == "Chip alignment image pick cancelled."
+
+
+def test_clicked_alignment_resolution_error_restores_retry_state() -> None:
+    window, stage, _manager, statuses = _window()
+    window._manual_alignment_pick_slot = 0
+    refreshes: list[str] = []
+    window._refresh_manual_alignment_ui = lambda: refreshes.append("refresh")
+    window._update_stage_coordinate_apply_state = lambda: None
+
+    Main._capture_manual_alignment_clicked(window, 0.0, 0.0)
+    request_id = stage.alignment_resolution_requests[0][0]
+    Main._on_manual_alignment_point_resolved(
+        window,
+        request_id,
+        False,
+        None,
+        None,
+        "Camera frames are unavailable for calibration.",
+    )
+
+    assert window._manual_alignment_capture_context is None
+    assert window._manual_alignment_pick_slot == 0
+    assert refreshes[-1] == "refresh"
+    assert statuses[-1] == "Camera frames are unavailable for calibration."

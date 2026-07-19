@@ -531,6 +531,13 @@ class _OpticalCalibrationRunContext:
     full_wizard: bool = False
 
 
+@dataclass(frozen=True)
+class _ManualAlignmentCaptureContext:
+    request_id: str
+    slot: int
+    cancelled: threading.Event
+
+
 @dataclass
 class _ApiStageCommandReservation:
     operation_id: str
@@ -803,6 +810,9 @@ class Main(QMainWindow):
         self._pending_quick_alignment_rotation = False
         self._manual_alignment_pick_slot: int | None = None
         self._manual_alignment_points: list[tuple[float, float] | None] = [None, None]
+        self._manual_alignment_capture_context: (
+            _ManualAlignmentCaptureContext | None
+        ) = None
         self._manual_jog_prediction = ManualJogPredictionState(
             ManualJogPredictionConfig(
                 axis_names=self.STAGE_AXIS_NAMES,
@@ -1076,6 +1086,10 @@ class Main(QMainWindow):
         )
         self.stage_controller.objective_mismatch_detected.connect(
             self._on_objective_mismatch_detected
+        )
+        self.stage_controller.clicked_point_resolved.connect(
+            self._on_manual_alignment_point_resolved,
+            Qt.ConnectionType.QueuedConnection,
         )
         self.stage_controller.autofocus_finished.connect(self.on_autofocus_finished)
         self.stage_controller.stage_position_changed.connect(
@@ -3226,30 +3240,7 @@ class Main(QMainWindow):
                     else message
                 ),
             }
-        if self._lens_distortion_calibration_running():
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": "Lens distortion calibration is already running.",
-            }
-        if not self._stage_serial_ready():
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": "Connect the stage controller before calibration.",
-            }
-        if self.stage_controller.is_busy():
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": "Stage is busy; lens distortion calibration not started.",
-            }
-        self._start_lens_distortion_calibration()
-        return {
-            "accepted": True,
-            "status_code": 202,
-            "message": "Lens distortion calibration started.",
-        }
+        return self._start_lens_distortion_calibration()
 
     def _api_click_to_move_calibration(
         self,
@@ -5265,17 +5256,18 @@ class Main(QMainWindow):
             )
             return
         self._optical_calibration_cancel_event().clear()
-        if self._start_lens_distortion_calibration(
+        start_result = self._start_lens_distortion_calibration(
             wizard_run_id=run_id,
             parent_session_token=parent_session_token,
             full_wizard=full_wizard,
-        ):
+        )
+        if bool(start_result["accepted"]):
             return
         if full_wizard:
             self._cancel_optical_calibration_wizard(run_id)
         wizard.set_lens_distortion_result(
             False,
-            "Lens distortion calibration did not start.",
+            str(start_result["message"]),
             run_id=run_id,
         )
 
@@ -5677,24 +5669,29 @@ class Main(QMainWindow):
         wizard_run_id: int | None = None,
         parent_session_token: str | None = None,
         full_wizard: bool = False,
-    ) -> bool:
+    ) -> dict[str, Any]:
         if self._lens_distortion_calibration_running():
-            self._show_status("Lens distortion calibration is already running.", 4000)
-            return False
+            message = "Lens distortion calibration is already running."
+            self._show_status(message, 4000)
+            return {"accepted": False, "status_code": 409, "message": message}
         if self._flat_field_calibration_running():
-            self._show_status("Flat-field calibration is already running.", 4000)
-            return False
+            message = "Flat-field calibration is already running."
+            self._show_status(message, 4000)
+            return {"accepted": False, "status_code": 409, "message": message}
         if not self._stage_serial_ready():
-            self._show_status("Connect the stage controller before calibration.", 5000)
-            return False
+            message = "Connect the stage controller before calibration."
+            self._show_status(message, 5000)
+            return {"accepted": False, "status_code": 409, "message": message}
         if self.stage_controller.is_busy():
-            self._show_status("Stage is busy; lens distortion calibration not started.", 5000)
-            return False
+            message = "Stage is busy; lens distortion calibration not started."
+            self._show_status(message, 5000)
+            return {"accepted": False, "status_code": 409, "message": message}
         objective_name, _magnification = self._active_objective_metadata()
         objective_name = normalize_objective_name(objective_name)
         if not objective_name:
-            self._show_status("No active objective selected.", 5000)
-            return False
+            message = "No active objective selected."
+            self._show_status(message, 5000)
+            return {"accepted": False, "status_code": 409, "message": message}
 
         linear_feedrate = self._coordinate_feedrate_for_axes(("X", "Y"))
         needle_feedrate = self._current_needle_feedrate()
@@ -5728,9 +5725,10 @@ class Main(QMainWindow):
                 self._lens_distortion_dialog.set_running(False)
                 self._lens_distortion_dialog.set_status(message)
             self._show_status(message, 8000)
-            return False
-        self._show_status("Lens distortion calibration started.", 4000)
-        return True
+            return {"accepted": False, "status_code": 500, "message": message}
+        message = "Lens distortion calibration started."
+        self._show_status(message, 4000)
+        return {"accepted": True, "status_code": 202, "message": message}
 
     def _reset_lens_distortion_calibration(self) -> tuple[bool, str]:
         active_name = normalize_objective_name(
@@ -6530,7 +6528,11 @@ class Main(QMainWindow):
         expected_sources = (
             {"click_calibration_reset"}
             if reset_callback
-            else {"_run_move", "click_calibration"}
+            else {
+                "_run_move",
+                "click_calibration",
+                "_run_clicked_point_resolution",
+            }
         )
         if not self._calibration_callback_token_is_current(
             task_token,
@@ -6762,6 +6764,9 @@ class Main(QMainWindow):
     def _arm_manual_alignment_pick(self, slot: int) -> None:
         if slot not in (0, 1):
             return
+        if getattr(self, "_manual_alignment_capture_context", None) is not None:
+            self._show_status("Alignment point capture is already running.", 4000)
+            return
         self._manual_alignment_pick_slot = slot
         self._set_alignment_panel_expanded()
         self._refresh_manual_alignment_ui()
@@ -6773,8 +6778,15 @@ class Main(QMainWindow):
         )
 
     def _cancel_manual_alignment_pick(self) -> None:
-        if self._manual_alignment_pick_slot is None:
+        context = getattr(self, "_manual_alignment_capture_context", None)
+        if self._manual_alignment_pick_slot is None and context is None:
             return
+        if isinstance(context, _ManualAlignmentCaptureContext):
+            context.cancelled.set()
+            self.stage_controller.cancel_clicked_point_resolution(
+                context.request_id,
+                "Alignment point capture cancelled."
+            )
         self._manual_alignment_pick_slot = None
         self._refresh_manual_alignment_ui()
         self._update_coordinate_display(cursor_xy=None)
@@ -6830,6 +6842,9 @@ class Main(QMainWindow):
     def _capture_manual_alignment_center(self, slot: int) -> None:
         if slot not in (0, 1):
             return
+        if getattr(self, "_manual_alignment_capture_context", None) is not None:
+            self._show_status("Alignment point capture is already running.", 4000)
+            return
         center_xy = self._resolve_alignment_capture_stage_position()
         if center_xy is None:
             return
@@ -6881,15 +6896,73 @@ class Main(QMainWindow):
         slot = self._manual_alignment_pick_slot
         if slot is None:
             return
+        if getattr(self, "_manual_alignment_capture_context", None) is not None:
+            self._show_status("Alignment point capture is already running.", 4000)
+            return
+        context = _ManualAlignmentCaptureContext(
+            request_id=uuid.uuid4().hex,
+            slot=slot,
+            cancelled=threading.Event(),
+        )
+        self._manual_alignment_capture_context = context
         try:
-            center_xy, captured = self.stage_controller.resolve_clicked_point_xy(
-                dx_pixels, dy_pixels
+            accepted = self.stage_controller.request_clicked_point_resolution(
+                context.request_id,
+                dx_pixels,
+                dy_pixels,
             )
         except Exception as exc:
-            self._show_status(str(exc), 5000)
+            accepted = False
+            message = str(exc) or type(exc).__name__
+        else:
+            message = "Stage is busy; alignment point capture not started."
+        if not accepted:
+            if self._manual_alignment_capture_context is context:
+                self._manual_alignment_capture_context = None
+            self._refresh_manual_alignment_ui()
+            self._update_stage_coordinate_apply_state()
+            self._show_status(message, 5000)
             return
-        self._update_coordinate_display(center_xy=center_xy, cursor_xy=captured)
-        self._capture_manual_alignment_point(slot, captured, source="image")
+        self._refresh_manual_alignment_ui()
+        self._update_stage_coordinate_apply_state()
+
+    def _on_manual_alignment_point_resolved(
+        self,
+        request_id: object,
+        success: bool,
+        center_xy: object,
+        captured_xy: object,
+        message: str,
+    ) -> None:
+        context = getattr(self, "_manual_alignment_capture_context", None)
+        if (
+            not isinstance(context, _ManualAlignmentCaptureContext)
+            or request_id != context.request_id
+        ):
+            return
+        self._manual_alignment_capture_context = None
+        if context.cancelled.is_set() or self._manual_alignment_pick_slot != context.slot:
+            self._refresh_manual_alignment_ui()
+            self._update_stage_coordinate_apply_state()
+            return
+        if not success:
+            self._refresh_manual_alignment_ui()
+            self._update_stage_coordinate_apply_state()
+            self._show_status(
+                str(message) or "Alignment point capture failed.",
+                5000,
+            )
+            return
+        try:
+            center = (float(center_xy[0]), float(center_xy[1]))
+            captured = (float(captured_xy[0]), float(captured_xy[1]))
+        except (IndexError, TypeError, ValueError):
+            self._refresh_manual_alignment_ui()
+            self._update_stage_coordinate_apply_state()
+            self._show_status("Alignment point capture returned invalid coordinates.", 5000)
+            return
+        self._update_coordinate_display(center_xy=center, cursor_xy=captured)
+        self._capture_manual_alignment_point(context.slot, captured, source="image")
 
     def _capture_manual_alignment_point(
         self, slot: int, captured: tuple[float, float], *, source: str
@@ -6979,6 +7052,9 @@ class Main(QMainWindow):
             self.alignment_panel.set_design_marks(self._design_session.source_design_marks)
             self.alignment_panel.set_captured_points(presentation.captured_points)
             self.alignment_panel.set_pick_slot(presentation.pick_slot)
+            self.alignment_panel.set_capture_running(
+                getattr(self, "_manual_alignment_capture_context", None) is not None
+            )
             self.alignment_panel.set_registration_status(
                 self._design_session.registration_status
             )
