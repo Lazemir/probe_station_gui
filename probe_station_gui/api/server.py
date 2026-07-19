@@ -1,7 +1,5 @@
 """FastAPI control surface for the probe station GUI."""
 
-from __future__ import annotations
-
 import logging
 import os
 import threading

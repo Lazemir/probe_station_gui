@@ -59,6 +59,7 @@ class ApiServerHttpTest(unittest.TestCase):
         status_callback=None,
         command_callback=None,
         auth_callback=None,
+        raise_server_exceptions=True,
     ):
         from fastapi.testclient import TestClient
 
@@ -69,7 +70,17 @@ class ApiServerHttpTest(unittest.TestCase):
             auth_callback=auth_callback,
         )
         app, _uvicorn = server._create_app()
-        return TestClient(app)
+        return TestClient(
+            app,
+            raise_server_exceptions=raise_server_exceptions,
+        )
+
+    def test_openapi_schema_endpoint_returns_success(self) -> None:
+        client = self._client(raise_server_exceptions=False)
+
+        response = client.get("/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
 
     def test_health_and_status_endpoints_return_callback_payloads(self) -> None:
         client = self._client(
