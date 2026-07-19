@@ -1,4 +1,6 @@
+import sys
 import unittest
+from types import ModuleType
 
 from probe_station_gui.api.keys import (
     API_PERMISSION_CAMERA_READ,
@@ -523,6 +525,54 @@ class ApiServerHttpTest(unittest.TestCase):
         self.assertEqual(update.status_code, 503)
         self.assertEqual(once.status_code, 503)
         self.assertEqual(update.json()["detail"]["message"], "Camera settings write failed.")
+
+    def test_exposure_policy_classifies_exception_from_reloaded_module(self) -> None:
+        module_name = "probe_station_gui.camera.exposure_policy"
+        stale_module = ModuleType(module_name)
+        stale_module.ExposurePolicyError = type(
+            "ExposurePolicyError",
+            (RuntimeError,),
+            {},
+        )
+        stale_module.ExposurePolicyBusyError = type(
+            "ExposurePolicyBusyError",
+            (stale_module.ExposurePolicyError,),
+            {},
+        )
+        current_module = ModuleType(module_name)
+        current_module.ExposurePolicyError = type(
+            "ExposurePolicyError",
+            (RuntimeError,),
+            {},
+        )
+        current_module.ExposurePolicyBusyError = type(
+            "ExposurePolicyBusyError",
+            (current_module.ExposurePolicyError,),
+            {},
+        )
+
+        def busy_after_reload(*_args, **_kwargs):
+            sys.modules[module_name] = current_module
+            raise current_module.ExposurePolicyBusyError(
+                "Camera exposure policy is busy."
+            )
+
+        client = self._client(
+            camera_exposure_once_callback=busy_after_reload,
+            raise_server_exceptions=False,
+        )
+        original_module = sys.modules[module_name]
+        sys.modules[module_name] = stale_module
+        try:
+            response = client.post("/api/v1/camera/exposure-once", json={})
+        finally:
+            sys.modules[module_name] = original_module
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["detail"]["message"],
+            "Camera exposure policy is busy.",
+        )
 
     def test_exposure_policy_endpoints_preserve_camera_permissions(self) -> None:
         client = self._client(

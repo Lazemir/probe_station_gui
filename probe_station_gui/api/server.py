@@ -314,23 +314,25 @@ class ProbeStationApiServer:
             *args: Any,
             **kwargs: Any,
         ) -> dict[str, Any]:
-            from probe_station_gui.camera.exposure_policy import (
-                ExposurePolicyBusyError,
-                ExposurePolicyError,
-            )
-
             try:
                 result = callback(*args, **kwargs)
-            except ExposurePolicyBusyError as exc:
-                raise HTTPException(
-                    status_code=409,
-                    detail={"message": str(exc)},
-                ) from exc
-            except ExposurePolicyError as exc:
-                raise HTTPException(
-                    status_code=503,
-                    detail={"message": str(exc)},
-                ) from exc
+            except Exception as exc:
+                from probe_station_gui.camera.exposure_policy import (
+                    ExposurePolicyBusyError,
+                    ExposurePolicyError,
+                )
+
+                if isinstance(exc, ExposurePolicyBusyError):
+                    raise HTTPException(
+                        status_code=409,
+                        detail={"message": str(exc)},
+                    ) from exc
+                if isinstance(exc, ExposurePolicyError):
+                    raise HTTPException(
+                        status_code=503,
+                        detail={"message": str(exc)},
+                    ) from exc
+                raise
             if not isinstance(result, dict):
                 raise HTTPException(
                     status_code=500,
