@@ -2127,6 +2127,9 @@ class DesignLayoutWindow(QWidget):
         self._escape_shortcut = QShortcut(QKeySequence("Esc"), self)
         self._escape_shortcut.setContext(Qt.WindowShortcut)
         self._escape_shortcut.activated.connect(self._cancel_active_interaction)
+        self._home_shortcut = QShortcut(QKeySequence("Home"), self)
+        self._home_shortcut.setContext(Qt.WindowShortcut)
+        self._home_shortcut.activated.connect(self._main_view.focus_gds_bounds)
         self._accept_alignment_shortcut = QShortcut(QKeySequence("Return"), self)
         self._accept_alignment_shortcut.setContext(Qt.WindowShortcut)
         self._accept_alignment_shortcut.activated.connect(

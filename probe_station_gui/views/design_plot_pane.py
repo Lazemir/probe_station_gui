@@ -4,14 +4,25 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import threading
 from time import perf_counter, monotonic
 
-from PySide6.QtCore import QEvent, QPointF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
 from probe_station_gui.design.markup import MarkupDocument
+from probe_station_gui.design.navigation_bounds import (
+    Box2D,
+    GDS_FOCUS_PADDING_FRACTION,
+    VIEW_RANGE_ABS_TOLERANCE,
+    clamp_view_bounds,
+    content_bounds,
+    fit_bounds_to_aspect,
+    navigation_frame,
+    pad_bounds,
+)
 
 from probe_station_gui.design.navigation_geometry import (
     first_segment_length,
@@ -62,6 +73,50 @@ except ImportError:  # pragma: no cover - optional runtime dependency
 
 logger = logging.getLogger(__name__)
 
+DesignContentKey = tuple[str, str, int, Box2D, str | None]
+
+
+def _design_content_key(document: DesignDocument) -> DesignContentKey:
+    return (
+        os.path.normcase(os.path.abspath(os.fspath(document.path))),
+        str(document.top_cell_name),
+        int(document.rotation_quarter_turns) % 4,
+        tuple(float(value) for value in document.bounds),
+        document.source_load_id,
+    )
+
+
+def _route_matches_document(
+    route: MeasurementRoute,
+    document: DesignDocument,
+) -> bool:
+    same_path = os.path.normcase(os.path.abspath(route.design.path)) == os.path.normcase(
+        os.path.abspath(os.fspath(document.path))
+    )
+    return (
+        same_path
+        and route.design.top_cell_name == str(document.top_cell_name)
+        and all(
+            math.isclose(route_value, document_value, rel_tol=0.0, abs_tol=1e-9)
+            for route_value, document_value in zip(
+                route.design.bounds,
+                document.bounds,
+                strict=True,
+            )
+        )
+        and math.isclose(route.design.dbu, document.dbu, rel_tol=0.0, abs_tol=1e-12)
+    )
+
+
+def _markup_matches_document(
+    markup: MarkupDocument,
+    document: DesignDocument,
+) -> bool:
+    return markup.source_path == os.path.normcase(
+        os.path.abspath(os.fspath(document.path))
+    )
+
+
 class _DesignPlotPane(QWidget):
     """Thin wrapper around pyqtgraph for design rendering."""
 
@@ -86,9 +141,14 @@ class _DesignPlotPane(QWidget):
     def __init__(self, *, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._document: DesignDocument | None = None
+        self._navigation_content_bounds: Box2D | None = None
+        self._navigation_frame: Box2D | None = None
+        self._navigation_ignored_coordinate_count = 0
+        self._last_navigation_invalid_coordinate_count = 0
         self._targets: list[MeasurementTarget] = []
         self._selected_target_id: str | None = None
         self._probe_route: MeasurementRoute | None = None
+        self._probe_route_document_key: DesignContentKey | None = None
         self._selected_route_point_index = -1
         self._probe_route_preview_points: list[Point2D] = []
         self._probe_route_preview_offsets: list[Point2D] = []
@@ -100,6 +160,7 @@ class _DesignPlotPane(QWidget):
         self._tool_sketch_segments: list[tuple[Point2D, Point2D]] = []
         self._tool_sketch_points: list[Point2D] = []
         self._markup: MarkupDocument | None = None
+        self._markup_document_key: DesignContentKey | None = None
         self._markup_generation = 0
         self._markup_snap_candidates: tuple[GuideSnapCandidate, ...] = ()
         self._selectable_entities: tuple[SelectableDesignEntity, ...] = ()
@@ -443,6 +504,145 @@ class _DesignPlotPane(QWidget):
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self._schedule_route_geometry_redraw()
+        self._update_navigation_limits()
+
+    def _viewport_size(self) -> tuple[float, float]:
+        if self._plot is None:
+            return (1.0, 1.0)
+        rect = self._plot.getViewBox().sceneBoundingRect()
+        return (max(1.0, float(rect.width())), max(1.0, float(rect.height())))
+
+    def _current_view_bounds(self) -> Box2D | None:
+        if self._plot is None:
+            return None
+        try:
+            x_range, y_range = self._plot.getViewBox().viewRange()[:2]
+            values = (
+                float(x_range[0]),
+                float(y_range[0]),
+                float(x_range[1]),
+                float(y_range[1]),
+            )
+        except (AttributeError, IndexError, TypeError, ValueError):
+            return None
+        return values if all(math.isfinite(value) for value in values) else None
+
+    def _set_view_bounds(self, bounds: Box2D) -> None:
+        if self._plot is None:
+            return
+        left, bottom, right, top = bounds
+        self._plot.getViewBox().setRange(
+            xRange=(left, right),
+            yRange=(bottom, top),
+            padding=0.0,
+        )
+
+    def _clear_navigation_limits(self) -> None:
+        self._navigation_content_bounds = None
+        self._navigation_frame = None
+        self._navigation_ignored_coordinate_count = 0
+        self._last_navigation_invalid_coordinate_count = 0
+        if self._plot is not None:
+            self._plot.getViewBox().setLimits(
+                xMin=None,
+                xMax=None,
+                yMin=None,
+                yMax=None,
+                maxXRange=None,
+                maxYRange=None,
+            )
+
+    def _update_navigation_limits(
+        self,
+        *,
+        recompute_content: bool = False,
+        focus_gds: bool = False,
+    ) -> None:
+        if self._plot is None or self._document is None:
+            self._clear_navigation_limits()
+            return
+        if recompute_content or self._navigation_content_bounds is None:
+            identity = _design_content_key(self._document)
+            route = (
+                self._probe_route
+                if not self._document_preview_active
+                and self._probe_route_document_key == identity
+                else None
+            )
+            markup = (
+                self._markup
+                if not self._document_preview_active
+                and self._markup_document_key == identity
+                else None
+            )
+            (
+                self._navigation_content_bounds,
+                self._navigation_ignored_coordinate_count,
+            ) = content_bounds(self._document.bounds, route, markup)
+        cached_content = self._navigation_content_bounds
+        if cached_content is None:
+            return
+        self._navigation_frame = navigation_frame(
+            cached_content,
+            self._viewport_size(),
+        )
+        left, bottom, right, top = self._navigation_frame
+        view_box = self._plot.getViewBox()
+        view_box.setLimits(
+            xMin=left,
+            xMax=right,
+            yMin=bottom,
+            yMax=top,
+            maxXRange=right - left,
+            maxYRange=top - bottom,
+        )
+        if (
+            self._navigation_ignored_coordinate_count
+            and self._navigation_ignored_coordinate_count
+            != self._last_navigation_invalid_coordinate_count
+        ):
+            logger.warning(
+                "Ignored %d invalid design navigation coordinates.",
+                self._navigation_ignored_coordinate_count,
+            )
+        self._last_navigation_invalid_coordinate_count = (
+            self._navigation_ignored_coordinate_count
+        )
+        if focus_gds:
+            self.focus_gds_bounds()
+            return
+        current = self._current_view_bounds()
+        if current is not None:
+            clamped = clamp_view_bounds(current, self._navigation_frame)
+            if (
+                current[0] < self._navigation_frame[0]
+                or current[1] < self._navigation_frame[1]
+                or current[2] > self._navigation_frame[2]
+                or current[3] > self._navigation_frame[3]
+            ) and clamped == self._navigation_frame:
+                epsilon = VIEW_RANGE_ABS_TOLERANCE
+                clamped = (
+                    clamped[0] + epsilon,
+                    clamped[1] + epsilon,
+                    clamped[2] - epsilon,
+                    clamped[3] - epsilon,
+                )
+            if any(
+                abs(a - b) > VIEW_RANGE_ABS_TOLERANCE
+                for a, b in zip(current, clamped, strict=True)
+            ):
+                self._set_view_bounds(clamped)
+
+    def focus_gds_bounds(self) -> None:
+        if self._document is None:
+            return
+        focused = fit_bounds_to_aspect(
+            pad_bounds(self._document.bounds, GDS_FOCUS_PADDING_FRACTION),
+            self._viewport_size(),
+        )
+        if self._navigation_frame is not None:
+            focused = clamp_view_bounds(focused, self._navigation_frame)
+        self._set_view_bounds(focused)
 
     def _schedule_route_geometry_redraw(self) -> None:
         if self._route_geometry_redraw_timer is None:
@@ -488,6 +688,7 @@ class _DesignPlotPane(QWidget):
             self._pending_hover_markup.clear()
             self._set_hover_snap(None)
             self._detach_file_backed_document(timeout_s=0.0)
+            self._clear_navigation_limits()
             self.set_status_message("No design loaded.")
             self._redraw_document()
         elif not same_document:
@@ -497,6 +698,7 @@ class _DesignPlotPane(QWidget):
             self._pending_hover_markup.clear()
             self._set_hover_snap(None)
             self.set_status_message("")
+            self._update_navigation_limits(recompute_content=True, focus_gds=True)
             if document.file_backed:
                 self._configure_file_backed_document(document)
             else:
@@ -631,6 +833,11 @@ class _DesignPlotPane(QWidget):
         else:
             self._status_label.hide()
             self._plot.show()
+            layout = self.layout()
+            if layout is not None:
+                layout.activate()
+            self._plot.resize(self.contentsRect().size())
+            self._plot.plotItem.setGeometry(QRectF(self._plot.rect()))
 
     def set_targets(
         self,
@@ -650,6 +857,14 @@ class _DesignPlotPane(QWidget):
     ) -> None:
         self._probe_route = route
         self._selected_route_point_index = selected_route_point_index
+        self._probe_route_document_key = (
+            _design_content_key(self._document)
+            if self._document is not None
+            and route is not None
+            and _route_matches_document(route, self._document)
+            else None
+        )
+        self._update_navigation_limits(recompute_content=True)
         self._schedule_route_geometry_redraw()
         self._redraw_overlays()
 
@@ -751,6 +966,7 @@ class _DesignPlotPane(QWidget):
                 )
         self._document_preview_active = True
         self.set_document(document)
+        self._update_navigation_limits(recompute_content=True, focus_gds=True)
         self._set_preview_overlay_visibility(False)
         self.set_status_message("")
 
@@ -765,6 +981,7 @@ class _DesignPlotPane(QWidget):
         previous_view_range = self._document_preview_previous_view_range
         self._document_preview_active = False
         self.set_document(document)
+        self._update_navigation_limits(recompute_content=True)
         if restore_view and self._plot is not None and previous_view_range is not None:
             self._plot.getViewBox().setRange(
                 xRange=previous_view_range[0],
@@ -825,6 +1042,14 @@ class _DesignPlotPane(QWidget):
                 for request_id, (_result, shift, control) in self._pending_hover_markup.items()
             }
         self._markup = markup
+        self._markup_document_key = (
+            _design_content_key(self._document)
+            if self._document is not None
+            and markup is not None
+            and _markup_matches_document(markup, self._document)
+            else None
+        )
+        self._update_navigation_limits(recompute_content=True)
         if markup is None or not markup.visible:
             self._tool_sketch_segments = []
             self._markup_snap_candidates = ()
@@ -1037,11 +1262,7 @@ class _DesignPlotPane(QWidget):
             self._set_hover_snap(None)
 
     def focus_bounds(self) -> None:
-        if self._plot is None or self._document is None:
-            return
-        left, bottom, right, top = self._document.bounds
-        self._plot.setXRange(left, right, padding=0.02)
-        self._plot.setYRange(bottom, top, padding=0.02)
+        self.focus_gds_bounds()
 
     def _redraw_document(self) -> None:
         if self._plot is None:
@@ -1053,7 +1274,6 @@ class _DesignPlotPane(QWidget):
         if self._document is None:
             return
         if self._document.file_backed:
-            self.focus_bounds()
             self._schedule_route_geometry_redraw()
             return
         point_count = 0
@@ -1067,7 +1287,6 @@ class _DesignPlotPane(QWidget):
             )
             self._layer_items.append(line)
             point_count += len(x_data)
-        self.focus_bounds()
         self._schedule_route_geometry_redraw()
         logger.debug(
             "DESIGN RENDER full items=%d points=%d elapsed_ms=%.2f",
