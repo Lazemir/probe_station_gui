@@ -95,6 +95,22 @@ def test_structurally_malformed_route_and_markup_are_ignored(tmp_path: Path) -> 
     assert ignored == 3  # invalid center, derived hit, and guide start
 
 
+def test_overlong_route_center_is_ignored_and_counted() -> None:
+    route = _route()
+    route.points = [
+        RoutePoint("bad", "Bad", (240.0, -30.0, 1.0))  # type: ignore[arg-type]
+    ]
+
+    bounds, ignored = content_bounds(
+        (0.0, 0.0, 100.0, 50.0),
+        route,
+        None,
+    )
+
+    assert bounds == (0.0, 0.0, 100.0, 50.0)
+    assert ignored == 2  # invalid center and derived needle hit
+
+
 def test_gds_only_bounds_receive_proportional_padding() -> None:
     result = build_navigation_bounds(
         (0.0, 0.0, 100.0, 50.0),

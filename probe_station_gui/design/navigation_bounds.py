@@ -35,7 +35,8 @@ def content_bounds(
     def include(point: object) -> Point2D | None:
         nonlocal left, bottom, right, top, ignored
         try:
-            x_value, y_value = float(point[0]), float(point[1])
+            x_raw, y_raw = point
+            x_value, y_value = float(x_raw), float(y_raw)
         except (IndexError, TypeError, ValueError):
             ignored += 1
             return None
